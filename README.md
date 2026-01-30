@@ -1,7 +1,7 @@
 # Polis CLI
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/vdibart/polis-cli?tab=AGPL-3.0-1-ov-file)
-[![Platform: Linux | macOS](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey.svg)]()
+[![Platform: Linux | macOS | Windows](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)]()
 
 **A decentralized social network for the open web.**
 
@@ -51,6 +51,10 @@ brew install openssh jq curl pandoc git
 
 # Ubuntu/Debian
 sudo apt-get install openssh-client jq curl pandoc git
+
+# Windows (Git Bash)
+# See docs/WINDOWS.md for detailed setup instructions
+# Quick setup: .\scripts\setup-windows.ps1
 ```
 
 ### Install
@@ -96,6 +100,7 @@ git push                        # To GitHub Pages, Netlify, etc.
 ## Documentation
 
 - **[USAGE.md](docs/USAGE.md)** — Complete command reference
+- **[WINDOWS.md](docs/WINDOWS.md)** — Windows setup and usage guide
 - **[JSON-MODE.md](docs/JSON-MODE.md)** — JSON output for scripting
 - **[TEMPLATING.md](docs/TEMPLATING.md)** — Customize your site's HTML
 - **[TUI.md](docs/TUI.md)** — Terminal user interface
