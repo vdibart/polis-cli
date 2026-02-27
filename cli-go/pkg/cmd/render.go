@@ -30,10 +30,13 @@ func handleRender(args []string) {
 		themesDir = findCLIThemesDir()
 	}
 
-	// Get base URL from .well-known/polis if not specified
+	// Get base URL: flag > env > .well-known/polis (legacy fallback)
 	url := *baseURL
 	if url == "" {
-		url = getBaseURLFromSite(dir)
+		url = os.Getenv("POLIS_BASE_URL")
+	}
+	if url == "" {
+		url = getBaseURLFromSite(dir) // legacy fallback for pre-upgrade sites
 	}
 
 	// Create renderer

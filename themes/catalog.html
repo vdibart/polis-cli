@@ -72,6 +72,8 @@
     <div id="preview-bar">
         <span class="bar-title">POLIS THEMES</span>
         <div class="tab-group">
+            <button class="tab" onclick="switchView('studio13','index',this)">Studio13</button>
+            <button class="tab" onclick="switchView('studio13','post',this)">Studio13: Post</button>
             <button class="tab active" onclick="switchView('vice','index',this)">Vice</button>
             <button class="tab" onclick="switchView('vice','post',this)">Vice: Post</button>
             <button class="tab" onclick="switchView('especial','index',this)">Especial</button>
@@ -95,10 +97,229 @@
         vice: 'vice/vice.css',
         especial: 'especial/especial.css',
         'especial-light': 'especial-light/especial-light.css',
+        studio13: 'studio13/studio13.css',
         sols: 'sols/sols.css',
         turbo: 'turbo/turbo.css',
         zane: 'zane/zane.css'
     };
+
+    /* Studio13 uses its own HTML structure — different from the standard themes */
+    const studio13IndexHTML = `
+    <main class="home-main">
+        <section class="home-intro">
+            <div class="container">
+                <h1 class="home-title">vdibart.polis.pub</h1>
+                <p class="home-subtitle">A chronological Polis blog. Latest posts are always on top.</p>
+            </div>
+        </section>
+
+        <section class="about">
+            <div class="container">
+                <div class="about-content">
+                    <p>Welcome to my polis site. This site runs on <em>polis</em>&mdash;signed markdown on your own domain. No platform, no middleman, just you and your words.</p>
+                </div>
+            </div>
+        </section>
+
+        <section class="recent-posts">
+            <div class="container">
+                <h2 class="section-title">Latest Posts</h2>
+                <div class="post-list">
+                    <article class="post-card">
+                        <a href="#" class="post-item" onclick="return false">
+                            <div class="post-meta-row">
+                                <span class="post-date">2026-02-10</span>
+                                <span class="post-comments">3 comments</span>
+                            </div>
+                            <h3 class="post-title">On the Architecture of Trust</h3>
+                            <p class="post-blurb">When we first started building on the web, there was an implicit promise: your words belong to you.</p>
+                            <span class="post-read-more">Read full post</span>
+                        </a>
+                    </article>
+                    <article class="post-card">
+                        <a href="#" class="post-item" onclick="return false">
+                            <div class="post-meta-row">
+                                <span class="post-date">2026-02-03</span>
+                                <span class="post-comments">7 comments</span>
+                            </div>
+                            <h3 class="post-title">Decentralized Identity and the Open Web</h3>
+                            <p class="post-blurb">Imagine a web where every author is a node, where following someone means subscribing to their domain.</p>
+                            <span class="post-read-more">Read full post</span>
+                        </a>
+                    </article>
+                    <article class="post-card">
+                        <a href="#" class="post-item" onclick="return false">
+                            <div class="post-meta-row">
+                                <span class="post-date">2026-01-28</span>
+                                <span class="post-comments">12 comments</span>
+                            </div>
+                            <h3 class="post-title">Why I Left the Platform</h3>
+                            <p class="post-blurb">The platform era gave us reach but took our sovereignty. Every post lives on rented land.</p>
+                            <span class="post-read-more">Read full post</span>
+                        </a>
+                    </article>
+                    <article class="post-card">
+                        <a href="#" class="post-item" onclick="return false">
+                            <div class="post-meta-row">
+                                <span class="post-date">2026-01-15</span>
+                                <span class="post-comments">2 comments</span>
+                            </div>
+                            <h3 class="post-title">Cryptographic Signatures for Everyone</h3>
+                            <p class="post-blurb">When you sign your content with Ed25519 keys, you create provable authorship without a platform.</p>
+                            <span class="post-read-more">Read full post</span>
+                        </a>
+                    </article>
+                    <article class="post-card">
+                        <a href="#" class="post-item" onclick="return false">
+                            <div class="post-meta-row">
+                                <span class="post-date">2026-01-08</span>
+                                <span class="post-comments">5 comments</span>
+                            </div>
+                            <h3 class="post-title">Building in Public, Owning Your Words</h3>
+                            <p class="post-blurb">This is what polis builds toward. Not a replacement for social media, but a foundation beneath it.</p>
+                            <span class="post-read-more">Read full post</span>
+                        </a>
+                    </article>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <a href="https://polis.pub" class="footer-logo" onclick="return false">POLIS<span class="footer-tagline">Your content, free from platform control</span></a>
+    </footer>`;
+
+    const studio13PostHTML = `
+    <main class="post-main">
+        <div class="container">
+            <a href="#" class="back-link" onclick="return false">&larr; Back to homepage</a>
+        </div>
+
+        <article class="post-content">
+            <div class="container">
+                <div class="post-header">
+                    <div class="post-date">February 10, 2026</div>
+                    <div class="post-meta">
+                        <span class="meta-label">Signed by</span>
+                        <span class="meta-value">vdibart</span>
+                        <span class="meta-sep">|</span>
+                        <span class="meta-label">Version</span>
+                        <span class="meta-value">a3f8c2d</span>
+                    </div>
+                </div>
+                <div class="content-body">
+                    <h2>The Promise We Made to Ourselves</h2>
+                    <p>When we first started building on the web, there was an implicit promise: <strong>your words belong to you</strong>. Your domain, your content, your audience. Somewhere along the way, we traded that for convenience.</p>
+                    <p>The platform era gave us reach but took our sovereignty. Every post lives on rented land. Every follower is a hostage to an algorithm you don't control.</p>
+                    <blockquote>The best time to reclaim your words was ten years ago. The second best time is now.</blockquote>
+                    <h3>What Cryptographic Signing Changes</h3>
+                    <p>When you sign your content with Ed25519 keys, you create something that didn't exist before: <strong>provable authorship without a platform</strong>. No one can forge your posts. No one can alter them without detection. Your domain becomes your identity.</p>
+                    <p>This isn't just a technical detail. It's a <a href="#">philosophical stance</a>. It says: I trust math more than terms of service.</p>
+                    <pre><code># Sign and publish from your own domain
+polis post "On the Architecture of Trust"
+# Your words, your keys, your domain</code></pre>
+                    <p>The tools are getting simpler. The barriers are falling. The question is no longer <em>can you own your content</em> but <em>will you</em>.</p>
+                    <h3>A Network of Domains</h3>
+                    <p>Imagine a web where every author is a node. Where following someone means subscribing to <em>their domain</em>, not a platform's feed. Where comments are cryptographically signed and published from the commenter's own site.</p>
+                    <ul>
+                        <li>No algorithm decides who sees your words</li>
+                        <li>No platform can deplatform you</li>
+                        <li>No terms of service can change under your feet</li>
+                    </ul>
+                    <p>This is what polis builds toward. Not a replacement for social media, but a <strong>foundation beneath it</strong>.</p>
+                </div>
+            </div>
+        </article>
+
+        <section class="comments">
+            <div class="container">
+                <div class="comments-header">
+                    <h2 class="comments-title">Comments (3)</h2>
+                    <details class="cta-inline">
+                        <summary class="cta-link">Learn how&hellip;</summary>
+                        <div class="cta-content">
+                            <p class="cta-text">Polis comments are cryptographically signed and published from your own site. No account needed&mdash;just your words and your domain.</p>
+                            <div class="cta-code">
+                                <pre><code><span class="code-comment"># Install polis and set up your site</span>
+polis init
+<span class="code-comment"># Create a comment (creates a signed .md file)</span>
+polis comment https://vdibart.polis.pub/posts/2026/02/on-the-architecture-of-trust</code></pre>
+                            </div>
+                            <a href="#" class="cta-link" onclick="return false">Get started with Polis &rarr;</a>
+                        </div>
+                    </details>
+                </div>
+                <div class="comments-list">
+                    <div class="comment">
+                        <div class="comment-header">
+                            <a href="#" class="comment-author" onclick="return false">mara.dev</a>
+                            <span class="comment-date">Feb 9, 2026</span>
+                        </div>
+                        <div class="comment-body">
+                            <p>This resonates deeply. The web we lost was never about platforms or protocols&mdash;it was about the <strong>relationship between author and reader</strong>. Polis gets that right.</p>
+                        </div>
+                    </div>
+                    <div class="comment">
+                        <div class="comment-header">
+                            <a href="#" class="comment-author" onclick="return false">kj@lightcone.pub</a>
+                            <span class="comment-date">Feb 7, 2026</span>
+                        </div>
+                        <div class="comment-body">
+                            <p>Strong disagree on the federation point. ActivityPub solved real problems. But the signature model here is elegant&mdash;provable authorship without a central registry is the right primitive.</p>
+                        </div>
+                    </div>
+                    <div class="comment">
+                        <div class="comment-header">
+                            <a href="#" class="comment-author" onclick="return false">sol.writer</a>
+                            <span class="comment-date">Feb 4, 2026</span>
+                        </div>
+                        <div class="comment-body">
+                            <p>Finally someone articulating what we've all been feeling. Bookmarked and sharing widely.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="post-footer-nav">
+            <div class="container">
+                <h2 class="section-title">More from this site</h2>
+                <div class="post-list">
+                    <article class="post-card">
+                        <a href="#" class="post-item" onclick="return false">
+                            <div class="post-meta-row">
+                                <span class="post-date">2026-02-03</span>
+                                <span class="post-comments">7 comments</span>
+                            </div>
+                            <h3 class="post-title">Decentralized Identity and the Open Web</h3>
+                        </a>
+                    </article>
+                    <article class="post-card">
+                        <a href="#" class="post-item" onclick="return false">
+                            <div class="post-meta-row">
+                                <span class="post-date">2026-01-28</span>
+                                <span class="post-comments">12 comments</span>
+                            </div>
+                            <h3 class="post-title">Why I Left the Platform</h3>
+                        </a>
+                    </article>
+                    <article class="post-card">
+                        <a href="#" class="post-item" onclick="return false">
+                            <div class="post-meta-row">
+                                <span class="post-date">2026-01-15</span>
+                                <span class="post-comments">2 comments</span>
+                            </div>
+                            <h3 class="post-title">Cryptographic Signatures for Everyone</h3>
+                        </a>
+                    </article>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <a href="https://polis.pub" class="footer-logo" onclick="return false">POLIS<span class="footer-tagline">Your content, free from platform control</span></a>
+    </footer>`;
 
     const indexHTML = `
     <section class="hero">
@@ -298,8 +519,16 @@ mkdir ~/my-polis-site && cd ~/my-polis-site
         // Update CSS
         document.getElementById('theme-css').href = cssPaths[theme];
 
+        // Studio13 uses its own HTML structure; other themes share the standard markup
+        let html;
+        if (theme === 'studio13') {
+            html = page === 'post' ? studio13PostHTML : studio13IndexHTML;
+        } else {
+            html = page === 'post' ? postHTML : indexHTML;
+        }
+
         // Update content
-        document.getElementById('preview-content').innerHTML = page === 'post' ? postHTML : indexHTML;
+        document.getElementById('preview-content').innerHTML = html;
 
         // Update active tab
         document.querySelectorAll('#preview-bar .tab').forEach(t => t.classList.remove('active'));

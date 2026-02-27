@@ -35,7 +35,7 @@ type SyncResult struct {
 func (s *Server) runUnifiedSync() SyncResult {
 	result := SyncResult{}
 
-	if s.DiscoveryURL == "" || s.DiscoveryKey == "" {
+	if s.DiscoveryURL == "" {
 		return result
 	}
 	baseURL := s.GetBaseURL()

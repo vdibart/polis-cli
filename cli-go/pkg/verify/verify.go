@@ -102,8 +102,8 @@ func VerifyContent(contentURL string) (*VerificationResult, error) {
 	var authorIdentity string
 	if err == nil {
 		publicKey = wk.PublicKey
-		// Prefer domain as public identity, fall back to email for backward compat
-		authorIdentity = wk.AuthorDomain()
+		// Extract domain from the fetch URL (the requesting actor already knows the domain)
+		authorIdentity = extractDomainFromBaseURL(baseURL)
 		if authorIdentity == "" && wk.Email != "" {
 			authorIdentity = wk.Email
 		}
@@ -319,4 +319,14 @@ func canonicalizeContent(content string) string {
 func sha256Hash(content []byte) string {
 	hash := sha256.Sum256(content)
 	return fmt.Sprintf("%x", hash)
+}
+
+// extractDomainFromBaseURL extracts the host from a base URL.
+func extractDomainFromBaseURL(u string) string {
+	u = strings.TrimPrefix(u, "https://")
+	u = strings.TrimPrefix(u, "http://")
+	if idx := strings.Index(u, "/"); idx >= 0 {
+		return u[:idx]
+	}
+	return u
 }

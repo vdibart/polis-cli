@@ -31,7 +31,7 @@ func TestRegisterPost_NotConfigured(t *testing.T) {
 	}
 }
 
-func TestRegisterPost_NoEmailNoDomain(t *testing.T) {
+func TestRegisterPost_NoEmailButHasBaseURL(t *testing.T) {
 	oldURL, oldKey, oldBase := DiscoveryURL, DiscoveryKey, BaseURL
 	defer func() { DiscoveryURL, DiscoveryKey, BaseURL = oldURL, oldKey, oldBase }()
 
@@ -41,7 +41,7 @@ func TestRegisterPost_NoEmailNoDomain(t *testing.T) {
 
 	dataDir := t.TempDir()
 
-	// Create .well-known/polis WITHOUT email or domain
+	// Create .well-known/polis WITHOUT email — author derived from BaseURL
 	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
 	wk := map[string]interface{}{
 		"public_key": "ssh-ed25519 AAAA...",
@@ -56,16 +56,19 @@ func TestRegisterPost_NoEmailNoDomain(t *testing.T) {
 		Version: "sha256:abc123",
 	}
 
+	// Will fail at signing (nil key) but should NOT fail at author resolution
+	// because domain is derived from BaseURL
 	err := RegisterPost(dataDir, result, nil, nil)
 	if err == nil {
-		t.Error("expected error when both email and domain are missing")
+		t.Error("expected error (nil private key), got nil")
 	}
-	if err != nil && !strings.Contains(err.Error(), "no author identity") {
-		t.Errorf("expected 'no author identity' error, got: %v", err)
+	// The error should be about signing, not about missing author
+	if strings.Contains(err.Error(), "no author identity") {
+		t.Errorf("should have used BaseURL domain as author, but got: %v", err)
 	}
 }
 
-func TestRegisterPost_DomainFallback(t *testing.T) {
+func TestRegisterPost_BaseURLDomainFallback(t *testing.T) {
 	oldURL, oldKey, oldBase := DiscoveryURL, DiscoveryKey, BaseURL
 	defer func() { DiscoveryURL, DiscoveryKey, BaseURL = oldURL, oldKey, oldBase }()
 
@@ -75,11 +78,10 @@ func TestRegisterPost_DomainFallback(t *testing.T) {
 
 	dataDir := t.TempDir()
 
-	// Create .well-known/polis with domain but NO email (hosted site pattern)
+	// Create .well-known/polis without email — domain from BaseURL
 	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
 	wk := map[string]interface{}{
 		"public_key": "ssh-ed25519 AAAA...",
-		"domain":     "alice.polis.pub",
 	}
 	data, _ := json.MarshalIndent(wk, "", "  ")
 	os.WriteFile(filepath.Join(dataDir, ".well-known", "polis"), data, 0644)
@@ -98,7 +100,7 @@ func TestRegisterPost_DomainFallback(t *testing.T) {
 	}
 	// The error should be about signing, not about missing author
 	if strings.Contains(err.Error(), "no author identity") {
-		t.Errorf("should have used domain as author, but got: %v", err)
+		t.Errorf("should have used BaseURL domain as author, but got: %v", err)
 	}
 }
 
@@ -112,12 +114,11 @@ func TestRegisterPost_EmailPreferredOverDomain(t *testing.T) {
 
 	dataDir := t.TempDir()
 
-	// Create .well-known/polis with BOTH email and domain
+	// Create .well-known/polis with email (email preferred over BaseURL-derived domain)
 	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
 	wk := map[string]interface{}{
 		"public_key": "ssh-ed25519 AAAA...",
 		"email":      "alice@example.com",
-		"domain":     "alice.polis.pub",
 	}
 	data, _ := json.MarshalIndent(wk, "", "  ")
 	os.WriteFile(filepath.Join(dataDir, ".well-known", "polis"), data, 0644)
@@ -151,7 +152,6 @@ func TestRegisterPost_PartialConfig(t *testing.T) {
 		base string
 	}{
 		{"no URL", "", "key", "https://test.polis.pub"},
-		{"no key", "https://discovery.example.com", "", "https://test.polis.pub"},
 		{"no base URL", "https://discovery.example.com", "key", ""},
 	}
 

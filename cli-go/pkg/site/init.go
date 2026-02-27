@@ -24,7 +24,6 @@ func GetGenerator() string {
 type InitOptions struct {
 	SiteTitle string // Optional site title
 	Author    string // Optional author name (falls back to git config user.name)
-	Domain    string // Optional canonical domain (e.g. "alice.polis.pub")
 	Email     string // Optional email address — private by default, only written if explicitly provided
 	Version   string // CLI version (e.g. "0.47.0") for metadata files
 	// Custom directory paths (empty = use defaults)
@@ -178,7 +177,6 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 	wk := &WellKnown{
 		Version:   GetGenerator(),
 		Author:    author,
-		Domain:    opts.Domain,
 		Email:     opts.Email, // Only written if explicitly provided (omitempty in JSON)
 		PublicKey: strings.TrimSpace(string(pubKey)),
 		SiteTitle: opts.SiteTitle,

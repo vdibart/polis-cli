@@ -43,7 +43,7 @@ func PublishEvent(eventType string, payload map[string]interface{}, privateKey [
 		baseURL = BaseURL
 	}
 
-	if dsURL == "" || dsKey == "" || baseURL == "" {
+	if dsURL == "" || baseURL == "" {
 		return nil
 	}
 	if privateKey == nil {

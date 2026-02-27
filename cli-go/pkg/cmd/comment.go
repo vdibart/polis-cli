@@ -129,18 +129,13 @@ func handleCommentSign(args []string) {
 		exitError("POLIS_BASE_URL not set")
 	}
 
-	// Resolve author identity: prefer domain, fall back to email for backward compat
-	authorIdentity := wk.AuthorDomain()
-	if authorIdentity == "" {
-		// Fall back: extract domain from POLIS_BASE_URL
-		authorIdentity = extractDomain(siteURL)
-	}
+	// Resolve author identity from POLIS_BASE_URL, fall back to email for backward compat
+	authorIdentity := extractDomain(siteURL)
 	if authorIdentity == "" && wk.Email != "" {
-		// Legacy fallback: use email if no domain available
 		authorIdentity = wk.Email
 	}
 	if authorIdentity == "" {
-		exitError("Author identity not configured — set domain in .well-known/polis or POLIS_BASE_URL")
+		exitError("Author identity not configured — set POLIS_BASE_URL")
 	}
 
 	// Sign the comment

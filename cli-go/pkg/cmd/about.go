@@ -48,7 +48,7 @@ func handleAbout(args []string) {
 			resp, err := client.CheckSiteRegistration(domain)
 			if err == nil && resp.IsRegistered {
 				registrationStatus = "registered"
-				registeredAt = resp.RegisteredAt
+				registeredAt = resp.CreatedAt
 			} else {
 				registrationStatus = "not registered"
 			}
@@ -81,11 +81,8 @@ func handleAbout(args []string) {
 		themesDir = wk.Config.Directories.Themes
 	}
 
-	// Resolve domain identity
-	domain := wk.AuthorDomain()
-	if domain == "" && baseURL != "" {
-		domain = extractDomain(baseURL)
-	}
+	// Resolve domain identity from POLIS_BASE_URL
+	domain := extractDomain(baseURL)
 
 	if jsonOutput {
 		siteData := map[string]interface{}{

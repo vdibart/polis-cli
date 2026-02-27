@@ -116,6 +116,7 @@ func (e *Engine) renderPostsSection(content string, ctx *RenderContext, depth in
 		rendered := e.substituteLoopVariables(processed, map[string]string{
 			"url":             post.URL,
 			"title":           post.Title,
+			"excerpt":         post.Excerpt,
 			"published":       post.Published,
 			"published_human": post.PublishedHuman,
 			"comment_count":   fmt.Sprintf("%d", post.CommentCount),
@@ -247,6 +248,7 @@ func (e *Engine) renderRecentPostsSection(content string, ctx *RenderContext, de
 		rendered := e.substituteLoopVariables(processed, map[string]string{
 			"url":             post.URL,
 			"title":           post.Title,
+			"excerpt":         post.Excerpt,
 			"published":       post.Published,
 			"published_human": post.PublishedHuman,
 			"comment_count":   fmt.Sprintf("%d", post.CommentCount),

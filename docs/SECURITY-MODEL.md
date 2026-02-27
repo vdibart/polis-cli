@@ -490,6 +490,46 @@ The `following.json` file (listing who you follow) is fetched over HTTPS without
 
 ---
 
+### 11. Server-Side Request Forgery (SSRF)
+
+**Threat:** Attacker registers a domain like `169.254.169.254` or `localhost` to make the discovery service issue outbound HTTP requests to internal infrastructure (cloud metadata endpoints, internal services).
+
+**Mitigation:**
+- `validateDomainSafety()` rejects all domains before outbound fetch
+- Blocked: IPv4/IPv6 address literals, `localhost`, reserved TLDs (`.local`, `.internal`, `.localhost`, `.test`, `.example`, `.invalid`), cloud metadata endpoints
+- Returns 400 before any network request is made
+
+**Residual risk:** None for known metadata endpoints. DNS rebinding attacks (domain resolves to internal IP) are not covered — would require DNS resolution validation.
+
+---
+
+### 12. Resource Exhaustion via Write Spam
+
+**Threat:** Attacker sends many requests with garbage signatures to force the discovery service to perform expensive outbound HTTP fetches and Ed25519 signature verifications.
+
+**Mitigation:**
+- Two-tier rate limiting: cheap IP-based check (120 req/hr) runs before any outbound fetch or crypto, per-domain check runs after authentication
+- SSRF validation rejects requests early for internal domains
+- 10s fetch timeout prevents slow-server resource tying
+- 64KB payload size limit on all endpoints
+
+**Residual risk:** Distributed attack from many IPs could bypass IP rate limits. Per-domain limits still protect against individual actor spam.
+
+---
+
+### 13. Read Endpoint Abuse
+
+**Threat:** Attacker scrapes or DoS-es read endpoints with high request volume.
+
+**Mitigation:**
+- Per-IP rate limits on all read endpoints (300-1200 req/hr depending on endpoint)
+- Offset cap of 10,000 on query endpoints prevents deep pagination abuse
+- Hourly cleanup of rate limit rows via pg_cron
+
+**Residual risk:** Distributed scraping from many IPs. Standard CDN/WAF protections recommended for production deployments.
+
+---
+
 ## Feature Security Analysis
 
 ### Publishing Posts

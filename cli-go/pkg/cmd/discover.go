@@ -21,8 +21,8 @@ func handleDiscover(args []string) {
 		exitError("Not a polis site directory")
 	}
 
-	if discoveryURL == "" || discoveryKey == "" {
-		exitError("Discovery service not configured (set DISCOVERY_SERVICE_URL and DISCOVERY_SERVICE_KEY)")
+	if discoveryURL == "" {
+		exitError("Discovery service not configured (set DISCOVERY_SERVICE_URL)")
 	}
 
 	myDomain := discovery.ExtractDomainFromURL(baseURL)

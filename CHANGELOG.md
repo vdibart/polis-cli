@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.56.0] - 2026-02-27
+
+This release adds the `unpublish` command, introduces the `patrol` integrity-checking package, removes the `migrate` command and all migration code, hardens discovery service API authentication, simplifies key rotation with transition signatures, and ships the new studio13 theme.
+
+### Added
+
+- **`unpublish` command (Bash + Go CLI)**: Remove a published post, deleting local files and unregistering from the discovery service with a signed unregister request.
+- **`patrol` package (Go)**: New integrity-checking package for verifying site content signatures and consistency.
+- **`MarkdownToPlainText()` renderer**: Converts markdown to plain text with HTML stripping, entity unescaping, and word-boundary-aware truncation — used for generating excerpt text.
+- **`{{excerpt}}` template variable**: New template variable available in post/comment templates for plain-text content summaries.
+- **`MakeContentUnregisterCanonicalJSON()`**: New canonical JSON builder for signed content unregistration.
+- **`MakeKeyRotationCanonicalJSON()` and `RotateKey()`**: New discovery client functions for cryptographic key rotation with transition signatures.
+- **New `studio13/` theme**: Community-contributed theme by Nick Katsivelos.
+- **`comment-inline.html` snippet**: Added to all themes for inline comment rendering in post pages.
+
+### Changed
+
+- **Key rotation rewritten**: `rotate-key` now uses transition signatures — signs a rotation message with the old key before swapping, then notifies the discovery service. No longer backs up old keys to `.old` files.
+- **Discovery client API auth hardening**: All HTTP methods now conditionally set the `Authorization` header only when an API key is present, preventing empty bearer tokens.
+- **`SiteCheckResponse.RegisteredAt` → `CreatedAt`**: Field renamed to match updated discovery service schema.
+- **Goldmark HTML renderer import alias**: Renamed from `html` to `goldhtml` to avoid conflict with stdlib `html` package.
+- **Template engine**: Added `excerpt` to the set of recognized variables; section processing improvements.
+- **Webapp handlers, routes, and server**: Expanded with new API endpoints, improved error handling, and UI updates.
+- **Webapp web UI**: Updated `app.js`, `index.html`, and `style.css` with new features and styling.
+- **Theme catalog**: Expanded `catalog.html` with studio13 and additional theme metadata.
+- **All themes**: Added `comment-inline.html` snippet to post templates; minor CSS additions.
+- **Docs**: Updated TEMPLATING.md, SECURITY-MODEL.md, USAGE.md, and WEBAPP-USER-MANUAL.md.
+- **Completions**: Removed `migrate`/`migrations` from bash and zsh completions; added `unpublish`.
+
+### Removed
+
+- **`polis migrate` command**: Domain migration feature removed from both CLIs.
+- **`polis migrations apply` command**: Migration application subcommand removed.
+- **`pkg/migrate/` package**: Entire migration package deleted.
+
 ## [0.55.0] - 2026-02-24
 
 This release adds an About page editor to the webapp, introduces theme switching from the Settings panel, ships new `also-reading` and `polis-widget` snippets for all six built-in themes, and delivers a range of webapp usability improvements.

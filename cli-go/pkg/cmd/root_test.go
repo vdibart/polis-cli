@@ -39,7 +39,6 @@ func TestPrintUsage(t *testing.T) {
 		"notifications",
 		"register",
 		"unregister",
-		"migrate",
 		"clone",
 		"rebuild",
 		"index",

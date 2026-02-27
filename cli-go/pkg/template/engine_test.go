@@ -617,6 +617,51 @@ func TestFollowingSection(t *testing.T) {
 	}
 }
 
+func TestExcerptInPostsSection(t *testing.T) {
+	engine := New(Config{})
+	ctx := NewRenderContext()
+	ctx.Posts = []PostData{
+		{URL: "/posts/1.html", Title: "Post One", Excerpt: "This is the excerpt of the first post."},
+		{URL: "/posts/2.html", Title: "Post Two", Excerpt: ""},
+	}
+
+	template := `{{#posts}}<div class="post-blurb">{{excerpt}}</div>{{/posts}}`
+
+	result, err := engine.Render(template, ctx)
+	if err != nil {
+		t.Fatalf("Render failed: %v", err)
+	}
+
+	if !strings.Contains(result, "This is the excerpt of the first post.") {
+		t.Errorf("Expected excerpt in output, got: %s", result)
+	}
+
+	// Second post has empty excerpt - should render empty
+	count := strings.Count(result, `<div class="post-blurb">`)
+	if count != 2 {
+		t.Errorf("Expected 2 post blurbs, got %d", count)
+	}
+}
+
+func TestExcerptInRecentPostsSection(t *testing.T) {
+	engine := New(Config{})
+	ctx := NewRenderContext()
+	ctx.RecentPosts = []PostData{
+		{URL: "/posts/1.html", Title: "Recent", Excerpt: "Recent post excerpt here."},
+	}
+
+	template := `{{#recent_posts}}<p>{{excerpt}}</p>{{/recent_posts}}`
+
+	result, err := engine.Render(template, ctx)
+	if err != nil {
+		t.Fatalf("Render failed: %v", err)
+	}
+
+	if !strings.Contains(result, "Recent post excerpt here.") {
+		t.Errorf("Expected excerpt in recent_posts output, got: %s", result)
+	}
+}
+
 func TestFollowingSectionEmpty(t *testing.T) {
 	engine := New(Config{})
 	ctx := NewRenderContext()

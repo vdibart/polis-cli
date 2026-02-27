@@ -297,6 +297,68 @@ func TestMarkdownToHTML_AutoHeadingID(t *testing.T) {
 	}
 }
 
+func TestMarkdownToPlainText_Basic(t *testing.T) {
+	result := MarkdownToPlainText("This is **bold** and *italic* text.", 200)
+	if !strings.Contains(result, "bold") {
+		t.Errorf("Expected 'bold' in result, got: %s", result)
+	}
+	if strings.Contains(result, "<") {
+		t.Errorf("Expected no HTML tags in result, got: %s", result)
+	}
+	if strings.Contains(result, "*") {
+		t.Errorf("Expected no markdown formatting in result, got: %s", result)
+	}
+}
+
+func TestMarkdownToPlainText_StripsTags(t *testing.T) {
+	// Markdown with raw HTML
+	result := MarkdownToPlainText("Hello <div>world</div> end", 200)
+	if strings.Contains(result, "<div>") {
+		t.Errorf("Expected HTML tags stripped, got: %s", result)
+	}
+	if !strings.Contains(result, "world") {
+		t.Errorf("Expected 'world' in result, got: %s", result)
+	}
+}
+
+func TestMarkdownToPlainText_Truncation(t *testing.T) {
+	long := strings.Repeat("word ", 100) // 500 chars
+	result := MarkdownToPlainText(long, 50)
+	if len(result) > 50 {
+		t.Errorf("Expected result <= 50 chars, got %d: %s", len(result), result)
+	}
+	if !strings.HasSuffix(result, "...") {
+		t.Errorf("Expected truncated result to end with '...', got: %s", result)
+	}
+}
+
+func TestMarkdownToPlainText_Empty(t *testing.T) {
+	result := MarkdownToPlainText("", 200)
+	if result != "" {
+		t.Errorf("Expected empty result, got: %s", result)
+	}
+}
+
+func TestMarkdownToPlainText_ShortContent(t *testing.T) {
+	result := MarkdownToPlainText("Short text.", 200)
+	if strings.HasSuffix(result, "...") {
+		t.Errorf("Short text should not be truncated, got: %s", result)
+	}
+	if !strings.Contains(result, "Short text.") {
+		t.Errorf("Expected original text, got: %s", result)
+	}
+}
+
+func TestMarkdownToPlainText_Headings(t *testing.T) {
+	result := MarkdownToPlainText("# Title\n\nBody paragraph.", 200)
+	if !strings.Contains(result, "Title") {
+		t.Errorf("Expected 'Title' in result, got: %s", result)
+	}
+	if !strings.Contains(result, "Body paragraph") {
+		t.Errorf("Expected 'Body paragraph' in result, got: %s", result)
+	}
+}
+
 // Benchmark rendering performance
 func BenchmarkMarkdownToHTML_Short(b *testing.B) {
 	input := "# Hello\n\nThis is a **test**."

@@ -54,10 +54,10 @@ brew install pandoc  # Optional: for polis render
 
 ```bash
 # Option 1: Add to PATH (quick start)
-export PATH="/path/to/polis-cli/cli-bash:$PATH"
+export PATH="/path/to/polis-cli/bin:$PATH"
 
 # Option 2: Create symlink
-sudo ln -s /path/to/polis-cli/cli-bash/polis /usr/local/bin/polis
+sudo ln -s /path/to/polis-cli/bin/polis /usr/local/bin/polis
 
 # Verify installation
 polis --help
@@ -76,8 +76,8 @@ mkdir my-site && cd my-site
 git init
 
 # Copy CLI tools and themes
-cp ../polis-cli/cli-bash/polis ./bin/
-cp ../polis-cli/cli-bash/polis-upgrade ./bin/
+cp ../polis-cli/bin/polis ./bin/
+cp ../polis-cli/bin/polis-upgrade ./bin/
 cp -r ../polis-cli/themes ./themes/
 
 # Initialize your site
@@ -692,16 +692,10 @@ Generated: index.html
 
 #### Themes
 
-Polis ships with three themes (turbo, zane, sols). On first render, a theme is randomly selected. To change themes:
+Polis ships with six themes (turbo, zane, sols, vice, especial, especial-light). On first render, a theme is randomly selected. To change themes:
 
-1. Edit `metadata/manifest.json` and set `active_theme`:
-   ```json
-   {
-     "active_theme": "zane"
-   }
-   ```
-
-2. Re-render with `polis render --force`
+- **Dashboard**: Open **Settings > Theme** and click a theme card. The site re-renders automatically.
+- **CLI**: Edit `metadata/manifest.json`, set `active_theme`, then run `polis render --force`.
 
 For theme customization, creating custom themes, template variables, and mustache syntax, see [TEMPLATING.md](TEMPLATING.md).
 

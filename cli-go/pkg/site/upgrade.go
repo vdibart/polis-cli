@@ -17,7 +17,7 @@ var KnownFields = map[string]bool{
 	"email":                         true,
 	"public_key":                    true,
 	"site_title":                    true,
-	"domain":                        true,
+	"domain":                        false, // Use POLIS_BASE_URL env var instead
 	"created":                       true,
 	"config":                        true,
 	"config.directories":            true,
@@ -108,6 +108,13 @@ func UpgradeWellKnown(siteDir string) (*WellKnown, error) {
 	}
 	if wk.Generator != "" {
 		wk.Generator = ""
+		upgraded = true
+	}
+
+	// Remove domain (runtime config, should use POLIS_BASE_URL env var instead)
+	if wk.Domain != "" {
+		log.Printf("[upgrade] Removing domain (use POLIS_BASE_URL env var instead)")
+		wk.Domain = ""
 		upgraded = true
 	}
 

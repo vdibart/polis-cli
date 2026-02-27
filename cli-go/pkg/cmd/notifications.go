@@ -67,12 +67,11 @@ func handleNotificationsList(args []string) {
 
 	// Also fetch pending blessings from discovery service
 	var pendingBlessings []map[string]interface{}
-	var migrations []map[string]interface{}
 
 	apiKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	baseURL := os.Getenv("POLIS_BASE_URL")
 
-	if apiKey != "" && baseURL != "" {
+	if baseURL != "" {
 		domain := extractDomain(baseURL)
 		privKey, _ := loadPrivateKey(dir)
 		client := discovery.NewAuthenticatedClient(discoveryURL, apiKey, domain, privKey)
@@ -92,21 +91,6 @@ func handleNotificationsList(args []string) {
 				})
 			}
 		}
-
-		// Get pending migrations
-		domains, _ := collectRelevantDomains(dir)
-		if len(domains) > 0 {
-			migrationsResp, err := client.QueryMigrations(domains)
-			if err == nil {
-				for _, m := range migrationsResp.Migrations {
-					migrations = append(migrations, map[string]interface{}{
-						"old_domain":  m.OldDomain,
-						"new_domain":  m.NewDomain,
-						"migrated_at": m.MigratedAt,
-					})
-				}
-			}
-		}
 	}
 
 	if jsonOutput {
@@ -116,11 +100,10 @@ func handleNotificationsList(args []string) {
 			"data": map[string]interface{}{
 				"notifications":     entries,
 				"pending_blessings": pendingBlessings,
-				"domain_migrations": migrations,
 			},
 		})
 	} else {
-		totalCount := len(entries) + len(pendingBlessings) + len(migrations)
+		totalCount := len(entries) + len(pendingBlessings)
 
 		if totalCount == 0 {
 			fmt.Println("[i] No notifications")
@@ -152,19 +135,6 @@ func handleNotificationsList(args []string) {
 			fmt.Println()
 			fmt.Println("[i] Run 'polis blessing requests' for details, or 'polis blessing grant <id>' to approve.")
 			fmt.Println()
-		}
-
-		if len(migrations) > 0 {
-			fmt.Printf("[i] === Domain Migrations (%d) ===\n", len(migrations))
-			for _, m := range migrations {
-				migratedAt := m["migrated_at"].(string)
-				if len(migratedAt) > 10 {
-					migratedAt = migratedAt[:10]
-				}
-				fmt.Printf("  %s -> %s (%s)\n", m["old_domain"], m["new_domain"], migratedAt)
-			}
-			fmt.Println()
-			fmt.Println("[i] Run 'polis migrations apply' to update local references.")
 		}
 	}
 }

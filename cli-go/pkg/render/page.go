@@ -437,9 +437,18 @@ func (r *PageRenderer) loadPublicIndex() ([]template.PostData, []template.Commen
 				}
 			}
 
+			// Generate excerpt from post body (non-fatal if file missing)
+			var excerpt string
+			mdPath := filepath.Join(r.config.DataDir, entry.Path)
+			if data, err := os.ReadFile(mdPath); err == nil {
+				body := stripFrontmatter(string(data))
+				excerpt = MarkdownToPlainText(body, 200)
+			}
+
 			posts = append(posts, template.PostData{
 				URL:            htmlPath,
 				Title:          entry.Title,
+				Excerpt:        excerpt,
 				Published:      entry.Published,
 				PublishedHuman: template.FormatHumanDate(entry.Published),
 				CommentCount:   count,
@@ -573,27 +582,9 @@ func (r *PageRenderer) getAuthorName() string {
 	return wk.AuthorName
 }
 
-// getAuthorDomain returns the site domain from .well-known/polis.
-// Reads the "domain" field first, falls back to extracting domain from "base_url".
+// getAuthorDomain returns the site domain, extracted from the BaseURL config.
 func (r *PageRenderer) getAuthorDomain() string {
-	wkPath := filepath.Join(r.config.DataDir, ".well-known", "polis")
-	data, err := os.ReadFile(wkPath)
-	if err != nil {
-		return ""
-	}
-
-	var wk struct {
-		Domain  string `json:"domain"`
-		BaseURL string `json:"base_url"`
-	}
-	if err := json.Unmarshal(data, &wk); err != nil {
-		return ""
-	}
-
-	if wk.Domain != "" {
-		return wk.Domain
-	}
-	return extractDomain(wk.BaseURL)
+	return extractDomain(r.config.BaseURL)
 }
 
 // buildURL builds a full URL for a file path.

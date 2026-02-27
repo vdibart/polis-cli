@@ -90,11 +90,6 @@
                                 <input type="url" id="init-discovery-url" class="wizard-input">
                                 <p class="hint">Coordinates content discovery and blessings across sites</p>
                             </div>
-                            <div class="wizard-section">
-                                <label for="init-discovery-key">Discovery Service Key:</label>
-                                <input type="text" id="init-discovery-key" class="wizard-input">
-                                <p class="hint">Public API key for the discovery service</p>
-                            </div>
                         </div>
                     </div>
                 </div>
@@ -141,6 +136,9 @@
         <div id="dashboard-screen" class="screen hidden">
             <!-- Top Header -->
             <header class="top-header">
+                <button class="hamburger" onclick="App.toggleMobileNav()" aria-label="Toggle navigation">
+                    <span></span><span></span><span></span>
+                </button>
                 <h1>Polis</h1>
                 <div class="header-right">
                     <span id="domain-display" class="domain-display"></span>

@@ -42,6 +42,13 @@ func GenerateKeypair() ([]byte, []byte, error) {
 	return privPEM, pubSSH, nil
 }
 
+// ValidatePrivateKey checks whether pemData contains a valid Ed25519 private key.
+// Returns nil if valid, an error otherwise. The parsed key is not retained.
+func ValidatePrivateKey(pemData []byte) error {
+	_, err := parsePrivateKey(pemData)
+	return err
+}
+
 // SignContent signs content with the private key and returns an SSH signature.
 // The privateKey should be in OpenSSH PEM format.
 // This produces signatures compatible with `ssh-keygen -Y sign`.

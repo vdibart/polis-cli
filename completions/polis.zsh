@@ -7,7 +7,7 @@
 # Or copy to ~/.zsh/completions/_polis (create dir if needed)
 
 _polis() {
-    local -a commands blessing_subcommands migrations_subcommands notifications_subcommands
+    local -a commands blessing_subcommands notifications_subcommands
     local cmd_pos=2  # Default command position
 
     commands=(
@@ -20,8 +20,6 @@ _polis() {
         'follow:Follow an author (--announce to broadcast)'
         'index:View content index'
         'init:Initialize Polis directory structure'
-        'migrate:Migrate content to a new domain'
-        'migrations:Apply discovered domain migrations'
         'notifications:View and manage notifications'
         'post:Create a new post (--filename, --title for stdin)'
         'preview:Preview a post or comment with signature verification'
@@ -43,10 +41,6 @@ _polis() {
         'grant:Grant a blessing request'
         'requests:List pending blessing requests'
         'sync:Sync auto-blessed comments from discovery service'
-    )
-
-    migrations_subcommands=(
-        'apply:Apply discovered domain migrations'
     )
 
     notifications_subcommands=(
@@ -81,11 +75,6 @@ _polis() {
                 blessing)
                     if [[ $CURRENT -eq $((cmd_pos + 1)) ]]; then
                         _describe -t subcommands 'blessing subcommands' blessing_subcommands
-                    fi
-                    ;;
-                migrations)
-                    if [[ $CURRENT -eq $((cmd_pos + 1)) ]]; then
-                        _describe -t subcommands 'migrations subcommands' migrations_subcommands
                     fi
                     ;;
                 notifications)
@@ -193,11 +182,6 @@ _polis() {
                         '--json[Output in JSON format]' \
                         ':file:_files' \
                         ':version-hash:'
-                    ;;
-                migrate)
-                    _arguments \
-                        '--json[Output in JSON format]' \
-                        ':new-domain:'
                     ;;
                 serve)
                     _arguments \

@@ -30,17 +30,26 @@ polis render --force
 
 ## Built-in Themes
 
-Polis ships with three themes:
+Polis ships with six themes:
 
 | Theme | Description |
 |-------|-------------|
 | **turbo** | Retro computing aesthetic with deep blue foundation |
 | **zane** | Neutral dark theme with teal and salmon accents |
 | **sols** | Nine Sols inspired theme with violet and peach tones |
+| **vice** | GTA Vice City / Miami Vice inspired with coral and sunset tones |
+| **especial** | Modelo Especial inspired dark theme with gold and cream |
+| **especial-light** | Light variant of especial with warm fog background |
 
 On first render, polis randomly selects a theme from those available. You can change the active theme at any time.
 
 ## Changing Themes
+
+### Via the Dashboard (recommended)
+
+Open **Settings** in the webapp dashboard. The **Theme** section shows all available themes with color palette previews. Click any theme to switch immediately — the site is re-rendered automatically.
+
+### Via the CLI
 
 Edit `metadata/manifest.json` and set the `active_theme` field:
 
@@ -71,6 +80,7 @@ Each theme is a self-contained folder in `.polis/themes/`:
 ├── post.html               # Individual post template
 ├── comment.html            # Comment page template
 ├── comment-inline.html     # Blessed comment (rendered inside posts)
+├── posts.html              # Archive page template (optional)
 ├── turbo.css               # Theme stylesheet
 └── snippets/               # Theme-specific snippets
     ├── about.html          # About section
@@ -185,6 +195,8 @@ comments/
         └── reply.html           # Generated (rendered HTML)
 
 index.html                       # Generated (listing page)
+posts/
+└── index.html                   # Generated (archive page, all posts)
 styles.css                       # Copied from active theme
 ```
 
@@ -219,15 +231,25 @@ Snippets can include other snippets (up to 10 levels deep).
 Use `{{#section}}...{{/section}}` for loops:
 
 ```html
-<!-- Loop over posts -->
+<!-- Loop over all posts (unlimited, use in archive pages) -->
 {{#posts}}
     {{> post-item}}
 {{/posts}}
 
-<!-- Loop over comments -->
+<!-- Loop over recent posts (limited to 10, use on homepage) -->
+{{#recent_posts}}
+    {{> post-item}}
+{{/recent_posts}}
+
+<!-- Loop over all comments (unlimited) -->
 {{#comments}}
     {{> comment-item}}
 {{/comments}}
+
+<!-- Loop over recent comments (limited to 10, use on homepage) -->
+{{#recent_comments}}
+    {{> comment-item}}
+{{/recent_comments}}
 
 <!-- Loop over blessed comments (on post pages) -->
 {{#blessed_comments}}
@@ -235,19 +257,22 @@ Use `{{#section}}...{{/section}}` for loops:
 {{/blessed_comments}}
 ```
 
+The `{{#recent_posts}}` and `{{#recent_comments}}` sections display the 10 most recent items. Use `{{#posts}}` and `{{#comments}}` (unlimited) in archive templates.
+
 ### Loop Variables
 
-**Inside `{{#posts}}` loops:**
+**Inside `{{#posts}}` and `{{#recent_posts}}` loops:**
 
 | Variable | Description |
 |----------|-------------|
 | `{{url}}` | Link to HTML file |
 | `{{title}}` | Post title |
+| `{{excerpt}}` | First ~200 chars of post body (plain text) |
 | `{{published}}` | ISO date |
 | `{{published_human}}` | Human-readable date |
 | `{{comment_count}}` | Number of blessed comments |
 
-**Inside `{{#comments}}` loops:**
+**Inside `{{#comments}}` and `{{#recent_comments}}` loops:**
 
 | Variable | Description |
 |----------|-------------|
@@ -343,6 +368,7 @@ A valid theme must contain:
 | `post.html` | Yes | Post page template |
 | `comment.html` | Yes | Comment page template |
 | `comment-inline.html` | Yes | Blessed comment template |
+| `posts.html` | Optional | Archive page template (all posts) |
 | `{themename}.css` | Yes | Theme stylesheet |
 | `snippets/` | Optional | Theme-specific snippets |
 
@@ -403,6 +429,7 @@ Set the site title during initialization: `polis init --site-title "My Site"`
 | `snippets/` | Global snippets (override theme snippets) |
 | `styles.css` | Active theme's stylesheet (copied on render) |
 | `index.html` | Generated listing page |
+| `posts/index.html` | Generated archive page (all posts) |
 | `posts/**/*.html` | Generated post pages |
 | `comments/**/*.html` | Generated comment pages |
 | `metadata/manifest.json` | Site metadata including `active_theme` |
@@ -568,6 +595,7 @@ Themes should style these key classes:
 | `.site-footer` | all | Page footer |
 | `.footer-logo` | all | Polis branding link |
 | `.footer-tagline` | all | Tagline text |
+| `.view-all` | index | "View all N posts" link |
 | `.post-meta` | post, comment | Signature/metadata block |
 | `.meta-label` | post, comment | "Signed by" etc. |
 | `.meta-value` | post, comment | Author name etc. |

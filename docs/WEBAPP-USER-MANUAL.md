@@ -313,6 +313,14 @@ Navigate to **My Site > Settings** to view and manage your site configuration.
 | Public Key | `.polis/keys/id_ed25519.pub` | Your Ed25519 public key (truncated, with copy button) |
 | Data Directory | Startup flag or cwd | Where your site files live |
 
+### Theme Section
+
+The Theme section displays a grid of all available themes with color palette previews. Each card shows 5 representative colors extracted from the theme's CSS variables.
+
+- Click any theme card to switch immediately — this updates the manifest, copies the theme CSS, and re-renders your entire site.
+- The currently active theme is highlighted with a badge.
+- Theme data is stored in `metadata/manifest.json` (`active_theme` field) and the theme CSS is copied to `styles.css` at the site root.
+
 ### Discovery Service Section
 
 | Field | Source | Description |

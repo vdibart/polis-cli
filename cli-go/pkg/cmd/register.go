@@ -84,7 +84,7 @@ func handleSiteRegister(client *discovery.Client, dir, domain string, privKey []
 		outputJSON(map[string]interface{}{
 			"success":       result.Success,
 			"domain":        domain,
-			"registered_at": result.RegisteredAt,
+			"created_at": result.CreatedAt,
 			"registry_url":  result.RegistryURL,
 		})
 	} else {

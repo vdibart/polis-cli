@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
@@ -27,7 +28,7 @@ func TestCheckSiteRegistration_Registered(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"is_registered":        true,
 			"domain":               "alice.com",
-			"registered_at":        "2026-01-15T10:30:00Z",
+			"created_at":        "2026-01-15T10:30:00Z",
 			"registry_url":         "https://registry.polis.pub/alice.com",
 			"registration_version": 1,
 		})
@@ -46,8 +47,8 @@ func TestCheckSiteRegistration_Registered(t *testing.T) {
 	if result.Domain != "alice.com" {
 		t.Errorf("Expected domain=alice.com, got %s", result.Domain)
 	}
-	if result.RegisteredAt != "2026-01-15T10:30:00Z" {
-		t.Errorf("Expected registered_at=2026-01-15T10:30:00Z, got %s", result.RegisteredAt)
+	if result.CreatedAt != "2026-01-15T10:30:00Z" {
+		t.Errorf("Expected created_at=2026-01-15T10:30:00Z, got %s", result.CreatedAt)
 	}
 }
 
@@ -151,7 +152,7 @@ func TestRegisterSite_Success(t *testing.T) {
 			"success":       true,
 			"domain":        "alice.com",
 			"registry_url":  "https://registry.polis.pub/alice.com",
-			"registered_at": "2026-01-15T10:30:00Z",
+			"created_at": "2026-01-15T10:30:00Z",
 		})
 	}))
 	defer server.Close()
@@ -541,5 +542,148 @@ func TestStreamQuery_WithoutTargetFilter(t *testing.T) {
 	_, err := client.StreamQuery("0", 100, "", "", "")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
+	}
+}
+
+// ============================================================================
+// Key Rotation Tests
+// ============================================================================
+
+func TestMakeKeyRotationCanonicalJSON(t *testing.T) {
+	payload, err := MakeKeyRotationCanonicalJSON("alice.polis.pub", "ssh-ed25519 AAA", "ssh-ed25519 BBB", "2026-02-25T12:00:00Z")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	expected := `{"action":"key-rotation","domain":"alice.polis.pub","new_key":"ssh-ed25519 BBB","old_key":"ssh-ed25519 AAA","timestamp":"2026-02-25T12:00:00Z"}`
+	if string(payload) != expected {
+		t.Errorf("Canonical payload mismatch.\nExpected: %s\nGot:      %s", expected, string(payload))
+	}
+}
+
+func TestMakeKeyRotationCanonicalJSON_KeyOrder(t *testing.T) {
+	// Verify keys are in alphabetical order: action, domain, new_key, old_key, timestamp
+	payload, err := MakeKeyRotationCanonicalJSON("bob.com", "ssh-ed25519 OLD", "ssh-ed25519 NEW", "2026-02-25T12:00:00Z")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		t.Fatalf("Failed to parse canonical JSON: %v", err)
+	}
+
+	expectedKeys := []string{"action", "domain", "new_key", "old_key", "timestamp"}
+	for _, key := range expectedKeys {
+		if _, ok := parsed[key]; !ok {
+			t.Errorf("Expected key %q in canonical payload", key)
+		}
+	}
+
+	if parsed["action"] != "key-rotation" {
+		t.Errorf("Expected action=key-rotation, got %v", parsed["action"])
+	}
+
+	// Verify the raw JSON has keys in alphabetical order by checking positions
+	raw := string(payload)
+	for i, key := range expectedKeys {
+		quoted := `"` + key + `"`
+		pos := strings.Index(raw, quoted)
+		if pos < 0 {
+			t.Fatalf("Key %q not found in canonical JSON: %s", key, raw)
+		}
+		if i > 0 {
+			prevQuoted := `"` + expectedKeys[i-1] + `"`
+			prevPos := strings.Index(raw, prevQuoted)
+			if pos <= prevPos {
+				t.Errorf("Key %q (pos %d) should appear after %q (pos %d) in canonical JSON",
+					key, pos, expectedKeys[i-1], prevPos)
+			}
+		}
+	}
+}
+
+func TestMakeContentUnregisterCanonicalJSON(t *testing.T) {
+	result := MakeContentUnregisterCanonicalJSON("polis.post", "https://example.com/posts/test.md")
+
+	expected := `{"type":"polis.post","url":"https://example.com/posts/test.md"}`
+	if result != expected {
+		t.Errorf("Canonical payload mismatch.\nExpected: %s\nGot:      %s", expected, result)
+	}
+}
+
+func TestRotateKey_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Errorf("Expected POST request, got %s", r.Method)
+		}
+		if r.URL.Path != "/ds-key-rotate" {
+			t.Errorf("Expected /ds-key-rotate, got %s", r.URL.Path)
+		}
+
+		var req KeyRotationRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Failed to decode request body: %v", err)
+		}
+
+		if req.Domain != "alice.polis.pub" {
+			t.Errorf("Expected domain=alice.polis.pub, got %s", req.Domain)
+		}
+		if req.OldKey != "ssh-ed25519 AAA" {
+			t.Errorf("Expected old_key=ssh-ed25519 AAA, got %s", req.OldKey)
+		}
+		if req.NewKey != "ssh-ed25519 BBB" {
+			t.Errorf("Expected new_key=ssh-ed25519 BBB, got %s", req.NewKey)
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Key rotated successfully",
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-api-key")
+	err := client.RotateKey(KeyRotationRequest{
+		Domain:        "alice.polis.pub",
+		OldKey:        "ssh-ed25519 AAA",
+		NewKey:        "ssh-ed25519 BBB",
+		TransitionSig: "fake-signature",
+		Timestamp:     "2026-02-25T12:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+}
+
+func TestRotateKey_DSRejects(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":false,"error":"Key mismatch: old_key does not match registered key"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-api-key")
+	err := client.RotateKey(KeyRotationRequest{
+		Domain:        "alice.polis.pub",
+		OldKey:        "ssh-ed25519 WRONG",
+		NewKey:        "ssh-ed25519 BBB",
+		TransitionSig: "fake-signature",
+		Timestamp:     "2026-02-25T12:00:00Z",
+	})
+	if err == nil {
+		t.Fatal("Expected error for rejected key rotation, got nil")
+	}
+
+	// Verify the error message contains useful information
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "key rotation failed") {
+		t.Errorf("Expected error to contain 'key rotation failed', got: %s", errMsg)
+	}
+	if !strings.Contains(errMsg, "409") {
+		t.Errorf("Expected error to contain status code '409', got: %s", errMsg)
 	}
 }

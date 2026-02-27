@@ -37,23 +37,6 @@ type WellKnown struct {
 	Config     Config `json:"config,omitempty"`
 }
 
-// AuthorDomain returns the domain identity for this site.
-// Prefers the explicit Domain field, falls back to extracting from BaseURL.
-func (wk *WellKnown) AuthorDomain() string {
-	if wk.Domain != "" {
-		return wk.Domain
-	}
-	if wk.BaseURL != "" {
-		u := strings.TrimPrefix(wk.BaseURL, "https://")
-		u = strings.TrimPrefix(u, "http://")
-		if idx := strings.Index(u, "/"); idx >= 0 {
-			return u[:idx]
-		}
-		return u
-	}
-	return ""
-}
-
 // Config holds the configuration section from .well-known/polis.
 type Config struct {
 	Directories DirConfig  `json:"directories,omitempty"`

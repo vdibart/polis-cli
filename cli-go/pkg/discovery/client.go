@@ -242,7 +242,9 @@ func (c *Client) RegisterContent(req *ContentRegisterRequest) (*ContentRegisterR
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -291,7 +293,9 @@ func (c *Client) UnregisterContent(contentType, contentURL, signature string) er
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -319,7 +323,9 @@ func (c *Client) CheckContent(contentType, contentURL string) (*ContentCheckResp
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -358,7 +364,9 @@ func (c *Client) QueryContent(contentType string, filters map[string]string) (*C
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 	if err := c.addAuthHeaders(httpReq); err != nil {
 		return nil, err
 	}
@@ -432,7 +440,9 @@ func (c *Client) UpdateRelationship(relType, sourceURL, targetURL, action string
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -462,7 +472,9 @@ func (c *Client) QueryRelationships(relType string, filters map[string]string) (
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 	if err := c.addAuthHeaders(httpReq); err != nil {
 		return nil, err
 	}
@@ -524,6 +536,19 @@ func MakeContentCanonicalJSON(contentType, contentURL, version, author string, m
 	})
 }
 
+// MakeContentUnregisterCanonicalJSON creates the deterministic canonical JSON for
+// content unregistration signing. Must match DS buildContentUnregisterCanonicalJSON: {type, url}
+func MakeContentUnregisterCanonicalJSON(contentType, contentURL string) string {
+	b, _ := json.Marshal(struct {
+		Type string `json:"type"`
+		URL  string `json:"url"`
+	}{
+		Type: contentType,
+		URL:  contentURL,
+	})
+	return string(b)
+}
+
 // MakeRelationshipCanonicalJSON creates canonical JSON for relationship update signing.
 // Must match DS buildRelationshipCanonicalJSON: {type, source_url, target_url, action}
 func MakeRelationshipCanonicalJSON(relType, sourceURL, targetURL, action string) ([]byte, error) {
@@ -543,7 +568,7 @@ func MakeRelationshipCanonicalJSON(relType, sourceURL, targetURL, action string)
 type SiteCheckResponse struct {
 	IsRegistered        bool   `json:"is_registered"`
 	Domain              string `json:"domain,omitempty"`
-	RegisteredAt        string `json:"registered_at,omitempty"`
+	CreatedAt           string `json:"created_at,omitempty"`
 	RegistryURL         string `json:"registry_url,omitempty"`
 	RegistrationVersion int    `json:"registration_version,omitempty"`
 	ServiceAttestation  string `json:"service_attestation,omitempty"`
@@ -554,7 +579,7 @@ type SiteRegisterResponse struct {
 	Success            bool   `json:"success"`
 	Domain             string `json:"domain,omitempty"`
 	RegistryURL        string `json:"registry_url,omitempty"`
-	RegisteredAt       string `json:"registered_at,omitempty"`
+	CreatedAt          string `json:"created_at,omitempty"`
 	ServiceAttestation string `json:"service_attestation,omitempty"`
 	Error              string `json:"error,omitempty"`
 	Code               string `json:"code,omitempty"`
@@ -603,7 +628,9 @@ func (c *Client) CheckSiteRegistration(domain string) (*SiteCheckResponse, error
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(httpReq)
@@ -668,7 +695,9 @@ func (c *Client) RegisterSite(domain string, privateKey []byte, email, authorNam
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -734,7 +763,9 @@ func (c *Client) UnregisterSite(domain string, privateKey []byte) (*SiteUnregist
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -773,130 +804,6 @@ func MakeSiteRegistrationCanonicalJSON(action, domain string) ([]byte, error) {
 }
 
 // ============================================================================
-// Domain Migration (ds-migrations endpoint, table: ds_domain_migrations)
-// ============================================================================
-
-// MigrationRecord represents a domain migration record from the discovery service.
-type MigrationRecord struct {
-	OldDomain  string `json:"old_domain"`
-	NewDomain  string `json:"new_domain"`
-	MigratedAt string `json:"migrated_at"`
-	PublicKey  string `json:"public_key"`
-}
-
-// MigrationResponse is the response from the migrations query endpoint.
-type MigrationResponse struct {
-	Count      int               `json:"count"`
-	Migrations []MigrationRecord `json:"migrations"`
-}
-
-// QueryMigrations queries the discovery service for domain migrations.
-func (c *Client) QueryMigrations(domains []string) (*MigrationResponse, error) {
-	endpoint := fmt.Sprintf("%s/ds-migrations?domains=%s", c.BaseURL, JoinDomains(domains))
-
-	httpReq, err := http.NewRequest("GET", endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-
-	resp, err := c.HTTPClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result MigrationResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return &result, nil
-}
-
-// migrationPayload is the canonical payload for domain migration signing.
-type migrationPayload struct {
-	Version   int    `json:"version"`
-	Action    string `json:"action"`
-	OldDomain string `json:"old_domain"`
-	NewDomain string `json:"new_domain"`
-}
-
-// MigrationRegisterRequest is the request to register a domain migration.
-type MigrationRegisterRequest struct {
-	Version   int    `json:"version"`
-	Action    string `json:"action"`
-	OldDomain string `json:"old_domain"`
-	NewDomain string `json:"new_domain"`
-	Signature string `json:"signature"`
-}
-
-// RegisterMigration registers a domain migration with the discovery service.
-func (c *Client) RegisterMigration(oldDomain, newDomain string, privateKey []byte) error {
-	endpoint := c.BaseURL + "/ds-migrations-register"
-
-	canonicalPayload := migrationPayload{
-		Version:   1,
-		Action:    "migrate",
-		OldDomain: oldDomain,
-		NewDomain: newDomain,
-	}
-	canonicalJSON, err := json.Marshal(canonicalPayload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal canonical payload: %w", err)
-	}
-
-	signature, err := signing.SignContent(canonicalJSON, privateKey)
-	if err != nil {
-		return fmt.Errorf("failed to sign payload: %w", err)
-	}
-
-	req := MigrationRegisterRequest{
-		Version:   1,
-		Action:    "migrate",
-		OldDomain: oldDomain,
-		NewDomain: newDomain,
-		Signature: signature,
-	}
-
-	body, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	httpReq, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-
-	resp, err := c.HTTPClient.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("migration registration failed with status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	return nil
-}
-
-// ============================================================================
 // Stream (ds-stream-* endpoints, table: ds_events)
 // ============================================================================
 
@@ -926,7 +833,7 @@ func unmarshalJSONBField(raw json.RawMessage) map[string]interface{} {
 type StreamEvent struct {
 	ID        json.Number            `json:"id"`
 	Type      string                 `json:"type"`
-	Timestamp string                 `json:"timestamp"`
+	Timestamp string                 `json:"created_at"`
 	Actor     string                 `json:"actor"`
 	Signature string                 `json:"signature"`
 	Payload   map[string]interface{} `json:"payload"`
@@ -938,7 +845,7 @@ func (e *StreamEvent) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		ID        json.Number     `json:"id"`
 		Type      string          `json:"type"`
-		Timestamp string          `json:"timestamp"`
+		Timestamp string          `json:"created_at"`
 		Actor     string          `json:"actor"`
 		Signature string          `json:"signature"`
 		Payload   json.RawMessage `json:"payload"`
@@ -1004,7 +911,9 @@ func (c *Client) StreamQuery(since string, limit int, typeFilter string, actorFi
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 	if err := c.addAuthHeaders(httpReq); err != nil {
 		return nil, err
 	}
@@ -1059,7 +968,9 @@ func (c *Client) StreamPublish(eventType, actor string, payload map[string]inter
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -1083,7 +994,9 @@ func (c *Client) StreamHealth() (*StreamHealthResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -1118,6 +1031,74 @@ func MakeStreamCanonicalJSON(eventType string, payload map[string]interface{}) (
 		Payload: payload,
 	}
 	return json.Marshal(canonical)
+}
+
+// ============================================================================
+// Key Rotation
+// ============================================================================
+
+// KeyRotationRequest is the request body for /ds-key-rotate.
+type KeyRotationRequest struct {
+	Domain        string `json:"domain"`
+	OldKey        string `json:"old_key"`
+	NewKey        string `json:"new_key"`
+	TransitionSig string `json:"transition_sig"`
+	Timestamp     string `json:"timestamp"`
+}
+
+// keyRotationCanonical is the canonical structure for key rotation signing.
+// Keys sorted alphabetically: action, domain, new_key, old_key, timestamp.
+type keyRotationCanonical struct {
+	Action    string `json:"action"`
+	Domain    string `json:"domain"`
+	NewKey    string `json:"new_key"`
+	OldKey    string `json:"old_key"`
+	Timestamp string `json:"timestamp"`
+}
+
+// MakeKeyRotationCanonicalJSON creates the deterministic canonical JSON for
+// key rotation signature verification. Keys are sorted alphabetically.
+func MakeKeyRotationCanonicalJSON(domain, oldKey, newKey, timestamp string) ([]byte, error) {
+	return json.Marshal(keyRotationCanonical{
+		Action:    "key-rotation",
+		Domain:    domain,
+		NewKey:    newKey,
+		OldKey:    oldKey,
+		Timestamp: timestamp,
+	})
+}
+
+// RotateKey sends a key rotation request to the discovery service.
+func (c *Client) RotateKey(req KeyRotationRequest) error {
+	endpoint := c.BaseURL + "/ds-key-rotate"
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("key rotation failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
 }
 
 // ============================================================================

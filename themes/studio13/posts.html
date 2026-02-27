@@ -1,0 +1,43 @@
+<!--
+    Polis Theme: Studio13 - Archive Page Template
+
+    Lists all posts (unlimited). Generated at posts/index.html.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>All Posts &mdash; {{site_title}}</title>
+    <meta name="description" content="All posts on {{site_title}}">
+    <link rel="stylesheet" href="../styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Orbitron:wght@700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <main class="home-main">
+        <!-- Navigation -->
+        <div class="container">
+            <a href="../index.html" class="back-link">&larr; Back to home</a>
+        </div>
+
+        <!-- All Posts -->
+        <section class="recent-posts">
+            <div class="container">
+                <h2 class="section-title">All Posts ({{post_count}})</h2>
+                <div class="post-list">
+{{#posts}}
+                    {{> theme:post-item}}
+{{/posts}}
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="site-footer">
+        <a href="https://polis.pub" class="footer-logo">POLIS<span class="footer-tagline">Your content, free from platform control</span></a>
+    </footer>
+</body>
+</html>

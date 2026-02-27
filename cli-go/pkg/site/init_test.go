@@ -490,12 +490,11 @@ func TestInit_ExplicitEmailIsWritten(t *testing.T) {
 	}
 }
 
-func TestInit_DomainIsWritten(t *testing.T) {
+func TestInit_DomainNotWritten(t *testing.T) {
 	dir := t.TempDir()
 
 	result, err := Init(dir, InitOptions{
 		Author: "alice",
-		Domain: "alice.polis.pub",
 	})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
@@ -509,11 +508,9 @@ func TestInit_DomainIsWritten(t *testing.T) {
 		t.Fatalf("Failed to load .well-known/polis: %v", err)
 	}
 
-	if wk.Domain != "alice.polis.pub" {
-		t.Errorf("Domain = %q, want %q", wk.Domain, "alice.polis.pub")
-	}
-	if wk.AuthorDomain() != "alice.polis.pub" {
-		t.Errorf("AuthorDomain() = %q, want %q", wk.AuthorDomain(), "alice.polis.pub")
+	// Domain should not be written — it's derived from POLIS_BASE_URL at runtime
+	if wk.Domain != "" {
+		t.Errorf("Domain should be empty, got %q", wk.Domain)
 	}
 }
 

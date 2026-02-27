@@ -177,20 +177,16 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	// Reload keys after successful init
 	s.LoadKeys()
 
-	// Write .env with discovery credentials and base URL.
+	// Write .env with discovery URL and base URL.
 	// Use user-provided values when available, fall back to server defaults.
+	// Note: DISCOVERY_SERVICE_KEY is no longer written — all auth uses Ed25519 signatures.
 	dsURL := req.DiscoveryURL
 	if dsURL == "" {
 		dsURL = s.DiscoveryURL
 	}
-	dsKey := req.DiscoveryKey
-	if dsKey == "" {
-		dsKey = s.DiscoveryKey
-	}
 	envPath := filepath.Join(s.DataDir, ".env")
 	envVars := map[string]string{
 		"DISCOVERY_SERVICE_URL": dsURL,
-		"DISCOVERY_SERVICE_KEY": dsKey,
 	}
 	if req.BaseURL != "" {
 		req.BaseURL = strings.TrimSuffix(req.BaseURL, "/")
@@ -201,7 +197,6 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 
 	// Update server state with the (possibly user-provided) discovery config
 	s.DiscoveryURL = dsURL
-	s.DiscoveryKey = dsKey
 
 	// Create config file (for webapp settings like hooks, discovery)
 	// SetupWizardDismissed defaults to false so wizard shows after init
@@ -257,7 +252,7 @@ func (s *Server) writeEnvFile(envPath string, vars map[string]string) {
 		var b strings.Builder
 		b.WriteString("# Polis Configuration\n")
 		// Write in a stable order
-		for _, key := range []string{"POLIS_BASE_URL", "DISCOVERY_SERVICE_URL", "DISCOVERY_SERVICE_KEY"} {
+		for _, key := range []string{"POLIS_BASE_URL", "DISCOVERY_SERVICE_URL", "DISCOVERY_SERVICE_KEY", "LOG_LEVEL", "LOG_RETENTION_DAYS"} {
 			if val, ok := vars[key]; ok {
 				b.WriteString(key + "=" + val + "\n")
 			}
@@ -387,7 +382,16 @@ func (s *Server) handleRender(w http.ResponseWriter, r *http.Request) {
 		Markdown string `json:"markdown"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if isBodyTooLargeError(err) {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Markdown) > MaxPostBodySize {
+		http.Error(w, "Post content too large (max 256KB)", http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -457,7 +461,16 @@ func (s *Server) handleDrafts(w http.ResponseWriter, r *http.Request) {
 			Markdown string `json:"markdown"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if isBodyTooLargeError(err) {
+				http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Markdown) > MaxPostBodySize {
+			http.Error(w, "Draft content too large (max 256KB)", http.StatusRequestEntityTooLarge)
 			return
 		}
 
@@ -546,7 +559,16 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		Filename string `json:"filename"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if isBodyTooLargeError(err) {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Markdown) > MaxPostBodySize {
+		http.Error(w, "Post content too large (max 256KB)", http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -717,7 +739,16 @@ func (s *Server) handleRepublish(w http.ResponseWriter, r *http.Request) {
 		Markdown string `json:"markdown"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if isBodyTooLargeError(err) {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Markdown) > MaxPostBodySize {
+		http.Error(w, "Post content too large (max 256KB)", http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -786,6 +817,231 @@ func (s *Server) handleRepublish(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.PrivateKey == nil {
+		http.Error(w, "Not configured - please complete setup first", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if req.Path == "" {
+		http.Error(w, "Post path required", http.StatusBadRequest)
+		return
+	}
+
+	// Validate path to prevent directory traversal
+	if err := validatePostPath(req.Path); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Verify file exists
+	fullPath := filepath.Join(s.DataDir, req.Path)
+	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+		http.Error(w, "Post not found", http.StatusNotFound)
+		return
+	}
+
+	// Build content URL from base URL + path
+	polisBaseURL := s.BaseURL
+	if polisBaseURL == "" {
+		http.Error(w, "POLIS_BASE_URL not configured", http.StatusBadRequest)
+		return
+	}
+	contentPath := strings.TrimSuffix(req.Path, ".md")
+	contentURL := strings.TrimRight(polisBaseURL, "/") + "/" + contentPath + ".md"
+
+	// Sign unregister request
+	canonical := discovery.MakeContentUnregisterCanonicalJSON("polis.post", contentURL)
+	sig, err := signing.SignContent([]byte(canonical), s.PrivateKey)
+	if err != nil {
+		s.LogError("Failed to sign unregister request for %s: %v", req.Path, err)
+		http.Error(w, "Failed to sign unregister request", http.StatusInternalServerError)
+		return
+	}
+
+	// Call DS to unregister (soft-delete)
+	dsClient := discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+	if err := dsClient.UnregisterContent("polis.post", contentURL, sig); err != nil {
+		s.LogError("DS unregister failed for %s: %v", req.Path, err)
+		// Non-fatal: still clean up locally
+	}
+
+	// Delete local .md file
+	if err := os.Remove(fullPath); err != nil {
+		s.LogError("Failed to delete post file %s: %v", req.Path, err)
+		http.Error(w, "Failed to delete post file", http.StatusInternalServerError)
+		return
+	}
+
+	// Delete rendered .html file if exists
+	htmlPath := strings.TrimSuffix(fullPath, ".md") + ".html"
+	os.Remove(htmlPath) // Ignore error — may not exist
+
+	// Remove from metadata/public.jsonl
+	if err := metadata.RemoveIndexEntry(s.DataDir, req.Path); err != nil {
+		s.LogWarn("Could not remove index entry for %s: %v", req.Path, err)
+	}
+
+	// Remove version history if exists
+	baseName := filepath.Base(req.Path)
+	versionsPath := filepath.Join(s.DataDir, ".versions", baseName)
+	os.Remove(versionsPath) // Ignore error — may not exist
+
+	// Update manifest
+	if err := publish.UpdateManifest(s.DataDir); err != nil {
+		s.LogWarn("Failed to update manifest after unpublish: %v", err)
+	}
+
+	// Render site to regenerate HTML files
+	if err := s.RenderSite(); err != nil {
+		log.Printf("[warning] post-unpublish render failed: %v", err)
+	}
+
+	s.LogInfo("Post unpublished: %s", req.Path)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+	})
+}
+
+func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.PrivateKey == nil || s.PublicKey == nil {
+		http.Error(w, "Not configured - keys not found", http.StatusBadRequest)
+		return
+	}
+
+	polisBaseURL := s.GetBaseURL()
+	if polisBaseURL == "" {
+		http.Error(w, "POLIS_BASE_URL not configured", http.StatusBadRequest)
+		return
+	}
+
+	// Extract domain from base URL (same as CLI rotate_key.go)
+	domain := polisurl.ExtractDomain(polisBaseURL)
+	if domain == "" {
+		http.Error(w, "Could not extract domain from POLIS_BASE_URL", http.StatusBadRequest)
+		return
+	}
+
+	// Read old keys before any changes
+	oldPubKey := strings.TrimSpace(string(s.PublicKey))
+	oldPrivKey := s.PrivateKey
+
+	// Generate new keypair
+	newPrivPEM, newPubSSH, err := signing.GenerateKeypair()
+	if err != nil {
+		s.LogError("Key rotation failed: keypair generation: %v", err)
+		http.Error(w, "Failed to generate new keypair", http.StatusInternalServerError)
+		return
+	}
+	newPubKey := strings.TrimSpace(string(newPubSSH))
+
+	// Build canonical rotation JSON and sign with OLD key
+	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	canonical, err := discovery.MakeKeyRotationCanonicalJSON(domain, oldPubKey, newPubKey, timestamp)
+	if err != nil {
+		s.LogError("Key rotation failed: canonical JSON: %v", err)
+		http.Error(w, "Failed to build rotation message", http.StatusInternalServerError)
+		return
+	}
+
+	transitionSig, err := signing.SignContent(canonical, oldPrivKey)
+	if err != nil {
+		s.LogError("Key rotation failed: transition signature: %v", err)
+		http.Error(w, "Failed to sign transition message", http.StatusInternalServerError)
+		return
+	}
+
+	// Notify DS FIRST (strict ordering — if DS fails, do NOT proceed with local swap)
+	dsClient := discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+	err = dsClient.RotateKey(discovery.KeyRotationRequest{
+		Domain:        domain,
+		OldKey:        oldPubKey,
+		NewKey:        newPubKey,
+		TransitionSig: transitionSig,
+		Timestamp:     timestamp,
+	})
+	if err != nil {
+		s.LogError("Key rotation failed: DS notification: %v", err)
+		http.Error(w, "Discovery service rejected key rotation: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// Backup old keys
+	keysDir := filepath.Join(s.DataDir, ".polis", "keys")
+	if err := os.Rename(filepath.Join(keysDir, "id_ed25519"), filepath.Join(keysDir, "id_ed25519.old")); err != nil {
+		s.LogError("Key rotation failed: backup old private key: %v", err)
+		http.Error(w, "Failed to backup old keys", http.StatusInternalServerError)
+		return
+	}
+	if err := os.Rename(filepath.Join(keysDir, "id_ed25519.pub"), filepath.Join(keysDir, "id_ed25519.pub.old")); err != nil {
+		s.LogError("Key rotation failed: backup old public key: %v", err)
+		http.Error(w, "Failed to backup old keys", http.StatusInternalServerError)
+		return
+	}
+
+	// Write new keys
+	if err := os.WriteFile(filepath.Join(keysDir, "id_ed25519"), newPrivPEM, 0600); err != nil {
+		s.LogError("Key rotation failed: writing new private key: %v", err)
+		http.Error(w, "Failed to write new keys", http.StatusInternalServerError)
+		return
+	}
+	if err := os.WriteFile(filepath.Join(keysDir, "id_ed25519.pub"), newPubSSH, 0644); err != nil {
+		s.LogError("Key rotation failed: writing new public key: %v", err)
+		http.Error(w, "Failed to write new keys", http.StatusInternalServerError)
+		return
+	}
+
+	// Update .well-known/polis with new public key
+	wk, err := site.LoadWellKnown(s.DataDir)
+	if err != nil {
+		s.LogError("Key rotation failed: loading .well-known/polis: %v", err)
+		http.Error(w, "Failed to update site identity", http.StatusInternalServerError)
+		return
+	}
+	wk.PublicKey = newPubKey
+	if err := site.SaveWellKnown(s.DataDir, wk); err != nil {
+		s.LogError("Key rotation failed: saving .well-known/polis: %v", err)
+		http.Error(w, "Failed to update site identity", http.StatusInternalServerError)
+		return
+	}
+
+	// Reload in-memory keys
+	s.LoadKeys()
+
+	// Re-render site (non-fatal if fails)
+	if err := s.RenderSite(); err != nil {
+		log.Printf("[warning] post-rotation render failed: %v", err)
+	}
+
+	s.LogInfo("Keys rotated successfully")
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":    true,
+		"public_key": newPubKey,
+	})
+}
+
 // Comment API handlers
 
 func (s *Server) handleCommentDrafts(w http.ResponseWriter, r *http.Request) {
@@ -813,7 +1069,16 @@ func (s *Server) handleCommentDrafts(w http.ResponseWriter, r *http.Request) {
 			Content   string `json:"content"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if isBodyTooLargeError(err) {
+				http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Content) > MaxCommentBodySize {
+			http.Error(w, "Comment content too large (max 64KB)", http.StatusRequestEntityTooLarge)
 			return
 		}
 
@@ -900,7 +1165,16 @@ func (s *Server) handleCommentSign(w http.ResponseWriter, r *http.Request) {
 		Content   string `json:"content"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if isBodyTooLargeError(err) {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Content) > MaxCommentBodySize {
+		http.Error(w, "Comment content too large (max 64KB)", http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -945,6 +1219,8 @@ func (s *Server) handleCommentSign(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to sign comment", http.StatusInternalServerError)
 		return
 	}
+
+	s.LogInfo("Comment signed for %s", draft.InReplyTo)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1015,6 +1291,8 @@ func (s *Server) handleCommentBeseech(w http.ResponseWriter, r *http.Request) {
 		}
 		hooks.RunHook(s.DataDir, hc, payload)
 	}
+
+	s.LogInfo("Comment beseeched for %s (status: %s)", req.CommentID, result.Status)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1159,6 +1437,8 @@ func (s *Server) handleCommentsSync(w http.ResponseWriter, r *http.Request) {
 	if err := s.RenderSite(); err != nil {
 		log.Printf("[warning] post-comment-sync render failed: %v", err)
 	}
+
+	s.LogInfo("Comments synced: %d blessed, %d denied", len(result.Blessed), len(result.Denied))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
@@ -1423,7 +1703,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	subdomain := ""
 	publicKey := ""
 	discoveryURL := s.DiscoveryURL
-	discoveryConfigured := s.DiscoveryURL != "" && s.DiscoveryKey != ""
+	discoveryConfigured := s.DiscoveryURL != ""
 	siteTitle := s.GetSiteTitle() // From .well-known/polis with fallback to base_url
 	viewMode := "list"            // Default to list mode
 	showFrontmatter := true       // Default to showing frontmatter
@@ -1535,7 +1815,16 @@ func (s *Server) handleAutomations(w http.ResponseWriter, r *http.Request) {
 			Script     string `json:"script"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if isBodyTooLargeError(err) {
+				http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Script) > MaxHookBodySize {
+			http.Error(w, "Hook script too large (max 32KB)", http.StatusRequestEntityTooLarge)
 			return
 		}
 
@@ -1856,6 +2145,7 @@ func (s *Server) handleThemeSwitch(w http.ResponseWriter, r *http.Request) {
 	// Validate that the theme exists
 	themes, err := theme.ListThemes(s.DataDir, s.CLIThemesDir)
 	if err != nil {
+		s.LogError("theme switch: failed to list themes: %v", err)
 		http.Error(w, "Failed to list themes", http.StatusInternalServerError)
 		return
 	}
@@ -1888,6 +2178,8 @@ func (s *Server) handleThemeSwitch(w http.ResponseWriter, r *http.Request) {
 		s.LogError("theme switch: render site failed: %v", err)
 		// Non-fatal — theme files are updated, render can be retried
 	}
+
+	s.LogInfo("Theme switched to %s", req.Theme)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2035,6 +2327,8 @@ func (s *Server) handleUpdateSiteTitle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to save site config", http.StatusInternalServerError)
 		return
 	}
+
+	s.LogInfo("Site title updated: %s", wk.SiteTitle)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2198,7 +2492,7 @@ func (s *Server) handleSiteRegistrationStatus(w http.ResponseWriter, r *http.Req
 	}
 
 	// Check if discovery service is configured
-	if s.DiscoveryURL == "" || s.DiscoveryKey == "" {
+	if s.DiscoveryURL == "" {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"configured": false,
@@ -2247,8 +2541,8 @@ func (s *Server) handleSiteRegistrationStatus(w http.ResponseWriter, r *http.Req
 		"configured":    true,
 		"domain":        domain,
 		"is_registered": result.IsRegistered,
-		"registered_at": result.RegisteredAt,
-		"registry_url":  result.RegistryURL,
+		"created_at":   result.CreatedAt,
+		"registry_url": result.RegistryURL,
 	})
 }
 
@@ -2260,7 +2554,7 @@ func (s *Server) handleSiteRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate discovery service is configured
-	if s.DiscoveryURL == "" || s.DiscoveryKey == "" {
+	if s.DiscoveryURL == "" {
 		http.Error(w, "Discovery service not configured", http.StatusBadRequest)
 		return
 	}
@@ -2305,8 +2599,8 @@ func (s *Server) handleSiteRegister(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":       result.Success,
 		"domain":        domain,
-		"registered_at": result.RegisteredAt,
-		"registry_url":  result.RegistryURL,
+		"created_at":   result.CreatedAt,
+		"registry_url": result.RegistryURL,
 	})
 }
 
@@ -2318,7 +2612,7 @@ func (s *Server) handleSiteUnregister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate discovery service is configured
-	if s.DiscoveryURL == "" || s.DiscoveryKey == "" {
+	if s.DiscoveryURL == "" {
 		http.Error(w, "Discovery service not configured", http.StatusBadRequest)
 		return
 	}
@@ -2472,7 +2766,16 @@ func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
 			Content string `json:"content"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if isBodyTooLargeError(err) {
+				http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Content) > MaxSnippetBodySize {
+			http.Error(w, "About content too large (max 64KB)", http.StatusRequestEntityTooLarge)
 			return
 		}
 
@@ -2495,6 +2798,8 @@ func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
 		if err := s.RenderSite(); err != nil {
 			s.LogWarn("about: render failed: %v", err)
 		}
+
+		s.LogInfo("About page updated")
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2534,7 +2839,16 @@ func (s *Server) handleSnippets(w http.ResponseWriter, r *http.Request) {
 			Content string `json:"content"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if isBodyTooLargeError(err) {
+				http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Content) > MaxSnippetBodySize {
+			http.Error(w, "Snippet content too large (max 64KB)", http.StatusRequestEntityTooLarge)
 			return
 		}
 
@@ -2600,7 +2914,16 @@ func (s *Server) handleSnippet(w http.ResponseWriter, r *http.Request) {
 			Source  string `json:"source"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if isBodyTooLargeError(err) {
+				http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Content) > MaxSnippetBodySize {
+			http.Error(w, "Snippet content too large (max 64KB)", http.StatusRequestEntityTooLarge)
 			return
 		}
 
@@ -2669,7 +2992,7 @@ func (s *Server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
 		RenderMarkers: true, // Enable snippet markers for editing
 	})
 	if err != nil {
-		log.Printf("[render-page] Failed to create renderer: %v", err)
+		s.LogError("Render page: failed to create renderer: %v", err)
 		http.Error(w, "Failed to create renderer", http.StatusInternalServerError)
 		return
 	}
@@ -2677,13 +3000,12 @@ func (s *Server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
 	// Render all pages with force=true to ensure snippets are updated
 	stats, err := renderer.RenderAll(true)
 	if err != nil {
-		log.Printf("[render-page] Render failed: %v", err)
+		s.LogError("Render page: render failed: %v", err)
 		http.Error(w, "Render failed", http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("[render-page] Rendered %d posts, %d comments, requested path: %s",
-		stats.PostsRendered, stats.CommentsRendered, req.Path)
+	s.LogInfo("Full site render: %d posts, %d comments", stats.PostsRendered, stats.CommentsRendered)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2910,6 +3232,8 @@ func (s *Server) handleFeedRefresh(w http.ResponseWriter, r *http.Request) {
 	if newItems < 0 {
 		newItems = 0
 	}
+
+	s.LogInfo("Feed refreshed: %d new items", newItems)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3817,7 +4141,16 @@ func (s *Server) handleWidgetPublish(w http.ResponseWriter, r *http.Request) {
 		Metadata map[string]interface{} `json:"metadata"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if isBodyTooLargeError(err) {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Text) > MaxCommentBodySize {
+		http.Error(w, "Comment text too large (max 64KB)", http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -3847,7 +4180,16 @@ func (s *Server) handleWidgetComment(w http.ResponseWriter, r *http.Request) {
 		Text   string `json:"text"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if isBodyTooLargeError(err) {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Text) > MaxCommentBodySize {
+		http.Error(w, "Comment text too large (max 64KB)", http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -3962,6 +4304,8 @@ func (s *Server) handleWidgetFollow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		s.LogInfo("Widget followed %s", authorURL)
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
@@ -4009,32 +4353,21 @@ var (
 	lastDownloadTime time.Time
 )
 
-// handleDownloadSite handles GET /api/download-site — streams a zip archive of the site.
-func (s *Server) handleDownloadSite(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Rate limit
-	downloadMu.Lock()
-	if time.Since(lastDownloadTime) < 10*time.Minute {
-		downloadMu.Unlock()
-		http.Error(w, "Please wait before downloading again", http.StatusTooManyRequests)
-		return
-	}
-	lastDownloadTime = time.Now()
-	downloadMu.Unlock()
-
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="polis-site.zip"`)
-
+// WriteZipArchive writes a ZIP archive of dataDir to w, excluding the named directories.
+// Directory names in excludeDirs are relative to dataDir (e.g. "logs", ".polis/keys").
+func WriteZipArchive(w io.Writer, dataDir string, excludeDirs []string) error {
 	zw := zip.NewWriter(w)
 	defer zw.Close()
 
-	dataDir := filepath.Clean(s.DataDir)
+	dataDir = filepath.Clean(dataDir)
 
-	filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
+	// Build a set of excluded directory paths for quick lookup
+	excludeSet := make(map[string]bool, len(excludeDirs))
+	for _, d := range excludeDirs {
+		excludeSet[filepath.Clean(d)] = true
+	}
+
+	return filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // skip files we can't read
 		}
@@ -4046,17 +4379,17 @@ func (s *Server) handleDownloadSite(w http.ResponseWriter, r *http.Request) {
 
 		// Skip excluded directories
 		if info.IsDir() {
-			switch rel {
-			case "logs", filepath.Join(".polis", "keys"):
+			if excludeSet[rel] {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
 		// Skip files inside excluded directories (safety check)
-		if strings.HasPrefix(rel, "logs"+string(filepath.Separator)) ||
-			strings.HasPrefix(rel, filepath.Join(".polis", "keys")+string(filepath.Separator)) {
-			return nil
+		for _, d := range excludeDirs {
+			if strings.HasPrefix(rel, d+string(filepath.Separator)) {
+				return nil
+			}
 		}
 
 		header, err := zip.FileInfoHeader(info)
@@ -4080,6 +4413,32 @@ func (s *Server) handleDownloadSite(w http.ResponseWriter, r *http.Request) {
 		io.Copy(writer, f)
 		return nil
 	})
+}
+
+// handleDownloadSite handles GET /api/download-site — streams a zip archive of the site.
+// Includes cryptographic keys. Only excludes logs.
+func (s *Server) handleDownloadSite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Rate limit
+	downloadMu.Lock()
+	if time.Since(lastDownloadTime) < 10*time.Minute {
+		downloadMu.Unlock()
+		http.Error(w, "Please wait before downloading again", http.StatusTooManyRequests)
+		return
+	}
+	lastDownloadTime = time.Now()
+	downloadMu.Unlock()
+
+	s.LogInfo("Site download requested")
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="polis-site.zip"`)
+
+	WriteZipArchive(w, s.DataDir, []string{"logs"})
 }
 
 // ============================================================================

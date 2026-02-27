@@ -12,13 +12,12 @@ _polis_completion() {
 
     # All top-level commands
     local commands="about blessing clone comment discover extract follow
-        index init migrate migrations notifications post preview
+        index init notifications post preview
         rebuild register render republish rotate-key serve unfollow
         unregister validate version"
 
     # Subcommands for specific commands
     local blessing_subcommands="beseech deny grant requests sync"
-    local migrations_subcommands="apply"
     local notifications_subcommands="list"
 
     # Options for specific commands
@@ -70,11 +69,6 @@ _polis_completion() {
                 blessing)
                     if [[ $effective_pos -eq 1 ]]; then
                         COMPREPLY=($(compgen -W "$blessing_subcommands --json" -- "$cur"))
-                    fi
-                    ;;
-                migrations)
-                    if [[ $effective_pos -eq 1 ]]; then
-                        COMPREPLY=($(compgen -W "$migrations_subcommands --json" -- "$cur"))
                     fi
                     ;;
                 notifications)
@@ -136,7 +130,7 @@ _polis_completion() {
                         COMPREPLY=($(compgen -W "--json" -- "$cur"))
                     fi
                     ;;
-                preview|migrate)
+                preview)
                     # These take URLs, not files - only complete flags
                     if [[ "$cur" == -* ]]; then
                         COMPREPLY=($(compgen -W "--json" -- "$cur"))

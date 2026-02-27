@@ -149,6 +149,9 @@ button:focus-visible,
    ============================================ */
 
 .site-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     padding: 1rem 0;
     max-width: var(--max-width);
     margin: 0 auto;

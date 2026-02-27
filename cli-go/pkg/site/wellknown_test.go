@@ -1090,7 +1090,6 @@ func TestEmailOmitempty_NotSerializedWhenEmpty(t *testing.T) {
 	wk := &WellKnown{
 		Version:   "0.1.0",
 		Author:    "alice",
-		Domain:    "alice.polis.pub",
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:   "2026-01-01T00:00:00Z",
 		// Email intentionally not set
@@ -1121,7 +1120,6 @@ func TestEmailOmitempty_SerializedWhenSet(t *testing.T) {
 	wk := &WellKnown{
 		Version:   "0.1.0",
 		Author:    "alice",
-		Domain:    "alice.polis.pub",
 		Email:     "alice@example.com",
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:   "2026-01-01T00:00:00Z",
@@ -1146,8 +1144,10 @@ func TestEmailOmitempty_SerializedWhenSet(t *testing.T) {
 	}
 }
 
-func TestDomainField_RoundTrip(t *testing.T) {
+func TestUpgradeWellKnown_RemovesDomain(t *testing.T) {
 	dir := setupTestDir(t)
+
+	// Create file with domain field (legacy format)
 	wk := &WellKnown{
 		Version:   "0.1.0",
 		Author:    "alice",
@@ -1157,61 +1157,24 @@ func TestDomainField_RoundTrip(t *testing.T) {
 	}
 	writeTestWellKnown(t, dir, wk)
 
-	loaded, err := LoadWellKnown(dir)
+	// Run upgrade
+	upgraded, err := UpgradeWellKnown(dir)
+	if err != nil {
+		t.Fatalf("UpgradeWellKnown failed: %v", err)
+	}
+
+	// Verify domain was removed
+	if upgraded.Domain != "" {
+		t.Errorf("Domain should be removed, got %q", upgraded.Domain)
+	}
+
+	// Verify file was updated and doesn't contain domain
+	data, err := os.ReadFile(filepath.Join(dir, ".well-known", "polis"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Domain != "alice.polis.pub" {
-		t.Errorf("Domain = %q, want %q", loaded.Domain, "alice.polis.pub")
-	}
-}
-
-func TestAuthorDomain_PrefersDomainField(t *testing.T) {
-	wk := &WellKnown{
-		Domain:  "alice.polis.pub",
-		BaseURL: "https://old.polis.pub",
-	}
-	if got := wk.AuthorDomain(); got != "alice.polis.pub" {
-		t.Errorf("AuthorDomain() = %q, want %q", got, "alice.polis.pub")
-	}
-}
-
-func TestAuthorDomain_FallsBackToBaseURL(t *testing.T) {
-	wk := &WellKnown{
-		BaseURL: "https://alice.polis.pub",
-	}
-	if got := wk.AuthorDomain(); got != "alice.polis.pub" {
-		t.Errorf("AuthorDomain() = %q, want %q", got, "alice.polis.pub")
-	}
-}
-
-func TestAuthorDomain_EmptyWhenNothing(t *testing.T) {
-	wk := &WellKnown{}
-	if got := wk.AuthorDomain(); got != "" {
-		t.Errorf("AuthorDomain() = %q, want empty", got)
-	}
-}
-
-func TestGetAuthorDomain_FromFile(t *testing.T) {
-	dir := setupTestDir(t)
-	wk := &WellKnown{
-		Version:   "0.1.0",
-		Domain:    "alice.polis.pub",
-		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-	}
-	writeTestWellKnown(t, dir, wk)
-
-	got := GetAuthorDomain(dir)
-	if got != "alice.polis.pub" {
-		t.Errorf("GetAuthorDomain() = %q, want %q", got, "alice.polis.pub")
-	}
-}
-
-func TestGetAuthorDomain_MissingFile(t *testing.T) {
-	dir := setupTestDir(t)
-	got := GetAuthorDomain(dir)
-	if got != "" {
-		t.Errorf("GetAuthorDomain() = %q, want empty for missing file", got)
+	if strings.Contains(string(data), `"domain"`) {
+		t.Error("Saved file should not contain domain key")
 	}
 }
 
@@ -1240,10 +1203,6 @@ func TestBackwardCompat_ExistingFileWithEmail(t *testing.T) {
 	}
 	if wk.Domain != "" {
 		t.Errorf("Domain should be empty for old-format file, got %q", wk.Domain)
-	}
-	// AuthorDomain falls back to empty (no base_url either)
-	if wk.AuthorDomain() != "" {
-		t.Errorf("AuthorDomain() = %q, want empty for old file without base_url", wk.AuthorDomain())
 	}
 }
 

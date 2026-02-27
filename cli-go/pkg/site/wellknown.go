@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // WellKnownDirectories contains directory path configuration.
@@ -36,18 +35,16 @@ type WellKnown struct {
 	// Canonical fields (bash CLI)
 	Version   string           `json:"version,omitempty"`
 	Author    string           `json:"author,omitempty"`
-	Domain    string           `json:"domain,omitempty"`
 	Email     string           `json:"email,omitempty"` // Private by default; only serialized if user opts in
 	PublicKey string           `json:"public_key"`
 	SiteTitle string           `json:"site_title,omitempty"`
 	Created   string           `json:"created,omitempty"`
 	Config    *WellKnownConfig `json:"config,omitempty"`
 
-	// Webapp-specific fields (kept for compatibility)
-	Subdomain string `json:"subdomain,omitempty"`
-	BaseURL   string `json:"base_url,omitempty"`
-
-	// Deprecated fields (kept for backward compat read, not written by new code)
+	// Deprecated fields (kept for backward compat read/upgrade, not written by new code)
+	Domain        string `json:"domain,omitempty"`         // Use POLIS_BASE_URL env var instead
+	Subdomain     string `json:"subdomain,omitempty"`      // Derived from POLIS_BASE_URL at runtime
+	BaseURL       string `json:"base_url,omitempty"`       // Use POLIS_BASE_URL env var instead
 	PublicKeyPath string `json:"public_key_path,omitempty"`
 	Generator     string `json:"generator,omitempty"`
 	CreatedAt     string `json:"created_at,omitempty"` // Use Created instead
@@ -105,34 +102,3 @@ func GetPublicKey(siteDir string) string {
 	return wk.PublicKey
 }
 
-// GetAuthorDomain returns the site's domain identity from .well-known/polis.
-// Prefers the explicit Domain field, falls back to extracting from BaseURL.
-func GetAuthorDomain(siteDir string) string {
-	wk, err := LoadWellKnown(siteDir)
-	if err != nil {
-		return ""
-	}
-	return wk.AuthorDomain()
-}
-
-// AuthorDomain returns the domain identity for this site.
-// Prefers the explicit Domain field, falls back to extracting from BaseURL.
-func (wk *WellKnown) AuthorDomain() string {
-	if wk.Domain != "" {
-		return wk.Domain
-	}
-	if wk.BaseURL != "" {
-		return extractDomainFromURL(wk.BaseURL)
-	}
-	return ""
-}
-
-// extractDomainFromURL extracts the host from a URL.
-func extractDomainFromURL(u string) string {
-	u = strings.TrimPrefix(u, "https://")
-	u = strings.TrimPrefix(u, "http://")
-	if idx := strings.Index(u, "/"); idx >= 0 {
-		return u[:idx]
-	}
-	return u
-}

@@ -1059,6 +1059,7 @@ const App = {
                 const view = item.dataset.view;
                 if (view) {
                     this.setActiveView(view);
+                    this.closeMobileNav();
                 }
             });
         });
@@ -1160,7 +1161,6 @@ const App = {
 
     // Default discovery service values (public, hardcoded to match server defaults)
     defaultDiscoveryURL: 'https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1',
-    defaultDiscoveryKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx0ZnBlenJpaWFxdmp1cHhidHR3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcxNDQwODMsImV4cCI6MjA4MjcyMDA4M30.N9ScKbdcswutM6i__W9sPWWcBONIcxdAqIbsljqMKMI',
 
     // Show init flow panel
     showInitFlow() {
@@ -1170,11 +1170,9 @@ const App = {
             const titleInput = document.getElementById('init-site-title');
             const urlInput = document.getElementById('init-base-url');
             const dsUrlInput = document.getElementById('init-discovery-url');
-            const dsKeyInput = document.getElementById('init-discovery-key');
             if (titleInput) titleInput.value = '';
             if (urlInput) urlInput.value = '';
             if (dsUrlInput) dsUrlInput.value = this.defaultDiscoveryURL;
-            if (dsKeyInput) dsKeyInput.value = this.defaultDiscoveryKey;
             panel.classList.remove('hidden');
         }
     },
@@ -1190,13 +1188,11 @@ const App = {
         const titleInput = document.getElementById('init-site-title');
         const urlInput = document.getElementById('init-base-url');
         const dsUrlInput = document.getElementById('init-discovery-url');
-        const dsKeyInput = document.getElementById('init-discovery-key');
         const executeBtn = document.getElementById('init-execute-btn');
 
         const siteTitle = titleInput ? titleInput.value.trim() : '';
         const baseUrl = urlInput ? urlInput.value.trim() : '';
         const discoveryUrl = dsUrlInput ? dsUrlInput.value.trim() : '';
-        const discoveryKey = dsKeyInput ? dsKeyInput.value.trim() : '';
 
         // Disable button while processing
         if (executeBtn) {
@@ -1209,7 +1205,6 @@ const App = {
                 site_title: siteTitle,
                 base_url: baseUrl,
                 discovery_url: discoveryUrl,
-                discovery_key: discoveryKey,
             });
 
             this.closeInitPanel();
@@ -1354,22 +1349,71 @@ const App = {
 
             if (posts.length === 0) {
                 const domain = this.siteBaseUrl ? new URL(this.siteBaseUrl).hostname : '';
+                const domainDisplay = domain ? `<a href="${this.escapeHtml(this.siteBaseUrl)}" target="_blank" rel="noopener">${this.escapeHtml(domain)}</a>` : 'your domain';
                 container.innerHTML = `
                     <div class="content-list">
                         <div class="empty-state">
                             <h3>No published posts yet</h3>
-                            <p>Write your first post to make your site come alive.</p>
+                            <p class="subtitle">Write your first post to make your site come alive.</p>
                             <button class="primary" onclick="App.newPost()">Write your first post</button>
-                            <details class="whats-new">
-                                <summary>Wait, what just happened?</summary>
-                                <div class="whats-new-body">
-                                    <p>We just created a Polis space for you!</p>
-                                    <p>See that <code>/_/</code> in the URL? Only you can access this dashboard.</p>
-                                    <p>Only you can publish to${domain ? ` <strong>${this.escapeHtml(domain)}</strong>` : ' your site'}, but everyone can see it &mdash; and verify you wrote it.</p>
-                                    <p>Anyone with a Polis site can comment on your posts, but you decide which comments appear here.</p>
-                                    <p>If you can't find your way back, we'll send a login link to your email.</p>
-                                    <p>And if you ever want to move on, you can download all your content and take it with you.</p>
-                                    <p>It's all yours. Enjoy.</p>
+                        </div>
+                        <div class="welcome-divider"></div>
+                        <div class="welcome-panels">
+                            <details class="welcome-panel">
+                                <summary><span class="icon">&#9656;</span> What to do next</summary>
+                                <div class="welcome-panel-body">
+                                    <ol class="next-steps">
+                                        <li>
+                                            <span class="step-number">1</span>
+                                            <span class="step-content">
+                                                <a href="#" onclick="event.preventDefault(); App.navigateTo('/settings')">Download your keys</a>
+                                                <span class="step-detail">Back them up somewhere safe.</span>
+                                            </span>
+                                        </li>
+                                        <li>
+                                            <span class="step-number">2</span>
+                                            <span class="step-content">
+                                                <a href="#" onclick="event.preventDefault(); App.openAboutEditor()">Update your About</a>
+                                                <span class="step-detail">Tell visitors who you are.</span>
+                                            </span>
+                                        </li>
+                                        <li>
+                                            <span class="step-number">3</span>
+                                            <span class="step-content">
+                                                <a href="#" onclick="event.preventDefault(); App.newPost()">Write your first post</a>
+                                                <span class="step-detail">Share something &mdash; anything. It's your space.</span>
+                                            </span>
+                                        </li>
+                                        <li>
+                                            <span class="step-number">4</span>
+                                            <span class="step-content">
+                                                <a href="#" onclick="event.preventDefault(); App.navigateTo('/social/following')">Follow an author</a>
+                                                <span class="step-detail">Discover conversations and build your feed.</span>
+                                            </span>
+                                        </li>
+                                        <li>
+                                            <span class="step-number">5</span>
+                                            <span class="step-content">
+                                                <a href="#" onclick="event.preventDefault(); navigator.clipboard.writeText('${this.escapeHtml(this.siteBaseUrl || '')}').then(() => App.showToast('URL copied!', 'success'))">Share your link</a>
+                                                <span class="step-detail">Anyone can read your site &mdash; no account needed.</span>
+                                            </span>
+                                        </li>
+                                        <li>
+                                            <span class="step-number">6</span>
+                                            <span class="step-content">
+                                                <a href="#" onclick="event.preventDefault(); App.navigateTo('/settings')">Pick a theme</a>
+                                                <span class="step-detail">Make it feel like yours.</span>
+                                            </span>
+                                        </li>
+                                    </ol>
+                                </div>
+                            </details>
+                            <details class="welcome-panel">
+                                <summary><span class="icon">&#9656;</span> What just happened</summary>
+                                <div class="welcome-panel-body">
+                                    <p>We created a polis site for you at ${domainDisplay}.</p>
+                                    <p>The <code>/_/</code> in the URL is your private dashboard &mdash; only you can see it.</p>
+                                    <p>If you ever lose your way, return to polis.pub or your dashboard and we'll send another login link to your email.</p>
                                 </div>
                             </details>
                         </div>
@@ -1390,6 +1434,7 @@ const App = {
                                 <span class="item-date">${this.formatDate(post.published)}</span>
                                 <span class="item-time">${this.formatTime(post.published)}</span>
                             </div>
+                            <button class="unpublish-btn" title="Unpublish" onclick="event.stopPropagation(); App.unpublishPost('${this.escapeHtml(post.path)}')">&times;</button>
                             ${this.siteBaseUrl ? `<a class="view-live-btn" href="${this.escapeHtml(this.siteBaseUrl + '/' + post.path.replace(/\.md$/, '.html'))}" target="_blank" rel="noopener" title="View live" onclick="event.stopPropagation()">&#x2197;</a>` : ''}
                         </div>
                     `).join('')}
@@ -1957,6 +2002,7 @@ const App = {
                                 <span class="settings-row-value" id="public-key-display">${this.escapeHtml(this.truncateKey(site.public_key))}</span>
                                 <div class="settings-row-actions">
                                     <button class="btn-copy" onclick="App.copyPublicKey('${this.escapeHtml(site.public_key || '')}')">Copy</button>
+                                    <button class="btn-danger-sm" onclick="App.rotateKeys()">Rotate</button>
                                 </div>
                             </div>
                             ${this.isHosted ? `
@@ -2013,7 +2059,7 @@ const App = {
                             ${!site.discovery_configured ? `
                             <div class="settings-row" style="margin-top: 0.5rem;">
                                 <span class="settings-row-value" style="font-size: 0.85em; color: var(--text-muted);">
-                                    Set DISCOVERY_SERVICE_URL and DISCOVERY_SERVICE_KEY in your .env file, then restart the webapp.
+                                    Set DISCOVERY_SERVICE_URL in your .env file, then restart the webapp.
                                 </span>
                             </div>
                             ` : ''}
@@ -2058,12 +2104,41 @@ const App = {
                         </div>
                     </div>
 
+                    ${this.isHosted ? `
+                    <div class="settings-section">
+                        <div class="settings-section-label">Account</div>
+                        <div class="settings-card">
+                            <div class="settings-row">
+                                <span class="settings-row-label">Login Email:</span>
+                                <span class="settings-row-value" id="account-email-display">Loading...</span>
+                                <div class="settings-row-actions">
+                                    <button class="compact" onclick="App.showEmailChangeForm()">Change</button>
+                                </div>
+                            </div>
+                            <div id="email-change-form" style="display:none; margin-top: 0.75rem; padding: 0 1rem 0.75rem;">
+                                <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                    <input type="email" id="new-email-input" placeholder="New email address" style="flex: 1; padding: 0.4rem 0.6rem; background: var(--bg-color); border: 1px solid var(--border-color); color: var(--text-color); border-radius: 4px; font-family: inherit; font-size: 0.9rem;">
+                                    <button class="primary" id="email-change-btn" onclick="App.requestEmailChange()">Send confirmation</button>
+                                    <button class="compact" onclick="document.getElementById('email-change-form').style.display='none'">Cancel</button>
+                                </div>
+                                <span id="email-change-status" style="font-size:0.85rem; color:var(--text-muted); margin-top:0.5rem; display:block;"></span>
+                            </div>
+                        </div>
+                    </div>
+                    ` : ''}
+
                     <div class="settings-section">
                         <div class="settings-section-label">Your Data</div>
                         <div class="settings-card">
                             <div class="settings-row" style="flex-direction: column; align-items: flex-start; gap: 0.75rem;">
-                                <span class="settings-row-value" style="white-space: normal; color: var(--text-muted); font-family: inherit;">Download a zip archive of your entire site &mdash; posts, snippets, config, and themes. Private keys are excluded.</span>
+                                ${this.isHosted ? `
+                                <span class="settings-row-value" style="white-space: normal; color: var(--text-muted); font-family: inherit;">Download a zip archive of your entire site &mdash; posts, snippets, config, themes, and cryptographic keys. For security, we'll send a verification link to your email.</span>
+                                <button class="primary" id="export-btn" onclick="App.requestExport()">Request export</button>
+                                <span id="export-status" style="font-size: 0.85rem; color: var(--text-muted);"></span>
+                                ` : `
+                                <span class="settings-row-value" style="white-space: normal; color: var(--text-muted); font-family: inherit;">Download a zip archive of your entire site &mdash; posts, snippets, config, themes, and cryptographic keys. Treat this file like a password.</span>
                                 <button class="primary" onclick="App.downloadSite()">Download site</button>
+                                `}
                             </div>
                         </div>
                     </div>
@@ -2078,6 +2153,11 @@ const App = {
                 if (statusEl) {
                     statusEl.innerHTML = `<span style="color: var(--text-muted);">Not configured</span>`;
                 }
+            }
+
+            // Fetch account info for hosted users
+            if (this.isHosted) {
+                this.fetchAccountEmail();
             }
         } catch (err) {
             container.innerHTML = `
@@ -2122,6 +2202,30 @@ const App = {
         }
     },
 
+    // Rotate keys with confirmation
+    async rotateKeys() {
+        const confirmed = await this.showConfirmModal(
+            'Rotate Keys',
+            'This will generate a new Ed25519 keypair and notify the discovery service. Your old key will be backed up. Previously signed content remains verifiable via key history.',
+            'Rotate Keys',
+            'Cancel',
+            'danger'
+        );
+        if (!confirmed) return;
+
+        try {
+            const data = await this.api('POST', '/api/rotate-key');
+            // Update the public key display in settings without full reload
+            const display = document.getElementById('public-key-display');
+            if (display && data.public_key) {
+                display.textContent = this.truncateKey(data.public_key);
+            }
+            this.showToast('Keys rotated successfully', 'success');
+        } catch (err) {
+            this.showToast(err.message || 'Failed to rotate keys', 'error');
+        }
+    },
+
     editSiteTitle() {
         const display = document.getElementById('site-title-display');
         const btn = document.getElementById('site-title-edit-btn');
@@ -2159,6 +2263,79 @@ const App = {
         window.location.href = '/api/download-site';
     },
 
+    async requestExport() {
+        const btn = document.getElementById('export-btn');
+        const status = document.getElementById('export-status');
+        if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
+        try {
+            const result = await this.api('POST', '/api/export/request', {});
+            if (status) {
+                status.style.color = 'var(--accent-color)';
+                status.textContent = result.message || 'Check your email for a download link.';
+            }
+            this.showToast('Export link sent to your email', 'success');
+        } catch (err) {
+            if (status) {
+                status.style.color = 'var(--salmon)';
+                status.textContent = err.message || 'Failed to request export.';
+            }
+            this.showToast('Export request failed: ' + err.message, 'error');
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Request export'; }
+        }
+    },
+
+    async fetchAccountEmail() {
+        try {
+            const info = await this.api('GET', '/api/account/info');
+            const el = document.getElementById('account-email-display');
+            if (el) el.textContent = info.email || 'Unknown';
+        } catch (err) {
+            const el = document.getElementById('account-email-display');
+            if (el) el.textContent = 'Failed to load';
+        }
+    },
+
+    showEmailChangeForm() {
+        const form = document.getElementById('email-change-form');
+        if (form) {
+            form.style.display = 'block';
+            const input = document.getElementById('new-email-input');
+            if (input) { input.value = ''; input.focus(); }
+            const status = document.getElementById('email-change-status');
+            if (status) status.textContent = '';
+        }
+    },
+
+    async requestEmailChange() {
+        const input = document.getElementById('new-email-input');
+        const btn = document.getElementById('email-change-btn');
+        const status = document.getElementById('email-change-status');
+        const email = input ? input.value.trim() : '';
+
+        if (!email || !email.includes('@') || !email.includes('.')) {
+            if (status) { status.style.color = 'var(--salmon)'; status.textContent = 'Please enter a valid email address.'; }
+            return;
+        }
+
+        if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
+        try {
+            const result = await this.api('POST', '/api/account/change-email', { email });
+            if (status) {
+                status.style.color = 'var(--accent-color)';
+                status.textContent = result.message || 'Check your new email for a confirmation link.';
+            }
+            this.showToast('Confirmation link sent to your new email', 'success');
+        } catch (err) {
+            if (status) {
+                status.style.color = 'var(--salmon)';
+                status.textContent = err.message || 'Failed to request email change.';
+            }
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = 'Send confirmation'; }
+        }
+    },
+
     async rerenderSite() {
         const btn = document.getElementById('rerender-btn');
         if (btn) { btn.disabled = true; btn.textContent = 'Rendering...'; }
@@ -2177,6 +2354,7 @@ const App = {
         'especial': 'Dark gold and navy, inspired by Modelo Especial.',
         'especial-light': 'Light variant of especial with warm fog tones.',
         'sols': 'Violet and peach, inspired by Nine Sols.',
+        'studio13': 'Stark black and burnt orange, late-night studio energy.',
         'turbo': 'Deep blue with bright cyan, retro computing aesthetic.',
         'vice': 'Warm coral and sunset hues, Miami Vice vibes.',
         'zane': 'Neutral dark with teal and salmon, based on a classic editor theme.',
@@ -2262,9 +2440,9 @@ const App = {
             if (result.is_registered) {
                 // Format the date nicely
                 let dateStr = '';
-                if (result.registered_at) {
+                if (result.created_at) {
                     try {
-                        const date = new Date(result.registered_at);
+                        const date = new Date(result.created_at);
                         dateStr = ` (since ${date.toLocaleDateString()})`;
                     } catch (e) {
                         dateStr = '';
@@ -3055,6 +3233,26 @@ echo "File: $POLIS_PATH"</code>
             this.editorUpdatePreview();
         } catch (err) {
             this.showToast('Failed to load draft: ' + err.message, 'error');
+        }
+    },
+
+    // Unpublish a post (remove from site and discovery)
+    async unpublishPost(path) {
+        const confirmed = await this.showConfirmModal(
+            'Unpublish Post',
+            'This will remove the post from your site and from discovery. Comments on other sites will remain. This cannot be undone.',
+            'Unpublish',
+            'Cancel',
+            'danger',
+        );
+        if (!confirmed) return;
+
+        try {
+            await this.api('POST', '/api/unpublish', { path });
+            this.showToast('Post unpublished', 'success');
+            this.loadViewContent();
+        } catch (err) {
+            this.showToast(err.message || 'Failed to unpublish', 'error');
         }
     },
 
@@ -4904,17 +5102,20 @@ git push</pre>
             const domain = authorURL.replace('https://', '').replace(/\/$/, '');
             const alreadyFollowed = result.data && result.data.already_followed;
 
+            const followActions = [
+                    { label: 'See your feed', primary: true, action: () => { this.dismissIntentResult(); this.setSidebarMode('social'); this.setActiveView('feed'); } },
+                    { label: 'Visit ' + domain, action: () => window.open(authorURL, '_blank') },
+                ];
+            const postLabel = this.counts.posts === 0 ? 'Write your first post' : 'Write a post';
+            followActions.push({ label: postLabel, action: () => { this.dismissIntentResult(); this.newPost(); } });
+
             this.showIntentResult({
                 icon: '&#10003;',
                 title: alreadyFollowed ? 'Already following ' + domain : 'Following ' + domain,
                 subtitle: alreadyFollowed
                     ? 'You were already following this author.'
                     : 'Their posts will appear in your feed.',
-                actions: [
-                    { label: 'See your feed', primary: true, action: () => { this.dismissIntentResult(); this.setSidebarMode('social'); this.setActiveView('feed'); } },
-                    { label: 'Visit ' + domain, action: () => window.open(authorURL, '_blank') },
-                    { label: 'Write your first post', action: () => { this.dismissIntentResult(); this.newPost(); } },
-                ],
+                actions: followActions,
             });
 
             await this.loadAllCounts();
@@ -4988,9 +5189,36 @@ git push</pre>
                     this.setActiveView('following');
                 }},
                 { label: 'Back to post', action: () => { window.open(target.replace(/\.md$/, '.html'), '_blank'); this.dismissIntentResult(); } },
-                { label: 'Write your first post', action: () => { this.dismissIntentResult(); this.newPost(); } },
+                { label: this.counts.posts === 0 ? 'Write your first post' : 'Write a post', action: () => { this.dismissIntentResult(); this.newPost(); } },
             ],
         });
+    },
+
+    toggleMobileNav() {
+        const sidebar = document.querySelector('.sidebar');
+        if (!sidebar) return;
+        const isOpen = sidebar.classList.toggle('mobile-open');
+        let backdrop = document.querySelector('.sidebar-backdrop');
+        if (isOpen) {
+            if (!backdrop) {
+                backdrop = document.createElement('div');
+                backdrop.className = 'sidebar-backdrop';
+                backdrop.addEventListener('click', () => this.toggleMobileNav());
+                sidebar.parentElement.appendChild(backdrop);
+            }
+            backdrop.classList.add('visible');
+        } else if (backdrop) {
+            backdrop.classList.remove('visible');
+        }
+    },
+
+    closeMobileNav() {
+        const sidebar = document.querySelector('.sidebar');
+        if (sidebar && sidebar.classList.contains('mobile-open')) {
+            sidebar.classList.remove('mobile-open');
+            const backdrop = document.querySelector('.sidebar-backdrop');
+            if (backdrop) backdrop.classList.remove('visible');
+        }
     },
 };
 

@@ -16,6 +16,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 )
 
@@ -74,12 +75,9 @@ func newConfiguredServer(t *testing.T) *Server {
 	}
 	s.BaseURL = "https://test-site.polis.pub"
 
-	// Create .well-known/polis (single source of truth for identity)
-	// Domain is the public identity. Email kept for backward compat tests.
+	// Create .well-known/polis (identity document)
+	// Domain is derived from POLIS_BASE_URL at runtime, not stored in file.
 	wellKnown := map[string]interface{}{
-		"subdomain":  "test-site",
-		"base_url":   "https://test-site.polis.pub",
-		"domain":     "test-site.polis.pub",
 		"site_title": "Test Site",
 		"public_key": string(pubKey),
 		"email":      "test@example.com",
@@ -2630,24 +2628,17 @@ func TestGetAuthorEmail_NoEmailField(t *testing.T) {
 // GetAuthorDomain Tests (Phase 0)
 // ============================================================================
 
-func TestGetAuthorDomain_FromDomainField(t *testing.T) {
-	s := newConfiguredServer(t) // has domain in .well-known/polis
+func TestGetAuthorDomain_FromBaseURL(t *testing.T) {
+	s := newConfiguredServer(t) // has BaseURL set to https://test-site.polis.pub
 	domain := s.GetAuthorDomain()
 	if domain != "test-site.polis.pub" {
 		t.Errorf("expected test-site.polis.pub, got %q", domain)
 	}
 }
 
-func TestGetAuthorDomain_FallbackToBaseURL(t *testing.T) {
+func TestGetAuthorDomain_DifferentBaseURL(t *testing.T) {
 	s := newTestServer(t)
 	s.BaseURL = "https://fallback.polis.pub"
-	// Create .well-known/polis without domain field
-	wellKnown := map[string]interface{}{
-		"public_key": "ssh-ed25519 AAAA...",
-		"author":     "Test",
-	}
-	data, _ := json.MarshalIndent(wellKnown, "", "  ")
-	os.WriteFile(filepath.Join(s.DataDir, ".well-known", "polis"), data, 0644)
 
 	domain := s.GetAuthorDomain()
 	if domain != "fallback.polis.pub" {
@@ -5347,9 +5338,6 @@ func TestHandleInit_NoBaseURL_EnvStillHasDiscovery(t *testing.T) {
 	if !strings.Contains(content, "DISCOVERY_SERVICE_URL=") {
 		t.Error("expected .env to contain DISCOVERY_SERVICE_URL")
 	}
-	if !strings.Contains(content, "DISCOVERY_SERVICE_KEY=") {
-		t.Error("expected .env to contain DISCOVERY_SERVICE_KEY")
-	}
 	// Should NOT contain POLIS_BASE_URL when not provided
 	if strings.Contains(content, "POLIS_BASE_URL=") {
 		t.Error("expected .env to NOT contain POLIS_BASE_URL when not provided")
@@ -5575,7 +5563,7 @@ func TestHandleDownloadSite_HappyPath(t *testing.T) {
 	// Create a test post
 	os.WriteFile(filepath.Join(s.DataDir, "posts", "hello.md"), []byte("# Hello"), 0644)
 
-	// Create a private key file that should be excluded
+	// Create a private key file that should be included
 	os.MkdirAll(filepath.Join(s.DataDir, ".polis", "keys"), 0755)
 	os.WriteFile(filepath.Join(s.DataDir, ".polis", "keys", "id_ed25519"), []byte("PRIVATE"), 0600)
 
@@ -5619,11 +5607,88 @@ func TestHandleDownloadSite_HappyPath(t *testing.T) {
 		t.Error("zip should contain .well-known/polis")
 	}
 
-	// Should NOT contain private keys or logs
+	// Should contain keys (included since keys are part of the export)
+	if !files[filepath.Join(".polis", "keys", "id_ed25519")] {
+		t.Error("zip should contain .polis/keys/id_ed25519")
+	}
+
+	// Should NOT contain logs
 	for name := range files {
+		if strings.HasPrefix(name, "logs") {
+			t.Errorf("zip should not contain logs: %s", name)
+		}
+	}
+}
+
+func TestWriteZipArchive_ExcludesDirs(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create files in various directories
+	os.MkdirAll(filepath.Join(dir, "posts"), 0755)
+	os.WriteFile(filepath.Join(dir, "posts", "hello.md"), []byte("# Hello"), 0644)
+
+	os.MkdirAll(filepath.Join(dir, ".polis", "keys"), 0755)
+	os.WriteFile(filepath.Join(dir, ".polis", "keys", "id_ed25519"), []byte("PRIVATE"), 0600)
+
+	os.MkdirAll(filepath.Join(dir, "logs"), 0755)
+	os.WriteFile(filepath.Join(dir, "logs", "2026-01-01.log"), []byte("log data"), 0644)
+
+	os.MkdirAll(filepath.Join(dir, "snippets"), 0755)
+	os.WriteFile(filepath.Join(dir, "snippets", "about.md"), []byte("about"), 0644)
+
+	// Exclude both logs and keys
+	var buf bytes.Buffer
+	err := WriteZipArchive(&buf, dir, []string{"logs", filepath.Join(".polis", "keys")})
+	if err != nil {
+		t.Fatalf("WriteZipArchive: %v", err)
+	}
+
+	reader, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("failed to read zip: %v", err)
+	}
+
+	files := make(map[string]bool)
+	for _, f := range reader.File {
+		files[f.Name] = true
+	}
+
+	if !files["posts/hello.md"] {
+		t.Error("zip should contain posts/hello.md")
+	}
+	if !files[filepath.Join("snippets", "about.md")] {
+		t.Error("zip should contain snippets/about.md")
+	}
+	for name := range files {
+		if strings.HasPrefix(name, "logs") {
+			t.Errorf("zip should not contain logs: %s", name)
+		}
 		if strings.HasPrefix(name, filepath.Join(".polis", "keys")) {
 			t.Errorf("zip should not contain keys: %s", name)
 		}
+	}
+
+	// Now exclude only logs (keys included)
+	buf.Reset()
+	err = WriteZipArchive(&buf, dir, []string{"logs"})
+	if err != nil {
+		t.Fatalf("WriteZipArchive: %v", err)
+	}
+
+	reader, err = zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("failed to read zip: %v", err)
+	}
+
+	files = make(map[string]bool)
+	for _, f := range reader.File {
+		files[f.Name] = true
+	}
+
+	if !files[filepath.Join(".polis", "keys", "id_ed25519")] {
+		t.Error("zip should contain .polis/keys/id_ed25519 when only logs excluded")
+	}
+	for name := range files {
 		if strings.HasPrefix(name, "logs") {
 			t.Errorf("zip should not contain logs: %s", name)
 		}
@@ -6660,5 +6725,405 @@ func TestWidgetUnfollowMissingAuthor(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for empty author, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- Body size limit tests ---
+
+func TestPublish_BodyTooLarge(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Create markdown exceeding MaxPostBodySize (256KB)
+	bigMarkdown := strings.Repeat("x", MaxPostBodySize+1)
+	body := jsonBody(t, map[string]string{"markdown": bigMarkdown})
+	req := httptest.NewRequest(http.MethodPost, "/api/publish", body)
+
+	// Apply the same limitBody wrapper that routes.go uses
+	w := httptest.NewRecorder()
+	handler := limitBody(s.handlePublish, MaxPostBodySize+4096)
+	handler(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 for oversized publish body, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestComment_BodyTooLarge(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Create content exceeding MaxCommentBodySize (64KB)
+	bigContent := strings.Repeat("x", MaxCommentBodySize+1)
+	body := jsonBody(t, map[string]interface{}{
+		"in_reply_to": "https://example.com/posts/test.md",
+		"content":     bigContent,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/comments/sign", body)
+
+	w := httptest.NewRecorder()
+	handler := limitBody(s.handleCommentSign, MaxCommentBodySize+4096)
+	handler(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 for oversized comment body, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSnippet_BodyTooLarge(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Create content exceeding MaxSnippetBodySize (64KB)
+	bigContent := strings.Repeat("x", MaxSnippetBodySize+1)
+	body := jsonBody(t, map[string]string{"content": bigContent, "source": "global"})
+	req := httptest.NewRequest(http.MethodPut, "/api/snippets/about", body)
+
+	w := httptest.NewRecorder()
+	handler := limitBody(s.handleSnippet, MaxSnippetBodySize+4096)
+	handler(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 for oversized snippet body, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHook_BodyTooLarge(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Create script exceeding MaxHookBodySize (32KB)
+	bigScript := strings.Repeat("x", MaxHookBodySize+1)
+	body := jsonBody(t, map[string]string{
+		"hook_type": "post-publish",
+		"script":    bigScript,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/automations", body)
+
+	w := httptest.NewRecorder()
+	handler := limitBody(s.handleAutomations, MaxHookBodySize+4096)
+	handler(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 for oversized hook body, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPublish_SmallBodyStillWorks(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	body := jsonBody(t, map[string]string{"markdown": "# Hello\n\nSmall post."})
+	req := httptest.NewRequest(http.MethodPost, "/api/publish", body)
+
+	w := httptest.NewRecorder()
+	handler := limitBody(s.handlePublish, MaxPostBodySize+4096)
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for small publish body, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ============================================================================
+// handleUnpublish Tests
+// ============================================================================
+
+func TestHandleUnpublish_Success(t *testing.T) {
+	s := newConfiguredServer(t)
+	// Use a local test server that returns 200 so the DS call completes instantly
+	dsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success":true}`))
+	}))
+	defer dsServer.Close()
+	s.DiscoveryURL = dsServer.URL
+
+	// Create a post file
+	postDir := filepath.Join(s.DataDir, "posts", "20260201")
+	if err := os.MkdirAll(postDir, 0755); err != nil {
+		t.Fatalf("failed to create post dir: %v", err)
+	}
+	postPath := filepath.Join(postDir, "test-post.md")
+	postContent := "---\ntitle: Test Post\npublished: 2026-02-01T12:00:00Z\n---\n\nHello world.\n"
+	if err := os.WriteFile(postPath, []byte(postContent), 0644); err != nil {
+		t.Fatalf("failed to write post file: %v", err)
+	}
+
+	// Create metadata/public.jsonl with an entry for that post
+	indexPath := filepath.Join(s.DataDir, "metadata", "public.jsonl")
+	indexEntries := []string{
+		`{"path":"posts/20260201/test-post.md","title":"Test Post","published":"2026-02-01T12:00:00Z"}`,
+		`{"path":"posts/20260202/other-post.md","title":"Other Post","published":"2026-02-02T12:00:00Z"}`,
+	}
+	if err := os.WriteFile(indexPath, []byte(strings.Join(indexEntries, "\n")+"\n"), 0644); err != nil {
+		t.Fatalf("failed to write public.jsonl: %v", err)
+	}
+
+	body := jsonBody(t, map[string]string{"path": "posts/20260201/test-post.md"})
+	req := httptest.NewRequest(http.MethodPost, "/api/unpublish", body)
+	w := httptest.NewRecorder()
+
+	s.handleUnpublish(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify success response
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if resp["success"] != true {
+		t.Errorf("expected success=true, got %v", resp["success"])
+	}
+
+	// Verify the post file was deleted
+	if _, err := os.Stat(postPath); !os.IsNotExist(err) {
+		t.Error("expected post file to be deleted, but it still exists")
+	}
+
+	// Verify the index entry was removed (only the other post should remain)
+	updatedIndex, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatalf("failed to read updated public.jsonl: %v", err)
+	}
+	indexStr := string(updatedIndex)
+	if strings.Contains(indexStr, "test-post.md") {
+		t.Error("expected test-post.md entry to be removed from public.jsonl")
+	}
+	if !strings.Contains(indexStr, "other-post.md") {
+		t.Error("expected other-post.md entry to remain in public.jsonl")
+	}
+}
+
+func TestHandleUnpublish_NotFound(t *testing.T) {
+	s := newConfiguredServer(t)
+	s.DiscoveryURL = "http://192.0.2.1:1"
+
+	body := jsonBody(t, map[string]string{"path": "posts/20260201/nonexistent.md"})
+	req := httptest.NewRequest(http.MethodPost, "/api/unpublish", body)
+	w := httptest.NewRecorder()
+
+	s.handleUnpublish(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleUnpublish_InvalidPath(t *testing.T) {
+	s := newConfiguredServer(t)
+	s.DiscoveryURL = "http://192.0.2.1:1"
+
+	body := jsonBody(t, map[string]string{"path": "../../../etc/passwd"})
+	req := httptest.NewRequest(http.MethodPost, "/api/unpublish", body)
+	w := httptest.NewRecorder()
+
+	s.handleUnpublish(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleUnpublish_MethodNotAllowed(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/unpublish", nil)
+	w := httptest.NewRecorder()
+
+	s.handleUnpublish(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleUnpublish_NoKeys(t *testing.T) {
+	s := newTestServer(t)
+
+	body := jsonBody(t, map[string]string{"path": "posts/20260201/test-post.md"})
+	req := httptest.NewRequest(http.MethodPost, "/api/unpublish", body)
+	w := httptest.NewRecorder()
+
+	s.handleUnpublish(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Not configured") {
+		t.Errorf("expected 'Not configured' in error, got: %s", w.Body.String())
+	}
+}
+
+// ============================================================================
+// handleRotateKey Tests
+// ============================================================================
+
+func TestHandleRotateKey_MethodNotAllowed(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/rotate-key", nil)
+	w := httptest.NewRecorder()
+
+	s.handleRotateKey(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleRotateKey_NoKeys(t *testing.T) {
+	s := newTestServer(t) // No keys configured
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rotate-key", nil)
+	w := httptest.NewRecorder()
+
+	s.handleRotateKey(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Not configured") {
+		t.Errorf("expected 'Not configured' in error, got: %s", w.Body.String())
+	}
+}
+
+func TestHandleRotateKey_NoBaseURL(t *testing.T) {
+	s := newConfiguredServer(t)
+	s.BaseURL = "" // Clear base URL
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rotate-key", nil)
+	w := httptest.NewRecorder()
+
+	s.handleRotateKey(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "POLIS_BASE_URL") {
+		t.Errorf("expected POLIS_BASE_URL error, got: %s", w.Body.String())
+	}
+}
+
+func TestHandleRotateKey_Success(t *testing.T) {
+	s := newConfiguredServer(t)
+	s.DiscoveryURL = "" // Will cause DS call to fail at network level
+
+	// Save old key for comparison
+	oldPubKey := strings.TrimSpace(string(s.PublicKey))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/rotate-key", nil)
+	w := httptest.NewRecorder()
+
+	s.handleRotateKey(w, req)
+
+	// DS call will fail since there's no real discovery service
+	// This tests the DS-failure path (502 Bad Gateway)
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("expected 502 (DS unavailable), got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify keys were NOT changed (DS failed, so local swap should not proceed)
+	currentPubKey := strings.TrimSpace(string(s.PublicKey))
+	if currentPubKey != oldPubKey {
+		t.Error("keys should not have changed when DS fails")
+	}
+}
+
+func TestHandleRotateKey_KeysChangedOnDisk(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Save old keys for comparison
+	oldPubKey := strings.TrimSpace(string(s.PublicKey))
+	oldPrivKey := make([]byte, len(s.PrivateKey))
+	copy(oldPrivKey, s.PrivateKey)
+
+	keysDir := filepath.Join(s.DataDir, ".polis", "keys")
+
+	// To test the full success path, we need to mock the DS client.
+	// Instead, we'll directly call the key rotation logic steps that happen
+	// after DS notification (backup + write + well-known update).
+	// This verifies the file operations are correct.
+
+	// Generate new keypair
+	newPrivPEM, newPubSSH, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("failed to generate keypair: %v", err)
+	}
+	newPubKey := strings.TrimSpace(string(newPubSSH))
+
+	// Simulate what handleRotateKey does after DS success:
+
+	// Backup old keys
+	if err := os.Rename(filepath.Join(keysDir, "id_ed25519"), filepath.Join(keysDir, "id_ed25519.old")); err != nil {
+		t.Fatalf("failed to backup old private key: %v", err)
+	}
+	if err := os.Rename(filepath.Join(keysDir, "id_ed25519.pub"), filepath.Join(keysDir, "id_ed25519.pub.old")); err != nil {
+		t.Fatalf("failed to backup old public key: %v", err)
+	}
+
+	// Write new keys
+	if err := os.WriteFile(filepath.Join(keysDir, "id_ed25519"), newPrivPEM, 0600); err != nil {
+		t.Fatalf("failed to write new private key: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(keysDir, "id_ed25519.pub"), newPubSSH, 0644); err != nil {
+		t.Fatalf("failed to write new public key: %v", err)
+	}
+
+	// Update .well-known/polis
+	wk, err := site.LoadWellKnown(s.DataDir)
+	if err != nil {
+		t.Fatalf("failed to load well-known: %v", err)
+	}
+	wk.PublicKey = newPubKey
+	if err := site.SaveWellKnown(s.DataDir, wk); err != nil {
+		t.Fatalf("failed to save well-known: %v", err)
+	}
+
+	// Reload in-memory keys
+	s.LoadKeys()
+
+	// Verify old keys backed up
+	oldPrivBackup, err := os.ReadFile(filepath.Join(keysDir, "id_ed25519.old"))
+	if err != nil {
+		t.Fatal("old private key backup not found")
+	}
+	if string(oldPrivBackup) != string(oldPrivKey) {
+		t.Error("backed up private key does not match original")
+	}
+
+	oldPubBackup, err := os.ReadFile(filepath.Join(keysDir, "id_ed25519.pub.old"))
+	if err != nil {
+		t.Fatal("old public key backup not found")
+	}
+	if strings.TrimSpace(string(oldPubBackup)) != oldPubKey {
+		t.Error("backed up public key does not match original")
+	}
+
+	// Verify new keys on disk
+	newPrivOnDisk, _ := os.ReadFile(filepath.Join(keysDir, "id_ed25519"))
+	if string(newPrivOnDisk) != string(newPrivPEM) {
+		t.Error("new private key on disk doesn't match generated key")
+	}
+
+	newPubOnDisk, _ := os.ReadFile(filepath.Join(keysDir, "id_ed25519.pub"))
+	if strings.TrimSpace(string(newPubOnDisk)) != newPubKey {
+		t.Error("new public key on disk doesn't match generated key")
+	}
+
+	// Verify in-memory keys updated
+	currentPubKey := strings.TrimSpace(string(s.PublicKey))
+	if currentPubKey != newPubKey {
+		t.Errorf("in-memory public key not updated: got %s, want %s", currentPubKey, newPubKey)
+	}
+	if currentPubKey == oldPubKey {
+		t.Error("in-memory public key should differ from old key")
+	}
+
+	// Verify .well-known/polis updated
+	wk2, err := site.LoadWellKnown(s.DataDir)
+	if err != nil {
+		t.Fatalf("failed to reload well-known: %v", err)
+	}
+	if wk2.PublicKey != newPubKey {
+		t.Errorf(".well-known public_key not updated: got %s, want %s", wk2.PublicKey, newPubKey)
 	}
 }

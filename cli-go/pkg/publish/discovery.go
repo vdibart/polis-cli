@@ -8,6 +8,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
 // Discovery service configuration. Set by the calling application
@@ -46,21 +47,21 @@ func resolveDiscoveryConfig(cfg *DiscoveryConfig) (dsURL, dsKey, baseURL string)
 // If cfg is nil, falls back to package-level globals.
 func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg *DiscoveryConfig) error {
 	dsURL, dsKey, baseURL := resolveDiscoveryConfig(cfg)
-	if dsURL == "" || dsKey == "" || baseURL == "" {
+	if dsURL == "" || baseURL == "" {
 		return nil
 	}
 
-	// Determine author identity from .well-known/polis (single source of truth)
+	// Determine author identity: email from .well-known/polis, or domain from baseURL
 	wk, err := site.LoadWellKnown(dataDir)
 	if err != nil {
 		return fmt.Errorf("load .well-known/polis: %w", err)
 	}
 	author := wk.Email
 	if author == "" {
-		author = wk.Domain
+		author = polisurl.ExtractDomain(baseURL)
 	}
 	if author == "" {
-		return fmt.Errorf("no author identity in .well-known/polis (need email or domain)")
+		return fmt.Errorf("no author identity (need email in .well-known/polis or POLIS_BASE_URL)")
 	}
 
 	// Build post URL from base URL + path

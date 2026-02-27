@@ -88,6 +88,7 @@ type FollowingData struct {
 type PostData struct {
 	URL            string
 	Title          string
+	Excerpt        string // Plain-text excerpt from post body (first ~200 chars)
 	Published      string
 	PublishedHuman string
 	CommentCount   int

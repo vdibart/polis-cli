@@ -36,10 +36,34 @@ import (
 // DefaultDiscoveryServiceURL is the default discovery service URL matching the CLI
 const DefaultDiscoveryServiceURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
 
-// DefaultDiscoveryServiceKey is the public anon key for the default discovery service.
-// This is intentionally public — it's the Supabase anon key used for unauthenticated
-// access to edge functions. All authorization is handled via Ed25519 signatures.
-const DefaultDiscoveryServiceKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx0ZnBlenJpaWFxdmp1cHhidHR3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjcxNDQwODMsImV4cCI6MjA4MjcyMDA4M30.N9ScKbdcswutM6i__W9sPWWcBONIcxdAqIbsljqMKMI"
+// Request body size limits
+const (
+	MaxPostBodySize    = 256 << 10 // 256KB - post markdown
+	MaxCommentBodySize = 64 << 10  // 64KB - comment text
+	MaxSnippetBodySize = 64 << 10  // 64KB - snippet/about content
+	MaxHookBodySize    = 32 << 10  // 32KB - hook scripts
+	MaxDefaultBodySize = 1 << 20   // 1MB - everything else
+)
+
+// limitBody wraps a handler with http.MaxBytesReader to cap request body size.
+func limitBody(next http.HandlerFunc, maxBytes int64) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		next(w, r)
+	}
+}
+
+// isBodyTooLargeError returns true if the error is from http.MaxBytesReader.
+func isBodyTooLargeError(err error) bool {
+	// MaxBytesError was added in Go 1.19; also check the legacy string.
+	if err == nil {
+		return false
+	}
+	if _, ok := err.(*http.MaxBytesError); ok {
+		return true
+	}
+	return err.Error() == "http: request body too large"
+}
 
 // Log levels
 const (
@@ -64,9 +88,6 @@ type Config struct {
 	// Show frontmatter in markdown pane (default true)
 	ShowFrontmatter *bool `json:"show_frontmatter,omitempty"`
 
-	// Logging level: 0=off, 1=basic, 2=verbose
-	LogLevel int `json:"log_level,omitempty"`
-
 	// Setup wizard dismissed state (false = show wizard after init)
 	SetupWizardDismissed bool `json:"setup_wizard_dismissed,omitempty"`
 
@@ -80,18 +101,23 @@ type SSEEvent struct {
 	Data  string // JSON payload
 }
 
+// DefaultLogRetentionDays is the default number of days to keep log files.
+const DefaultLogRetentionDays = 7
+
 // Server holds the application state
 type Server struct {
-	DataDir      string
-	CLIThemesDir string // Path to CLI themes directory (fallback for theme snippets)
-	CLIVersion   string // CLI version for metadata files (set by bundled binary or from version.txt)
-	Config       *Config
-	PrivateKey   []byte
-	PublicKey    []byte
-	Logger       *Logger
-	BaseURL      string // From POLIS_BASE_URL env var (runtime config, not stored in .well-known/polis)
-	DiscoveryURL string // From .env / env var DISCOVERY_SERVICE_URL (not stored in webapp-config.json)
-	DiscoveryKey string // From .env / env var DISCOVERY_SERVICE_KEY (not stored in webapp-config.json)
+	DataDir          string
+	CLIThemesDir     string // Path to CLI themes directory (fallback for theme snippets)
+	CLIVersion       string // CLI version for metadata files (set by bundled binary or from version.txt)
+	Config           *Config
+	PrivateKey       []byte
+	PublicKey        []byte
+	Logger           *Logger
+	LogLevel         int // From .env LOG_LEVEL (default 1)
+	LogRetentionDays int // From .env LOG_RETENTION_DAYS (default 7)
+	BaseURL          string // From POLIS_BASE_URL env var (runtime config, not stored in .well-known/polis)
+	DiscoveryURL     string // From .env / env var DISCOVERY_SERVICE_URL (not stored in webapp-config.json)
+	DiscoveryKey     string // From .env / env var DISCOVERY_SERVICE_KEY (not stored in webapp-config.json)
 
 	// Unified sync infrastructure
 	syncHandlers []stream.SyncHandler
@@ -104,10 +130,12 @@ type Server struct {
 
 // Logger handles logging to files organized by date
 type Logger struct {
-	level   int
-	logsDir string
-	file    *os.File
-	mu      sync.Mutex
+	level         int
+	logsDir       string
+	retentionDays int
+	lastPruneAt   time.Time
+	file          *os.File
+	mu            sync.Mutex
 }
 
 // NewLogger creates a new logger with the given level and logs directory
@@ -115,6 +143,13 @@ func NewLogger(level int, logsDir string) *Logger {
 	return &Logger{
 		level:   level,
 		logsDir: logsDir,
+	}
+}
+
+// SetRetentionDays sets the number of days to keep log files for pruning.
+func (l *Logger) SetRetentionDays(days int) {
+	if l != nil {
+		l.retentionDays = days
 	}
 }
 
@@ -198,6 +233,40 @@ func (l *Logger) Close() {
 	}
 }
 
+// PruneLogs deletes log files older than retentionDays.
+// Short-circuits if less than 24h since last prune. Nil-safe.
+func (l *Logger) PruneLogs() {
+	if l == nil || l.retentionDays <= 0 {
+		return
+	}
+
+	l.mu.Lock()
+	if !l.lastPruneAt.IsZero() && time.Since(l.lastPruneAt) < 24*time.Hour {
+		l.mu.Unlock()
+		return
+	}
+	l.lastPruneAt = time.Now()
+	l.mu.Unlock()
+
+	entries, err := os.ReadDir(l.logsDir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().AddDate(0, 0, -l.retentionDays)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			os.Remove(filepath.Join(l.logsDir, e.Name()))
+		}
+	}
+}
+
 // Server logging helpers
 func (s *Server) LogInfo(format string, args ...interface{}) {
 	if s.Logger != nil {
@@ -235,7 +304,7 @@ func (s *Server) GetBaseURL() string {
 // globals which are unsafe in multi-tenant (hosted) mode where each tenant
 // has a different BaseURL.
 func (s *Server) DiscoveryConfig() *publish.DiscoveryConfig {
-	if s.DiscoveryURL == "" || s.DiscoveryKey == "" || s.BaseURL == "" {
+	if s.DiscoveryURL == "" || s.BaseURL == "" {
 		return nil
 	}
 	return &publish.DiscoveryConfig{
@@ -404,16 +473,26 @@ func (s *Server) LoadEnv() {
 	if baseURL := env["POLIS_BASE_URL"]; baseURL != "" {
 		s.BaseURL = strings.TrimSuffix(baseURL, "/")
 	}
+
+	// Log level and retention from .env
+	if v := env["LOG_LEVEL"]; v != "" {
+		if level, err := strconv.Atoi(v); err == nil && level >= 0 {
+			s.LogLevel = level
+		}
+	}
+	if v := env["LOG_RETENTION_DAYS"]; v != "" {
+		if days, err := strconv.Atoi(v); err == nil && days > 0 {
+			s.LogRetentionDays = days
+		}
+	}
 }
 
-// ApplyDiscoveryDefaults sets default discovery service URL and key if not configured.
+// ApplyDiscoveryDefaults sets the default discovery service URL if not configured.
 // This ensures the webapp works out of the box without requiring .env configuration.
+// The discovery service key is no longer needed — all auth uses Ed25519 signatures.
 func (s *Server) ApplyDiscoveryDefaults() {
 	if s.DiscoveryURL == "" {
 		s.DiscoveryURL = DefaultDiscoveryServiceURL
-	}
-	if s.DiscoveryKey == "" {
-		s.DiscoveryKey = DefaultDiscoveryServiceKey
 	}
 }
 
@@ -427,16 +506,8 @@ func (s *Server) GetAuthorEmail() string {
 	return wk.Email
 }
 
-// GetAuthorDomain returns the domain identity from .well-known/polis.
-// Prefers the explicit Domain field, falls back to extracting from POLIS_BASE_URL.
+// GetAuthorDomain returns the domain identity, extracted from POLIS_BASE_URL.
 func (s *Server) GetAuthorDomain() string {
-	wk, err := site.LoadWellKnown(s.DataDir)
-	if err == nil {
-		if d := wk.AuthorDomain(); d != "" {
-			return d
-		}
-	}
-	// Fall back to extracting from POLIS_BASE_URL
 	if baseURL := s.GetBaseURL(); baseURL != "" {
 		return polisurl.ExtractDomain(baseURL)
 	}
@@ -628,17 +699,27 @@ func (s *Server) Initialize() {
 	stream.DiscoveryKey = s.DiscoveryKey
 	stream.BaseURL = s.BaseURL
 
-	// Initialize logger if log level is configured
-	logLevel := 0
-	if s.Config != nil {
-		logLevel = s.Config.LogLevel
+	// Apply log defaults and write back to .env so settings are visible
+	if s.LogLevel == 0 {
+		s.LogLevel = LogLevelBasic
 	}
-	if logLevel > 0 {
-		logsDir := filepath.Join(s.DataDir, "logs")
-		s.Logger = NewLogger(logLevel, logsDir)
-		s.Logger.Info("Server starting with log level %d", logLevel)
-		s.Logger.Info("Data directory: %s", s.DataDir)
+	if s.LogRetentionDays == 0 {
+		s.LogRetentionDays = DefaultLogRetentionDays
 	}
+
+	envPath := filepath.Join(s.DataDir, ".env")
+	s.writeEnvFile(envPath, map[string]string{
+		"LOG_LEVEL":          strconv.Itoa(s.LogLevel),
+		"LOG_RETENTION_DAYS": strconv.Itoa(s.LogRetentionDays),
+	})
+
+	// Create logger (disk only — no stdout)
+	logsDir := filepath.Join(s.DataDir, "logs")
+	s.Logger = NewLogger(s.LogLevel, logsDir)
+	s.Logger.retentionDays = s.LogRetentionDays
+	s.Logger.PruneLogs()
+	s.Logger.Info("Server starting with log level %d", s.LogLevel)
+	s.Logger.Info("Data directory: %s", s.DataDir)
 }
 
 // migrateDraftsDir migrates .polis/drafts to .polis/posts/drafts if needed.
@@ -716,6 +797,9 @@ func (s *Server) StartBackgroundSync() {
 			select {
 			case <-ticker.C:
 				s.runUnifiedSync()
+				if s.Logger != nil {
+					s.Logger.PruneLogs()
+				}
 			case <-s.syncTrigger:
 				s.runUnifiedSync()
 			}
@@ -929,7 +1013,7 @@ func (s *Server) computeAllCounts() CountsPayload {
 // and moves any that have been blessed or denied. Re-renders the site if
 // any statuses changed so HTML and index.html stay current.
 func (s *Server) syncCommentStatuses() {
-	if s.DiscoveryURL == "" || s.DiscoveryKey == "" || s.PrivateKey == nil {
+	if s.DiscoveryURL == "" || s.PrivateKey == nil {
 		return
 	}
 	baseURL := s.GetBaseURL()
@@ -971,7 +1055,7 @@ func (s *Server) syncCommentStatuses() {
 // with separate queries per relevance group, applies rules, and appends
 // new entries to state.jsonl.
 func (s *Server) syncNotifications() {
-	if s.DiscoveryURL == "" || s.DiscoveryKey == "" {
+	if s.DiscoveryURL == "" {
 		return
 	}
 	baseURL := s.GetBaseURL()
@@ -1161,8 +1245,8 @@ func cursorGreater(a, b string) bool {
 // syncFeed queries the discovery stream for post and comment events
 // from followed authors and merges them into the feed cache.
 func (s *Server) syncFeed() {
-	if s.DiscoveryURL == "" || s.DiscoveryKey == "" {
-		log.Printf("[feed-sync] skip: no discovery config (url=%q key=%d chars)", s.DiscoveryURL, len(s.DiscoveryKey))
+	if s.DiscoveryURL == "" {
+		log.Printf("[feed-sync] skip: no discovery config (url=%q)", s.DiscoveryURL)
 		return
 	}
 	baseURL := s.GetBaseURL()

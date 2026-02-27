@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
@@ -614,6 +616,176 @@ func TestSPAHandler_DeepLinkFallsBackToIndex(t *testing.T) {
 		}
 		if body := w.Body.String(); body != "<html>SPA</html>" {
 			t.Errorf("%s: expected index.html content for SPA fallback, got %q", path, body)
+		}
+	}
+}
+
+// ============================================================================
+// Logger Tests
+// ============================================================================
+
+func TestPruneLogs_BasicPrune(t *testing.T) {
+	logsDir := filepath.Join(t.TempDir(), "logs")
+	os.MkdirAll(logsDir, 0755)
+
+	// Create an old log file (10 days ago)
+	oldFile := filepath.Join(logsDir, "2026-02-15.log")
+	os.WriteFile(oldFile, []byte("old"), 0644)
+	oldTime := time.Now().AddDate(0, 0, -10)
+	os.Chtimes(oldFile, oldTime, oldTime)
+
+	// Create a recent log file (today)
+	recentFile := filepath.Join(logsDir, "2026-02-25.log")
+	os.WriteFile(recentFile, []byte("recent"), 0644)
+
+	logger := NewLogger(LogLevelBasic, logsDir)
+	logger.retentionDays = 7
+
+	logger.PruneLogs()
+
+	// Old file should be deleted
+	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+		t.Error("expected old log file to be deleted")
+	}
+
+	// Recent file should still exist
+	if _, err := os.Stat(recentFile); err != nil {
+		t.Error("expected recent log file to still exist")
+	}
+}
+
+func TestPruneLogs_TimeGuard(t *testing.T) {
+	logsDir := filepath.Join(t.TempDir(), "logs")
+	os.MkdirAll(logsDir, 0755)
+
+	logger := NewLogger(LogLevelBasic, logsDir)
+	logger.retentionDays = 7
+
+	// First call should succeed
+	logger.PruneLogs()
+
+	// Create an old file after first prune
+	oldFile := filepath.Join(logsDir, "2026-02-10.log")
+	os.WriteFile(oldFile, []byte("old"), 0644)
+	oldTime := time.Now().AddDate(0, 0, -20)
+	os.Chtimes(oldFile, oldTime, oldTime)
+
+	// Second call within 24h should be a no-op (time guard)
+	logger.PruneLogs()
+
+	// File should still exist because prune was skipped
+	if _, err := os.Stat(oldFile); os.IsNotExist(err) {
+		t.Error("expected old file to still exist due to time guard")
+	}
+}
+
+func TestPruneLogs_NilSafety(t *testing.T) {
+	// Should not panic on nil logger
+	var logger *Logger
+	logger.PruneLogs()
+}
+
+func TestEnvLogLevel(t *testing.T) {
+	dataDir := t.TempDir()
+	envPath := filepath.Join(dataDir, ".env")
+
+	os.WriteFile(envPath, []byte("LOG_LEVEL=2\nLOG_RETENTION_DAYS=14\n"), 0644)
+
+	s := NewServer(dataDir, "")
+	s.LoadEnv()
+
+	if s.LogLevel != 2 {
+		t.Errorf("expected LogLevel=2, got %d", s.LogLevel)
+	}
+	if s.LogRetentionDays != 14 {
+		t.Errorf("expected LogRetentionDays=14, got %d", s.LogRetentionDays)
+	}
+}
+
+func TestEnvDefaultLevel(t *testing.T) {
+	dataDir := t.TempDir()
+
+	// Create minimal site structure so Initialize doesn't fail
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "keys"), 0755)
+
+	s := NewServer(dataDir, "")
+	s.Initialize()
+	defer s.Close()
+
+	if s.LogLevel != LogLevelBasic {
+		t.Errorf("expected default LogLevel=%d, got %d", LogLevelBasic, s.LogLevel)
+	}
+	if s.LogRetentionDays != DefaultLogRetentionDays {
+		t.Errorf("expected default LogRetentionDays=%d, got %d", DefaultLogRetentionDays, s.LogRetentionDays)
+	}
+
+	// Verify Logger was created
+	if s.Logger == nil {
+		t.Error("expected Logger to be created with default level")
+	}
+}
+
+func TestEnvWriteBack(t *testing.T) {
+	dataDir := t.TempDir()
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "keys"), 0755)
+
+	s := NewServer(dataDir, "")
+	s.Initialize()
+	defer s.Close()
+
+	// Verify .env was written with defaults
+	envPath := filepath.Join(dataDir, ".env")
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("expected .env to exist: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "LOG_LEVEL=1") {
+		t.Errorf("expected LOG_LEVEL=1 in .env, got:\n%s", content)
+	}
+	if !strings.Contains(content, "LOG_RETENTION_DAYS=7") {
+		t.Errorf("expected LOG_RETENTION_DAYS=7 in .env, got:\n%s", content)
+	}
+}
+
+func TestKeyAudit_NoPrivateKeyInLogFormats(t *testing.T) {
+	// Read all .go files in the server package and verify that
+	// LogInfo/LogError/LogWarn/LogDebug format strings don't contain
+	// patterns that could leak private key material.
+	files, err := filepath.Glob(filepath.Join(".", "*.go"))
+	if err != nil {
+		t.Fatalf("failed to glob: %v", err)
+	}
+
+	dangerPatterns := []string{
+		"PrivateKey",
+		"privKey",
+		"private_key",
+		"priv_key",
+	}
+
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		// Find all log format strings (LogInfo, LogError, etc.)
+		for _, line := range strings.Split(content, "\n") {
+			trimmed := strings.TrimSpace(line)
+			isLogCall := strings.Contains(trimmed, "s.LogInfo(") ||
+				strings.Contains(trimmed, "s.LogError(") ||
+				strings.Contains(trimmed, "s.LogWarn(") ||
+				strings.Contains(trimmed, "s.LogDebug(") ||
+				strings.Contains(trimmed, "l.log(")
+			if !isLogCall {
+				continue
+			}
+			for _, pattern := range dangerPatterns {
+				if strings.Contains(trimmed, pattern) {
+					t.Errorf("potential private key leak in log call in %s: %s", file, trimmed)
+				}
+			}
 		}
 	}
 }

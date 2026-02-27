@@ -58,7 +58,7 @@ func BeseechComment(dataDir, commentID string, privateKey []byte, dsCfg ...*Disc
 		baseURL = BaseURL
 	}
 
-	if dsURL == "" || dsKey == "" {
+	if dsURL == "" {
 		return nil, fmt.Errorf("discovery service not configured")
 	}
 	if baseURL == "" {

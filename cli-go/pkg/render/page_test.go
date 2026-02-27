@@ -391,14 +391,6 @@ func TestRenderFile_AuthorDomainAndPageType(t *testing.T) {
 	tempDir := t.TempDir()
 	setupTestSite(t, tempDir)
 
-	// Override .well-known/polis with domain field
-	os.WriteFile(filepath.Join(tempDir, ".well-known", "polis"), []byte(`{
-		"base_url": "https://alice.polis.pub",
-		"site_title": "Test Site",
-		"author_name": "Test Author",
-		"domain": "alice.polis.pub"
-	}`), 0644)
-
 	// Update post template to include widget variables
 	themesDir := filepath.Join(tempDir, ".polis", "themes", "turbo")
 	postTmpl := `<!DOCTYPE html>
@@ -414,6 +406,7 @@ func TestRenderFile_AuthorDomainAndPageType(t *testing.T) {
 	os.MkdirAll(postsDir, 0755)
 	os.WriteFile(filepath.Join(postsDir, "test.md"), []byte("---\ntitle: Widget Test\npublished: 2026-01-15T12:00:00Z\n---\nHello"), 0644)
 
+	// author_domain is derived from BaseURL config, not from .well-known/polis
 	renderer, err := NewPageRenderer(PageConfig{
 		DataDir: tempDir,
 		BaseURL: "https://alice.polis.pub",
@@ -438,16 +431,9 @@ func TestRenderFile_AuthorDomainAndPageType(t *testing.T) {
 	}
 }
 
-func TestRenderFile_AuthorDomainFallsBackToBaseURL(t *testing.T) {
+func TestRenderFile_AuthorDomainFromBaseURLConfig(t *testing.T) {
 	tempDir := t.TempDir()
 	setupTestSite(t, tempDir)
-
-	// .well-known/polis without domain field — should fall back to base_url extraction
-	os.WriteFile(filepath.Join(tempDir, ".well-known", "polis"), []byte(`{
-		"base_url": "https://bob.example.com",
-		"site_title": "Test Site",
-		"author_name": "Test Author"
-	}`), 0644)
 
 	// Template that exposes author_domain
 	themesDir := filepath.Join(tempDir, ".polis", "themes", "turbo")
@@ -458,6 +444,7 @@ func TestRenderFile_AuthorDomainFallsBackToBaseURL(t *testing.T) {
 	os.MkdirAll(postsDir, 0755)
 	os.WriteFile(filepath.Join(postsDir, "t.md"), []byte("---\ntitle: Test\n---\nContent"), 0644)
 
+	// author_domain is derived from BaseURL config
 	renderer, _ := NewPageRenderer(PageConfig{DataDir: tempDir, BaseURL: "https://bob.example.com"})
 
 	html, _, err := renderer.RenderFile("posts/t.md", "post", true)
@@ -466,7 +453,88 @@ func TestRenderFile_AuthorDomainFallsBackToBaseURL(t *testing.T) {
 	}
 
 	if !strings.Contains(html, `data-author="bob.example.com"`) {
-		t.Errorf("Expected author_domain extracted from base_url, got: %s", html)
+		t.Errorf("Expected author_domain from BaseURL config, got: %s", html)
+	}
+}
+
+func TestRenderFile_AuthorDomainEmptyWithoutBaseURL(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	// Template that exposes author_domain
+	themesDir := filepath.Join(tempDir, ".polis", "themes", "turbo")
+	postTmpl := `<div data-author="{{author_domain}}">{{title}}</div>`
+	os.WriteFile(filepath.Join(themesDir, "post.html"), []byte(postTmpl), 0644)
+
+	postsDir := filepath.Join(tempDir, "posts")
+	os.MkdirAll(postsDir, 0755)
+	os.WriteFile(filepath.Join(postsDir, "t.md"), []byte("---\ntitle: Test\n---\nContent"), 0644)
+
+	// No BaseURL — author_domain should be empty (graceful degradation)
+	renderer, _ := NewPageRenderer(PageConfig{DataDir: tempDir})
+
+	html, _, err := renderer.RenderFile("posts/t.md", "post", true)
+	if err != nil {
+		t.Fatalf("RenderFile failed: %v", err)
+	}
+
+	if !strings.Contains(html, `data-author=""`) {
+		t.Errorf("Expected empty author_domain without BaseURL, got: %s", html)
+	}
+}
+
+func TestRenderIndex_ExcerptPopulated(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	// Update index template to show excerpt
+	themesDir := filepath.Join(tempDir, ".polis", "themes", "turbo")
+	idxTmpl := `<!DOCTYPE html>
+<html>
+<head><title>{{site_title}}</title></head>
+<body>
+{{#recent_posts}}<div class="post-item"><a href="{{url}}">{{title}}</a><p class="excerpt">{{excerpt}}</p></div>{{/recent_posts}}
+</body>
+</html>`
+	os.WriteFile(filepath.Join(themesDir, "index.html"), []byte(idxTmpl), 0644)
+
+	// Create a real markdown post file
+	postsDir := filepath.Join(tempDir, "posts")
+	os.MkdirAll(postsDir, 0755)
+	os.WriteFile(filepath.Join(postsDir, "hello.md"), []byte("---\ntitle: Hello World\npublished: 2026-01-15T12:00:00Z\n---\nThis is the body of my post about **important things** in the world."), 0644)
+
+	// Create metadata/public.jsonl
+	metadataDir := filepath.Join(tempDir, "metadata")
+	os.WriteFile(filepath.Join(metadataDir, "public.jsonl"), []byte(`{"path":"posts/hello.md","title":"Hello World","published":"2026-01-15T12:00:00Z","type":"post"}`+"\n"), 0644)
+
+	renderer, err := NewPageRenderer(PageConfig{
+		DataDir: tempDir,
+		BaseURL: "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer failed: %v", err)
+	}
+
+	err = renderer.RenderIndex()
+	if err != nil {
+		t.Fatalf("RenderIndex failed: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(tempDir, "index.html"))
+	if err != nil {
+		t.Fatalf("Failed to read index.html: %v", err)
+	}
+
+	html := string(content)
+
+	// Excerpt should contain plain text from post body
+	if !strings.Contains(html, "important things") {
+		t.Errorf("Expected excerpt to contain 'important things', got: %s", html)
+	}
+
+	// Excerpt should NOT contain markdown formatting
+	if strings.Contains(html, "**important") {
+		t.Errorf("Excerpt should not contain markdown formatting, got: %s", html)
 	}
 }
 

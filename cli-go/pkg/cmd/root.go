@@ -133,16 +133,10 @@ func Execute(args []string) {
 		handleBlessing(cmdArgs)
 	case "rebuild":
 		handleRebuild(cmdArgs)
-	case "migrate":
-		handleMigrate(cmdArgs)
-	case "migrations":
-		if len(cmdArgs) > 0 && cmdArgs[0] == "apply" {
-			handleMigrationsApply(cmdArgs[1:])
-		} else {
-			exitError("Unknown migrations subcommand. Use: polis migrations apply")
-		}
 	case "rotate-key":
 		handleRotateKey(cmdArgs)
+	case "unpublish":
+		handleUnpublish(cmdArgs)
 	case "notifications":
 		handleNotifications(cmdArgs)
 	case "clone":
@@ -215,8 +209,6 @@ Commands related to site administration:
   polis register                  Register site with discovery service
   polis unregister [--force]      Unregister site
   polis render [--force]          Render markdown to HTML
-  polis migrate <new-domain>      Migrate content to a new domain
-  polis migrations apply          Apply domain migrations to local files
 
 Commands related to cloning remote polis sites:
   polis clone <url> [dir]         Clone a public polis site
@@ -236,7 +228,8 @@ Commands related to local configuration:
   polis index                     View index
   polis version                   Print CLI version
   polis about                     Show site, versions, config info
-  polis rotate-key                Generate new keypair and re-sign content
+  polis unpublish <path>          Remove a published post
+  polis rotate-key                Generate new keypair and rotate discovery key
   polis serve [-d|--data-dir PATH] Start local web server (bundled binary only)
 
 Examples:
