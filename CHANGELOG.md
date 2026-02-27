@@ -17,7 +17,7 @@ This release adds the `unpublish` command, introduces the `patrol` integrity-che
 - **`{{excerpt}}` template variable**: New template variable available in post/comment templates for plain-text content summaries.
 - **`MakeContentUnregisterCanonicalJSON()`**: New canonical JSON builder for signed content unregistration.
 - **`MakeKeyRotationCanonicalJSON()` and `RotateKey()`**: New discovery client functions for cryptographic key rotation with transition signatures.
-- **New `studio13/` theme**: Community-contributed theme by Nick Katsivelos.
+- **New `studio13/` theme**: Community-contributed theme by Nick Katsivelos (https://s13.nyc).
 - **`comment-inline.html` snippet**: Added to all themes for inline comment rendering in post pages.
 
 ### Changed
