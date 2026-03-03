@@ -66,7 +66,7 @@ git push                        # To GitHub Pages, Netlify, etc.
 
 ## Two ways to use it
 
-**Command line** — `polis post`, `polis follow`, `polis discover`, `polis comment`, and 23 more commands. All support `--json` for scripting and automation. See the [full command reference](docs/USAGE.md).
+**Command line** — `polis post`, `polis follow`, `polis discover`, `polis comment`, and 23 more commands. All support `--json` for scripting and automation. See the [full command reference](docs/cli/user/command-reference.md).
 
 **Web UI** — Run `polis-full serve` to get a full publishing environment in your browser — write and preview posts, manage blessings, and discover what authors you follow are writing.
 
@@ -113,8 +113,8 @@ cd polis-cli && make all
 
 ## Going deeper
 
-- **Themes** — Three built-in themes (sols, turbo, zane) with Mustache-style templating. See [TEMPLATING.md](docs/TEMPLATING.md).
-- **JSON mode** — Every command supports `--json` for scripting and automation. See [JSON-MODE.md](docs/JSON-MODE.md).
+- **Themes** — Seven built-in themes with Mustache-style templating. See [Templating](docs/cli/user/templating.md).
+- **JSON mode** — Every command supports `--json` for scripting and automation. See [JSON Mode](docs/cli/user/json-mode.md).
 - **Interactive tutorial** — Run `polis-tutorial` for a guided walkthrough with simulated commands.
 - **AI integration** — Polis includes a [Claude Code](https://claude.ai/code) skill for natural language workflows: "publish my draft", "check my blessing requests", "comment on Alice's post".
 
@@ -128,11 +128,11 @@ The bootstrap bash implementation (`cli-bash/polis`) is a single ~9000-line file
 
 ## Documentation
 
-- **[USAGE.md](docs/USAGE.md)** — Complete command reference (27 commands)
-- **[TEMPLATING.md](docs/TEMPLATING.md)** — Themes and templates
-- **[JSON-MODE.md](docs/JSON-MODE.md)** — JSON output for scripting
-- **[SECURITY-MODEL.md](docs/SECURITY-MODEL.md)** — Cryptographic details
-- **[MANIFESTO.md](docs/MANIFESTO.md)** — Vision and philosophy
+- **[Command Reference](docs/cli/user/command-reference.md)** — Complete command reference
+- **[Templating](docs/cli/user/templating.md)** — Themes and templates
+- **[JSON Mode](docs/cli/user/json-mode.md)** — JSON output for scripting
+- **[Security Model](docs/general/security-model.md)** — Cryptographic details
+- **[Vision](docs/general/vision.md)** — Why Polis exists
 
 ---
 
