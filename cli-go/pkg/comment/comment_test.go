@@ -1,7 +1,6 @@
 package comment
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,10 +33,10 @@ func TestGetGenerator_DefaultDev(t *testing.T) {
 
 func TestEnsureUniqueCommentID_NoCollision(t *testing.T) {
 	dataDir := t.TempDir()
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "drafts"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "pending"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "denied"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, "comments"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "drafts"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "denied"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "comment"), 0755)
 
 	result := ensureUniqueCommentID(dataDir, "alice-hello-20260101")
 	if result != "alice-hello-20260101" {
@@ -47,11 +46,11 @@ func TestEnsureUniqueCommentID_NoCollision(t *testing.T) {
 
 func TestEnsureUniqueCommentID_DraftCollision(t *testing.T) {
 	dataDir := t.TempDir()
-	draftsDir := filepath.Join(dataDir, ".polis", "comments", "drafts")
+	draftsDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "drafts")
 	os.MkdirAll(draftsDir, 0755)
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "pending"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "denied"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, "comments"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "denied"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "comment"), 0755)
 
 	// Create existing draft
 	os.WriteFile(filepath.Join(draftsDir, "alice-hello-20260101.md"), []byte("draft"), 0644)
@@ -64,10 +63,10 @@ func TestEnsureUniqueCommentID_DraftCollision(t *testing.T) {
 
 func TestEnsureUniqueCommentID_BlessedCollision(t *testing.T) {
 	dataDir := t.TempDir()
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "drafts"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "pending"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "denied"), 0755)
-	blessedDir := filepath.Join(dataDir, "comments", "20260101")
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "drafts"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "denied"), 0755)
+	blessedDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260101")
 	os.MkdirAll(blessedDir, 0755)
 
 	// Create existing blessed comment
@@ -83,9 +82,8 @@ func TestMoveComment_AddsToBlessedComments(t *testing.T) {
 	dataDir := t.TempDir()
 
 	// Create required directories
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "pending"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, "comments"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, "metadata"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "comment"), 0755)
 
 	// Create a pending comment with CLI-compatible frontmatter
 	commentContent := `---
@@ -104,7 +102,7 @@ signature: fakesig
 This is a test comment.`
 
 	commentID := "bob-hello-world-20260102"
-	pendingPath := filepath.Join(dataDir, ".polis", "comments", "pending", commentID+".md")
+	pendingPath := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending", commentID+".md")
 	os.WriteFile(pendingPath, []byte(commentContent), 0644)
 
 	// Move to blessed
@@ -113,25 +111,10 @@ This is a test comment.`
 		t.Fatalf("MoveComment failed: %v", err)
 	}
 
-	// Verify blessed-comments.json was created/updated
-	blessedPath := filepath.Join(dataDir, "metadata", "blessed-comments.json")
+	// Verify blessed.json was created/updated
+	blessedPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "blessed.json")
 	if _, err := os.Stat(blessedPath); os.IsNotExist(err) {
-		t.Fatal("expected blessed-comments.json to be created")
-	}
-
-	// Verify manifest.json was created/updated with correct comment count
-	manifestPath := filepath.Join(dataDir, "metadata", "manifest.json")
-	manifestData, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatalf("expected manifest.json to be created: %v", err)
-	}
-	var manifest map[string]interface{}
-	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		t.Fatalf("manifest.json is not valid JSON: %v", err)
-	}
-	commentCount := int(manifest["comment_count"].(float64))
-	if commentCount != 1 {
-		t.Errorf("manifest comment_count = %d, want 1", commentCount)
+		t.Fatal("expected blessed.json to be created")
 	}
 }
 
@@ -139,10 +122,8 @@ func TestPublishComment_CopiesFilesAndUpdatesIndex(t *testing.T) {
 	dataDir := t.TempDir()
 
 	// Create required directories
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "pending"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, "comments"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, "metadata"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, "posts"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "comment"), 0755)
 
 	// Create a pending comment
 	commentContent := `---
@@ -161,7 +142,7 @@ signature: fakesig
 This is a **test** comment.`
 
 	commentID := "bob-hello-world-20260215"
-	pendingPath := filepath.Join(dataDir, ".polis", "comments", "pending", commentID+".md")
+	pendingPath := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending", commentID+".md")
 	os.WriteFile(pendingPath, []byte(commentContent), 0644)
 
 	// Publish
@@ -170,23 +151,23 @@ This is a **test** comment.`
 		t.Fatalf("PublishComment failed: %v", err)
 	}
 
-	// Verify .md file was copied to comments/YYYYMMDD/
-	mdPath := filepath.Join(dataDir, "comments", "20260215", commentID+".md")
+	// Verify .md file was copied to content/pub.polis.core/comment/YYYYMMDD/
+	mdPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260215", commentID+".md")
 	if _, err := os.Stat(mdPath); os.IsNotExist(err) {
-		t.Error("expected .md file in comments/20260215/")
+		t.Error("expected .md file in content/pub.polis.core/comment/20260215/")
 	}
 
 	// Note: HTML rendering is now handled by RenderSite(), not PublishComment().
 	// The .html file is NOT expected here.
 
-	// Verify public.jsonl was updated
-	indexPath := filepath.Join(dataDir, "metadata", "public.jsonl")
+	// Verify index.jsonl was updated
+	indexPath := filepath.Join(dataDir, "content", "pub.polis.core", "index.jsonl")
 	indexData, err := os.ReadFile(indexPath)
 	if err != nil {
-		t.Fatalf("expected public.jsonl: %v", err)
+		t.Fatalf("expected index.jsonl: %v", err)
 	}
 	if !containsString(string(indexData), commentID) {
-		t.Error("public.jsonl does not contain published comment")
+		t.Error("index.jsonl does not contain published comment")
 	}
 
 	// Verify pending file is NOT removed (publish is a copy, not a move)
@@ -216,10 +197,10 @@ func TestSignComment_DomainInFrontmatter(t *testing.T) {
 	dataDir := t.TempDir()
 
 	// Create required directories
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "drafts"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "pending"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "denied"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, "comments"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "drafts"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "denied"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "comment"), 0755)
 
 	// Generate a test key
 	privKey := generateTestKey(t)
@@ -240,7 +221,7 @@ func TestSignComment_DomainInFrontmatter(t *testing.T) {
 	}
 
 	// Verify the written file has domain in frontmatter
-	pendingDir := filepath.Join(dataDir, ".polis", "comments", "pending")
+	pendingDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending")
 	entries, _ := os.ReadDir(pendingDir)
 	if len(entries) == 0 {
 		t.Fatal("Expected a pending comment file")
@@ -254,10 +235,10 @@ func TestSignComment_DomainInFrontmatter(t *testing.T) {
 
 func TestSignComment_BackwardCompatWithEmail(t *testing.T) {
 	dataDir := t.TempDir()
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "drafts"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "pending"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "denied"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, "comments"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "drafts"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "denied"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "comment"), 0755)
 
 	privKey := generateTestKey(t)
 
@@ -290,20 +271,8 @@ func TestMoveComment_UpdatesManifestCommentCount(t *testing.T) {
 	dataDir := t.TempDir()
 
 	// Create required directories
-	os.MkdirAll(filepath.Join(dataDir, ".polis", "comments", "pending"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, "comments"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, "metadata"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, "posts"), 0755)
-
-	// Create initial manifest with comment_count: 0
-	initialManifest := map[string]interface{}{
-		"version":        "0.47.0",
-		"last_published": "",
-		"post_count":     0,
-		"comment_count":  0,
-	}
-	manifestData, _ := json.MarshalIndent(initialManifest, "", "  ")
-	os.WriteFile(filepath.Join(dataDir, "metadata", "manifest.json"), manifestData, 0644)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "comment"), 0755)
 
 	// Create two pending comments
 	for i, id := range []string{"comment-a", "comment-b"} {
@@ -320,7 +289,7 @@ signature: fakesig
 ---
 
 Test comment ` + id
-		pendingPath := filepath.Join(dataDir, ".polis", "comments", "pending", id+".md")
+		pendingPath := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending", id+".md")
 		os.WriteFile(pendingPath, []byte(content), 0644)
 	}
 
@@ -329,24 +298,14 @@ Test comment ` + id
 		t.Fatalf("MoveComment failed: %v", err)
 	}
 
-	// Check manifest shows 1 comment
-	data, _ := os.ReadFile(filepath.Join(dataDir, "metadata", "manifest.json"))
-	var m1 map[string]interface{}
-	json.Unmarshal(data, &m1)
-	if int(m1["comment_count"].(float64)) != 1 {
-		t.Errorf("after first blessing: comment_count = %v, want 1", m1["comment_count"])
-	}
-
 	// Bless second comment
 	if err := MoveComment(dataDir, "comment-b", StatusPending, StatusBlessed); err != nil {
 		t.Fatalf("MoveComment failed: %v", err)
 	}
 
-	// Check manifest shows 2 comments
-	data, _ = os.ReadFile(filepath.Join(dataDir, "metadata", "manifest.json"))
-	var m2 map[string]interface{}
-	json.Unmarshal(data, &m2)
-	if int(m2["comment_count"].(float64)) != 2 {
-		t.Errorf("after second blessing: comment_count = %v, want 2", m2["comment_count"])
+	// Verify blessed.json exists after blessings
+	blessedPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "blessed.json")
+	if _, err := os.Stat(blessedPath); os.IsNotExist(err) {
+		t.Fatal("expected blessed.json to exist after blessings")
 	}
 }

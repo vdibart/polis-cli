@@ -9,8 +9,11 @@ import (
 )
 
 const (
-	// PublicIndexFilename is the name of the public index file.
-	PublicIndexFilename = "public.jsonl"
+	// PublicIndexFilename is the name of the bundle index file.
+	PublicIndexFilename = "index.jsonl"
+
+	// BundleContentDir is the relative path to the core bundle content directory.
+	BundleContentDir = "content/pub.polis.core"
 )
 
 // IndexEntry represents a single entry in public.jsonl.
@@ -55,7 +58,7 @@ func AppendToPublicIndex(siteDir string, entry *IndexEntry) error {
 	}
 
 	// No duplicate - append
-	metadataDir := filepath.Join(siteDir, "metadata")
+	metadataDir := filepath.Join(siteDir, BundleContentDir)
 	if err := os.MkdirAll(metadataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create metadata directory: %w", err)
 	}
@@ -110,7 +113,7 @@ func AppendPostToIndex(siteDir string, path, title, published, currentVersion st
 
 // LoadPublicIndex reads all entries from public.jsonl.
 func LoadPublicIndex(siteDir string) ([]IndexEntry, error) {
-	indexPath := filepath.Join(siteDir, "metadata", PublicIndexFilename)
+	indexPath := filepath.Join(siteDir, BundleContentDir, PublicIndexFilename)
 	data, err := os.ReadFile(indexPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -208,7 +211,7 @@ func RemoveIndexEntry(siteDir, path string) error {
 
 // writePublicIndex writes all entries to public.jsonl.
 func writePublicIndex(siteDir string, entries []IndexEntry) error {
-	metadataDir := filepath.Join(siteDir, "metadata")
+	metadataDir := filepath.Join(siteDir, BundleContentDir)
 	if err := os.MkdirAll(metadataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create metadata directory: %w", err)
 	}

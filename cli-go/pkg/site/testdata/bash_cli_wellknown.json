@@ -1,23 +1,15 @@
 {
-    "version": "1.0.0",
+    "version": "polis-cli/0.45.0",
     "author": "John Doe",
     "email": "john@example.com",
     "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBashCLITestKeyXXXXXXXXXXXXXXXXXXXX polis-local",
     "site_title": "My Site",
     "created": "2026-01-01T00:00:00Z",
-    "config": {
-        "directories": {
-            "keys": ".polis/keys",
-            "posts": "posts",
-            "comments": "comments",
-            "snippets": "snippets",
-            "themes": ".polis/themes",
-            "versions": ".versions"
-        },
-        "files": {
-            "public_index": "metadata/public.jsonl",
-            "blessed_comments": "metadata/blessed-comments.json",
-            "following_index": "metadata/following.json"
+    "active_theme": "sols",
+    "bundles": {
+        "pub.polis.core": {
+            "active": true,
+            "path": "content/pub.polis.core/bundle.json"
         }
     }
 }

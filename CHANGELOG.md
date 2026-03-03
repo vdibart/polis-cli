@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.57.0] - 2026-03-02
+
+This release introduces the bundle system, policy engine, content-type dispatch API, source/output separation for rendering, structured event logging, and a major webapp restructure. It also includes security hardening round 4 and a documentation reorganization into a component/audience hierarchy.
+
+### Added
+
+- **Bundle system (`pkg/bundle/`)**: Declarative content-type bundles that define how content is structured, validated, and rendered.
+- **Path resolver (`pkg/resolve/`)**: Centralized path resolution for content, metadata, and configuration files.
+- **Content-type dispatch engine (`pkg/ops/`)**: Type-aware operation routing that dispatches create/read/update/delete operations to the correct handler based on content type.
+- **Policy engine (`pkg/policy/`)**: Declarative rule evaluation system for content policies (e.g., blessing requirements, publish constraints).
+- **REST API (`webapp/internal/api/`)**: New `/v1/` content-type dispatch layer with router, handlers, middleware (auth, CORS, per-route body limits).
+- **Structured event logging**: JSON-formatted event output to stdout with `pub.polis.*` event types for machine-readable log consumption.
+- **SSE-gated background sync**: Webapp background sync (notifications, feed) only runs when at least one SSE client is connected, reducing idle resource usage.
+- **Per-route body size limits**: HTTP request body limits configured per endpoint to prevent oversized payloads.
+- **Content source-to-mount redirect**: 301 redirects from content source paths to their rendered mount paths.
+- **New themes**: `especial`, `especial-light`, `vice` themes added.
+
+### Changed
+
+- **`polis.*` → `pub.polis.*` event types**: All event types, content types, and relationship types renamed with `pub.` prefix for namespace clarity.
+- **Webapp flattened**: `webapp/localhost/` directory structure flattened to `webapp/` — the `localhost/` nesting level is removed.
+- **Route extraction**: HTTP route registration extracted from `server.go` into dedicated `routes.go` file.
+- **Source/output separation for rendering**: Render pipeline now distinguishes content source files from generated output files.
+- **Documentation restructured**: Flat `docs/*.md` files reorganized into `docs/<component>/<audience>/` hierarchy (cli, webapp, api, ds, general).
+- **Go version requirement**: Bumped from 1.22 to 1.24.
+- **Makefile**: Updated all build paths for webapp restructure; added `linux/arm64` to release targets; fixed output path depth for webapp/bundled builds.
+
+### Security
+
+- **Round 4 hardening**: XSS fixes in template rendering, open redirect prevention, path traversal guards, CORS policy tightening for SSE, rate limiting on auth endpoints, IP spoofing mitigation, TOCTOU fix in magic link verification, sanitized error responses, security headers.
+
+### Documentation
+
+- **New docs**: `general/content-system.md` (bundles, content types, events), `api/user/reference.md` (REST API reference), `api/developer/dispatch-engine.md` (engine architecture).
+- **Updated docs**: Security model, vision, glossary, CLI packages, webapp development guide, DS references.
+- **Removed from public**: `ops/` (internal infrastructure), `archive/` (business planning).
+
 ## [0.56.0] - 2026-02-27
 
 This release adds the `unpublish` command, introduces the `patrol` integrity-checking package, removes the `migrate` command and all migration code, hardens discovery service API authentication, simplifies key rotation with transition signatures, and ships the new studio13 theme.

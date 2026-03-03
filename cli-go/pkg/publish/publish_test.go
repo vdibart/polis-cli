@@ -32,7 +32,7 @@ func TestDefaultVersion_UsesGenerator(t *testing.T) {
 func TestEnsureUniqueFilename_NoCollision(t *testing.T) {
 	dataDir := t.TempDir()
 	dateDir := "20260101"
-	os.MkdirAll(filepath.Join(dataDir, "posts", dateDir), 0755)
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir), 0755)
 
 	result := ensureUniqueFilename(dataDir, dateDir, "hello-world")
 	if result != "hello-world" {
@@ -43,7 +43,7 @@ func TestEnsureUniqueFilename_NoCollision(t *testing.T) {
 func TestEnsureUniqueFilename_PostCollision(t *testing.T) {
 	dataDir := t.TempDir()
 	dateDir := "20260101"
-	postsDir := filepath.Join(dataDir, "posts", dateDir)
+	postsDir := filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir)
 	os.MkdirAll(postsDir, 0755)
 
 	// Create existing post
@@ -58,7 +58,7 @@ func TestEnsureUniqueFilename_PostCollision(t *testing.T) {
 func TestEnsureUniqueFilename_MultipleCollisions(t *testing.T) {
 	dataDir := t.TempDir()
 	dateDir := "20260101"
-	postsDir := filepath.Join(dataDir, "posts", dateDir)
+	postsDir := filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir)
 	os.MkdirAll(postsDir, 0755)
 
 	// Create existing posts
@@ -113,8 +113,8 @@ func TestSlugify_UntitledTitleInPublishPost(t *testing.T) {
 func TestEnsureUniqueFilename_DraftCollision(t *testing.T) {
 	dataDir := t.TempDir()
 	dateDir := "20260101"
-	os.MkdirAll(filepath.Join(dataDir, "posts", dateDir), 0755)
-	draftsDir := filepath.Join(dataDir, ".polis", "drafts")
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir), 0755)
+	draftsDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
 	os.MkdirAll(draftsDir, 0755)
 
 	// Create existing draft

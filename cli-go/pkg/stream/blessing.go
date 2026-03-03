@@ -30,10 +30,10 @@ type BlessingState struct {
 	Denied    int             `json:"denied"`
 }
 
-func (h *BlessingHandler) TypePrefix() string { return "polis.blessing" }
+func (h *BlessingHandler) TypePrefix() string { return "pub.polis.comment.blessing" }
 
 func (h *BlessingHandler) EventTypes() []string {
-	return []string{"polis.blessing.requested", "polis.blessing.granted", "polis.blessing.denied"}
+	return []string{"pub.polis.comment.blessing.requested", "pub.polis.comment.blessing.granted", "pub.polis.comment.blessing.denied"}
 }
 
 func (h *BlessingHandler) NewState() interface{} {
@@ -69,7 +69,7 @@ func (h *BlessingHandler) Process(events []discovery.StreamEvent, state interfac
 		}
 
 		switch evt.Type {
-		case "polis.blessing.requested":
+		case "pub.polis.comment.blessing.requested":
 			if _, exists := blessingMap[sourceURL]; !exists {
 				entry := &BlessingEntry{
 					SourceURL: sourceURL,
@@ -81,7 +81,7 @@ func (h *BlessingHandler) Process(events []discovery.StreamEvent, state interfac
 				blessingMap[sourceURL] = entry
 			}
 
-		case "polis.blessing.granted":
+		case "pub.polis.comment.blessing.granted":
 			if entry, exists := blessingMap[sourceURL]; exists {
 				entry.Status = "granted"
 				entry.UpdatedAt = evt.Timestamp
@@ -95,7 +95,7 @@ func (h *BlessingHandler) Process(events []discovery.StreamEvent, state interfac
 				}
 			}
 
-		case "polis.blessing.denied":
+		case "pub.polis.comment.blessing.denied":
 			if entry, exists := blessingMap[sourceURL]; exists {
 				entry.Status = "denied"
 				entry.UpdatedAt = evt.Timestamp

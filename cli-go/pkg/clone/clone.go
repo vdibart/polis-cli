@@ -78,25 +78,23 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 		return nil, fmt.Errorf("failed to fetch manifest: %w", err)
 	}
 
-	// Create metadata directory and save manifest
-	metadataDir := filepath.Join(targetDir, "metadata")
-	if err := os.MkdirAll(metadataDir, 0755); err != nil {
+	// Create content directory structure
+	bundleDir := filepath.Join(targetDir, "content", "pub.polis.core")
+	if err := os.MkdirAll(bundleDir, 0755); err != nil {
 		return nil, err
 	}
 
-	manifestData, _ := json.MarshalIndent(manifest, "", "  ")
-	if err := os.WriteFile(filepath.Join(metadataDir, "manifest.json"), append(manifestData, '\n'), 0644); err != nil {
-		return nil, err
-	}
+	// Manifest data is now absorbed into .well-known/polis (already written above)
+	_ = manifest
 
 	// Fetch public index
 	entries, err := client.FetchPublicIndex(serverURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch public.jsonl: %w", err)
+		return nil, fmt.Errorf("failed to fetch index.jsonl: %w", err)
 	}
 
-	// Save public.jsonl
-	indexFile, err := os.Create(filepath.Join(metadataDir, "public.jsonl"))
+	// Save index.jsonl
+	indexFile, err := os.Create(filepath.Join(bundleDir, "index.jsonl"))
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +105,7 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	indexFile.Close()
 
 	// Download posts
-	postsDir := filepath.Join(targetDir, "posts")
+	postsDir := filepath.Join(targetDir, "content", "pub.polis.core", "post")
 	for _, entry := range entries {
 		if entry.Type != "post" {
 			continue
@@ -142,10 +140,12 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 		result.PostsDownloaded++
 	}
 
-	// Try to fetch blessed-comments.json
-	blessedURL := serverURL + "/metadata/blessed-comments.json"
+	// Try to fetch blessed.json (comment/blessed.json)
+	commentDir := filepath.Join(bundleDir, "comment")
+	os.MkdirAll(commentDir, 0755)
+	blessedURL := serverURL + "/content/pub.polis.core/comment/blessed.json"
 	if content, err := client.FetchContent(blessedURL); err == nil {
-		if err := os.WriteFile(filepath.Join(metadataDir, "blessed-comments.json"), []byte(content), 0644); err == nil {
+		if err := os.WriteFile(filepath.Join(commentDir, "blessed.json"), []byte(content), 0644); err == nil {
 			// Count blessed comments
 			var bc struct {
 				Comments []struct {
@@ -161,9 +161,11 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	}
 
 	// Try to fetch following.json
-	followingURL := serverURL + "/metadata/following.json"
+	followDir := filepath.Join(bundleDir, "follow")
+	os.MkdirAll(followDir, 0755)
+	followingURL := serverURL + "/content/pub.polis.core/follow/following.json"
 	if content, err := client.FetchContent(followingURL); err == nil {
-		os.WriteFile(filepath.Join(metadataDir, "following.json"), []byte(content), 0644)
+		os.WriteFile(filepath.Join(followDir, "following.json"), []byte(content), 0644)
 	}
 
 	// Save clone state

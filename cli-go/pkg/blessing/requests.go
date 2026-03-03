@@ -28,7 +28,7 @@ type IncomingRequest struct {
 // We filter client-side to only return records where target_url domain matches ours,
 // so the post owner sees incoming requests but the commenter doesn't.
 func FetchPendingRequests(client *discovery.Client, domain string) ([]IncomingRequest, error) {
-	resp, err := client.QueryRelationships("polis.blessing", map[string]string{
+	resp, err := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 		"status": "pending",
 	})
 	if err != nil {

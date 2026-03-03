@@ -1,14 +1,11 @@
 package metadata
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 )
 
 func TestAppendToPublicIndex_NoDuplicates(t *testing.T) {
 	siteDir := t.TempDir()
-	os.MkdirAll(filepath.Join(siteDir, "metadata"), 0755)
 
 	entry := &IndexEntry{
 		Type:           "post",
@@ -30,7 +27,6 @@ func TestAppendToPublicIndex_NoDuplicates(t *testing.T) {
 
 func TestAppendToPublicIndex_DuplicateUpdatesInPlace(t *testing.T) {
 	siteDir := t.TempDir()
-	os.MkdirAll(filepath.Join(siteDir, "metadata"), 0755)
 
 	entry1 := &IndexEntry{
 		Type:           "post",
@@ -64,7 +60,6 @@ func TestAppendToPublicIndex_DuplicateUpdatesInPlace(t *testing.T) {
 
 func TestAppendToPublicIndex_DifferentPathsAppended(t *testing.T) {
 	siteDir := t.TempDir()
-	os.MkdirAll(filepath.Join(siteDir, "metadata"), 0755)
 
 	entry1 := &IndexEntry{
 		Type: "post",
@@ -86,7 +81,6 @@ func TestAppendToPublicIndex_DifferentPathsAppended(t *testing.T) {
 
 func TestAppendCommentToIndex_Dedup(t *testing.T) {
 	siteDir := t.TempDir()
-	os.MkdirAll(filepath.Join(siteDir, "metadata"), 0755)
 
 	path := "comments/20260101/comment-id.md"
 

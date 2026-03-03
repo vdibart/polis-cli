@@ -1,7 +1,6 @@
 package index
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,12 +9,11 @@ import (
 
 func TestRebuildPostsIndex_SkipsVersionsDir(t *testing.T) {
 	dataDir := t.TempDir()
-	postsDir := filepath.Join(dataDir, "posts", "20260101")
+	postsDir := filepath.Join(dataDir, "content", "pub.polis.core", "post", "20260101")
 	versionsDir := filepath.Join(postsDir, ".versions")
-	metadataDir := filepath.Join(dataDir, "metadata")
 	os.MkdirAll(postsDir, 0755)
 	os.MkdirAll(versionsDir, 0755)
-	os.MkdirAll(metadataDir, 0755)
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core"), 0755)
 
 	// Create a real post
 	postContent := `---
@@ -43,7 +41,6 @@ Hello World content.
 
 func TestRebuildCommentsIndex_EmptyWhenNoDiscovery(t *testing.T) {
 	dataDir := t.TempDir()
-	os.MkdirAll(filepath.Join(dataDir, "metadata"), 0755)
 
 	opts := RebuildOptions{Comments: true}
 	count, err := rebuildCommentsIndex(dataDir, opts)
@@ -55,15 +52,14 @@ func TestRebuildCommentsIndex_EmptyWhenNoDiscovery(t *testing.T) {
 	}
 
 	// Verify file was created
-	blessedPath := filepath.Join(dataDir, "metadata", "blessed-comments.json")
+	blessedPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "blessed.json")
 	if _, err := os.Stat(blessedPath); os.IsNotExist(err) {
-		t.Error("expected blessed-comments.json to be created")
+		t.Error("expected blessed.json to be created")
 	}
 }
 
 func TestRebuildCommentsIndex_UsesPackageVersion(t *testing.T) {
 	dataDir := t.TempDir()
-	os.MkdirAll(filepath.Join(dataDir, "metadata"), 0755)
 
 	opts := RebuildOptions{Comments: true}
 	_, err := rebuildCommentsIndex(dataDir, opts)
@@ -71,36 +67,19 @@ func TestRebuildCommentsIndex_UsesPackageVersion(t *testing.T) {
 		t.Fatalf("rebuild failed: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(dataDir, "metadata", "blessed-comments.json"))
+	data, err := os.ReadFile(filepath.Join(dataDir, "content", "pub.polis.core", "comment", "blessed.json"))
 	if err != nil {
-		t.Fatalf("failed to read blessed-comments.json: %v", err)
+		t.Fatalf("failed to read blessed.json: %v", err)
 	}
 
 	if !strings.Contains(string(data), `"version": "`+GetGenerator()+`"`) {
-		t.Errorf("blessed-comments.json should contain version %q, got: %s", GetGenerator(), string(data))
+		t.Errorf("blessed.json should contain version %q, got: %s", GetGenerator(), string(data))
 	}
 }
 
-func TestRegenerateManifest_UsesPackageVersion(t *testing.T) {
+func TestRegenerateManifest_IsNoOp(t *testing.T) {
 	dataDir := t.TempDir()
-	os.MkdirAll(filepath.Join(dataDir, "posts"), 0755)
-	os.MkdirAll(filepath.Join(dataDir, "metadata"), 0755)
-
 	if err := regenerateManifest(dataDir); err != nil {
-		t.Fatalf("regenerateManifest failed: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(dataDir, "metadata", "manifest.json"))
-	if err != nil {
-		t.Fatalf("failed to read manifest.json: %v", err)
-	}
-
-	var manifest map[string]interface{}
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		t.Fatalf("failed to parse manifest.json: %v", err)
-	}
-
-	if manifest["version"] != GetGenerator() {
-		t.Errorf("manifest.json version = %q, want %q", manifest["version"], GetGenerator())
+		t.Fatalf("regenerateManifest should return nil: %v", err)
 	}
 }

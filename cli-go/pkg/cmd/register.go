@@ -28,7 +28,7 @@ func handleRegister(args []string) {
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if discoveryURL == "" {
-		discoveryURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+		discoveryURL = "https://ds.polis.pub"
 	}
 
 	// Get domain from POLIS_BASE_URL
@@ -107,7 +107,7 @@ func handleUnregister(args []string) {
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if discoveryURL == "" {
-		discoveryURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+		discoveryURL = "https://ds.polis.pub"
 	}
 
 	// Get domain from POLIS_BASE_URL

@@ -223,7 +223,7 @@ func (e *Engine) substituteVariables(template string, ctx *RenderContext) string
 // GetThemeSnippetsDir returns the path to theme snippets directory.
 func (e *Engine) GetThemeSnippetsDir() string {
 	// First try local theme
-	localTheme := filepath.Join(e.config.DataDir, ".polis", "themes", e.config.ActiveTheme, "snippets")
+	localTheme := filepath.Join(e.config.DataDir, "site", "themes", e.config.ActiveTheme, "snippets")
 	if e.config.ActiveTheme != "" {
 		return localTheme
 	}
@@ -236,7 +236,7 @@ func (e *Engine) GetThemeSnippetsDir() string {
 
 // GetGlobalSnippetsDir returns the path to global snippets directory.
 func (e *Engine) GetGlobalSnippetsDir() string {
-	return filepath.Join(e.config.DataDir, "snippets")
+	return filepath.Join(e.config.DataDir, "site", "snippets")
 }
 
 // FormatHumanDate formats an ISO 8601 date string to human-readable format.

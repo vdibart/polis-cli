@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
@@ -55,19 +56,20 @@ func DefaultFeedConfig() FeedConfig {
 
 // CacheManager handles feed cache operations.
 type CacheManager struct {
+	mu         sync.Mutex
 	cacheFile  string        // state/polis.feed.jsonl
 	configFile string        // config/feed.json
 	store      *stream.Store // for cursor operations
 }
 
-// CacheFile returns the path to polis.feed.jsonl for a given DS domain.
+// CacheFile returns the path to pub.polis.feed.jsonl for a given DS domain.
 func CacheFile(dataDir, discoveryDomain string) string {
-	return filepath.Join(dataDir, ".polis", "ds", discoveryDomain, "state", "polis.feed.jsonl")
+	return filepath.Join(dataDir, ".polis", "ds", discoveryDomain, "pub.polis.core", "state", "pub.polis.feed.jsonl")
 }
 
 // ConfigFile returns the path to config/feed.json for a given DS domain.
 func ConfigFile(dataDir, discoveryDomain string) string {
-	return filepath.Join(dataDir, ".polis", "ds", discoveryDomain, "config", "feed.json")
+	return filepath.Join(dataDir, ".polis", "ds", discoveryDomain, "pub.polis.core", "config", "feed.json")
 }
 
 // NewCacheManager creates a new feed cache manager scoped to a discovery service domain.
@@ -75,7 +77,7 @@ func NewCacheManager(dataDir, discoveryDomain string) *CacheManager {
 	return &CacheManager{
 		cacheFile:  CacheFile(dataDir, discoveryDomain),
 		configFile: ConfigFile(dataDir, discoveryDomain),
-		store:      stream.NewStore(dataDir, discoveryDomain),
+		store:      stream.NewStore(dataDir, discoveryDomain, "pub.polis.core"),
 	}
 }
 
@@ -88,6 +90,12 @@ func ComputeItemID(authorURL, path string) string {
 
 // List returns all cached feed items, sorted by published descending.
 func (cm *CacheManager) List() ([]CachedFeedItem, error) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	return cm.listLocked()
+}
+
+func (cm *CacheManager) listLocked() ([]CachedFeedItem, error) {
 	file, err := os.Open(cm.cacheFile)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -189,12 +197,12 @@ func (cm *CacheManager) UnreadCount() (int, error) {
 
 // GetCursor returns the feed stream cursor position, or "0" if not set.
 func (cm *CacheManager) GetCursor() (string, error) {
-	return cm.store.GetCursor("polis.feed")
+	return cm.store.GetCursor("pub.polis.feed")
 }
 
 // SetCursor stores the feed stream cursor position.
 func (cm *CacheManager) SetCursor(cursor string) error {
-	return cm.store.SetCursor("polis.feed", cursor)
+	return cm.store.SetCursor("pub.polis.feed", cursor)
 }
 
 // LoadConfig loads the feed configuration, returning defaults if not found.
@@ -243,7 +251,7 @@ func (cm *CacheManager) SaveConfig(cfg *FeedConfig) error {
 
 // IsStale returns true if the cache needs refreshing based on staleness_minutes.
 func (cm *CacheManager) IsStale() (bool, error) {
-	entry, err := cm.store.GetCursorEntry("polis.feed")
+	entry, err := cm.store.GetCursorEntry("pub.polis.feed")
 	if err != nil {
 		return true, nil
 	}
@@ -272,7 +280,7 @@ func (cm *CacheManager) IsStale() (bool, error) {
 
 // LastUpdated returns the timestamp of the last feed sync, or empty string if never synced.
 func (cm *CacheManager) LastUpdated() string {
-	entry, err := cm.store.GetCursorEntry("polis.feed")
+	entry, err := cm.store.GetCursorEntry("pub.polis.feed")
 	if err != nil {
 		return ""
 	}
@@ -281,7 +289,10 @@ func (cm *CacheManager) LastUpdated() string {
 
 // MergeItems integrates new FeedItems into the cache. Returns the number of new items added.
 func (cm *CacheManager) MergeItems(items []FeedItem) (int, error) {
-	existing, err := cm.List()
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	existing, err := cm.listLocked()
 	if err != nil {
 		return 0, err
 	}
@@ -327,14 +338,17 @@ func (cm *CacheManager) MergeItems(items []FeedItem) (int, error) {
 	}
 
 	// Prune after merge
-	cm.Prune()
+	cm.pruneLocked()
 
 	return newCount, nil
 }
 
 // MarkRead marks a single item as read.
 func (cm *CacheManager) MarkRead(id string) error {
-	items, err := cm.List()
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	items, err := cm.listLocked()
 	if err != nil {
 		return err
 	}
@@ -358,7 +372,10 @@ func (cm *CacheManager) MarkRead(id string) error {
 
 // MarkUnread marks a single item as unread.
 func (cm *CacheManager) MarkUnread(id string) error {
-	items, err := cm.List()
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	items, err := cm.listLocked()
 	if err != nil {
 		return err
 	}
@@ -381,7 +398,10 @@ func (cm *CacheManager) MarkUnread(id string) error {
 
 // MarkAllRead marks all items as read.
 func (cm *CacheManager) MarkAllRead() error {
-	items, err := cm.List()
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	items, err := cm.listLocked()
 	if err != nil {
 		return err
 	}
@@ -398,7 +418,10 @@ func (cm *CacheManager) MarkAllRead() error {
 
 // MarkUnreadFrom marks the item with the given ID and all more recent items (by published date) as unread.
 func (cm *CacheManager) MarkUnreadFrom(id string) error {
-	items, err := cm.List()
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	items, err := cm.listLocked()
 	if err != nil {
 		return err
 	}
@@ -428,7 +451,13 @@ func (cm *CacheManager) MarkUnreadFrom(id string) error {
 
 // Prune enforces MaxItems and MaxAgeDays limits. Returns the number of items removed.
 func (cm *CacheManager) Prune() (int, error) {
-	items, err := cm.List()
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	return cm.pruneLocked()
+}
+
+func (cm *CacheManager) pruneLocked() (int, error) {
+	items, err := cm.listLocked()
 	if err != nil {
 		return 0, err
 	}

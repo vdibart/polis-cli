@@ -20,10 +20,10 @@ type FollowerState struct {
 	Count     int      `json:"count"`
 }
 
-func (h *FollowHandler) TypePrefix() string { return "polis.follow" }
+func (h *FollowHandler) TypePrefix() string { return "pub.polis.follow" }
 
 func (h *FollowHandler) EventTypes() []string {
-	return []string{"polis.follow.announced", "polis.follow.removed"}
+	return []string{"pub.polis.follow.announced", "pub.polis.follow.removed"}
 }
 
 func (h *FollowHandler) NewState() interface{} {
@@ -50,9 +50,9 @@ func (h *FollowHandler) Process(events []discovery.StreamEvent, state interface{
 		}
 
 		switch evt.Type {
-		case "polis.follow.announced":
+		case "pub.polis.follow.announced":
 			followerSet[evt.Actor] = true
-		case "polis.follow.removed":
+		case "pub.polis.follow.removed":
 			delete(followerSet, evt.Actor)
 		}
 	}

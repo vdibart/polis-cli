@@ -170,7 +170,7 @@ func scanForKeyLeak(siteDir string) string {
 
 	// Public-facing directories to scan
 	scanDirs := []string{
-		"posts", "comments", "snippets", ".well-known", "metadata",
+		"content", "site", ".well-known", "policies",
 	}
 
 	for _, dir := range scanDirs {
@@ -246,9 +246,9 @@ func fileContainsString(path, needle string) bool {
 	return false
 }
 
-// verifyPosts walks the posts/ directory and verifies signatures and hashes.
+// verifyPosts walks the content post directory and verifies signatures and hashes.
 func verifyPosts(siteDir string, pubKey []byte, result *CheckResult) {
-	postsDir := filepath.Join(siteDir, "posts")
+	postsDir := filepath.Join(siteDir, "content", "pub.polis.core", "post")
 	if _, err := os.Stat(postsDir); os.IsNotExist(err) {
 		return
 	}

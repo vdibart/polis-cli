@@ -30,7 +30,7 @@ func setupValidTenant(t *testing.T, name string) (string, []byte, []byte) {
 	for _, dir := range []string{
 		".well-known",
 		filepath.Join(".polis", "keys"),
-		"posts",
+		filepath.Join("content", "pub.polis.core", "post"),
 	} {
 		if err := os.MkdirAll(filepath.Join(siteDir, dir), 0755); err != nil {
 			t.Fatalf("MkdirAll: %v", err)
@@ -88,7 +88,7 @@ func createSignedPost(t *testing.T, siteDir string, privKey, pubKey []byte, titl
 
 	// Write to posts directory
 	dateDir := "20260115"
-	postsDir := filepath.Join(siteDir, "posts", dateDir)
+	postsDir := filepath.Join(siteDir, "content", "pub.polis.core", "post", dateDir)
 	if err := os.MkdirAll(postsDir, 0755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -99,7 +99,7 @@ func createSignedPost(t *testing.T, siteDir string, privKey, pubKey []byte, titl
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	return filepath.Join("posts", dateDir, slug+".md")
+	return filepath.Join("content", "pub.polis.core", "post", dateDir, slug+".md")
 }
 
 // extractSigBase64 strips PEM headers from an SSH signature.
@@ -230,7 +230,7 @@ func TestCheckTenant_KeyLeak(t *testing.T) {
 	siteDir, _, _ := setupValidTenant(t, "frank")
 
 	// Plant a private key header in a post file
-	postsDir := filepath.Join(siteDir, "posts", "20260115")
+	postsDir := filepath.Join(siteDir, "content", "pub.polis.core", "post", "20260115")
 	os.MkdirAll(postsDir, 0755)
 	leakedContent := "---\ntitle: Leaked Key\n---\n\nOops:\n-----BEGIN OPENSSH PRIVATE KEY-----\nfakedata\n-----END OPENSSH PRIVATE KEY-----\n"
 	os.WriteFile(filepath.Join(postsDir, "leaked.md"), []byte(leakedContent), 0644)
@@ -240,7 +240,7 @@ func TestCheckTenant_KeyLeak(t *testing.T) {
 	if result.KeyLeak.OK {
 		t.Error("KeyLeak should fail when private key header found in posts")
 	}
-	if !strings.Contains(result.KeyLeak.Message, "posts/") {
+	if !strings.Contains(result.KeyLeak.Message, "content/") {
 		t.Errorf("KeyLeak message should contain file path, got: %s", result.KeyLeak.Message)
 	}
 }
@@ -267,7 +267,7 @@ func TestCheckAllTenants(t *testing.T) {
 			t.Fatalf("GenerateKeypair: %v", err)
 		}
 
-		for _, dir := range []string{".well-known", filepath.Join(".polis", "keys"), "posts"} {
+		for _, dir := range []string{".well-known", filepath.Join(".polis", "keys"), filepath.Join("content", "pub.polis.core", "post")} {
 			os.MkdirAll(filepath.Join(siteDir, dir), 0755)
 		}
 
@@ -320,7 +320,7 @@ func TestCheckTenant_SkipsVersionsDir(t *testing.T) {
 	createSignedPost(t, siteDir, privKey, pubKey, "Real Post", "# Real Post\n\nContent.\n")
 
 	// Create a .versions directory with a .md file that should be skipped
-	versionsDir := filepath.Join(siteDir, "posts", "20260115", ".versions")
+	versionsDir := filepath.Join(siteDir, "content", "pub.polis.core", "post", "20260115", ".versions")
 	os.MkdirAll(versionsDir, 0755)
 	os.WriteFile(filepath.Join(versionsDir, "real-post.md"), []byte("version history data"), 0644)
 

@@ -14,7 +14,7 @@ _polis_completion() {
     local commands="about blessing clone comment discover extract follow
         index init notifications post preview
         rebuild register render republish rotate-key serve unfollow
-        unregister validate version"
+        unpublish unregister validate version"
 
     # Subcommands for specific commands
     local blessing_subcommands="beseech deny grant requests sync"
@@ -141,6 +141,12 @@ _polis_completion() {
                     ;;
                 validate)
                     [[ "$cur" == -* ]] && COMPREPLY=($(compgen -W "$validate_opts" -- "$cur"))
+                    ;;
+                unpublish)
+                    # Complete flags if typing flag, otherwise fall back to file completion
+                    if [[ "$cur" == -* ]]; then
+                        COMPREPLY=($(compgen -W "--json" -- "$cur"))
+                    fi
                     ;;
                 about|version|index|register)
                     [[ "$cur" == -* ]] && COMPREPLY=($(compgen -W "--json" -- "$cur"))

@@ -52,7 +52,7 @@ func handleFollow(args []string) {
 	// Load discovery client (authenticated for pending/denied queries)
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	if discoveryURL == "" {
-		discoveryURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+		discoveryURL = "https://ds.polis.pub"
 	}
 	apiKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	baseURL := os.Getenv("POLIS_BASE_URL")
@@ -62,10 +62,10 @@ func handleFollow(args []string) {
 	// Fetch unblessed comments from this author on our posts via relationship-query
 	authorDomain := discovery.ExtractDomainFromURL(authorURL)
 
-	pendingResp, _ := client.QueryRelationships("polis.blessing", map[string]string{
+	pendingResp, _ := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 		"status": "pending",
 	})
-	deniedResp, _ := client.QueryRelationships("polis.blessing", map[string]string{
+	deniedResp, _ := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 		"status": "denied",
 	})
 
@@ -92,7 +92,7 @@ func handleFollow(args []string) {
 
 	for _, rel := range allUnblessed {
 		// Grant blessing via relationship-update
-		if err := client.UpdateRelationship("polis.blessing", rel.SourceURL, rel.TargetURL, "grant", privKey); err != nil {
+		if err := client.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "grant", privKey); err != nil {
 			failedCount++
 			continue
 		}
@@ -100,7 +100,7 @@ func handleFollow(args []string) {
 	}
 
 	// Add to following.json
-	followingPath := filepath.Join(dir, "metadata", "following.json")
+	followingPath := filepath.Join(dir, "content", "pub.polis.core", "follow", "following.json")
 	f, err := following.Load(followingPath)
 	if err != nil {
 		exitError("Failed to load following.json: %v", err)

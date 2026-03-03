@@ -2,6 +2,7 @@ package stream
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
@@ -28,7 +29,7 @@ type DiscoveryConfig struct {
 }
 
 // PublishEvent publishes an event to the discovery stream.
-// Silently returns nil if discovery is not configured.
+// Returns nil if discovery is not configured (with diagnostic log).
 // If dsCfg is non-nil, it overrides package-level discovery globals for
 // multi-tenant safety. Pass nil to use globals (single-tenant / CLI mode).
 func PublishEvent(eventType string, payload map[string]interface{}, privateKey []byte, dsCfg ...*DiscoveryConfig) error {
@@ -44,9 +45,18 @@ func PublishEvent(eventType string, payload map[string]interface{}, privateKey [
 	}
 
 	if dsURL == "" || baseURL == "" {
+		var missing []string
+		if dsURL == "" {
+			missing = append(missing, "DISCOVERY_SERVICE_URL")
+		}
+		if baseURL == "" {
+			missing = append(missing, "POLIS_BASE_URL")
+		}
+		fmt.Printf("[i] Stream event skipped: %s not set\n", strings.Join(missing, ", "))
 		return nil
 	}
 	if privateKey == nil {
+		fmt.Println("[i] Stream event skipped: no private key")
 		return nil
 	}
 

@@ -21,7 +21,7 @@ func GetGenerator() string {
 
 const (
 	// BlessedCommentsFilename is the name of the blessed comments index file.
-	BlessedCommentsFilename = "blessed-comments.json"
+	BlessedCommentsFilename = "blessed.json"
 )
 
 // BlessedComments represents the blessed-comments.json file structure.
@@ -48,7 +48,7 @@ type BlessedComment struct {
 // LoadBlessedComments reads the blessed-comments.json file from the metadata directory.
 // Returns an error if the file doesn't exist.
 func LoadBlessedComments(siteDir string) (*BlessedComments, error) {
-	filePath := filepath.Join(siteDir, "metadata", BlessedCommentsFilename)
+	filePath := filepath.Join(siteDir, BundleContentDir, "comment", BlessedCommentsFilename)
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read blessed-comments.json: %w", err)
@@ -65,7 +65,7 @@ func LoadBlessedComments(siteDir string) (*BlessedComments, error) {
 // SaveBlessedComments writes the blessed-comments.json file atomically.
 // It writes to a temporary file first, then renames to ensure atomic update.
 func SaveBlessedComments(siteDir string, bc *BlessedComments) error {
-	metadataDir := filepath.Join(siteDir, "metadata")
+	metadataDir := filepath.Join(siteDir, BundleContentDir, "comment")
 	if err := os.MkdirAll(metadataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create metadata directory: %w", err)
 	}
@@ -94,7 +94,7 @@ func SaveBlessedComments(siteDir string, bc *BlessedComments) error {
 // InitBlessedComments creates an empty blessed-comments.json if it doesn't exist.
 // Returns nil if the file already exists (does not overwrite).
 func InitBlessedComments(siteDir string, version string) error {
-	filePath := filepath.Join(siteDir, "metadata", BlessedCommentsFilename)
+	filePath := filepath.Join(siteDir, BundleContentDir, "comment", BlessedCommentsFilename)
 
 	// Check if file already exists
 	if _, err := os.Stat(filePath); err == nil {
@@ -102,7 +102,7 @@ func InitBlessedComments(siteDir string, version string) error {
 	}
 
 	// Create metadata directory if needed
-	metadataDir := filepath.Join(siteDir, "metadata")
+	metadataDir := filepath.Join(siteDir, BundleContentDir, "comment")
 	if err := os.MkdirAll(metadataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create metadata directory: %w", err)
 	}

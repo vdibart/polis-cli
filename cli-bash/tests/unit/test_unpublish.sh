@@ -12,6 +12,9 @@ test_unpublish_removes_files() {
     setup_test_env "unpublish_removes_files"
     trap teardown_test_env EXIT
 
+    # Unpublish requires POLIS_BASE_URL for DS communication
+    export POLIS_BASE_URL="https://test.example.com"
+
     # Initialize
     "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
 
@@ -56,6 +59,9 @@ test_unpublish_updates_index() {
     setup_test_env "unpublish_updates_index"
     trap teardown_test_env EXIT
 
+    # Unpublish requires POLIS_BASE_URL for DS communication
+    export POLIS_BASE_URL="https://test.example.com"
+
     # Initialize
     "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
 
@@ -71,8 +77,8 @@ test_unpublish_updates_index() {
     assert_exit_code 0 $? || return 1
 
     # Verify both in index
-    assert_file_contains "metadata/public.jsonl" "Post One" || return 1
-    assert_file_contains "metadata/public.jsonl" "Post Two" || return 1
+    assert_file_contains "content/pub.polis.core/index.jsonl" "Post One" || return 1
+    assert_file_contains "content/pub.polis.core/index.jsonl" "Post Two" || return 1
 
     # Unpublish post one
     local path1
@@ -81,8 +87,8 @@ test_unpublish_updates_index() {
     "$POLIS_BIN" --json unpublish "$path1" > /dev/null 2>&1
 
     # Post One should be gone from index, Post Two should remain
-    assert_file_not_contains "metadata/public.jsonl" "Post One" || return 1
-    assert_file_contains "metadata/public.jsonl" "Post Two" || return 1
+    assert_file_not_contains "content/pub.polis.core/index.jsonl" "Post One" || return 1
+    assert_file_contains "content/pub.polis.core/index.jsonl" "Post Two" || return 1
 
     log "  [OK] Index entry removed, other posts preserved"
     return 0
@@ -96,9 +102,9 @@ test_unpublish_invalid_path() {
     # Initialize
     "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
 
-    # Try to unpublish a path that doesn't start with posts/
+    # Try to unpublish a path that doesn't start with content/pub.polis.core/post/
     local result
-    result=$("$POLIS_BIN" --json unpublish "metadata/public.jsonl" 2>&1)
+    result=$("$POLIS_BIN" --json unpublish "content/pub.polis.core/index.jsonl" 2>&1)
     local exit_code=$?
 
     assert_exit_code 1 "$exit_code" || return 1
@@ -120,7 +126,7 @@ test_unpublish_path_traversal() {
 
     # Try path traversal
     local result
-    result=$("$POLIS_BIN" --json unpublish "posts/../../etc/passwd" 2>&1)
+    result=$("$POLIS_BIN" --json unpublish "content/pub.polis.core/post/../../etc/passwd" 2>&1)
     local exit_code=$?
 
     assert_exit_code 1 "$exit_code" || return 1

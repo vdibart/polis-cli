@@ -35,32 +35,32 @@ const (
 )
 
 // getCommentDir returns the base directory for comments of a given status.
-// Private statuses (drafts, pending, denied) go to .polis/comments/
-// Blessed comments go to public comments/ (with YYYYMMDD date structure)
+// Private statuses (drafts, pending, denied) go to .polis/content/pub.polis.core/comments/
+// Blessed comments go to content/pub.polis.core/comment/ (with YYYYMMDD date structure)
 func getCommentDir(dataDir, status string) string {
 	if status == StatusBlessed {
-		return filepath.Join(dataDir, "comments")
+		return filepath.Join(dataDir, "content", "pub.polis.core", "comment")
 	}
-	return filepath.Join(dataDir, ".polis", "comments", status)
+	return filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", status)
 }
 
 // getBlessedCommentPath returns the path for a blessed comment with date-based structure.
-// Format: comments/YYYYMMDD/comment-id.md
+// Format: content/pub.polis.core/comment/YYYYMMDD/comment-id.md
 func getBlessedCommentPath(dataDir, commentID string, timestamp time.Time) string {
 	dateDir := timestamp.Format("20060102")
-	return filepath.Join(dataDir, "comments", dateDir, commentID+".md")
+	return filepath.Join(dataDir, "content", "pub.polis.core", "comment", dateDir, commentID+".md")
 }
 
 // getCommentPath returns the full path for a comment file based on status.
 // For blessed comments, it returns the date-based path.
-// For other statuses, it returns the flat path in .polis/comments/<status>/.
+// For other statuses, it returns the flat path in .polis/content/pub.polis.core/comments/<status>/.
 func getCommentPath(dataDir, commentID, status string) string {
 	if status == StatusBlessed {
 		// For blessed, we need to search the date directories
 		// This is a fallback - caller should use getBlessedCommentPath when timestamp is known
-		return filepath.Join(dataDir, "comments")
+		return filepath.Join(dataDir, "content", "pub.polis.core", "comment")
 	}
-	return filepath.Join(dataDir, ".polis", "comments", status, commentID+".md")
+	return filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", status, commentID+".md")
 }
 
 // CommentDraft represents a comment draft before signing.
@@ -132,7 +132,7 @@ func SaveDraft(dataDir string, draft *CommentDraft) error {
 	draft.InReplyTo = polisurl.NormalizeToMD(draft.InReplyTo)
 	draft.RootPost = polisurl.NormalizeToMD(draft.RootPost)
 
-	draftsDir := filepath.Join(dataDir, ".polis", "comments", StatusDrafts)
+	draftsDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", StatusDrafts)
 	if err := os.MkdirAll(draftsDir, 0755); err != nil {
 		return fmt.Errorf("failed to create drafts directory: %w", err)
 	}
@@ -172,7 +172,7 @@ updated_at: %s
 
 // LoadDraft loads a comment draft by ID.
 func LoadDraft(dataDir, id string) (*CommentDraft, error) {
-	draftPath := filepath.Join(dataDir, ".polis", "comments", StatusDrafts, id+".md")
+	draftPath := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", StatusDrafts, id+".md")
 	data, err := os.ReadFile(draftPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read draft: %w", err)
@@ -195,7 +195,7 @@ func LoadDraft(dataDir, id string) (*CommentDraft, error) {
 
 // ListDrafts returns all comment drafts.
 func ListDrafts(dataDir string) ([]*CommentDraft, error) {
-	draftsDir := filepath.Join(dataDir, ".polis", "comments", StatusDrafts)
+	draftsDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", StatusDrafts)
 	entries, err := os.ReadDir(draftsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -222,7 +222,7 @@ func ListDrafts(dataDir string) ([]*CommentDraft, error) {
 
 // DeleteDraft removes a comment draft.
 func DeleteDraft(dataDir, id string) error {
-	draftPath := filepath.Join(dataDir, ".polis", "comments", StatusDrafts, id+".md")
+	draftPath := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", StatusDrafts, id+".md")
 	if err := os.Remove(draftPath); err != nil {
 		return fmt.Errorf("failed to delete draft: %w", err)
 	}
@@ -343,7 +343,7 @@ signature: %s
 	finalContent := finalFrontmatter + "\n\n" + content
 
 	// Create pending directory (private)
-	pendingDir := filepath.Join(dataDir, ".polis", "comments", StatusPending)
+	pendingDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", StatusPending)
 	if err := os.MkdirAll(pendingDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create pending directory: %w", err)
 	}
@@ -380,9 +380,9 @@ signature: %s
 }
 
 // MoveComment moves a comment between status directories.
-// When moving to blessed status, uses date-based directory structure (comments/YYYY/MM/).
-// Other statuses use .polis/comments/<status>/.
-// When moving to blessed, also adds the comment to public.jsonl for CLI compatibility.
+// When moving to blessed status, uses date-based directory structure (content/pub.polis.core/comment/YYYYMMDD/).
+// Other statuses use .polis/content/pub.polis.core/comments/<status>/.
+// When moving to blessed, also adds the comment to index.jsonl.
 func MoveComment(dataDir, commentID, fromStatus, toStatus string) error {
 	// Determine source path
 	var fromPath string
@@ -394,7 +394,7 @@ func MoveComment(dataDir, commentID, fromStatus, toStatus string) error {
 		}
 		fromPath = foundPath
 	} else {
-		fromPath = filepath.Join(dataDir, ".polis", "comments", fromStatus, commentID+".md")
+		fromPath = filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", fromStatus, commentID+".md")
 	}
 
 	// Read source file
@@ -423,14 +423,14 @@ func MoveComment(dataDir, commentID, fromStatus, toStatus string) error {
 			}
 		}
 		dateDir := timestamp.Format("20060102")
-		toDir := filepath.Join(dataDir, "comments", dateDir)
+		toDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment", dateDir)
 		if err := os.MkdirAll(toDir, 0755); err != nil {
 			return fmt.Errorf("failed to create directory: %w", err)
 		}
 		toPath = filepath.Join(toDir, commentID+".md")
-		relativePath = filepath.Join("comments", dateDir, commentID+".md")
+		relativePath = filepath.Join("content", "pub.polis.core", "comment", dateDir, commentID+".md")
 	} else {
-		toDir := filepath.Join(dataDir, ".polis", "comments", toStatus)
+		toDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", toStatus)
 		if err := os.MkdirAll(toDir, 0755); err != nil {
 			return fmt.Errorf("failed to create directory: %w", err)
 		}
@@ -514,7 +514,7 @@ func MoveComment(dataDir, commentID, fromStatus, toStatus string) error {
 // of blessing status (matching bash CLI behavior).
 func PublishComment(dataDir, commentID string) error {
 	// Read the pending comment
-	pendingPath := filepath.Join(dataDir, ".polis", "comments", StatusPending, commentID+".md")
+	pendingPath := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", StatusPending, commentID+".md")
 	data, err := os.ReadFile(pendingPath)
 	if err != nil {
 		return fmt.Errorf("failed to read pending comment: %w", err)
@@ -532,8 +532,8 @@ func PublishComment(dataDir, commentID string) error {
 	}
 	dateDir := timestamp.Format("20060102")
 
-	// Create target directory: comments/YYYYMMDD/
-	targetDir := filepath.Join(dataDir, "comments", dateDir)
+	// Create target directory: content/pub.polis.core/comment/YYYYMMDD/
+	targetDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment", dateDir)
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return fmt.Errorf("failed to create comments directory: %w", err)
 	}
@@ -549,7 +549,7 @@ func PublishComment(dataDir, commentID string) error {
 	// that gets overwritten anyway.
 
 	// Append to public.jsonl
-	relativePath := filepath.Join("comments", dateDir, commentID+".md")
+	relativePath := filepath.Join("content", "pub.polis.core", "comment", dateDir, commentID+".md")
 
 	// Parse nested in-reply-to for the index entry
 	inReplyToURL, _ := ParseNestedInReplyTo(content)
@@ -585,7 +585,7 @@ func PublishComment(dataDir, commentID string) error {
 // findBlessedComment searches for a blessed comment in the date-based directory structure.
 // Structure: comments/YYYYMMDD/comment-id.md
 func findBlessedComment(dataDir, commentID string) (bool, string) {
-	commentsDir := filepath.Join(dataDir, "comments")
+	commentsDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment")
 
 	// Walk through date directories (YYYYMMDD format)
 	dateDirs, err := os.ReadDir(commentsDir)
@@ -615,7 +615,7 @@ func ListComments(dataDir, status string) ([]*CommentMeta, error) {
 		return listBlessedComments(dataDir)
 	}
 
-	commentsDir := filepath.Join(dataDir, ".polis", "comments", status)
+	commentsDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", status)
 	entries, err := os.ReadDir(commentsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -683,7 +683,7 @@ func ListComments(dataDir, status string) ([]*CommentMeta, error) {
 // Parses CLI-compatible frontmatter format.
 func listBlessedComments(dataDir string) ([]*CommentMeta, error) {
 	var comments []*CommentMeta
-	commentsDir := filepath.Join(dataDir, "comments")
+	commentsDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment")
 
 	// Walk through date directories (YYYYMMDD format)
 	dateDirs, err := os.ReadDir(commentsDir)
@@ -712,7 +712,7 @@ func listBlessedComments(dataDir string) ([]*CommentMeta, error) {
 			}
 
 			// Skip comments that still exist in pending (published-but-pending, not yet blessed)
-			pendingPath := filepath.Join(dataDir, ".polis", "comments", StatusPending, file.Name())
+			pendingPath := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", StatusPending, file.Name())
 			if _, err := os.Stat(pendingPath); err == nil {
 				continue
 			}
@@ -780,7 +780,7 @@ func GetComment(dataDir, commentID, status string) (*SignedComment, error) {
 		}
 		commentPath = foundPath
 	} else {
-		commentPath = filepath.Join(dataDir, ".polis", "comments", status, commentID+".md")
+		commentPath = filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", status, commentID+".md")
 	}
 
 	data, err := os.ReadFile(commentPath)
@@ -1001,7 +1001,7 @@ func ensureUniqueCommentID(dataDir, commentID string) string {
 		collision := false
 		// Check all private status dirs
 		for _, status := range []string{StatusDrafts, StatusPending, StatusDenied} {
-			path := filepath.Join(dataDir, ".polis", "comments", status, candidate+".md")
+			path := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", status, candidate+".md")
 			if _, err := os.Stat(path); err == nil {
 				collision = true
 				break
@@ -1009,7 +1009,7 @@ func ensureUniqueCommentID(dataDir, commentID string) string {
 		}
 		// Check blessed (public) comments date dirs
 		if !collision {
-			commentsDir := filepath.Join(dataDir, "comments")
+			commentsDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment")
 			if dateDirs, err := os.ReadDir(commentsDir); err == nil {
 				for _, dd := range dateDirs {
 					if dd.IsDir() {

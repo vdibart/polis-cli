@@ -87,7 +87,7 @@ func handleDiscover(args []string) {
 
 	// Query DS stream
 	client := discovery.NewClient(discoveryURL, discoveryKey)
-	typeFilter := "polis.post.published,polis.post.republished,polis.comment.published,polis.comment.republished"
+	typeFilter := "pub.polis.post.published,pub.polis.post.republished,pub.polis.comment.published,pub.polis.comment.republished"
 	actorFilter := discovery.JoinDomains(domains)
 
 	result, err := client.StreamQuery(cursor, 1000, typeFilter, actorFilter, "")

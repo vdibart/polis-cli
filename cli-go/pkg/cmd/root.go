@@ -34,7 +34,7 @@ var (
 )
 
 // DefaultDiscoveryServiceURL is the default discovery service URL.
-const DefaultDiscoveryServiceURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+const DefaultDiscoveryServiceURL = "https://ds.polis.pub"
 
 // Execute is the main entry point for the CLI.
 func Execute(args []string) {

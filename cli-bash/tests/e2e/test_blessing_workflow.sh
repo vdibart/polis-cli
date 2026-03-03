@@ -237,9 +237,9 @@ test_blessing_grant() {
     fi
 
     # Verify blessed-comments.json was updated
-    if [[ -f "metadata/blessed-comments.json" ]]; then
+    if [[ -f "content/pub.polis.core/comment/blessed.json" ]]; then
         local blessed_count
-        blessed_count=$(jq '.comments | length' metadata/blessed-comments.json 2>/dev/null || echo "0")
+        blessed_count=$(jq '.comments | length' content/pub.polis.core/comment/blessed.json 2>/dev/null || echo "0")
         log "  Blessed comments count: $blessed_count"
     fi
 

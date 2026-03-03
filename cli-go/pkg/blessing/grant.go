@@ -24,7 +24,7 @@ type GrantResult struct {
 // 3. Optionally runs the post-comment hook
 func Grant(siteDir string, request *IncomingRequest, client *discovery.Client, hookConfig *hooks.HookConfig, privateKey []byte) (*GrantResult, error) {
 	// Grant via unified relationship-update endpoint
-	if err := client.UpdateRelationship("polis.blessing", request.CommentURL, request.InReplyTo, "grant", privateKey); err != nil {
+	if err := client.UpdateRelationship("pub.polis.comment.blessing", request.CommentURL, request.InReplyTo, "grant", privateKey); err != nil {
 		return nil, fmt.Errorf("failed to grant blessing: %w", err)
 	}
 

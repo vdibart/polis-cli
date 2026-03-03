@@ -40,68 +40,68 @@ func DefaultRules() []Rule {
 	return []Rule{
 		{
 			ID:        "new-follower",
-			EventType: "polis.follow.announced",
+			EventType: "pub.polis.follow.announced",
 			Enabled:   true,
 			Filter:    RuleFilter{Relevance: "target_domain"},
-			Template:  RuleTemplate{Icon: "\U0001F464", Message: "{{actor}} started following you", Link: "/_/#followers"},
+			Template:  RuleTemplate{Icon: "\U0001F464", Message: "{{actor}} started following you", Link: "/_/social/followers"},
 			Batch:     true,
 			BatchWindow: "24h",
 		},
 		{
 			ID:        "lost-follower",
-			EventType: "polis.follow.removed",
+			EventType: "pub.polis.follow.removed",
 			Enabled:   true,
 			Filter:    RuleFilter{Relevance: "target_domain"},
-			Template:  RuleTemplate{Icon: "\U0001F464", Message: "{{actor}} unfollowed you", Link: "/_/#followers"},
+			Template:  RuleTemplate{Icon: "\U0001F464", Message: "{{actor}} unfollowed you", Link: "/_/social/followers"},
 		},
 		{
 			ID:        "blessing-requested",
-			EventType: "polis.blessing.requested",
+			EventType: "pub.polis.comment.blessing.requested",
 			Enabled:   true,
 			Filter:    RuleFilter{Relevance: "target_domain"},
-			Template:  RuleTemplate{Icon: "\U0001F514", Message: "{{actor}} requested a blessing on {{post_name}}", Link: "/_/#blessings"},
+			Template:  RuleTemplate{Icon: "\U0001F514", Message: "{{actor}} requested a blessing on {{post_name}}", Link: "/_/blessings"},
 		},
 		{
 			ID:        "blessing-granted",
-			EventType: "polis.blessing.granted",
+			EventType: "pub.polis.comment.blessing.granted",
 			Enabled:   true,
 			Filter:    RuleFilter{Relevance: "source_domain"},
-			Template:  RuleTemplate{Icon: "\u2713", Message: "{{actor}} blessed your comment", Link: "/_/#my-comments-blessed"},
+			Template:  RuleTemplate{Icon: "\u2713", Message: "{{actor}} blessed your comment", Link: "/_/comments?filter=blessed"},
 		},
 		{
 			ID:        "blessing-denied",
-			EventType: "polis.blessing.denied",
+			EventType: "pub.polis.comment.blessing.denied",
 			Enabled:   true,
 			Filter:    RuleFilter{Relevance: "source_domain"},
-			Template:  RuleTemplate{Icon: "\u2717", Message: "{{actor}} denied your comment", Link: "/_/#my-comments-denied"},
+			Template:  RuleTemplate{Icon: "\u2717", Message: "{{actor}} denied your comment", Link: "/_/comments?filter=denied"},
 		},
 		{
 			ID:        "new-comment",
-			EventType: "polis.comment.published",
+			EventType: "pub.polis.comment.published",
 			Enabled:   true,
 			Filter:    RuleFilter{Relevance: "target_domain"},
-			Template:  RuleTemplate{Icon: "\U0001F4AC", Message: "{{actor}} commented on {{post_name}}", Link: "/_/#blessings"},
+			Template:  RuleTemplate{Icon: "\U0001F4AC", Message: "{{actor}} commented on {{post_name}}", Link: "/_/blessings"},
 		},
 		{
 			ID:        "updated-comment",
-			EventType: "polis.comment.republished",
+			EventType: "pub.polis.comment.republished",
 			Enabled:   false,
 			Filter:    RuleFilter{Relevance: "target_domain"},
-			Template:  RuleTemplate{Icon: "\U0001F4AC", Message: "{{actor}} updated their comment on {{post_name}}", Link: "/_/#blessings"},
+			Template:  RuleTemplate{Icon: "\U0001F4AC", Message: "{{actor}} updated their comment on {{post_name}}", Link: "/_/blessings"},
 		},
 		{
 			ID:        "new-post",
-			EventType: "polis.post.published",
+			EventType: "pub.polis.post.published",
 			Enabled:   true,
 			Filter:    RuleFilter{Relevance: "followed_author"},
-			Template:  RuleTemplate{Icon: "\U0001F4DD", Message: "{{actor}} published a new post", Link: "/_/#feed"},
+			Template:  RuleTemplate{Icon: "\U0001F4DD", Message: "{{actor}} published a new post", Link: "{{url}}"},
 		},
 		{
 			ID:        "updated-post",
-			EventType: "polis.post.republished",
+			EventType: "pub.polis.post.republished",
 			Enabled:   false,
 			Filter:    RuleFilter{Relevance: "followed_author"},
-			Template:  RuleTemplate{Icon: "\U0001F4DD", Message: "{{actor}} updated a post", Link: "/_/#feed"},
+			Template:  RuleTemplate{Icon: "\U0001F4DD", Message: "{{actor}} updated a post", Link: "{{url}}"},
 		},
 	}
 }
@@ -123,7 +123,7 @@ func TemplateVarsFromEvent(actor, timestamp string, payload map[string]interface
 		"timestamp": timestamp,
 	}
 
-	for _, key := range []string{"source_url", "target_url", "target_domain", "source_domain", "in_reply_to", "comment_url"} {
+	for _, key := range []string{"url", "source_url", "target_url", "target_domain", "source_domain", "in_reply_to", "comment_url"} {
 		if v, ok := payload[key].(string); ok {
 			vars[key] = v
 		}

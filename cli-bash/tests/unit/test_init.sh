@@ -25,9 +25,11 @@ test_init_basic() {
 
     # Verify directories created
     assert_dir_exists ".polis/keys" || return 1
-    assert_dir_exists "posts" || return 1
-    assert_dir_exists "comments" || return 1
-    assert_dir_exists "metadata" || return 1
+    assert_dir_exists "content/pub.polis.core/post" || return 1
+    assert_dir_exists "content/pub.polis.core/comment" || return 1
+    assert_dir_exists "content/pub.polis.core/follow" || return 1
+    assert_dir_exists "site/snippets" || return 1
+    assert_dir_exists "site/themes" || return 1
     assert_dir_exists ".well-known" || return 1
 
     # Verify key files created
@@ -36,13 +38,14 @@ test_init_basic() {
 
     # Verify config files created
     assert_file_exists ".well-known/polis" || return 1
-    assert_file_exists "metadata/public.jsonl" || return 1
-    assert_file_exists "metadata/blessed-comments.json" || return 1
-    assert_file_exists "metadata/following.json" || return 1
+    assert_file_exists "content/pub.polis.core/index.jsonl" || return 1
+    assert_file_exists "content/pub.polis.core/comment/blessed.json" || return 1
+    assert_file_exists "content/pub.polis.core/follow/following.json" || return 1
 
-    # Verify .well-known/polis contains valid JSON with public key
+    # Verify .well-known/polis contains valid JSON with public key and bundle registry
     assert_file_contains ".well-known/polis" '"public_key"' || return 1
     assert_file_contains ".well-known/polis" '"version"' || return 1
+    assert_file_contains ".well-known/polis" '"bundles"' || return 1
 
     return 0
 }
@@ -66,9 +69,9 @@ test_init_custom_dirs() {
     assert_dir_exists "articles" || return 1
     assert_dir_exists "replies" || return 1
 
-    # Default directories should NOT exist
-    assert_file_not_exists "posts" || return 1
-    assert_file_not_exists "comments" || return 1
+    # Default content directories should NOT exist
+    assert_file_not_exists "content/pub.polis.core/post" || return 1
+    assert_file_not_exists "content/pub.polis.core/comment" || return 1
 
     return 0
 }

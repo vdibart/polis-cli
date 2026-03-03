@@ -39,9 +39,9 @@ func (h *FeedHandler) Process(events []discovery.StreamEvent) []FeedItem {
 // Returns false if the event type is not a feed-relevant type.
 func (h *FeedHandler) eventToItem(evt discovery.StreamEvent) (FeedItem, bool) {
 	switch evt.Type {
-	case "polis.post.published", "polis.post.republished":
+	case "pub.polis.post.published", "pub.polis.post.republished":
 		return h.postEventToItem(evt), true
-	case "polis.comment.published", "polis.comment.republished":
+	case "pub.polis.comment.published", "pub.polis.comment.republished":
 		return h.commentEventToItem(evt), true
 	default:
 		return FeedItem{}, false

@@ -6,6 +6,7 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
+	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 )
 
 // NotificationHandler is a rule-driven projection handler that generates local
@@ -23,6 +24,12 @@ type NotificationHandler struct {
 	// pre-filtered by actor in the DS query. If nil, falls back to the legacy
 	// behavior of accepting any non-self actor.
 	FollowedDomains map[string]bool
+	// Policies is the active policy set loaded from rules.jsonl files.
+	// When non-empty, events matching a deny policy are suppressed.
+	Policies []policy.Policy
+	// FollowerDomains is a set of domains that follow us. Used for policy
+	// evaluation when rules reference the "followers" source.
+	FollowerDomains map[string]bool
 }
 
 // NotificationConfig is the user configuration stored in config/notifications.json.
@@ -34,19 +41,19 @@ type NotificationConfig struct {
 	MaxAgeDays   int                 `json:"max_age_days,omitempty"`
 }
 
-func (h *NotificationHandler) TypePrefix() string { return "polis.notification" }
+func (h *NotificationHandler) TypePrefix() string { return "pub.polis.notification" }
 
 func (h *NotificationHandler) EventTypes() []string {
 	return []string{
-		"polis.follow.announced",
-		"polis.follow.removed",
-		"polis.blessing.requested",
-		"polis.blessing.granted",
-		"polis.blessing.denied",
-		"polis.post.published",
-		"polis.post.republished",
-		"polis.comment.published",
-		"polis.comment.republished",
+		"pub.polis.follow.announced",
+		"pub.polis.follow.removed",
+		"pub.polis.comment.blessing.requested",
+		"pub.polis.comment.blessing.granted",
+		"pub.polis.comment.blessing.denied",
+		"pub.polis.post.published",
+		"pub.polis.post.republished",
+		"pub.polis.comment.published",
+		"pub.polis.comment.republished",
 	}
 }
 
@@ -108,6 +115,27 @@ func (h *NotificationHandler) Process(events []discovery.StreamEvent) []notifica
 		rules, ok := ruleMap[evt.Type]
 		if !ok {
 			continue
+		}
+
+		// Policy check: deny events that match a deny policy
+		if len(h.Policies) > 0 {
+			pEvt := policy.Event{
+				Type:        evt.Type,
+				ActorDomain: evt.Actor,
+			}
+			if td, ok := evt.Payload["target_domain"].(string); ok {
+				pEvt.TargetDomain = td
+			}
+			if tp, ok := evt.Payload["target_url"].(string); ok {
+				pEvt.TargetPath = tp
+			}
+			ctx := policy.EvalContext{
+				FollowingDomains: h.FollowedDomains,
+				FollowerDomains:  h.FollowerDomains,
+			}
+			if policy.Evaluate(h.Policies, pEvt, ctx) == policy.Deny {
+				continue
+			}
 		}
 
 		for _, rule := range rules {

@@ -41,7 +41,7 @@ func Beseech(req *BeseechRequest, client *discovery.Client, privateKey []byte) (
 
 	// Create canonical JSON for signing
 	canonicalJSON, err := discovery.MakeContentCanonicalJSON(
-		"polis.comment",
+		"pub.polis.comment",
 		req.CommentURL,
 		req.CommentVersion,
 		req.Author,
@@ -59,7 +59,7 @@ func Beseech(req *BeseechRequest, client *discovery.Client, privateKey []byte) (
 
 	// Send the content registration request
 	contentReq := &discovery.ContentRegisterRequest{
-		Type:      "polis.comment",
+		Type:      "pub.polis.comment",
 		URL:       req.CommentURL,
 		Version:   req.CommentVersion,
 		Author:    req.Author,

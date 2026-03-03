@@ -1,12 +1,12 @@
 #!/bin/bash
 # test_framework.sh - Core test framework utilities for Polis CLI tests
 #
-# Tests run in the current working directory using the existing git repo.
-# Test artifacts are created in test-data/, committed, then git rm'd at cleanup.
+# Tests run inside an isolated test-data/ subdirectory within the existing
+# git repo. Each test gets a fresh test-data/ directory; polis commands
+# execute with CWD=test-data/ so all paths are relative to it.
 #
 # Provides:
-#   - Test environment setup/teardown (test-data/ subdirectory)
-#   - Git-tracked artifact management
+#   - Test environment setup/teardown (cd into test-data/ subdirectory)
 #   - Test execution and tracking
 #   - Output formatting (human-readable or JSON)
 
@@ -22,6 +22,7 @@ TEST_RESULTS=()
 : "${SKIP_NETWORK:=false}"
 : "${AUTO_PUSH:=false}"
 TEST_DATA_DIR="test-data"
+ORIGINAL_TEST_DIR=""
 
 # Color codes (disabled in JSON mode)
 if [[ "$JSON_OUTPUT" != "true" ]]; then
@@ -38,7 +39,7 @@ else
     NC=''
 fi
 
-# Check if test-data directory exists
+# Check if test-data directory exists (called from repo root)
 has_test_data() {
     [[ -d "$TEST_DATA_DIR" ]]
 }
@@ -49,18 +50,20 @@ emergency_cleanup() {
         echo "  Running emergency cleanup..."
     fi
 
-    if [[ -d "$TEST_DATA_DIR" ]]; then
-        # Try git rm first
-        git rm -rf --quiet "$TEST_DATA_DIR" 2>/dev/null || true
-
-        # Force remove if still exists
-        rm -rf "$TEST_DATA_DIR" 2>/dev/null || true
-
-        # Commit cleanup if there are staged changes
-        if ! git diff --cached --quiet 2>/dev/null; then
-            git commit -m "test-emergency-cleanup: $(date +%Y%m%d-%H%M%S)" --quiet 2>/dev/null || true
-        fi
+    # Ensure we're at repo root
+    if [[ -n "$ORIGINAL_TEST_DIR" ]]; then
+        cd "$ORIGINAL_TEST_DIR"
     fi
+
+    if [[ -d "$TEST_DATA_DIR" ]]; then
+        # Unstage any test files from git index
+        git reset HEAD "$TEST_DATA_DIR" 2>/dev/null || true
+
+        # Force remove
+        rm -rf "$TEST_DATA_DIR" 2>/dev/null || true
+    fi
+
+    ORIGINAL_TEST_DIR=""
 
     if [[ "$JSON_OUTPUT" != "true" ]]; then
         echo "  Cleanup complete"
@@ -79,9 +82,16 @@ init_test_run() {
 }
 
 # Initialize test environment
-# Creates test-data/ subdirectory with posts, comments, metadata
+# Creates test-data/ subdirectory and cds into it.
+# Polis commands run with CWD=test-data/ so all paths are relative.
+# Does NOT export path env vars — lets polis use its built-in defaults.
 setup_test_env() {
     local test_name="$1"
+
+    # Ensure we start from repo root
+    if [[ -n "$ORIGINAL_TEST_DIR" ]]; then
+        cd "$ORIGINAL_TEST_DIR"
+    fi
 
     # Verify we're in a git repo
     if ! git rev-parse --git-dir > /dev/null 2>&1; then
@@ -89,64 +99,48 @@ setup_test_env() {
         exit 1
     fi
 
-    # Create test-data directory structure
-    mkdir -p "$TEST_DATA_DIR/posts"
-    mkdir -p "$TEST_DATA_DIR/comments"
-    mkdir -p "$TEST_DATA_DIR/metadata"
+    ORIGINAL_TEST_DIR="$(pwd)"
 
-    # Set environment variables for fixtures
-    export POSTS_DIR="$TEST_DATA_DIR/posts"
-    export COMMENTS_DIR="$TEST_DATA_DIR/comments"
-    export METADATA_DIR="$TEST_DATA_DIR/metadata"
+    # Clean up any leftover test data from previous test
+    if [[ -d "$TEST_DATA_DIR" ]]; then
+        git reset HEAD "$TEST_DATA_DIR" 2>/dev/null || true
+        rm -rf "$TEST_DATA_DIR"
+    fi
 
-    # Initialize test metadata files
-    echo '{"comments":[],"last_updated":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}' > "$TEST_DATA_DIR/metadata/blessed-comments.json"
-    echo '{"following":[]}' > "$TEST_DATA_DIR/metadata/following.json"
-    touch "$TEST_DATA_DIR/metadata/public.jsonl"
+    # Unset polis path env vars so polis uses built-in defaults
+    unset POSTS_DIR COMMENTS_DIR KEYS_DIR SNIPPETS_DIR THEMES_DIR
+    unset PUBLIC_INDEX BLESSED_COMMENTS FOLLOWING_INDEX MANIFEST
+    unset VERSIONS_DIR_NAME METADATA_DIR
+
+    # Create fresh test directory and enter it
+    mkdir -p "$TEST_DATA_DIR"
+    cd "$TEST_DATA_DIR"
 
     if [[ "$JSON_OUTPUT" != "true" ]]; then
-        echo "  [SETUP] Test directory: $TEST_DATA_DIR (test: $test_name)"
+        echo "  [SETUP] Test directory: $(pwd) (test: $test_name)"
     fi
 }
 
 # Clean up test environment
-# Commits test artifacts, then removes them via git rm
 teardown_test_env() {
+    # Return to repo root
+    if [[ -n "$ORIGINAL_TEST_DIR" ]]; then
+        cd "$ORIGINAL_TEST_DIR"
+    fi
+
     if [[ -d "$TEST_DATA_DIR" ]]; then
-        # Stage test artifacts
-        git add "$TEST_DATA_DIR" 2>/dev/null || true
+        # Unstage any test files from git index
+        git reset HEAD "$TEST_DATA_DIR" 2>/dev/null || true
 
-        # Commit test artifacts if anything was staged
-        if ! git diff --cached --quiet 2>/dev/null; then
-            git commit -m "test-artifacts: $(date +%Y%m%d-%H%M%S)" --quiet 2>/dev/null || true
-        fi
-
-        # Remove test-data via git rm
-        git rm -rf --quiet "$TEST_DATA_DIR" 2>/dev/null || rm -rf "$TEST_DATA_DIR"
-
-        # Commit the removal
-        if ! git diff --cached --quiet 2>/dev/null; then
-            git commit -m "test-cleanup: removed test-data" --quiet 2>/dev/null || true
-        fi
-
-        # Auto-push if enabled
-        if [[ "$AUTO_PUSH" == "true" ]]; then
-            if git remote get-url origin &>/dev/null; then
-                git push --quiet 2>/dev/null || {
-                    if [[ "$JSON_OUTPUT" != "true" ]]; then
-                        echo "  [WARN] Auto-push failed. Run 'git push' manually."
-                    fi
-                }
-            fi
-        fi
+        # Remove test directory
+        rm -rf "$TEST_DATA_DIR" 2>/dev/null || true
 
         if [[ "$JSON_OUTPUT" != "true" ]]; then
             echo "  [TEARDOWN] Cleaned up: $TEST_DATA_DIR"
         fi
     fi
 
-    # Clear environment variables
-    unset POSTS_DIR COMMENTS_DIR METADATA_DIR
+    ORIGINAL_TEST_DIR=""
 }
 
 # Run a single test
@@ -155,6 +149,7 @@ run_test() {
     local test_name="$1"
     local test_func="$2"
     local start_time end_time duration
+    local saved_dir="$(pwd)"
 
     TEST_COUNT=$((TEST_COUNT + 1))
     start_time=$(date +%s%N)
@@ -175,6 +170,14 @@ run_test() {
     end_time=$(date +%s%N)
     duration=$(( (end_time - start_time) / 1000000 ))  # milliseconds
 
+    # Ensure we're back at the original directory and cleaned up
+    cd "$saved_dir"
+    if [[ -d "$TEST_DATA_DIR" ]]; then
+        git reset HEAD "$TEST_DATA_DIR" 2>/dev/null || true
+        rm -rf "$TEST_DATA_DIR" 2>/dev/null || true
+    fi
+    ORIGINAL_TEST_DIR=""
+
     if [[ $result -eq 0 ]]; then
         PASS_COUNT=$((PASS_COUNT + 1))
         if [[ "$JSON_OUTPUT" != "true" ]]; then
@@ -189,7 +192,8 @@ run_test() {
         TEST_RESULTS+=("{\"name\":\"$test_name\",\"status\":\"fail\",\"duration_ms\":$duration}")
     fi
 
-    return $result
+    # Always return 0 — failures are tracked via FAIL_COUNT
+    return 0
 }
 
 # Skip a test (for conditional skipping)

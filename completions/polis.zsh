@@ -30,6 +30,7 @@ _polis() {
         'rotate-key:Generate new keypair and re-sign content (--delete-old-key)'
         'serve:Start local web server (bundled binary only, -d/--data-dir)'
         'unfollow:Unfollow an author (--announce to broadcast)'
+        'unpublish:Remove a published post and notify discovery service'
         'unregister:Unregister site from discovery service (--force to skip confirmation)'
         'validate:Validate site structure (--json)'
         'version:Print CLI version'
@@ -190,6 +191,11 @@ _polis() {
                     ;;
                 validate)
                     _arguments '--json[Output in JSON format]'
+                    ;;
+                unpublish)
+                    _arguments \
+                        '--json[Output in JSON format]' \
+                        ':file:_files'
                     ;;
                 about|version|index|register)
                     _arguments '--json[Output in JSON format]'

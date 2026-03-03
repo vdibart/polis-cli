@@ -43,10 +43,10 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 	// Fetch unblessed relationships from this author via relationship-query
 	authorDomain := discovery.ExtractDomainFromURL(authorURL)
 
-	pendingResp, _ := discoveryClient.QueryRelationships("polis.blessing", map[string]string{
+	pendingResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 		"status": "pending",
 	})
-	deniedResp, _ := discoveryClient.QueryRelationships("polis.blessing", map[string]string{
+	deniedResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 		"status": "denied",
 	})
 
@@ -70,7 +70,7 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 
 	// Bless all unblessed comments via relationship-update
 	for _, rel := range allUnblessed {
-		if err := discoveryClient.UpdateRelationship("polis.blessing", rel.SourceURL, rel.TargetURL, "grant", privKey); err != nil {
+		if err := discoveryClient.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "grant", privKey); err != nil {
 			result.CommentsFailed++
 			continue
 		}
@@ -99,7 +99,7 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 	}
 
 	// Emit follow event to discovery stream (non-fatal)
-	stream.PublishEvent("polis.follow.announced", map[string]interface{}{
+	stream.PublishEvent("pub.polis.follow.announced", map[string]interface{}{
 		"target_domain": discovery.ExtractDomainFromURL(authorURL),
 	}, privKey)
 
@@ -119,7 +119,7 @@ func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient 
 		authorDomain := discovery.ExtractDomainFromURL(authorURL)
 
 		// Fetch granted blessings where source is from the author's domain
-		grantedResp, _ := discoveryClient.QueryRelationships("polis.blessing", map[string]string{
+		grantedResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 			"status": "granted",
 		})
 
@@ -127,7 +127,7 @@ func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient 
 			for _, rel := range grantedResp.Records {
 				if discovery.ExtractDomainFromURL(rel.SourceURL) == authorDomain {
 					result.CommentsFound++
-					if err := discoveryClient.UpdateRelationship("polis.blessing", rel.SourceURL, rel.TargetURL, "deny", privKey); err != nil {
+					if err := discoveryClient.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "deny", privKey); err != nil {
 						result.CommentsFailed++
 						continue
 					}
@@ -150,7 +150,7 @@ func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient 
 	}
 
 	// Emit unfollow event to discovery stream (non-fatal)
-	stream.PublishEvent("polis.follow.removed", map[string]interface{}{
+	stream.PublishEvent("pub.polis.follow.removed", map[string]interface{}{
 		"target_domain": discovery.ExtractDomainFromURL(authorURL),
 	}, privKey)
 

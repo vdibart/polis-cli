@@ -10,7 +10,7 @@ func TestRunHook_AutoDiscover(t *testing.T) {
 	dir := t.TempDir()
 
 	// Create conventional hook location
-	hookDir := filepath.Join(dir, ".polis", "hooks")
+	hookDir := filepath.Join(dir, ".polis", "webapp", "hooks")
 	if err := os.MkdirAll(hookDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestRunHook_ExplicitOverridesConvention(t *testing.T) {
 	dir := t.TempDir()
 
 	// Create conventional hook (should NOT be called)
-	hookDir := filepath.Join(dir, ".polis", "hooks")
+	hookDir := filepath.Join(dir, ".polis", "webapp", "hooks")
 	if err := os.MkdirAll(hookDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestGetHookPathWithDiscovery_AutoDiscover(t *testing.T) {
 	dir := t.TempDir()
 
 	// Create conventional hook
-	hookDir := filepath.Join(dir, ".polis", "hooks")
+	hookDir := filepath.Join(dir, ".polis", "webapp", "hooks")
 	if err := os.MkdirAll(hookDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestGetHookPathWithDiscovery_AutoDiscover(t *testing.T) {
 	}
 
 	path := GetHookPathWithDiscovery(nil, EventPostPublish, dir)
-	if path != filepath.Join(".polis", "hooks", "post-publish.sh") {
+	if path != filepath.Join(".polis", "webapp", "hooks", "post-publish.sh") {
 		t.Errorf("Expected conventional path, got %q", path)
 	}
 

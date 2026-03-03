@@ -67,7 +67,7 @@ func RunHook(siteDir string, config *HookConfig, payload *HookPayload) (*HookRes
 
 	// Auto-discover from conventional location if not explicitly configured
 	if hookPath == "" {
-		conventional := filepath.Join(".polis", "hooks", string(payload.Event)+".sh")
+		conventional := filepath.Join(".polis", "webapp", "hooks", string(payload.Event)+".sh")
 		fullPath := filepath.Join(siteDir, conventional)
 		if _, err := os.Stat(fullPath); err == nil {
 			hookPath = conventional
@@ -167,7 +167,7 @@ func GetHookPathWithDiscovery(config *HookConfig, event HookEvent, siteDir strin
 	}
 
 	if hookPath == "" && siteDir != "" {
-		conventional := filepath.Join(".polis", "hooks", string(event)+".sh")
+		conventional := filepath.Join(".polis", "webapp", "hooks", string(event)+".sh")
 		fullPath := filepath.Join(siteDir, conventional)
 		if _, err := os.Stat(fullPath); err == nil {
 			hookPath = conventional

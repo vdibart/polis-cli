@@ -19,7 +19,7 @@ func handleUnpublish(args []string) {
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		exitError("Usage: polis unpublish <path>\n  Example: polis unpublish posts/20260201/my-post.md")
+		exitError("Usage: polis unpublish <path>\n  Example: polis unpublish content/pub.polis.core/post/20260201/my-post.md")
 	}
 
 	postPath := fs.Arg(0)
@@ -36,9 +36,9 @@ func handleUnpublish(args []string) {
 
 // RunUnpublish removes a published post locally and from the discovery service.
 func RunUnpublish(dataDir, postPath string) error {
-	// Validate path is under posts/ (prevent directory traversal)
-	if !strings.HasPrefix(postPath, "posts/") {
-		return fmt.Errorf("path must start with posts/: %s", postPath)
+	// Validate path is under content/pub.polis.core/post/ (prevent directory traversal)
+	if !strings.HasPrefix(postPath, "content/pub.polis.core/post/") {
+		return fmt.Errorf("path must start with content/pub.polis.core/post/: %s", postPath)
 	}
 	if strings.Contains(postPath, "..") {
 		return fmt.Errorf("path must not contain '..': %s", postPath)
@@ -71,7 +71,7 @@ func RunUnpublish(dataDir, postPath string) error {
 	}
 
 	// Build canonical unregister JSON and sign
-	canonical := discovery.MakeContentUnregisterCanonicalJSON("polis.post", contentURL)
+	canonical := discovery.MakeContentUnregisterCanonicalJSON("pub.polis.post", contentURL)
 	sig, err := signing.SignContent([]byte(canonical), privKey)
 	if err != nil {
 		return fmt.Errorf("failed to sign unregister request: %v", err)
@@ -81,7 +81,7 @@ func RunUnpublish(dataDir, postPath string) error {
 	dsURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	dsKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if dsURL == "" {
-		dsURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+		dsURL = "https://ds.polis.pub"
 	}
 	dsClient := discovery.NewClient(dsURL, dsKey)
 
@@ -89,7 +89,7 @@ func RunUnpublish(dataDir, postPath string) error {
 		fmt.Println("[i] Removing from discovery service...")
 	}
 
-	if err := dsClient.UnregisterContent("polis.post", contentURL, sig); err != nil {
+	if err := dsClient.UnregisterContent("pub.polis.post", contentURL, sig); err != nil {
 		// Non-fatal: DS might be unreachable, still clean up locally
 		if !jsonOutput {
 			fmt.Printf("[!] Warning: DS unregister failed: %v\n", err)

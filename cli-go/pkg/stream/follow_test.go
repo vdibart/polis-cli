@@ -10,8 +10,8 @@ import (
 
 func TestFollowHandler_TypePrefix(t *testing.T) {
 	h := &FollowHandler{MyDomain: "bob.com"}
-	if h.TypePrefix() != "polis.follow" {
-		t.Errorf("TypePrefix() = %q, want %q", h.TypePrefix(), "polis.follow")
+	if h.TypePrefix() != "pub.polis.follow" {
+		t.Errorf("TypePrefix() = %q, want %q", h.TypePrefix(), "pub.polis.follow")
 	}
 }
 
@@ -21,11 +21,11 @@ func TestFollowHandler_EventTypes(t *testing.T) {
 	if len(types) != 2 {
 		t.Fatalf("EventTypes() len = %d, want 2", len(types))
 	}
-	if types[0] != "polis.follow.announced" {
-		t.Errorf("EventTypes()[0] = %q, want %q", types[0], "polis.follow.announced")
+	if types[0] != "pub.polis.follow.announced" {
+		t.Errorf("EventTypes()[0] = %q, want %q", types[0], "pub.polis.follow.announced")
 	}
-	if types[1] != "polis.follow.removed" {
-		t.Errorf("EventTypes()[1] = %q, want %q", types[1], "polis.follow.removed")
+	if types[1] != "pub.polis.follow.removed" {
+		t.Errorf("EventTypes()[1] = %q, want %q", types[1], "pub.polis.follow.removed")
 	}
 }
 
@@ -36,7 +36,7 @@ func TestFollowHandler_ProcessFollow(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:    json.Number("1"),
-			Type:  "polis.follow.announced",
+			Type:  "pub.polis.follow.announced",
 			Actor: "alice.com",
 			Payload: map[string]interface{}{
 				"target_domain": "bob.com",
@@ -44,7 +44,7 @@ func TestFollowHandler_ProcessFollow(t *testing.T) {
 		},
 		{
 			ID:    json.Number("2"),
-			Type:  "polis.follow.announced",
+			Type:  "pub.polis.follow.announced",
 			Actor: "charlie.com",
 			Payload: map[string]interface{}{
 				"target_domain": "bob.com",
@@ -80,7 +80,7 @@ func TestFollowHandler_ProcessUnfollow(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:    json.Number("3"),
-			Type:  "polis.follow.removed",
+			Type:  "pub.polis.follow.removed",
 			Actor: "alice.com",
 			Payload: map[string]interface{}{
 				"target_domain": "bob.com",
@@ -109,7 +109,7 @@ func TestFollowHandler_IgnoresOtherDomains(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:    json.Number("1"),
-			Type:  "polis.follow.announced",
+			Type:  "pub.polis.follow.announced",
 			Actor: "alice.com",
 			Payload: map[string]interface{}{
 				"target_domain": "someone-else.com", // not bob.com
@@ -136,7 +136,7 @@ func TestFollowHandler_Idempotent(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:    json.Number("1"),
-			Type:  "polis.follow.announced",
+			Type:  "pub.polis.follow.announced",
 			Actor: "alice.com",
 			Payload: map[string]interface{}{
 				"target_domain": "bob.com",
@@ -144,7 +144,7 @@ func TestFollowHandler_Idempotent(t *testing.T) {
 		},
 		{
 			ID:    json.Number("2"),
-			Type:  "polis.follow.announced",
+			Type:  "pub.polis.follow.announced",
 			Actor: "alice.com",
 			Payload: map[string]interface{}{
 				"target_domain": "bob.com",
@@ -185,7 +185,7 @@ func TestFollowHandler_EmptyEvents(t *testing.T) {
 func TestFollowHandler_FullCycle(t *testing.T) {
 	// Test with Store integration
 	dir := t.TempDir()
-	store := NewStore(dir, "test.supabase.co")
+	store := NewStore(dir, "test.supabase.co", "pub.polis.core")
 	h := &FollowHandler{MyDomain: "bob.com"}
 
 	// Initial state
@@ -196,7 +196,7 @@ func TestFollowHandler_FullCycle(t *testing.T) {
 	events1 := []discovery.StreamEvent{
 		{
 			ID:    json.Number("1"),
-			Type:  "polis.follow.announced",
+			Type:  "pub.polis.follow.announced",
 			Actor: "alice.com",
 			Payload: map[string]interface{}{
 				"target_domain": "bob.com",
@@ -228,7 +228,7 @@ func TestFollowHandler_FullCycle(t *testing.T) {
 	events2 := []discovery.StreamEvent{
 		{
 			ID:    json.Number("2"),
-			Type:  "polis.follow.announced",
+			Type:  "pub.polis.follow.announced",
 			Actor: "charlie.com",
 			Payload: map[string]interface{}{
 				"target_domain": "bob.com",
@@ -236,7 +236,7 @@ func TestFollowHandler_FullCycle(t *testing.T) {
 		},
 		{
 			ID:    json.Number("3"),
-			Type:  "polis.follow.removed",
+			Type:  "pub.polis.follow.removed",
 			Actor: "alice.com",
 			Payload: map[string]interface{}{
 				"target_domain": "bob.com",

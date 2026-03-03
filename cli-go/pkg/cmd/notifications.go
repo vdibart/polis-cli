@@ -43,7 +43,7 @@ func handleNotificationsList(args []string) {
 	// Determine discovery domain
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	if discoveryURL == "" {
-		discoveryURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+		discoveryURL = "https://ds.polis.pub"
 	}
 	discoveryDomain := extractDomain(discoveryURL)
 	if discoveryDomain == "" {
@@ -77,7 +77,7 @@ func handleNotificationsList(args []string) {
 		client := discovery.NewAuthenticatedClient(discoveryURL, apiKey, domain, privKey)
 
 		// Get pending blessings via relationship-query
-		resp, err := client.QueryRelationships("polis.blessing", map[string]string{
+		resp, err := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 			"actor":  domain,
 			"status": "pending",
 		})

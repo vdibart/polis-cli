@@ -10,31 +10,18 @@ import (
 func handleInit(args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	siteTitle := fs.String("site-title", "", "Site display name")
-	keysDir := fs.String("keys-dir", "", "Custom keys directory (default: .polis/keys)")
-	postsDir := fs.String("posts-dir", "", "Custom posts directory (default: posts)")
-	commentsDir := fs.String("comments-dir", "", "Custom comments directory (default: comments)")
-	snippetsDir := fs.String("snippets-dir", "", "Custom snippets directory (default: snippets)")
-	themesDir := fs.String("themes-dir", "", "Custom themes directory (default: .polis/themes)")
-	versionsDir := fs.String("versions-dir", "", "Custom versions directory (default: .versions)")
-	publicIndex := fs.String("public-index", "", "Custom public index path (default: metadata/public.jsonl)")
-	blessedComments := fs.String("blessed-comments", "", "Custom blessed comments path (default: metadata/blessed-comments.json)")
-	followingIndex := fs.String("following-index", "", "Custom following index path (default: metadata/following.json)")
+	author := fs.String("author", "", "Author name (default: git config user.name)")
+	email := fs.String("email", "", "Email address (optional, private by default)")
+	theme := fs.String("theme", "", "Initial theme (default: sols)")
 	fs.Parse(args)
 
 	dir := getDataDir()
 
 	opts := site.InitOptions{
-		SiteTitle:       *siteTitle,
-		Version:         Version,
-		KeysDir:         *keysDir,
-		PostsDir:        *postsDir,
-		CommentsDir:     *commentsDir,
-		SnippetsDir:     *snippetsDir,
-		ThemesDir:       *themesDir,
-		VersionsDir:     *versionsDir,
-		PublicIndex:     *publicIndex,
-		BlessedComments: *blessedComments,
-		FollowingIndex:  *followingIndex,
+		SiteTitle: *siteTitle,
+		Author:    *author,
+		Email:     *email,
+		Theme:     *theme,
 	}
 
 	result, err := site.Init(dir, opts)

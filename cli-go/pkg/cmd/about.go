@@ -23,18 +23,14 @@ func handleAbout(args []string) {
 		exitError("Failed to load .well-known/polis: %v", err)
 	}
 
-	// Load manifest.json
-	manifestPath := filepath.Join(dir, "metadata", "manifest.json")
-	var manifest map[string]interface{}
-	if data, err := os.ReadFile(manifestPath); err == nil {
-		json.Unmarshal(data, &manifest)
-	}
+	// Active theme from well-known
+	activeTheme := wk.ActiveTheme
 
 	// Get environment config
 	baseURL := os.Getenv("POLIS_BASE_URL")
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	if discoveryURL == "" {
-		discoveryURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+		discoveryURL = "https://ds.polis.pub"
 	}
 
 	// Check discovery service registration
@@ -56,12 +52,12 @@ func handleAbout(args []string) {
 	}
 
 	// Count posts and comments
-	postCount := countFiles(filepath.Join(dir, "posts"), ".md")
-	commentCount := countFiles(filepath.Join(dir, "comments"), ".md")
+	postCount := countFiles(filepath.Join(dir, "content", "pub.polis.core", "post"), ".md")
+	commentCount := countFiles(filepath.Join(dir, "content", "pub.polis.core", "comment"), ".md")
 
 	// Count following
 	followingCount := 0
-	followingPath := filepath.Join(dir, "metadata", "following.json")
+	followingPath := filepath.Join(dir, "content", "pub.polis.core", "follow", "following.json")
 	if data, err := os.ReadFile(followingPath); err == nil {
 		var f struct {
 			Following []interface{} `json:"following"`
@@ -71,15 +67,12 @@ func handleAbout(args []string) {
 		}
 	}
 
-	// Get config directories (handle nil Config)
-	var keysDir, postsDir, commentsDir, snippetsDir, themesDir string
-	if wk.Config != nil {
-		keysDir = wk.Config.Directories.Keys
-		postsDir = wk.Config.Directories.Posts
-		commentsDir = wk.Config.Directories.Comments
-		snippetsDir = wk.Config.Directories.Snippets
-		themesDir = wk.Config.Directories.Themes
-	}
+	// Standard directory paths (new bundle-based layout)
+	keysDir := ".polis/keys"
+	postsDir := "content/pub.polis.core/post"
+	commentsDir := "content/pub.polis.core/comment"
+	snippetsDir := "site/snippets"
+	themesDir := "site/themes"
 
 	// Resolve domain identity from POLIS_BASE_URL
 	domain := extractDomain(baseURL)
@@ -91,6 +84,7 @@ func handleAbout(args []string) {
 			"created":         wk.Created,
 			"public_key":      wk.PublicKey,
 			"site_title":      wk.SiteTitle,
+			"active_theme":    activeTheme,
 			"base_url":        baseURL,
 			"post_count":      postCount,
 			"comment_count":   commentCount,
@@ -139,6 +133,9 @@ func handleAbout(args []string) {
 		}
 		if baseURL != "" {
 			fmt.Printf("  Base URL: %s\n", baseURL)
+		}
+		if activeTheme != "" {
+			fmt.Printf("  Theme: %s\n", activeTheme)
 		}
 		fmt.Printf("  Posts: %d\n", postCount)
 		fmt.Printf("  Comments: %d\n", commentCount)

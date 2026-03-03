@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polis</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Toast Container -->
+        <div id="toast-container" class="toast-container"></div>
+
+        <!-- Welcome Screen (shown when no site is configured) -->
+        <div id="welcome-screen" class="screen hidden">
+            <div class="welcome-container">
+                <h1>Welcome to Polis</h1>
+                <p class="welcome-subtitle">Choose how to set up your site</p>
+                <div class="welcome-options">
+                    <div class="welcome-option" onclick="App.showInitFlow()">
+                        <div class="option-icon">+</div>
+                        <div class="option-content">
+                            <h3>Initialize New Site</h3>
+                            <p>Create a fresh polis site with new keys</p>
+                        </div>
+                        <div class="option-arrow">&rarr;</div>
+                    </div>
+                    <div class="welcome-option" onclick="App.showLinkFlow()">
+                        <div class="option-icon">&#8627;</div>
+                        <div class="option-content">
+                            <h3>Link Existing Site</h3>
+                            <p>Connect to an existing polis site directory</p>
+                        </div>
+                        <div class="option-arrow">&rarr;</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Error Screen (shown when site is incomplete/invalid) -->
+        <div id="error-screen" class="screen hidden">
+            <div class="error-container">
+                <div class="error-icon">!</div>
+                <h1>Site Configuration Error</h1>
+                <p class="error-subtitle">There are issues with your polis site that need to be resolved.</p>
+                <div id="validation-errors" class="error-list">
+                    <!-- Validation errors will be populated by JS -->
+                </div>
+                <div class="error-actions">
+                    <button class="primary" onclick="App.retryValidation()">Try Again</button>
+                    <button class="secondary" onclick="App.showInitFlow()">Re-initialize</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Init Panel (slide-out wizard for initializing new site) -->
+        <div id="init-panel" class="wizard-panel hidden">
+            <div class="wizard-overlay"></div>
+            <div class="wizard-content">
+                <div class="wizard-header">
+                    <h3>Initialize New Site</h3>
+                    <button id="init-close-btn" class="wizard-close">&times;</button>
+                </div>
+                <div class="wizard-body">
+                    <div class="wizard-section">
+                        <p class="wizard-intro">This will create a new polis site with:</p>
+                        <ul class="wizard-checklist">
+                            <li>Ed25519 keypair for signing your content</li>
+                            <li>.well-known/polis identity file</li>
+                            <li>Directory structure for posts, comments, and metadata</li>
+                        </ul>
+                    </div>
+                    <div class="wizard-section">
+                        <label for="init-site-title">Site Title (optional):</label>
+                        <input type="text" id="init-site-title" class="wizard-input" placeholder="My Polis Site">
+                        <p class="hint">A friendly name for your site</p>
+                    </div>
+                    <div class="wizard-section">
+                        <label for="init-base-url">Base URL (optional):</label>
+                        <input type="url" id="init-base-url" class="wizard-input" placeholder="https://example.com">
+                        <p class="hint">The public URL where your site will be hosted</p>
+                    </div>
+                    <div class="wizard-section wizard-collapsible">
+                        <button class="wizard-collapse-toggle" onclick="this.parentElement.classList.toggle('expanded')">
+                            Discovery Service <span class="collapse-arrow">&#9656;</span>
+                        </button>
+                        <div class="wizard-collapse-body">
+                            <div class="wizard-section">
+                                <label for="init-discovery-url">Discovery Service URL:</label>
+                                <input type="url" id="init-discovery-url" class="wizard-input">
+                                <p class="hint">Coordinates content discovery and blessings across sites</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="wizard-footer">
+                    <button id="init-cancel-btn" class="secondary">Cancel</button>
+                    <div class="wizard-footer-spacer"></div>
+                    <button id="init-execute-btn" class="primary">Initialize Site</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Link Panel (slide-out wizard for linking existing site) -->
+        <div id="link-panel" class="wizard-panel hidden">
+            <div class="wizard-overlay"></div>
+            <div class="wizard-content">
+                <div class="wizard-header">
+                    <h3>Link Existing Site</h3>
+                    <button id="link-close-btn" class="wizard-close">&times;</button>
+                </div>
+                <div class="wizard-body">
+                    <div class="wizard-section">
+                        <p class="wizard-intro">Connect to an existing polis site. The target directory must have:</p>
+                        <ul class="wizard-checklist">
+                            <li>.well-known/polis file</li>
+                            <li>.polis/keys/id_ed25519 (private key)</li>
+                            <li>.polis/keys/id_ed25519.pub (public key)</li>
+                        </ul>
+                    </div>
+                    <div class="wizard-section">
+                        <label for="link-path">Site Directory Path:</label>
+                        <input type="text" id="link-path" class="wizard-input" placeholder="/path/to/my-polis-site">
+                        <p class="hint">Absolute path to your existing polis site directory</p>
+                    </div>
+                </div>
+                <div class="wizard-footer">
+                    <button id="link-cancel-btn" class="secondary">Cancel</button>
+                    <div class="wizard-footer-spacer"></div>
+                    <button id="link-execute-btn" class="primary">Link Site</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Dashboard Screen -->
+        <div id="dashboard-screen" class="screen hidden">
+            <!-- Top Header -->
+            <header class="top-header">
+                <button class="hamburger" onclick="App.toggleMobileNav()" aria-label="Toggle navigation">
+                    <span></span><span></span><span></span>
+                </button>
+                <h1>Polis</h1>
+                <div class="header-right">
+                    <span id="domain-display" class="domain-display"></span>
+                    <button id="notification-bell" class="notification-bell" onclick="App.toggleNotifications()" title="Notifications">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                            <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                        </svg>
+                        <span id="notification-dot" class="notification-dot hidden"></span>
+                    </button>
+                    <button id="settings-btn" class="notification-bell" onclick="App.toggleSettings()" title="Settings">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="3"/>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                        </svg>
+                    </button>
+                </div>
+            </header>
+
+            <!-- Setup Banner (shown when site not registered) -->
+            <div id="setup-banner" class="setup-banner hidden">
+                <span>Your site isn't registered with the discovery network yet.</span>
+                <a class="setup-banner-link" onclick="App.openSetupWizard()">Complete Setup</a>
+                <button class="setup-banner-dismiss" onclick="App.dismissSetupBanner()">&times;</button>
+            </div>
+
+            <!-- Main Container with Sidebar -->
+            <div class="main-container">
+                <!-- Sidebar Navigation -->
+                <aside class="sidebar">
+                    <div class="sidebar-mode-toggle">
+                        <button class="mode-tab active" data-sidebar-mode="my-site">My Site</button>
+                        <button class="mode-tab" data-sidebar-mode="social">Social</button>
+                    </div>
+
+                    <!-- My Site mode -->
+                    <div id="sidebar-my-site">
+                        <div id="sidebar-section-posts" class="sidebar-section">
+                            <div class="section-label">
+                                Posts
+                                <button class="section-add-btn" onclick="App.newPost()" title="New Post">+</button>
+                            </div>
+                            <nav>
+                                <button class="nav-item active" data-view="posts-published">
+                                    Published
+                                    <span id="posts-count" class="badge" style="display: none;">0</span>
+                                </button>
+                                <button class="nav-item" data-view="posts-drafts">
+                                    Drafts
+                                    <span id="drafts-count" class="badge" style="display: none;">0</span>
+                                </button>
+                            </nav>
+                        </div>
+                        <div id="sidebar-section-comments" class="sidebar-section">
+                            <div class="section-label">
+                                Comments
+                                <button class="section-add-btn" onclick="App.newCommentDraft()" title="New Comment">+</button>
+                            </div>
+                            <nav>
+                                <button class="nav-item" data-view="comments-published">
+                                    Published
+                                    <span id="comments-published-count" class="badge" style="display: none;">0</span>
+                                </button>
+                                <button class="nav-item" data-view="blessing-requests">
+                                    Blessing Requests
+                                    <span id="incoming-pending-count" class="badge warning" style="display: none;">0</span>
+                                </button>
+                            </nav>
+                        </div>
+                        <div id="sidebar-section-snippets" class="sidebar-section">
+                            <div class="section-label">Snippets</div>
+                            <nav>
+                                <button class="nav-item" data-view="about">About</button>
+                            </nav>
+                        </div>
+                    </div>
+
+                    <!-- Social mode -->
+                    <div id="sidebar-social" class="hidden">
+                        <div id="sidebar-section-discover" class="sidebar-section">
+                            <div class="section-label">Discover</div>
+                            <nav id="social-plugins-nav">
+                                <!-- Populated by JS from SOCIAL_PLUGINS -->
+                            </nav>
+                            <nav>
+                                <button class="nav-item" data-view="following">
+                                    Following
+                                </button>
+                                <button class="nav-item" data-view="followers">
+                                    Followers
+                                    <span id="followers-count" class="badge" style="display: none;">0</span>
+                                </button>
+                            </nav>
+                        </div>
+                    </div>
+
+                    <div id="sidebar-follow-link" class="sidebar-footer hidden">
+                        <button id="copy-follow-link-btn" onclick="App.copyFollowLink()" title="Copy your follow link to share">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                            </svg>
+                            Copy Follow Link
+                        </button>
+                    </div>
+                </aside>
+
+                <!-- Content Area -->
+                <main class="content-area">
+                    <!-- Welcome Panel (lifecycle-aware) -->
+                    <div id="welcome-panel" class="welcome-panel hidden"></div>
+
+                    <!-- Dynamic content header and body will be rendered by JS -->
+                    <div class="content-header">
+                        <h2 id="content-title">Published Posts</h2>
+                        <div id="content-actions" class="content-header-actions">
+                            <button id="new-post-btn" class="primary">New Post</button>
+                        </div>
+                    </div>
+                    <div class="content-body">
+                        <div id="content-list" class="card">
+                            <div class="content-list">
+                                <div class="empty-state">
+                                    <h3>No published posts yet</h3>
+                                    <p>Start writing your first post</p>
+                                    <button class="primary" onclick="App.newPost()">New Post</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </main>
+            </div>
+
+        </div>
+
+        <!-- Editor Screen -->
+        <div id="editor-screen" class="screen hidden">
+            <header>
+                <button id="back-btn" class="secondary">&larr; Back</button>
+                <div id="filename-container" class="filename-container">
+                    <label for="filename-input">Filename:</label>
+                    <input type="text" id="filename-input" placeholder="auto-generated-from-title" />
+                    <span class="filename-suffix">.md</span>
+                </div>
+                <div class="editor-actions">
+                    <button id="save-draft-btn" class="secondary">Save Draft</button>
+                    <button id="publish-btn" class="primary">Publish</button>
+                </div>
+            </header>
+            <div class="editor-container">
+                <div class="editor-pane">
+                    <div class="pane-header">
+                        <span>Markdown</span>
+                        <div class="pane-header-spacer"></div>
+                        <button id="editor-fm-toggle" class="pane-toggle-btn hidden" title="Toggle frontmatter display">Show FM</button>
+                    </div>
+                    <div id="editor-fm-display" class="editor-fm-display hidden">
+                        <pre id="editor-fm-content"></pre>
+                    </div>
+                    <textarea id="markdown-input" placeholder="# Your Post Title
+
+Write your content here in markdown...
+
+**Bold text** and *italic text* work as expected.
+
+## Subheadings
+
+- Bullet points
+- Are supported
+
+1. As are
+2. Numbered lists
+
+> Blockquotes too!
+
+```
+code blocks
+```
+"></textarea>
+                </div>
+                <div class="preview-pane">
+                    <div class="pane-header">Preview</div>
+                    <div id="preview-content" class="preview-content">
+                        <p class="empty-state">Start writing to see a preview.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Comment Composer Screen -->
+        <div id="comment-screen" class="screen hidden">
+            <header>
+                <button id="comment-back-btn" class="secondary">&larr; Back</button>
+                <div class="editor-actions">
+                    <button id="save-comment-draft-btn" class="secondary">Save Draft</button>
+                    <button id="sign-send-btn" class="primary">Sign & Send for Blessing</button>
+                </div>
+            </header>
+            <div class="comment-composer">
+                <div class="comment-target-input">
+                    <label for="reply-to-url">Replying to:</label>
+                    <input type="url" id="reply-to-url" placeholder="https://alice.polis.site/posts/20260127/hello-world.md" required>
+                </div>
+                <div class="comment-editor">
+                    <div class="pane-header">Your Comment</div>
+                    <textarea id="comment-input" placeholder="Write your comment here...
+
+You can use **markdown** formatting."></textarea>
+                </div>
+            </div>
+        </div>
+
+        <!-- About Editor Screen -->
+        <div id="about-screen" class="screen hidden">
+            <header>
+                <button id="about-back-btn" class="secondary">&larr; Back</button>
+                <div class="about-help-text">Publish the below to update the about section on your homepage.</div>
+                <div class="editor-actions">
+                    <button id="about-publish-btn" class="primary">Publish</button>
+                </div>
+            </header>
+            <div class="editor-container">
+                <div class="editor-pane">
+                    <div class="pane-header">Markdown</div>
+                    <textarea id="about-editor-textarea" placeholder="Write your about section in markdown..."></textarea>
+                </div>
+                <div class="preview-pane">
+                    <div class="pane-header">Preview</div>
+                    <div id="about-editor-preview" class="preview-content">
+                        <p class="empty-state">Start writing to see a preview.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Comment Detail Panel (slide-out from right) -->
+        <div id="comment-detail-panel" class="comment-detail-panel hidden">
+            <div class="comment-detail-overlay"></div>
+            <div class="comment-detail-content">
+                <div class="comment-detail-header">
+                    <h3 id="comment-detail-title">Comment Details</h3>
+                    <button id="comment-detail-close-btn" class="comment-detail-close">&times;</button>
+                </div>
+                <div id="comment-detail-body" class="comment-detail-body">
+                    <!-- Dynamic content -->
+                </div>
+                <div id="comment-detail-footer" class="comment-detail-footer">
+                    <!-- Action buttons -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Wizard Panel (slide-out from right) -->
+        <div id="wizard-panel" class="wizard-panel hidden">
+            <div class="wizard-overlay"></div>
+            <div class="wizard-content">
+                <div class="wizard-header">
+                    <h3 id="wizard-title">Setup Wizard</h3>
+                    <div class="wizard-step-indicator">
+                        <span id="wizard-step-current">1</span> of <span id="wizard-step-total">3</span>
+                    </div>
+                    <button id="wizard-close-btn" class="wizard-close">&times;</button>
+                </div>
+                <div id="wizard-body" class="wizard-body">
+                    <!-- Dynamic wizard content -->
+                </div>
+                <div class="wizard-footer">
+                    <button id="wizard-back-btn" class="secondary" style="display: none;">&larr; Back</button>
+                    <div class="wizard-footer-spacer"></div>
+                    <button id="wizard-next-btn" class="primary">Next &rarr;</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Registration Panel (slide-out for site registration) -->
+        <div id="registration-panel" class="wizard-panel hidden">
+            <div class="wizard-overlay"></div>
+            <div class="wizard-content">
+                <div class="wizard-header">
+                    <h3 id="registration-panel-title">Register Your Site</h3>
+                    <button id="registration-close-btn" class="wizard-close">&times;</button>
+                </div>
+                <div class="wizard-body" id="registration-panel-body">
+                    <!-- Dynamic content -->
+                </div>
+                <div class="wizard-footer" id="registration-panel-footer">
+                    <!-- Dynamic buttons -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Setup Wizard Panel (post-init deploy & register flow) -->
+        <div id="setup-wizard-panel" class="wizard-panel hidden">
+            <div class="wizard-overlay" onclick="App.dismissSetupWizard()"></div>
+            <div class="wizard-content">
+                <div class="wizard-header">
+                    <h3>Set Up Your Site</h3>
+                    <button id="setup-wizard-close-btn" class="wizard-close" onclick="App.dismissSetupWizard()">&times;</button>
+                </div>
+                <div class="wizard-body">
+                    <div id="setup-wizard-steps" class="setup-steps"></div>
+                    <div id="setup-wizard-content"></div>
+                </div>
+                <div class="wizard-footer">
+                    <button id="setup-wizard-later-btn" class="secondary" onclick="App.dismissSetupWizard()">Do this later</button>
+                    <div class="wizard-footer-spacer"></div>
+                    <button id="setup-wizard-action-btn" class="primary" onclick="App.setupWizardAction()">Next</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Follow Author Panel (slide-out from right) -->
+        <div id="follow-panel" class="wizard-panel hidden">
+            <div class="wizard-overlay" onclick="App.closeFollowPanel()"></div>
+            <div class="wizard-content">
+                <div class="wizard-header">
+                    <h3>Follow Author</h3>
+                    <button class="wizard-close" onclick="App.closeFollowPanel()">&times;</button>
+                </div>
+                <div class="wizard-body">
+                    <div class="wizard-section">
+                        <label for="follow-url-input">Author URL or Domain</label>
+                        <input type="text" id="follow-url-input" class="wizard-input" placeholder="author.polis.pub" />
+                        <p class="wizard-hint">Enter a domain, URL, or follow link. Examples: author.polis.pub, https://author.polis.pub, polis.pub/f/author</p>
+                    </div>
+                    <div id="follow-suggestion" class="follow-suggestion hidden">
+                        <div class="follow-suggestion-label">Suggested</div>
+                        <p>Try following <strong>discover.polis.pub</strong> — a community hub for discovering conversations across the network.</p>
+                        <button class="secondary" onclick="document.getElementById('follow-url-input').value='https://discover.polis.pub/'; document.getElementById('follow-url-input').focus(); this.parentElement.classList.add('hidden');">Use this URL</button>
+                    </div>
+                </div>
+                <div class="wizard-footer">
+                    <button class="secondary" onclick="App.closeFollowPanel()">Cancel</button>
+                    <div class="wizard-footer-spacer"></div>
+                    <button class="primary" onclick="App.submitFollow()">Follow</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Key Rotate Panel (slide-out from right) -->
+        <div id="key-rotate-panel" class="wizard-panel hidden">
+            <div class="wizard-overlay" onclick="App.closeRotatePanel()"></div>
+            <div class="wizard-content">
+                <div class="wizard-header">
+                    <h3>Rotate Keys</h3>
+                    <button class="wizard-close" onclick="App.closeRotatePanel()">&times;</button>
+                </div>
+                <div class="wizard-body">
+                    <div class="wizard-section">
+                        <p style="line-height: 1.6; color: var(--text-soft);">
+                            Key rotation generates a new Ed25519 signing keypair for your site.
+                            Your old key is backed up and previously signed content remains
+                            verifiable via key history.
+                        </p>
+                    </div>
+                    <div class="wizard-section">
+                        <div class="settings-section-label" style="margin-bottom: 0.5rem;">When to rotate</div>
+                        <ul style="margin: 0; padding-left: 1.25rem; line-height: 1.8; color: var(--text-soft); font-size: 0.9rem;">
+                            <li>You suspect your private key has been compromised</li>
+                            <li>You're migrating your site to a new machine</li>
+                            <li>Periodic hygiene (once a year is plenty)</li>
+                        </ul>
+                    </div>
+                    <div class="wizard-section">
+                        <p style="line-height: 1.6; color: var(--text-muted); font-size: 0.85rem;">
+                            You don't need to rotate frequently. If your keys are safe,
+                            there's no urgency to change them.
+                        </p>
+                    </div>
+                </div>
+                <div class="wizard-footer">
+                    <button class="secondary" onclick="App.closeRotatePanel()">Cancel</button>
+                    <div class="wizard-footer-spacer"></div>
+                    <button class="danger" onclick="App.confirmRotateKeys()">Rotate Keys</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Remote Post Viewer Panel (slide-out from right) -->
+        <div id="remote-post-panel" class="comment-detail-panel hidden">
+            <div class="comment-detail-overlay" onclick="App.closeRemotePost()"></div>
+            <div class="comment-detail-content">
+                <div class="comment-detail-header">
+                    <h3 id="remote-post-title">Remote Post</h3>
+                    <button class="comment-detail-close" onclick="App.closeRemotePost()">&times;</button>
+                </div>
+                <div id="remote-post-meta" class="remote-post-meta"></div>
+                <div id="remote-post-body" class="comment-detail-body remote-post-body"></div>
+            </div>
+        </div>
+
+        <!-- Notification Panel (flyout from right) -->
+        <div id="notification-panel" class="comment-detail-panel hidden">
+            <div class="comment-detail-overlay" onclick="App.closeNotifications()"></div>
+            <div class="comment-detail-content">
+                <div class="comment-detail-header">
+                    <h3>Notifications</h3>
+                    <div class="notification-header-actions">
+                        <button id="notification-toggle-all" class="notification-toggle-btn" onclick="App.toggleAllNotifications()">Show All</button>
+                        <button class="comment-detail-close" onclick="App.closeNotifications()">&times;</button>
+                    </div>
+                </div>
+                <div id="notification-list" class="comment-detail-body notification-list">
+                    <!-- Dynamic notification items -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

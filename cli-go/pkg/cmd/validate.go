@@ -30,11 +30,11 @@ func handleValidate(args []string) {
 			if result.SiteInfo.SiteTitle != "" {
 				fmt.Printf("  Title: %s\n", result.SiteInfo.SiteTitle)
 			}
-			if result.SiteInfo.BaseURL != "" {
-				fmt.Printf("  Base URL: %s\n", result.SiteInfo.BaseURL)
+			if result.SiteInfo.Version != "" {
+				fmt.Printf("  Version: %s\n", result.SiteInfo.Version)
 			}
-			if result.SiteInfo.Generator != "" {
-				fmt.Printf("  Generator: %s\n", result.SiteInfo.Generator)
+			if result.SiteInfo.ActiveTheme != "" {
+				fmt.Printf("  Theme: %s\n", result.SiteInfo.ActiveTheme)
 			}
 		}
 	}

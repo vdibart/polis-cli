@@ -13,7 +13,7 @@ import (
 
 // Discovery service configuration. Set by the calling application
 // (CLI or webapp) during initialization. If any are empty, registration
-// is silently skipped.
+// is skipped with a diagnostic message.
 //
 // For multi-tenant use (e.g., hosted service), pass a *DiscoveryConfig
 // to RegisterPost/PublishPost/RepublishPost instead of using these globals.
@@ -43,11 +43,20 @@ func resolveDiscoveryConfig(cfg *DiscoveryConfig) (dsURL, dsKey, baseURL string)
 
 // RegisterPost registers a published post with the discovery service.
 // Called automatically by PublishPost/RepublishPost when discovery is configured.
-// Returns nil if discovery is not configured (silent skip) or on success.
-// If cfg is nil, falls back to package-level globals.
+// Returns nil on success. Returns an error if registration fails.
+// If both dsURL and baseURL are empty (unconfigured), returns nil with a
+// diagnostic log. If cfg is nil, falls back to package-level globals.
 func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg *DiscoveryConfig) error {
 	dsURL, dsKey, baseURL := resolveDiscoveryConfig(cfg)
 	if dsURL == "" || baseURL == "" {
+		var missing []string
+		if dsURL == "" {
+			missing = append(missing, "DISCOVERY_SERVICE_URL")
+		}
+		if baseURL == "" {
+			missing = append(missing, "POLIS_BASE_URL")
+		}
+		fmt.Printf("[i] Discovery registration skipped: %s not set\n", strings.Join(missing, ", "))
 		return nil
 	}
 
@@ -76,7 +85,7 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 
 	// Build canonical JSON for signing
 	canonical, err := discovery.MakeContentCanonicalJSON(
-		"polis.post", postURL, result.Version, author, metadata,
+		"pub.polis.post", postURL, result.Version, author, metadata,
 	)
 	if err != nil {
 		return fmt.Errorf("canonical JSON: %w", err)
@@ -89,7 +98,7 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 
 	client := discovery.NewClient(dsURL, dsKey)
 	req := &discovery.ContentRegisterRequest{
-		Type:      "polis.post",
+		Type:      "pub.polis.post",
 		URL:       postURL,
 		Version:   result.Version,
 		Author:    author,
@@ -101,5 +110,6 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 		return fmt.Errorf("register: %w", err)
 	}
 
+	fmt.Printf("[✓] Registered with discovery service: %s\n", postURL)
 	return nil
 }

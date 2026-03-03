@@ -33,7 +33,7 @@ func TestRenderFile_Post(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Create a test post
-	postsDir := filepath.Join(tempDir, "posts")
+	postsDir := filepath.Join(tempDir, "content", "pub.polis.core", "post")
 	os.MkdirAll(postsDir, 0755)
 
 	postContent := `---
@@ -54,7 +54,7 @@ This is the **test** content.
 		t.Fatalf("NewPageRenderer failed: %v", err)
 	}
 
-	html, rendered, err := renderer.RenderFile("posts/test-post.md", "post", true)
+	html, rendered, err := renderer.RenderFile("content/pub.polis.core/post/test-post.md", "post", true)
 	if err != nil {
 		t.Fatalf("RenderFile failed: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestRenderFile_Skip(t *testing.T) {
 	tempDir := t.TempDir()
 	setupTestSite(t, tempDir)
 
-	postsDir := filepath.Join(tempDir, "posts")
+	postsDir := filepath.Join(tempDir, "content", "pub.polis.core", "post")
 	os.MkdirAll(postsDir, 0755)
 
 	postContent := `---
@@ -98,7 +98,7 @@ Content.
 	})
 
 	// First render with force
-	_, rendered, err := renderer.RenderFile("posts/skip-test.md", "post", true)
+	_, rendered, err := renderer.RenderFile("content/pub.polis.core/post/skip-test.md", "post", true)
 	if err != nil {
 		t.Fatalf("First render failed: %v", err)
 	}
@@ -112,7 +112,7 @@ Content.
 	os.Chtimes(htmlPath, futureTime, futureTime)
 
 	// Second render without force should skip (HTML is newer)
-	_, rendered, err = renderer.RenderFile("posts/skip-test.md", "post", false)
+	_, rendered, err = renderer.RenderFile("content/pub.polis.core/post/skip-test.md", "post", false)
 	if err != nil {
 		t.Fatalf("Second render failed: %v", err)
 	}
@@ -125,13 +125,13 @@ func TestRenderIndex(t *testing.T) {
 	tempDir := t.TempDir()
 	setupTestSite(t, tempDir)
 
-	// Create metadata/public.jsonl with some entries
-	metadataDir := filepath.Join(tempDir, "metadata")
-	os.MkdirAll(metadataDir, 0755)
-	publicJSONL := `{"path":"posts/hello.md","title":"Hello World","published":"2026-01-15T12:00:00Z","type":"post"}
-{"path":"posts/goodbye.md","title":"Goodbye World","published":"2026-01-16T12:00:00Z","type":"post"}
+	// Create content/pub.polis.core/index.jsonl with some entries
+	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
+	os.MkdirAll(contentDir, 0755)
+	publicJSONL := `{"path":"content/pub.polis.core/post/hello.md","title":"Hello World","published":"2026-01-15T12:00:00Z","type":"post"}
+{"path":"content/pub.polis.core/post/goodbye.md","title":"Goodbye World","published":"2026-01-16T12:00:00Z","type":"post"}
 `
-	os.WriteFile(filepath.Join(metadataDir, "public.jsonl"), []byte(publicJSONL), 0644)
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(publicJSONL), 0644)
 
 	renderer, _ := NewPageRenderer(PageConfig{
 		DataDir:       tempDir,
@@ -157,7 +157,7 @@ func TestRenderIndex(t *testing.T) {
 	}
 
 	// Check that posts section was processed (URL should be converted to .html)
-	if !strings.Contains(string(content), "posts/hello.html") {
+	if !strings.Contains(string(content), "content/pub.polis.core/post/hello.html") {
 		t.Errorf("Expected index to contain post URL, got: %s", content)
 	}
 }
@@ -167,14 +167,13 @@ func TestRenderAll(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Create posts directory with a post
-	postsDir := filepath.Join(tempDir, "posts")
+	postsDir := filepath.Join(tempDir, "content", "pub.polis.core", "post")
 	os.MkdirAll(postsDir, 0755)
 	os.WriteFile(filepath.Join(postsDir, "post1.md"), []byte("---\ntitle: Post 1\n---\nContent 1"), 0644)
 
-	// Create metadata/public.jsonl
-	metadataDir := filepath.Join(tempDir, "metadata")
-	os.MkdirAll(metadataDir, 0755)
-	os.WriteFile(filepath.Join(metadataDir, "public.jsonl"), []byte(`{"path":"posts/post1.md","title":"Post 1","type":"post"}`), 0644)
+	// Create content/pub.polis.core/index.jsonl
+	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(`{"path":"content/pub.polis.core/post/post1.md","title":"Post 1","type":"post"}`), 0644)
 
 	renderer, _ := NewPageRenderer(PageConfig{
 		DataDir: tempDir,
@@ -198,15 +197,15 @@ func TestRenderIndex_LimitsRecentPosts(t *testing.T) {
 	tempDir := t.TempDir()
 	setupTestSite(t, tempDir)
 
-	// Create metadata/public.jsonl with 15 posts
-	metadataDir := filepath.Join(tempDir, "metadata")
-	os.MkdirAll(metadataDir, 0755)
+	// Create content/pub.polis.core/index.jsonl with 15 posts
+	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
+	os.MkdirAll(contentDir, 0755)
 
 	var entries string
 	for i := 1; i <= 15; i++ {
-		entries += fmt.Sprintf(`{"path":"posts/post-%02d.md","title":"Post %d","published":"2026-01-%02dT12:00:00Z","type":"post"}`, i, i, i) + "\n"
+		entries += fmt.Sprintf(`{"path":"content/pub.polis.core/post/post-%02d.md","title":"Post %d","published":"2026-01-%02dT12:00:00Z","type":"post"}`, i, i, i) + "\n"
 	}
-	os.WriteFile(filepath.Join(metadataDir, "public.jsonl"), []byte(entries), 0644)
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(entries), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
 		DataDir:       tempDir,
@@ -246,15 +245,15 @@ func TestRenderIndex_NoViewAllWhenFewPosts(t *testing.T) {
 	tempDir := t.TempDir()
 	setupTestSite(t, tempDir)
 
-	// Create metadata/public.jsonl with only 5 posts (under the limit)
-	metadataDir := filepath.Join(tempDir, "metadata")
-	os.MkdirAll(metadataDir, 0755)
+	// Create content/pub.polis.core/index.jsonl with only 5 posts (under the limit)
+	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
+	os.MkdirAll(contentDir, 0755)
 
 	var entries string
 	for i := 1; i <= 5; i++ {
-		entries += fmt.Sprintf(`{"path":"posts/post-%02d.md","title":"Post %d","published":"2026-01-%02dT12:00:00Z","type":"post"}`, i, i, i) + "\n"
+		entries += fmt.Sprintf(`{"path":"content/pub.polis.core/post/post-%02d.md","title":"Post %d","published":"2026-01-%02dT12:00:00Z","type":"post"}`, i, i, i) + "\n"
 	}
-	os.WriteFile(filepath.Join(metadataDir, "public.jsonl"), []byte(entries), 0644)
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(entries), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
 		DataDir:       tempDir,
@@ -293,15 +292,15 @@ func TestRenderArchive(t *testing.T) {
 	tempDir := t.TempDir()
 	setupTestSite(t, tempDir)
 
-	// Create metadata/public.jsonl with 15 posts
-	metadataDir := filepath.Join(tempDir, "metadata")
-	os.MkdirAll(metadataDir, 0755)
+	// Create content/pub.polis.core/index.jsonl with 15 posts
+	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
+	os.MkdirAll(contentDir, 0755)
 
 	var entries string
 	for i := 1; i <= 15; i++ {
-		entries += fmt.Sprintf(`{"path":"posts/post-%02d.md","title":"Post %d","published":"2026-01-%02dT12:00:00Z","type":"post"}`, i, i, i) + "\n"
+		entries += fmt.Sprintf(`{"path":"content/pub.polis.core/post/post-%02d.md","title":"Post %d","published":"2026-01-%02dT12:00:00Z","type":"post"}`, i, i, i) + "\n"
 	}
-	os.WriteFile(filepath.Join(metadataDir, "public.jsonl"), []byte(entries), 0644)
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(entries), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
 		DataDir:       tempDir,
@@ -317,10 +316,10 @@ func TestRenderArchive(t *testing.T) {
 		t.Fatalf("RenderArchive failed: %v", err)
 	}
 
-	// Read the generated posts/index.html
-	content, err := os.ReadFile(filepath.Join(tempDir, "posts", "index.html"))
+	// Read the generated content/pub.polis.core/post/index.html
+	content, err := os.ReadFile(filepath.Join(tempDir, "content", "pub.polis.core", "post", "index.html"))
 	if err != nil {
-		t.Fatalf("Failed to read posts/index.html: %v", err)
+		t.Fatalf("Failed to read content/pub.polis.core/post/index.html: %v", err)
 	}
 
 	html := string(content)
@@ -351,10 +350,11 @@ func TestRenderArchive_NoTemplate(t *testing.T) {
 	os.WriteFile(filepath.Join(wellKnownDir, "polis"), []byte(`{
 		"base_url": "https://example.com",
 		"site_title": "Test Site",
-		"author_name": "Test Author"
+		"author_name": "Test Author",
+		"active_theme": "turbo"
 	}`), 0644)
 
-	themesDir := filepath.Join(tempDir, ".polis", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
 	os.MkdirAll(themesDir, 0755)
 	os.WriteFile(filepath.Join(themesDir, "post.html"), []byte("<html>{{title}}</html>"), 0644)
 	os.WriteFile(filepath.Join(themesDir, "comment.html"), []byte("<html>{{title}}</html>"), 0644)
@@ -363,10 +363,9 @@ func TestRenderArchive_NoTemplate(t *testing.T) {
 	os.WriteFile(filepath.Join(themesDir, "turbo.css"), []byte("/* test css */"), 0644)
 	// NO posts.html
 
-	metadataDir := filepath.Join(tempDir, "metadata")
-	os.MkdirAll(metadataDir, 0755)
-	os.WriteFile(filepath.Join(metadataDir, "manifest.json"), []byte(`{"active_theme":"turbo"}`), 0644)
-	os.WriteFile(filepath.Join(metadataDir, "public.jsonl"), []byte(`{"path":"posts/test.md","title":"Test","type":"post"}`), 0644)
+	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
+	os.MkdirAll(contentDir, 0755)
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(`{"path":"content/pub.polis.core/post/test.md","title":"Test","type":"post"}`), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
 		DataDir: tempDir,
@@ -381,9 +380,9 @@ func TestRenderArchive_NoTemplate(t *testing.T) {
 		t.Fatalf("RenderArchive should not error when template missing: %v", err)
 	}
 
-	// posts/index.html should NOT be created
-	if _, err := os.Stat(filepath.Join(tempDir, "posts", "index.html")); !os.IsNotExist(err) {
-		t.Error("posts/index.html should not exist when theme lacks posts.html")
+	// content/pub.polis.core/post/index.html should NOT be created
+	if _, err := os.Stat(filepath.Join(tempDir, "content", "pub.polis.core", "post", "index.html")); !os.IsNotExist(err) {
+		t.Error("content/pub.polis.core/post/index.html should not exist when theme lacks posts.html")
 	}
 }
 
@@ -392,7 +391,7 @@ func TestRenderFile_AuthorDomainAndPageType(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Update post template to include widget variables
-	themesDir := filepath.Join(tempDir, ".polis", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
 	postTmpl := `<!DOCTYPE html>
 <html>
 <head><title>{{title}}</title></head>
@@ -402,7 +401,7 @@ func TestRenderFile_AuthorDomainAndPageType(t *testing.T) {
 </html>`
 	os.WriteFile(filepath.Join(themesDir, "post.html"), []byte(postTmpl), 0644)
 
-	postsDir := filepath.Join(tempDir, "posts")
+	postsDir := filepath.Join(tempDir, "content", "pub.polis.core", "post")
 	os.MkdirAll(postsDir, 0755)
 	os.WriteFile(filepath.Join(postsDir, "test.md"), []byte("---\ntitle: Widget Test\npublished: 2026-01-15T12:00:00Z\n---\nHello"), 0644)
 
@@ -415,7 +414,7 @@ func TestRenderFile_AuthorDomainAndPageType(t *testing.T) {
 		t.Fatalf("NewPageRenderer failed: %v", err)
 	}
 
-	html, rendered, err := renderer.RenderFile("posts/test.md", "post", true)
+	html, rendered, err := renderer.RenderFile("content/pub.polis.core/post/test.md", "post", true)
 	if err != nil {
 		t.Fatalf("RenderFile failed: %v", err)
 	}
@@ -436,18 +435,18 @@ func TestRenderFile_AuthorDomainFromBaseURLConfig(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Template that exposes author_domain
-	themesDir := filepath.Join(tempDir, ".polis", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
 	postTmpl := `<div data-author="{{author_domain}}">{{title}}</div>`
 	os.WriteFile(filepath.Join(themesDir, "post.html"), []byte(postTmpl), 0644)
 
-	postsDir := filepath.Join(tempDir, "posts")
+	postsDir := filepath.Join(tempDir, "content", "pub.polis.core", "post")
 	os.MkdirAll(postsDir, 0755)
 	os.WriteFile(filepath.Join(postsDir, "t.md"), []byte("---\ntitle: Test\n---\nContent"), 0644)
 
 	// author_domain is derived from BaseURL config
 	renderer, _ := NewPageRenderer(PageConfig{DataDir: tempDir, BaseURL: "https://bob.example.com"})
 
-	html, _, err := renderer.RenderFile("posts/t.md", "post", true)
+	html, _, err := renderer.RenderFile("content/pub.polis.core/post/t.md", "post", true)
 	if err != nil {
 		t.Fatalf("RenderFile failed: %v", err)
 	}
@@ -462,18 +461,18 @@ func TestRenderFile_AuthorDomainEmptyWithoutBaseURL(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Template that exposes author_domain
-	themesDir := filepath.Join(tempDir, ".polis", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
 	postTmpl := `<div data-author="{{author_domain}}">{{title}}</div>`
 	os.WriteFile(filepath.Join(themesDir, "post.html"), []byte(postTmpl), 0644)
 
-	postsDir := filepath.Join(tempDir, "posts")
+	postsDir := filepath.Join(tempDir, "content", "pub.polis.core", "post")
 	os.MkdirAll(postsDir, 0755)
 	os.WriteFile(filepath.Join(postsDir, "t.md"), []byte("---\ntitle: Test\n---\nContent"), 0644)
 
 	// No BaseURL — author_domain should be empty (graceful degradation)
 	renderer, _ := NewPageRenderer(PageConfig{DataDir: tempDir})
 
-	html, _, err := renderer.RenderFile("posts/t.md", "post", true)
+	html, _, err := renderer.RenderFile("content/pub.polis.core/post/t.md", "post", true)
 	if err != nil {
 		t.Fatalf("RenderFile failed: %v", err)
 	}
@@ -488,7 +487,7 @@ func TestRenderIndex_ExcerptPopulated(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Update index template to show excerpt
-	themesDir := filepath.Join(tempDir, ".polis", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
 	idxTmpl := `<!DOCTYPE html>
 <html>
 <head><title>{{site_title}}</title></head>
@@ -499,13 +498,13 @@ func TestRenderIndex_ExcerptPopulated(t *testing.T) {
 	os.WriteFile(filepath.Join(themesDir, "index.html"), []byte(idxTmpl), 0644)
 
 	// Create a real markdown post file
-	postsDir := filepath.Join(tempDir, "posts")
+	postsDir := filepath.Join(tempDir, "content", "pub.polis.core", "post")
 	os.MkdirAll(postsDir, 0755)
 	os.WriteFile(filepath.Join(postsDir, "hello.md"), []byte("---\ntitle: Hello World\npublished: 2026-01-15T12:00:00Z\n---\nThis is the body of my post about **important things** in the world."), 0644)
 
-	// Create metadata/public.jsonl
-	metadataDir := filepath.Join(tempDir, "metadata")
-	os.WriteFile(filepath.Join(metadataDir, "public.jsonl"), []byte(`{"path":"posts/hello.md","title":"Hello World","published":"2026-01-15T12:00:00Z","type":"post"}`+"\n"), 0644)
+	// Create content/pub.polis.core/index.jsonl
+	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(`{"path":"content/pub.polis.core/post/hello.md","title":"Hello World","published":"2026-01-15T12:00:00Z","type":"post"}`+"\n"), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
 		DataDir: tempDir,
@@ -543,7 +542,7 @@ func TestRenderIndex_PageTypeIsIndex(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Update index template to include page_type
-	themesDir := filepath.Join(tempDir, ".polis", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
 	idxTmpl := `<!DOCTYPE html>
 <html>
 <head><title>{{site_title}}</title></head>
@@ -553,9 +552,9 @@ func TestRenderIndex_PageTypeIsIndex(t *testing.T) {
 </html>`
 	os.WriteFile(filepath.Join(themesDir, "index.html"), []byte(idxTmpl), 0644)
 
-	metadataDir := filepath.Join(tempDir, "metadata")
-	os.MkdirAll(metadataDir, 0755)
-	os.WriteFile(filepath.Join(metadataDir, "public.jsonl"), []byte(""), 0644)
+	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
+	os.MkdirAll(contentDir, 0755)
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(""), 0644)
 
 	renderer, _ := NewPageRenderer(PageConfig{DataDir: tempDir, BaseURL: "https://example.com"})
 	err := renderer.RenderIndex()
@@ -569,6 +568,302 @@ func TestRenderIndex_PageTypeIsIndex(t *testing.T) {
 	}
 }
 
+// mountConfig returns standard PageConfig fields for source/output separation tests.
+func mountConfig(dir string) PageConfig {
+	return PageConfig{
+		DataDir:           dir,
+		BaseURL:           "https://example.com",
+		RenderMarkers:     false,
+		PostsSourceDir:    "content/pub.polis.core/post",
+		PostsMountDir:     "posts",
+		CommentsSourceDir: "content/pub.polis.core/comment",
+		CommentsMountDir:  "comments",
+	}
+}
+
+func TestSourceToMountPath(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	cfg := mountConfig(tempDir)
+	renderer, err := NewPageRenderer(cfg)
+	if err != nil {
+		t.Fatalf("NewPageRenderer failed: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		path     string
+		fileType string
+		want     string
+	}{
+		{"post maps to mount", "content/pub.polis.core/post/20260101/hello.md", "post", "posts/20260101/hello.md"},
+		{"comment maps to mount", "content/pub.polis.core/comment/20260101/reply.md", "comment", "comments/20260101/reply.md"},
+		{"non-matching path unchanged", "other/path.md", "post", "other/path.md"},
+		{"legacy (no config)", "content/pub.polis.core/post/test.md", "", "content/pub.polis.core/post/test.md"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := renderer.sourceToMountPath(tt.path, tt.fileType)
+			if got != tt.want {
+				t.Errorf("sourceToMountPath(%q, %q) = %q, want %q", tt.path, tt.fileType, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderFile_MountDir(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	// Create a test post in source dir
+	postsDir := filepath.Join(tempDir, "content", "pub.polis.core", "post")
+	os.MkdirAll(postsDir, 0755)
+	os.WriteFile(filepath.Join(postsDir, "test-post.md"), []byte("---\ntitle: Mount Test\npublished: 2026-01-15T12:00:00Z\n---\nHello **world**."), 0644)
+
+	cfg := mountConfig(tempDir)
+	renderer, err := NewPageRenderer(cfg)
+	if err != nil {
+		t.Fatalf("NewPageRenderer failed: %v", err)
+	}
+
+	html, rendered, err := renderer.RenderFile("content/pub.polis.core/post/test-post.md", "post", true)
+	if err != nil {
+		t.Fatalf("RenderFile failed: %v", err)
+	}
+	if !rendered {
+		t.Error("Expected file to be rendered")
+	}
+	if !strings.Contains(html, "Mount Test") {
+		t.Errorf("Expected HTML to contain title, got: %s", html)
+	}
+
+	// HTML should be in mount dir, NOT source dir
+	mountHTML := filepath.Join(tempDir, "posts", "test-post.html")
+	if _, err := os.Stat(mountHTML); os.IsNotExist(err) {
+		t.Error("Expected HTML file in mount dir (posts/test-post.html)")
+	}
+
+	sourceHTML := filepath.Join(postsDir, "test-post.html")
+	if _, err := os.Stat(sourceHTML); !os.IsNotExist(err) {
+		t.Error("HTML should NOT be written to source dir")
+	}
+
+	// .md should be copied to mount dir
+	mountMD := filepath.Join(tempDir, "posts", "test-post.md")
+	if _, err := os.Stat(mountMD); os.IsNotExist(err) {
+		t.Error("Expected .md file copied to mount dir (posts/test-post.md)")
+	}
+}
+
+func TestRenderFile_MountDir_Skip(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	postsDir := filepath.Join(tempDir, "content", "pub.polis.core", "post")
+	os.MkdirAll(postsDir, 0755)
+	os.WriteFile(filepath.Join(postsDir, "skip-test.md"), []byte("---\ntitle: Skip Test\n---\nContent."), 0644)
+
+	cfg := mountConfig(tempDir)
+	renderer, _ := NewPageRenderer(cfg)
+
+	// First render
+	_, rendered, err := renderer.RenderFile("content/pub.polis.core/post/skip-test.md", "post", true)
+	if err != nil {
+		t.Fatalf("First render failed: %v", err)
+	}
+	if !rendered {
+		t.Error("First render should render")
+	}
+
+	// Touch the mount HTML to be newer
+	mountHTML := filepath.Join(tempDir, "posts", "skip-test.html")
+	futureTime := time.Now().Add(time.Second)
+	os.Chtimes(mountHTML, futureTime, futureTime)
+
+	// Second render should skip
+	_, rendered, err = renderer.RenderFile("content/pub.polis.core/post/skip-test.md", "post", false)
+	if err != nil {
+		t.Fatalf("Second render failed: %v", err)
+	}
+	if rendered {
+		t.Error("Second render should skip (HTML in mount dir is up to date)")
+	}
+}
+
+func TestRenderFile_MountDir_CSSHomePaths(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	// Template that exposes css_path and home_path
+	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
+	postTmpl := `<link rel="stylesheet" href="{{css_path}}"><a href="{{home_path}}">Home</a><h1>{{title}}</h1>`
+	os.WriteFile(filepath.Join(themesDir, "post.html"), []byte(postTmpl), 0644)
+
+	postsDir := filepath.Join(tempDir, "content", "pub.polis.core", "post", "20260101")
+	os.MkdirAll(postsDir, 0755)
+	os.WriteFile(filepath.Join(postsDir, "test.md"), []byte("---\ntitle: Path Test\n---\nContent"), 0644)
+
+	cfg := mountConfig(tempDir)
+	renderer, _ := NewPageRenderer(cfg)
+
+	html, _, err := renderer.RenderFile("content/pub.polis.core/post/20260101/test.md", "post", true)
+	if err != nil {
+		t.Fatalf("RenderFile failed: %v", err)
+	}
+
+	// Mount path is posts/20260101/test.html (depth 2), so CSS should be ../../styles.css
+	if !strings.Contains(html, `../../styles.css`) {
+		t.Errorf("Expected ../../styles.css for mount path depth 2, got: %s", html)
+	}
+	if !strings.Contains(html, `../../index.html`) {
+		t.Errorf("Expected ../../index.html for mount path depth 2, got: %s", html)
+	}
+}
+
+func TestRenderAll_MountDir(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	// Create a post and a comment in source dirs
+	postsDir := filepath.Join(tempDir, "content", "pub.polis.core", "post")
+	os.MkdirAll(postsDir, 0755)
+	os.WriteFile(filepath.Join(postsDir, "post1.md"), []byte("---\ntitle: Post 1\n---\nContent 1"), 0644)
+
+	commentsDir := filepath.Join(tempDir, "content", "pub.polis.core", "comment")
+	os.MkdirAll(commentsDir, 0755)
+	os.WriteFile(filepath.Join(commentsDir, "comment1.md"), []byte("---\ntitle: Comment 1\n---\nReply"), 0644)
+
+	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(
+		`{"path":"content/pub.polis.core/post/post1.md","title":"Post 1","type":"post"}`+"\n"+
+			`{"path":"content/pub.polis.core/comment/comment1.md","title":"Comment 1","type":"comment"}`+"\n"), 0644)
+
+	cfg := mountConfig(tempDir)
+	renderer, _ := NewPageRenderer(cfg)
+
+	stats, err := renderer.RenderAll(true)
+	if err != nil {
+		t.Fatalf("RenderAll failed: %v", err)
+	}
+
+	if stats.PostsRendered != 1 {
+		t.Errorf("Expected 1 post rendered, got %d", stats.PostsRendered)
+	}
+	if stats.CommentsRendered != 1 {
+		t.Errorf("Expected 1 comment rendered, got %d", stats.CommentsRendered)
+	}
+
+	// Verify output is in mount dirs
+	if _, err := os.Stat(filepath.Join(tempDir, "posts", "post1.html")); os.IsNotExist(err) {
+		t.Error("Expected posts/post1.html in mount dir")
+	}
+	if _, err := os.Stat(filepath.Join(tempDir, "posts", "post1.md")); os.IsNotExist(err) {
+		t.Error("Expected posts/post1.md copied to mount dir")
+	}
+	if _, err := os.Stat(filepath.Join(tempDir, "comments", "comment1.html")); os.IsNotExist(err) {
+		t.Error("Expected comments/comment1.html in mount dir")
+	}
+}
+
+func TestRenderAll_CopiesArtifacts(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	// Create blessed.json in comment source dir
+	commentDir := filepath.Join(tempDir, "content", "pub.polis.core", "comment")
+	os.MkdirAll(commentDir, 0755)
+	os.WriteFile(filepath.Join(commentDir, "blessed.json"), []byte(`{"comments":[]}`), 0644)
+
+	cfg := mountConfig(tempDir)
+	renderer, _ := NewPageRenderer(cfg)
+
+	_, err := renderer.RenderAll(true)
+	if err != nil {
+		t.Fatalf("RenderAll failed: %v", err)
+	}
+
+	// Verify blessed.json was copied to comments mount dir
+	dstBlessed := filepath.Join(tempDir, "comments", "blessed.json")
+	if _, err := os.Stat(dstBlessed); os.IsNotExist(err) {
+		t.Error("Expected blessed.json copied to comments mount dir")
+	}
+}
+
+func TestRenderIndex_MountDirURLs(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
+	os.MkdirAll(contentDir, 0755)
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(
+		`{"path":"content/pub.polis.core/post/hello.md","title":"Hello","published":"2026-01-15T12:00:00Z","type":"post"}`+"\n"), 0644)
+
+	cfg := mountConfig(tempDir)
+	renderer, _ := NewPageRenderer(cfg)
+
+	err := renderer.RenderIndex()
+	if err != nil {
+		t.Fatalf("RenderIndex failed: %v", err)
+	}
+
+	content, _ := os.ReadFile(filepath.Join(tempDir, "index.html"))
+	html := string(content)
+
+	// URL should use mount path, not source path
+	if !strings.Contains(html, "posts/hello.html") {
+		t.Errorf("Expected mount path URL (posts/hello.html), got: %s", html)
+	}
+	if strings.Contains(html, "content/pub.polis.core/post/hello.html") {
+		t.Errorf("URL should NOT use source path, got: %s", html)
+	}
+}
+
+func TestRenderArchive_MountDir(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
+	os.MkdirAll(contentDir, 0755)
+
+	var entries string
+	for i := 1; i <= 5; i++ {
+		entries += fmt.Sprintf(`{"path":"content/pub.polis.core/post/post-%02d.md","title":"Post %d","published":"2026-01-%02dT12:00:00Z","type":"post"}`, i, i, i) + "\n"
+	}
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(entries), 0644)
+
+	cfg := mountConfig(tempDir)
+	renderer, err := NewPageRenderer(cfg)
+	if err != nil {
+		t.Fatalf("NewPageRenderer failed: %v", err)
+	}
+
+	err = renderer.RenderArchive()
+	if err != nil {
+		t.Fatalf("RenderArchive failed: %v", err)
+	}
+
+	// Archive should be in mount dir (posts/index.html)
+	archivePath := filepath.Join(tempDir, "posts", "index.html")
+	content, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatalf("Failed to read posts/index.html: %v", err)
+	}
+
+	html := string(content)
+	postCount := strings.Count(html, `class="post-item"`)
+	if postCount != 5 {
+		t.Errorf("Expected 5 post items on archive page, got %d", postCount)
+	}
+
+	// Should NOT be in legacy location
+	legacyPath := filepath.Join(tempDir, "content", "pub.polis.core", "post", "index.html")
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Error("Archive should NOT be in legacy source dir when mount dir is configured")
+	}
+}
+
 // setupTestSite creates a minimal polis site structure for testing.
 func setupTestSite(t *testing.T, dir string) {
 	t.Helper()
@@ -579,11 +874,12 @@ func setupTestSite(t *testing.T, dir string) {
 	os.WriteFile(filepath.Join(wellKnownDir, "polis"), []byte(`{
 		"base_url": "https://example.com",
 		"site_title": "Test Site",
-		"author_name": "Test Author"
+		"author_name": "Test Author",
+		"active_theme": "turbo"
 	}`), 0644)
 
-	// Create .polis/themes/turbo with minimal templates
-	themesDir := filepath.Join(dir, ".polis", "themes", "turbo")
+	// Create site/themes/turbo with minimal templates
+	themesDir := filepath.Join(dir, "site", "themes", "turbo")
 	os.MkdirAll(themesDir, 0755)
 
 	postTemplate := `<!DOCTYPE html>
@@ -623,8 +919,8 @@ func setupTestSite(t *testing.T, dir string) {
 	// Create CSS file (required by RenderAll)
 	os.WriteFile(filepath.Join(themesDir, "turbo.css"), []byte("/* test css */"), 0644)
 
-	// Create empty metadata/public.jsonl
-	metadataDir := filepath.Join(dir, "metadata")
-	os.MkdirAll(metadataDir, 0755)
-	os.WriteFile(filepath.Join(metadataDir, "public.jsonl"), []byte(""), 0644)
+	// Create empty content/pub.polis.core/index.jsonl
+	contentDir := filepath.Join(dir, "content", "pub.polis.core")
+	os.MkdirAll(contentDir, 0755)
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(""), 0644)
 }

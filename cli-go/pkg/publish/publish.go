@@ -296,8 +296,8 @@ version-history:
 	// Build final content
 	finalContent := finalFrontmatter + "\n\n" + canonicalBody
 
-	// Create directory structure: posts/YYYYMMDD/
-	postsDir := filepath.Join(dataDir, "posts", dateDir)
+	// Create directory structure: content/pub.polis.core/post/YYYYMMDD/
+	postsDir := filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir)
 	if err := os.MkdirAll(postsDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create posts directory: %w", err)
 	}
@@ -308,8 +308,8 @@ version-history:
 		return nil, fmt.Errorf("failed to write post file: %w", err)
 	}
 
-	// Update index
-	relativePath := filepath.Join("posts", dateDir, filename+".md")
+	// Update index (path relative to site root for content access)
+	relativePath := filepath.Join("content", "pub.polis.core", "post", dateDir, filename+".md")
 
 	// Initialize version history with CLI-compatible format
 	// Pass content WITHOUT frontmatter (canonicalBody)
@@ -359,23 +359,17 @@ func ensureUniqueFilename(dataDir, dateDir, filename string) string {
 	candidate := filename
 	suffix := 2
 	for {
-		// Check posts directory
-		postPath := filepath.Join(dataDir, "posts", dateDir, candidate+".md")
+		// Check posts content directory
+		postPath := filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir, candidate+".md")
 		if _, err := os.Stat(postPath); err == nil {
 			candidate = fmt.Sprintf("%s-%d", filename, suffix)
 			suffix++
 			continue
 		}
 
-		// Check drafts directories (both old and new paths)
-		draftPath1 := filepath.Join(dataDir, ".polis", "posts", "drafts", candidate+".md")
-		draftPath2 := filepath.Join(dataDir, ".polis", "drafts", candidate+".md")
-		if _, err := os.Stat(draftPath1); err == nil {
-			candidate = fmt.Sprintf("%s-%d", filename, suffix)
-			suffix++
-			continue
-		}
-		if _, err := os.Stat(draftPath2); err == nil {
+		// Check drafts directory
+		draftPath := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "posts", "drafts", candidate+".md")
+		if _, err := os.Stat(draftPath); err == nil {
 			candidate = fmt.Sprintf("%s-%d", filename, suffix)
 			suffix++
 			continue
@@ -478,7 +472,7 @@ func updateCurrentHashInVersionsFile(versionsPath, newHash string) error {
 // canonicalPath is the relative path like "posts/20260128/filename.md"
 // contentWithoutFrontmatter is the body content without YAML frontmatter
 func initializeVersionHistory(dataDir, dateDir, filename, canonicalPath, contentWithoutFrontmatter, hash, timestamp string) error {
-	versionsDir := filepath.Join(dataDir, "posts", dateDir, ".versions")
+	versionsDir := filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir, ".versions")
 	if err := os.MkdirAll(versionsDir, 0755); err != nil {
 		return err
 	}
@@ -511,86 +505,10 @@ func DefaultVersion() string {
 	return GetGenerator()
 }
 
-// UpdateManifest updates the manifest.json file.
-// Matches the bash CLI's manifest structure exactly.
+// UpdateManifest is a no-op — manifest.json has been absorbed into .well-known/polis.
+// Post/comment counts are computed on-the-fly by the webapp from the content directories.
 func UpdateManifest(dataDir string) error {
-	metadataDir := filepath.Join(dataDir, "metadata")
-	manifestPath := filepath.Join(metadataDir, "manifest.json")
-
-	// Load existing manifest if present (preserves active_theme, version)
-	var manifest ManifestData
-	if data, err := os.ReadFile(manifestPath); err == nil {
-		json.Unmarshal(data, &manifest)
-	}
-
-	// Set version if not already set
-	if manifest.Version == "" {
-		manifest.Version = DefaultVersion()
-	}
-
-	// Count posts and find last_published timestamp
-	postCount := 0
-	var lastPublished string
-	postsDir := filepath.Join(dataDir, "posts")
-	if entries, err := os.ReadDir(postsDir); err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() {
-				// Count .md files in date directory
-				dateDirPath := filepath.Join(postsDir, entry.Name())
-				if files, err := os.ReadDir(dateDirPath); err == nil {
-					for _, file := range files {
-						if !file.IsDir() && strings.HasSuffix(file.Name(), ".md") {
-							postCount++
-							// Check file modification time for last_published
-							filePath := filepath.Join(dateDirPath, file.Name())
-							if info, err := os.Stat(filePath); err == nil {
-								modTime := info.ModTime().UTC().Format("2006-01-02T15:04:05Z")
-								if modTime > lastPublished {
-									lastPublished = modTime
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Count comments
-	commentCount := 0
-	commentsDir := filepath.Join(dataDir, "comments")
-	if entries, err := os.ReadDir(commentsDir); err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() {
-				// Count .md files in date directory
-				dateDirPath := filepath.Join(commentsDir, entry.Name())
-				if files, err := os.ReadDir(dateDirPath); err == nil {
-					for _, file := range files {
-						if !file.IsDir() && strings.HasSuffix(file.Name(), ".md") {
-							commentCount++
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Use current time if no posts found
-	if lastPublished == "" {
-		lastPublished = time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	}
-
-	manifest.PostCount = postCount
-	manifest.CommentCount = commentCount
-	manifest.LastPublished = lastPublished
-
-	// Write manifest
-	data, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(manifestPath, data, 0644)
+	return nil
 }
 
 // HasFrontmatter checks if content already has YAML frontmatter.
@@ -835,7 +753,7 @@ signature: %s
 // oldContentWithoutFrontmatter is the previous version's content for diff computation
 // newContentWithoutFrontmatter is the new content for diff computation
 func appendVersionHistory(dataDir, dateDir, filename, canonicalPath, previousHash, newHash, timestamp, oldContentWithoutFrontmatter, newContentWithoutFrontmatter string) error {
-	versionsDir := filepath.Join(dataDir, "posts", dateDir, ".versions")
+	versionsDir := filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir, ".versions")
 	if err := os.MkdirAll(versionsDir, 0755); err != nil {
 		return err
 	}
@@ -884,9 +802,9 @@ DIFF_START
 	return err
 }
 
-// UpdateIndexEntry updates an existing entry in public.jsonl.
+// UpdateIndexEntry updates an existing entry in the index.
 func UpdateIndexEntry(dataDir, postPath, newTitle, newVersion string) error {
-	indexPath := filepath.Join(dataDir, "metadata", "public.jsonl")
+	indexPath := filepath.Join(dataDir, "content", "pub.polis.core", "index.jsonl")
 
 	data, err := os.ReadFile(indexPath)
 	if err != nil {

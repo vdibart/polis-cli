@@ -18,7 +18,7 @@ func TestFeedHandler_PostEvent(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:        json.Number("1"),
-			Type:      "polis.post.published",
+			Type:      "pub.polis.post.published",
 			Timestamp: "2026-02-01T10:00:00Z",
 			Actor:     "alice.polis.pub",
 			Payload: map[string]interface{}{
@@ -73,7 +73,7 @@ func TestFeedHandler_CommentEvent(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:        json.Number("2"),
-			Type:      "polis.comment.published",
+			Type:      "pub.polis.comment.published",
 			Timestamp: "2026-02-02T10:00:00Z",
 			Actor:     "bob.polis.pub",
 			Payload: map[string]interface{}{
@@ -124,7 +124,7 @@ func TestFeedHandler_CommentEvent_NoTargetURL(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:        json.Number("3"),
-			Type:      "polis.comment.published",
+			Type:      "pub.polis.comment.published",
 			Timestamp: "2026-02-02T10:00:00Z",
 			Actor:     "bob.polis.pub",
 			Payload: map[string]interface{}{
@@ -154,7 +154,7 @@ func TestFeedHandler_CommentEvent_RootPostFallback(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:        json.Number("4"),
-			Type:      "polis.comment.published",
+			Type:      "pub.polis.comment.published",
 			Timestamp: "2026-02-02T10:00:00Z",
 			Actor:     "bob.polis.pub",
 			Payload: map[string]interface{}{
@@ -189,7 +189,7 @@ func TestFeedHandler_SkipsSelfEvents(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:        json.Number("1"),
-			Type:      "polis.post.published",
+			Type:      "pub.polis.post.published",
 			Timestamp: "2026-02-01T10:00:00Z",
 			Actor:     "me.polis.pub", // Self-authored
 			Payload: map[string]interface{}{
@@ -202,7 +202,7 @@ func TestFeedHandler_SkipsSelfEvents(t *testing.T) {
 		},
 		{
 			ID:        json.Number("2"),
-			Type:      "polis.post.published",
+			Type:      "pub.polis.post.published",
 			Timestamp: "2026-02-01T11:00:00Z",
 			Actor:     "alice.polis.pub", // Not self
 			Payload: map[string]interface{}{
@@ -232,14 +232,14 @@ func TestFeedHandler_IgnoresUnknownTypes(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:        json.Number("1"),
-			Type:      "polis.blessing.granted",
+			Type:      "pub.polis.comment.blessing.granted",
 			Timestamp: "2026-02-01T10:00:00Z",
 			Actor:     "alice.polis.pub",
 			Payload:   map[string]interface{}{},
 		},
 		{
 			ID:        json.Number("2"),
-			Type:      "polis.follow.announced",
+			Type:      "pub.polis.follow.announced",
 			Timestamp: "2026-02-01T10:00:00Z",
 			Actor:     "bob.polis.pub",
 			Payload:   map[string]interface{}{},
@@ -260,7 +260,7 @@ func TestFeedHandler_RepublishedEvents(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:        json.Number("1"),
-			Type:      "polis.post.republished",
+			Type:      "pub.polis.post.republished",
 			Timestamp: "2026-02-01T10:00:00Z",
 			Actor:     "alice.polis.pub",
 			Payload: map[string]interface{}{
@@ -274,7 +274,7 @@ func TestFeedHandler_RepublishedEvents(t *testing.T) {
 		},
 		{
 			ID:        json.Number("2"),
-			Type:      "polis.comment.republished",
+			Type:      "pub.polis.comment.republished",
 			Timestamp: "2026-02-02T10:00:00Z",
 			Actor:     "bob.polis.pub",
 			Payload: map[string]interface{}{
@@ -307,7 +307,7 @@ func TestFeedHandler_FallbackTimestamp(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:        json.Number("1"),
-			Type:      "polis.post.published",
+			Type:      "pub.polis.post.published",
 			Timestamp: "2026-02-01T10:00:00Z",
 			Actor:     "alice.polis.pub",
 			Payload: map[string]interface{}{

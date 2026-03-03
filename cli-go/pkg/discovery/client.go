@@ -15,6 +15,9 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 )
 
+// maxDSResponseSize is the maximum response body size for DS API responses (5MB).
+const maxDSResponseSize = 5 * 1024 * 1024
+
 // Client is an HTTP client for the discovery service.
 type Client struct {
 	BaseURL       string
@@ -252,7 +255,7 @@ func (c *Client) RegisterContent(req *ContentRegisterRequest) (*ContentRegisterR
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -304,7 +307,7 @@ func (c *Client) UnregisterContent(contentType, contentURL, signature string) er
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 		return fmt.Errorf("content unregistration failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -333,7 +336,7 @@ func (c *Client) CheckContent(contentType, contentURL string) (*ContentCheckResp
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -377,7 +380,7 @@ func (c *Client) QueryContent(contentType string, filters map[string]string) (*C
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -451,7 +454,7 @@ func (c *Client) UpdateRelationship(relType, sourceURL, targetURL, action string
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 		return fmt.Errorf("relationship update failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -485,7 +488,7 @@ func (c *Client) QueryRelationships(relType string, filters map[string]string) (
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -572,6 +575,7 @@ type SiteCheckResponse struct {
 	RegistryURL         string `json:"registry_url,omitempty"`
 	RegistrationVersion int    `json:"registration_version,omitempty"`
 	ServiceAttestation  string `json:"service_attestation,omitempty"`
+	AttestationKeyID    string `json:"attestation_key_id,omitempty"`
 }
 
 // SiteRegisterResponse is the response from the sites-register endpoint.
@@ -639,7 +643,7 @@ func (c *Client) CheckSiteRegistration(domain string) (*SiteCheckResponse, error
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -705,7 +709,7 @@ func (c *Client) RegisterSite(domain string, privateKey []byte, email, authorNam
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -773,7 +777,7 @@ func (c *Client) UnregisterSite(domain string, privateKey []byte) (*SiteUnregist
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -924,7 +928,7 @@ func (c *Client) StreamQuery(since string, limit int, typeFilter string, actorFi
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -979,7 +983,7 @@ func (c *Client) StreamPublish(eventType, actor string, payload map[string]inter
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 		return fmt.Errorf("stream publish failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -1004,7 +1008,7 @@ func (c *Client) StreamHealth() (*StreamHealthResponse, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -1094,7 +1098,7 @@ func (c *Client) RotateKey(req KeyRotationRequest) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 		return fmt.Errorf("key rotation failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 

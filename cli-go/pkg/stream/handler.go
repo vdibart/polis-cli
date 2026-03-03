@@ -6,7 +6,7 @@ import (
 
 // ProjectionHandler defines how a projection processes stream events.
 type ProjectionHandler interface {
-	// TypePrefix returns the event type prefix this handler owns (e.g., "polis.follow").
+	// TypePrefix returns the event type prefix this handler owns (e.g., "pub.polis.follow").
 	TypePrefix() string
 
 	// EventTypes returns the specific event types this handler consumes.
@@ -23,8 +23,8 @@ type ProjectionHandler interface {
 // Note: NotificationHandler is not included here because it uses a different
 // processing model (rule-driven, writes to state.jsonl instead of projection state).
 var BuiltinHandlers = map[string]ProjectionHandler{
-	"polis.follow":   &FollowHandler{},
-	"polis.blessing": &BlessingHandler{},
+	"pub.polis.follow":            &FollowHandler{},
+	"pub.polis.comment.blessing":  &BlessingHandler{},
 }
 
 // SyncHandler processes batches of stream events as part of the unified sync loop.

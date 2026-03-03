@@ -16,7 +16,7 @@ type DenyResult struct {
 // This calls the discovery service via relationship-update to deny the blessing.
 // No local state changes are needed for denials.
 func Deny(commentURL, targetURL string, client *discovery.Client, privateKey []byte) (*DenyResult, error) {
-	if err := client.UpdateRelationship("polis.blessing", commentURL, targetURL, "deny", privateKey); err != nil {
+	if err := client.UpdateRelationship("pub.polis.comment.blessing", commentURL, targetURL, "deny", privateKey); err != nil {
 		return nil, fmt.Errorf("failed to deny blessing: %w", err)
 	}
 

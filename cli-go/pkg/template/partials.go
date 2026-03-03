@@ -112,7 +112,7 @@ func (e *Engine) getThemeSnippetsDir() string {
 	}
 
 	// Try local theme first
-	localDir := filepath.Join(e.config.DataDir, ".polis", "themes", e.config.ActiveTheme, "snippets")
+	localDir := filepath.Join(e.config.DataDir, "site", "themes", e.config.ActiveTheme, "snippets")
 	if _, err := os.Stat(localDir); err == nil {
 		return localDir
 	}

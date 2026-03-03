@@ -120,7 +120,7 @@ func TestCommentsSectionViaPartial(t *testing.T) {
 	// The index template uses {{> theme:comment-item}} inside {{#comments}},
 	// so target_author and preview must be available after partial expansion.
 	tempDir := t.TempDir()
-	themeDir := filepath.Join(tempDir, ".polis", "themes", "turbo", "snippets")
+	themeDir := filepath.Join(tempDir, "site", "themes", "turbo", "snippets")
 	os.MkdirAll(themeDir, 0755)
 	os.WriteFile(filepath.Join(themeDir, "comment-item.html"), []byte(
 		`<span class="author">{{target_author}}</span> <span class="preview">{{preview}}</span>`), 0644)
@@ -158,7 +158,7 @@ func TestCommentsSectionViaPartial(t *testing.T) {
 func TestPartialLoading(t *testing.T) {
 	// Create temp directory with snippets
 	tempDir := t.TempDir()
-	snippetsDir := filepath.Join(tempDir, "snippets")
+	snippetsDir := filepath.Join(tempDir, "site", "snippets")
 	os.MkdirAll(snippetsDir, 0755)
 
 	// Create a test snippet
@@ -197,7 +197,7 @@ func mockMarkdownRenderer(md string) (string, error) {
 func TestPartialWithMarkdown(t *testing.T) {
 	// Create temp directory with snippets
 	tempDir := t.TempDir()
-	snippetsDir := filepath.Join(tempDir, "snippets")
+	snippetsDir := filepath.Join(tempDir, "site", "snippets")
 	os.MkdirAll(snippetsDir, 0755)
 
 	// Create a markdown snippet
@@ -231,12 +231,12 @@ func TestPartialResolutionOrder(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Global snippets
-	globalDir := filepath.Join(tempDir, "snippets")
+	globalDir := filepath.Join(tempDir, "site", "snippets")
 	os.MkdirAll(globalDir, 0755)
 	os.WriteFile(filepath.Join(globalDir, "about.html"), []byte("GLOBAL ABOUT"), 0644)
 
 	// Theme snippets
-	themeDir := filepath.Join(tempDir, ".polis", "themes", "turbo", "snippets")
+	themeDir := filepath.Join(tempDir, "site", "themes", "turbo", "snippets")
 	os.MkdirAll(themeDir, 0755)
 	os.WriteFile(filepath.Join(themeDir, "about.html"), []byte("THEME ABOUT"), 0644)
 
@@ -300,7 +300,7 @@ func TestStripMarkers(t *testing.T) {
 
 func TestMaxRecursionDepth(t *testing.T) {
 	tempDir := t.TempDir()
-	snippetsDir := filepath.Join(tempDir, "snippets")
+	snippetsDir := filepath.Join(tempDir, "site", "snippets")
 	os.MkdirAll(snippetsDir, 0755)
 
 	// Create recursive snippet
@@ -357,7 +357,7 @@ func TestPostTitleWithPartialSyntaxViaSnippet(t *testing.T) {
 	// inside processPartials substitutes {{title}} with the user value,
 	// which must not be re-interpreted as template syntax.
 	tempDir := t.TempDir()
-	themeDir := filepath.Join(tempDir, ".polis", "themes", "sols", "snippets")
+	themeDir := filepath.Join(tempDir, "site", "themes", "sols", "snippets")
 	os.MkdirAll(themeDir, 0755)
 	os.WriteFile(filepath.Join(themeDir, "post-item.html"), []byte(
 		`<a href="{{url}}"><span>{{title}}</span></a>`), 0644)

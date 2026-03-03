@@ -30,7 +30,7 @@ func handleUnfollow(args []string) {
 	// Load discovery client
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	if discoveryURL == "" {
-		discoveryURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+		discoveryURL = "https://ds.polis.pub"
 	}
 	apiKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	client := discovery.NewClient(discoveryURL, apiKey)
@@ -56,7 +56,7 @@ func handleUnfollow(args []string) {
 	if remoteWK != nil {
 		authorDomain := discovery.ExtractDomainFromURL(authorURL)
 		// Fetch granted blessings where source is from the author's domain
-		grantedResp, _ := client.QueryRelationships("polis.blessing", map[string]string{
+		grantedResp, _ := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 			"status": "granted",
 		})
 
@@ -64,7 +64,7 @@ func handleUnfollow(args []string) {
 			for _, rel := range grantedResp.Records {
 				if discovery.ExtractDomainFromURL(rel.SourceURL) == authorDomain {
 					commentCount++
-					if err := client.UpdateRelationship("polis.blessing", rel.SourceURL, rel.TargetURL, "deny", privKey); err != nil {
+					if err := client.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "deny", privKey); err != nil {
 						failedCount++
 						continue
 					}
@@ -75,7 +75,7 @@ func handleUnfollow(args []string) {
 	}
 
 	// Remove from following.json
-	followingPath := filepath.Join(dir, "metadata", "following.json")
+	followingPath := filepath.Join(dir, "content", "pub.polis.core", "follow", "following.json")
 	f, err := following.Load(followingPath)
 	if err != nil {
 		exitError("Failed to load following.json: %v", err)

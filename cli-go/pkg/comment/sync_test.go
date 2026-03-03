@@ -18,7 +18,7 @@ func TestSyncParsesNestedInReplyTo(t *testing.T) {
 	dataDir := t.TempDir()
 
 	// Create pending directory
-	pendingDir := filepath.Join(dataDir, ".polis", "comments", "pending")
+	pendingDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending")
 	if err := os.MkdirAll(pendingDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -99,13 +99,13 @@ func TestSyncFromEvents_BlessingGranted(t *testing.T) {
 	dataDir := t.TempDir()
 
 	// Create pending directory and a comment file
-	pendingDir := filepath.Join(dataDir, ".polis", "comments", "pending")
+	pendingDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending")
 	if err := os.MkdirAll(pendingDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	// Also create the blessed date directory for MoveComment
-	blessedDir := filepath.Join(dataDir, "comments")
+	blessedDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment")
 	if err := os.MkdirAll(blessedDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ Great post!
 	events := []discovery.StreamEvent{
 		{
 			ID:   json.Number("100"),
-			Type: "polis.blessing.granted",
+			Type: "pub.polis.comment.blessing.granted",
 			Payload: map[string]interface{}{
 				"source_url":    "https://alice.com/comments/20260222/testpost-20260222.md",
 				"source_domain": "alice.com",
@@ -158,8 +158,8 @@ Great post!
 func TestSyncFromEvents_BlessingDenied(t *testing.T) {
 	dataDir := t.TempDir()
 
-	pendingDir := filepath.Join(dataDir, ".polis", "comments", "pending")
-	deniedDir := filepath.Join(dataDir, ".polis", "comments", "denied")
+	pendingDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending")
+	deniedDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "denied")
 	if err := os.MkdirAll(pendingDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ Hi!
 	events := []discovery.StreamEvent{
 		{
 			ID:   json.Number("100"),
-			Type: "polis.blessing.denied",
+			Type: "pub.polis.comment.blessing.denied",
 			Payload: map[string]interface{}{
 				"source_url":    "https://alice.com/comments/20260222/test.md",
 				"source_domain": "alice.com",
@@ -214,7 +214,7 @@ Hi!
 func TestSyncFromEvents_IgnoresOtherDomains(t *testing.T) {
 	dataDir := t.TempDir()
 
-	pendingDir := filepath.Join(dataDir, ".polis", "comments", "pending")
+	pendingDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending")
 	if err := os.MkdirAll(pendingDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ Hi!
 	events := []discovery.StreamEvent{
 		{
 			ID:   json.Number("100"),
-			Type: "polis.blessing.granted",
+			Type: "pub.polis.comment.blessing.granted",
 			Payload: map[string]interface{}{
 				"source_url":    "https://charlie.com/comments/20260222/other.md",
 				"source_domain": "charlie.com", // Not alice.com
@@ -270,7 +270,7 @@ func TestSyncFromEvents_EmptyBaseURL(t *testing.T) {
 	dataDir := t.TempDir()
 
 	events := []discovery.StreamEvent{
-		{ID: json.Number("1"), Type: "polis.blessing.granted", Payload: map[string]interface{}{
+		{ID: json.Number("1"), Type: "pub.polis.comment.blessing.granted", Payload: map[string]interface{}{
 			"source_url": "https://x.com/c/1.md", "source_domain": "",
 		}},
 	}

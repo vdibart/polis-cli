@@ -86,7 +86,7 @@ func handleCommentDraft(args []string) {
 	} else {
 		fmt.Printf("Created draft: %s\n", draft.ID)
 		fmt.Printf("In reply to: %s\n", draft.InReplyTo)
-		fmt.Printf("Edit at: .polis/comments/drafts/%s.md\n", draft.ID)
+		fmt.Printf("Edit at: .polis/content/pub.polis.core/comments/drafts/%s.md\n", draft.ID)
 	}
 }
 
@@ -120,11 +120,8 @@ func handleCommentSign(args []string) {
 		exitError("Failed to load .well-known/polis: %v", err)
 	}
 
-	// Get site URL from env or .well-known/polis
+	// Get site URL from env
 	siteURL := os.Getenv("POLIS_BASE_URL")
-	if siteURL == "" && wk.BaseURL != "" {
-		siteURL = wk.BaseURL
-	}
 	if siteURL == "" {
 		exitError("POLIS_BASE_URL not set")
 	}
@@ -272,7 +269,7 @@ func handleCommentSync(args []string) {
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if discoveryURL == "" {
-		discoveryURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+		discoveryURL = "https://ds.polis.pub"
 	}
 
 	baseURL := os.Getenv("POLIS_BASE_URL")

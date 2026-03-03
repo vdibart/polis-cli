@@ -5,7 +5,7 @@ project_name: polis
 before:
   hooks:
     - go mod tidy -C cli-go
-    - go mod tidy -C webapp/localhost
+    - go mod tidy -C webapp
 
 builds:
   # CLI-only binary (~9 MB)
@@ -30,7 +30,7 @@ builds:
 
   # Webapp-only binary (~11 MB)
   - id: polis-server
-    dir: webapp/localhost
+    dir: webapp
     main: ./cmd/server
     binary: polis-server
     env:
@@ -50,7 +50,7 @@ builds:
 
   # Bundled binary: CLI + serve command (~12 MB)
   - id: polis-full
-    dir: webapp/localhost
+    dir: webapp
     main: ./cmd/polis-full
     binary: polis-full
     env:

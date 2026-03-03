@@ -59,7 +59,7 @@ This content was added in an update."
 
     # Verify index contains the post
     log "Step 5: Verify index"
-    assert_file_contains "metadata/public.jsonl" "Integration Test Post" || return 1
+    assert_file_contains "content/pub.polis.core/index.jsonl" "Integration Test Post" || return 1
 
     log "  [OK] Full post cycle completed successfully"
     return 0
@@ -117,14 +117,14 @@ test_rebuild_index() {
 
     # Count initial index entries
     local initial_count
-    initial_count=$(wc -l < metadata/public.jsonl)
+    initial_count=$(wc -l < content/pub.polis.core/index.jsonl)
     log "  Initial index entries: $initial_count"
 
     # Clear and rebuild index
-    echo "" > metadata/public.jsonl
+    echo "" > content/pub.polis.core/index.jsonl
 
     local result
-    result=$("$POLIS_BIN" --json rebuild 2>&1)
+    result=$("$POLIS_BIN" --json rebuild --posts 2>&1)
     local exit_code=$?
 
     # Rebuild may not have JSON mode, check for success either way
@@ -135,7 +135,7 @@ test_rebuild_index() {
 
     # Verify index was rebuilt
     local rebuild_count
-    rebuild_count=$(wc -l < metadata/public.jsonl)
+    rebuild_count=$(wc -l < content/pub.polis.core/index.jsonl)
     log "  Rebuilt index entries: $rebuild_count"
 
     if [[ "$rebuild_count" -ge 3 ]]; then
@@ -146,9 +146,9 @@ test_rebuild_index() {
     fi
 
     # Verify all posts are in index
-    assert_file_contains "metadata/public.jsonl" "First Post" || return 1
-    assert_file_contains "metadata/public.jsonl" "Second Post" || return 1
-    assert_file_contains "metadata/public.jsonl" "Third Post" || return 1
+    assert_file_contains "content/pub.polis.core/index.jsonl" "First Post" || return 1
+    assert_file_contains "content/pub.polis.core/index.jsonl" "Second Post" || return 1
+    assert_file_contains "content/pub.polis.core/index.jsonl" "Third Post" || return 1
 
     return 0
 }

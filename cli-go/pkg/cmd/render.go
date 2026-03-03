@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 )
 
@@ -39,12 +40,23 @@ func handleRender(args []string) {
 		url = getBaseURLFromSite(dir) // legacy fallback for pre-upgrade sites
 	}
 
+	// Load bundle for source/mount path resolution
+	coreBundle := loadOrDefaultBundle(dir)
+	postsSource, _ := coreBundle.ContentDir("pub.polis.post")
+	postsMountDir, _ := coreBundle.MountDir("pub.polis.post")
+	commentsSource, _ := coreBundle.ContentDir("pub.polis.comment")
+	commentsMountDir, _ := coreBundle.MountDir("pub.polis.comment")
+
 	// Create renderer
 	renderer, err := render.NewPageRenderer(render.PageConfig{
-		DataDir:       dir,
-		CLIThemesDir:  themesDir,
-		BaseURL:       url,
-		RenderMarkers: false, // CLI rendering doesn't need edit markers
+		DataDir:           dir,
+		CLIThemesDir:      themesDir,
+		BaseURL:           url,
+		RenderMarkers:     false, // CLI rendering doesn't need edit markers
+		PostsSourceDir:    postsSource,
+		PostsMountDir:     postsMountDir,
+		CommentsSourceDir: commentsSource,
+		CommentsMountDir:  commentsMountDir,
 	})
 	if err != nil {
 		exitError("Failed to create renderer: %v", err)
@@ -96,6 +108,16 @@ func getBaseURLFromSite(dir string) string {
 		return ""
 	}
 	return wk.BaseURL
+}
+
+// loadOrDefaultBundle loads the site's bundle.json if present, otherwise returns
+// the default pub.polis.core bundle.
+func loadOrDefaultBundle(dir string) *bundle.Bundle {
+	bundlePath := filepath.Join(dir, "content", "pub.polis.core", "bundle.json")
+	if b, err := bundle.LoadBundle(bundlePath); err == nil {
+		return b
+	}
+	return bundle.DefaultCoreBundle()
 }
 
 func findCLIThemesDir() string {

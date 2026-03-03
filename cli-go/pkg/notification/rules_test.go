@@ -12,15 +12,15 @@ func TestDefaultRules(t *testing.T) {
 
 	// Check all event types are covered
 	eventTypes := map[string]bool{
-		"polis.follow.announced":    false,
-		"polis.follow.removed":      false,
-		"polis.blessing.requested":  false,
-		"polis.blessing.granted":    false,
-		"polis.blessing.denied":     false,
-		"polis.comment.published":   false,
-		"polis.comment.republished": false,
-		"polis.post.published":      false,
-		"polis.post.republished":    false,
+		"pub.polis.follow.announced":            false,
+		"pub.polis.follow.removed":              false,
+		"pub.polis.comment.blessing.requested":  false,
+		"pub.polis.comment.blessing.granted":    false,
+		"pub.polis.comment.blessing.denied":     false,
+		"pub.polis.comment.published":           false,
+		"pub.polis.comment.republished":         false,
+		"pub.polis.post.published":              false,
+		"pub.polis.post.republished":            false,
 	}
 	for _, r := range rules {
 		if _, ok := eventTypes[r.EventType]; !ok {

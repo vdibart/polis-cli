@@ -21,7 +21,7 @@ type SyncResult struct {
 // SyncPendingComments checks all pending comments with the discovery service
 // and moves them to blessed/denied based on their status.
 // It also runs the post-comment hook when a comment is blessed.
-// Pending/denied comments are in .polis/comments/, blessed go to public comments/YYYY/MM/.
+// Pending/denied comments are in .polis/content/pub.polis.core/comments/, blessed go to content/pub.polis.core/comment/YYYYMMDD/.
 // baseURL is this site's base URL (e.g. "https://follower1.polis.pub"), used to
 // reconstruct comment URLs from frontmatter when the flat comment_url field is absent.
 func SyncPendingComments(dataDir, baseURL string, discoveryClient *discovery.Client, hookConfig *hooks.HookConfig) (*SyncResult, error) {
@@ -32,7 +32,7 @@ func SyncPendingComments(dataDir, baseURL string, discoveryClient *discovery.Cli
 		Errors:       []string{},
 	}
 
-	pendingDir := filepath.Join(dataDir, ".polis", "comments", StatusPending)
+	pendingDir := getCommentDir(dataDir, StatusPending)
 	entries, err := os.ReadDir(pendingDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -84,7 +84,7 @@ func SyncPendingComments(dataDir, baseURL string, discoveryClient *discovery.Cli
 		}
 
 		// Check blessing status via relationship-query
-		resp, err := discoveryClient.QueryRelationships("polis.blessing", map[string]string{
+		resp, err := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 			"source_url": commentURL,
 			"target_url": inReplyTo,
 		})
@@ -174,13 +174,13 @@ func SyncFromEvents(dataDir, baseURL string, events []discovery.StreamEvent, hoo
 	blessingEvents := make(map[string]string)
 	for _, evt := range events {
 		switch evt.Type {
-		case "polis.blessing.granted", "polis.blessing.denied":
+		case "pub.polis.comment.blessing.granted", "pub.polis.comment.blessing.denied":
 			sourceURL, _ := evt.Payload["source_url"].(string)
 			sourceDomain, _ := evt.Payload["source_domain"].(string)
 			if sourceURL == "" || sourceDomain != myDomain {
 				continue
 			}
-			if evt.Type == "polis.blessing.granted" {
+			if evt.Type == "pub.polis.comment.blessing.granted" {
 				blessingEvents[sourceURL] = "granted"
 			} else {
 				blessingEvents[sourceURL] = "denied"
@@ -193,7 +193,7 @@ func SyncFromEvents(dataDir, baseURL string, events []discovery.StreamEvent, hoo
 	}
 
 	// Scan pending comments and match against events
-	pendingDir := filepath.Join(dataDir, ".polis", "comments", StatusPending)
+	pendingDir := getCommentDir(dataDir, StatusPending)
 	entries, err := os.ReadDir(pendingDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -287,8 +287,8 @@ func SyncFromEvents(dataDir, baseURL string, events []discovery.StreamEvent, hoo
 // SyncSingleComment syncs a single comment by ID.
 // baseURL is this site's base URL, used to reconstruct comment URLs when missing.
 func SyncSingleComment(dataDir, baseURL, commentID string, discoveryClient *discovery.Client, hookConfig *hooks.HookConfig) (string, error) {
-	// Read comment to get URL (from .polis/comments/pending/)
-	commentPath := filepath.Join(dataDir, ".polis", "comments", StatusPending, commentID+".md")
+	// Read comment to get URL
+	commentPath := filepath.Join(getCommentDir(dataDir, StatusPending), commentID+".md")
 	data, err := os.ReadFile(commentPath)
 	if err != nil {
 		return "", err
@@ -321,7 +321,7 @@ func SyncSingleComment(dataDir, baseURL, commentID string, discoveryClient *disc
 	}
 
 	// Check status via relationship-query
-	resp, err := discoveryClient.QueryRelationships("polis.blessing", map[string]string{
+	resp, err := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 		"source_url": commentURL,
 		"target_url": inReplyTo,
 	})

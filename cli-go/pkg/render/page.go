@@ -19,6 +19,13 @@ type PageConfig struct {
 	CLIThemesDir  string // CLI themes directory (fallback)
 	BaseURL       string // Site base URL
 	RenderMarkers bool   // Add snippet markers for editing
+	// Source/output separation: when MountDir is set, rendered output goes to
+	// mount dirs (e.g. "posts/") instead of alongside source files in content dirs.
+	// Empty MountDir falls back to legacy behavior (write next to source).
+	PostsSourceDir    string // e.g. "content/pub.polis.core/post"
+	PostsMountDir     string // e.g. "posts"
+	CommentsSourceDir string // e.g. "content/pub.polis.core/comment"
+	CommentsMountDir  string // e.g. "comments"
 }
 
 // PageRenderer renders polis pages using templates.
@@ -74,12 +81,47 @@ func NewPageRenderer(cfg PageConfig) (*PageRenderer, error) {
 	}, nil
 }
 
+// sourceToMountPath maps a source-relative path to its mount-relative equivalent.
+// If mount dirs are not configured, returns the original path (legacy behavior).
+func (r *PageRenderer) sourceToMountPath(sourcePath, fileType string) string {
+	var sourceDir, mountDir string
+	switch fileType {
+	case "post":
+		sourceDir, mountDir = r.config.PostsSourceDir, r.config.PostsMountDir
+	case "comment":
+		sourceDir, mountDir = r.config.CommentsSourceDir, r.config.CommentsMountDir
+	}
+	if mountDir == "" || sourceDir == "" {
+		return sourcePath // legacy: no separation
+	}
+	suffix := strings.TrimPrefix(sourcePath, sourceDir+"/")
+	if suffix == sourcePath {
+		return sourcePath // path doesn't match source prefix
+	}
+	return filepath.Join(mountDir, suffix)
+}
+
+// copyFile copies a file from src to dst, creating parent directories as needed.
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0644)
+}
+
 // RenderFile renders a single file (post or comment) to HTML.
 // Returns the rendered HTML, whether it was rendered (vs skipped), and any error.
 func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (string, bool, error) {
-	// Build full paths
+	// Build full paths — source is always in content dir
 	mdPath := filepath.Join(r.config.DataDir, path)
-	htmlPath := strings.TrimSuffix(mdPath, ".md") + ".html"
+	// Map source path to mount path for output
+	mountPath := r.sourceToMountPath(path, fileType)
+	htmlMountRel := strings.TrimSuffix(mountPath, ".md") + ".html"
+	htmlPath := filepath.Join(r.config.DataDir, htmlMountRel)
 
 	// Check if rendering is needed (unless force)
 	if !force {
@@ -111,24 +153,24 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 		return "", false, fmt.Errorf("failed to render markdown: %w", err)
 	}
 
-	// Build render context
+	// Build render context — use mount path for URLs and relative paths
 	ctx := template.NewRenderContext()
 	ctx.Title = fm["title"]
 	ctx.Content = htmlContent
 	ctx.Published = fm["published"]
 	ctx.PublishedHuman = template.FormatHumanDate(fm["published"])
-	ctx.URL = r.buildURL(path)
+	ctx.URL = r.buildURL(htmlMountRel)
 	ctx.Version = fm["current-version"]
 	if ctx.Version == "" {
 		ctx.Version = fm["version"]
 	}
 	ctx.SignatureShort = template.TruncateSignature(fm["signature"], 16)
 
-	// Site info
+	// Site info — CSS/Home paths computed from mount path (shallower than source)
 	ctx.SiteURL = r.config.BaseURL
 	ctx.SiteTitle = r.getSiteTitle()
-	ctx.CSSPath = theme.CalculateCSSPath(path)
-	ctx.HomePath = theme.CalculateHomePath(path)
+	ctx.CSSPath = theme.CalculateCSSPath(htmlMountRel)
+	ctx.HomePath = theme.CalculateHomePath(htmlMountRel)
 	ctx.AuthorName = r.getAuthorName()
 	if ctx.AuthorName == "" {
 		ctx.AuthorName = r.getAuthorDomain()
@@ -176,13 +218,21 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 		return "", false, fmt.Errorf("failed to render template: %w", err)
 	}
 
-	// Write output
+	// Write HTML output to mount dir
 	if err := os.MkdirAll(filepath.Dir(htmlPath), 0755); err != nil {
 		return "", false, fmt.Errorf("failed to create output directory: %w", err)
 	}
 
 	if err := os.WriteFile(htmlPath, []byte(rendered), 0644); err != nil {
 		return "", false, fmt.Errorf("failed to write output: %w", err)
+	}
+
+	// Copy source .md to mount dir (alongside HTML) if mount path differs from source
+	if mountPath != path {
+		mdMountPath := filepath.Join(r.config.DataDir, mountPath)
+		if err := copyFile(mdPath, mdMountPath); err != nil {
+			return "", false, fmt.Errorf("failed to copy source to mount: %w", err)
+		}
 	}
 
 	return rendered, true, nil
@@ -296,8 +346,11 @@ func (r *PageRenderer) RenderArchive() error {
 		return fmt.Errorf("failed to render archive template: %w", err)
 	}
 
-	// Write output to posts/index.html
-	archiveDir := filepath.Join(r.config.DataDir, "posts")
+	// Write output to mount dir (posts/index.html) or legacy content dir
+	archiveDir := filepath.Join(r.config.DataDir, r.config.PostsMountDir)
+	if r.config.PostsMountDir == "" {
+		archiveDir = filepath.Join(r.config.DataDir, "content", "pub.polis.core", "post")
+	}
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		return fmt.Errorf("failed to create posts directory: %w", err)
 	}
@@ -320,7 +373,7 @@ func (r *PageRenderer) RenderAll(force bool) (*RenderStats, error) {
 	}
 
 	// Find all posts
-	postsDir := filepath.Join(r.config.DataDir, "posts")
+	postsDir := filepath.Join(r.config.DataDir, "content", "pub.polis.core", "post")
 	if err := filepath.Walk(postsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -352,7 +405,7 @@ func (r *PageRenderer) RenderAll(force bool) (*RenderStats, error) {
 	}
 
 	// Find all comments
-	commentsDir := filepath.Join(r.config.DataDir, "comments")
+	commentsDir := filepath.Join(r.config.DataDir, "content", "pub.polis.core", "comment")
 	if err := filepath.Walk(commentsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -381,6 +434,15 @@ func (r *PageRenderer) RenderAll(force bool) (*RenderStats, error) {
 		return nil
 	}); err != nil && !os.IsNotExist(err) {
 		return nil, err
+	}
+
+	// Copy artifacts to mount dirs
+	if r.config.CommentsMountDir != "" {
+		srcBlessed := filepath.Join(r.config.DataDir, "content", "pub.polis.core", "comment", "blessed.json")
+		if _, err := os.Stat(srcBlessed); err == nil {
+			dstBlessed := filepath.Join(r.config.DataDir, r.config.CommentsMountDir, "blessed.json")
+			copyFile(srcBlessed, dstBlessed) // non-fatal
+		}
 	}
 
 	// Generate index
@@ -420,8 +482,9 @@ func (r *PageRenderer) loadPublicIndex() ([]template.PostData, []template.Commen
 
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Path, "posts/") || entry.Type == "post" {
-			// Convert .md to .html for URL
-			htmlPath := strings.TrimSuffix(entry.Path, ".md") + ".html"
+			// Map source path to mount path, then convert .md to .html for URL
+			mountPath := r.sourceToMountPath(entry.Path, "post")
+			htmlPath := strings.TrimSuffix(mountPath, ".md") + ".html"
 
 			// Look up blessed comment count (try multiple path forms)
 			count := commentCountMap[entry.Path]
@@ -437,7 +500,7 @@ func (r *PageRenderer) loadPublicIndex() ([]template.PostData, []template.Commen
 				}
 			}
 
-			// Generate excerpt from post body (non-fatal if file missing)
+			// Generate excerpt from post body — read from source path
 			var excerpt string
 			mdPath := filepath.Join(r.config.DataDir, entry.Path)
 			if data, err := os.ReadFile(mdPath); err == nil {
@@ -454,7 +517,8 @@ func (r *PageRenderer) loadPublicIndex() ([]template.PostData, []template.Commen
 				CommentCount:   count,
 			})
 		} else if strings.HasPrefix(entry.Path, "comments/") || entry.Type == "comment" {
-			htmlPath := strings.TrimSuffix(entry.Path, ".md") + ".html"
+			mountPath := r.sourceToMountPath(entry.Path, "comment")
+			htmlPath := strings.TrimSuffix(mountPath, ".md") + ".html"
 			inReplyToURL := ""
 			if entry.InReplyTo != nil {
 				inReplyToURL = entry.InReplyTo.URL
@@ -508,38 +572,48 @@ func (r *PageRenderer) loadBlessedCommentsForPost(postPath string) ([]template.B
 
 // loadLocalCommentContent tries to resolve a comment URL to a local file and load its content.
 // Returns rendered HTML content if found, empty string otherwise.
+// Checks both mount path (comments/) and source path (content/pub.polis.core/comment/).
 func (r *PageRenderer) loadLocalCommentContent(commentURL string) string {
 	// Try to extract relative path from URL (e.g., comments/20260101/id.md)
-	relPath := ""
+	suffix := ""
 	if idx := strings.Index(commentURL, "/comments/"); idx >= 0 {
-		relPath = commentURL[idx+1:] // "comments/..."
+		suffix = commentURL[idx+len("/comments/"):] // "20260101/id.md"
 	} else if strings.HasPrefix(commentURL, "comments/") {
-		relPath = commentURL
+		suffix = strings.TrimPrefix(commentURL, "comments/")
 	}
 
-	if relPath == "" {
+	if suffix == "" {
 		return ""
 	}
 
 	// Ensure .md extension
-	if !strings.HasSuffix(relPath, ".md") {
-		relPath = strings.TrimSuffix(relPath, ".html") + ".md"
+	if !strings.HasSuffix(suffix, ".md") {
+		suffix = strings.TrimSuffix(suffix, ".html") + ".md"
 	}
 
-	// Read the local file
-	fullPath := filepath.Join(r.config.DataDir, relPath)
-	data, err := os.ReadFile(fullPath)
-	if err != nil {
-		return ""
+	// Try multiple candidate paths: mount path first, then source content path
+	candidates := []string{
+		filepath.Join(r.config.DataDir, "comments", suffix),
+	}
+	if r.config.CommentsSourceDir != "" {
+		candidates = append(candidates, filepath.Join(r.config.DataDir, r.config.CommentsSourceDir, suffix))
 	}
 
-	// Strip frontmatter and render markdown
-	body := stripFrontmatter(string(data))
-	html, err := MarkdownToHTML(body)
-	if err != nil {
-		return body // Return raw text if rendering fails
+	for _, fullPath := range candidates {
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			continue
+		}
+		// Strip frontmatter and render markdown
+		body := stripFrontmatter(string(data))
+		html, err := MarkdownToHTML(body)
+		if err != nil {
+			return body
+		}
+		return html
 	}
-	return html
+
+	return ""
 }
 
 // getSiteTitle returns the site title from .well-known/polis.

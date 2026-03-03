@@ -59,32 +59,32 @@ func validatePath(path string) error {
 	return nil
 }
 
-// GetActiveTheme reads the active_theme from manifest.json.
+// GetActiveTheme reads the active_theme from .well-known/polis.
 func GetActiveTheme(dataDir string) (string, error) {
-	manifestPath := filepath.Join(dataDir, "metadata", "manifest.json")
-	data, err := os.ReadFile(manifestPath)
+	wkPath := filepath.Join(dataDir, ".well-known", "polis")
+	data, err := os.ReadFile(wkPath)
 	if err != nil {
-		// Default to "zane" if manifest doesn't exist or can't be read
+		// Default to "zane" if well-known doesn't exist or can't be read
 		return "zane", nil
 	}
 
-	var manifest struct {
+	var wk struct {
 		ActiveTheme string `json:"active_theme"`
 	}
-	if err := json.Unmarshal(data, &manifest); err != nil {
+	if err := json.Unmarshal(data, &wk); err != nil {
 		return "zane", nil
 	}
 
-	if manifest.ActiveTheme == "" {
+	if wk.ActiveTheme == "" {
 		return "zane", nil
 	}
-	return manifest.ActiveTheme, nil
+	return wk.ActiveTheme, nil
 }
 
 // ListSnippets returns a merged list of snippets from global and theme directories.
 // Global snippets take precedence over theme snippets with the same name.
 // Theme snippets are located at:
-//  1. data/.polis/themes/{active_theme}/snippets/ (local copy)
+//  1. data/site/themes/{active_theme}/snippets/ (local copy)
 //  2. cli/themes/{active_theme}/snippets/ (fallback to CLI themes)
 //
 // The filter parameter controls which snippets are returned:
@@ -105,10 +105,10 @@ func ListSnippets(dataDir, cliThemesDir, activeTheme, relativePath, filter strin
 		}
 	}
 
-	globalBase := filepath.Join(dataDir, "snippets")
+	globalBase := filepath.Join(dataDir, "site", "snippets")
 
-	// Theme snippets: prefer local .polis/themes/, fall back to CLI themes
-	themeBase := filepath.Join(dataDir, ".polis", "themes", activeTheme, "snippets")
+	// Theme snippets: prefer local site/themes/, fall back to CLI themes
+	themeBase := filepath.Join(dataDir, "site", "themes", activeTheme, "snippets")
 	if _, err := os.Stat(themeBase); os.IsNotExist(err) && cliThemesDir != "" {
 		// Fall back to CLI themes directory
 		themeBase = filepath.Join(cliThemesDir, activeTheme, "snippets")
@@ -281,7 +281,7 @@ func resolveSnippetFile(baseDir, snippetPath string) string {
 // ReadSnippet reads the content of a snippet from the specified source.
 // source must be "global" or "theme".
 // Theme snippets are located at:
-//  1. data/.polis/themes/{active_theme}/snippets/ (local copy)
+//  1. data/site/themes/{active_theme}/snippets/ (local copy)
 //  2. cli/themes/{active_theme}/snippets/ (fallback to CLI themes)
 func ReadSnippet(dataDir, cliThemesDir, activeTheme, snippetPath, source string) (*SnippetContent, error) {
 	if err := validatePath(snippetPath); err != nil {
@@ -300,10 +300,10 @@ func ReadSnippet(dataDir, cliThemesDir, activeTheme, snippetPath, source string)
 	var fullPath string
 	switch source {
 	case "global":
-		fullPath = resolveSnippetFile(filepath.Join(dataDir, "snippets"), snippetPath)
+		fullPath = resolveSnippetFile(filepath.Join(dataDir, "site", "snippets"), snippetPath)
 	case "theme":
-		// Theme snippets: prefer local .polis/themes/, fall back to CLI themes
-		fullPath = resolveSnippetFile(filepath.Join(dataDir, ".polis", "themes", activeTheme, "snippets"), snippetPath)
+		// Theme snippets: prefer local site/themes/, fall back to CLI themes
+		fullPath = resolveSnippetFile(filepath.Join(dataDir, "site", "themes", activeTheme, "snippets"), snippetPath)
 		if fullPath == "" && cliThemesDir != "" {
 			// Fall back to CLI themes directory
 			fullPath = resolveSnippetFile(filepath.Join(cliThemesDir, activeTheme, "snippets"), snippetPath)
@@ -337,7 +337,7 @@ func ReadSnippet(dataDir, cliThemesDir, activeTheme, snippetPath, source string)
 
 // WriteSnippet saves content to the specified source (global or theme).
 // Theme snippets are written to:
-//  1. data/.polis/themes/{active_theme}/snippets/ (local copy) if it exists
+//  1. data/site/themes/{active_theme}/snippets/ (local copy) if it exists
 //  2. cli/themes/{active_theme}/snippets/ (fallback to CLI themes)
 //
 // When writing, if the snippetPath doesn't have an extension and no existing
@@ -360,7 +360,7 @@ func WriteSnippet(dataDir, cliThemesDir, activeTheme, snippetPath, content, sour
 	switch source {
 	case "global":
 		// Try to resolve existing file first
-		baseDir := filepath.Join(dataDir, "snippets")
+		baseDir := filepath.Join(dataDir, "site", "snippets")
 		resolved := resolveSnippetFile(baseDir, snippetPath)
 		if resolved != "" {
 			fullPath = resolved
@@ -373,8 +373,8 @@ func WriteSnippet(dataDir, cliThemesDir, activeTheme, snippetPath, content, sour
 			fullPath = filepath.Join(baseDir, snippetPath)
 		}
 	case "theme":
-		// Theme snippets: prefer local .polis/themes/, fall back to CLI themes
-		localThemeBase := filepath.Join(dataDir, ".polis", "themes", activeTheme, "snippets")
+		// Theme snippets: prefer local site/themes/, fall back to CLI themes
+		localThemeBase := filepath.Join(dataDir, "site", "themes", activeTheme, "snippets")
 		cliThemeBase := filepath.Join(cliThemesDir, activeTheme, "snippets")
 
 		// Try to resolve existing file
@@ -433,7 +433,7 @@ func CreateSnippet(dataDir, snippetPath, content string) error {
 		return fmt.Errorf("snippet must have .html or .md extension")
 	}
 
-	fullPath := filepath.Join(dataDir, "snippets", snippetPath)
+	fullPath := filepath.Join(dataDir, "site", "snippets", snippetPath)
 
 	// Check if snippet already exists
 	if _, err := os.Stat(fullPath); err == nil {
@@ -461,7 +461,7 @@ func DeleteSnippet(dataDir, snippetPath string) error {
 		return err
 	}
 
-	fullPath := filepath.Join(dataDir, "snippets", snippetPath)
+	fullPath := filepath.Join(dataDir, "site", "snippets", snippetPath)
 
 	// Check if it exists
 	info, err := os.Stat(fullPath)

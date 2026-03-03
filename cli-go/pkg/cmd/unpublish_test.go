@@ -12,7 +12,7 @@ import (
 )
 
 // setupUnpublishSite creates a minimal polis site fixture in a temp directory.
-// It creates .well-known/polis, .polis/keys/id_ed25519, metadata/, and posts/ dirs.
+// It creates .well-known/polis, .polis/keys/id_ed25519, and content/pub.polis.core/post/ dirs.
 // Returns the site directory and the private key PEM bytes.
 func setupUnpublishSite(t *testing.T) (string, []byte) {
 	t.Helper()
@@ -51,13 +51,8 @@ func setupUnpublishSite(t *testing.T) (string, []byte) {
 		t.Fatal(err)
 	}
 
-	// Create metadata directory
-	if err := os.MkdirAll(filepath.Join(dir, "metadata"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create posts directory
-	if err := os.MkdirAll(filepath.Join(dir, "posts"), 0755); err != nil {
+	// Create content directory (for index.jsonl and posts)
+	if err := os.MkdirAll(filepath.Join(dir, "content", "pub.polis.core", "post"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -65,17 +60,17 @@ func setupUnpublishSite(t *testing.T) (string, []byte) {
 }
 
 // createTestPost creates a post .md file and its .html sibling, and adds an
-// entry to metadata/public.jsonl. Returns the relative post path (e.g.
-// "posts/20260201/my-post.md").
+// entry to content/pub.polis.core/index.jsonl. Returns the relative post path (e.g.
+// "content/pub.polis.core/post/20260201/my-post.md").
 func createTestPost(t *testing.T, dir, dateDir, slug, title string) string {
 	t.Helper()
 
-	postDir := filepath.Join(dir, "posts", dateDir)
+	postDir := filepath.Join(dir, "content", "pub.polis.core", "post", dateDir)
 	if err := os.MkdirAll(postDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	relPath := filepath.Join("posts", dateDir, slug+".md")
+	relPath := filepath.Join("content", "pub.polis.core", "post", dateDir, slug+".md")
 
 	// Write .md file
 	mdContent := "---\ntitle: " + title + "\npublished: 2026-02-01T00:00:00Z\n---\n\n# " + title + "\n\nHello world.\n"
@@ -147,19 +142,6 @@ func TestRunUnpublish_Success(t *testing.T) {
 		}
 	}
 
-	// Assert manifest.json was updated (post_count should be 0)
-	manifestPath := filepath.Join(dir, "metadata", "manifest.json")
-	manifestData, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatalf("manifest.json should exist after unpublish: %v", err)
-	}
-	var manifest map[string]interface{}
-	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		t.Fatalf("failed to parse manifest.json: %v", err)
-	}
-	if count, ok := manifest["post_count"].(float64); !ok || count != 0 {
-		t.Errorf("expected manifest post_count to be 0 after unpublish, got %v", manifest["post_count"])
-	}
 }
 
 func TestRunUnpublish_NoFile(t *testing.T) {
@@ -172,7 +154,7 @@ func TestRunUnpublish_NoFile(t *testing.T) {
 	t.Setenv("POLIS_BASE_URL", "https://example.com")
 	t.Setenv("DISCOVERY_SERVICE_URL", "http://localhost:1/fake-ds")
 
-	err := RunUnpublish(dir, "posts/20260201/nonexistent.md")
+	err := RunUnpublish(dir, "content/pub.polis.core/post/20260201/nonexistent.md")
 	if err == nil {
 		t.Fatal("expected error for nonexistent post")
 	}
@@ -190,7 +172,7 @@ func TestRunUnpublish_InvalidPath(t *testing.T) {
 
 	t.Setenv("POLIS_BASE_URL", "https://example.com")
 
-	err := RunUnpublish(dir, "posts/../../../etc/passwd")
+	err := RunUnpublish(dir, "content/pub.polis.core/post/../../../etc/passwd")
 	if err == nil {
 		t.Fatal("expected error for path traversal")
 	}
@@ -210,10 +192,10 @@ func TestRunUnpublish_NotUnderPosts(t *testing.T) {
 
 	err := RunUnpublish(dir, "comments/foo.md")
 	if err == nil {
-		t.Fatal("expected error for path not under posts/")
+		t.Fatal("expected error for path not under content/pub.polis.core/post/")
 	}
-	if !strings.Contains(err.Error(), "posts/") {
-		t.Errorf("expected error to mention 'posts/', got: %v", err)
+	if !strings.Contains(err.Error(), "content/pub.polis.core/post/") {
+		t.Errorf("expected error to mention 'content/pub.polis.core/post/', got: %v", err)
 	}
 }
 
@@ -272,18 +254,5 @@ func TestRunUnpublish_PreservesOtherPosts(t *testing.T) {
 	}
 	if entries[0].Title != "Post B" {
 		t.Errorf("expected remaining entry title to be 'Post B', got %s", entries[0].Title)
-	}
-
-	// Manifest should show post_count=1
-	manifestData, err := os.ReadFile(filepath.Join(dir, "metadata", "manifest.json"))
-	if err != nil {
-		t.Fatalf("manifest.json should exist: %v", err)
-	}
-	var manifest map[string]interface{}
-	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		t.Fatalf("failed to parse manifest.json: %v", err)
-	}
-	if count, ok := manifest["post_count"].(float64); !ok || count != 1 {
-		t.Errorf("expected manifest post_count to be 1, got %v", manifest["post_count"])
 	}
 }

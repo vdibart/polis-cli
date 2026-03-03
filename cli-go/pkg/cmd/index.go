@@ -15,7 +15,7 @@ func handleIndex(args []string) {
 		exitError("Not a polis site directory")
 	}
 
-	indexPath := filepath.Join(dir, "metadata", "public.jsonl")
+	indexPath := filepath.Join(dir, "content", "pub.polis.core", "index.jsonl")
 
 	file, err := os.Open(indexPath)
 	if err != nil {

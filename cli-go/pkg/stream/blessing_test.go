@@ -16,9 +16,9 @@ func TestBlessingHandler_EventTypes(t *testing.T) {
 	}
 
 	expected := map[string]bool{
-		"polis.blessing.requested": true,
-		"polis.blessing.granted":   true,
-		"polis.blessing.denied":    true,
+		"pub.polis.comment.blessing.requested": true,
+		"pub.polis.comment.blessing.granted":   true,
+		"pub.polis.comment.blessing.denied":    true,
 	}
 	for _, typ := range types {
 		if !expected[typ] {
@@ -34,7 +34,7 @@ func TestBlessingHandler_ProcessRequested_WithTargetDomain(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:    json.Number("1"),
-			Type:  "polis.blessing.requested",
+			Type:  "pub.polis.comment.blessing.requested",
 			Actor: "alice.com",
 			Payload: map[string]interface{}{
 				"source_url":    "https://alice.com/comments/1.md",
@@ -70,7 +70,7 @@ func TestBlessingHandler_ProcessRequested_FallbackToTargetURL(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:    json.Number("1"),
-			Type:  "polis.blessing.requested",
+			Type:  "pub.polis.comment.blessing.requested",
 			Actor: "alice.com",
 			Payload: map[string]interface{}{
 				"source_url": "https://alice.com/comments/1.md",
@@ -101,7 +101,7 @@ func TestBlessingHandler_ProcessGranted(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:    json.Number("1"),
-			Type:  "polis.blessing.granted",
+			Type:  "pub.polis.comment.blessing.granted",
 			Actor: "bob.com",
 			Payload: map[string]interface{}{
 				"source_url":    "https://alice.com/comments/1.md",
@@ -136,7 +136,7 @@ func TestBlessingHandler_ProcessDenied(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:    json.Number("1"),
-			Type:  "polis.blessing.denied",
+			Type:  "pub.polis.comment.blessing.denied",
 			Actor: "bob.com",
 			Payload: map[string]interface{}{
 				"source_url":    "https://alice.com/comments/1.md",
@@ -171,7 +171,7 @@ func TestBlessingHandler_IgnoresOtherDomains(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:    json.Number("1"),
-			Type:  "polis.blessing.requested",
+			Type:  "pub.polis.comment.blessing.requested",
 			Actor: "alice.com",
 			Payload: map[string]interface{}{
 				"source_url":    "https://alice.com/comments/1.md",
@@ -201,7 +201,7 @@ func TestBlessingHandler_FullLifecycle(t *testing.T) {
 	events1 := []discovery.StreamEvent{
 		{
 			ID:    json.Number("1"),
-			Type:  "polis.blessing.requested",
+			Type:  "pub.polis.comment.blessing.requested",
 			Actor: "alice.com",
 			Payload: map[string]interface{}{
 				"source_url":    "https://alice.com/comments/1.md",
@@ -227,7 +227,7 @@ func TestBlessingHandler_FullLifecycle(t *testing.T) {
 	events2 := []discovery.StreamEvent{
 		{
 			ID:    json.Number("2"),
-			Type:  "polis.blessing.granted",
+			Type:  "pub.polis.comment.blessing.granted",
 			Actor: "bob.com",
 			Payload: map[string]interface{}{
 				"source_url":    "https://alice.com/comments/1.md",

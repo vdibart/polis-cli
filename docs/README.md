@@ -1,33 +1,55 @@
 # Polis Documentation
 
-Navigation index for the docs directory. See also the [project README](../README.md).
+Documentation is organized by component and audience. Each component directory has a README with an overview, quick start, and links to its documents.
 
-## For End Users
+## By Component
 
-| Document | Description |
-|----------|-------------|
-| [WEBAPP-USER-MANUAL.md](WEBAPP-USER-MANUAL.md) | How to use the local web interface |
-| [USAGE.md](USAGE.md) | CLI command reference (applies to both Go and Bash CLIs) |
-| [TEMPLATING.md](TEMPLATING.md) | Theme customization and template syntax |
-| [GLOSSARY.md](GLOSSARY.md) | Polis-specific terminology |
+| Component | Description | README |
+|-----------|-------------|--------|
+| [general/](general/) | Protocol specs, project governance, reference | [general/README.md](general/README.md) |
+| [cli/](cli/) | CLI tool (Go + Bash implementations) | [cli/README.md](cli/README.md) |
+| [webapp/](webapp/) | Local web interface (Go SPA) | [webapp/README.md](webapp/README.md) |
+| [api/](api/) | Content Type REST API (`/v1/`) | [api/README.md](api/README.md) |
+| [ds/](ds/) | Discovery Service (coordination layer) | [ds/README.md](ds/README.md) |
 
-## For Everyone
+## By Audience
 
-| Document | Description |
-|----------|-------------|
-| [MANIFESTO.md](MANIFESTO.md) | Why Polis exists — philosophy and motivation |
-| [EXPERIENCE-PRINCIPLES.md](EXPERIENCE-PRINCIPLES.md) | UX design guidelines |
+### For Users
 
-## For Developers and Evaluators
+| Document | Component | Description |
+|----------|-----------|-------------|
+| [Webapp User Manual](webapp/user/user-manual.md) | webapp | How to use the local web interface |
+| [CLI Command Reference](cli/user/command-reference.md) | cli | Complete command reference |
+| [Templating](cli/user/templating.md) | cli | Theme customization and template syntax |
+| [JSON Mode](cli/user/json-mode.md) | cli | Machine-readable `--json` output format |
+| [API Reference](api/user/reference.md) | api | REST API routes, examples, error codes |
+| [Glossary](general/glossary.md) | general | Polis-specific terminology |
 
-| Document | Description |
-|----------|-------------|
-| [SECURITY-MODEL.md](SECURITY-MODEL.md) | Cryptographic foundations, threat model, attack vectors |
-| [DISCOVERY-STREAM-ARCHITECTURE.md](DISCOVERY-STREAM-ARCHITECTURE.md) | Event stream design and protocol |
-| [JSON-MODE.md](JSON-MODE.md) | Machine-readable CLI output format |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, testing, and code conventions |
-| [SECURITY.md](SECURITY.md) | Vulnerability reporting policy |
+### For Developers
 
-## Archived
+| Document | Component | Description |
+|----------|-----------|-------------|
+| [Content System](general/content-system.md) | general | Bundles, content types, events, filesystem layout |
+| [Security Model](general/security-model.md) | general | Crypto, identity, trust model, policies, threats |
+| [CLI Packages](cli/developer/packages.md) | cli | Package structure, import rules, version propagation |
+| [Webapp Development](webapp/developer/development.md) | webapp | Handler patterns, testing, frontend architecture |
+| [Dispatch Engine](api/developer/dispatch-engine.md) | api | Engine architecture, handler types |
+| [DS API Reference](ds/developer/api-reference.md) | ds | Discovery service REST API (20+ endpoints) |
+| [Stream Architecture](ds/developer/stream-architecture.md) | ds | Event stream design and protocol |
+| [Storage Adapter](ds/developer/storage-adapter.md) | ds | Custom storage adapter interface |
+| [Contributing](general/contributing.md) | general | Development setup and contribution guidelines |
 
-Historical planning documents are in [archive/](archive/).
+### For Operators
+
+| Document | Component | Description |
+|----------|-----------|-------------|
+| [DS Deployment](ds/admin/deployment.md) | ds | Deploy on Fly.io, Docker, or bare Deno |
+| [DS Configuration](ds/admin/configuration.md) | ds | Admin API and 24 tuning parameters |
+
+### For Everyone
+
+| Document | Component | Description |
+|----------|-----------|-------------|
+| [Vision](general/vision.md) | general | Why Polis exists — manifesto and experience principles |
+| [Security Policy](general/security.md) | general | Vulnerability reporting |
+

@@ -98,7 +98,7 @@ func BeseechComment(dataDir, commentID string, privateKey []byte, dsCfg ...*Disc
 
 	// Build canonical JSON for signing
 	canonical, err := discovery.MakeContentCanonicalJSON(
-		"polis.comment", commentURL, signed.Meta.CommentVersion, signed.Meta.Author, commentMetadata,
+		"pub.polis.comment", commentURL, signed.Meta.CommentVersion, signed.Meta.Author, commentMetadata,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("canonical JSON: %w", err)
@@ -113,7 +113,7 @@ func BeseechComment(dataDir, commentID string, privateKey []byte, dsCfg ...*Disc
 	// Register with discovery service
 	client := discovery.NewClient(dsURL, dsKey)
 	contentReq := &discovery.ContentRegisterRequest{
-		Type:      "polis.comment",
+		Type:      "pub.polis.comment",
 		URL:       commentURL,
 		Version:   signed.Meta.CommentVersion,
 		Author:    signed.Meta.Author,

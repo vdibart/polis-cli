@@ -29,7 +29,7 @@ func createTestTheme(t *testing.T, themeDir, themeName string) {
 
 func TestLoad(t *testing.T) {
 	tempDir := t.TempDir()
-	themesDir := filepath.Join(tempDir, ".polis", "themes")
+	themesDir := filepath.Join(tempDir, "site", "themes")
 	createTestTheme(t, themesDir, "turbo")
 
 	templates, err := Load(tempDir, "", "turbo")
@@ -75,21 +75,9 @@ func TestLoadMissingTheme(t *testing.T) {
 func TestManifest(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Create metadata directory
-	os.MkdirAll(filepath.Join(tempDir, "metadata"), 0755)
-
-	// Save manifest
-	manifest := &Manifest{
-		Version:      "0.1.0",
-		ActiveTheme:  "turbo",
-		PostCount:    5,
-		CommentCount: 3,
-	}
-
-	err := SaveManifest(tempDir, manifest)
-	if err != nil {
-		t.Fatalf("SaveManifest failed: %v", err)
-	}
+	// Create .well-known directory and write polis config
+	os.MkdirAll(filepath.Join(tempDir, ".well-known"), 0755)
+	os.WriteFile(filepath.Join(tempDir, ".well-known", "polis"), []byte(`{"active_theme":"turbo","public_key":"test"}`), 0644)
 
 	// Load manifest
 	loaded, err := LoadManifest(tempDir)
@@ -100,15 +88,14 @@ func TestManifest(t *testing.T) {
 	if loaded.ActiveTheme != "turbo" {
 		t.Errorf("Expected active_theme 'turbo', got '%s'", loaded.ActiveTheme)
 	}
-
-	if loaded.PostCount != 5 {
-		t.Errorf("Expected post_count 5, got %d", loaded.PostCount)
-	}
 }
 
 func TestGetActiveTheme(t *testing.T) {
 	tempDir := t.TempDir()
-	os.MkdirAll(filepath.Join(tempDir, "metadata"), 0755)
+
+	// Create .well-known directory and write initial polis config
+	os.MkdirAll(filepath.Join(tempDir, ".well-known"), 0755)
+	os.WriteFile(filepath.Join(tempDir, ".well-known", "polis"), []byte(`{"active_theme":"initial","public_key":"test"}`), 0644)
 
 	// Set active theme
 	err := SetActiveTheme(tempDir, "zane")
@@ -129,7 +116,7 @@ func TestGetActiveTheme(t *testing.T) {
 
 func TestCopyCSS(t *testing.T) {
 	tempDir := t.TempDir()
-	themesDir := filepath.Join(tempDir, ".polis", "themes")
+	themesDir := filepath.Join(tempDir, "site", "themes")
 	createTestTheme(t, themesDir, "turbo")
 
 	err := CopyCSS(tempDir, "", "turbo")
@@ -149,7 +136,7 @@ func TestListThemes(t *testing.T) {
 	cliThemesDir := t.TempDir()
 
 	// Create local theme
-	createTestTheme(t, filepath.Join(dataDir, ".polis", "themes"), "local-theme")
+	createTestTheme(t, filepath.Join(dataDir, "site", "themes"), "local-theme")
 
 	// Create CLI themes
 	createTestTheme(t, cliThemesDir, "cli-theme1")
@@ -223,7 +210,7 @@ func TestSelectRandomTheme_SingleTheme(t *testing.T) {
 
 func TestLoad_OptionalArchiveTemplate(t *testing.T) {
 	tempDir := t.TempDir()
-	themesDir := filepath.Join(tempDir, ".polis", "themes")
+	themesDir := filepath.Join(tempDir, "site", "themes")
 	createTestTheme(t, themesDir, "turbo")
 
 	// Add posts.html to the theme
@@ -245,7 +232,7 @@ func TestLoad_OptionalArchiveTemplate(t *testing.T) {
 
 func TestLoad_MissingArchiveTemplate(t *testing.T) {
 	tempDir := t.TempDir()
-	themesDir := filepath.Join(tempDir, ".polis", "themes")
+	themesDir := filepath.Join(tempDir, "site", "themes")
 	createTestTheme(t, themesDir, "turbo")
 
 	// Do NOT add posts.html

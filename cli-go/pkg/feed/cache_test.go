@@ -445,10 +445,10 @@ func TestCacheManager_IsStale_SameCursorRefreshesTimestamp(t *testing.T) {
 	cm.SetCursor("100")
 
 	// Overwrite cursor entry with an old timestamp to simulate staleness
-	cursorsPath := filepath.Join(dir, ".polis", "ds", testDiscoveryDomain, "state", "cursors.json")
+	cursorsPath := filepath.Join(dir, ".polis", "ds", testDiscoveryDomain, "pub.polis.core", "state", "cursors.json")
 	cf := map[string]interface{}{
 		"cursors": map[string]interface{}{
-			"polis.feed": map[string]interface{}{
+			"pub.polis.feed": map[string]interface{}{
 				"position":     "100",
 				"last_updated": "2020-01-01T00:00:00Z",
 			},
@@ -560,8 +560,8 @@ func TestCacheManager_CreatesDirectory(t *testing.T) {
 	}
 
 	// Verify cache file at new path
-	if _, err := os.Stat(filepath.Join(dir, ".polis", "ds", testDiscoveryDomain, "state", "polis.feed.jsonl")); err != nil {
-		t.Error("cache file should exist at state/polis.feed.jsonl")
+	if _, err := os.Stat(filepath.Join(dir, ".polis", "ds", testDiscoveryDomain, "pub.polis.core", "state", "pub.polis.feed.jsonl")); err != nil {
+		t.Error("cache file should exist at pub.polis.core/state/pub.polis.feed.jsonl")
 	}
 }
 
@@ -592,7 +592,7 @@ func TestCacheManager_ConfigRoundTrip(t *testing.T) {
 	}
 
 	// Verify config file at new path
-	if _, err := os.Stat(filepath.Join(dir, ".polis", "ds", testDiscoveryDomain, "config", "feed.json")); err != nil {
-		t.Error("config file should exist at config/feed.json")
+	if _, err := os.Stat(filepath.Join(dir, ".polis", "ds", testDiscoveryDomain, "pub.polis.core", "config", "feed.json")); err != nil {
+		t.Error("config file should exist at pub.polis.core/config/feed.json")
 	}
 }

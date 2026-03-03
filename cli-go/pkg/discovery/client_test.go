@@ -374,7 +374,7 @@ func TestQueryRelationships_AuthenticatedSendsHeaders(t *testing.T) {
 	defer server.Close()
 
 	client := NewAuthenticatedClient(server.URL, "test-key", "alice.com", privKey)
-	_, err = client.QueryRelationships("polis.blessing", map[string]string{"status": "pending"})
+	_, err = client.QueryRelationships("pub.polis.comment.blessing", map[string]string{"status": "pending"})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestQueryContent_AuthenticatedSendsHeaders(t *testing.T) {
 	defer server.Close()
 
 	client := NewAuthenticatedClient(server.URL, "test-key", "alice.com", privKey)
-	_, err = client.QueryContent("polis.comment", map[string]string{"actor": "bob.com"})
+	_, err = client.QueryContent("pub.polis.comment", map[string]string{"actor": "bob.com"})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -604,9 +604,9 @@ func TestMakeKeyRotationCanonicalJSON_KeyOrder(t *testing.T) {
 }
 
 func TestMakeContentUnregisterCanonicalJSON(t *testing.T) {
-	result := MakeContentUnregisterCanonicalJSON("polis.post", "https://example.com/posts/test.md")
+	result := MakeContentUnregisterCanonicalJSON("pub.polis.post", "https://example.com/posts/test.md")
 
-	expected := `{"type":"polis.post","url":"https://example.com/posts/test.md"}`
+	expected := `{"type":"pub.polis.post","url":"https://example.com/posts/test.md"}`
 	if result != expected {
 		t.Errorf("Canonical payload mismatch.\nExpected: %s\nGot:      %s", expected, result)
 	}

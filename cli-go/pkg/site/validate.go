@@ -29,12 +29,11 @@ type ValidationError struct {
 
 // SiteInfo contains information about a valid polis site.
 type SiteInfo struct {
-	SiteTitle string `json:"site_title,omitempty"`
-	BaseURL   string `json:"base_url,omitempty"`
-	PublicKey string `json:"public_key,omitempty"`
-	Generator string `json:"generator,omitempty"`
-	Version   string `json:"version,omitempty"`
-	CreatedAt string `json:"created_at,omitempty"`
+	SiteTitle   string `json:"site_title,omitempty"`
+	PublicKey   string `json:"public_key,omitempty"`
+	Version     string `json:"version,omitempty"`
+	Created     string `json:"created,omitempty"`
+	ActiveTheme string `json:"active_theme,omitempty"`
 }
 
 // ValidationResult contains the full validation result.
@@ -45,7 +44,6 @@ type ValidationResult struct {
 }
 
 // Validate checks if a directory is a valid polis site.
-// This function has no webapp dependencies and can be used by CLI tools.
 func Validate(siteDir string) *ValidationResult {
 	result := &ValidationResult{
 		Status: StatusValid,
@@ -84,7 +82,6 @@ func Validate(siteDir string) *ValidationResult {
 		return result
 	}
 
-	// Check for required files
 	var errors []ValidationError
 
 	// Check .well-known/polis
@@ -129,7 +126,7 @@ func Validate(siteDir string) *ValidationResult {
 		})
 	}
 
-	// If we have both .well-known/polis and public key file, verify they match
+	// Verify public key match
 	if wellKnown != nil && pubKeyErr == nil && len(pubKeyData) > 0 {
 		pubKeyStr := strings.TrimSpace(string(pubKeyData))
 		wellKnownPubKey := strings.TrimSpace(wellKnown.PublicKey)
@@ -143,11 +140,27 @@ func Validate(siteDir string) *ValidationResult {
 		}
 	}
 
+	// Check bundle structure
+	if wellKnown != nil {
+		for name, entry := range wellKnown.Bundles {
+			if !entry.Active {
+				continue
+			}
+			bundlePath := filepath.Join(siteDir, entry.Path)
+			if _, err := os.Stat(bundlePath); os.IsNotExist(err) {
+				errors = append(errors, ValidationError{
+					Code:       "BUNDLE_MISSING",
+					Message:    "Bundle file not found for " + name,
+					Path:       bundlePath,
+					Suggestion: "Create the bundle.json or remove the bundle from .well-known/polis",
+				})
+			}
+		}
+	}
+
 	// Determine final status
 	if len(errors) > 0 {
 		result.Errors = errors
-		// If .well-known/polis exists but other things are missing, it's incomplete
-		// If .well-known/polis doesn't exist, it might not be a polis site at all
 		hasWellKnown := wellKnown != nil
 		hasMissingKeys := false
 		for _, e := range errors {
@@ -156,21 +169,17 @@ func Validate(siteDir string) *ValidationResult {
 			}
 		}
 		if !hasWellKnown && hasMissingKeys {
-			// Could be an empty directory - not found
 			result.Status = StatusNotFound
 		} else {
-			// Has some polis files but something is wrong - incomplete
 			result.Status = StatusIncomplete
 		}
 	} else {
-		// Valid site - populate site info
 		result.SiteInfo = &SiteInfo{
-			SiteTitle: wellKnown.SiteTitle,
-			BaseURL:   wellKnown.BaseURL,
-			PublicKey: wellKnown.PublicKey,
-			Generator: wellKnown.Generator,
-			Version:   wellKnown.Version,
-			CreatedAt: wellKnown.CreatedAt,
+			SiteTitle:   wellKnown.SiteTitle,
+			PublicKey:    wellKnown.PublicKey,
+			Version:     wellKnown.Version,
+			Created:     wellKnown.Created,
+			ActiveTheme: wellKnown.ActiveTheme,
 		}
 	}
 
@@ -206,7 +215,6 @@ func validateWellKnown(path string) (*WellKnown, *ValidationError) {
 		}
 	}
 
-	// Validate required fields
 	if wk.PublicKey == "" {
 		return nil, &ValidationError{
 			Code:       "WELLKNOWN_MISSING_PUBKEY",

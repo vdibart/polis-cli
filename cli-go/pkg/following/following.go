@@ -39,7 +39,7 @@ type FollowingEntry struct {
 
 // DefaultPath returns the default path to following.json.
 func DefaultPath(dataDir string) string {
-	return filepath.Join(dataDir, "metadata", "following.json")
+	return filepath.Join(dataDir, "content", "pub.polis.core", "follow", "following.json")
 }
 
 // Load loads the following.json file from the given path.

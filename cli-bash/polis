@@ -16,7 +16,7 @@
 #   macOS:   brew install openssh jq curl coreutils git pandoc
 #
 
-set -e
+set -eo pipefail
 
 # ============================================================================
 # CONFIGURATION LOADING
@@ -28,7 +28,7 @@ set -e
 #   4. Hardcoded defaults
 
 # Fixed constants (never configurable - required for discovery)
-VERSION="0.56.0"
+VERSION="0.57.0"
 WELL_KNOWN_DIR=".well-known"
 WELL_KNOWN_FILE="polis"
 
@@ -65,6 +65,7 @@ load_env_file() {
 }
 
 # Load user config from .well-known/polis JSON
+# v2: paths are fixed by bundle convention, no more config.directories/config.files
 load_wellknown_config() {
     local config_file="$WELL_KNOWN_DIR/$WELL_KNOWN_FILE"
     [ ! -f "$config_file" ] && return 0
@@ -72,30 +73,19 @@ load_wellknown_config() {
     # Check if jq is available
     command -v jq > /dev/null 2>&1 || return 0
 
-    # Extract config values (only if not already set)
-    local config_json
-    config_json=$(jq -r '.config // empty' "$config_file" 2>/dev/null) || return 0
-    [ -z "$config_json" ] && return 0
-
-    # Directory config
-    [ -z "${KEYS_DIR+x}" ] && KEYS_DIR=$(echo "$config_json" | jq -r '.directories.keys // empty')
-    [ -z "${POSTS_DIR+x}" ] && POSTS_DIR=$(echo "$config_json" | jq -r '.directories.posts // empty')
-    [ -z "${COMMENTS_DIR+x}" ] && COMMENTS_DIR=$(echo "$config_json" | jq -r '.directories.comments // empty')
-    [ -z "${SNIPPETS_DIR+x}" ] && SNIPPETS_DIR=$(echo "$config_json" | jq -r '.directories.snippets // empty')
-    [ -z "${THEMES_DIR+x}" ] && THEMES_DIR=$(echo "$config_json" | jq -r '.directories.themes // empty')
-    [ -z "${VERSIONS_DIR_NAME+x}" ] && VERSIONS_DIR_NAME=$(echo "$config_json" | jq -r '.directories.versions // empty')
-
-    # File config
-    [ -z "${PUBLIC_INDEX+x}" ] && PUBLIC_INDEX=$(echo "$config_json" | jq -r '.files.public_index // empty')
-    [ -z "${BLESSED_COMMENTS+x}" ] && BLESSED_COMMENTS=$(echo "$config_json" | jq -r '.files.blessed_comments // empty')
-    [ -z "${FOLLOWING_INDEX+x}" ] && FOLLOWING_INDEX=$(echo "$config_json" | jq -r '.files.following_index // empty')
+    # Read active_theme if set
+    local active_theme
+    active_theme=$(jq -r '.active_theme // empty' "$config_file" 2>/dev/null) || return 0
+    if [ -n "$active_theme" ]; then
+        ACTIVE_THEME="$active_theme"
+    fi
 }
 
 # Apply hardcoded defaults for any unset variables
 apply_defaults() {
     # Developer config defaults
     : "${POLIS_BASE_URL:=}"
-    : "${DISCOVERY_SERVICE_URL:=https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1}"
+    : "${DISCOVERY_SERVICE_URL:=https://ds.polis.pub}"
     : "${DISCOVERY_SERVICE_KEY:=}"
 
     # Derived endpoints (always computed from base) — unified content/relationship API
@@ -106,19 +96,25 @@ apply_defaults() {
     POLIS_RELATIONSHIP_QUERY_ENDPOINT="${DISCOVERY_SERVICE_URL}/ds-relationship-query"
     POLIS_STREAM_PUBLISH_ENDPOINT="${DISCOVERY_SERVICE_URL}/ds-stream-publish"
 
-    # User directory defaults
+    # User directory defaults (bundle-based layout)
     : "${KEYS_DIR:=.polis/keys}"
-    : "${POSTS_DIR:=posts}"
-    : "${COMMENTS_DIR:=comments}"
-    : "${SNIPPETS_DIR:=snippets}"
-    : "${THEMES_DIR:=.polis/themes}"
+    : "${POSTS_DIR:=content/pub.polis.core/post}"
+    : "${COMMENTS_DIR:=content/pub.polis.core/comment}"
+    : "${SNIPPETS_DIR:=site/snippets}"
+    : "${THEMES_DIR:=site/themes}"
     : "${VERSIONS_DIR_NAME:=.versions}"
 
-    # User file defaults
-    : "${PUBLIC_INDEX:=metadata/public.jsonl}"
-    : "${BLESSED_COMMENTS:=metadata/blessed-comments.json}"
-    : "${FOLLOWING_INDEX:=metadata/following.json}"
-    : "${MANIFEST:=metadata/manifest.json}"
+    # Mount directories (rendered output — source/output separation)
+    : "${POSTS_MOUNT_DIR:=posts}"
+    : "${COMMENTS_MOUNT_DIR:=comments}"
+
+    # User file defaults (bundle-based layout)
+    : "${PUBLIC_INDEX:=content/pub.polis.core/index.jsonl}"
+    : "${BLESSED_COMMENTS:=content/pub.polis.core/comment/blessed.json}"
+    : "${FOLLOWING_INDEX:=content/pub.polis.core/follow/following.json}"
+
+    # Manifest is now .well-known/polis (active_theme, version live there)
+    : "${MANIFEST:=.well-known/polis}"
 
     # Notification files (private, in .polis/)
     : "${NOTIFICATIONS_FILE:=.polis/notifications.jsonl}"
@@ -305,8 +301,8 @@ cmd_init() {
     local following_index="${custom_following_index:-$FOLLOWING_INDEX}"
     local versions_dir="${custom_versions_dir:-$VERSIONS_DIR_NAME}"
 
-    # Derive metadata directory from file paths
-    local metadata_dir=$(dirname "$public_index")
+    # Derive following directory from file path
+    local following_dir=$(dirname "$following_index")
 
     info_human "Initializing Polis directory structure..."
 
@@ -314,16 +310,21 @@ cmd_init() {
     local dirs_created=()
     local files_created=()
 
-    # Create directory structure
+    # Create directory structure (bundle-based layout)
     mkdir -p "$keys_dir"
     mkdir -p "$posts_dir"
     mkdir -p "$comments_dir"
+    mkdir -p "$following_dir"
     mkdir -p "$snippets_dir"
     mkdir -p "$themes_dir"
-    mkdir -p "$metadata_dir"
     mkdir -p "$WELL_KNOWN_DIR"
+    mkdir -p ".polis/content/pub.polis.core/posts/drafts"
+    mkdir -p ".polis/content/pub.polis.core/comments/drafts"
+    mkdir -p ".polis/content/pub.polis.core/comments/pending"
+    mkdir -p ".polis/content/pub.polis.core/comments/denied"
+    mkdir -p ".polis/logs"
 
-    dirs_created=("$keys_dir" "$posts_dir" "$comments_dir" "$snippets_dir" "$themes_dir" "$metadata_dir" "$WELL_KNOWN_DIR")
+    dirs_created=("$keys_dir" "$posts_dir" "$comments_dir" "$following_dir" "$snippets_dir" "$themes_dir" "$WELL_KNOWN_DIR")
     success_human "Created directory structure"
 
     # Generate Ed25519 keypair
@@ -343,40 +344,22 @@ cmd_init() {
     # Get public key for metadata
     PUBKEY=$(cat "$keys_dir/id_ed25519.pub")
 
-    # Create .well-known/polis metadata file with config section
+    # Create .well-known/polis metadata file (v2: identity + bundle registry)
     local wellknown_json
     wellknown_json=$(jq -n \
         --arg version "polis-cli/$VERSION" \
         --arg author "$(git config user.name || echo 'Unknown')" \
         --arg public_key "$PUBKEY" \
         --arg created "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-        --arg keys_dir "$keys_dir" \
-        --arg posts_dir "$posts_dir" \
-        --arg comments_dir "$comments_dir" \
-        --arg snippets_dir "$snippets_dir" \
-        --arg themes_dir "$themes_dir" \
-        --arg versions_dir "$versions_dir" \
-        --arg public_index "$public_index" \
-        --arg blessed_comments "$blessed_comments" \
-        --arg following_index "$following_index" \
         '{
             version: $version,
             author: $author,
             public_key: $public_key,
             created: $created,
-            config: {
-                directories: {
-                    keys: $keys_dir,
-                    posts: $posts_dir,
-                    comments: $comments_dir,
-                    snippets: $snippets_dir,
-                    themes: $themes_dir,
-                    versions: $versions_dir
-                },
-                files: {
-                    public_index: $public_index,
-                    blessed_comments: $blessed_comments,
-                    following_index: $following_index
+            bundles: {
+                "pub.polis.core": {
+                    active: true,
+                    path: "content/pub.polis.core/bundle.json"
                 }
             }
         }')
@@ -391,11 +374,13 @@ cmd_init() {
     success_human "Created $WELL_KNOWN_DIR/polis metadata"
 
     # Create empty public.jsonl index
+    mkdir -p "$(dirname "$public_index")"
     > "$public_index"
     files_created+=("$public_index")
     success_human "Created $public_index index"
 
     # Create empty blessed-comments.json
+    mkdir -p "$(dirname "$blessed_comments")"
     cat > "$blessed_comments" << EOF
 {
   "version": "polis-cli/$VERSION",
@@ -406,6 +391,7 @@ EOF
     success_human "Created $blessed_comments"
 
     # Create empty following.json
+    mkdir -p "$(dirname "$following_index")"
     cat > "$following_index" << EOF
 {
   "version": "polis-cli/$VERSION",
@@ -414,20 +400,6 @@ EOF
 EOF
     files_created+=("$following_index")
     success_human "Created $following_index"
-
-    # Create initial manifest.json (no site_title - stored in .well-known/polis)
-    local manifest_path="$metadata_dir/manifest.json"
-    jq -n \
-        --arg version "polis-cli/$VERSION" \
-        --arg last_published "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-        '{
-            version: $version,
-            last_published: $last_published,
-            post_count: 0,
-            comment_count: 0
-        }' > "$manifest_path"
-    files_created+=("$manifest_path")
-    success_human "Created $manifest_path"
 
     # Create default about snippet
     if [ ! -f "$snippets_dir/about.md" ]; then
@@ -441,23 +413,17 @@ ABOUT
     # Create .gitignore if it doesn't exist
     if [ ! -f ".gitignore" ]; then
         cat > ".gitignore" << 'EOF'
-# Polis configuration and secrets
+# Polis internals and secrets
 .polis/
-.env
+.env*
 
-# Local theme customizations (optional - remove if you want to track themes)
-themes/
+# Installed themes (regeneratable via polis init)
+/site/themes/
 
-# Logs
-logs/
-*.log
-
-# Polis executables (if copied locally)
-polis
-polis-tui
-polis-tutorial
-polis-upgrade
-polis-server
+# Binaries
+/polis
+/polis-server
+/polis-full
 EOF
         files_created+=(".gitignore")
         success_human "Created .gitignore"
@@ -473,7 +439,7 @@ EOF
 # The .env file is gitignored and should contain your actual credentials.
 
 # Discovery service URL (default shown below)
-DISCOVERY_SERVICE_URL=https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1
+DISCOVERY_SERVICE_URL=https://ds.polis.pub
 
 # Optional: Your site's public URL (used for generating links)
 # POLIS_BASE_URL=https://yoursite.com
@@ -522,7 +488,7 @@ EOF
             success_human "Installed themes: ${themes_copied[*]}"
         fi
     else
-        warn "Theme files not found at $source_themes_dir"
+        warn_human "Theme files not found at $source_themes_dir"
         info_human "Themes must be manually copied to $themes_dir"
     fi
 
@@ -589,19 +555,19 @@ extract_frontmatter_field() {
     awk -v field="$field:" '/^---$/{if(++count==2) exit} count==1 && $0 ~ "^"field{sub("^"field" *", ""); print; exit}' "$file"
 }
 
-# Validate manifest.json exists and is valid JSON
+# Validate .well-known/polis exists and is valid JSON
 # Returns 0 if valid, 1 if invalid/missing
 # Prints error message on failure
 validate_manifest() {
-    if [ ! -f "$MANIFEST" ]; then
-        error "Manifest not found: $MANIFEST"
+    if [ ! -f "$WELL_KNOWN_DIR/polis" ]; then
+        error ".well-known/polis not found"
         error "Run 'polis init' to create a new site."
         return 1
     fi
 
     local jq_error
-    if ! jq_error=$(jq empty "$MANIFEST" 2>&1); then
-        error "Invalid JSON in manifest: $MANIFEST"
+    if ! jq_error=$(jq empty "$WELL_KNOWN_DIR/polis" 2>&1); then
+        error "Invalid JSON in .well-known/polis"
         error "JSON parse error: $jq_error"
         error "Please fix the syntax error and try again."
         return 1
@@ -2404,7 +2370,7 @@ format_blessing_table() {
 
 # Rebuild public.json index from all posts and comments
 rebuild_index() {
-    info "Rebuilding public.jsonl index..."
+    info_human "Rebuilding public.jsonl index..."
 
     # Check if jq is available
     if ! command -v jq > /dev/null 2>&1; then
@@ -2500,7 +2466,7 @@ rebuild_index() {
     fi
 
     local total_count=$((post_count + comment_count))
-    success "Rebuilt public.jsonl ($total_count entries: $post_count posts, $comment_count comments)"
+    success_human "Rebuilt public.jsonl ($total_count entries: $post_count posts, $comment_count comments)"
 }
 
 # Generate manifest.json from public.jsonl
@@ -2516,51 +2482,18 @@ generate_manifest() {
         return 1
     fi
 
-    # Count posts and comments from public.jsonl
-    local post_count=$(jq -s '[.[] | select(.type == "post")] | length' "$PUBLIC_INDEX" 2>/dev/null || echo "0")
-    local comment_count=$(jq -s '[.[] | select(.type == "comment")] | length' "$PUBLIC_INDEX" 2>/dev/null || echo "0")
-
-    # Get the most recent published timestamp
-    local last_published=$(jq -s 'map(.published) | sort | last // empty' "$PUBLIC_INDEX" 2>/dev/null)
-
-    # If no content yet, use current time
-    if [ -z "$last_published" ] || [ "$last_published" = "null" ]; then
-        last_published="\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\""
+    # Update version in .well-known/polis
+    local wellknown_file="$WELL_KNOWN_DIR/polis"
+    if [ -f "$wellknown_file" ]; then
+        local tmp_wk=$(mktemp)
+        jq --arg version "polis-cli/$VERSION" '. + {version: $version}' "$wellknown_file" > "$tmp_wk" 2>/dev/null && \
+            mv "$tmp_wk" "$wellknown_file" || rm -f "$tmp_wk"
     fi
-
-    # Preserve existing active_theme if set (site_title is now in .well-known/polis)
-    local active_theme=""
-    if [ -f "$MANIFEST" ]; then
-        active_theme=$(jq -r '.active_theme // empty' "$MANIFEST" 2>/dev/null)
-    fi
-
-    # Generate manifest.json
-    local metadata_dir=$(dirname "$MANIFEST")
-    mkdir -p "$metadata_dir"
-
-    # Build base manifest
-    local manifest_json
-    manifest_json=$(jq -n \
-        --arg version "polis-cli/$VERSION" \
-        --argjson last_published "$last_published" \
-        --argjson post_count "$post_count" \
-        --argjson comment_count "$comment_count" \
-        '{
-            version: $version,
-            last_published: $last_published,
-            post_count: $post_count,
-            comment_count: $comment_count
-        }')
-
-    # Add active_theme if set
-    if [ -n "$active_theme" ]; then
-        manifest_json=$(echo "$manifest_json" | jq --arg active_theme "$active_theme" '. + {active_theme: $active_theme}')
-    fi
-
-    echo "$manifest_json" > "$MANIFEST"
 
     if [ "$silent" != "true" ]; then
-        success "Generated $MANIFEST (last_published: $(echo $last_published | tr -d '"'), $post_count posts, $comment_count comments)"
+        local post_count=$(jq -s '[.[] | select(.type == "post")] | length' "$PUBLIC_INDEX" 2>/dev/null || echo "0")
+        local comment_count=$(jq -s '[.[] | select(.type == "comment")] | length' "$PUBLIC_INDEX" 2>/dev/null || echo "0")
+        success "Updated .well-known/polis ($post_count posts, $comment_count comments in index)"
     fi
 }
 
@@ -2798,7 +2731,7 @@ _register_post_with_discovery() {
     # CRITICAL: Field order must match Go's json.Marshal output for contentCanonicalPayload
     # Order: type, url, version, author, metadata
     local canonical_payload=$(jq -n -c \
-        --arg type "polis.post" \
+        --arg type "pub.polis.post" \
         --arg url "$post_url" \
         --arg version "sha256:$content_hash" \
         --arg author "$author" \
@@ -2834,7 +2767,7 @@ _register_post_with_discovery() {
 
     # Build final payload with signature
     local final_payload=$(jq -n \
-        --arg type "polis.post" \
+        --arg type "pub.polis.post" \
         --arg url "$post_url" \
         --arg version "sha256:$content_hash" \
         --arg author "$author" \
@@ -3039,7 +2972,7 @@ _internal_beseech_from_file() {
     fi
 
     local canonical_payload=$(jq -n -c \
-        --arg type "polis.comment" \
+        --arg type "pub.polis.comment" \
         --arg url "$comment_url" \
         --arg version "$version" \
         --arg author "$author" \
@@ -3079,7 +3012,7 @@ _internal_beseech_from_file() {
 
     # Build final JSON payload with signature — unified content-register format
     local final_payload=$(jq -n \
-        --arg type "polis.comment" \
+        --arg type "pub.polis.comment" \
         --arg url "$comment_url" \
         --arg version "$version" \
         --arg author "$author" \
@@ -4073,7 +4006,7 @@ $version_history_new
     cat "$content_only" >> "$temp_file"
 
     # Sign the file
-    info "Signing file..."
+    info_human "Signing file..."
     local signature=$(sign_file "$temp_file")
 
     # Create final frontmatter with signature
@@ -4230,8 +4163,8 @@ cmd_rebuild() {
         rebuild_index
         # Count entries
         if [ -f "$PUBLIC_INDEX" ]; then
-            posts_count=$(grep -c '"type":"post"' "$PUBLIC_INDEX" 2>/dev/null || echo "0")
-            comments_count=$(grep -c '"type":"comment"' "$PUBLIC_INDEX" 2>/dev/null || echo "0")
+            posts_count=$(grep -c '"type":"post"' "$PUBLIC_INDEX" 2>/dev/null) || posts_count=0
+            comments_count=$(grep -c '"type":"comment"' "$PUBLIC_INDEX" 2>/dev/null) || comments_count=0
         fi
         success_human "Rebuilt public.jsonl ($posts_count posts, $comments_count comments)"
     fi
@@ -4398,8 +4331,8 @@ cmd_discover() {
 
         echo -n "$author_url (last checked: $last_checked_human)"
 
-        # Fetch manifest.json from author's site
-        local manifest_url="${author_url}/metadata/manifest.json"
+        # Fetch .well-known/polis from author's site (replaces manifest.json)
+        local manifest_url="${author_url}/.well-known/polis"
         local manifest_response=$(curl -s --max-time 10 "$manifest_url" 2>/dev/null)
 
         if [ -z "$manifest_response" ] || ! echo "$manifest_response" | jq -e '.' > /dev/null 2>&1; then
@@ -4429,8 +4362,8 @@ cmd_discover() {
             continue
         fi
 
-        # Fetch public.jsonl to get new items
-        local index_url="${author_url}/metadata/public.jsonl"
+        # Fetch index.jsonl to get new items
+        local index_url="${author_url}/content/pub.polis.core/index.jsonl"
         local index_response=$(curl -s --max-time 30 "$index_url" 2>/dev/null)
 
         if [ -z "$index_response" ]; then
@@ -4850,7 +4783,7 @@ cmd_rotate_key() {
     # 3. Notify DS of key rotation BEFORE local key swap (strict ordering)
     info_human ""
     info_human "Notifying discovery service of key rotation..."
-    local ds_url="${DISCOVERY_SERVICE_URL:-https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1}"
+    local ds_url="${DISCOVERY_SERVICE_URL:-https://ds.polis.pub}"
     local ds_payload
     ds_payload=$(jq -cn \
         --arg dom "$domain" \
@@ -4947,19 +4880,19 @@ cmd_unpublish() {
 
     # Validate argument
     if [ -z "$post_path" ]; then
-        json_error "unpublish" "INVALID_INPUT" "Usage: polis unpublish <path>  Example: polis unpublish posts/20260201/my-post.md"
+        json_error "unpublish" "INVALID_INPUT" "Usage: polis unpublish <path>  Example: polis unpublish content/pub.polis.core/post/20260201/my-post.md"
     fi
 
-    # Validate path is under posts/ (no traversal)
-    if [[ "$post_path" != posts/* ]]; then
-        json_error "unpublish" "INVALID_INPUT" "Path must start with posts/: $post_path"
+    # Validate path is under content/pub.polis.core/post/ (no traversal)
+    if [[ "$post_path" != content/pub.polis.core/post/* ]]; then
+        json_error "unpublish" "INVALID_INPUT" "Path must start with content/pub.polis.core/post/: $post_path"
     fi
     if [[ "$post_path" == *..* ]]; then
         json_error "unpublish" "INVALID_INPUT" "Path must not contain '..': $post_path"
     fi
 
     # Verify file exists
-    local full_path="$DATA_DIR/$post_path"
+    local full_path="$post_path"
     if [ ! -f "$full_path" ]; then
         json_error "unpublish" "NOT_FOUND" "Post not found: $post_path"
     fi
@@ -4975,7 +4908,7 @@ cmd_unpublish() {
 
     # Build canonical unregister JSON and sign
     local canonical
-    canonical=$(printf '{"type":"polis.post","url":"%s"}' "$content_url")
+    canonical=$(printf '{"type":"pub.polis.post","url":"%s"}' "$content_url")
 
     local temp_file
     temp_file=$(mktemp)
@@ -4994,10 +4927,10 @@ cmd_unpublish() {
 
     # Call DS to unregister (now does soft-delete)
     info_human "Removing from discovery service..."
-    local ds_url="${DISCOVERY_SERVICE_URL:-https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1}"
+    local ds_url="${DISCOVERY_SERVICE_URL:-https://ds.polis.pub}"
     local ds_payload
     ds_payload=$(jq -cn \
-        --arg type "polis.post" \
+        --arg type "pub.polis.post" \
         --arg url "$content_url" \
         --arg sig "$signature" \
         '{type: $type, url: $url, signature: $sig}')
@@ -5022,8 +4955,8 @@ cmd_unpublish() {
     local html_path="${full_path%.md}.html"
     rm -f "$html_path" 2>/dev/null
 
-    # Remove from metadata/public.jsonl
-    local index_file="$DATA_DIR/metadata/public.jsonl"
+    # Remove from index.jsonl
+    local index_file="$PUBLIC_INDEX"
     if [ -f "$index_file" ]; then
         local temp_index
         temp_index=$(mktemp)
@@ -5032,9 +4965,9 @@ cmd_unpublish() {
     fi
 
     # Remove version history if exists
-    local base_name
-    base_name=$(basename "$post_path")
-    rm -f "$DATA_DIR/.versions/$base_name" 2>/dev/null
+    local versions_file
+    versions_file=$(get_versions_file_path "$post_path")
+    rm -f "$versions_file" 2>/dev/null
 
     # Rebuild manifest
     generate_manifest true > /dev/null 2>&1
@@ -5236,7 +5169,7 @@ cmd_blessing_grant() {
     # CRITICAL: Field order must match Go's json.Marshal for relationshipCanonicalPayload
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     local canonical_payload=$(jq -n -c \
-        --arg type "polis.blessing" \
+        --arg type "pub.polis.comment.blessing" \
         --arg source_url "$comment_url" \
         --arg target_url "$in_reply_to" \
         --arg action "grant" \
@@ -5253,7 +5186,7 @@ cmd_blessing_grant() {
 
     # Prepare POST payload with signature — unified relationship-update format
     local payload=$(jq -n \
-        --arg type "polis.blessing" \
+        --arg type "pub.polis.comment.blessing" \
         --arg source_url "$comment_url" \
         --arg target_url "$in_reply_to" \
         --arg action "grant" \
@@ -5378,7 +5311,7 @@ cmd_blessing_deny() {
     # Create signed payload for authentication — unified relationship update format
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     local canonical_payload=$(jq -n -c \
-        --arg type "polis.blessing" \
+        --arg type "pub.polis.comment.blessing" \
         --arg source_url "$comment_url" \
         --arg target_url "$in_reply_to" \
         --arg action "deny" \
@@ -5395,7 +5328,7 @@ cmd_blessing_deny() {
 
     # Prepare POST payload with signature — unified relationship-update format
     local payload=$(jq -n \
-        --arg type "polis.blessing" \
+        --arg type "pub.polis.comment.blessing" \
         --arg source_url "$comment_url" \
         --arg target_url "$in_reply_to" \
         --arg action "deny" \
@@ -5577,7 +5510,7 @@ cmd_follow() {
             # Create signed grant payload
             local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             local canonical_payload=$(jq -n -c \
-                --arg type "polis.blessing" \
+                --arg type "pub.polis.comment.blessing" \
                 --arg source_url "$source_url" \
                 --arg target_url "$target_url" \
                 --arg action "grant" \
@@ -5591,7 +5524,7 @@ cmd_follow() {
             rm -f "$temp_file" "$temp_file.sig"
 
             local payload=$(jq -n \
-                --arg type "polis.blessing" \
+                --arg type "pub.polis.comment.blessing" \
                 --arg source_url "$source_url" \
                 --arg target_url "$target_url" \
                 --arg action "grant" \
@@ -5625,7 +5558,7 @@ cmd_follow() {
 
     # Emit follow event to discovery stream (non-fatal, matches Go CLI)
     local target_domain=$(extract_domain_from_url "$author_url")
-    _emit_stream_event "polis.follow.announced" "$(jq -n -c --arg target_domain "$target_domain" '{target_domain: $target_domain}')"
+    _emit_stream_event "pub.polis.follow.announced" "$(jq -n -c --arg target_domain "$target_domain" '{target_domain: $target_domain}')"
 
     # Output results
     if [ "$JSON_MODE" = true ]; then
@@ -5761,7 +5694,7 @@ cmd_unfollow() {
             # Create signed deny payload
             local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             local canonical_payload=$(jq -n -c \
-                --arg type "polis.blessing" \
+                --arg type "pub.polis.comment.blessing" \
                 --arg source_url "$comment_url" \
                 --arg target_url "$target_url" \
                 --arg action "deny" \
@@ -5775,7 +5708,7 @@ cmd_unfollow() {
             rm -f "$temp_file" "$temp_file.sig"
 
             local payload=$(jq -n \
-                --arg type "polis.blessing" \
+                --arg type "pub.polis.comment.blessing" \
                 --arg source_url "$comment_url" \
                 --arg target_url "$target_url" \
                 --arg action "deny" \
@@ -5806,7 +5739,7 @@ cmd_unfollow() {
 
     # Emit unfollow event to discovery stream (non-fatal, matches Go CLI)
     local target_domain=$(extract_domain_from_url "$author_url")
-    _emit_stream_event "polis.follow.removed" "$(jq -n -c --arg target_domain "$target_domain" '{target_domain: $target_domain}')"
+    _emit_stream_event "pub.polis.follow.removed" "$(jq -n -c --arg target_domain "$target_domain" '{target_domain: $target_domain}')"
 
     # Output results
     if [ "$JSON_MODE" = true ]; then
@@ -6727,20 +6660,20 @@ clone_full() {
     mkdir -p "$target_dir/.well-known"
     echo "$wellknown_content" > "$target_dir/.well-known/polis"
 
-    # Get config paths from .well-known/polis
-    local public_index_path=$(echo "$wellknown_content" | jq -r '.config.files.public_index // "metadata/public.jsonl"')
-    local blessed_comments_path=$(echo "$wellknown_content" | jq -r '.config.files.blessed_comments // "metadata/blessed-comments.json"')
-    local following_path=$(echo "$wellknown_content" | jq -r '.config.files.following // "metadata/following.json"')
+    # Content paths are fixed by bundle convention
+    local public_index_path="content/pub.polis.core/index.jsonl"
+    local blessed_comments_path="content/pub.polis.core/comment/blessed.json"
+    local following_path="content/pub.polis.core/follow/following.json"
 
-    # Fetch public.jsonl manifest
-    info_human "Fetching content manifest..."
+    # Fetch index.jsonl
+    info_human "Fetching content index..."
     local manifest_content=$(fetch_remote_content "${server_url}/${public_index_path}")
 
     if [ -z "$manifest_content" ]; then
-        json_error "clone" "FETCH_ERROR" "Failed to fetch manifest from $server_url/$public_index_path"
+        json_error "clone" "FETCH_ERROR" "Failed to fetch index from $server_url/$public_index_path"
     fi
 
-    mkdir -p "$target_dir/metadata"
+    mkdir -p "$target_dir/content/pub.polis.core"
     echo "$manifest_content" > "$target_dir/${public_index_path}"
 
     # Track statistics
@@ -6879,12 +6812,13 @@ clone_diff() {
         json_error "clone" "FETCH_ERROR" "Failed to fetch .well-known/polis from $server_url"
     fi
 
-    local public_index_path=$(echo "$wellknown_content" | jq -r '.config.files.public_index // "metadata/public.jsonl"')
-    local blessed_comments_path=$(echo "$wellknown_content" | jq -r '.config.files.blessed_comments // "metadata/blessed-comments.json"')
+    # Content paths are fixed by bundle convention
+    local public_index_path="content/pub.polis.core/index.jsonl"
+    local blessed_comments_path="content/pub.polis.core/comment/blessed.json"
 
     local manifest_content=$(fetch_remote_content "${server_url}/${public_index_path}")
     if [ -z "$manifest_content" ]; then
-        json_error "clone" "FETCH_ERROR" "Failed to fetch manifest from $server_url/$public_index_path"
+        json_error "clone" "FETCH_ERROR" "Failed to fetch index from $server_url/$public_index_path"
     fi
 
     # Track statistics
@@ -8008,7 +7942,26 @@ render_file() {
     local type="$2"  # "post" or "comment"
     local force="$3"
 
-    local output_file="${input_file%.md}.html"
+    # Compute mount-dir output path (source/output separation)
+    local suffix=""
+    local mount_dir=""
+    local output_file=""
+    local output_md=""
+    if [ "$type" = "post" ] && [ -n "$POSTS_MOUNT_DIR" ]; then
+        suffix="${input_file#$POSTS_DIR/}"
+        mount_dir="$POSTS_MOUNT_DIR"
+    elif [ "$type" = "comment" ] && [ -n "$COMMENTS_MOUNT_DIR" ]; then
+        suffix="${input_file#$COMMENTS_DIR/}"
+        mount_dir="$COMMENTS_MOUNT_DIR"
+    fi
+
+    if [ -n "$mount_dir" ] && [ "$suffix" != "$input_file" ]; then
+        output_file="${mount_dir}/${suffix%.md}.html"
+        output_md="${mount_dir}/${suffix}"
+    else
+        output_file="${input_file%.md}.html"
+        output_md=""  # no copy needed (legacy mode)
+    fi
 
     # Skip if output is newer than input (unless force)
     if [ "$force" != "true" ] && [ -f "$output_file" ] && [ "$output_file" -nt "$input_file" ]; then
@@ -8041,9 +7994,10 @@ render_file() {
     body=$(echo "$body" | sed '/./,$!d')
     local html_content=$(echo "$body" | pandoc -f markdown -t html 2>/dev/null || echo "$body")
 
-    # Build canonical URL (normalize to avoid double slashes)
+    # Build canonical URL using mount path (normalize to avoid double slashes)
     local base_url="${POLIS_BASE_URL%/}"  # Remove trailing slash if present
-    local url="${base_url}/${input_file}"
+    local url_path="$output_file"  # Use mount path for URL (e.g., posts/20260101/test.html)
+    local url="${base_url}/${url_path}"
     info_human "  [url] Canonical URL: $url"
 
     # Get site info - prefer .well-known/polis, fallback to domain
@@ -8063,8 +8017,8 @@ render_file() {
         [ -n "$wk_name" ] && author_name="$wk_name"
     fi
 
-    # Calculate relative path to root and CSS (count directory depth)
-    local dir_path=$(dirname "$input_file")
+    # Calculate relative path to root and CSS based on output path (mount path)
+    local dir_path=$(dirname "$output_file")
     local root_path=""
     local css_path=""
     local home_path=""
@@ -8145,8 +8099,16 @@ ${frontmatter_fields}
 === END POLIS SOURCE ===
 -->"
 
-    # Write output
+    # Write output (create mount dir if needed)
+    mkdir -p "$(dirname "$output_file")"
     echo "$result" > "$output_file"
+
+    # Copy source .md to mount dir (alongside HTML) if mount path differs from source
+    if [ -n "$output_md" ]; then
+        mkdir -p "$(dirname "$output_md")"
+        cp "$input_file" "$output_md"
+    fi
+
     return 0  # Rendered
 }
 
@@ -8170,7 +8132,15 @@ render_index() {
 
             [ -z "$path" ] && continue
 
-            local html_path="${path%.md}.html"
+            # Map source path to mount path for URL
+            local mount_path="$path"
+            if [ -n "$POSTS_MOUNT_DIR" ]; then
+                local path_suffix="${path#$POSTS_DIR/}"
+                if [ "$path_suffix" != "$path" ]; then
+                    mount_path="${POSTS_MOUNT_DIR}/${path_suffix}"
+                fi
+            fi
+            local html_path="${mount_path%.md}.html"
             local published_human=$(format_date_human "$published")
 
             posts_list+="            <li><a href=\"$html_path\">$title</a> <time>$published_human</time></li>
@@ -8252,9 +8222,9 @@ render_archive() {
     result="${result//\{\{post_count\}\}/$(escape_for_replacement "$post_count")}"
     result="${result//\{\{year\}\}/$(escape_for_replacement "$(date +%Y)")}"
 
-    mkdir -p "posts"
-    echo "$result" > "posts/index.html"
-    info_human "  Written: posts/index.html"
+    mkdir -p "$POSTS_MOUNT_DIR"
+    echo "$result" > "$POSTS_MOUNT_DIR/index.html"
+    info_human "  Written: $POSTS_MOUNT_DIR/index.html"
 }
 
 # Command: polis render
@@ -8313,8 +8283,10 @@ cmd_render() {
     info_human "=== Render Configuration ==="
     info_human "Working directory: $(pwd)"
     info_human "POLIS_BASE_URL: $POLIS_BASE_URL"
-    info_human "Posts dir: $POSTS_DIR"
-    info_human "Comments dir: $COMMENTS_DIR"
+    info_human "Posts source: $POSTS_DIR"
+    info_human "Posts mount: $POSTS_MOUNT_DIR"
+    info_human "Comments source: $COMMENTS_DIR"
+    info_human "Comments mount: $COMMENTS_MOUNT_DIR"
     info_human "Blessed comments file: $BLESSED_COMMENTS"
     info_human "Active theme: $ACTIVE_THEME"
     info_human "Snippet markers: $RENDER_MARKERS"
@@ -8378,6 +8350,13 @@ cmd_render() {
         done < <(find "$COMMENTS_DIR" -name "*.md" -not -path "*/.versions/*" -type f 2>/dev/null)
     else
         info_human "Comments directory not found: $COMMENTS_DIR"
+    fi
+
+    # Copy artifacts to mount dirs
+    if [ -n "$COMMENTS_MOUNT_DIR" ] && [ -f "$BLESSED_COMMENTS" ]; then
+        mkdir -p "$COMMENTS_MOUNT_DIR"
+        cp "$BLESSED_COMMENTS" "$COMMENTS_MOUNT_DIR/blessed.json"
+        info_human "Copied blessed.json to $COMMENTS_MOUNT_DIR/"
     fi
 
     info_human ""

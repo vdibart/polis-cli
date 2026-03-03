@@ -1,14 +1,11 @@
 package metadata
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 )
 
 func TestGetBlessedCommentsForPost_ExactMatch(t *testing.T) {
 	siteDir := t.TempDir()
-	os.MkdirAll(filepath.Join(siteDir, "metadata"), 0755)
 
 	AddBlessedComment(siteDir, "posts/20260101/hello.md", BlessedComment{
 		URL:     "https://bob.polis.pub/comments/20260102/re-hello.md",
@@ -26,7 +23,6 @@ func TestGetBlessedCommentsForPost_ExactMatch(t *testing.T) {
 
 func TestGetBlessedCommentsForPost_ExtensionSwap(t *testing.T) {
 	siteDir := t.TempDir()
-	os.MkdirAll(filepath.Join(siteDir, "metadata"), 0755)
 
 	// Stored with .md extension
 	AddBlessedComment(siteDir, "posts/20260101/hello.md", BlessedComment{
@@ -45,7 +41,6 @@ func TestGetBlessedCommentsForPost_ExtensionSwap(t *testing.T) {
 
 func TestGetBlessedCommentsForPost_FullURLMatch(t *testing.T) {
 	siteDir := t.TempDir()
-	os.MkdirAll(filepath.Join(siteDir, "metadata"), 0755)
 
 	// Stored as full URL
 	AddBlessedComment(siteDir, "https://alice.polis.pub/posts/20260101/hello.md", BlessedComment{

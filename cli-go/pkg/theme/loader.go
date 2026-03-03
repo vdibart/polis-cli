@@ -35,14 +35,14 @@ type Manifest struct {
 }
 
 // Load loads templates from the active theme.
-// It tries the local theme first (.polis/themes/{name}/), then falls back to CLI themes.
+// It tries the local theme first (site/themes/{name}/), then falls back to CLI themes.
 func Load(dataDir, cliThemesDir, themeName string) (*Templates, error) {
 	if themeName == "" {
 		return nil, fmt.Errorf("theme name is required")
 	}
 
 	// Try local theme first
-	localThemeDir := filepath.Join(dataDir, ".polis", "themes", themeName)
+	localThemeDir := filepath.Join(dataDir, "site", "themes", themeName)
 	templates, err := loadFromDir(localThemeDir)
 	if err == nil {
 		return templates, nil
@@ -117,56 +117,54 @@ func SelectRandomTheme(dataDir, cliThemesDir string) (string, error) {
 	return selected, nil
 }
 
-// LoadManifest loads the site manifest from metadata/manifest.json.
+// LoadManifest loads site metadata from .well-known/polis.
+// Returns a Manifest struct for compatibility with existing code.
 func LoadManifest(dataDir string) (*Manifest, error) {
-	manifestPath := filepath.Join(dataDir, "metadata", "manifest.json")
-	data, err := os.ReadFile(manifestPath)
+	wkPath := filepath.Join(dataDir, ".well-known", "polis")
+	data, err := os.ReadFile(wkPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read manifest: %w", err)
+		return nil, fmt.Errorf("failed to read .well-known/polis: %w", err)
 	}
 
-	var manifest Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return nil, fmt.Errorf("failed to parse manifest: %w", err)
+	var wk struct {
+		ActiveTheme string `json:"active_theme"`
+	}
+	if err := json.Unmarshal(data, &wk); err != nil {
+		return nil, fmt.Errorf("failed to parse .well-known/polis: %w", err)
 	}
 
-	return &manifest, nil
+	return &Manifest{
+		ActiveTheme: wk.ActiveTheme,
+	}, nil
 }
 
-// SaveManifest saves the site manifest to metadata/manifest.json.
-func SaveManifest(dataDir string, manifest *Manifest) error {
-	manifestPath := filepath.Join(dataDir, "metadata", "manifest.json")
-
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(manifestPath), 0755); err != nil {
-		return fmt.Errorf("failed to create metadata directory: %w", err)
-	}
-
-	data, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal manifest: %w", err)
-	}
-
-	if err := os.WriteFile(manifestPath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write manifest: %w", err)
-	}
-
-	return nil
-}
-
-// SetActiveTheme updates the active theme in the manifest.
+// SetActiveTheme updates the active theme in .well-known/polis.
 func SetActiveTheme(dataDir, themeName string) error {
-	manifest, err := LoadManifest(dataDir)
+	wkPath := filepath.Join(dataDir, ".well-known", "polis")
+
+	// Read existing well-known
+	var wk map[string]interface{}
+	data, err := os.ReadFile(wkPath)
 	if err != nil {
-		// Create new manifest if it doesn't exist
-		manifest = &Manifest{
-			Version: Version,
+		wk = make(map[string]interface{})
+	} else {
+		if err := json.Unmarshal(data, &wk); err != nil {
+			wk = make(map[string]interface{})
 		}
 	}
 
-	manifest.ActiveTheme = themeName
+	wk["active_theme"] = themeName
 
-	return SaveManifest(dataDir, manifest)
+	out, err := json.MarshalIndent(wk, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal .well-known/polis: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(wkPath), 0755); err != nil {
+		return fmt.Errorf("failed to create .well-known directory: %w", err)
+	}
+
+	return os.WriteFile(wkPath, append(out, '\n'), 0644)
 }
 
 // CopyCSS copies the theme's CSS file to styles.css at the site root.
@@ -175,7 +173,7 @@ func CopyCSS(dataDir, cliThemesDir, themeName string) error {
 	cssFilename := themeName + ".css"
 
 	// Try local theme first
-	localCSSPath := filepath.Join(dataDir, ".polis", "themes", themeName, cssFilename)
+	localCSSPath := filepath.Join(dataDir, "site", "themes", themeName, cssFilename)
 	destPath := filepath.Join(dataDir, "styles.css")
 
 	if _, err := os.Stat(localCSSPath); err == nil {
@@ -217,7 +215,7 @@ func ListThemes(dataDir, cliThemesDir string) ([]string, error) {
 	themeSet := make(map[string]bool)
 
 	// List local themes
-	localThemesDir := filepath.Join(dataDir, ".polis", "themes")
+	localThemesDir := filepath.Join(dataDir, "site", "themes")
 	if entries, err := os.ReadDir(localThemesDir); err == nil {
 		for _, entry := range entries {
 			if entry.IsDir() && isValidTheme(filepath.Join(localThemesDir, entry.Name())) {
@@ -260,7 +258,7 @@ func isValidTheme(themeDir string) bool {
 // GetThemeDir returns the path to a theme's directory.
 // Returns the local theme path if it exists, otherwise the CLI theme path.
 func GetThemeDir(dataDir, cliThemesDir, themeName string) string {
-	localDir := filepath.Join(dataDir, ".polis", "themes", themeName)
+	localDir := filepath.Join(dataDir, "site", "themes", themeName)
 	if _, err := os.Stat(localDir); err == nil {
 		return localDir
 	}

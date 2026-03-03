@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// maxBodySize is the maximum response body size for remote content fetches (10MB).
+const maxBodySize = 10 * 1024 * 1024
+
 // Client is an HTTP client for fetching remote content.
 type Client struct {
 	HTTPClient *http.Client
@@ -100,7 +103,7 @@ func (c *Client) FetchContent(url string) (string, error) {
 		return "", fmt.Errorf("fetch failed with status %d for %s", resp.StatusCode, url)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
 		return "", fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -147,7 +150,7 @@ func (c *Client) FetchAuthorEmail(baseURL string) (string, error) {
 // FetchManifest fetches and parses the manifest.json from a site.
 func (c *Client) FetchManifest(baseURL string) (*Manifest, error) {
 	baseURL = strings.TrimSuffix(baseURL, "/")
-	url := baseURL + "/metadata/manifest.json"
+	url := baseURL + "/.well-known/polis"
 
 	content, err := c.FetchContent(url)
 	if err != nil {
@@ -165,7 +168,7 @@ func (c *Client) FetchManifest(baseURL string) (*Manifest, error) {
 // FetchPublicIndex fetches and parses the public.jsonl index from a site.
 func (c *Client) FetchPublicIndex(baseURL string) ([]PublicIndexEntry, error) {
 	baseURL = strings.TrimSuffix(baseURL, "/")
-	url := baseURL + "/metadata/public.jsonl"
+	url := baseURL + "/content/pub.polis.core/index.jsonl"
 
 	content, err := c.FetchContent(url)
 	if err != nil {

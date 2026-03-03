@@ -68,7 +68,7 @@ func handleBlessingRequests(args []string) {
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if discoveryURL == "" {
-		discoveryURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+		discoveryURL = "https://ds.polis.pub"
 	}
 
 	// Get domain from POLIS_BASE_URL
@@ -130,7 +130,7 @@ func handleBlessingGrant(args []string) {
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if discoveryURL == "" {
-		discoveryURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+		discoveryURL = "https://ds.polis.pub"
 	}
 
 	client := discovery.NewClient(discoveryURL, discoveryKey)
@@ -173,7 +173,7 @@ func handleBlessingDeny(args []string) {
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if discoveryURL == "" {
-		discoveryURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+		discoveryURL = "https://ds.polis.pub"
 	}
 
 	// To deny, we need to look up the pending relationship first
@@ -232,13 +232,13 @@ func handleBlessingBeseech(args []string) {
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if discoveryURL == "" {
-		discoveryURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+		discoveryURL = "https://ds.polis.pub"
 	}
 
 	client := discovery.NewClient(discoveryURL, discoveryKey)
 
 	// Check current content status via content-check
-	checkResp, err := client.CheckContent("polis.comment", commentVersion)
+	checkResp, err := client.CheckContent("pub.polis.comment", commentVersion)
 	if err != nil {
 		exitError("Failed to check comment status: %v", err)
 	}
@@ -286,7 +286,7 @@ func handleBlessingSync(args []string) {
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if discoveryURL == "" {
-		discoveryURL = "https://ltfpezriiaqvjupxbttw.supabase.co/functions/v1"
+		discoveryURL = "https://ds.polis.pub"
 	}
 
 	baseURL := os.Getenv("POLIS_BASE_URL")

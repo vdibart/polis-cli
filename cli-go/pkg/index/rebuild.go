@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
@@ -89,8 +88,8 @@ func RebuildIndex(dataDir, baseURL string, opts RebuildOptions) (*RebuildResult,
 
 // rebuildPostsIndex rebuilds the public.jsonl from posts.
 func rebuildPostsIndex(dataDir, baseURL string) (int, error) {
-	postsDir := filepath.Join(dataDir, "posts")
-	indexPath := filepath.Join(dataDir, "metadata", "public.jsonl")
+	postsDir := filepath.Join(dataDir, "content", "pub.polis.core", "post")
+	indexPath := filepath.Join(dataDir, "content", "pub.polis.core", "index.jsonl")
 
 	// Ensure metadata directory exists
 	if err := os.MkdirAll(filepath.Dir(indexPath), 0755); err != nil {
@@ -177,8 +176,8 @@ func buildPostEntry(path, dataDir, baseURL string) (PostEntry, error) {
 // rebuildCommentsIndex rebuilds blessed-comments.json from the discovery service.
 // Falls back to an empty file if discovery is not configured.
 func rebuildCommentsIndex(dataDir string, opts RebuildOptions) (int, error) {
-	metadataDir := filepath.Join(dataDir, "metadata")
-	if err := os.MkdirAll(metadataDir, 0755); err != nil {
+	commentDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment")
+	if err := os.MkdirAll(commentDir, 0755); err != nil {
 		return 0, err
 	}
 
@@ -192,7 +191,7 @@ func rebuildCommentsIndex(dataDir string, opts RebuildOptions) (int, error) {
 		domain = strings.TrimPrefix(domain, "http://")
 		domain = strings.TrimSuffix(domain, "/")
 
-		resp, err := client.QueryRelationships("polis.blessing", map[string]string{
+		resp, err := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 			"actor":  domain,
 			"status": "granted",
 		})
@@ -234,7 +233,7 @@ func rebuildCommentsIndex(dataDir string, opts RebuildOptions) (int, error) {
 	}
 
 	// No discovery or fetch failed - ensure file exists with empty comments
-	blessedPath := filepath.Join(metadataDir, "blessed-comments.json")
+	blessedPath := filepath.Join(commentDir, "blessed.json")
 	if _, err := os.Stat(blessedPath); os.IsNotExist(err) {
 		bc := &metadata.BlessedComments{
 			Version:  GetGenerator(),
@@ -249,25 +248,11 @@ func rebuildCommentsIndex(dataDir string, opts RebuildOptions) (int, error) {
 }
 
 // clearNotifications clears notification state files.
-// Handles legacy (.polis/notifications.jsonl), old (.polis/ds/*/notifications/state.jsonl),
-// and current (.polis/ds/*/state/polis.notification.jsonl) paths.
+// Current path: .polis/ds/<domain>/pub.polis.core/state/pub.polis.notification.jsonl
 func clearNotifications(dataDir string) (int, error) {
 	count := 0
 
-	// Clear legacy notification file if it exists
-	oldPath := filepath.Join(dataDir, ".polis", "notifications.jsonl")
-	if data, err := os.ReadFile(oldPath); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.TrimSpace(line) != "" {
-				count++
-			}
-		}
-		os.Remove(oldPath)
-	}
-	// Also remove legacy manifest
-	os.Remove(filepath.Join(dataDir, ".polis", "notifications-manifest.json"))
-
-	// Clear state files under .polis/ds/*/
+	// Clear state files under .polis/ds/*/pub.polis.core/
 	dsDir := filepath.Join(dataDir, ".polis", "ds")
 	entries, err := os.ReadDir(dsDir)
 	if err == nil {
@@ -275,8 +260,7 @@ func clearNotifications(dataDir string) (int, error) {
 			if !entry.IsDir() {
 				continue
 			}
-			// Current path: state/polis.notification.jsonl
-			statePath := filepath.Join(dsDir, entry.Name(), "state", "polis.notification.jsonl")
+			statePath := filepath.Join(dsDir, entry.Name(), "pub.polis.core", "state", "pub.polis.notification.jsonl")
 			if data, err := os.ReadFile(statePath); err == nil {
 				for _, line := range strings.Split(string(data), "\n") {
 					if strings.TrimSpace(line) != "" {
@@ -285,69 +269,15 @@ func clearNotifications(dataDir string) (int, error) {
 				}
 				os.WriteFile(statePath, []byte{}, 0644)
 			}
-			// Previous path: state/notifications.jsonl (pre-rename)
-			prevStatePath := filepath.Join(dsDir, entry.Name(), "state", "notifications.jsonl")
-			if data, err := os.ReadFile(prevStatePath); err == nil {
-				for _, line := range strings.Split(string(data), "\n") {
-					if strings.TrimSpace(line) != "" {
-						count++
-					}
-				}
-				os.WriteFile(prevStatePath, []byte{}, 0644)
-			}
-			// Old path: notifications/state.jsonl (pre-migration)
-			oldStatePath := filepath.Join(dsDir, entry.Name(), "notifications", "state.jsonl")
-			if data, err := os.ReadFile(oldStatePath); err == nil {
-				for _, line := range strings.Split(string(data), "\n") {
-					if strings.TrimSpace(line) != "" {
-						count++
-					}
-				}
-				os.WriteFile(oldStatePath, []byte{}, 0644)
-			}
 		}
 	}
 
 	return count, nil
 }
 
-// regenerateManifest updates the manifest.json file.
+// regenerateManifest is a no-op — manifest.json has been absorbed into .well-known/polis.
 func regenerateManifest(dataDir string) error {
-	manifestPath := filepath.Join(dataDir, "metadata", "manifest.json")
-
-	// Count posts
-	postCount := 0
-	postsDir := filepath.Join(dataDir, "posts")
-	filepath.Walk(postsDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.HasSuffix(path, ".md") && !strings.Contains(path, ".versions") {
-			postCount++
-		}
-		return nil
-	})
-
-	// Count comments
-	commentCount := 0
-	commentsDir := filepath.Join(dataDir, "comments")
-	filepath.Walk(commentsDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.HasSuffix(path, ".md") && !strings.Contains(path, ".versions") {
-			commentCount++
-		}
-		return nil
-	})
-
-	manifest := map[string]interface{}{
-		"version":        GetGenerator(),
-		"last_published": time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-		"post_count":     postCount,
-		"comment_count":  commentCount,
-	}
-
-	data, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(manifestPath, append(data, '\n'), 0644)
+	return nil
 }
 
 // parseFrontmatter extracts frontmatter fields from content.
