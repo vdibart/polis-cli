@@ -159,7 +159,7 @@ func (s *Store) loadCursors() (*CursorsFile, error) {
 }
 
 func (s *Store) saveCursors(cf *CursorsFile) error {
-	if err := os.MkdirAll(s.stateDir, 0755); err != nil {
+	if err := os.MkdirAll(s.stateDir, 0700); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
 	}
 	data, err := json.MarshalIndent(cf, "", "  ")
@@ -171,7 +171,7 @@ func (s *Store) saveCursors(cf *CursorsFile) error {
 
 // saveCursorsLocked writes cursors without acquiring the mutex (for use within already-locked methods).
 func (s *Store) saveCursorsLocked(cf *CursorsFile) error {
-	if err := os.MkdirAll(s.stateDir, 0755); err != nil {
+	if err := os.MkdirAll(s.stateDir, 0700); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
 	}
 	data, err := json.MarshalIndent(cf, "", "  ")
@@ -230,7 +230,7 @@ func (s *Store) LoadState(name string, target interface{}) error {
 func (s *Store) SaveState(name string, state interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := os.MkdirAll(s.stateDir, 0755); err != nil {
+	if err := os.MkdirAll(s.stateDir, 0700); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -263,7 +263,7 @@ func (s *Store) LoadConfig(name string, target interface{}) error {
 func (s *Store) SaveConfig(name string, config interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := os.MkdirAll(s.configDir, 0755); err != nil {
+	if err := os.MkdirAll(s.configDir, 0700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 	data, err := json.MarshalIndent(config, "", "  ")

@@ -25,6 +25,9 @@ type Client struct {
 	Domain        string // optional: for signed GET requests
 	PrivateKeyPEM []byte // optional: for signed GET requests
 	HTTPClient    *http.Client
+	DSKeyCache    *DSKeyCache // optional: for DS response verification
+	RequestID     string      // optional: propagated as X-Request-Id for cross-boundary tracing
+	Logger        func(method, path string, durationMs int64, requestID string) // optional: DS roundtrip timing
 }
 
 // NewClient creates a new discovery service client (unauthenticated GET requests).
@@ -35,6 +38,7 @@ func NewClient(baseURL, apiKey string) *Client {
 		HTTPClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		DSKeyCache: NewDSKeyCache(baseURL, 0),
 	}
 }
 
@@ -49,6 +53,7 @@ func NewAuthenticatedClient(baseURL, apiKey, domain string, privateKeyPEM []byte
 		HTTPClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		DSKeyCache: NewDSKeyCache(baseURL, 0),
 	}
 }
 
@@ -68,6 +73,25 @@ func MakeQueryAuthCanonicalJSON(domain, timestamp string) ([]byte, error) {
 		Domain:    domain,
 		Timestamp: timestamp,
 	})
+}
+
+// setRequestID sets X-Request-Id on the request if the client has one configured.
+func (c *Client) setRequestID(req *http.Request) {
+	if c.RequestID != "" {
+		req.Header.Set("X-Request-Id", c.RequestID)
+	}
+}
+
+// doWithTiming executes an HTTP request, calling the Logger callback if set.
+func (c *Client) doWithTiming(req *http.Request) (*http.Response, error) {
+	c.setRequestID(req)
+	start := time.Now()
+	resp, err := c.HTTPClient.Do(req)
+	if c.Logger != nil {
+		durationMs := time.Since(start).Milliseconds()
+		c.Logger(req.Method, req.URL.Path, durationMs, c.RequestID)
+	}
+	return resp, err
 }
 
 // addAuthHeaders adds X-Polis-Domain, X-Polis-Signature, X-Polis-Timestamp
@@ -174,8 +198,10 @@ func (r *ContentRecord) UnmarshalJSON(data []byte) error {
 
 // ContentQueryResponse is the response from content-query.
 type ContentQueryResponse struct {
-	Count   int             `json:"count"`
-	Records []ContentRecord `json:"records"`
+	Count       int             `json:"count"`
+	Records     []ContentRecord `json:"records"`
+	DSSignature string          `json:"ds_signature,omitempty"`
+	DSKeyID     string          `json:"ds_key_id,omitempty"`
 }
 
 // ============================================================================
@@ -222,8 +248,10 @@ func (r *RelationshipRecord) UnmarshalJSON(data []byte) error {
 
 // RelationshipQueryResponse is the response from relationship-query.
 type RelationshipQueryResponse struct {
-	Count   int                  `json:"count"`
-	Records []RelationshipRecord `json:"records"`
+	Count       int                  `json:"count"`
+	Records     []RelationshipRecord `json:"records"`
+	DSSignature string               `json:"ds_signature,omitempty"`
+	DSKeyID     string               `json:"ds_key_id,omitempty"`
 }
 
 // ============================================================================
@@ -232,7 +260,7 @@ type RelationshipQueryResponse struct {
 
 // RegisterContent registers or updates content with the discovery service.
 func (c *Client) RegisterContent(req *ContentRegisterRequest) (*ContentRegisterResponse, error) {
-	endpoint := c.BaseURL + "/ds-content-register"
+	endpoint := c.BaseURL + "/v1/content"
 
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -249,7 +277,7 @@ func (c *Client) RegisterContent(req *ContentRegisterRequest) (*ContentRegisterR
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -277,7 +305,7 @@ func (c *Client) RegisterContent(req *ContentRegisterRequest) (*ContentRegisterR
 
 // UnregisterContent removes content from the discovery service.
 func (c *Client) UnregisterContent(contentType, contentURL, signature string) error {
-	endpoint := c.BaseURL + "/ds-content-unregister"
+	endpoint := c.BaseURL + "/v1/content/unregister"
 
 	req := ContentUnregisterRequest{
 		Type:      contentType,
@@ -300,7 +328,7 @@ func (c *Client) UnregisterContent(contentType, contentURL, signature string) er
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -319,7 +347,7 @@ func (c *Client) CheckContent(contentType, contentURL string) (*ContentCheckResp
 	params := url.Values{}
 	params.Set("type", contentType)
 	params.Set("url", contentURL)
-	endpoint := c.BaseURL + "/ds-content-check?" + params.Encode()
+	endpoint := c.BaseURL + "/v1/content/check?" + params.Encode()
 
 	httpReq, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
@@ -330,7 +358,7 @@ func (c *Client) CheckContent(contentType, contentURL string) (*ContentCheckResp
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -360,7 +388,7 @@ func (c *Client) QueryContent(contentType string, filters map[string]string) (*C
 	for k, v := range filters {
 		params.Set(k, v)
 	}
-	endpoint := c.BaseURL + "/ds-content-query?" + params.Encode()
+	endpoint := c.BaseURL + "/v1/content?" + params.Encode()
 
 	httpReq, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
@@ -374,7 +402,7 @@ func (c *Client) QueryContent(contentType string, filters map[string]string) (*C
 		return nil, err
 	}
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -394,6 +422,10 @@ func (c *Client) QueryContent(contentType string, filters map[string]string) (*C
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
+	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
+		return nil, fmt.Errorf("content query: %w", err)
+	}
+
 	return &result, nil
 }
 
@@ -404,7 +436,7 @@ func (c *Client) QueryContent(contentType string, filters map[string]string) (*C
 // UpdateRelationship updates a relationship status (grant/deny blessing).
 // The privateKey is used to sign the request payload.
 func (c *Client) UpdateRelationship(relType, sourceURL, targetURL, action string, privateKey []byte) error {
-	endpoint := c.BaseURL + "/ds-relationship-update"
+	endpoint := c.BaseURL + "/v1/relationships"
 
 	// Create canonical payload for signing (must match DS buildRelationshipCanonicalJSON)
 	canonicalPayload := relationshipCanonicalPayload{
@@ -447,7 +479,7 @@ func (c *Client) UpdateRelationship(relType, sourceURL, targetURL, action string
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -468,7 +500,7 @@ func (c *Client) QueryRelationships(relType string, filters map[string]string) (
 	for k, v := range filters {
 		params.Set(k, v)
 	}
-	endpoint := c.BaseURL + "/ds-relationship-query?" + params.Encode()
+	endpoint := c.BaseURL + "/v1/relationships?" + params.Encode()
 
 	httpReq, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
@@ -482,7 +514,7 @@ func (c *Client) QueryRelationships(relType string, filters map[string]string) (
 		return nil, err
 	}
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -500,6 +532,10 @@ func (c *Client) QueryRelationships(relType string, filters map[string]string) (
 	var result RelationshipQueryResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
+		return nil, fmt.Errorf("relationship query: %w", err)
 	}
 
 	return &result, nil
@@ -564,7 +600,7 @@ func MakeRelationshipCanonicalJSON(relType, sourceURL, targetURL, action string)
 }
 
 // ============================================================================
-// Site Registration (ds-sites-* endpoints, table: ds_registered_sites)
+// Site Registration (/v1/sites/* endpoints, table: ds_registered_sites)
 // ============================================================================
 
 // SiteCheckResponse is the response from the sites-check endpoint.
@@ -576,6 +612,8 @@ type SiteCheckResponse struct {
 	RegistrationVersion int    `json:"registration_version,omitempty"`
 	ServiceAttestation  string `json:"service_attestation,omitempty"`
 	AttestationKeyID    string `json:"attestation_key_id,omitempty"`
+	DSSignature         string `json:"ds_signature,omitempty"`
+	DSKeyID             string `json:"ds_key_id,omitempty"`
 }
 
 // SiteRegisterResponse is the response from the sites-register endpoint.
@@ -625,7 +663,7 @@ type siteUnregisterRequest struct {
 
 // CheckSiteRegistration checks if a domain is registered with the discovery service.
 func (c *Client) CheckSiteRegistration(domain string) (*SiteCheckResponse, error) {
-	endpoint := fmt.Sprintf("%s/ds-sites-check?domain=%s", c.BaseURL, domain)
+	endpoint := fmt.Sprintf("%s/v1/sites/check?domain=%s", c.BaseURL, domain)
 
 	httpReq, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
@@ -637,7 +675,7 @@ func (c *Client) CheckSiteRegistration(domain string) (*SiteCheckResponse, error
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -657,12 +695,16 @@ func (c *Client) CheckSiteRegistration(domain string) (*SiteCheckResponse, error
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
+	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
+		return nil, fmt.Errorf("site check: %w", err)
+	}
+
 	return &result, nil
 }
 
 // RegisterSite registers a domain with the discovery service.
 func (c *Client) RegisterSite(domain string, privateKey []byte, email, authorName string) (*SiteRegisterResponse, error) {
-	endpoint := c.BaseURL + "/ds-sites-register"
+	endpoint := c.BaseURL + "/v1/sites"
 
 	canonicalPayload := siteRegistrationPayload{
 		Version: 1,
@@ -703,7 +745,7 @@ func (c *Client) RegisterSite(domain string, privateKey []byte, email, authorNam
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -732,7 +774,7 @@ func (c *Client) RegisterSite(domain string, privateKey []byte, email, authorNam
 
 // UnregisterSite unregisters a domain from the discovery service.
 func (c *Client) UnregisterSite(domain string, privateKey []byte) (*SiteUnregisterResponse, error) {
-	endpoint := c.BaseURL + "/ds-sites-unregister"
+	endpoint := c.BaseURL + "/v1/sites/unregister"
 
 	canonicalPayload := siteRegistrationPayload{
 		Version: 1,
@@ -771,7 +813,7 @@ func (c *Client) UnregisterSite(domain string, privateKey []byte) (*SiteUnregist
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -808,7 +850,7 @@ func MakeSiteRegistrationCanonicalJSON(action, domain string) ([]byte, error) {
 }
 
 // ============================================================================
-// Stream (ds-stream-* endpoints, table: ds_events)
+// Stream (/v1/stream endpoints, table: ds_events)
 // ============================================================================
 
 // unmarshalJSONBField handles Postgres JSONB fields that may arrive as either
@@ -831,6 +873,35 @@ func unmarshalJSONBField(raw json.RawMessage) map[string]interface{} {
 		return map[string]interface{}{}
 	}
 	return result
+}
+
+
+// verifyResponse verifies the DS envelope signature on a query response.
+// It extracts the data fields (everything except ds_signature and ds_key_id),
+// builds canonical JSON, and verifies the signature.
+func (c *Client) verifyResponse(rawBody []byte, dsSignature, dsKeyID string) error {
+	if c.DSKeyCache == nil {
+		return nil
+	}
+
+	// Parse the full response into a generic map
+	var full map[string]interface{}
+	if err := json.Unmarshal(rawBody, &full); err != nil {
+		return fmt.Errorf("failed to parse response for verification: %w", err)
+	}
+
+	// Extract data fields (everything except ds_signature, ds_key_id)
+	data := make(map[string]interface{}, len(full))
+	for k, v := range full {
+		if k != "ds_signature" && k != "ds_key_id" {
+			data[k] = v
+		}
+	}
+
+	return VerifyDSResponse(c.DSKeyCache, data, SignedResponse{
+		DSSignature: dsSignature,
+		DSKeyID:     dsKeyID,
+	})
 }
 
 // StreamEvent represents a single event in the discovery stream.
@@ -869,14 +940,16 @@ func (e *StreamEvent) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// StreamQueryResponse is the response from GET /ds-stream.
+// StreamQueryResponse is the response from GET /v1/stream.
 type StreamQueryResponse struct {
-	Events  []StreamEvent `json:"events"`
-	Cursor  string        `json:"cursor"`
-	HasMore bool          `json:"has_more"`
+	Events      []StreamEvent `json:"events"`
+	Cursor      string        `json:"cursor"`
+	HasMore     bool          `json:"has_more"`
+	DSSignature string        `json:"ds_signature,omitempty"`
+	DSKeyID     string        `json:"ds_key_id,omitempty"`
 }
 
-// StreamHealthResponse is the response from GET /ds-stream-health.
+// StreamHealthResponse is the response from GET /v1/stream/health.
 type StreamHealthResponse struct {
 	Status       string `json:"status"`
 	LatestCursor string `json:"latest_cursor"`
@@ -906,7 +979,7 @@ func (c *Client) StreamQuery(since string, limit int, typeFilter string, actorFi
 		params.Set("source", sourceFilter[0])
 	}
 
-	endpoint := c.BaseURL + "/ds-stream"
+	endpoint := c.BaseURL + "/v1/stream"
 	if len(params) > 0 {
 		endpoint += "?" + params.Encode()
 	}
@@ -922,7 +995,7 @@ func (c *Client) StreamQuery(since string, limit int, typeFilter string, actorFi
 		return nil, err
 	}
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -942,12 +1015,16 @@ func (c *Client) StreamQuery(since string, limit int, typeFilter string, actorFi
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
+	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
+		return nil, fmt.Errorf("stream query: %w", err)
+	}
+
 	return &result, nil
 }
 
 // StreamPublish publishes an event to the discovery stream.
 func (c *Client) StreamPublish(eventType, actor string, payload map[string]interface{}, signature string) error {
-	endpoint := c.BaseURL + "/ds-stream-publish"
+	endpoint := c.BaseURL + "/v1/stream"
 
 	reqBody := struct {
 		Type      string                 `json:"type"`
@@ -976,7 +1053,7 @@ func (c *Client) StreamPublish(eventType, actor string, payload map[string]inter
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
@@ -992,7 +1069,7 @@ func (c *Client) StreamPublish(eventType, actor string, payload map[string]inter
 
 // StreamHealth returns the health status of the discovery stream.
 func (c *Client) StreamHealth() (*StreamHealthResponse, error) {
-	endpoint := c.BaseURL + "/ds-stream-health"
+	endpoint := c.BaseURL + "/v1/stream/health"
 
 	httpReq, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
@@ -1002,7 +1079,7 @@ func (c *Client) StreamHealth() (*StreamHealthResponse, error) {
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -1041,7 +1118,7 @@ func MakeStreamCanonicalJSON(eventType string, payload map[string]interface{}) (
 // Key Rotation
 // ============================================================================
 
-// KeyRotationRequest is the request body for /ds-key-rotate.
+// KeyRotationRequest is the request body for /v1/sites/keys/rotate.
 type KeyRotationRequest struct {
 	Domain        string `json:"domain"`
 	OldKey        string `json:"old_key"`
@@ -1074,7 +1151,7 @@ func MakeKeyRotationCanonicalJSON(domain, oldKey, newKey, timestamp string) ([]b
 
 // RotateKey sends a key rotation request to the discovery service.
 func (c *Client) RotateKey(req KeyRotationRequest) error {
-	endpoint := c.BaseURL + "/ds-key-rotate"
+	endpoint := c.BaseURL + "/v1/sites/keys/rotate"
 
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -1091,7 +1168,7 @@ func (c *Client) RotateKey(req KeyRotationRequest) error {
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}

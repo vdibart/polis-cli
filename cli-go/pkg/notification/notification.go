@@ -121,7 +121,7 @@ func (m *Manager) Append(entries []StateEntry) (int, error) {
 	}
 
 	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0700); err != nil {
 		return 0, fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -291,7 +291,7 @@ func (m *Manager) Prune(cfg PruneConfig) (int, error) {
 
 // writeAll rewrites the entire state file.
 func (m *Manager) writeAll(entries []StateEntry) error {
-	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 

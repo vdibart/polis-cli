@@ -1,19 +1,20 @@
 package server
 
 import (
+	"crypto/rand"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/blessing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
-	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
@@ -34,6 +35,16 @@ type SyncResult struct {
 // runUnifiedSync performs a single unified sync cycle: queries the DS stream
 // with a single cursor, fans out events to all registered handlers, then
 // advances the cursor and renders if needed.
+// generateSyncID creates a UUIDv4 for sync cycle correlation.
+func generateSyncID() string {
+	var uuid [16]byte
+	_, _ = rand.Read(uuid[:])
+	uuid[6] = (uuid[6] & 0x0f) | 0x40
+	uuid[8] = (uuid[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
+}
+
 func (s *Server) runUnifiedSync() SyncResult {
 	result := SyncResult{}
 
@@ -50,11 +61,20 @@ func (s *Server) runUnifiedSync() SyncResult {
 		return result
 	}
 
+	syncID := generateSyncID()
+	syncStart := time.Now()
+
 	discoveryDomain := s.GetDiscoveryDomain()
 	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
 
 	// Get unified cursor, migrating from old per-handler cursors on first run
 	cursor := s.getUnifiedCursor(store)
+
+	s.LogEvent("pub.polis.sync.start", map[string]interface{}{
+		"sync_id":       syncID,
+		"cursor":        cursor,
+		"handler_count": len(s.syncHandlers),
+	})
 
 	// Collect events from targeted queries (2-3 DS calls with a shared cursor)
 	allEvents, newCursor := s.queryStreamEvents(myDomain, cursor)
@@ -63,6 +83,11 @@ func (s *Server) runUnifiedSync() SyncResult {
 		if newCursor != "" && cursorGreater(newCursor, cursor) {
 			_ = store.SetCursor("pub.polis.sync", newCursor)
 		}
+		s.LogEvent("pub.polis.sync.complete", map[string]interface{}{
+			"sync_id":          syncID,
+			"events_processed": 0,
+			"duration_ms":      time.Since(syncStart).Milliseconds(),
+		})
 		return result
 	}
 
@@ -110,6 +135,19 @@ func (s *Server) runUnifiedSync() SyncResult {
 	// Broadcast counts via SSE
 	s.broadcastCounts(result)
 
+	// Log sync completion
+	s.LogEvent("pub.polis.sync.complete", map[string]interface{}{
+		"sync_id":            syncID,
+		"cursor_before":      cursor,
+		"cursor_after":       newCursor,
+		"events_processed":   len(allEvents),
+		"new_notifications":  result.NewNotifications,
+		"new_feed_items":     result.NewFeedItems,
+		"followers_changed":  result.FollowersChanged,
+		"files_changed":      result.FilesChanged,
+		"duration_ms":        time.Since(syncStart).Milliseconds(),
+	})
+
 	return result
 }
 
@@ -155,10 +193,12 @@ func cursorLess(a, b string) bool {
 // 2. Events where we're the source (blessing grants/denials of our comments)
 // 3. Events from followed authors (new posts/comments for feed + notifications)
 func (s *Server) queryStreamEvents(myDomain, cursor string) ([]discovery.StreamEvent, string) {
-	client := discovery.NewAuthenticatedClient(s.DiscoveryURL, s.DiscoveryKey, myDomain, s.PrivateKey)
+	client := s.NewAuthDSClient(nil, myDomain)
 	newCursor := cursor
 	seen := make(map[string]bool) // event ID -> already collected
 	var allEvents []discovery.StreamEvent
+	dsQueryErrors := 0
+	dsQueryCount := 0
 
 	addEvents := func(events []discovery.StreamEvent, resultCursor string) {
 		for _, evt := range events {
@@ -174,16 +214,20 @@ func (s *Server) queryStreamEvents(myDomain, cursor string) ([]discovery.StreamE
 	}
 
 	// Query 1: Events targeting our domain
+	dsQueryCount++
 	result, err := client.StreamQuery(cursor, 1000, "", "", myDomain)
 	if err != nil {
+		dsQueryErrors++
 		s.LogDebug("unified sync: target_domain query failed: %v", err)
 	} else {
 		addEvents(result.Events, result.Cursor)
 	}
 
 	// Query 2: Events where we're the source (for blessing grant/deny)
+	dsQueryCount++
 	result, err = client.StreamQuery(cursor, 1000, "", "", "", myDomain)
 	if err != nil {
+		dsQueryErrors++
 		s.LogDebug("unified sync: source_domain query failed: %v", err)
 	} else {
 		addEvents(result.Events, result.Cursor)
@@ -201,15 +245,61 @@ func (s *Server) queryStreamEvents(myDomain, cursor string) ([]discovery.StreamE
 			}
 		}
 		if len(domains) > 0 {
+			dsQueryCount++
 			actorFilter := discovery.JoinDomains(domains)
 			result, err = client.StreamQuery(cursor, 1000, "", actorFilter, "")
 			if err != nil {
+				dsQueryErrors++
 				s.LogDebug("unified sync: followed_author query failed: %v", err)
 			} else {
 				addEvents(result.Events, result.Cursor)
 			}
 		}
 	}
+
+	// Load verification config and state
+	discoveryDomain := s.GetDiscoveryDomain()
+	vStore := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	vCfg := stream.LoadVerificationConfig(vStore)
+	var vState stream.VerificationState
+	_ = vState.Load(vStore)
+
+	// Check if DS should be suspended due to repeated envelope failures
+	if vState.ShouldSuspendSync(vCfg.MaxConsecutiveDSFails) {
+		s.LogWarn("unified sync: [x] DS may be compromised or misconfigured — sync suspended (%d consecutive failures)", vState.DSFailures.Consecutive)
+		_ = vState.Save(vStore)
+		return nil, cursor
+	}
+
+	// Track DS envelope verification results
+	if dsQueryErrors > 0 && dsQueryErrors == dsQueryCount {
+		// All queries failed — likely DS signature issue
+		vState.RecordDSFailure()
+		s.LogWarn("unified sync: [!] All %d DS queries failed — possible signature verification issue", dsQueryCount)
+	} else if len(allEvents) > 0 {
+		vState.RecordDSSuccess()
+	}
+
+	// Verify author signatures on all events before processing
+	allEvents = discovery.FilterVerifiedEvents(
+		s.AuthorKeyCache,
+		allEvents,
+		vCfg.RequireAuthorSignatures,
+		func(evt discovery.StreamEvent, msg string) {
+			s.LogWarn("unified sync: [!] %s (event %v)", msg, evt.ID)
+			vState.RecordAuthorFailure(evt.Actor, evt.Type)
+		},
+	)
+
+	// Check for repeated failures and warn
+	recent := vState.RecentAuthorFailures(24 * time.Hour)
+	for domain, stat := range recent {
+		if stat.Total >= 5 {
+			s.LogWarn("unified sync: [!] Repeated verification failures from %s (%d in 24h) — consider blocking", domain, stat.Total)
+		}
+	}
+
+	_ = vState.Save(vStore)
 
 	return allEvents, newCursor
 }
@@ -513,15 +603,13 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 			followerDomains[f] = true
 		}
 		ctx := policy.EvalContext{
+			MyDomain:         myDomain,
 			FollowingDomains: followedDomains,
 			FollowerDomains:  followerDomains,
 		}
 
-		client := discovery.NewAuthenticatedClient(s.DiscoveryURL, s.DiscoveryKey, myDomain, s.PrivateKey)
-		var hc *hooks.HookConfig
-		if s.Config != nil {
-			hc = s.Config.Hooks
-		}
+		client := s.NewAuthDSClient(nil, myDomain)
+		hc := s.getHookConfig()
 
 		for _, evt := range events {
 			if evt.Type != "pub.polis.comment.blessing.requested" {
@@ -545,12 +633,12 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 				TargetPath:   inReplyTo,
 			}
 
-			decision, explicit := policy.EvaluateExplicit(policies, pEvt, ctx)
-			if !explicit {
+			evalResult := policy.EvaluateWithLog(policies, pEvt, ctx)
+			if !evalResult.Matched {
 				continue // no match -> manual review
 			}
 
-			if decision == policy.Allow {
+			if evalResult.Decision == policy.Allow || evalResult.Decision == policy.Emit {
 				// Auto-grant
 				commentVersion, _ := evt.Payload["comment_version"].(string)
 				_, err := blessing.GrantByVersion(s.DataDir, commentVersion, commentURL, inReplyTo, client, hc, s.PrivateKey)
@@ -560,6 +648,7 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 					s.LogEvent("pub.polis.comment.blessing.auto_grant", map[string]interface{}{
 					"comment_url": commentURL,
 					"actor":       evt.Actor,
+					"policy_rule": evalResult.Rule,
 				})
 				}
 			} else {
@@ -571,6 +660,7 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 					s.LogEvent("pub.polis.comment.blessing.auto_deny", map[string]interface{}{
 					"comment_url": commentURL,
 					"actor":       evt.Actor,
+					"policy_rule": evalResult.Rule,
 				})
 				}
 			}
@@ -679,10 +769,7 @@ func (h *commentStatusSyncHandler) Process(events []discovery.StreamEvent) strea
 		return stream.HandlerResult{}
 	}
 
-	var hc *hooks.HookConfig
-	if s.Config != nil {
-		hc = s.Config.Hooks
-	}
+	hc := s.getHookConfig()
 
 	result, err := comment.SyncFromEvents(s.DataDir, baseURL, events, hc)
 	if err != nil {

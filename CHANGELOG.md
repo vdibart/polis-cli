@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.58.0] - 2026-03-07
+
+This release adds end-to-end encrypted direct messages, a major webapp UI redesign, DS signature verification with two-layer cryptographic trust, policy engine extensions, and a migration of all hardcoded blessing/notification logic to user-configurable declarative policies.
+
+### Added
+
+- **[Go CLI] Direct messages (`polis dm`)**: New `pub.polis.dm` content type with end-to-end encryption. Ed25519-to-X25519 key conversion, NaCl box transport, and secretbox storage. Subcommands: `polis dm list`, `read`, `send`, `retry`, `config`. Per-sender and global rate limiting via `POLIS_DM_RATE_*` / `POLIS_DM_MAX_SIZE` environment variables. Policy-based acceptance control.
+- **[Go CLI] DS signature verification (`pkg/discovery/ds_verify.go`)**: Clients now verify Ed25519 envelope signatures on all discovery service responses. Cached with TTL, retries once on key rotation. Verification failures tracked per-domain with anomaly detection: sync suspended after 3 consecutive DS failures, author-level warning after 5 failures from the same domain within 24 hours. Configurable via `verification.json`.
+- **[Go CLI] Author signature verification (`pkg/discovery/author_verify.go`)**: Stream events are now individually verified against the originating author's public key, closing the attack vector where a compromised DS could inject fake follows or fabricate blessing grants.
+- **[Go CLI] `pkg/stream/verification_state.go`**: Tracks per-domain verification counters and anomaly state across sync sessions.
+- **[Go CLI] `pkg/site/dirs.go`**: Shared directory path constants for site layout.
+- **[Webapp] v2 UI redesign**: New topbar layout, dual-theme (dark/light), and redesigned feed, posts, comments, and blessings views. Button styles unified to outlined/ghost across all panels. Excerpts added to feed cards, post rows, and comment rows.
+- **[Webapp] Avatar support**: User avatars displayed in the feed and settings. Avatar randomizer and display name configuration added to Settings. Custom avatars shown without initials overlay; reset restores initials.
+- **[Webapp] Webapp middleware (`internal/server/middleware.go`)**: Request middleware extracted into dedicated file.
+
+### Changed
+
+- **[Bash CLI] Discovery API paths updated to `/v1/`**: All 14 endpoint paths in the bash CLI now match the DS `/v1/` REST redesign (e.g. `ds-content-register` → `/v1/content`).
+- **[Go CLI] Policy engine: `emit`/`omit` verbs and `self`/`thread-blessed` sources**: Policy rules can now control event emission and filter by thread-blessed status. All hardcoded blessing, notification, and event-gating logic migrated to user-configurable policy rules.
+- **[Go CLI] `.polis/` directory permissions**: Changed from default to `0700` for improved security.
+- **[Webapp] Feed sort uses parsed timestamps**: Feed chronological ordering now parses timestamps instead of string-comparing, fixing sort order regressions.
+- **[Webapp] Feed counts blessed comments as replies**: Fixed feed not including blessed comments in reply counts.
+- **[Webapp] Remote site avatars**: Fetches and displays remote site avatars in feed items.
+
+### Fixed
+
+- **[Webapp] Conversations click handler**: Fixed SyntaxError in conversations click handler; restored Mark Unread / Unread From Here hover actions.
+- **[Webapp] Mark Unread button**: Fixed button escaping and click bubbling issues.
+- **[Webapp] Following empty state**: Restored heading on Following empty state CTA.
+- **[Webapp] Blessed comments not rendering**: Fixed path mismatch (`/post/` vs `/posts/`) that prevented blessed comments from appearing.
+- **[Webapp] Index page comment count**: Fixed comment count on index pages when using source content paths.
+- **[Go CLI] DS key format mismatch**: Fixed conversion of raw base64 DS keys to `ssh-ed25519` format.
+
 ## [0.57.0] - 2026-03-02
 
 This release introduces the bundle system, policy engine, content-type dispatch API, source/output separation for rendering, structured event logging, and a major webapp restructure. It also includes security hardening round 4 and a documentation reorganization into a component/audience hierarchy.

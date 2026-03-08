@@ -28,7 +28,7 @@ set -eo pipefail
 #   4. Hardcoded defaults
 
 # Fixed constants (never configurable - required for discovery)
-VERSION="0.57.0"
+VERSION="0.58.0"
 WELL_KNOWN_DIR=".well-known"
 WELL_KNOWN_FILE="polis"
 
@@ -89,12 +89,12 @@ apply_defaults() {
     : "${DISCOVERY_SERVICE_KEY:=}"
 
     # Derived endpoints (always computed from base) — unified content/relationship API
-    POLIS_CONTENT_REGISTER_ENDPOINT="${DISCOVERY_SERVICE_URL}/ds-content-register"
-    POLIS_CONTENT_QUERY_ENDPOINT="${DISCOVERY_SERVICE_URL}/ds-content-query"
-    POLIS_CONTENT_CHECK_ENDPOINT="${DISCOVERY_SERVICE_URL}/ds-content-check"
-    POLIS_RELATIONSHIP_UPDATE_ENDPOINT="${DISCOVERY_SERVICE_URL}/ds-relationship-update"
-    POLIS_RELATIONSHIP_QUERY_ENDPOINT="${DISCOVERY_SERVICE_URL}/ds-relationship-query"
-    POLIS_STREAM_PUBLISH_ENDPOINT="${DISCOVERY_SERVICE_URL}/ds-stream-publish"
+    POLIS_CONTENT_REGISTER_ENDPOINT="${DISCOVERY_SERVICE_URL}/v1/content"
+    POLIS_CONTENT_QUERY_ENDPOINT="${DISCOVERY_SERVICE_URL}/v1/content"
+    POLIS_CONTENT_CHECK_ENDPOINT="${DISCOVERY_SERVICE_URL}/v1/content/check"
+    POLIS_RELATIONSHIP_UPDATE_ENDPOINT="${DISCOVERY_SERVICE_URL}/v1/relationships"
+    POLIS_RELATIONSHIP_QUERY_ENDPOINT="${DISCOVERY_SERVICE_URL}/v1/relationships"
+    POLIS_STREAM_PUBLISH_ENDPOINT="${DISCOVERY_SERVICE_URL}/v1/stream"
 
     # User directory defaults (bundle-based layout)
     : "${KEYS_DIR:=.polis/keys}"
@@ -4484,7 +4484,7 @@ cmd_about() {
     if [ -n "$DISCOVERY_SERVICE_URL" ] && [ -n "$POLIS_BASE_URL" ]; then
         local domain=$(extract_domain_from_url "$POLIS_BASE_URL")
         if [ -n "$domain" ]; then
-            local check_endpoint="${DISCOVERY_SERVICE_URL}/ds-sites-check?domain=$domain"
+            local check_endpoint="${DISCOVERY_SERVICE_URL}/v1/sites/check?domain=$domain"
             local check_response=$(curl -s -w "\n%{http_code}" \
                 --location --request GET "$check_endpoint" \
                 --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
@@ -4795,7 +4795,7 @@ cmd_rotate_key() {
 
     local ds_response
     local ds_status
-    ds_response=$(curl -s -w "\n%{http_code}" -X POST "${ds_url}/ds-key-rotate" \
+    ds_response=$(curl -s -w "\n%{http_code}" -X POST "${ds_url}/v1/sites/keys/rotate" \
         -H "Content-Type: application/json" \
         ${DISCOVERY_SERVICE_KEY:+-H "Authorization: Bearer $DISCOVERY_SERVICE_KEY"} \
         -d "$ds_payload" 2>/dev/null)
@@ -4936,7 +4936,7 @@ cmd_unpublish() {
         '{type: $type, url: $url, signature: $sig}')
 
     local ds_response
-    ds_response=$(curl -s -X POST "${ds_url}/ds-content-unregister" \
+    ds_response=$(curl -s -X POST "${ds_url}/v1/content/unregister" \
         -H "Content-Type: application/json" \
         ${DISCOVERY_SERVICE_KEY:+-H "Authorization: Bearer $DISCOVERY_SERVICE_KEY"} \
         -d "$ds_payload" 2>/dev/null)
@@ -6133,8 +6133,8 @@ cmd_register() {
 
     info_human "Checking registration status for $domain..."
 
-    # Check if already registered via sites-check endpoint
-    local check_endpoint="${DISCOVERY_SERVICE_URL}/ds-sites-check?domain=$domain"
+    # Check if already registered via sites/check endpoint
+    local check_endpoint="${DISCOVERY_SERVICE_URL}/v1/sites/check?domain=$domain"
     local check_response=$(curl -s -w "\n%{http_code}" \
         --location --request GET "$check_endpoint" \
         --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
@@ -6164,7 +6164,7 @@ cmd_register() {
         local attestation_verified="unknown"
         if [ -n "$service_attestation" ] && [ "$service_attestation" != "null" ]; then
             # Fetch discovery service public key
-            local pubkey_endpoint="${DISCOVERY_SERVICE_URL}/ds-sites-public-key"
+            local pubkey_endpoint="${DISCOVERY_SERVICE_URL}/v1/sites/public-key"
             local pubkey_response=$(curl -s -w "\n%{http_code}" \
                 --location --request GET "$pubkey_endpoint" \
                 --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" 2>&1)
@@ -6280,8 +6280,8 @@ cmd_register() {
         '{version: $ver, action: $act, domain: $dom, signature: $sig} +
          (if $author != "" then {author_name: $author} else {} end)')
 
-    # Call sites-register endpoint
-    local register_endpoint="${DISCOVERY_SERVICE_URL}/ds-sites-register"
+    # Call sites register endpoint
+    local register_endpoint="${DISCOVERY_SERVICE_URL}/v1/sites"
     local response=$(curl -s -w "\n%{http_code}" \
         --location --request POST "$register_endpoint" \
         --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
@@ -6391,7 +6391,7 @@ cmd_unregister() {
     # Check if registered
     info_human "Checking registration status for $domain..."
 
-    local check_endpoint="${DISCOVERY_SERVICE_URL}/ds-sites-check?domain=$domain"
+    local check_endpoint="${DISCOVERY_SERVICE_URL}/v1/sites/check?domain=$domain"
     local check_response=$(curl -s -w "\n%{http_code}" \
         --location --request GET "$check_endpoint" \
         --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
@@ -6471,8 +6471,8 @@ cmd_unregister() {
         --arg sig "$signature" \
         '{version: $ver, action: $act, domain: $dom, signature: $sig}')
 
-    # Call sites-unregister endpoint
-    local unregister_endpoint="${DISCOVERY_SERVICE_URL}/ds-sites-unregister"
+    # Call sites unregister endpoint
+    local unregister_endpoint="${DISCOVERY_SERVICE_URL}/v1/sites/unregister"
     local response=$(curl -s -w "\n%{http_code}" \
         --location --request POST "$unregister_endpoint" \
         --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \

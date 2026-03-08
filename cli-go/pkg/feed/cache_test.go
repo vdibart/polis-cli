@@ -58,6 +58,50 @@ func TestCacheManager_EmptyCache(t *testing.T) {
 	}
 }
 
+func TestCacheManager_ListSortsOutOfOrderJSONL(t *testing.T) {
+	dir := t.TempDir()
+	cm := NewCacheManager(dir, testDiscoveryDomain)
+
+	// Write items out of order directly to the JSONL cache file
+	cacheFile := CacheFile(dir, testDiscoveryDomain)
+	if err := os.MkdirAll(filepath.Dir(cacheFile), 0755); err != nil {
+		t.Fatal(err)
+	}
+	lines := []CachedFeedItem{
+		{ID: "oldest", Type: "post", Title: "Oldest", Published: "2026-01-01T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub", CachedAt: "2026-01-01T10:00:00Z"},
+		{ID: "newest", Type: "post", Title: "Newest", Published: "2026-01-03T10:00:00Z", AuthorURL: "https://b.pub", AuthorDomain: "b.pub", CachedAt: "2026-01-03T10:00:00Z"},
+		{ID: "middle", Type: "post", Title: "Middle", Published: "2026-01-02T10:00:00Z", AuthorURL: "https://c.pub", AuthorDomain: "c.pub", CachedAt: "2026-01-02T10:00:00Z"},
+	}
+	f, err := os.Create(cacheFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range lines {
+		data, _ := json.Marshal(item)
+		f.Write(data)
+		f.Write([]byte("\n"))
+	}
+	f.Close()
+
+	// List should return sorted by Published descending regardless of file order
+	items, err := cm.List()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(items))
+	}
+	if items[0].ID != "newest" {
+		t.Errorf("expected newest first, got %s", items[0].ID)
+	}
+	if items[1].ID != "middle" {
+		t.Errorf("expected middle second, got %s", items[1].ID)
+	}
+	if items[2].ID != "oldest" {
+		t.Errorf("expected oldest last, got %s", items[2].ID)
+	}
+}
+
 func TestCacheManager_MergeItems(t *testing.T) {
 	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
 
@@ -140,6 +184,60 @@ func TestCacheManager_MergeDedup(t *testing.T) {
 	}
 	if cached[0].ReadAt == "" {
 		t.Error("read state should be preserved after dedup merge")
+	}
+}
+
+func TestCacheManager_MergeDedup_BlessingGrantedAndPublished(t *testing.T) {
+	// When the same comment arrives via both comment.published (from another user)
+	// and blessing.granted, the cache should deduplicate by author+URL.
+	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+
+	// First: comment arrives via comment.published
+	n1, err := cm.MergeItems([]FeedItem{
+		{
+			Type:         "comment",
+			Title:        "Great post!",
+			URL:          "https://bob.polis.pub/comments/20260304/reply.md",
+			Published:    "2026-02-04T10:00:00Z",
+			AuthorURL:    "https://bob.polis.pub",
+			AuthorDomain: "bob.polis.pub",
+			TargetURL:    "https://alice.polis.pub/posts/20260304/hello.html",
+			TargetDomain: "alice.polis.pub",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n1 != 1 {
+		t.Errorf("expected 1 new item, got %d", n1)
+	}
+
+	// Second: same comment arrives via blessing.granted (different timestamp, no title)
+	n2, err := cm.MergeItems([]FeedItem{
+		{
+			Type:         "comment",
+			URL:          "https://bob.polis.pub/comments/20260304/reply.md",
+			Published:    "2026-02-04T12:00:00Z",
+			AuthorURL:    "https://bob.polis.pub",
+			AuthorDomain: "bob.polis.pub",
+			TargetURL:    "https://alice.polis.pub/posts/20260304/hello.html",
+			TargetDomain: "alice.polis.pub",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("expected 0 new items (dedup), got %d", n2)
+	}
+
+	// Should only have 1 item total
+	items, _ := cm.List()
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item after dedup, got %d", len(items))
+	}
+	if items[0].Title != "Great post!" {
+		t.Errorf("original title should be preserved, got %q", items[0].Title)
 	}
 }
 

@@ -537,6 +537,70 @@ func TestRenderIndex_ExcerptPopulated(t *testing.T) {
 	}
 }
 
+func TestRenderIndex_CommentCountWithSourceContentPath(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	// Use an index template that shows comment_count
+	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
+	idxTmpl := `<!DOCTYPE html>
+<html>
+<head><title>{{site_title}}</title></head>
+<body>
+{{#recent_posts}}<div class="post-item"><a href="{{url}}">{{title}}</a> ({{comment_count}} comments)</div>{{/recent_posts}}
+</body>
+</html>`
+	os.WriteFile(filepath.Join(themesDir, "index.html"), []byte(idxTmpl), 0644)
+
+	// Create a post source file
+	postsDir := filepath.Join(tempDir, "content", "pub.polis.core", "post", "20260304")
+	os.MkdirAll(postsDir, 0755)
+	os.WriteFile(filepath.Join(postsDir, "hello-world.md"), []byte("---\ntitle: Hello World\npublished: 2026-03-04T12:00:00Z\n---\nContent"), 0644)
+
+	// Create index.jsonl with source content path
+	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(
+		`{"path":"content/pub.polis.core/post/20260304/hello-world.md","title":"Hello World","published":"2026-03-04T12:00:00Z","type":"post"}`+"\n"), 0644)
+
+	// Create blessed.json with mount path (this is what blessing/grant writes)
+	commentDir := filepath.Join(tempDir, "content", "pub.polis.core", "comment")
+	os.MkdirAll(commentDir, 0755)
+	blessedJSON := `{"version":"polis-cli-go/0.56.0","comments":[{"post":"posts/20260304/hello-world.md","blessed":[{"url":"https://other.polis.pub/comments/20260304/re-hello.md","version":"sha256:abc","blessed_at":"2026-03-04T14:00:00Z"}]}]}`
+	os.WriteFile(filepath.Join(commentDir, "blessed.json"), []byte(blessedJSON), 0644)
+
+	renderer, err := NewPageRenderer(PageConfig{
+		DataDir:           tempDir,
+		BaseURL:           "https://david.polis.pub",
+		PostsSourceDir:    "content/pub.polis.core/post",
+		PostsMountDir:     "posts",
+		CommentsSourceDir: "content/pub.polis.core/comment",
+		CommentsMountDir:  "comments",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer failed: %v", err)
+	}
+
+	err = renderer.RenderIndex()
+	if err != nil {
+		t.Fatalf("RenderIndex failed: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(tempDir, "index.html"))
+	if err != nil {
+		t.Fatalf("Failed to read index.html: %v", err)
+	}
+
+	html := string(content)
+
+	// Should show 1 comment, not 0 — this is the bug we fixed
+	if !strings.Contains(html, "(1 comments)") {
+		t.Errorf("Expected '(1 comments)' in index, got: %s", html)
+	}
+	if strings.Contains(html, "(0 comments)") {
+		t.Errorf("Index should NOT show '(0 comments)' when blessed.json has 1 comment, got: %s", html)
+	}
+}
+
 func TestRenderIndex_PageTypeIsIndex(t *testing.T) {
 	tempDir := t.TempDir()
 	setupTestSite(t, tempDir)

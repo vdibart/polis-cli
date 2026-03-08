@@ -4,7 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Polis</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/style.css">
 </head>
 <body>
     <div id="app">
@@ -133,30 +136,63 @@
         </div>
 
         <!-- Dashboard Screen -->
-        <div id="dashboard-screen" class="screen hidden">
-            <!-- Top Header -->
-            <header class="top-header">
-                <button class="hamburger" onclick="App.toggleMobileNav()" aria-label="Toggle navigation">
-                    <span></span><span></span><span></span>
-                </button>
-                <h1>Polis</h1>
-                <div class="header-right">
-                    <span id="domain-display" class="domain-display"></span>
-                    <button id="notification-bell" class="notification-bell" onclick="App.toggleNotifications()" title="Notifications">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-                            <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
-                        </svg>
-                        <span id="notification-dot" class="notification-dot hidden"></span>
-                    </button>
-                    <button id="settings-btn" class="notification-bell" onclick="App.toggleSettings()" title="Settings">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <circle cx="12" cy="12" r="3"/>
-                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-                        </svg>
-                    </button>
+        <div id="dashboard-screen" class="screen hidden layout-v2">
+            <!-- Top Nav Bar (v2) -->
+            <nav class="topbar">
+                <a id="topbar-logo" class="topbar-logo" target="_blank" title="View your site">Polis <span id="topbar-domain" class="topbar-domain"></span></a>
+                <div class="topbar-inner">
+                <div class="topbar-menu">
+                    <div class="mode-toggle">
+                        <button id="mode-btn-feed" class="mode-btn active" onclick="App.switchMode('feed')">Feed</button>
+                        <button id="mode-btn-posts" class="mode-btn" onclick="App.switchMode('posts')">Posts</button>
+                        <button id="mode-btn-write" class="mode-btn" onclick="App.switchMode('write')">Write</button>
+                    </div>
+
+                    <div class="bar-icons">
+                        <button id="bar-icon-theme" class="bar-icon" onclick="App.toggleTheme()" title="Toggle theme">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="5"/>
+                                <line x1="12" y1="1" x2="12" y2="3"/>
+                                <line x1="12" y1="21" x2="12" y2="23"/>
+                                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+                                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+                                <line x1="1" y1="12" x2="3" y2="12"/>
+                                <line x1="21" y1="12" x2="23" y2="12"/>
+                                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+                                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                            </svg>
+                        </button>
+                        <button id="bar-icon-bell" class="bar-icon" onclick="App.toggleNotifications()" title="Notifications">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                                <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                            </svg>
+                            <span id="topbar-notification-dot" class="badge-dot red hidden"></span>
+                        </button>
+                        <button id="bar-icon-heart" class="bar-icon" onclick="App.navigateTo('/blessings')" title="Blessing Requests">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                            </svg>
+                            <span id="topbar-blessing-dot" class="badge-dot amber hidden"></span>
+                        </button>
+                        <button id="bar-icon-people" class="bar-icon" onclick="App.navigateTo('/social/following')" title="Network">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                                <circle cx="9" cy="7" r="4"/>
+                                <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                                <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                            </svg>
+                        </button>
+                        <button id="bar-icon-gear" class="bar-icon" onclick="App.navigateTo('/settings')" title="Settings">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="3"/>
+                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                            </svg>
+                        </button>
+                    </div>
                 </div>
-            </header>
+                </div>
+            </nav>
 
             <!-- Setup Banner (shown when site not registered) -->
             <div id="setup-banner" class="setup-banner hidden">
@@ -165,112 +201,96 @@
                 <button class="setup-banner-dismiss" onclick="App.dismissSetupBanner()">&times;</button>
             </div>
 
-            <!-- Main Container with Sidebar -->
-            <div class="main-container">
-                <!-- Sidebar Navigation -->
-                <aside class="sidebar">
-                    <div class="sidebar-mode-toggle">
-                        <button class="mode-tab active" data-sidebar-mode="my-site">My Site</button>
-                        <button class="mode-tab" data-sidebar-mode="social">Social</button>
-                    </div>
+            <!-- Content Shell (centered column) -->
+            <div class="content-shell">
+                <!-- Welcome Panel (lifecycle-aware) -->
+                <div id="welcome-panel" class="welcome-panel hidden"></div>
 
-                    <!-- My Site mode -->
-                    <div id="sidebar-my-site">
-                        <div id="sidebar-section-posts" class="sidebar-section">
-                            <div class="section-label">
-                                Posts
-                                <button class="section-add-btn" onclick="App.newPost()" title="New Post">+</button>
-                            </div>
-                            <nav>
-                                <button class="nav-item active" data-view="posts-published">
-                                    Published
-                                    <span id="posts-count" class="badge" style="display: none;">0</span>
-                                </button>
-                                <button class="nav-item" data-view="posts-drafts">
-                                    Drafts
-                                    <span id="drafts-count" class="badge" style="display: none;">0</span>
-                                </button>
-                            </nav>
-                        </div>
-                        <div id="sidebar-section-comments" class="sidebar-section">
-                            <div class="section-label">
-                                Comments
-                                <button class="section-add-btn" onclick="App.newCommentDraft()" title="New Comment">+</button>
-                            </div>
-                            <nav>
-                                <button class="nav-item" data-view="comments-published">
-                                    Published
-                                    <span id="comments-published-count" class="badge" style="display: none;">0</span>
-                                </button>
-                                <button class="nav-item" data-view="blessing-requests">
-                                    Blessing Requests
-                                    <span id="incoming-pending-count" class="badge warning" style="display: none;">0</span>
-                                </button>
-                            </nav>
-                        </div>
-                        <div id="sidebar-section-snippets" class="sidebar-section">
-                            <div class="section-label">Snippets</div>
-                            <nav>
-                                <button class="nav-item" data-view="about">About</button>
-                            </nav>
-                        </div>
+                <!-- Dynamic content header and body will be rendered by JS -->
+                <div class="content-header">
+                    <h2 id="content-title">Published Posts</h2>
+                    <div id="content-actions" class="content-header-actions">
+                        <button id="new-post-btn" class="primary">New Post</button>
                     </div>
-
-                    <!-- Social mode -->
-                    <div id="sidebar-social" class="hidden">
-                        <div id="sidebar-section-discover" class="sidebar-section">
-                            <div class="section-label">Discover</div>
-                            <nav id="social-plugins-nav">
-                                <!-- Populated by JS from SOCIAL_PLUGINS -->
-                            </nav>
-                            <nav>
-                                <button class="nav-item" data-view="following">
-                                    Following
-                                </button>
-                                <button class="nav-item" data-view="followers">
-                                    Followers
-                                    <span id="followers-count" class="badge" style="display: none;">0</span>
-                                </button>
-                            </nav>
-                        </div>
+                </div>
+                <div class="content-body">
+                    <div id="content-list">
                     </div>
-
-                    <div id="sidebar-follow-link" class="sidebar-footer hidden">
-                        <button id="copy-follow-link-btn" onclick="App.copyFollowLink()" title="Copy your follow link to share">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
-                                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-                            </svg>
-                            Copy Follow Link
-                        </button>
-                    </div>
-                </aside>
-
-                <!-- Content Area -->
-                <main class="content-area">
-                    <!-- Welcome Panel (lifecycle-aware) -->
-                    <div id="welcome-panel" class="welcome-panel hidden"></div>
-
-                    <!-- Dynamic content header and body will be rendered by JS -->
-                    <div class="content-header">
-                        <h2 id="content-title">Published Posts</h2>
-                        <div id="content-actions" class="content-header-actions">
-                            <button id="new-post-btn" class="primary">New Post</button>
-                        </div>
-                    </div>
-                    <div class="content-body">
-                        <div id="content-list" class="card">
-                            <div class="content-list">
-                                <div class="empty-state">
-                                    <h3>No published posts yet</h3>
-                                    <p>Start writing your first post</p>
-                                    <button class="primary" onclick="App.newPost()">New Post</button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </main>
+                </div>
             </div>
+
+            <!-- Legacy sidebar (hidden in v2 layout, kept for rollback) -->
+            <aside class="sidebar legacy-sidebar hidden">
+                <div class="sidebar-mode-toggle">
+                    <button class="mode-tab active" data-sidebar-mode="my-site">My Site</button>
+                    <button class="mode-tab" data-sidebar-mode="social">Social</button>
+                </div>
+                <div id="sidebar-my-site">
+                    <div id="sidebar-section-posts" class="sidebar-section">
+                        <div class="section-label">
+                            Posts
+                            <button class="section-add-btn" onclick="App.newPost()" title="New Post">+</button>
+                        </div>
+                        <nav>
+                            <button class="nav-item active" data-view="posts-published">
+                                Published
+                                <span id="posts-count" class="badge" style="display: none;">0</span>
+                            </button>
+                            <button class="nav-item" data-view="posts-drafts">
+                                Drafts
+                                <span id="drafts-count" class="badge" style="display: none;">0</span>
+                            </button>
+                        </nav>
+                    </div>
+                    <div id="sidebar-section-comments" class="sidebar-section">
+                        <div class="section-label">
+                            Comments
+                            <button class="section-add-btn" onclick="App.newCommentDraft()" title="New Comment">+</button>
+                        </div>
+                        <nav>
+                            <button class="nav-item" data-view="comments-published">
+                                Published
+                                <span id="comments-published-count" class="badge" style="display: none;">0</span>
+                            </button>
+                            <button class="nav-item" data-view="blessing-requests">
+                                Blessing Requests
+                                <span id="incoming-pending-count" class="badge warning" style="display: none;">0</span>
+                            </button>
+                        </nav>
+                    </div>
+                    <div id="sidebar-section-snippets" class="sidebar-section">
+                        <div class="section-label">Snippets</div>
+                        <nav>
+                            <button class="nav-item" data-view="about">About</button>
+                        </nav>
+                    </div>
+                </div>
+                <div id="sidebar-social" class="hidden">
+                    <div id="sidebar-section-discover" class="sidebar-section">
+                        <div class="section-label">Discover</div>
+                        <nav id="social-plugins-nav">
+                        </nav>
+                        <nav>
+                            <button class="nav-item" data-view="following">
+                                Following
+                            </button>
+                            <button class="nav-item" data-view="followers">
+                                Followers
+                                <span id="followers-count" class="badge" style="display: none;">0</span>
+                            </button>
+                        </nav>
+                    </div>
+                </div>
+                <div id="sidebar-follow-link" class="sidebar-footer hidden">
+                    <button id="copy-follow-link-btn" onclick="App.copyFollowLink()" title="Copy your follow link to share">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                        </svg>
+                        Copy Follow Link
+                    </button>
+                </div>
+            </aside>
 
         </div>
 
@@ -548,6 +568,6 @@ You can use **markdown** formatting."></textarea>
         </div>
     </div>
 
-    <script src="app.js"></script>
+    <script src="/app.js"></script>
 </body>
 </html>

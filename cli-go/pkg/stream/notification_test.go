@@ -170,6 +170,9 @@ func TestNotificationHandler_SkipSelfEvents(t *testing.T) {
 	h := &NotificationHandler{
 		MyDomain: "bob.com",
 		Rules:    notification.DefaultRules(),
+		Policies: []policy.Policy{
+			{Active: true, Rule: "omit pub.polis.notification from self"},
+		},
 	}
 
 	events := []discovery.StreamEvent{

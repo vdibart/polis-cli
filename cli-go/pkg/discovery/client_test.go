@@ -16,8 +16,8 @@ func TestCheckSiteRegistration_Registered(t *testing.T) {
 		if r.Method != "GET" {
 			t.Errorf("Expected GET request, got %s", r.Method)
 		}
-		if r.URL.Path != "/ds-sites-check" {
-			t.Errorf("Expected /ds-sites-check, got %s", r.URL.Path)
+		if r.URL.Path != "/v1/sites/check" {
+			t.Errorf("Expected /v1/sites/check, got %s", r.URL.Path)
 		}
 		domain := r.URL.Query().Get("domain")
 		if domain != "alice.com" {
@@ -36,6 +36,7 @@ func TestCheckSiteRegistration_Registered(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-api-key")
+	client.DSKeyCache = nil // skip DS verification (testing request/response format)
 	result, err := client.CheckSiteRegistration("alice.com")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -62,6 +63,7 @@ func TestCheckSiteRegistration_NotRegistered(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-api-key")
+	client.DSKeyCache = nil // skip DS verification (testing request/response format)
 	result, err := client.CheckSiteRegistration("bob.com")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -137,8 +139,8 @@ func TestRegisterSite_Success(t *testing.T) {
 		if r.Method != "POST" {
 			t.Errorf("Expected POST request, got %s", r.Method)
 		}
-		if r.URL.Path != "/ds-sites-register" {
-			t.Errorf("Expected /ds-sites-register, got %s", r.URL.Path)
+		if r.URL.Path != "/v1/sites" {
+			t.Errorf("Expected /v1/sites, got %s", r.URL.Path)
 		}
 
 		// Decode and store the received payload for verification
@@ -211,8 +213,8 @@ func TestUnregisterSite_Success(t *testing.T) {
 		if r.Method != "POST" {
 			t.Errorf("Expected POST request, got %s", r.Method)
 		}
-		if r.URL.Path != "/ds-sites-unregister" {
-			t.Errorf("Expected /ds-sites-unregister, got %s", r.URL.Path)
+		if r.URL.Path != "/v1/sites/unregister" {
+			t.Errorf("Expected /v1/sites/unregister, got %s", r.URL.Path)
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&receivedPayload); err != nil {
@@ -374,6 +376,7 @@ func TestQueryRelationships_AuthenticatedSendsHeaders(t *testing.T) {
 	defer server.Close()
 
 	client := NewAuthenticatedClient(server.URL, "test-key", "alice.com", privKey)
+	client.DSKeyCache = nil // skip DS verification (testing auth headers)
 	_, err = client.QueryRelationships("pub.polis.comment.blessing", map[string]string{"status": "pending"})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -404,6 +407,7 @@ func TestQueryContent_AuthenticatedSendsHeaders(t *testing.T) {
 	defer server.Close()
 
 	client := NewAuthenticatedClient(server.URL, "test-key", "alice.com", privKey)
+	client.DSKeyCache = nil // skip DS verification (testing auth headers)
 	_, err = client.QueryContent("pub.polis.comment", map[string]string{"actor": "bob.com"})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -434,6 +438,7 @@ func TestStreamQuery_AuthenticatedSendsHeaders(t *testing.T) {
 	defer server.Close()
 
 	client := NewAuthenticatedClient(server.URL, "test-key", "alice.com", privKey)
+	client.DSKeyCache = nil // skip DS verification (testing auth headers)
 	_, err = client.StreamQuery("0", 100, "", "", "alice.com")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -494,8 +499,8 @@ func TestStreamQuery_WithTargetFilter(t *testing.T) {
 		if r.Method != "GET" {
 			t.Errorf("Expected GET request, got %s", r.Method)
 		}
-		if r.URL.Path != "/ds-stream" {
-			t.Errorf("Expected /ds-stream, got %s", r.URL.Path)
+		if r.URL.Path != "/v1/stream" {
+			t.Errorf("Expected /v1/stream, got %s", r.URL.Path)
 		}
 
 		target := r.URL.Query().Get("target")
@@ -513,6 +518,7 @@ func TestStreamQuery_WithTargetFilter(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-api-key")
+	client.DSKeyCache = nil // skip DS verification (testing target filter)
 	result, err := client.StreamQuery("0", 100, "", "", "bob.com")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -539,6 +545,7 @@ func TestStreamQuery_WithoutTargetFilter(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-api-key")
+	client.DSKeyCache = nil // skip DS verification (testing no-target filter)
 	_, err := client.StreamQuery("0", 100, "", "", "")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
@@ -617,8 +624,8 @@ func TestRotateKey_Success(t *testing.T) {
 		if r.Method != "POST" {
 			t.Errorf("Expected POST request, got %s", r.Method)
 		}
-		if r.URL.Path != "/ds-key-rotate" {
-			t.Errorf("Expected /ds-key-rotate, got %s", r.URL.Path)
+		if r.URL.Path != "/v1/sites/keys/rotate" {
+			t.Errorf("Expected /v1/sites/keys/rotate, got %s", r.URL.Path)
 		}
 
 		var req KeyRotationRequest
@@ -685,5 +692,87 @@ func TestRotateKey_DSRejects(t *testing.T) {
 	}
 	if !strings.Contains(errMsg, "409") {
 		t.Errorf("Expected error to contain status code '409', got: %s", errMsg)
+	}
+}
+
+func TestClient_RequestIDPropagation(t *testing.T) {
+	var receivedHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeader = r.Header.Get("X-Request-Id")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"is_registered": true,
+			"domain":        "test.com",
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-key")
+	client.RequestID = "test-trace-id-123"
+
+	_, _ = client.CheckSiteRegistration("test.com")
+
+	if receivedHeader != "test-trace-id-123" {
+		t.Errorf("X-Request-Id = %q, want %q", receivedHeader, "test-trace-id-123")
+	}
+}
+
+func TestClient_RequestIDAbsentWhenEmpty(t *testing.T) {
+	var hasHeader bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hasHeader = r.Header.Get("X-Request-Id") != ""
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"is_registered": false,
+			"domain":        "test.com",
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-key")
+	// RequestID not set
+
+	_, _ = client.CheckSiteRegistration("test.com")
+
+	if hasHeader {
+		t.Error("X-Request-Id should not be set when RequestID is empty")
+	}
+}
+
+func TestClient_LoggerCallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"is_registered": true,
+			"domain":        "test.com",
+		})
+	}))
+	defer server.Close()
+
+	var loggedMethod, loggedPath, loggedRequestID string
+	var loggedDuration int64
+
+	client := NewClient(server.URL, "test-key")
+	client.RequestID = "trace-456"
+	client.Logger = func(method, path string, durationMs int64, requestID string) {
+		loggedMethod = method
+		loggedPath = path
+		loggedDuration = durationMs
+		loggedRequestID = requestID
+	}
+
+	_, _ = client.CheckSiteRegistration("test.com")
+
+	if loggedMethod != "GET" {
+		t.Errorf("Logger method = %q, want GET", loggedMethod)
+	}
+	if loggedPath != "/v1/sites/check" {
+		t.Errorf("Logger path = %q, want /v1/sites/check", loggedPath)
+	}
+	if loggedDuration < 0 {
+		t.Errorf("Logger duration = %d, want >= 0", loggedDuration)
+	}
+	if loggedRequestID != "trace-456" {
+		t.Errorf("Logger requestID = %q, want trace-456", loggedRequestID)
 	}
 }

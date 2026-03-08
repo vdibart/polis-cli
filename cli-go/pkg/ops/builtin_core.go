@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
+	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
+	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 )
 
 // BuiltinCoreHandler handles operations for the pub.polis.core bundle.
@@ -31,6 +34,8 @@ func (h *BuiltinCoreHandler) Handle(ctx context.Context, req ActionRequest, env 
 		return h.handleFollow(ctx, req, env)
 	case "pub.polis.feed":
 		return h.handleFeed(ctx, req, env)
+	case "pub.polis.dm":
+		return h.handleDM(ctx, req, env)
 	default:
 		return nil, fmt.Errorf("unsupported content type: %s", req.ContentType)
 	}
@@ -47,6 +52,8 @@ func (h *BuiltinCoreHandler) Actions(contentType string) []string {
 		return []string{"list", "create", "delete"}
 	case "pub.polis.feed":
 		return []string{"list", "refresh"}
+	case "pub.polis.dm":
+		return []string{"list", "get", "send", "deliver", "mark_read", "delete", "retry"}
 	default:
 		return nil
 	}
@@ -258,4 +265,306 @@ func (h *BuiltinCoreHandler) handleFeed(ctx context.Context, req ActionRequest, 
 	default:
 		return nil, fmt.Errorf("unsupported action %q for pub.polis.feed", req.Action)
 	}
+}
+
+// ── DM operations ───────────────────────────────────────────────────
+
+func (h *BuiltinCoreHandler) handleDM(ctx context.Context, req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	switch req.Action {
+	case "list":
+		return h.listDMConversations(env)
+	case "get":
+		return h.getDMConversation(req, env)
+	case "send":
+		return h.sendDM(req, env)
+	case "deliver":
+		return h.deliverDM(req, env)
+	case "mark_read":
+		return h.markDMRead(req, env)
+	case "delete":
+		return h.deleteDMConversation(req, env)
+	case "retry":
+		return h.retryDM(req, env)
+	default:
+		return nil, fmt.Errorf("unsupported action %q for pub.polis.dm", req.Action)
+	}
+}
+
+func (h *BuiltinCoreHandler) dmStore(env HandlerEnv) (*dm.Store, error) {
+	siteDir := env.Resolver.SiteDir()
+	privKey, err := signing.ParsePrivateKey(env.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+	return dm.NewStore(siteDir, privKey.Seed())
+}
+
+func (h *BuiltinCoreHandler) listDMConversations(env HandlerEnv) (*ActionResult, error) {
+	store, err := h.dmStore(env)
+	if err != nil {
+		return nil, err
+	}
+
+	idx, err := store.LoadIndex()
+	if err != nil {
+		return nil, fmt.Errorf("load conversations: %w", err)
+	}
+
+	convMaps := make([]map[string]any, 0, len(idx.Conversations))
+	for _, c := range idx.Conversations {
+		convMaps = append(convMaps, map[string]any{
+			"id":              c.ID,
+			"peer_domain":     c.PeerDomain,
+			"peer_url":        c.PeerURL,
+			"last_message_at": c.LastMessageAt,
+			"unread_count":    c.UnreadCount,
+			"last_preview":    c.LastPreview,
+		})
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data: map[string]any{
+			"conversations": convMaps,
+			"count":         len(convMaps),
+		},
+	}, nil
+}
+
+func (h *BuiltinCoreHandler) getDMConversation(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	convID, _ := req.Payload["id"].(string)
+	if convID == "" {
+		return nil, fmt.Errorf("conversation id required")
+	}
+
+	store, err := h.dmStore(env)
+	if err != nil {
+		return nil, err
+	}
+
+	conv, err := store.LoadConversation(convID)
+	if err != nil {
+		return nil, fmt.Errorf("load conversation: %w", err)
+	}
+
+	// Decrypt messages for response
+	msgMaps := make([]map[string]any, 0, len(conv.Messages))
+	for _, msg := range conv.Messages {
+		content, _ := store.DecryptMessage(&msg)
+		m := map[string]any{
+			"id":        msg.ID,
+			"from":      msg.From,
+			"to":        msg.To,
+			"content":   content,
+			"timestamp": msg.Timestamp,
+			"status":    msg.Status,
+		}
+		if msg.ReadAt != "" {
+			m["read_at"] = msg.ReadAt
+		}
+		if msg.ReplyToID != "" {
+			m["reply_to_id"] = msg.ReplyToID
+		}
+		msgMaps = append(msgMaps, m)
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data: map[string]any{
+			"conversation_id": convID,
+			"peer_domain":     conv.PeerDomain,
+			"peer_url":        conv.PeerURL,
+			"messages":        msgMaps,
+			"count":           len(msgMaps),
+		},
+	}, nil
+}
+
+func (h *BuiltinCoreHandler) sendDM(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	recipientURL, _ := req.Payload["recipient_url"].(string)
+	content, _ := req.Payload["content"].(string)
+	replyToID, _ := req.Payload["reply_to_id"].(string)
+
+	if recipientURL == "" {
+		return nil, fmt.Errorf("recipient_url required")
+	}
+	if strings.TrimSpace(content) == "" {
+		return nil, fmt.Errorf("content required")
+	}
+
+	store, err := h.dmStore(env)
+	if err != nil {
+		return nil, err
+	}
+
+	sender := dm.NewSender(env.PrivateKey, env.PublicKey, env.BaseURL, store)
+	// Extract domain from BaseURL
+	sender.Domain = dm.ExtractDomainFromURL(env.BaseURL)
+
+	msg, err := sender.SendMessage(recipientURL, content, replyToID)
+	if err != nil && msg == nil {
+		return nil, fmt.Errorf("send: %w", err)
+	}
+
+	result := map[string]any{
+		"message_id":      msg.ID,
+		"conversation_id": dm.ComputeConversationID(sender.Domain, dm.ExtractDomainFromURL(recipientURL)),
+		"status":          msg.Status,
+	}
+	if err != nil {
+		result["error"] = err.Error()
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data:   result,
+	}, nil
+}
+
+func (h *BuiltinCoreHandler) deliverDM(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	// The sender domain should be set in the payload by the API router
+	// after verifying the signed request headers
+	senderDomain, _ := req.Payload["sender_domain"].(string)
+	envelopeJSON, _ := req.Payload["envelope"].(string)
+
+	if senderDomain == "" {
+		return nil, fmt.Errorf("sender_domain required (set by signed-request auth)")
+	}
+	if envelopeJSON == "" {
+		return nil, fmt.Errorf("envelope required")
+	}
+
+	store, err := h.dmStore(env)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load following domains for policy check
+	siteDir := env.Resolver.SiteDir()
+	followingPath := following.DefaultPath(siteDir)
+	followingDomains := make(map[string]bool)
+	if f, err := following.Load(followingPath); err == nil {
+		for _, e := range f.All() {
+			domain := dm.ExtractDomainFromURL(e.URL)
+			if domain != "" {
+				followingDomains[domain] = true
+			}
+		}
+	}
+
+	rl := dm.NewRateLimiter(envInt("POLIS_DM_RATE_PER_SENDER", 0), envInt("POLIS_DM_RATE_GLOBAL", 0))
+	receiver := dm.NewReceiver(env.PrivateKey, env.PublicKey, env.BaseURL, siteDir, store, rl)
+	if maxSize := envInt("POLIS_DM_MAX_SIZE", 0); maxSize > 0 {
+		receiver.MaxMessageSize = maxSize
+	}
+	receiver.Domain = dm.ExtractDomainFromURL(env.BaseURL)
+
+	msg, err := receiver.ReceiveMessage(senderDomain, []byte(envelopeJSON), followingDomains)
+	if err != nil {
+		return nil, fmt.Errorf("deliver: %w", err)
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data: map[string]any{
+			"message_id":      msg.ID,
+			"conversation_id": dm.ComputeConversationID(receiver.Domain, senderDomain),
+			"status":          "received",
+		},
+	}, nil
+}
+
+func (h *BuiltinCoreHandler) markDMRead(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	convID, _ := req.Payload["conversation_id"].(string)
+	if convID == "" {
+		return nil, fmt.Errorf("conversation_id required")
+	}
+
+	store, err := h.dmStore(env)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := store.MarkRead(convID); err != nil {
+		return nil, fmt.Errorf("mark read: %w", err)
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data:   map[string]any{"conversation_id": convID},
+	}, nil
+}
+
+func (h *BuiltinCoreHandler) deleteDMConversation(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	convID, _ := req.Payload["id"].(string)
+	if convID == "" {
+		return nil, fmt.Errorf("conversation id required")
+	}
+
+	store, err := h.dmStore(env)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := store.DeleteConversation(convID); err != nil {
+		return nil, fmt.Errorf("delete conversation: %w", err)
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data:   map[string]any{"conversation_id": convID, "deleted": true},
+	}, nil
+}
+
+func (h *BuiltinCoreHandler) retryDM(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	store, err := h.dmStore(env)
+	if err != nil {
+		return nil, err
+	}
+
+	unsent, err := store.GetUnsentMessages()
+	if err != nil {
+		return nil, fmt.Errorf("get unsent: %w", err)
+	}
+
+	if len(unsent) == 0 {
+		return &ActionResult{
+			Status: "success",
+			Data:   map[string]any{"retried": 0, "message": "no unsent messages"},
+		}, nil
+	}
+
+	// For now, just report unsent messages — actual retry requires
+	// re-encrypting and re-delivering, which needs the recipient's key.
+	// The full retry path will re-compose the message from stored plaintext.
+	unsentMaps := make([]map[string]any, 0, len(unsent))
+	for _, u := range unsent {
+		unsentMaps = append(unsentMaps, map[string]any{
+			"conversation_id": u.ConvID,
+			"message_id":      u.Message.ID,
+			"to":              u.Message.To,
+			"timestamp":       u.Message.Timestamp,
+		})
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data: map[string]any{
+			"unsent_count": len(unsent),
+			"unsent":       unsentMaps,
+		},
+	}, nil
+}
+
+// envInt reads an integer from an environment variable, returning defaultVal if unset or invalid.
+func envInt(key string, defaultVal int) int {
+	s := os.Getenv(key)
+	if s == "" {
+		return defaultVal
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return defaultVal
+	}
+	return v
 }

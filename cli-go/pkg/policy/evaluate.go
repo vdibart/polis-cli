@@ -2,6 +2,15 @@ package policy
 
 import "strings"
 
+// EvalResult contains the full result of a policy evaluation, including
+// the matched rule for audit logging.
+type EvalResult struct {
+	Decision Decision
+	Matched  bool
+	Rule     string // the raw policy string that matched, empty if no match
+	RuleIdx  int    // index in the policy list (-1 if no match)
+}
+
 // Evaluate returns the decision for an event against a set of policies.
 // First active matching rule wins. No match returns Allow (default permissive).
 func Evaluate(policies []Policy, evt Event, ctx EvalContext) Decision {
@@ -14,9 +23,18 @@ func Evaluate(policies []Policy, evt Event, ctx EvalContext) Decision {
 // This distinction is critical for blessing auto-decisions:
 //   - (Allow, true)  -> explicit allow -> auto-grant
 //   - (Deny, true)   -> explicit deny  -> auto-deny
+//   - (Emit, true)   -> explicit emit  -> trigger side-effect
+//   - (Omit, true)   -> explicit omit  -> suppress side-effect
 //   - (Allow, false)  -> no match      -> manual review
 func EvaluateExplicit(policies []Policy, evt Event, ctx EvalContext) (Decision, bool) {
-	for _, p := range policies {
+	r := EvaluateWithLog(policies, evt, ctx)
+	return r.Decision, r.Matched
+}
+
+// EvaluateWithLog returns the full evaluation result including the matched
+// rule string and index for audit logging.
+func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult {
+	for i, p := range policies {
 		if !p.Active {
 			continue
 		}
@@ -25,10 +43,19 @@ func EvaluateExplicit(policies []Policy, evt Event, ctx EvalContext) (Decision, 
 			continue // skip unparseable rules
 		}
 		if matches(parsed, evt, ctx) {
-			return Decision(parsed.Action), true
+			return EvalResult{
+				Decision: Decision(parsed.Action),
+				Matched:  true,
+				Rule:     p.Rule,
+				RuleIdx:  i,
+			}
 		}
 	}
-	return Allow, false
+	return EvalResult{
+		Decision: Allow,
+		Matched:  false,
+		RuleIdx:  -1,
+	}
 }
 
 // matches checks if a parsed rule matches the given event and context.
@@ -79,6 +106,12 @@ func matchesSource(source, actorDomain string, ctx EvalContext) bool {
 		return ctx.FollowingDomains[actorDomain]
 	case "followers":
 		return ctx.FollowerDomains[actorDomain]
+	case "self":
+		return ctx.MyDomain != "" && actorDomain == ctx.MyDomain
+	case "thread-blessed":
+		// thread-blessed is resolved by the DS via storage query.
+		// Client-side, it always returns false (no local resolution).
+		return false
 	default:
 		return false
 	}

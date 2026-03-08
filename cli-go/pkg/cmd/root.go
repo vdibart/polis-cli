@@ -3,13 +3,16 @@ package cmd
 
 import (
 	"bufio"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
+	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/index"
@@ -31,13 +34,71 @@ var (
 	discoveryURL string
 	discoveryKey string
 	baseURL      string
+	requestID    string   // UUIDv4 for cross-boundary tracing
+	cliLogFile   *os.File // optional log file (POLIS_LOG_FILE env var)
 )
 
 // DefaultDiscoveryServiceURL is the default discovery service URL.
 const DefaultDiscoveryServiceURL = "https://ds.polis.pub"
 
+// generateRequestID creates a UUIDv4 using crypto/rand.
+func generateRequestID() string {
+	var uuid [16]byte
+	_, _ = rand.Read(uuid[:])
+	uuid[6] = (uuid[6] & 0x0f) | 0x40 // version 4
+	uuid[8] = (uuid[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
+}
+
+// initCLILogger opens the log file if POLIS_LOG_FILE is set.
+func initCLILogger() {
+	logPath := os.Getenv("POLIS_LOG_FILE")
+	if logPath == "" {
+		return
+	}
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[!] Failed to open log file %s: %v\n", logPath, err)
+		return
+	}
+	cliLogFile = f
+}
+
+// logCLIAction writes a structured JSON log line to the CLI log file.
+func logCLIAction(action string, fields map[string]interface{}) {
+	if cliLogFile == nil {
+		return
+	}
+	obj := map[string]interface{}{
+		"ts":         time.Now().UTC().Format(time.RFC3339),
+		"source":     "cli",
+		"action":     action,
+		"request_id": requestID,
+	}
+	for k, v := range fields {
+		obj[k] = v
+	}
+	data, err := json.Marshal(obj)
+	if err != nil {
+		return
+	}
+	fmt.Fprintln(cliLogFile, string(data))
+}
+
 // Execute is the main entry point for the CLI.
 func Execute(args []string) {
+	// Generate request ID for cross-boundary tracing
+	requestID = generateRequestID()
+
+	// Initialize CLI file logger (optional, via POLIS_LOG_FILE env var)
+	initCLILogger()
+	defer func() {
+		if cliLogFile != nil {
+			cliLogFile.Close()
+		}
+	}()
+
 	// Propagate CLI version to all packages that embed it in metadata
 	publish.Version = Version
 	comment.Version = Version
@@ -48,6 +109,7 @@ func Execute(args []string) {
 	theme.Version = Version
 	feed.Version = Version
 	site.Version = Version
+	dm.Version = Version
 
 	// Load .env file (does not override existing env vars, matches bash CLI)
 	loadEnv()
@@ -102,6 +164,17 @@ func Execute(args []string) {
 	command := filteredArgs[0]
 	cmdArgs := filteredArgs[1:]
 
+	// Log CLI action for network-capable commands (audit trail)
+	defer func() {
+		switch command {
+		case "post", "republish", "comment", "follow", "unfollow", "discover",
+			"blessing", "register", "unregister", "dm", "clone", "rotate-key":
+			logCLIAction(command, map[string]interface{}{
+				"args_count": len(cmdArgs),
+			})
+		}
+	}()
+
 	switch command {
 	case "init":
 		handleInit(cmdArgs)
@@ -145,6 +218,8 @@ func Execute(args []string) {
 		handleRegister(cmdArgs)
 	case "unregister":
 		handleUnregister(cmdArgs)
+	case "dm":
+		handleDM(cmdArgs)
 	case "serve":
 		handleServe(cmdArgs)
 	case "version", "--version", "-v":
@@ -204,6 +279,12 @@ Commands related to content discovery:
 Commands related to notifications:
   polis notifications             List unread notifications
   polis notifications list        List notifications (--type <types>)
+
+Commands related to direct messages:
+  polis dm list                   List DM conversations
+  polis dm read <conv_id>         Read messages in a conversation
+  polis dm send <url> <message>   Send a DM to a recipient
+  polis dm retry [conv_id]        Retry delivering unsent messages
 
 Commands related to site administration:
   polis register                  Register site with discovery service
@@ -271,6 +352,10 @@ func exitError(format string, args ...interface{}) {
 
 // outputJSON outputs a JSON response
 func outputJSON(data interface{}) {
+	// Inject request_id into map-type JSON output for cross-boundary tracing
+	if m, ok := data.(map[string]interface{}); ok && requestID != "" {
+		m["request_id"] = requestID
+	}
 	json.NewEncoder(os.Stdout).Encode(data)
 }
 

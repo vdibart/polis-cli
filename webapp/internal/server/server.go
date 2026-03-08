@@ -70,6 +70,20 @@ func isBodyTooLargeError(err error) bool {
 	return err.Error() == "http: request body too large"
 }
 
+// handleBodyTooLarge checks for body-too-large error and logs a security event.
+// Returns true if the error was a body-too-large error (and the response was written).
+func (s *Server) handleBodyTooLarge(w http.ResponseWriter, r *http.Request, err error) bool {
+	if !isBodyTooLargeError(err) {
+		return false
+	}
+	s.LogEvent("pub.polis.security.body_too_large", map[string]interface{}{
+		"path": r.URL.Path, "method": r.Method,
+		"request_id": RequestIDFromContext(r.Context()),
+	})
+	http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+	return true
+}
+
 // Log levels
 const (
 	LogLevelOff     = 0 // No logging
@@ -98,6 +112,9 @@ type Config struct {
 
 	// Hide read items in feed/activity views (default false)
 	HideRead bool `json:"hide_read,omitempty"`
+
+	// Webapp theme: "light" or "dark" (default "dark")
+	WebappTheme string `json:"webapp_theme,omitempty"`
 }
 
 // SSEEvent is a server-sent event pushed to connected clients.
@@ -124,9 +141,15 @@ type Server struct {
 	DiscoveryURL     string // From .env / env var DISCOVERY_SERVICE_URL (not stored in webapp/config.json)
 	DiscoveryKey     string // From .env / env var DISCOVERY_SERVICE_KEY (not stored in webapp/config.json)
 
+	// EnableHooks controls whether post-action hooks (post-publish, post-republish,
+	// post-comment) are allowed to execute. Defaults to false (safe for hosted/
+	// multi-tenant). Localhost server sets this to true during startup.
+	EnableHooks bool
+
 	// Unified sync infrastructure
-	syncHandlers []stream.SyncHandler
-	syncTrigger  chan struct{} // non-blocking channel to trigger on-demand sync
+	syncHandlers   []stream.SyncHandler
+	syncTrigger    chan struct{} // non-blocking channel to trigger on-demand sync
+	AuthorKeyCache *discovery.AuthorKeyCache // cached author public keys for signature verification
 
 	// SSE client registry
 	sseClients map[chan SSEEvent]struct{}
@@ -169,8 +192,8 @@ func (l *Logger) getLogFile() (*os.File, error) {
 	today := time.Now().Format("2006-01-02")
 	logPath := filepath.Join(l.logsDir, today+".log")
 
-	// Create logs directory if it doesn't exist
-	if err := os.MkdirAll(l.logsDir, 0755); err != nil {
+	// Create logs directory if it doesn't exist (.polis/logs — restricted)
+	if err := os.MkdirAll(l.logsDir, 0700); err != nil {
 		return nil, err
 	}
 
@@ -312,6 +335,44 @@ func eventCategory(event string) string {
 	return rest
 }
 
+// Request logs an HTTP request as structured JSON (both disk and stdout).
+// This is the per-request access log used for cross-boundary tracing.
+func (l *Logger) Request(method, path string, status int, duration time.Duration, requestID string) {
+	if l == nil || l.level < LogLevelBasic {
+		return
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	durationMs := duration.Milliseconds()
+
+	// Write to disk
+	file, err := l.getLogFile()
+	if err == nil && file != nil {
+		timestamp := now.Format("2006-01-02 15:04:05")
+		fmt.Fprintf(file, "%s [HTTP] %s %s %d %dms request_id=%s\n", timestamp, method, path, status, durationMs, requestID)
+	}
+
+	// Emit JSON to stdout when enabled
+	if l.jsonOutput {
+		obj := map[string]interface{}{
+			"ts":          now.UTC().Format(time.RFC3339),
+			"source":      "webapp",
+			"request_id":  requestID,
+			"method":      method,
+			"path":        path,
+			"status":      status,
+			"duration_ms": durationMs,
+		}
+		data, err := json.Marshal(obj)
+		if err == nil {
+			fmt.Fprintln(os.Stdout, string(data))
+		}
+	}
+}
+
 // Close closes the log file
 func (l *Logger) Close() {
 	if l != nil && l.file != nil {
@@ -382,6 +443,39 @@ func (s *Server) LogDebug(format string, args ...interface{}) {
 func (s *Server) LogEvent(event string, fields map[string]interface{}) {
 	if s.Logger != nil {
 		s.Logger.Event(event, fields)
+	}
+}
+
+// NewDSClient creates a discovery client with request ID propagation and timing.
+// Use for handlers that have an http.Request context.
+func (s *Server) NewDSClient(r *http.Request) *discovery.Client {
+	client := discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+	if r != nil {
+		client.RequestID = RequestIDFromContext(r.Context())
+	}
+	s.setDSLogger(client)
+	return client
+}
+
+// NewAuthDSClient creates an authenticated discovery client with request ID propagation.
+func (s *Server) NewAuthDSClient(r *http.Request, domain string) *discovery.Client {
+	client := discovery.NewAuthenticatedClient(s.DiscoveryURL, s.DiscoveryKey, domain, s.PrivateKey)
+	if r != nil {
+		client.RequestID = RequestIDFromContext(r.Context())
+	}
+	s.setDSLogger(client)
+	return client
+}
+
+// setDSLogger configures DS roundtrip timing logging on a discovery client.
+func (s *Server) setDSLogger(client *discovery.Client) {
+	client.Logger = func(method, path string, durationMs int64, requestID string) {
+		s.LogEvent("pub.polis.ds_roundtrip", map[string]interface{}{
+			"method":      method,
+			"path":        path,
+			"duration_ms": durationMs,
+			"request_id":  requestID,
+		})
 	}
 }
 
@@ -499,10 +593,22 @@ func (s *Server) LoadConfig() {
 	s.Config = &config
 }
 
+// getHookConfig returns the hook configuration if hooks are enabled, nil otherwise.
+// This centralizes the EnableHooks guard so callsites don't need to check individually.
+func (s *Server) getHookConfig() *hooks.HookConfig {
+	if !s.EnableHooks {
+		return nil
+	}
+	if s.Config != nil {
+		return s.Config.Hooks
+	}
+	return nil
+}
+
 // SaveConfig saves the webapp configuration to webapp/config.json
 func (s *Server) SaveConfig() error {
 	configPath := filepath.Join(s.DataDir, ".polis", "webapp", "config.json")
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 		return err
 	}
 	// Clear deprecated fields before saving (don't persist them)
@@ -872,6 +978,9 @@ func (s *Server) Initialize() {
 	s.Logger.PruneLogs()
 	s.Logger.Info("Server starting with log level %d", s.LogLevel)
 	s.Logger.Info("Data directory: %s", s.DataDir)
+
+	// Initialize author key cache for stream event signature verification
+	s.AuthorKeyCache = discovery.NewAuthorKeyCache(0, 0)
 }
 
 // migrateDraftsDir migrates .polis/drafts to .polis/content/pub.polis.core/posts/drafts if needed.
@@ -884,8 +993,8 @@ func (s *Server) migrateDraftsDir() {
 	_, newErr := os.Stat(newPath)
 
 	if oldErr == nil && oldInfo.IsDir() && os.IsNotExist(newErr) {
-		// Create parent directory
-		if err := os.MkdirAll(filepath.Dir(newPath), 0755); err != nil {
+		// Create parent directory (.polis/content — restricted)
+		if err := os.MkdirAll(filepath.Dir(newPath), 0700); err != nil {
 			log.Printf("[warning] Failed to create parent directory for drafts migration: %v", err)
 			return
 		}
@@ -1202,12 +1311,9 @@ func (s *Server) syncCommentStatuses() {
 	}
 
 	myDomain := discovery.ExtractDomainFromURL(baseURL)
-	client := discovery.NewAuthenticatedClient(s.DiscoveryURL, s.DiscoveryKey, myDomain, s.PrivateKey)
+	client := s.NewAuthDSClient(nil, myDomain)
 
-	var hc *hooks.HookConfig
-	if s.Config != nil {
-		hc = s.Config.Hooks
-	}
+	hc := s.getHookConfig()
 
 	result, err := comment.SyncPendingComments(s.DataDir, baseURL, client, hc)
 	if err != nil {
@@ -1293,7 +1399,7 @@ func (s *Server) syncNotifications() {
 	cursor, _ := store.GetCursor("pub.polis.notification")
 
 	myDomainForAuth := discovery.ExtractDomainFromURL(s.GetBaseURL())
-	client := discovery.NewAuthenticatedClient(s.DiscoveryURL, s.DiscoveryKey, myDomainForAuth, s.PrivateKey)
+	client := s.NewAuthDSClient(nil, myDomainForAuth)
 
 	// Group rules by relevance for targeted server-side filtering
 	groups := handler.RulesByRelevance()
@@ -1465,7 +1571,7 @@ func (s *Server) syncFeed() {
 	cursor, _ := cm.GetCursor()
 
 	// Query DS stream with actor filter for followed domains
-	client := discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+	client := s.NewDSClient(nil)
 	typeFilter := "pub.polis.post.published,pub.polis.post.republished,pub.polis.comment.published,pub.polis.comment.republished"
 	actorFilter := discovery.JoinDomains(domains)
 
@@ -1547,6 +1653,7 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 
 	// Initialize server
 	server := NewServer(dataDir, cliThemesDir)
+	server.EnableHooks = true // Localhost mode: hooks are safe to run
 	if len(opts) > 0 && opts[0].CLIVersion != "" {
 		server.CLIVersion = opts[0].CLIVersion
 	}
@@ -1570,7 +1677,9 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 	if apiEngine, err := server.newContentEngine(); err != nil {
 		log.Printf("[warning] v1 API not available: %v", err)
 	} else {
-		api.SetupRoutes(mux, apiEngine, dataDir)
+		api.SetupRoutes(mux, apiEngine, dataDir, func(event string, fields map[string]interface{}) {
+			server.LogEvent(event, fields)
+		})
 		log.Printf("[info] v1 content API enabled")
 	}
 
@@ -1590,7 +1699,10 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 		OpenBrowser(url)
 	}()
 
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	// Wrap mux with request logging middleware for correlation IDs and access logs
+	handler := requestLoggingMiddleware(server.Logger, mux)
+
+	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatal("Server error:", err)
 	}
 }

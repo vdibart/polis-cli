@@ -12,6 +12,16 @@ type BundleEntry struct {
 	Path   string `json:"path"`
 }
 
+// AvatarConfig represents custom avatar styling for a polis site.
+type AvatarConfig struct {
+	BG           string `json:"bg"`
+	FG           string `json:"fg"`
+	Border       string `json:"border,omitempty"`
+	BorderW      int    `json:"border_w,omitempty"`
+	Pattern      string `json:"pattern,omitempty"`
+	PatternColor string `json:"pattern_color,omitempty"`
+}
+
 // WellKnown represents the .well-known/polis v2 file structure.
 // This is the identity document and bundle registry for a polis site.
 type WellKnown struct {
@@ -20,6 +30,8 @@ type WellKnown struct {
 	Author      string                 `json:"author"`
 	Email       string                 `json:"email,omitempty"`
 	SiteTitle   string                 `json:"site_title,omitempty"`
+	AuthorName  string                 `json:"author_name,omitempty"`
+	Avatar      *AvatarConfig          `json:"avatar,omitempty"`
 	Created     string                 `json:"created"`
 	ActiveTheme string                 `json:"active_theme,omitempty"`
 	Bundles     map[string]BundleEntry `json:"bundles,omitempty"`

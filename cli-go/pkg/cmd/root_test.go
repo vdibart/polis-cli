@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -210,5 +211,149 @@ func TestLoadEnvFile_Missing(t *testing.T) {
 	loaded := loadEnvFile("/nonexistent/.env")
 	if loaded {
 		t.Error("expected loadEnvFile to return false for missing file")
+	}
+}
+
+func TestGenerateRequestID_ValidUUIDv4(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		id := generateRequestID()
+
+		// UUIDv4 format: 8-4-4-4-12 hex chars
+		parts := strings.Split(id, "-")
+		if len(parts) != 5 {
+			t.Fatalf("expected 5 dash-separated parts, got %d: %q", len(parts), id)
+		}
+		expectedLens := []int{8, 4, 4, 4, 12}
+		for j, part := range parts {
+			if len(part) != expectedLens[j] {
+				t.Errorf("part %d: expected %d chars, got %d in %q", j, expectedLens[j], len(part), id)
+			}
+		}
+
+		// Version nibble (char index 0 of 3rd segment) must be '4'
+		if parts[2][0] != '4' {
+			t.Errorf("expected version nibble '4', got %q in %q", string(parts[2][0]), id)
+		}
+
+		// Variant nibble (char index 0 of 4th segment) must be 8, 9, a, or b
+		v := parts[3][0]
+		if v != '8' && v != '9' && v != 'a' && v != 'b' {
+			t.Errorf("expected variant nibble in [89ab], got %q in %q", string(v), id)
+		}
+	}
+
+	// Uniqueness: two calls should not produce the same ID
+	a := generateRequestID()
+	b := generateRequestID()
+	if a == b {
+		t.Errorf("two consecutive generateRequestID() calls returned the same value: %q", a)
+	}
+}
+
+func TestLogCLIAction_WritesJSON(t *testing.T) {
+	// Save and restore global state
+	oldLogFile := cliLogFile
+	oldRequestID := requestID
+	defer func() {
+		cliLogFile = oldLogFile
+		requestID = oldRequestID
+	}()
+
+	tmpFile := filepath.Join(t.TempDir(), "cli.log")
+	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cliLogFile = f
+	requestID = "test-request-id-1234"
+
+	logCLIAction("post", map[string]interface{}{
+		"args_count": 2,
+		"extra":      "value",
+	})
+
+	f.Close()
+
+	data, err := os.ReadFile(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.TrimSpace(string(data))
+	if line == "" {
+		t.Fatal("expected log line, got empty file")
+	}
+
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(line), &obj); err != nil {
+		t.Fatalf("log line is not valid JSON: %v\nline: %s", err, line)
+	}
+
+	// Check required fields
+	if obj["source"] != "cli" {
+		t.Errorf("expected source=cli, got %v", obj["source"])
+	}
+	if obj["action"] != "post" {
+		t.Errorf("expected action=post, got %v", obj["action"])
+	}
+	if obj["request_id"] != "test-request-id-1234" {
+		t.Errorf("expected request_id=test-request-id-1234, got %v", obj["request_id"])
+	}
+	if obj["ts"] == nil || obj["ts"] == "" {
+		t.Error("expected ts field to be present")
+	}
+	// Check custom fields were merged
+	if obj["extra"] != "value" {
+		t.Errorf("expected extra=value, got %v", obj["extra"])
+	}
+}
+
+func TestLogCLIAction_NoOpWhenLogFileNil(t *testing.T) {
+	// Save and restore global state
+	oldLogFile := cliLogFile
+	defer func() { cliLogFile = oldLogFile }()
+
+	cliLogFile = nil
+
+	// Should not panic or write anything
+	logCLIAction("post", map[string]interface{}{"key": "val"})
+}
+
+func TestOutputJSON_InjectsRequestID(t *testing.T) {
+	// Save and restore global state
+	oldRequestID := requestID
+	defer func() { requestID = oldRequestID }()
+	requestID = "injected-uuid-5678"
+
+	// Capture stdout
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	data := map[string]interface{}{
+		"status":  "success",
+		"command": "version",
+	}
+	outputJSON(data)
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, buf.String())
+	}
+
+	if result["request_id"] != "injected-uuid-5678" {
+		t.Errorf("expected request_id=injected-uuid-5678, got %v", result["request_id"])
+	}
+	// Original fields should still be present
+	if result["status"] != "success" {
+		t.Errorf("expected status=success, got %v", result["status"])
+	}
+	if result["command"] != "version" {
+		t.Errorf("expected command=version, got %v", result["command"])
 	}
 }

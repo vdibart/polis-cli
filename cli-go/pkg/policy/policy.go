@@ -18,9 +18,9 @@ type Policy struct {
 
 // ParsedRule is the structured representation of a policy rule string.
 type ParsedRule struct {
-	Action string // "allow" or "deny"
+	Action string // "allow", "deny", "emit", or "omit"
 	Type   string // event type prefix, "all", or "none"
-	Source string // "all", "none", "following", "followers"
+	Source string // "all", "none", "following", "followers", "self", "thread-blessed"
 	Domain string // optional: actor domain filter (from "at <domain>")
 	Target string // optional: target path filter (from "on <target>")
 }
@@ -31,10 +31,13 @@ type Decision string
 const (
 	Allow Decision = "allow"
 	Deny  Decision = "deny"
+	Emit  Decision = "emit"
+	Omit  Decision = "omit"
 )
 
 // EvalContext provides runtime context for source matching.
 type EvalContext struct {
+	MyDomain         string          // the local site's domain
 	FollowingDomains map[string]bool
 	FollowerDomains  map[string]bool
 }
@@ -56,10 +59,48 @@ func DefaultPaths(dataDir string) (privatePath, publicPath string) {
 	return
 }
 
-// DefaultPolicyContent returns the default policy file content for new sites.
-func DefaultPolicyContent() string {
-	return `{"active":true,"policy":"allow pub.polis.comment.blessing from following"}` + "\n"
+// DefaultPublicPolicyContent returns the default public policy file content for new sites.
+// Public policies are published at policies/rules.jsonl and visible to the network.
+//
+// Default emit rules:
+//   - Self-comments are auto-blessed (you always bless your own comments)
+//   - Comments from followed authors are auto-blessed (trust your social graph)
+//   - Authors with prior thread blessings are auto-blessed (thread-trust)
+func DefaultPublicPolicyContent() string {
+	return `{"version":1,"generator":"polis-cli-go/` + policyVersion + `"}
+{"active":true,"policy":"emit pub.polis.comment.blessing from self"}
+{"active":true,"policy":"emit pub.polis.comment.blessing from following"}
+{"active":true,"policy":"emit pub.polis.comment.blessing from thread-blessed"}
+`
 }
+
+// DefaultPrivatePolicyContent returns the default private policy file content for new sites.
+// Private policies are stored at .polis/policies/rules.jsonl and never published.
+//
+// Default rules:
+//   - Core content types (post, comment, follow, site) allowed from all (user can remove to disable)
+//   - DMs accepted only from following (default social boundary)
+//   - Self-notifications suppressed (you don't need to see your own actions)
+func DefaultPrivatePolicyContent() string {
+	return `{"version":1,"generator":"polis-cli-go/` + policyVersion + `"}
+{"active":true,"policy":"allow pub.polis.post from all"}
+{"active":true,"policy":"allow pub.polis.comment from all"}
+{"active":true,"policy":"allow pub.polis.follow from all"}
+{"active":true,"policy":"allow pub.polis.site from all"}
+{"active":true,"policy":"allow pub.polis.dm from following"}
+{"active":true,"policy":"deny pub.polis.dm from all"}
+{"active":true,"policy":"omit pub.polis.notification from self"}
+`
+}
+
+// DefaultPolicyContent returns the default public policy file content for new sites.
+// Deprecated: Use DefaultPublicPolicyContent instead.
+func DefaultPolicyContent() string {
+	return DefaultPublicPolicyContent()
+}
+
+// policyVersion is the current policy file version string.
+const policyVersion = "0.57.0"
 
 // LoadPolicies loads policies from private and public JSONL files.
 // Private policies are loaded first (higher priority), then public.

@@ -5,6 +5,40 @@ All notable changes to the Go CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.58.0] - 2026-03-07
+
+This release adds end-to-end encrypted direct messages, DS signature verification with two-layer cryptographic trust, policy engine extensions, and a migration of all hardcoded blessing/notification logic to user-configurable declarative policies. The webapp gets a major UI redesign with a new topbar layout, dual-theme support, excerpt cards, and avatar support.
+
+### Added
+
+- **`polis dm` command**: End-to-end encrypted direct messages as a new `pub.polis.dm` content type. Ed25519-to-X25519 key conversion, NaCl box transport, secretbox storage. Subcommands: `list`, `read`, `send`, `retry`, `config`. Per-sender and global rate limiting; policy-based acceptance control.
+- **`pkg/dm/`**: Full DM implementation package — crypto, store, rate limiting, send, receive, types. 49 tests.
+- **`pkg/discovery/ds_verify.go`**: Discovery service response verification via Ed25519 envelope signatures. Cached with TTL, retries once on key rotation. Anomaly tracking: sync suspended after 3 consecutive DS failures.
+- **`pkg/discovery/author_verify.go`**: Per-event author signature verification on stream events to prevent DS impersonation attacks.
+- **`pkg/stream/verification_state.go`**: Per-domain verification counters and anomaly state.
+- **`pkg/site/dirs.go`**: Shared directory path constants.
+- **[Webapp] v2 UI redesign**: Topbar layout, dual-theme (dark/light), redesigned feed/posts/comments/blessings views. Unified outlined/ghost button styles. Excerpts on feed cards, post rows, and comment rows.
+- **[Webapp] Avatar support**: Remote site avatars in feed items; avatar randomizer and display name in Settings. Custom avatars suppress initials overlay.
+- **[Webapp] `internal/server/middleware.go`**: Request middleware extracted into dedicated file.
+
+### Changed
+
+- **Discovery API paths**: All endpoint paths updated to match DS `/v1/` REST redesign (14 paths).
+- **Policy engine: `emit`/`omit` verbs and `self`/`thread-blessed` sources**: Policy rules now control event emission and can filter by thread-blessed status. All hardcoded blessing, notification, and event-gating logic migrated to configurable rules.
+- **`.polis/` directory permissions**: Changed to `0700`.
+- **[Webapp] Feed sort**: Timestamp parsing replaces string comparison for correct chronological ordering.
+- **[Webapp] Feed reply counts**: Blessed comments now counted as replies.
+- **[Webapp] Remote avatars**: Fetched and displayed in feed items.
+
+### Fixed
+
+- **[Webapp] Conversations**: Fixed SyntaxError in click handler; restored Mark Unread / Unread From Here hover actions.
+- **[Webapp] Mark Unread button**: Fixed button escaping and click bubbling.
+- **[Webapp] Following empty state**: Restored heading on empty state CTA.
+- **[Webapp] Blessed comments not rendering**: Fixed `/post/` vs `/posts/` path mismatch.
+- **[Webapp] Index page comment count**: Fixed comment count for source content paths.
+- **DS key format**: Fixed raw base64 DS key conversion to `ssh-ed25519` format.
+
 ## [0.55.0] - 2026-02-24
 
 This release adds an About page editor to the webapp, introduces theme switching from the Settings panel, ships new `also-reading` and `polis-widget` snippets for all six built-in themes, and delivers a range of webapp usability improvements.

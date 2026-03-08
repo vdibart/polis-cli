@@ -4,12 +4,27 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 )
+
+// testPolicies returns the default public policies for testing.
+func testPolicies(t *testing.T) []policy.Policy {
+	t.Helper()
+	dir := t.TempDir()
+	pubPath := filepath.Join(dir, "public.jsonl")
+	os.WriteFile(pubPath, []byte(policy.DefaultPublicPolicyContent()), 0644)
+	policies, err := policy.LoadPolicies("/nonexistent", pubPath)
+	if err != nil {
+		t.Fatalf("failed to load test policies: %v", err)
+	}
+	return policies
+}
 
 // mockDiscoveryServer creates a minimal discovery service mock.
 func mockDiscoveryServer(t *testing.T) *httptest.Server {
@@ -54,7 +69,7 @@ func TestFollowWithBlessing_AddsToFollowing(t *testing.T) {
 	discoveryClient := discovery.NewClient(discoverySrv.URL, "test-key")
 	remoteClient := remote.NewClient()
 
-	result, err := FollowWithBlessing(followingPath, remoteSite.URL, discoveryClient, remoteClient, []byte("fake-key"))
+	result, err := FollowWithBlessing(followingPath, remoteSite.URL, discoveryClient, remoteClient, []byte("fake-key"), testPolicies(t))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,13 +108,13 @@ func TestFollowWithBlessing_AlreadyFollowed(t *testing.T) {
 	remoteClient := remote.NewClient()
 
 	// Follow first time
-	_, err := FollowWithBlessing(followingPath, remoteSite.URL, discoveryClient, remoteClient, []byte("fake-key"))
+	_, err := FollowWithBlessing(followingPath, remoteSite.URL, discoveryClient, remoteClient, []byte("fake-key"), testPolicies(t))
 	if err != nil {
 		t.Fatalf("first follow failed: %v", err)
 	}
 
 	// Follow second time
-	result, err := FollowWithBlessing(followingPath, remoteSite.URL, discoveryClient, remoteClient, []byte("fake-key"))
+	result, err := FollowWithBlessing(followingPath, remoteSite.URL, discoveryClient, remoteClient, []byte("fake-key"), testPolicies(t))
 	if err != nil {
 		t.Fatalf("second follow failed: %v", err)
 	}
@@ -126,7 +141,7 @@ func TestUnfollowWithDenial_RemovesFromFollowing(t *testing.T) {
 	discoveryClient := discovery.NewClient(discoverySrv.URL, "test-key")
 	remoteClient := remote.NewClient()
 
-	result, err := UnfollowWithDenial(followingPath, remoteSite.URL, discoveryClient, remoteClient, []byte("fake-key"))
+	result, err := UnfollowWithDenial(followingPath, remoteSite.URL, discoveryClient, remoteClient, []byte("fake-key"), testPolicies(t))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,7 +173,7 @@ func TestUnfollowWithDenial_NotFollowing(t *testing.T) {
 	discoveryClient := discovery.NewClient(discoverySrv.URL, "test-key")
 	remoteClient := remote.NewClient()
 
-	result, err := UnfollowWithDenial(followingPath, remoteSite.URL, discoveryClient, remoteClient, []byte("fake-key"))
+	result, err := UnfollowWithDenial(followingPath, remoteSite.URL, discoveryClient, remoteClient, []byte("fake-key"), testPolicies(t))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -178,7 +193,7 @@ func TestFollowWithBlessing_UnreachableSite(t *testing.T) {
 	discoveryClient := discovery.NewClient(discoverySrv.URL, "test-key")
 	remoteClient := remote.NewClient()
 
-	_, err := FollowWithBlessing(followingPath, "https://127.0.0.1:1", discoveryClient, remoteClient, []byte("fake-key"))
+	_, err := FollowWithBlessing(followingPath, "https://127.0.0.1:1", discoveryClient, remoteClient, []byte("fake-key"), testPolicies(t))
 	if err == nil {
 		t.Error("expected error for unreachable site")
 	}

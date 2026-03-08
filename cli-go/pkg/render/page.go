@@ -489,11 +489,9 @@ func (r *PageRenderer) loadPublicIndex() ([]template.PostData, []template.Commen
 			// Look up blessed comment count (try multiple path forms)
 			count := commentCountMap[entry.Path]
 			if count == 0 {
-				// Try without extension
-				base := strings.TrimSuffix(strings.TrimSuffix(entry.Path, ".md"), ".html")
+				// Try flexible matching (handles mount path vs source content path)
 				for k, v := range commentCountMap {
-					kb := strings.TrimSuffix(strings.TrimSuffix(k, ".md"), ".html")
-					if kb == base {
+					if metadata.MatchesPostPath(k, entry.Path) {
 						count = v
 						break
 					}

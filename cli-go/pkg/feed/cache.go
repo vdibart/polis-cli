@@ -11,8 +11,51 @@ import (
 	"sync"
 	"time"
 
+	"strings"
+
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 )
+
+// ParsePublished parses a published timestamp that may be in ISO 8601 or
+// JavaScript Date.toString() format (e.g. "Wed Mar 04 2026 22:00:01 GMT+0000 (Coordinated Universal Time)").
+// Returns zero time if unparseable.
+func ParsePublished(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	// Try ISO 8601 first (most common in well-formed data)
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	if t, err := time.Parse("2006-01-02T15:04:05Z", s); err == nil {
+		return t
+	}
+	// JS Date.toString(): "Wed Mar 04 2026 22:00:01 GMT+0000 (Coordinated Universal Time)"
+	// Strip the parenthesized timezone name suffix before parsing
+	cleaned := s
+	if idx := strings.Index(s, " ("); idx > 0 {
+		cleaned = s[:idx]
+	}
+	if t, err := time.Parse("Mon Jan 02 2006 15:04:05 GMT-0700", cleaned); err == nil {
+		return t
+	}
+	return time.Time{}
+}
+
+// PublishedBefore returns true if timestamp a is before timestamp b.
+func PublishedBefore(a, b string) bool {
+	ta, tb := ParsePublished(a), ParsePublished(b)
+	if ta.IsZero() && tb.IsZero() {
+		return a < b // fallback to string comparison
+	}
+	if ta.IsZero() {
+		return true // unknown dates sort last
+	}
+	if tb.IsZero() {
+		return false
+	}
+	return ta.Before(tb)
+}
 
 // Version is set at init time by cmd package.
 var Version = "dev"
@@ -36,6 +79,7 @@ type CachedFeedItem struct {
 	TargetDomain string `json:"target_domain,omitempty"`
 	CachedAt     string `json:"cached_at"`
 	ReadAt       string `json:"read_at,omitempty"`
+	Excerpt      string `json:"excerpt,omitempty"`
 }
 
 // FeedConfig holds user-editable feed configuration.
@@ -122,6 +166,12 @@ func (cm *CacheManager) listLocked() ([]CachedFeedItem, error) {
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("failed to read cache: %w", err)
 	}
+
+	// Sort by Published descending to match the docstring contract.
+	// The JSONL file order is not guaranteed (corruption, manual edits, older versions).
+	sort.Slice(items, func(i, j int) bool {
+		return PublishedBefore(items[j].Published, items[i].Published)
+	})
 
 	return items, nil
 }
@@ -226,7 +276,7 @@ func (cm *CacheManager) LoadConfig() (*FeedConfig, error) {
 
 // SaveConfig writes the feed configuration to disk.
 func (cm *CacheManager) SaveConfig(cfg *FeedConfig) error {
-	if err := os.MkdirAll(filepath.Dir(cm.configFile), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cm.configFile), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -311,12 +361,17 @@ func (cm *CacheManager) MergeItems(items []FeedItem) (int, error) {
 		if _, exists := idMap[id]; exists {
 			continue
 		}
+		// Normalize published timestamp to ISO 8601
+		published := item.Published
+		if t := ParsePublished(published); !t.IsZero() {
+			published = t.UTC().Format(time.RFC3339)
+		}
 		existing = append(existing, CachedFeedItem{
 			ID:           id,
 			Type:         item.Type,
 			Title:        item.Title,
 			URL:          item.URL,
-			Published:    item.Published,
+			Published:    published,
 			Hash:         item.Hash,
 			AuthorURL:    item.AuthorURL,
 			AuthorDomain: item.AuthorDomain,
@@ -330,7 +385,7 @@ func (cm *CacheManager) MergeItems(items []FeedItem) (int, error) {
 
 	// Sort by published descending
 	sort.Slice(existing, func(i, j int) bool {
-		return existing[i].Published > existing[j].Published
+		return PublishedBefore(existing[j].Published, existing[i].Published)
 	})
 
 	if err := cm.writeAll(existing); err != nil {
@@ -440,12 +495,25 @@ func (cm *CacheManager) MarkUnreadFrom(id string) error {
 	}
 
 	// Mark the target and all items with same or newer published date as unread
+	targetTime := ParsePublished(targetPublished)
 	for i := range items {
-		if items[i].Published >= targetPublished {
+		itemTime := ParsePublished(items[i].Published)
+		if !itemTime.IsZero() && !targetTime.IsZero() && !itemTime.Before(targetTime) {
+			items[i].ReadAt = ""
+		} else if items[i].Published >= targetPublished {
+			// Fallback for unparseable timestamps
 			items[i].ReadAt = ""
 		}
 	}
 
+	return cm.writeAll(items)
+}
+
+// SaveItems writes all items back to the cache file. Used to persist
+// updates like excerpts without going through MergeItems.
+func (cm *CacheManager) SaveItems(items []CachedFeedItem) error {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	return cm.writeAll(items)
 }
 
@@ -516,7 +584,7 @@ func (cm *CacheManager) SetStalenessMinutes(minutes int) error {
 
 // writeAll rewrites all items to the cache file.
 func (cm *CacheManager) writeAll(items []CachedFeedItem) error {
-	if err := os.MkdirAll(filepath.Dir(cm.cacheFile), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cm.cacheFile), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 

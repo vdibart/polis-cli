@@ -19,6 +19,9 @@ const App = {
     // Site info (loaded from /api/settings)
     siteInfo: null,
 
+    // Webapp theme: 'light' or 'dark'
+    webappTheme: 'dark',
+
     // Hosted mode: set via window.__POLIS_HOSTED by the hosted service
     isHosted: !!(window.__POLIS_HOSTED),
 
@@ -70,12 +73,123 @@ const App = {
     // Site base URL for live links
     siteBaseUrl: '',
 
+    // Custom avatar config (from .well-known/polis)
+    avatarConfig: null,
+    _pendingAvatar: null,
+
+    // Display name (from .well-known/polis author_name)
+    authorName: '',
+
+    // Remote avatar cache: domain -> { avatar, author_name } or null
+    _remoteAvatarCache: {},
+    _remoteAvatarFetching: {},
+
     showScreen(name) {
         Object.values(this.screens).forEach(s => {
             if (s) s.classList.add('hidden');
         });
         if (this.screens[name]) {
             this.screens[name].classList.remove('hidden');
+        }
+        if (name === 'editor') {
+            this._updateTopbarMode('editor');
+        }
+    },
+
+    // Theme management
+    setWebappTheme(theme) {
+        if (theme !== 'light' && theme !== 'dark') theme = 'dark';
+        this.webappTheme = theme;
+        document.documentElement.dataset.theme = theme;
+        try { localStorage.setItem('polis-webapp-theme', theme); } catch (e) {}
+        // Persist to server (fire and forget)
+        fetch('/api/settings/webapp-theme', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ theme }),
+        }).catch(() => {});
+    },
+
+    _initTheme(serverTheme) {
+        // Priority: localStorage > server config > fallback dark
+        let theme;
+        try { theme = localStorage.getItem('polis-webapp-theme'); } catch (e) {}
+        if (!theme && serverTheme) theme = serverTheme;
+        if (!theme) theme = 'dark';
+        this.webappTheme = theme;
+        document.documentElement.dataset.theme = theme;
+    },
+
+    toggleTheme() {
+        this.setWebappTheme(this.webappTheme === 'dark' ? 'light' : 'dark');
+        this._updateThemeIcon();
+    },
+
+    _updateThemeIcon() {
+        const btn = document.getElementById('bar-icon-theme');
+        if (!btn) return;
+        const isDark = this.webappTheme === 'dark';
+        btn.innerHTML = isDark
+            ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>'
+            : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+    },
+
+    // Mode toggle: 'feed' or 'posts'
+    switchMode(mode) {
+        const btns = ['feed', 'posts', 'write'].map(m => document.getElementById(`mode-btn-${m}`));
+        btns.forEach(b => b && b.classList.remove('active'));
+        if (mode === 'feed') {
+            btns[0] && btns[0].classList.add('active');
+            this.navigateTo('/social/conversations');
+        } else if (mode === 'write') {
+            btns[2] && btns[2].classList.add('active');
+            this.newPost();
+        } else {
+            btns[1] && btns[1].classList.add('active');
+            this.navigateTo('/posts');
+        }
+    },
+
+    // Update topbar mode buttons to reflect current view
+    _updateTopbarMode(mode) {
+        const btns = ['feed', 'posts', 'write'].map(m => document.getElementById(`mode-btn-${m}`));
+        btns.forEach(b => b && b.classList.remove('active'));
+        if (mode === 'social') {
+            btns[0] && btns[0].classList.add('active');
+        } else if (mode === 'editor') {
+            btns[2] && btns[2].classList.add('active');
+        } else {
+            btns[1] && btns[1].classList.add('active');
+        }
+    },
+
+    // Update topbar badge dots from counts
+    _updateTopbarBadges() {
+        const notifDot = document.getElementById('topbar-notification-dot');
+        const blessingDot = document.getElementById('topbar-blessing-dot');
+
+        if (notifDot) {
+            const hasUnread = (this.notificationState && this.notificationState.unreadCount > 0);
+            notifDot.classList.toggle('hidden', !hasUnread);
+        }
+        if (blessingDot) {
+            const hasPending = this.counts.incomingPending > 0;
+            blessingDot.classList.toggle('hidden', !hasPending);
+        }
+    },
+
+    // Populate topbar domain from site config
+    _updateTopbarDomain(baseUrl) {
+        const el = document.getElementById('topbar-domain');
+        const logo = document.getElementById('topbar-logo');
+        if (el && baseUrl) {
+            try {
+                const domain = new URL(baseUrl).hostname;
+                el.textContent = domain;
+                if (logo) logo.href = baseUrl;
+            } catch (e) {
+                el.textContent = '';
+            }
         }
     },
 
@@ -286,7 +400,7 @@ const App = {
     // route, and dispatch entry. Removing an entry removes the view entirely.
     SOCIAL_PLUGINS: [
         { id: 'pulse',         label: 'Pulse',         path: '/social/pulse',         title: 'Community Pulse',  actions: '',                                                                                                                                                              render: 'renderPulse',                autoRefresh: true  },
-        { id: 'conversations', label: 'Conversations', path: '/social/conversations', title: 'Conversations',    actions: '<button id="mark-all-read-btn" class="secondary sync-btn" onclick="App.markAllConversationsRead()">Mark All Read</button> <button class="secondary sync-btn" onclick="App.refreshConversations()">Refresh</button>', render: 'renderConversationsTabbed',   autoRefresh: true  },
+        { id: 'conversations', label: 'Feed', path: '/social/conversations', title: '',    actions: '', render: 'renderConversationsTabbed',   autoRefresh: true  },
     ],
 
     // Resolve a pathname against the route table.
@@ -438,15 +552,17 @@ const App = {
         const mySite = document.getElementById('sidebar-my-site');
         const social = document.getElementById('sidebar-social');
         if (mode === 'social') {
-            mySite.classList.add('hidden');
-            social.classList.remove('hidden');
+            mySite && mySite.classList.add('hidden');
+            social && social.classList.remove('hidden');
         } else {
-            social.classList.add('hidden');
-            mySite.classList.remove('hidden');
+            social && social.classList.add('hidden');
+            mySite && mySite.classList.remove('hidden');
         }
         document.querySelectorAll('.sidebar-mode-toggle .mode-tab').forEach(tab => {
             tab.classList.toggle('active', tab.dataset.sidebarMode === mode);
         });
+        // Also update topbar mode toggle
+        this._updateTopbarMode(mode);
     },
 
     // Update sidebar active item highlight without triggering content load
@@ -486,6 +602,9 @@ const App = {
 
     // Initialize app
     async init() {
+        // Apply theme before first render to avoid flash
+        this._initTheme(null);
+
         // Register social plugins before anything else (must precede bindEvents)
         this._registerPlugins();
 
@@ -504,12 +623,16 @@ const App = {
 
             switch (validation.status) {
                 case 'valid':
-                    document.getElementById('domain-display').textContent =
-                        status.site_title || '';
-                    // Show domain in header
+                    { const dd = document.getElementById('domain-display'); if (dd) dd.textContent = status.site_title || ''; }
+                    // Show domain in header and topbar
                     this.updateDomainDisplay(status.base_url);
+                    this._updateTopbarDomain(status.base_url);
+                    this._updateThemeIcon();
                     this.siteBaseUrl = status.base_url || '';
+                    this.avatarConfig = status.avatar || null;
+                    this.authorName = status.author_name || '';
                     await this.loadAllCounts();
+                    this._updateTopbarBadges();
                     this.initNotifications();
                     this.initSSE();
                     this.checkSetupBanner();
@@ -560,8 +683,7 @@ const App = {
                 default:
                     // Legacy fallback for backwards compatibility
                     if (status.configured) {
-                        document.getElementById('domain-display').textContent =
-                            status.site_title || '';
+                        { const dd = document.getElementById('domain-display'); if (dd) dd.textContent = status.site_title || ''; }
                         this.updateDomainDisplay(status.base_url);
                         this.siteBaseUrl = status.base_url || '';
                         this.initNotifications();
@@ -698,6 +820,7 @@ const App = {
             this.updateBadges();
             this.updateSidebar();
             this._updateNotificationDot();
+            this._updateTopbarBadges();
         } catch (err) {
             console.error('Failed to load counts:', err);
         }
@@ -722,6 +845,7 @@ const App = {
         this.updateBadges();
         this.updateSidebar();
         this._updateNotificationDot();
+        this._updateTopbarBadges();
 
         // If on a view that shows items affected by sync, refresh it
         const autoRefreshViews = ['feed', 'blessing-requests', 'followers', 'comments-published',
@@ -914,6 +1038,7 @@ const App = {
 
     // Load content for current view
     async loadViewContent() {
+        const contentHeader = document.querySelector('.content-header');
         const contentTitle = document.getElementById('content-title');
         const contentActions = document.getElementById('content-actions');
         const contentList = document.getElementById('content-list');
@@ -921,45 +1046,46 @@ const App = {
         // Plugin dispatch: check if current view is a social plugin
         const plugin = this.SOCIAL_PLUGINS.find(p => p.id === this.currentView);
         if (plugin) {
-            contentTitle.textContent = plugin.title;
-            contentActions.innerHTML = plugin.actions;
+            if (contentHeader) contentHeader.classList.add('hidden');
             await this[plugin.render](contentList);
             return;
         }
 
+        // Posts-mode views use v3 sub-tabs instead of content-header
+        const postsViews = ['posts-published', 'posts-drafts', 'comments-published', 'blessing-requests'];
+        // Feed-mode views hide header entirely
+        const feedViews = ['following', 'followers'];
+
+        if (postsViews.includes(this.currentView)) {
+            if (contentHeader) contentHeader.classList.add('hidden');
+        } else if (feedViews.includes(this.currentView)) {
+            if (contentHeader) contentHeader.classList.add('hidden');
+        } else if (this.currentView === 'settings') {
+            if (contentHeader) contentHeader.classList.add('hidden');
+        } else {
+            if (contentHeader) contentHeader.classList.remove('hidden');
+        }
+
         switch (this.currentView) {
             case 'posts-published':
-                contentTitle.textContent = 'Published Posts';
-                contentActions.innerHTML = this.lifecycleStage === 'just_arrived' ? '' : '<button id="new-post-btn" class="primary" onclick="App.newPost()">New Post</button>';
                 await this.renderPostsList(contentList);
                 break;
 
             case 'posts-drafts':
-                contentTitle.textContent = 'Post Drafts';
-                contentActions.innerHTML = '<button id="new-post-btn" class="primary" onclick="App.newPost()">New Post</button>';
                 await this.renderDraftsList(contentList);
                 break;
 
             // MY COMMENTS (all statuses in one tabbed view)
             case 'comments-published':
-                contentTitle.textContent = 'My Comments';
-                contentActions.innerHTML = `
-                    <button id="sync-comments-btn" class="secondary sync-btn" onclick="App.syncComments()">Refresh</button>
-                    <button class="primary" onclick="App.newComment()">New Comment</button>
-                `;
                 await this.renderCommentsPublished(contentList);
                 break;
 
             // ON MY POSTS (incoming - others wrote these)
             case 'blessing-requests':
-                contentTitle.textContent = 'Blessing Requests';
-                contentActions.innerHTML = '';
                 await this.renderBlessingRequests(contentList);
                 break;
 
             case 'settings':
-                contentTitle.textContent = 'Settings';
-                contentActions.innerHTML = '';
                 this.renderSettings(contentList);
                 break;
 
@@ -971,12 +1097,14 @@ const App = {
             case 'following':
                 contentTitle.textContent = 'Following';
                 contentActions.innerHTML = '<button class="primary" onclick="App.openFollowPanel()">Follow Author</button>';
+                if (contentHeader) contentHeader.classList.remove('hidden');
                 await this.renderFollowingList(contentList);
                 break;
 
             case 'followers':
                 contentTitle.textContent = 'Followers';
                 contentActions.innerHTML = '<button class="secondary sync-btn" onclick="App.refreshFollowers(true)">Refresh</button>';
+                if (contentHeader) contentHeader.classList.remove('hidden');
                 await this.renderFollowersList(contentList);
                 break;
 
@@ -1211,8 +1339,7 @@ const App = {
             this.showToast('Site initialized successfully!', 'success');
 
             // Update display and show dashboard
-            document.getElementById('domain-display').textContent =
-                result.site_title || '';
+            { const dd = document.getElementById('domain-display'); if (dd) dd.textContent = result.site_title || ''; }
             this.updateDomainDisplay(result.base_url);
             this.siteBaseUrl = result.base_url || '';
             this.initNotifications();
@@ -1284,8 +1411,7 @@ const App = {
             this.showToast('Site linked successfully!', 'success');
 
             // Update display and show dashboard
-            document.getElementById('domain-display').textContent =
-                result.site_title || '';
+            { const dd = document.getElementById('domain-display'); if (dd) dd.textContent = result.site_title || ''; }
             this.updateDomainDisplay(result.base_url);
             this.initNotifications();
             await this.loadAllCounts();
@@ -1339,6 +1465,37 @@ const App = {
         this.newComment();
     },
 
+    // Render v3 sub-tabs for Posts mode
+    _renderPostsSubTabs(activeTab) {
+        const tabs = [
+            { id: 'posts-published', label: 'Published', countKey: 'posts' },
+            { id: 'posts-drafts', label: 'Drafts', countKey: 'drafts' },
+            { id: 'comments-published', label: 'Comments', countKey: 'comments' },
+            { id: 'blessing-requests', label: 'Blessings', countKey: 'blessingsPending', warning: true },
+        ];
+        const ctaMap = {
+            'posts-published': '<button class="btn-new" onclick="App.newPost()">New Post</button>',
+            'posts-drafts': '<button class="btn-new" onclick="App.newPost()">New Post</button>',
+            'comments-published': '<button class="btn-new" onclick="App.newComment()">New Comment</button>',
+            'blessing-requests': '',
+        };
+        return `
+            <div class="view-tabs">
+                <div class="tab-group">
+                    ${tabs.map(t => {
+                        const count = this.counts[t.countKey] || 0;
+                        const countHtml = count > 0 ? `<span class="tab-count${t.warning ? ' warning' : ''}">${count}</span>` : '';
+                        const pathMap = { 'posts-published': '/posts', 'posts-drafts': '/posts/drafts', 'comments-published': '/comments', 'blessing-requests': '/blessings' };
+                        return `<button class="tab-item${activeTab === t.id ? ' active' : ''}" onclick="App.navigateTo('${pathMap[t.id]}')">${t.label} ${countHtml}</button>`;
+                    }).join('')}
+                </div>
+                <div class="view-actions">
+                    ${ctaMap[activeTab] || ''}
+                </div>
+            </div>
+        `;
+    },
+
     // Render posts list
     async renderPostsList(container) {
         try {
@@ -1350,7 +1507,7 @@ const App = {
             if (posts.length === 0) {
                 const domain = this.siteBaseUrl ? new URL(this.siteBaseUrl).hostname : '';
                 const domainDisplay = domain ? `<a href="${this.escapeHtml(this.siteBaseUrl)}" target="_blank" rel="noopener">${this.escapeHtml(domain)}</a>` : 'your domain';
-                container.innerHTML = `
+                container.innerHTML = this._renderPostsSubTabs('posts-published') + `
                     <div class="content-list">
                         <div class="empty-state">
                             <h3>No published posts yet</h3>
@@ -1421,22 +1578,29 @@ const App = {
                 return;
             }
 
-            container.innerHTML = `
-                <div class="content-list">
-                    ${posts.map(post => `
-                        <div class="content-item" data-path="${this.escapeHtml(post.path)}" onclick="App.openPost('${this.escapeHtml(post.path)}')">
-                            <div class="item-info">
-                                <div class="item-title">${this.escapeHtml(post.title)}</div>
-                                <div class="item-path">${this.escapeHtml(post.path)}</div>
+            container.innerHTML = this._renderPostsSubTabs('posts-published') + `
+                <div class="post-list">
+                    ${posts.map(post => {
+                        const commentCount = post.comment_count || 0;
+                        const commentHtml = commentCount > 0 ? `
+                            <div class="comment-count${post.pending_comments ? ' has-pending' : ''}">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                                ${post.pending_comments ? `<span class="pending">${commentCount}</span>` : commentCount}
+                            </div>` : '';
+                        const excerptHtml = post.excerpt ? `<div class="post-excerpt">${this.escapeHtml(post.excerpt)}</div>` : '';
+                        return `
+                        <div class="post-row" onclick="App.openPost('${this.escapeHtml(post.path)}')">
+                            <div class="post-info">
+                                <div class="post-title">${this.escapeHtml(post.title)}</div>
+                                ${excerptHtml}
+                                <div class="post-meta"><span>${this.formatDate(post.published)}</span></div>
                             </div>
-                            <div class="item-date-group">
-                                <span class="item-date">${this.formatDate(post.published)}</span>
-                                <span class="item-time">${this.formatTime(post.published)}</span>
+                            <div class="post-status">
+                                ${commentHtml}
+                                <span class="post-date">${this.formatRelativeTime(post.published)}</span>
                             </div>
-                            <button class="unpublish-btn" title="Unpublish" onclick="event.stopPropagation(); App.unpublishPost('${this.escapeHtml(post.path)}')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
-                            ${this.siteBaseUrl ? `<a class="view-live-btn" href="${this.escapeHtml(this.siteBaseUrl + '/' + post.path.replace(/\.md$/, '.html'))}" target="_blank" rel="noopener" title="View live" onclick="event.stopPropagation()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>` : ''}
-                        </div>
-                    `).join('')}
+                        </div>`;
+                    }).join('')}
                 </div>
             `;
         } catch (err) {
@@ -1460,7 +1624,7 @@ const App = {
             this.updateBadge('drafts-count', drafts.length);
 
             if (drafts.length === 0) {
-                container.innerHTML = `
+                container.innerHTML = this._renderPostsSubTabs('posts-drafts') + `
                     <div class="content-list">
                         <div class="empty-state">
                             <h3>No drafts yet</h3>
@@ -1472,17 +1636,16 @@ const App = {
                 return;
             }
 
-            container.innerHTML = `
-                <div class="content-list">
+            container.innerHTML = this._renderPostsSubTabs('posts-drafts') + `
+                <div class="post-list">
                     ${drafts.map(draft => `
-                        <div class="content-item" onclick="App.openDraft('${this.escapeHtml(draft.id)}')">
-                            <div class="item-info">
-                                <div class="item-title">${this.escapeHtml(draft.id)}</div>
-                                <div class="item-path">drafts/${this.escapeHtml(draft.id)}.md</div>
+                        <div class="post-row" onclick="App.openDraft('${this.escapeHtml(draft.id)}')">
+                            <div class="post-info">
+                                <div class="post-title">${this.escapeHtml(draft.id)}</div>
+                                <div class="post-meta"><span>Edited ${this.formatDate(draft.modified)}</span></div>
                             </div>
-                            <div class="item-date-group">
-                                <span class="item-date">${this.formatDate(draft.modified)}</span>
-                                <span class="item-time">${this.formatTime(draft.modified)}</span>
+                            <div class="post-status">
+                                <span class="draft-badge">Draft</span>
                             </div>
                         </div>
                     `).join('')}
@@ -1548,7 +1711,7 @@ const App = {
                 _domain: this.extractDomainFromUrl(c.in_reply_to),
             }));
         } catch (err) {
-            container.innerHTML = `<div class="content-list"><div class="empty-state"><h3>Failed to load</h3><p>${this.escapeHtml(err.message)}</p></div></div>`;
+            container.innerHTML = this._renderPostsSubTabs('comments-published') + `<div class="post-list"><div class="empty-state"><h3>Failed to load</h3><p>${this.escapeHtml(err.message)}</p></div></div>`;
             return;
         }
 
@@ -1560,15 +1723,17 @@ const App = {
         const total = drafts.length + pending.length + blessed.length + denied.length;
         this.updateBadge('comments-published-count', total);
 
-        // Build pill-style filter tabs
-        const tabClass = (name) => name === currentFilter ? 'feed-filter-tab active' : 'feed-filter-tab';
+        // Build filter tabs matching view-tabs style
+        const tabClass = (name) => name === currentFilter ? 'tab-item active' : 'tab-item';
         const tabs = `
-            <div class="feed-filter-tabs">
-                <button class="${tabClass('all')}" onclick="App.renderCommentsPublished(document.getElementById('content-list'), 'all')">All (${total})</button>
-                <button class="${tabClass('drafts')}" onclick="App.renderCommentsPublished(document.getElementById('content-list'), 'drafts')">Drafts (${drafts.length})</button>
-                <button class="${tabClass('blessed')}" onclick="App.renderCommentsPublished(document.getElementById('content-list'), 'blessed')">Blessed (${blessed.length})</button>
-                <button class="${tabClass('pending')}" onclick="App.renderCommentsPublished(document.getElementById('content-list'), 'pending')">Pending (${pending.length})</button>
-                <button class="${tabClass('denied')}" onclick="App.renderCommentsPublished(document.getElementById('content-list'), 'denied')">Denied (${denied.length})</button>
+            <div class="view-tabs" style="margin-bottom: 0.5rem;">
+                <div class="tab-group">
+                    <button class="${tabClass('all')}" onclick="App.renderCommentsPublished(document.getElementById('content-list'), 'all')">All <span class="tab-count">${total}</span></button>
+                    <button class="${tabClass('drafts')}" onclick="App.renderCommentsPublished(document.getElementById('content-list'), 'drafts')">Drafts <span class="tab-count">${drafts.length}</span></button>
+                    <button class="${tabClass('blessed')}" onclick="App.renderCommentsPublished(document.getElementById('content-list'), 'blessed')">Blessed <span class="tab-count">${blessed.length}</span></button>
+                    <button class="${tabClass('pending')}" onclick="App.renderCommentsPublished(document.getElementById('content-list'), 'pending')">Pending <span class="tab-count">${pending.length}</span></button>
+                    <button class="${tabClass('denied')}" onclick="App.renderCommentsPublished(document.getElementById('content-list'), 'denied')">Denied <span class="tab-count">${denied.length}</span></button>
+                </div>
             </div>
         `;
 
@@ -1591,7 +1756,7 @@ const App = {
                 blessed: 'No blessed comments',
                 denied: 'No denied comments',
             };
-            container.innerHTML = `${tabs}<div class="content-list"><div class="empty-state"><h3>${emptyMessages[currentFilter] || 'No comments'}</h3><p>Write a comment to reply to someone's post</p><button class="primary" onclick="App.newComment()">New Comment</button></div></div>`;
+            container.innerHTML = this._renderPostsSubTabs('comments-published') + `${tabs}<div class="post-list"><div class="empty-state"><h3>${emptyMessages[currentFilter] || 'No comments'}</h3><p>Write a comment to reply to someone's post</p><button class="primary" onclick="App.newComment()">New Comment</button></div></div>`;
             return;
         }
 
@@ -1600,24 +1765,26 @@ const App = {
             const onclick = item._status === 'draft'
                 ? `App.openCommentDraft('${this.escapeHtml(item.id)}')`
                 : `App.viewMyComment('${this.escapeHtml(item.id)}', '${item._status}')`;
+            const excerpt = item.excerpt || '';
+            const showExcerpt = excerpt && !excerpt.toLowerCase().startsWith((item._title || '').toLowerCase().slice(0, 30));
             return `
-                <div class="content-item" onclick="${onclick}">
-                    <div class="item-info">
-                        <div class="item-title">${this.escapeHtml(item._title)}</div>
-                        <div class="item-path">
+                <div class="post-row" onclick="${onclick}">
+                    <div class="post-info">
+                        <div class="post-title">${this.escapeHtml(item._title)}</div>
+                        ${showExcerpt ? `<div class="post-excerpt">${this.escapeHtml(excerpt)}</div>` : ''}
+                        <div class="post-meta">
                             <span class="comment-status-badge ${item._status}">${item._status}</span>
-                            ${item._domain ? this.escapeHtml(item._domain) : ''}
+                            ${item._domain ? `<span class="sep">&middot;</span><span>${this.escapeHtml(item._domain)}</span>` : ''}
                         </div>
                     </div>
-                    <div class="item-date-group">
-                        <span class="item-date">${this.formatDate(date)}</span>
-                        <span class="item-time">${this.formatTime(date)}</span>
+                    <div class="post-status">
+                        <span class="post-date">${this.formatRelativeTime(date)}</span>
                     </div>
                 </div>
             `;
         }).join('');
 
-        container.innerHTML = `${tabs}<div class="content-list">${itemsHtml}</div>`;
+        container.innerHTML = this._renderPostsSubTabs('comments-published') + `${tabs}<div class="post-list">${itemsHtml}</div>`;
     },
 
     // View a comment (my outgoing comments)
@@ -1777,7 +1944,7 @@ const App = {
                 }
             }
         } catch (err) {
-            container.innerHTML = `<div class="content-list"><div class="empty-state"><h3>Failed to load</h3><p>${this.escapeHtml(err.message)}</p></div></div>`;
+            container.innerHTML = this._renderPostsSubTabs('blessing-requests') + `<div class="post-list"><div class="empty-state"><h3>Failed to load</h3><p>${this.escapeHtml(err.message)}</p></div></div>`;
             return;
         }
 
@@ -1786,13 +1953,15 @@ const App = {
         this.counts.incomingBlessed = allBlessed.length;
         this.updateBadge('incoming-pending-count', requests.length, true);
 
-        // Build pill-style filter tabs (matching feed/conversations)
-        const tabClass = (name) => name === currentFilter ? 'feed-filter-tab active' : 'feed-filter-tab';
+        // Build filter tabs matching view-tabs style
+        const tabClass = (name) => name === currentFilter ? 'tab-item active' : 'tab-item';
         const tabs = `
-            <div class="feed-filter-tabs">
-                <button class="${tabClass('all')}" onclick="App.renderBlessingRequests(document.getElementById('content-list'), 'all')">All (${requests.length + allBlessed.length})</button>
-                <button class="${tabClass('pending')}" onclick="App.renderBlessingRequests(document.getElementById('content-list'), 'pending')">Pending (${requests.length})</button>
-                <button class="${tabClass('blessed')}" onclick="App.renderBlessingRequests(document.getElementById('content-list'), 'blessed')">Blessed (${allBlessed.length})</button>
+            <div class="view-tabs" style="margin-bottom: 0.5rem;">
+                <div class="tab-group">
+                    <button class="${tabClass('all')}" onclick="App.renderBlessingRequests(document.getElementById('content-list'), 'all')">All <span class="tab-count">${requests.length + allBlessed.length}</span></button>
+                    <button class="${tabClass('pending')}" onclick="App.renderBlessingRequests(document.getElementById('content-list'), 'pending')">Pending <span class="tab-count">${requests.length}</span></button>
+                    <button class="${tabClass('blessed')}" onclick="App.renderBlessingRequests(document.getElementById('content-list'), 'blessed')">Blessed <span class="tab-count">${allBlessed.length}</span></button>
+                </div>
             </div>
         `;
 
@@ -1800,7 +1969,7 @@ const App = {
         this._pendingRequests = requests;
         this._blessedComments = allBlessed;
 
-        // Build items using standard content-item layout
+        // Build items using post-row layout
         let items = '';
         if (currentFilter === 'pending' || currentFilter === 'all') {
             items += requests.map((r, idx) => {
@@ -1808,17 +1977,16 @@ const App = {
                 const slug = (r.in_reply_to || '').split('/').pop()?.replace(/\.md$/, '') || 'post';
                 const title = `Re: ${slug}`;
                 return `
-                <div class="content-item" onclick="App.openPendingRequestDetail(${idx})">
-                    <div class="item-info">
-                        <div class="item-title">${this.escapeHtml(title)}</div>
-                        <div class="item-path">
-                            <span class="comment-status-badge pending">PENDING</span>
-                            ${r.author ? this.escapeHtml(r.author) : ''}
+                <div class="post-row" onclick="App.openPendingRequestDetail(${idx})">
+                    <div class="post-info">
+                        <div class="post-title">${this.escapeHtml(title)}</div>
+                        <div class="post-meta">
+                            <span class="comment-status-badge pending">pending</span>
+                            ${r.author ? `<span class="sep">&middot;</span><span>${this.escapeHtml(r.author)}</span>` : ''}
                         </div>
                     </div>
-                    <div class="item-date-group">
-                        <span class="item-date">${this.formatDate(date)}</span>
-                        <span class="item-time">${this.formatTime(date)}</span>
+                    <div class="post-status">
+                        <span class="post-date">${this.formatRelativeTime(date)}</span>
                     </div>
                 </div>`;
             }).join('');
@@ -1827,17 +1995,16 @@ const App = {
             items += allBlessed.map((c, idx) => {
                 const domain = this.extractDomainFromUrl(c.post);
                 return `
-                <div class="content-item" onclick="App.openBlessedCommentDetail(${idx})">
-                    <div class="item-info">
-                        <div class="item-title">${this.escapeHtml(c.url ? c.url.split('/').pop() : 'comment')}</div>
-                        <div class="item-path">
+                <div class="post-row" onclick="App.openBlessedCommentDetail(${idx})">
+                    <div class="post-info">
+                        <div class="post-title">${this.escapeHtml(c.url ? c.url.split('/').pop() : 'comment')}</div>
+                        <div class="post-meta">
                             <span class="comment-status-badge blessed">blessed</span>
-                            ${domain ? this.escapeHtml(domain) : ''}
+                            ${domain ? `<span class="sep">&middot;</span><span>${this.escapeHtml(domain)}</span>` : ''}
                         </div>
                     </div>
-                    <div class="item-date-group">
-                        <span class="item-date">${this.formatDate(c.blessed_at)}</span>
-                        <span class="item-time">${this.formatTime(c.blessed_at)}</span>
+                    <div class="post-status">
+                        <span class="post-date">${this.formatRelativeTime(c.blessed_at)}</span>
                     </div>
                 </div>`;
             }).join('');
@@ -1852,7 +2019,7 @@ const App = {
             items = `<div class="empty-state"><h3>${msg}</h3><p>When someone comments on your posts, their requests appear here</p></div>`;
         }
 
-        container.innerHTML = `${tabs}<div class="content-list">${items}</div>`;
+        container.innerHTML = this._renderPostsSubTabs('blessing-requests') + `${tabs}<div class="post-list">${items}</div>`;
     },
 
     // Open blessed comment detail panel with content preview
@@ -1950,6 +2117,10 @@ const App = {
             const site = settings.site || {};
             const automations = settings.automations || [];
 
+            // Sync avatar/author_name from settings
+            this.avatarConfig = site.avatar || null;
+            this.authorName = site.author_name || '';
+
             // Store existing hooks for advanced panel
             this.existingHooks = settings.existing_hooks || [];
 
@@ -1997,6 +2168,24 @@ const App = {
                                 </div>
                             </div>
                             <div class="settings-row">
+                                <span class="settings-row-label">Display Name:</span>
+                                <span class="settings-row-value" id="author-name-display">${this.escapeHtml(site.author_name || '') || '<span style="color:var(--text-faint);">Not set</span>'}</span>
+                                <div class="settings-row-actions">
+                                    <button class="btn-copy" id="author-name-edit-btn" onclick="App.editAuthorName()">Edit</button>
+                                </div>
+                            </div>
+                            <div class="settings-row">
+                                <span class="settings-row-label">Avatar:</span>
+                                <span class="settings-row-value avatar-preview-row">
+                                    <div class="author-avatar" id="avatar-preview" style="${site.avatar ? this._buildAvatarStyle(site.avatar) : `background: ${(() => { const d = this.siteBaseUrl ? (() => { try { return new URL(this.siteBaseUrl).hostname; } catch(e) { return 'me'; } })() : 'me'; return this.domainToAvatar(d).color; })()};`}">${site.avatar ? '' : (() => { const d = this.siteBaseUrl ? (() => { try { return new URL(this.siteBaseUrl).hostname; } catch(e) { return 'me'; } })() : 'me'; return this.domainToAvatar(d).initials; })()}</div>
+                                </span>
+                                <div class="settings-row-actions">
+                                    <button class="btn-copy" onclick="App.randomizeAvatar()">Randomize</button>
+                                    <button class="btn-copy" id="avatar-save-btn" onclick="App.saveAvatar()" disabled>Save</button>
+                                    ${site.avatar ? `<button class="btn-copy" onclick="App.resetAvatar()">Reset</button>` : ''}
+                                </div>
+                            </div>
+                            <div class="settings-row">
                                 <span class="settings-row-label">Public Key:</span>
                                 <span class="settings-row-value" id="public-key-display">${this.escapeHtml(this.truncateKey(site.public_key))}</span>
                                 <div class="settings-row-actions">
@@ -2013,26 +2202,39 @@ const App = {
                         </div>
                     </div>
 
+                    <div class="settings-section">
+                        <div class="settings-section-label">Webapp Appearance</div>
+                        <div class="settings-card">
+                            <div class="settings-row">
+                                <span class="settings-row-label">Color Mode:</span>
+                                <span class="settings-row-value">${this.webappTheme === 'light' ? 'Light' : 'Dark'}</span>
+                                <div class="settings-row-actions">
+                                    <button class="btn-copy" onclick="App.toggleTheme()">${this.webappTheme === 'light' ? 'Switch to Dark' : 'Switch to Light'}</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     ${themes.length > 0 ? `
                     <div class="settings-section">
-                        <div class="settings-section-label">Theme</div>
+                        <div class="settings-section-label">Site Theme</div>
                         <div class="settings-card">
-                            <div class="settings-row" style="flex-direction: column; align-items: flex-start; gap: 0.75rem;">
-                                <div class="theme-picker">
-                                    <select id="theme-select" class="theme-select" onchange="App.onThemeSelectChange()">
-                                        ${themes.map(t => {
-                                            const desc = this.themeDescriptions[t.name] || '';
-                                            const label = desc ? `${t.name} — ${desc}` : t.name;
-                                            return `<option value="${this.escapeHtml(t.name)}" ${t.active ? 'selected' : ''} data-original="${t.active ? 'true' : ''}">${this.escapeHtml(label)}</option>`;
-                                        }).join('')}
-                                    </select>
-                                </div>
-                                <div class="theme-actions">
+                            <div class="settings-row settings-row-stacked">
+                                <select id="theme-select" class="theme-select" onchange="App.onThemeSelectChange()">
+                                    ${themes.map(t => {
+                                        const desc = this.themeDescriptions[t.name] || '';
+                                        const label = desc ? `${t.name} — ${desc}` : t.name;
+                                        return `<option value="${this.escapeHtml(t.name)}" ${t.active ? 'selected' : ''} data-original="${t.active ? 'true' : ''}">${this.escapeHtml(label)}</option>`;
+                                    }).join('')}
+                                </select>
+                                <div class="settings-row-actions">
                                     <button class="primary" id="theme-apply-btn" disabled onclick="App.applySelectedTheme()">Change Theme</button>
-                                    <span class="theme-view-link" id="theme-view-link" style="display: none;">
-                                        Theme updated. <a href="#" onclick="App.viewSite(); return false;">View your site</a>
-                                    </span>
                                 </div>
+                            </div>
+                            <div id="theme-view-link" class="settings-row" style="display: none; justify-content: center;">
+                                <span class="theme-view-link">
+                                    Theme updated. <a href="#" onclick="App.viewSite(); return false;">View your site</a>
+                                </span>
                             </div>
                         </div>
                     </div>
@@ -2048,7 +2250,7 @@ const App = {
                             </div>
                             <div class="settings-row">
                                 <span class="settings-row-label">URL:</span>
-                                <span class="settings-row-value" style="font-size: 0.85em; word-break: break-all;">${this.escapeHtml(discoveryUrl)}</span>
+                                <span class="settings-row-value">${this.escapeHtml(discoveryUrl)}</span>
                             </div>
                             <div class="settings-row">
                                 <span class="settings-row-label">Registration:</span>
@@ -2056,8 +2258,9 @@ const App = {
                             </div>
                             <div id="registration-action" class="settings-action-row"></div>
                             ${!site.discovery_configured ? `
-                            <div class="settings-row" style="margin-top: 0.5rem;">
-                                <span class="settings-row-value" style="font-size: 0.85em; color: var(--text-muted);">
+                            <div class="settings-row">
+                                <span class="settings-row-label"></span>
+                                <span class="settings-row-value" style="color: var(--text-muted); font-size: 0.8rem;">
                                     Set DISCOVERY_SERVICE_URL in your .env file, then restart the webapp.
                                 </span>
                             </div>
@@ -2094,11 +2297,13 @@ const App = {
                     <div class="settings-section">
                         <div class="settings-section-label">Troubleshooting</div>
                         <div class="settings-card">
-                            <div class="settings-row" style="flex-direction: column; align-items: flex-start; gap: 0.75rem;">
-                                <span class="settings-row-value" style="white-space: normal; color: var(--text-muted); font-family: inherit;">
+                            <div class="settings-row">
+                                <span class="settings-row-value" style="white-space: normal; color: var(--text-muted); font-family: inherit; text-align: left;">
                                     Force re-render all posts and comments. Use this if pages look wrong after a theme or snippet change.
                                 </span>
-                                <button class="primary" id="rerender-btn" onclick="App.rerenderSite()">Re-render all pages</button>
+                                <div class="settings-row-actions">
+                                    <button class="btn-copy" id="rerender-btn" onclick="App.rerenderSite()">Re-render</button>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -2129,14 +2334,18 @@ const App = {
                     <div class="settings-section">
                         <div class="settings-section-label">Your Data</div>
                         <div class="settings-card">
-                            <div class="settings-row" style="flex-direction: column; align-items: flex-start; gap: 0.75rem;">
+                            <div class="settings-row">
                                 ${this.isHosted ? `
-                                <span class="settings-row-value" style="white-space: normal; color: var(--text-muted); font-family: inherit;">Download a zip archive of your entire site &mdash; posts, snippets, config, themes, and cryptographic keys. For security, we'll send a verification link to your email.</span>
-                                <button class="primary" id="export-btn" onclick="App.requestExport()">Request export</button>
-                                <span id="export-status" style="font-size: 0.85rem; color: var(--text-muted);"></span>
+                                <span class="settings-row-value" style="white-space: normal; color: var(--text-muted); font-family: inherit; text-align: left;">Download a zip archive of your entire site &mdash; posts, snippets, config, themes, and cryptographic keys.</span>
+                                <div class="settings-row-actions" style="flex-direction: column; align-items: flex-end; gap: 0.35rem;">
+                                    <button class="btn-copy" id="export-btn" onclick="App.requestExport()">Export</button>
+                                    <span id="export-status" style="font-size: 0.75rem; color: var(--text-muted);"></span>
+                                </div>
                                 ` : `
-                                <span class="settings-row-value" style="white-space: normal; color: var(--text-muted); font-family: inherit;">Download a zip archive of your entire site &mdash; posts, snippets, config, themes, and cryptographic keys. Treat this file like a password.</span>
-                                <button class="primary" onclick="App.downloadSite()">Download site</button>
+                                <span class="settings-row-value" style="white-space: normal; color: var(--text-muted); font-family: inherit; text-align: left;">Download a zip archive of your entire site &mdash; posts, snippets, config, themes, and cryptographic keys.</span>
+                                <div class="settings-row-actions">
+                                    <button class="btn-copy" onclick="App.downloadSite()">Download</button>
+                                </div>
                                 `}
                             </div>
                         </div>
@@ -2250,12 +2459,45 @@ const App = {
         try {
             const result = await this.api('POST', '/api/settings/site-title', { site_title: newTitle });
             display.textContent = result.site_title || 'Not configured';
-            document.getElementById('domain-display').textContent = result.site_title || '';
+            { const dd = document.getElementById('domain-display'); if (dd) dd.textContent = result.site_title || ''; }
             btn.textContent = 'Edit';
             btn.onclick = () => App.editSiteTitle();
             this.showToast('Site title updated', 'success');
         } catch (err) {
             this.showToast('Failed to update title: ' + err.message, 'error');
+        }
+    },
+
+    editAuthorName() {
+        const display = document.getElementById('author-name-display');
+        const btn = document.getElementById('author-name-edit-btn');
+        if (!display || !btn) return;
+
+        const current = display.textContent === 'Not set' ? '' : display.textContent;
+        display.innerHTML = `<input type="text" id="author-name-input" value="${this.escapeHtml(current)}" maxlength="50" placeholder="Display name" style="font-size:0.85rem;font-family:var(--font-mono);background:var(--bg-light);border:1px solid var(--border-color);color:var(--text-color);padding:0.25rem 0.5rem;border-radius:3px;width:100%;">`;
+        btn.textContent = 'Save';
+        btn.onclick = () => App.saveAuthorName();
+
+        const input = document.getElementById('author-name-input');
+        if (input) { input.focus(); input.select(); }
+    },
+
+    async saveAuthorName() {
+        const input = document.getElementById('author-name-input');
+        const display = document.getElementById('author-name-display');
+        const btn = document.getElementById('author-name-edit-btn');
+        if (!input || !display || !btn) return;
+
+        const name = input.value.trim();
+        try {
+            const result = await this.api('POST', '/api/settings/author-name', { author_name: name });
+            this.authorName = result.author_name || '';
+            display.innerHTML = this.escapeHtml(result.author_name) || '<span style="color:var(--text-faint);">Not set</span>';
+            btn.textContent = 'Edit';
+            btn.onclick = () => App.editAuthorName();
+            this.showToast(name ? 'Display name updated' : 'Display name cleared', 'success');
+        } catch (err) {
+            this.showToast('Failed to update name: ' + err.message, 'error');
         }
     },
 
@@ -2281,7 +2523,7 @@ const App = {
             }
             this.showToast('Export request failed: ' + err.message, 'error');
         } finally {
-            if (btn) { btn.disabled = false; btn.textContent = 'Request export'; }
+            if (btn) { btn.disabled = false; btn.textContent = 'Export'; }
         }
     },
 
@@ -2345,7 +2587,7 @@ const App = {
         } catch (err) {
             this.showToast('Re-render failed: ' + err.message, 'error');
         } finally {
-            if (btn) { btn.disabled = false; btn.textContent = 'Re-render all pages'; }
+            if (btn) { btn.disabled = false; btn.textContent = 'Re-render'; }
         }
     },
 
@@ -2387,7 +2629,7 @@ const App = {
             if (btn) btn.disabled = true;
             // Show the "view site" link
             const link = document.getElementById('theme-view-link');
-            if (link) link.style.display = 'inline';
+            if (link) link.style.display = 'flex';
         } catch (err) {
             this.showToast('Failed to switch theme: ' + err.message, 'error');
         }
@@ -2430,10 +2672,7 @@ const App = {
             }
 
             if (result.error) {
-                statusEl.innerHTML = `<span style="color: var(--warning-color);">Unable to check</span>`;
-                if (actionEl) {
-                    actionEl.innerHTML = `<span style="font-size: 0.85em; color: var(--text-muted);">${this.escapeHtml(result.error)}</span>`;
-                }
+                statusEl.innerHTML = `<span style="color: var(--warning-color);">${this.escapeHtml(result.error)}</span>`;
                 return;
             }
 
@@ -3650,27 +3889,7 @@ echo "File: $POLIS_PATH"</code>
     },
 
     async renderConversationsTabbed(container) {
-        const subtab = this._conversationsSubtab || 'all';
-        const filterHtml = `
-            <div class="feed-filter-tabs">
-                <button class="feed-filter-tab ${subtab === 'all' ? 'active' : ''}" onclick="App.setConversationsSubtab('all')">All</button>
-                <button class="feed-filter-tab ${subtab === 'posts-comments' ? 'active' : ''}" onclick="App.setConversationsSubtab('posts-comments')">Posts & Comments</button>
-                <button class="feed-filter-tab ${subtab === 'activity' ? 'active' : ''}" onclick="App.setConversationsSubtab('activity')">Activity</button>
-            </div>
-        `;
-
-        switch (subtab) {
-            case 'posts-comments':
-                await this._renderPostsCommentsSubtab(container, filterHtml);
-                break;
-            case 'activity':
-                await this._renderActivitySubtab(container, filterHtml);
-                break;
-            default:
-                await this._renderAllSubtab(container, filterHtml);
-                break;
-        }
-        this._updateMarkAllReadBtn();
+        await this._renderAllSubtab(container, '');
     },
 
     _titleFromUrl(url) {
@@ -3684,74 +3903,106 @@ echo "File: $POLIS_PATH"</code>
     },
 
     _renderGroupedItem(group) {
-        const hasComments = group.total_comments > 0;
-        const typeLabel = hasComments ? 'Post + Comments' : 'Post';
-        const badgeClass = hasComments ? 'feed-type-badge post-comments' : 'feed-type-badge post';
         const isUnread = group.post_unread || group.unread_comments > 0;
-        const unreadClass = isUnread ? ' feed-item-unread' : '';
-        const unreadDot = isUnread ? '<span class="unread-dot"></span>' : '';
         const title = group.post_title || this._titleFromUrl(group.post_url);
         const linkUrl = group.post_url ? group.post_url.replace(/\.md$/, '.html') : '#';
         const ids = JSON.stringify(group.item_ids);
+        const domain = group.post_domain || '';
+        const avatar = this.domainToAvatar(domain);
+        const myDomain = this.siteBaseUrl ? (() => { try { return new URL(this.siteBaseUrl).hostname; } catch(e) { return ''; } })() : '';
+        const isMyDomain = domain && myDomain && domain === myDomain;
+        const remoteCached = !isMyDomain && domain ? this._remoteAvatarCache[domain] : null;
+        const hasCustomAvatar = (isMyDomain && this.avatarConfig) || (remoteCached && remoteCached.avatar);
+        const customAvatar = isMyDomain ? this.avatarConfig : (remoteCached ? remoteCached.avatar : null);
+        const defaultName = domain.replace(/\.polis\.pub$/, '').replace(/\./g, ' ');
+        const authorName = (isMyDomain && this.authorName) ? this.authorName : (remoteCached && remoteCached.author_name) ? remoteCached.author_name : defaultName;
+        const time = this.formatRelativeTime(group.last_activity);
+        const markLabel = isUnread ? 'Mark read' : 'Mark unread';
 
-        let summaryHtml = '';
-        if (hasComments) {
-            const parts = [];
-            if (group.network_comments > 0) {
-                parts.push(`${group.network_comments} ${group.network_comments === 1 ? 'person' : 'people'} in your network`);
-            }
-            if (group.external_comments > 0) {
-                parts.push(`${group.external_comments} ${group.external_comments === 1 ? 'person' : 'people'} outside`);
-            }
-            if (parts.length > 0) {
-                summaryHtml = `<div class="grouped-comment-summary">Recent comments from ${parts.join(' and ')}</div>`;
-            }
+        let threadHtml = '';
+        if (group.total_comments > 0) {
+            threadHtml = `
+                <div class="thread-row">
+                    <svg class="thread-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M4 6v6h8" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span>${group.total_comments} ${group.total_comments === 1 ? 'reply' : 'replies'}</span>
+                    <button class="reply-btn" onclick="event.stopPropagation(); App.newCommentDraft('${this.escapeHtml(linkUrl)}')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="9 17 4 12 9 7"/>
+                            <path d="M20 18v-2a4 4 0 0 0-4-4H4"/>
+                        </svg>
+                        Reply
+                    </button>
+                </div>`;
+        } else {
+            threadHtml = `
+                <div class="thread-row" style="color: var(--text-faint);">
+                    <svg class="thread-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M4 6v6h8" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span>No replies yet</span>
+                    <button class="reply-btn" onclick="event.stopPropagation(); App.newCommentDraft('${this.escapeHtml(linkUrl)}')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="9 17 4 12 9 7"/>
+                            <path d="M20 18v-2a4 4 0 0 0-4-4H4"/>
+                        </svg>
+                        Reply
+                    </button>
+                </div>`;
         }
 
         return `
-            <a href="${this.escapeHtml(linkUrl)}" target="_blank" rel="noopener"
-               class="content-item feed-item${unreadClass}"
-               onclick="App._markGroupRead(${this.escapeHtml(ids)}, this)">
-                <div class="item-info">
-                    <div class="item-title">${unreadDot}${this.escapeHtml(title)}</div>
-                    <div class="item-path">
-                        <span class="${badgeClass}">${typeLabel}</span>
-                        ${this.escapeHtml(group.post_domain || '')}
+            <div class="feed-item${isUnread ? ' unread' : ''}"
+               data-ids='${ids}'
+               data-url="${this.escapeHtml(linkUrl)}"
+               onclick="App._handleGroupClick(this)">
+                <div class="item-hover-actions">
+                    <button class="hover-btn" onclick="event.stopPropagation(); App.${isUnread ? 'markFeedRead' : 'markFeedUnread'}(JSON.parse(this.closest('.feed-item').dataset.ids))">${markLabel}</button>
+                </div>
+                <div class="item-top">
+                    <div class="author-row">
+                        <div class="author-avatar" style="${hasCustomAvatar ? this._buildAvatarStyle(customAvatar) : `background: ${avatar.color};`}">${hasCustomAvatar ? '' : avatar.initials}</div>
+                        <div>
+                            <span class="author-name">${this.escapeHtml(authorName)}</span>
+                            <span class="author-domain">&middot; ${this.escapeHtml(domain)}</span>
+                        </div>
                     </div>
-                    ${summaryHtml}
+                    <span class="item-time">${this.escapeHtml(time)}</span>
                 </div>
-                <div class="item-date-group">
-                    <span class="item-date">${this.formatDate(group.last_activity)}</span>
-                    <span class="item-time">${this.formatTime(group.last_activity)}</span>
-                </div>
-            </a>
+                <div class="item-title">${this.escapeHtml(title)}</div>
+                ${group.post_excerpt && !group.post_excerpt.toLowerCase().startsWith(title.toLowerCase().slice(0, 30)) ? `<div class="item-excerpt">${this.escapeHtml(group.post_excerpt)}</div>` : ''}
+                ${threadHtml}
+            </div>
         `;
     },
 
-    async _markGroupRead(itemIds, el) {
+    async _handleGroupClick(el) {
+        const itemIds = JSON.parse(el.dataset.ids || '[]');
+        const url = el.dataset.url || '';
         if (!itemIds || itemIds.length === 0) return;
-        // Update UI immediately
-        if (el) {
-            const wasUnread = el.classList.contains('feed-item-unread');
-            el.classList.remove('feed-item-unread');
-            const dot = el.querySelector('.unread-dot');
-            if (dot) dot.remove();
-            if (wasUnread) {
-                this.counts.feedUnread = Math.max(0, (this.counts.feedUnread || 0) - 1);
-                this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
-                this._updateMarkAllReadBtn();
+        try {
+            // Mark all items in this group as read on the server
+            await Promise.all(itemIds.map(id =>
+                this.api('POST', '/api/feed/read', { id })
+            ));
+            // Update counts and re-render (same pattern as markAllConversationsRead)
+            this.counts.feedUnread = Math.max(0, (this.counts.feedUnread || 0) - 1);
+            this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+            if (this.currentView === 'conversations') {
+                const contentList = document.getElementById('content-list');
+                if (contentList) await this.renderConversationsTabbed(contentList);
             }
+        } catch (err) {
+            this.showToast('Failed to mark as read: ' + err.message, 'error');
         }
-        // Await all mark-read calls so the server state is updated before
-        // any auto-refresh re-renders the list and overwrites our UI changes.
-        await Promise.all(itemIds.map(id =>
-            this.api('POST', '/api/feed/read', { id }).catch(() => {})
-        ));
+        // Open the URL in a background tab
+        if (url && url !== '#') window.open(url, '_blank', 'noopener');
     },
 
     async _renderPostsCommentsSubtab(container, filterHtml) {
         try {
-            container.innerHTML = filterHtml + '<div class="content-list"><div class="empty-state"><p>Loading...</p></div></div>';
+            container.innerHTML = filterHtml + '<div class="feed-list"><div class="empty-state"><p>Loading...</p></div></div>';
             const result = await this.api('GET', '/api/feed/grouped');
             const groups = result.groups || [];
 
@@ -3762,21 +4013,24 @@ echo "File: $POLIS_PATH"</code>
                 const emptyMsg = this.counts.following === 0
                     ? `<h3>No posts or comments yet</h3><p>Follow someone to see their posts here.</p><button class="primary" onclick="App.openFollowPanel()">Follow an author</button>`
                     : `<h3>No items</h3><p>No posts or comments in the feed yet. Click Refresh to check for new content.</p>`;
-                container.innerHTML = filterHtml + `<div class="content-list"><div class="empty-state">${emptyMsg}</div></div>`;
+                container.innerHTML = filterHtml + `<div class="feed-list"><div class="empty-state">${emptyMsg}</div></div>`;
 
                 if (!this._conversationsRefreshing) this._autoRefreshConversations();
                 return;
             }
 
             container.innerHTML = filterHtml + `
-                <div class="content-list">
+                <div class="feed-list">
                     ${groups.map(g => this._renderGroupedItem(g)).join('')}
                 </div>
             `;
 
+            // Fetch remote avatars for domains not yet cached
+            this._fetchRemoteAvatarsForGroups(groups);
+
             if (!this._conversationsRefreshing) this._autoRefreshConversations();
         } catch (err) {
-            container.innerHTML = filterHtml + `<div class="content-list"><div class="empty-state"><h3>Failed to load</h3><p>${this.escapeHtml(err.message)}</p></div></div>`;
+            container.innerHTML = filterHtml + `<div class="feed-list"><div class="empty-state"><h3>Failed to load</h3><p>${this.escapeHtml(err.message)}</p></div></div>`;
         }
     },
 
@@ -3828,7 +4082,7 @@ echo "File: $POLIS_PATH"</code>
 
     async _renderAllSubtab(container, filterHtml) {
         try {
-            container.innerHTML = filterHtml + '<div class="content-list"><div class="empty-state"><p>Loading...</p></div></div>';
+            container.innerHTML = filterHtml + '<div class="feed-list"><div class="empty-state"><p>Loading...</p></div></div>';
 
             // Fetch grouped feed and activity in parallel
             const [groupedResult, activityResult] = await Promise.all([
@@ -3864,21 +4118,32 @@ echo "File: $POLIS_PATH"</code>
                 entries.push({ type: 'activity', data: evt, timestamp: evt.timestamp });
             }
 
-            // Sort by timestamp descending
-            entries.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+            // Sort by timestamp descending (parse to handle non-ISO formats)
+            entries.sort((a, b) => {
+                const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+                const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+                return (tb || 0) - (ta || 0);
+            });
 
             if (entries.length === 0) {
                 const emptyMsg = this.counts.following === 0
-                    ? `<h3>No conversations yet</h3><p>Follow someone to see their activity here.</p><button class="primary" onclick="App.openFollowPanel()">Follow an author</button>`
-                    : `<h3>No activity</h3><p>No items yet. Click Refresh to check for new content.</p>`;
-                container.innerHTML = filterHtml + `<div class="content-list"><div class="empty-state">${emptyMsg}</div></div>`;
+                    ? `<h3>Your feed is empty</h3><p>Follow someone to see their posts here.</p><button class="primary" onclick="App.openFollowPanel()">Follow an author</button>`
+                    : `<h3>Nothing new</h3><p>No items yet. Click Refresh to check for new content.</p>`;
+                container.innerHTML = filterHtml + `<div class="feed-list"><div class="empty-state">${emptyMsg}</div></div>`;
 
                 if (!this._conversationsRefreshing) this._autoRefreshConversations();
                 return;
             }
 
+            const markReadBtn = (this.counts.feedUnread || 0) > 0
+                ? `<button class="feed-btn mark-read" onclick="App.markAllConversationsRead()">Mark all read</button>`
+                : '';
             container.innerHTML = filterHtml + `
-                <div class="content-list">
+                <div class="feed-list">
+                    <div class="feed-date-sep">
+                        <span>Recent</span>
+                        ${markReadBtn}
+                    </div>
                     ${entries.map(e => {
                         if (e.type === 'group') return this._renderGroupedItem(e.data);
                         return this.renderActivityEvent(e.data);
@@ -3886,9 +4151,13 @@ echo "File: $POLIS_PATH"</code>
                 </div>
             `;
 
+            // Fetch remote avatars for domains in feed groups
+            const feedGroups = entries.filter(e => e.type === 'group').map(e => e.data);
+            this._fetchRemoteAvatarsForGroups(feedGroups);
+
             if (!this._conversationsRefreshing) this._autoRefreshConversations();
         } catch (err) {
-            container.innerHTML = filterHtml + `<div class="content-list"><div class="empty-state"><h3>Failed to load</h3><p>${this.escapeHtml(err.message)}</p></div></div>`;
+            container.innerHTML = filterHtml + `<div class="feed-list"><div class="empty-state"><h3>Failed to load</h3><p>${this.escapeHtml(err.message)}</p></div></div>`;
         }
     },
 
@@ -3908,7 +4177,7 @@ echo "File: $POLIS_PATH"</code>
             if (newItems > 0) {
                 this.showToast(`${newItems} new item${newItems > 1 ? 's' : ''}`, 'success');
             } else {
-                this.showToast('Conversations up to date', 'success');
+                this.showToast('Feed up to date', 'success');
             }
 
             // Re-render if still on conversations view
@@ -3972,6 +4241,56 @@ echo "File: $POLIS_PATH"</code>
         }
     },
 
+    async markFeedRead(itemIds) {
+        try {
+            await Promise.all(itemIds.map(id =>
+                this.api('POST', '/api/feed/read', { id })
+            ));
+            this.counts.feedUnread = Math.max(0, (this.counts.feedUnread || 0) - itemIds.length);
+            this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+
+            if (this.currentView === 'conversations') {
+                const contentList = document.getElementById('content-list');
+                if (contentList) await this.renderConversationsTabbed(contentList);
+            }
+        } catch (err) {
+            this.showToast('Failed: ' + err.message, 'error');
+        }
+    },
+
+    async markFeedUnread(itemIds) {
+        try {
+            await Promise.all(itemIds.map(id =>
+                this.api('POST', '/api/feed/read', { id, unread: true })
+            ));
+            this.counts.feedUnread = Math.min((this.counts.feedUnread || 0) + 1, Infinity);
+            this.updateBadge('feed-count', this.counts.feedUnread, true);
+
+            if (this.currentView === 'conversations') {
+                const contentList = document.getElementById('content-list');
+                if (contentList) await this.renderConversationsTabbed(contentList);
+            }
+        } catch (err) {
+            this.showToast('Failed: ' + err.message, 'error');
+        }
+    },
+
+    async markUnreadFromHere(id) {
+        try {
+            await this.api('POST', '/api/feed/read', { from_id: id });
+            const counts = await this.api('GET', '/api/feed/counts');
+            this.counts.feedUnread = counts.unread || 0;
+            this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+
+            if (this.currentView === 'conversations') {
+                const contentList = document.getElementById('content-list');
+                if (contentList) await this.renderConversationsTabbed(contentList);
+            }
+        } catch (err) {
+            this.showToast('Failed: ' + err.message, 'error');
+        }
+    },
+
     async renderFollowingList(container) {
         try {
             const result = await this.api('GET', '/api/following');
@@ -3990,6 +4309,7 @@ echo "File: $POLIS_PATH"</code>
                 container.innerHTML = `
                     <div class="content-list">
                         <div class="empty-state onboarding-empty">
+                            <h3>Get started by following an author</h3>
                             <p>Following an author means their posts appear in your Conversations feed
                                and their comments on your site are automatically blessed.</p>
                             <div class="content-item following-item onboarding-follow-card">
@@ -4325,24 +4645,13 @@ echo "File: $POLIS_PATH"</code>
         }
 
         const tag = linkUrl ? 'a' : 'div';
-        const linkAttrs = linkUrl ? ` href="${this.escapeHtml(linkUrl)}" target="_blank" rel="noopener"` : '';
+        const linkAttrs = linkUrl ? ` href="${this.escapeHtml(linkUrl)}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit;"` : '';
 
         return `
-            <${tag}${linkAttrs} class="content-item activity-event">
-                <div class="item-info">
-                    <div class="item-title">
-                        <span class="activity-actor">${this.escapeHtml(evt.actor)}</span>
-                        ${actionLabel}
-                    </div>
-                    <div class="item-path">
-                        <span class="activity-type-badge">${this.escapeHtml(typeBadge)}</span>
-                        ${detail}
-                    </div>
-                </div>
-                <div class="item-date-group">
-                    <span class="item-date">${this.formatDate(evt.timestamp)}</span>
-                    <span class="item-time">${this.formatTime(evt.timestamp)}</span>
-                </div>
+            <${tag}${linkAttrs} class="activity-item">
+                <span class="act-dot"></span>
+                <span><span class="act-who">${this.escapeHtml(evt.actor)}</span> ${actionLabel}${detail ? ' — ' + detail : ''}</span>
+                <span class="act-when">${this.formatRelativeTime(evt.timestamp)}</span>
             </${tag}>
         `;
     },
@@ -4958,6 +5267,11 @@ git push</pre>
             const settings = await this.api('GET', '/api/settings');
             this.setupWizardDismissed = settings.setup_wizard_dismissed || false;
 
+            // Sync theme from server if not already set locally
+            if (!localStorage.getItem('polis-webapp-theme') && settings.webapp_theme) {
+                this._initTheme(settings.webapp_theme);
+            }
+
             // Check registration status
             try {
                 const regStatus = await this.api('GET', '/api/site/registration-status');
@@ -5000,6 +5314,241 @@ git push</pre>
         if (diffDay < 2) return 'yesterday';
         if (diffDay < 7) return `${diffDay} days ago`;
         return this.formatDate(isoString);
+    },
+
+    // Fetch remote avatar configs for a list of domains, updating cache and re-rendering feed items
+    async _fetchRemoteAvatars(domains) {
+        const toFetch = domains.filter(d => !(d in this._remoteAvatarCache) && !this._remoteAvatarFetching[d]);
+        if (toFetch.length === 0) return;
+
+        // Mark as in-flight
+        toFetch.forEach(d => { this._remoteAvatarFetching[d] = true; });
+
+        // Fetch in parallel
+        const results = await Promise.allSettled(toFetch.map(async (domain) => {
+            try {
+                const data = await this.api('GET', `/api/remote/avatar?domain=${encodeURIComponent(domain)}`);
+                this._remoteAvatarCache[domain] = {
+                    avatar: data.avatar || null,
+                    author_name: data.author_name || '',
+                };
+            } catch {
+                this._remoteAvatarCache[domain] = { avatar: null, author_name: '' };
+            } finally {
+                delete this._remoteAvatarFetching[domain];
+            }
+        }));
+
+        // Re-render feed items that now have avatar data
+        const updated = toFetch.filter(d => this._remoteAvatarCache[d]?.avatar);
+        if (updated.length > 0) {
+            updated.forEach(domain => {
+                document.querySelectorAll('.feed-item').forEach(el => {
+                    const domainEl = el.querySelector('.author-domain');
+                    if (!domainEl) return;
+                    const text = domainEl.textContent.replace(/^·\s*/, '').trim();
+                    if (text !== domain) return;
+                    const avatarEl = el.querySelector('.author-avatar');
+                    if (!avatarEl) return;
+                    const cached = this._remoteAvatarCache[domain];
+                    avatarEl.setAttribute('style', this._buildAvatarStyle(cached.avatar));
+                    avatarEl.textContent = '';
+                    if (cached.author_name) {
+                        const nameEl = el.querySelector('.author-name');
+                        if (nameEl) nameEl.textContent = cached.author_name;
+                    }
+                });
+            });
+        }
+    },
+
+    // Extract unique remote domains from feed groups and fetch their avatars
+    _fetchRemoteAvatarsForGroups(groups) {
+        const myDomain = this.siteBaseUrl ? (() => { try { return new URL(this.siteBaseUrl).hostname; } catch(e) { return ''; } })() : '';
+        const domains = [...new Set(groups.map(g => g.post_domain).filter(d => d && d !== myDomain))];
+        if (domains.length > 0) this._fetchRemoteAvatars(domains);
+    },
+
+    // Generate avatar initials + deterministic HSL color from domain
+    domainToAvatar(domain) {
+        if (!domain) return { initials: '?', color: '#888' };
+        const parts = domain.replace(/^www\./, '').split('.');
+        const name = parts[0] || '';
+        const initials = name.slice(0, 2).toUpperCase();
+        // Deterministic hue from domain hash
+        let hash = 0;
+        for (let i = 0; i < domain.length; i++) {
+            hash = domain.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const hue = ((hash % 360) + 360) % 360;
+        const color = `hsl(${hue}, 35%, 55%)`;
+        return { initials, color };
+    },
+
+    // Avatar color utilities
+    _hexToRgb(hex) {
+        const n = parseInt(hex.slice(1), 16);
+        return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+    },
+    _relativeLuminance(r, g, b) {
+        const [rs, gs, bs] = [r, g, b].map(c => {
+            c = c / 255;
+            return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+        });
+        return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs;
+    },
+    _contrastRatio(hex1, hex2) {
+        const c1 = this._hexToRgb(hex1), c2 = this._hexToRgb(hex2);
+        const l1 = this._relativeLuminance(c1.r, c1.g, c1.b);
+        const l2 = this._relativeLuminance(c2.r, c2.g, c2.b);
+        const lighter = Math.max(l1, l2), darker = Math.min(l1, l2);
+        return (lighter + 0.05) / (darker + 0.05);
+    },
+    _hslToHex(h, s, l) {
+        s /= 100; l /= 100;
+        const a = s * Math.min(l, 1 - l);
+        const f = n => { const k = (n + h / 30) % 12; return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
+        const toHex = x => Math.round(x * 255).toString(16).padStart(2, '0');
+        return '#' + toHex(f(0)) + toHex(f(8)) + toHex(f(4));
+    },
+    _randomHslToHex(sMin, sMax, lMin, lMax) {
+        const h = Math.floor(Math.random() * 360);
+        const s = sMin + Math.random() * (sMax - sMin);
+        const l = lMin + Math.random() * (lMax - lMin);
+        return this._hslToHex(h, s, l);
+    },
+    _shiftLightness(hex, amount) {
+        const { r, g, b } = this._hexToRgb(hex);
+        const max = Math.max(r, g, b) / 255, min = Math.min(r, g, b) / 255;
+        let h, s, l = (max + min) / 2;
+        if (max === min) { h = s = 0; } else {
+            const d = max - min;
+            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+            if (max === r / 255) h = ((g / 255 - b / 255) / d + (g < b ? 6 : 0)) * 60;
+            else if (max === g / 255) h = ((b / 255 - r / 255) / d + 2) * 60;
+            else h = ((r / 255 - g / 255) / d + 4) * 60;
+        }
+        const newL = Math.max(0, Math.min(100, l * 100 + amount));
+        return this._hslToHex(h, s * 100, newL);
+    },
+
+    // Avatar SVG patterns
+    _avatarPatterns: {
+        none: () => '',
+        rings: (c) => `<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><circle cx='14' cy='14' r='10' fill='none' stroke='${c}' stroke-width='1.5'/><circle cx='14' cy='14' r='5' fill='none' stroke='${c}' stroke-width='1'/></svg>`,
+        cross: (c) => `<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><line x1='4' y1='4' x2='24' y2='24' stroke='${c}' stroke-width='1.5'/><line x1='24' y1='4' x2='4' y2='24' stroke='${c}' stroke-width='1.5'/></svg>`,
+        grid: (c) => `<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><line x1='9' y1='0' x2='9' y2='28' stroke='${c}' stroke-width='0.8'/><line x1='19' y1='0' x2='19' y2='28' stroke='${c}' stroke-width='0.8'/><line x1='0' y1='9' x2='28' y2='9' stroke='${c}' stroke-width='0.8'/><line x1='0' y1='19' x2='28' y2='19' stroke='${c}' stroke-width='0.8'/></svg>`,
+        dots: (c) => `<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><circle cx='7' cy='7' r='2' fill='${c}'/><circle cx='21' cy='7' r='2' fill='${c}'/><circle cx='14' cy='14' r='2' fill='${c}'/><circle cx='7' cy='21' r='2' fill='${c}'/><circle cx='21' cy='21' r='2' fill='${c}'/></svg>`,
+        stripes: (c) => `<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><line x1='-2' y1='6' x2='6' y2='-2' stroke='${c}' stroke-width='1.5'/><line x1='5' y1='13' x2='13' y2='5' stroke='${c}' stroke-width='1.5'/><line x1='12' y1='20' x2='20' y2='12' stroke='${c}' stroke-width='1.5'/><line x1='19' y1='27' x2='27' y2='19' stroke='${c}' stroke-width='1.5'/><line x1='26' y1='34' x2='34' y2='26' stroke='${c}' stroke-width='1.5'/></svg>`,
+        diamond: (c) => `<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><polygon points='14,4 24,14 14,24 4,14' fill='none' stroke='${c}' stroke-width='1.5'/></svg>`,
+        halves: (c) => `<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><rect x='0' y='14' width='28' height='14' fill='${c}' opacity='0.4'/></svg>`,
+    },
+    _avatarSvgPattern(name, color) {
+        const fn = this._avatarPatterns[name];
+        if (!fn) return '';
+        const svg = fn(color);
+        if (!svg) return '';
+        return `url(data:image/svg+xml;base64,${btoa(svg)})`;
+    },
+
+    // Build inline CSS for a custom avatar config
+    _buildAvatarStyle(config) {
+        if (!config) return '';
+        let style = `background-color: ${config.bg}; color: ${config.fg};`;
+        if (config.border && config.border_w > 0) {
+            style += ` border: ${config.border_w}px solid ${config.border};`;
+        }
+        if (config.pattern && config.pattern !== 'none' && config.pattern_color) {
+            const uri = this._avatarSvgPattern(config.pattern, config.pattern_color);
+            if (uri) style += ` background-image: ${uri}; background-size: cover;`;
+        }
+        return style;
+    },
+
+    // Randomize avatar config
+    randomizeAvatar() {
+        const patterns = ['none', 'rings', 'cross', 'grid', 'dots', 'stripes', 'diamond', 'halves'];
+        let bg, fg;
+        for (let i = 0; i < 10; i++) {
+            bg = this._randomHslToHex(25, 60, 25, 65);
+            fg = '#ffffff';
+            if (this._contrastRatio(bg, fg) >= 4.5) break;
+            fg = '#1a1a2e';
+            if (this._contrastRatio(bg, fg) >= 4.5) break;
+            fg = '#ffffff';
+        }
+        const border = this._randomHslToHex(20, 50, 40, 70);
+        const borderW = Math.floor(Math.random() * 4);
+        const pattern = patterns[Math.floor(Math.random() * patterns.length)];
+        const shift = (Math.random() > 0.5 ? 1 : -1) * (15 + Math.random() * 10);
+        const patternColor = this._shiftLightness(bg, shift);
+
+        this._pendingAvatar = { bg, fg, border, border_w: borderW, pattern, pattern_color: patternColor };
+
+        // Update preview if visible (no initials for custom avatars)
+        const preview = document.getElementById('avatar-preview');
+        if (preview) {
+            preview.setAttribute('style', this._buildAvatarStyle(this._pendingAvatar));
+            preview.textContent = '';
+        }
+        // Enable save button
+        const saveBtn = document.getElementById('avatar-save-btn');
+        if (saveBtn) saveBtn.disabled = false;
+    },
+
+    async saveAvatar() {
+        const config = this._pendingAvatar;
+        if (!config) return;
+        try {
+            const result = await this.api('POST', '/api/settings/avatar', { avatar: config });
+            this.avatarConfig = result.avatar;
+            this._pendingAvatar = null;
+            this.showToast('Avatar saved', 'success');
+        } catch (err) {
+            this.showToast('Failed to save avatar: ' + err.message, 'error');
+        }
+    },
+
+    async resetAvatar() {
+        try {
+            await this.api('POST', '/api/settings/avatar', { avatar: null });
+            this.avatarConfig = null;
+            this._pendingAvatar = null;
+            this.showToast('Avatar reset', 'success');
+            // Update preview to deterministic
+            const preview = document.getElementById('avatar-preview');
+            if (preview) {
+                const domain = this.siteBaseUrl ? (() => { try { return new URL(this.siteBaseUrl).hostname; } catch(e) { return ''; } })() : '';
+                const det = this.domainToAvatar(domain || 'me');
+                preview.setAttribute('style', `background: ${det.color};`);
+                preview.textContent = det.initials;
+            }
+            const saveBtn = document.getElementById('avatar-save-btn');
+            if (saveBtn) saveBtn.disabled = true;
+        } catch (err) {
+            this.showToast('Failed to reset avatar: ' + err.message, 'error');
+        }
+    },
+
+    // Strip markdown and truncate at word boundary
+    truncateExcerpt(markdown, maxLen = 160) {
+        if (!markdown) return '';
+        // Strip common markdown syntax
+        let text = markdown
+            .replace(/^#{1,6}\s+/gm, '')           // headings
+            .replace(/\*\*(.+?)\*\*/g, '$1')       // bold
+            .replace(/\*(.+?)\*/g, '$1')            // italic
+            .replace(/`(.+?)`/g, '$1')              // inline code
+            .replace(/\[(.+?)\]\(.+?\)/g, '$1')    // links
+            .replace(/^[-*+]\s+/gm, '')             // list items
+            .replace(/^>\s+/gm, '')                 // blockquotes
+            .replace(/---+/g, '')                   // horizontal rules
+            .replace(/\n+/g, ' ')                   // newlines to spaces
+            .trim();
+        if (text.length <= maxLen) return text;
+        const truncated = text.slice(0, maxLen);
+        const lastSpace = truncated.lastIndexOf(' ');
+        return (lastSpace > maxLen * 0.5 ? truncated.slice(0, lastSpace) : truncated) + '\u2026';
     },
 
     // ── Widget Token Auto-Issuance ──────────────────────────────────

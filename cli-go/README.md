@@ -75,7 +75,7 @@ result, _ := publish.PublishPost(dataDir, content, filename, privateKey)
 
 ## Commands
 
-The Go CLI implements all Polis commands (`init`, `post`, `comment`, `render`, `blessing`, `follow`, `clone`, `migrate`, etc.). See the [CLI Command Reference](../docs/USAGE.md) for the full list.
+The Go CLI implements all Polis commands (`init`, `post`, `comment`, `render`, `blessing`, `follow`, `clone`, `migrate`, etc.). See the [CLI Command Reference](../docs/cli/user/command-reference.md) for the full list.
 
 ## Template System
 
@@ -100,3 +100,12 @@ go test -v ./...
 # Run specific package tests
 go test -v ./pkg/render/...
 ```
+
+## Centralized Documentation
+
+For comprehensive CLI documentation, see [`docs/cli/`](../docs/cli/README.md):
+
+- [Command Reference](../docs/cli/user/command-reference.md) — Complete CLI usage guide
+- [JSON Mode](../docs/cli/user/json-mode.md) — Machine-readable output format
+- [Templating](../docs/cli/user/templating.md) — Theme customization
+- [Package Structure](../docs/cli/developer/packages.md) — Import rules and version propagation

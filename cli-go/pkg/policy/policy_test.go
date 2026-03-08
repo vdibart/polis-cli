@@ -3,6 +3,7 @@ package policy
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -82,6 +83,31 @@ func TestLoadPolicies_EmptyLines(t *testing.T) {
 	}
 }
 
+func TestLoadPolicies_VersionHeaderSkipped(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rules.jsonl")
+
+	// Version header line has no "policy" field -> should be loaded but skipped by evaluator
+	content := `{"version":1,"generator":"polis-cli-go/0.57.0"}
+{"active":true,"policy":"allow all from all"}
+`
+	os.WriteFile(path, []byte(content), 0644)
+
+	policies, err := LoadPolicies(path, "/nonexistent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Version header is valid JSON with no "policy" field -> loaded as Policy{Active:false, Rule:""}
+	// The evaluator will skip it because Active is false and Rule is empty
+	if len(policies) != 2 {
+		t.Fatalf("expected 2 entries (header + rule), got %d", len(policies))
+	}
+	// Only the second entry has a valid rule
+	if policies[1].Rule != "allow all from all" {
+		t.Errorf("second policy rule = %q, want allow all from all", policies[1].Rule)
+	}
+}
+
 func TestDefaultPaths(t *testing.T) {
 	priv, pub := DefaultPaths("/site")
 	wantPriv := filepath.Join("/site", ".polis", "policies", "rules.jsonl")
@@ -113,6 +139,14 @@ func TestParse_AllKeywordCombos(t *testing.T) {
 		{"deny all from followers", "deny", "all", "followers"},
 		{"allow pub.polis.comment from following", "allow", "pub.polis.comment", "following"},
 		{"deny pub.polis.comment.blessing from all", "deny", "pub.polis.comment.blessing", "all"},
+		// New verbs
+		{"emit pub.polis.comment.blessing from self", "emit", "pub.polis.comment.blessing", "self"},
+		{"omit pub.polis.notification from self", "omit", "pub.polis.notification", "self"},
+		{"emit pub.polis.comment.blessing from following", "emit", "pub.polis.comment.blessing", "following"},
+		{"emit pub.polis.comment.blessing from thread-blessed", "emit", "pub.polis.comment.blessing", "thread-blessed"},
+		// New sources with existing verbs
+		{"allow pub.polis.dm from self", "allow", "pub.polis.dm", "self"},
+		{"deny all from all at evil.corp", "deny", "all", "all"},
 	}
 
 	for _, tt := range tests {
@@ -179,6 +213,7 @@ func TestParse_Errors(t *testing.T) {
 		"allow all",
 		"allow all from",
 		"invalid all from all",           // bad action
+		"grant all from all",             // bad action (not allow/deny/emit/omit)
 		"allow all to all",               // "to" instead of "from"
 		"allow all from nobody",           // bad source
 		"allow all from all at",           // at without domain
@@ -201,6 +236,38 @@ func TestParse_TypeValidation(t *testing.T) {
 	_, err := Parse("allow badtype from all")
 	if err == nil {
 		t.Error("expected error for non-dotted type")
+	}
+}
+
+func TestParse_RoundTrip(t *testing.T) {
+	rules := []string{
+		"emit pub.polis.comment.blessing from self",
+		"emit pub.polis.comment.blessing from following",
+		"emit pub.polis.comment.blessing from thread-blessed",
+		"omit pub.polis.notification from self",
+		"allow pub.polis.dm from following",
+		"deny pub.polis.dm from all",
+		"allow pub.polis.comment from following at friend.com on posts/hello.md",
+	}
+
+	for _, rule := range rules {
+		t.Run(rule, func(t *testing.T) {
+			p, err := Parse(rule)
+			if err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			// Reconstruct the rule string
+			reconstructed := p.Action + " " + p.Type + " from " + p.Source
+			if p.Domain != "" {
+				reconstructed += " at " + p.Domain
+			}
+			if p.Target != "" {
+				reconstructed += " on " + p.Target
+			}
+			if reconstructed != rule {
+				t.Errorf("round-trip mismatch: got %q, want %q", reconstructed, rule)
+			}
+		})
 	}
 }
 
@@ -253,6 +320,7 @@ func TestMatchesType(t *testing.T) {
 
 func TestMatchesSource(t *testing.T) {
 	ctx := EvalContext{
+		MyDomain:         "mysite.com",
 		FollowingDomains: map[string]bool{"alice.com": true, "bob.com": true},
 		FollowerDomains:  map[string]bool{"charlie.com": true},
 	}
@@ -268,6 +336,12 @@ func TestMatchesSource(t *testing.T) {
 		{"following", "unknown.com", false},
 		{"followers", "charlie.com", true},
 		{"followers", "unknown.com", false},
+		// self source
+		{"self", "mysite.com", true},
+		{"self", "other.com", false},
+		// thread-blessed always false client-side
+		{"thread-blessed", "alice.com", false},
+		{"thread-blessed", "mysite.com", false},
 	}
 
 	for _, tt := range tests {
@@ -277,6 +351,14 @@ func TestMatchesSource(t *testing.T) {
 				t.Errorf("matchesSource(%q, %q) = %v, want %v", tt.source, tt.actor, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMatchesSource_SelfWithEmptyMyDomain(t *testing.T) {
+	ctx := EvalContext{} // MyDomain is empty
+	got := matchesSource("self", "anything.com", ctx)
+	if got {
+		t.Error("self should not match when MyDomain is empty")
 	}
 }
 
@@ -364,9 +446,9 @@ func TestEvaluate_TargetQualifier(t *testing.T) {
 
 	// Matching target -> deny
 	evt := Event{
-		Type:       "pub.polis.comment.published",
+		Type:        "pub.polis.comment.published",
 		ActorDomain: "alice.com",
-		TargetPath: "posts/2026/01/draft.md",
+		TargetPath:  "posts/2026/01/draft.md",
 	}
 	if got := Evaluate(policies, evt, ctx); got != Deny {
 		t.Errorf("Evaluate = %v, want Deny for matching target", got)
@@ -400,6 +482,65 @@ func TestEvaluate_MalformedRuleSkipped(t *testing.T) {
 	// Malformed first rule skipped, second rule matches
 	if got := Evaluate(policies, evt, ctx); got != Allow {
 		t.Errorf("Evaluate = %v, want Allow", got)
+	}
+}
+
+func TestEvaluate_EmitDecision(t *testing.T) {
+	policies := []Policy{
+		{Active: true, Rule: "emit pub.polis.comment.blessing from self"},
+	}
+
+	ctx := EvalContext{MyDomain: "mysite.com"}
+	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "mysite.com"}
+
+	decision, explicit := EvaluateExplicit(policies, evt, ctx)
+	if decision != Emit || !explicit {
+		t.Errorf("EvaluateExplicit = (%v, %v), want (Emit, true)", decision, explicit)
+	}
+}
+
+func TestEvaluate_OmitDecision(t *testing.T) {
+	policies := []Policy{
+		{Active: true, Rule: "omit pub.polis.notification from self"},
+	}
+
+	ctx := EvalContext{MyDomain: "mysite.com"}
+	evt := Event{Type: "pub.polis.notification.follow", ActorDomain: "mysite.com"}
+
+	decision, explicit := EvaluateExplicit(policies, evt, ctx)
+	if decision != Omit || !explicit {
+		t.Errorf("EvaluateExplicit = (%v, %v), want (Omit, true)", decision, explicit)
+	}
+}
+
+func TestEvaluate_MixedVerbsFirstMatchWins(t *testing.T) {
+	policies := []Policy{
+		{Active: true, Rule: "emit pub.polis.comment.blessing from self"},
+		{Active: true, Rule: "emit pub.polis.comment.blessing from following"},
+		{Active: true, Rule: "omit pub.polis.comment.blessing from all"},
+	}
+
+	ctx := EvalContext{
+		MyDomain:         "mysite.com",
+		FollowingDomains: map[string]bool{"alice.com": true},
+	}
+
+	// Self -> emit (first rule)
+	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "mysite.com"}
+	if got := Evaluate(policies, evt, ctx); got != Emit {
+		t.Errorf("self = %v, want Emit", got)
+	}
+
+	// Following -> emit (second rule)
+	evt.ActorDomain = "alice.com"
+	if got := Evaluate(policies, evt, ctx); got != Emit {
+		t.Errorf("following = %v, want Emit", got)
+	}
+
+	// Stranger -> omit (third rule)
+	evt.ActorDomain = "stranger.com"
+	if got := Evaluate(policies, evt, ctx); got != Omit {
+		t.Errorf("stranger = %v, want Omit", got)
 	}
 }
 
@@ -447,6 +588,65 @@ func TestEvaluateExplicit_NoMatch(t *testing.T) {
 	decision, explicit := EvaluateExplicit(policies, evt, ctx)
 	if decision != Allow || explicit {
 		t.Errorf("EvaluateExplicit = (%v, %v), want (Allow, false)", decision, explicit)
+	}
+}
+
+// ============================================================================
+// EvaluateWithLog tests
+// ============================================================================
+
+func TestEvaluateWithLog_MatchedRule(t *testing.T) {
+	policies := []Policy{
+		{Active: true, Rule: "emit pub.polis.comment.blessing from self"},
+		{Active: true, Rule: "emit pub.polis.comment.blessing from following"},
+	}
+
+	ctx := EvalContext{
+		MyDomain:         "mysite.com",
+		FollowingDomains: map[string]bool{"alice.com": true},
+	}
+
+	// Self match -> first rule
+	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "mysite.com"}
+	result := EvaluateWithLog(policies, evt, ctx)
+	if result.Decision != Emit || !result.Matched {
+		t.Errorf("decision = %v, matched = %v, want Emit/true", result.Decision, result.Matched)
+	}
+	if result.Rule != "emit pub.polis.comment.blessing from self" {
+		t.Errorf("rule = %q, want self rule", result.Rule)
+	}
+	if result.RuleIdx != 0 {
+		t.Errorf("rule_idx = %d, want 0", result.RuleIdx)
+	}
+
+	// Following match -> second rule
+	evt.ActorDomain = "alice.com"
+	result = EvaluateWithLog(policies, evt, ctx)
+	if result.Decision != Emit || !result.Matched {
+		t.Errorf("decision = %v, matched = %v, want Emit/true", result.Decision, result.Matched)
+	}
+	if result.RuleIdx != 1 {
+		t.Errorf("rule_idx = %d, want 1", result.RuleIdx)
+	}
+}
+
+func TestEvaluateWithLog_NoMatch(t *testing.T) {
+	policies := []Policy{
+		{Active: true, Rule: "emit pub.polis.comment.blessing from self"},
+	}
+
+	ctx := EvalContext{MyDomain: "mysite.com"}
+	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "other.com"}
+
+	result := EvaluateWithLog(policies, evt, ctx)
+	if result.Decision != Allow || result.Matched {
+		t.Errorf("decision = %v, matched = %v, want Allow/false", result.Decision, result.Matched)
+	}
+	if result.Rule != "" {
+		t.Errorf("rule = %q, want empty", result.Rule)
+	}
+	if result.RuleIdx != -1 {
+		t.Errorf("rule_idx = %d, want -1", result.RuleIdx)
 	}
 }
 
@@ -566,12 +766,49 @@ func TestSpec_BlessingAutoDecision(t *testing.T) {
 	}
 }
 
-func TestDefaultPolicyContent(t *testing.T) {
-	content := DefaultPolicyContent()
-	if content == "" {
-		t.Fatal("DefaultPolicyContent() returned empty string")
+func TestSpec_EmitBlessingFromSelf(t *testing.T) {
+	policies := []Policy{
+		{Active: true, Rule: "emit pub.polis.comment.blessing from self"},
+		{Active: true, Rule: "emit pub.polis.comment.blessing from following"},
 	}
-	// Should be valid JSONL
+
+	ctx := EvalContext{
+		MyDomain:         "mysite.com",
+		FollowingDomains: map[string]bool{"alice.com": true},
+	}
+
+	// Self-comment -> emit (auto-bless)
+	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "mysite.com"}
+	decision, explicit := EvaluateExplicit(policies, evt, ctx)
+	if decision != Emit || !explicit {
+		t.Errorf("self blessing = (%v, %v), want (Emit, true)", decision, explicit)
+	}
+
+	// Following -> emit
+	evt.ActorDomain = "alice.com"
+	decision, explicit = EvaluateExplicit(policies, evt, ctx)
+	if decision != Emit || !explicit {
+		t.Errorf("following blessing = (%v, %v), want (Emit, true)", decision, explicit)
+	}
+
+	// Stranger -> no match -> default Allow (pending)
+	evt.ActorDomain = "stranger.com"
+	decision, explicit = EvaluateExplicit(policies, evt, ctx)
+	if decision != Allow || explicit {
+		t.Errorf("stranger blessing = (%v, %v), want (Allow, false)", decision, explicit)
+	}
+}
+
+// ============================================================================
+// Default policy content tests
+// ============================================================================
+
+func TestDefaultPublicPolicyContent(t *testing.T) {
+	content := DefaultPublicPolicyContent()
+	if content == "" {
+		t.Fatal("DefaultPublicPolicyContent() returned empty string")
+	}
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rules.jsonl")
 	os.WriteFile(path, []byte(content), 0644)
@@ -580,13 +817,101 @@ func TestDefaultPolicyContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to load default policy content: %v", err)
 	}
-	if len(policies) != 1 {
-		t.Fatalf("expected 1 policy, got %d", len(policies))
+
+	// Filter to only active policies with non-empty rules
+	var activePolicies []Policy
+	for _, p := range policies {
+		if p.Active && p.Rule != "" {
+			activePolicies = append(activePolicies, p)
+		}
 	}
-	if !policies[0].Active {
-		t.Error("default policy should be active")
+
+	if len(activePolicies) != 3 {
+		t.Fatalf("expected 3 active policies, got %d", len(activePolicies))
 	}
-	if policies[0].Rule != "allow pub.polis.comment.blessing from following" {
-		t.Errorf("default policy rule = %q", policies[0].Rule)
+
+	// Verify all 3 emit rules parse correctly
+	expectedRules := []string{
+		"emit pub.polis.comment.blessing from self",
+		"emit pub.polis.comment.blessing from following",
+		"emit pub.polis.comment.blessing from thread-blessed",
+	}
+	for i, expected := range expectedRules {
+		if activePolicies[i].Rule != expected {
+			t.Errorf("policy[%d] = %q, want %q", i, activePolicies[i].Rule, expected)
+		}
+		// Ensure it parses
+		if _, err := Parse(activePolicies[i].Rule); err != nil {
+			t.Errorf("policy[%d] parse error: %v", i, err)
+		}
+	}
+}
+
+func TestDefaultPrivatePolicyContent(t *testing.T) {
+	content := DefaultPrivatePolicyContent()
+	if content == "" {
+		t.Fatal("DefaultPrivatePolicyContent() returned empty string")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rules.jsonl")
+	os.WriteFile(path, []byte(content), 0644)
+
+	policies, err := LoadPolicies(path, "/nonexistent")
+	if err != nil {
+		t.Fatalf("failed to load default private policy content: %v", err)
+	}
+
+	// Filter to only active policies with non-empty rules
+	var activePolicies []Policy
+	for _, p := range policies {
+		if p.Active && p.Rule != "" {
+			activePolicies = append(activePolicies, p)
+		}
+	}
+
+	if len(activePolicies) != 7 {
+		t.Fatalf("expected 7 active policies, got %d", len(activePolicies))
+	}
+
+	expectedRules := []string{
+		"allow pub.polis.post from all",
+		"allow pub.polis.comment from all",
+		"allow pub.polis.follow from all",
+		"allow pub.polis.site from all",
+		"allow pub.polis.dm from following",
+		"deny pub.polis.dm from all",
+		"omit pub.polis.notification from self",
+	}
+	for i, expected := range expectedRules {
+		if activePolicies[i].Rule != expected {
+			t.Errorf("policy[%d] = %q, want %q", i, activePolicies[i].Rule, expected)
+		}
+		if _, err := Parse(activePolicies[i].Rule); err != nil {
+			t.Errorf("policy[%d] parse error: %v", i, err)
+		}
+	}
+}
+
+func TestDefaultPolicyContent_BackwardsCompat(t *testing.T) {
+	// DefaultPolicyContent() should return same as DefaultPublicPolicyContent()
+	if DefaultPolicyContent() != DefaultPublicPolicyContent() {
+		t.Error("DefaultPolicyContent() should delegate to DefaultPublicPolicyContent()")
+	}
+}
+
+func TestDefaultPolicies_VersionHeader(t *testing.T) {
+	// Both default policy contents should start with a version header
+	for _, content := range []string{DefaultPublicPolicyContent(), DefaultPrivatePolicyContent()} {
+		lines := strings.Split(strings.TrimSpace(content), "\n")
+		if len(lines) < 2 {
+			t.Fatal("expected at least 2 lines (header + rules)")
+		}
+		if !strings.Contains(lines[0], `"version"`) {
+			t.Errorf("first line should be version header, got: %s", lines[0])
+		}
+		if !strings.Contains(lines[0], `"generator"`) {
+			t.Errorf("first line should contain generator, got: %s", lines[0])
+		}
 	}
 }

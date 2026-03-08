@@ -102,11 +102,6 @@ func (h *NotificationHandler) Process(events []discovery.StreamEvent) []notifica
 	var entries []notification.StateEntry
 
 	for _, evt := range events {
-		// Skip self-events
-		if evt.Actor == h.MyDomain {
-			continue
-		}
-
 		// Skip muted domains
 		if h.MutedDomains[evt.Actor] {
 			continue
@@ -117,10 +112,17 @@ func (h *NotificationHandler) Process(events []discovery.StreamEvent) []notifica
 			continue
 		}
 
-		// Policy check: deny events that match a deny policy
+		// Policy check: deny/omit events that match a deny or omit policy.
+		// This replaces the former hardcoded self-event skip — the default
+		// private policy "omit pub.polis.notification from self" handles it.
+		//
+		// The event type is prefixed with "pub.polis.notification." so that
+		// notification-specific policies (like "omit pub.polis.notification from self")
+		// match via dot-boundary prefix matching without interfering with
+		// policies that target the raw event types in other contexts.
 		if len(h.Policies) > 0 {
 			pEvt := policy.Event{
-				Type:        evt.Type,
+				Type:        "pub.polis.notification." + evt.Type,
 				ActorDomain: evt.Actor,
 			}
 			if td, ok := evt.Payload["target_domain"].(string); ok {
@@ -130,10 +132,12 @@ func (h *NotificationHandler) Process(events []discovery.StreamEvent) []notifica
 				pEvt.TargetPath = tp
 			}
 			ctx := policy.EvalContext{
+				MyDomain:         h.MyDomain,
 				FollowingDomains: h.FollowedDomains,
 				FollowerDomains:  h.FollowerDomains,
 			}
-			if policy.Evaluate(h.Policies, pEvt, ctx) == policy.Deny {
+			result := policy.EvaluateWithLog(h.Policies, pEvt, ctx)
+			if result.Decision == policy.Deny || result.Decision == policy.Omit {
 				continue
 			}
 		}

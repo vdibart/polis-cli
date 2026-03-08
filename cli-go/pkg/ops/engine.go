@@ -268,7 +268,8 @@ func isWriteAction(action string) bool {
 	case "create", "update", "delete",
 		"bless", "deny", "revoke", "sync",
 		"draft.save", "draft.delete",
-		"refresh":
+		"refresh",
+		"send", "deliver", "mark_read", "retry":
 		return true
 	default:
 		return false

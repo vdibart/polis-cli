@@ -24,6 +24,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
+	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
@@ -128,6 +129,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		showFrontmatter = *s.Config.ShowFrontmatter
 	}
 	response["show_frontmatter"] = showFrontmatter
+
+	// Include avatar and author_name from .well-known/polis
+	if wk, err := site.LoadWellKnown(s.DataDir); err == nil {
+		if wk.Avatar != nil {
+			response["avatar"] = wk.Avatar
+		}
+		if wk.AuthorName != "" {
+			response["author_name"] = wk.AuthorName
+		}
+	}
 
 	json.NewEncoder(w).Encode(response)
 }
@@ -403,8 +414,7 @@ func (s *Server) handleRender(w http.ResponseWriter, r *http.Request) {
 		Markdown string `json:"markdown"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if isBodyTooLargeError(err) {
-			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		if s.handleBodyTooLarge(w, r, err) {
 			return
 		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
@@ -580,8 +590,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		Filename string `json:"filename"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if isBodyTooLargeError(err) {
-			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		if s.handleBodyTooLarge(w, r, err) {
 			return
 		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
@@ -623,11 +632,8 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Run post-publish hook (checks explicit config, then auto-discovers .polis/webapp/hooks/)
-	{
-		var hc *hooks.HookConfig
-		if s.Config != nil {
-			hc = s.Config.Hooks
-		}
+	if s.EnableHooks {
+		hc := s.getHookConfig()
 		payload := &hooks.HookPayload{
 			Event:         hooks.EventPostPublish,
 			Path:          result.Path,
@@ -685,8 +691,16 @@ func (s *Server) handlePosts(w http.ResponseWriter, r *http.Request) {
 		}
 		// Filter out comments - only include posts
 		if path, ok := entry["path"].(string); ok {
-			if strings.HasPrefix(path, "comments/") {
+			if strings.HasPrefix(path, "comments/") || strings.Contains(path, "/comment/") {
 				continue
+			}
+		}
+		// Generate excerpt from source markdown
+		if path, ok := entry["path"].(string); ok {
+			srcPath := filepath.Join(s.DataDir, path)
+			if raw, err := os.ReadFile(srcPath); err == nil {
+				body := stripFrontmatter(string(raw))
+				entry["excerpt"] = makeExcerpt(body, 140)
 			}
 		}
 		posts = append(posts, entry)
@@ -718,6 +732,9 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request) {
 
 	// Validate path to prevent directory traversal
 	if err := validatePostPath(postPath); err != nil {
+		s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
+			"path": postPath, "request_id": RequestIDFromContext(r.Context()),
+		})
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -765,8 +782,7 @@ func (s *Server) handleRepublish(w http.ResponseWriter, r *http.Request) {
 		Markdown string `json:"markdown"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if isBodyTooLargeError(err) {
-			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		if s.handleBodyTooLarge(w, r, err) {
 			return
 		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
@@ -785,6 +801,9 @@ func (s *Server) handleRepublish(w http.ResponseWriter, r *http.Request) {
 
 	// Validate path to prevent directory traversal
 	if err := validatePostPath(req.Path); err != nil {
+		s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
+			"path": req.Path, "request_id": RequestIDFromContext(r.Context()),
+		})
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -819,11 +838,8 @@ func (s *Server) handleRepublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Run post-republish hook (checks explicit config, then auto-discovers .polis/webapp/hooks/)
-	{
-		var hc *hooks.HookConfig
-		if s.Config != nil {
-			hc = s.Config.Hooks
-		}
+	if s.EnableHooks {
+		hc := s.getHookConfig()
 		payload := &hooks.HookPayload{
 			Event:         hooks.EventPostRepublish,
 			Path:          result.Path,
@@ -872,6 +888,9 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 
 	// Validate path to prevent directory traversal
 	if err := validatePostPath(req.Path); err != nil {
+		s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
+			"path": req.Path, "request_id": RequestIDFromContext(r.Context()),
+		})
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -902,7 +921,7 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call DS to unregister (soft-delete)
-	dsClient := discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+	dsClient := s.NewDSClient(r)
 	if err := dsClient.UnregisterContent("pub.polis.post", contentURL, sig); err != nil {
 		s.LogError("DS unregister failed for %s: %v", req.Path, err)
 		// Non-fatal: still clean up locally
@@ -1003,7 +1022,7 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Notify DS FIRST (strict ordering — if DS fails, do NOT proceed with local swap)
-	dsClient := discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+	dsClient := s.NewDSClient(r)
 	err = dsClient.RotateKey(discovery.KeyRotationRequest{
 		Domain:        domain,
 		OldKey:        oldPubKey,
@@ -1199,8 +1218,7 @@ func (s *Server) handleCommentSign(w http.ResponseWriter, r *http.Request) {
 		Content   string `json:"content"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if isBodyTooLargeError(err) {
-			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		if s.handleBodyTooLarge(w, r, err) {
 			return
 		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
@@ -1312,11 +1330,8 @@ func (s *Server) handleCommentBeseech(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Run hooks if auto-blessed
-	if result.AutoBlessed {
-		var hc *hooks.HookConfig
-		if s.Config != nil {
-			hc = s.Config.Hooks
-		}
+	if result.AutoBlessed && s.EnableHooks {
+		hc := s.getHookConfig()
 		payload := &hooks.HookPayload{
 			Event:         hooks.EventPostComment,
 			Path:          fmt.Sprintf("comments/blessed/%s.md", req.CommentID),
@@ -1461,13 +1476,10 @@ func (s *Server) handleCommentsSync(w http.ResponseWriter, r *http.Request) {
 
 	// Create authenticated discovery client (needed for pending/denied queries)
 	myDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
-	client := discovery.NewAuthenticatedClient(s.DiscoveryURL, s.DiscoveryKey, myDomain, s.PrivateKey)
+	client := s.NewAuthDSClient(r, myDomain)
 
-	// Sync pending comments
-	var hc *hooks.HookConfig
-	if s.Config != nil {
-		hc = s.Config.Hooks
-	}
+	// Sync pending comments (pass nil hookConfig when hooks disabled to prevent execution)
+	hc := s.getHookConfig()
 	result, err := comment.SyncPendingComments(s.DataDir, s.GetBaseURL(), client, hc)
 	if err != nil {
 		log.Printf("handleCommentsSync: failed for %s: %v", myDomain, err)
@@ -1511,7 +1523,7 @@ func (s *Server) handleBlessingRequests(w http.ResponseWriter, r *http.Request) 
 
 	// Create authenticated discovery client (needed for status=pending queries)
 	myDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
-	client := discovery.NewAuthenticatedClient(s.DiscoveryURL, s.DiscoveryKey, myDomain, s.PrivateKey)
+	client := s.NewAuthDSClient(r, myDomain)
 
 	// Fetch pending blessing requests (actor must be full domain, not subdomain)
 	requests, err := blessing.FetchPendingRequests(client, myDomain)
@@ -1560,7 +1572,7 @@ func (s *Server) handleBlessingGrant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create discovery client
-	client := discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+	client := s.NewDSClient(r)
 
 	// If comment_version is missing (old DS records without metadata), look it up
 	if req.CommentVersion == "" {
@@ -1572,10 +1584,7 @@ func (s *Server) handleBlessingGrant(w http.ResponseWriter, r *http.Request) {
 	// Grant the blessing (with signed request)
 	// Normalize URLs to .md format for consistent storage
 	s.LogDebug("Granting blessing for comment version: %s", req.CommentVersion)
-	var bhc *hooks.HookConfig
-	if s.Config != nil {
-		bhc = s.Config.Hooks
-	}
+	bhc := s.getHookConfig()
 	result, err := blessing.GrantByVersion(
 		s.DataDir,
 		req.CommentVersion,
@@ -1652,7 +1661,7 @@ func (s *Server) handleBlessingDeny(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create discovery client
-	client := discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+	client := s.NewDSClient(r)
 
 	// Deny the blessing (with signed request)
 	s.LogDebug("Denying blessing for comment: %s", req.CommentURL)
@@ -1792,9 +1801,23 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		setupWizardDismissed = s.Config.SetupWizardDismissed
 	}
 
+	// Webapp theme preference
+	webappTheme := "dark"
+	if s.Config != nil && s.Config.WebappTheme != "" {
+		webappTheme = s.Config.WebappTheme
+	}
+
 	// Load theme data
 	themes, _ := theme.ListThemesWithPalettes(s.DataDir, s.CLIThemesDir)
 	activeTheme, _ := theme.GetActiveTheme(s.DataDir)
+
+	// Load avatar and author_name from .well-known/polis
+	var avatarConfig *site.AvatarConfig
+	var authorName string
+	if wk, err := site.LoadWellKnown(s.DataDir); err == nil {
+		avatarConfig = wk.Avatar
+		authorName = wk.AuthorName
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1808,11 +1831,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"view_mode":            viewMode,
 			"show_frontmatter":     showFrontmatter,
 			"base_url":             baseURL,
+			"avatar":               avatarConfig,
+			"author_name":          authorName,
 		},
 		"automations":             automations,
 		"existing_hooks":          existingHooks,
 		"setup_wizard_dismissed":  setupWizardDismissed,
 		"hide_read":               s.Config != nil && s.Config.HideRead,
+		"webapp_theme":            webappTheme,
 		"active_theme":            activeTheme,
 		"themes":                  themes,
 	})
@@ -1820,10 +1846,10 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getAutomations() []Automation {
 	var automations []Automation
-	var hc *hooks.HookConfig
-	if s.Config != nil {
-		hc = s.Config.Hooks
+	if !s.EnableHooks {
+		return automations
 	}
+	hc := s.getHookConfig()
 
 	type hookInfo struct {
 		event       hooks.HookEvent
@@ -1864,6 +1890,10 @@ func (s *Server) handleAutomations(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case http.MethodPost:
+		if !s.EnableHooks {
+			http.Error(w, "Hooks are not available in this mode", http.StatusForbidden)
+			return
+		}
 		// Create a new automation
 		var req struct {
 			TemplateID string `json:"template_id"`
@@ -1941,6 +1971,10 @@ func (s *Server) handleAutomationsQuick(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.EnableHooks {
+		http.Error(w, "Hooks are not available in this mode", http.StatusForbidden)
+		return
+	}
 
 	// Use the vercel template (default for quick create)
 	template, _ := hooks.GetTemplate("vercel")
@@ -1962,9 +1996,9 @@ func (s *Server) handleAutomationsQuick(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) createHookScript(script string, hookType string) (string, error) {
-	// Create hooks directory
+	// Create hooks directory (.polis/webapp/hooks — restricted)
 	hooksDir := filepath.Join(s.DataDir, ".polis", "webapp", "hooks")
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+	if err := os.MkdirAll(hooksDir, 0700); err != nil {
 		return "", fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
@@ -2009,6 +2043,10 @@ func (s *Server) handleAutomation(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodDelete:
+		if !s.EnableHooks {
+			http.Error(w, "Hooks are not available in this mode", http.StatusForbidden)
+			return
+		}
 		// Remove the automation
 		if s.Config == nil || s.Config.Hooks == nil {
 			http.Error(w, "No automations configured", http.StatusNotFound)
@@ -2088,6 +2126,10 @@ func (s *Server) handleHooksGenerate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.EnableHooks {
+		http.Error(w, "Hooks are not available in this mode", http.StatusForbidden)
+		return
+	}
 
 	var req struct {
 		HookType string `json:"hook_type"`
@@ -2108,9 +2150,9 @@ func (s *Server) handleHooksGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create hooks directory
+	// Create hooks directory (.polis/webapp/hooks — restricted)
 	hooksDir := filepath.Join(s.DataDir, ".polis", "webapp", "hooks")
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+	if err := os.MkdirAll(hooksDir, 0700); err != nil {
 		s.LogError("failed to create hooks directory: %v", err)
 		http.Error(w, "Failed to create hooks directory", http.StatusInternalServerError)
 		return
@@ -2356,6 +2398,44 @@ func (s *Server) handleHideRead(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleWebappTheme handles POST /api/settings/webapp-theme to switch between light and dark themes.
+func (s *Server) handleWebappTheme(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Theme string `json:"theme"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if req.Theme != "light" && req.Theme != "dark" {
+		http.Error(w, "Invalid theme: must be 'light' or 'dark'", http.StatusBadRequest)
+		return
+	}
+
+	if s.Config == nil {
+		s.Config = &Config{}
+	}
+
+	s.Config.WebappTheme = req.Theme
+	if err := s.SaveConfig(); err != nil {
+		s.LogError("failed to save config: %v", err)
+		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      true,
+		"webapp_theme": req.Theme,
+	})
+}
+
 // handleUpdateSiteTitle handles POST /api/settings/site-title to update the site title.
 func (s *Server) handleUpdateSiteTitle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -2394,6 +2474,127 @@ func (s *Server) handleUpdateSiteTitle(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":    true,
 		"site_title": wk.SiteTitle,
+	})
+}
+
+// Valid hex color pattern for avatar config
+var hexColorRegex = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+
+// Valid avatar pattern names
+var validPatterns = map[string]bool{
+	"none": true, "rings": true, "cross": true, "grid": true,
+	"dots": true, "stripes": true, "diamond": true, "halves": true,
+}
+
+func (s *Server) handleUpdateAvatar(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Avatar *site.AvatarConfig `json:"avatar"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	wk, err := site.LoadWellKnown(s.DataDir)
+	if err != nil {
+		s.LogError("failed to load .well-known/polis: %v", err)
+		http.Error(w, "Failed to load site config", http.StatusInternalServerError)
+		return
+	}
+
+	if req.Avatar != nil {
+		// Validate hex colors
+		for _, c := range []string{req.Avatar.BG, req.Avatar.FG} {
+			if !hexColorRegex.MatchString(c) {
+				http.Error(w, "Invalid color: must be #RRGGBB hex", http.StatusBadRequest)
+				return
+			}
+		}
+		for _, c := range []string{req.Avatar.Border, req.Avatar.PatternColor} {
+			if c != "" && !hexColorRegex.MatchString(c) {
+				http.Error(w, "Invalid color: must be #RRGGBB hex", http.StatusBadRequest)
+				return
+			}
+		}
+		// Validate border width
+		if req.Avatar.BorderW < 0 || req.Avatar.BorderW > 3 {
+			http.Error(w, "Invalid border_w: must be 0-3", http.StatusBadRequest)
+			return
+		}
+		// Validate pattern
+		if req.Avatar.Pattern != "" && !validPatterns[req.Avatar.Pattern] {
+			http.Error(w, "Invalid pattern", http.StatusBadRequest)
+			return
+		}
+	}
+
+	wk.Avatar = req.Avatar
+
+	if err := site.SaveWellKnown(s.DataDir, wk); err != nil {
+		s.LogError("failed to save .well-known/polis: %v", err)
+		http.Error(w, "Failed to save site config", http.StatusInternalServerError)
+		return
+	}
+
+	s.LogEvent("pub.polis.site.avatar_update", map[string]interface{}{
+		"has_avatar": req.Avatar != nil,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"avatar":  wk.Avatar,
+	})
+}
+
+func (s *Server) handleUpdateAuthorName(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		AuthorName string `json:"author_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	name := strings.TrimSpace(req.AuthorName)
+	if len(name) > 50 {
+		http.Error(w, "Display name must be 50 characters or less", http.StatusBadRequest)
+		return
+	}
+
+	wk, err := site.LoadWellKnown(s.DataDir)
+	if err != nil {
+		s.LogError("failed to load .well-known/polis: %v", err)
+		http.Error(w, "Failed to load site config", http.StatusInternalServerError)
+		return
+	}
+
+	wk.AuthorName = name
+
+	if err := site.SaveWellKnown(s.DataDir, wk); err != nil {
+		s.LogError("failed to save .well-known/polis: %v", err)
+		http.Error(w, "Failed to save site config", http.StatusInternalServerError)
+		return
+	}
+
+	s.LogEvent("pub.polis.site.author_name_update", map[string]interface{}{
+		"author_name": name,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":     true,
+		"author_name": name,
 	})
 }
 
@@ -2438,6 +2639,9 @@ func (s *Server) handleContent(w http.ResponseWriter, r *http.Request) {
 
 	// Validate path to prevent directory traversal
 	if err := validateContentPath(contentPath); err != nil {
+		s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
+			"path": contentPath, "request_id": RequestIDFromContext(r.Context()),
+		})
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -2608,15 +2812,21 @@ func (s *Server) handleSiteRegistrationStatus(w http.ResponseWriter, r *http.Req
 	}
 
 	// Query discovery service for registration status
-	client := discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+	client := s.NewDSClient(r)
 	result, err := client.CheckSiteRegistration(domain)
 	if err != nil {
 		s.LogWarn("Failed to check registration status: %v", err)
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "ds_signature") {
+			errMsg = "DS response signature verification failed — DS may need redeployment"
+		} else if strings.Contains(errMsg, "connection refused") || strings.Contains(errMsg, "no such host") {
+			errMsg = "Discovery service unreachable"
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"configured": true,
 			"domain":     domain,
-			"error":      "Unable to check registration status",
+			"error":      errMsg,
 		})
 		return
 	}
@@ -2670,7 +2880,7 @@ func (s *Server) handleSiteRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Register with discovery service (email omitted — private by default)
-	client := discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+	client := s.NewDSClient(r)
 	result, err := client.RegisterSite(domain, s.PrivateKey, "", authorName)
 	if err != nil {
 		s.LogError("Failed to register site: %v", err)
@@ -2730,7 +2940,7 @@ func (s *Server) handleSiteUnregister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Unregister from discovery service
-	client := discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+	client := s.NewDSClient(r)
 	result, err := client.UnregisterSite(domain, s.PrivateKey)
 	if err != nil {
 		s.LogError("Failed to unregister site: %v", err)
@@ -3198,10 +3408,13 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 		}
 
 		followDomain := ownDomain
-		discoveryClient := discovery.NewAuthenticatedClient(s.DiscoveryURL, s.DiscoveryKey, followDomain, s.PrivateKey)
+		discoveryClient := s.NewAuthDSClient(r, followDomain)
 		remoteClient := remote.NewClient()
 
-		result, err := following.FollowWithBlessing(followingPath, req.URL, discoveryClient, remoteClient, s.PrivateKey)
+		privPath, pubPath := policy.DefaultPaths(s.DataDir)
+		policies, _ := policy.LoadPolicies(privPath, pubPath)
+
+		result, err := following.FollowWithBlessing(followingPath, req.URL, discoveryClient, remoteClient, s.PrivateKey, policies)
 		if err != nil {
 			s.LogError("follow failed: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -3243,10 +3456,13 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 		}
 
 		unfollowDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
-		discoveryClient := discovery.NewAuthenticatedClient(s.DiscoveryURL, s.DiscoveryKey, unfollowDomain, s.PrivateKey)
+		discoveryClient := s.NewAuthDSClient(r, unfollowDomain)
 		remoteClient := remote.NewClient()
 
-		result, err := following.UnfollowWithDenial(followingPath, req.URL, discoveryClient, remoteClient, s.PrivateKey)
+		privPath2, pubPath2 := policy.DefaultPaths(s.DataDir)
+		unfollowPolicies, _ := policy.LoadPolicies(privPath2, pubPath2)
+
+		result, err := following.UnfollowWithDenial(followingPath, req.URL, discoveryClient, remoteClient, s.PrivateKey, unfollowPolicies)
 		if err != nil {
 			s.LogError("unfollow failed: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -3478,18 +3694,19 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 
 	// Group items by post URL
 	type feedGroup struct {
-		PostURL         string   `json:"post_url"`
-		PostTitle       string   `json:"post_title"`
-		PostDomain      string   `json:"post_domain"`
-		PostPublished   string   `json:"post_published"`
-		HasPost         bool     `json:"has_post"`
-		TotalComments   int      `json:"total_comments"`
-		NetworkComments int      `json:"network_comments"`
-		ExternalComments int     `json:"external_comments"`
-		UnreadComments  int      `json:"unread_comments"`
-		LastActivity    string   `json:"last_activity"`
-		PostUnread      bool     `json:"post_unread"`
-		ItemIDs         []string `json:"item_ids"`
+		PostURL          string   `json:"post_url"`
+		PostTitle        string   `json:"post_title"`
+		PostDomain       string   `json:"post_domain"`
+		PostPublished    string   `json:"post_published"`
+		PostExcerpt      string   `json:"post_excerpt,omitempty"`
+		HasPost          bool     `json:"has_post"`
+		TotalComments    int      `json:"total_comments"`
+		NetworkComments  int      `json:"network_comments"`
+		ExternalComments int      `json:"external_comments"`
+		UnreadComments   int      `json:"unread_comments"`
+		LastActivity     string   `json:"last_activity"`
+		PostUnread       bool     `json:"post_unread"`
+		ItemIDs          []string `json:"item_ids"`
 	}
 
 	groups := make(map[string]*feedGroup)
@@ -3527,8 +3744,11 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 			if item.Published != "" {
 				g.PostPublished = item.Published
 			}
+			if item.Excerpt != "" {
+				g.PostExcerpt = item.Excerpt
+			}
 			g.ItemIDs = append(g.ItemIDs, item.ID)
-			if item.Published > g.LastActivity {
+			if feed.PublishedBefore(g.LastActivity, item.Published) {
 				g.LastActivity = item.Published
 			}
 		} else if item.Type == "comment" {
@@ -3558,7 +3778,7 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 				g.UnreadComments++
 			}
 			g.ItemIDs = append(g.ItemIDs, item.ID)
-			if item.Published > g.LastActivity {
+			if feed.PublishedBefore(g.LastActivity, item.Published) {
 				g.LastActivity = item.Published
 			}
 		}
@@ -3570,9 +3790,9 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 		result = append(result, groups[key])
 	}
 
-	// Sort by last_activity descending
+	// Sort by last_activity descending (parse timestamps to handle JS Date format)
 	sort.Slice(result, func(i, j int) bool {
-		return result[i].LastActivity > result[j].LastActivity
+		return feed.PublishedBefore(result[j].LastActivity, result[i].LastActivity)
 	})
 
 	stale, _ := cm.IsStale()
@@ -3584,6 +3804,103 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 		"unread_items": totalUnread,
 		"stale":        stale,
 	})
+
+	// Background: fetch excerpts for post items that don't have one yet
+	var needExcerpts []int
+	for i, item := range items {
+		if item.Type == "post" && item.Excerpt == "" {
+			needExcerpts = append(needExcerpts, i)
+		}
+	}
+	if len(needExcerpts) > 0 {
+		go s.fetchFeedExcerpts(cm, items, needExcerpts)
+	}
+}
+
+// fetchFeedExcerpts fetches remote post content and caches excerpts.
+// Runs in background goroutine; errors are logged, never fatal.
+func (s *Server) fetchFeedExcerpts(cm *feed.CacheManager, items []feed.CachedFeedItem, indices []int) {
+	client := remote.NewClient()
+	updated := false
+
+	for _, idx := range indices {
+		item := &items[idx]
+		content, err := client.FetchContent(item.URL)
+		if err != nil {
+			s.LogDebug("excerpt fetch failed for %s: %v", item.URL, err)
+			continue
+		}
+		// If HTML, try markdown source
+		if looksLikeHTML(content) {
+			altContent, _, altErr := client.TryAlternateExtension(item.URL)
+			if altErr == nil && !looksLikeHTML(altContent) {
+				content = altContent
+			} else {
+				continue // Can't extract excerpt from HTML
+			}
+		}
+		body := stripFrontmatter(content)
+		excerpt := makeExcerpt(body, 140)
+		if excerpt != "" {
+			item.Excerpt = excerpt
+			updated = true
+		}
+	}
+
+	if updated {
+		if err := cm.SaveItems(items); err != nil {
+			s.LogError("failed to save feed excerpts: %v", err)
+		} else {
+			s.LogDebug("cached %d feed excerpts", len(indices))
+		}
+	}
+}
+
+// handleRemoteAvatar fetches avatar and author_name from a remote site's .well-known/polis.
+// GET /api/remote/avatar?domain=discover.polis.pub
+func (s *Server) handleRemoteAvatar(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	domain := r.URL.Query().Get("domain")
+	if domain == "" {
+		http.Error(w, "Missing 'domain' parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Validate domain: no slashes, no colons, basic sanity
+	if strings.ContainsAny(domain, "/\\:@?#") || len(domain) > 253 {
+		http.Error(w, "Invalid domain", http.StatusBadRequest)
+		return
+	}
+
+	client := remote.NewClient()
+	client.HTTPClient.Timeout = 5 * time.Second
+
+	wk, err := client.FetchWellKnown("https://" + domain)
+	if err != nil {
+		// Return empty result rather than error — no avatar is normal
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"domain": domain,
+		})
+		return
+	}
+
+	resp := map[string]interface{}{
+		"domain": domain,
+	}
+	if wk.Avatar != nil {
+		resp["avatar"] = wk.Avatar
+	}
+	if wk.AuthorName != "" {
+		resp["author_name"] = wk.AuthorName
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 // handleRemotePost fetches a remote post and returns it as rendered HTML.
@@ -3651,6 +3968,65 @@ func (s *Server) handleRemotePost(w http.ResponseWriter, r *http.Request) {
 		"content": htmlContent,
 		"raw":     body,
 	})
+}
+
+// makeExcerpt strips markdown syntax and truncates to maxLen at a word boundary.
+func makeExcerpt(markdown string, maxLen int) string {
+	// Remove headings
+	lines := strings.Split(markdown, "\n")
+	var clean []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "---") {
+			continue
+		}
+		// Strip images, links, bold, italic, code
+		s := trimmed
+		// Remove images ![alt](url)
+		for {
+			idx := strings.Index(s, "![")
+			if idx < 0 {
+				break
+			}
+			end := strings.Index(s[idx:], ")")
+			if end < 0 {
+				break
+			}
+			s = s[:idx] + s[idx+end+1:]
+		}
+		// Remove links [text](url) -> text
+		for {
+			idx := strings.Index(s, "](")
+			if idx < 0 {
+				break
+			}
+			start := strings.LastIndex(s[:idx], "[")
+			end := strings.Index(s[idx:], ")")
+			if start < 0 || end < 0 {
+				break
+			}
+			s = s[:start] + s[start+1:idx] + s[idx+end+1:]
+		}
+		s = strings.ReplaceAll(s, "**", "")
+		s = strings.ReplaceAll(s, "__", "")
+		s = strings.ReplaceAll(s, "*", "")
+		s = strings.ReplaceAll(s, "_", "")
+		s = strings.ReplaceAll(s, "`", "")
+		s = strings.TrimSpace(s)
+		if s != "" {
+			clean = append(clean, s)
+		}
+	}
+	text := strings.Join(clean, " ")
+	if len(text) <= maxLen {
+		return text
+	}
+	// Truncate at word boundary
+	cut := strings.LastIndex(text[:maxLen], " ")
+	if cut < maxLen/2 {
+		cut = maxLen
+	}
+	return text[:cut] + "…"
 }
 
 // stripFrontmatter removes YAML frontmatter (---...---) from content.
@@ -3728,9 +4104,6 @@ func (s *Server) handleActivityStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	discoveryURL := s.DiscoveryURL
-	apiKey := s.DiscoveryKey
-
 	// Load following list to get followed domains
 	followingPath := following.DefaultPath(s.DataDir)
 	f, err := following.Load(followingPath)
@@ -3779,7 +4152,7 @@ func (s *Server) handleActivityStream(w http.ResponseWriter, r *http.Request) {
 		limit = 1000
 	}
 
-	client := discovery.NewClient(discoveryURL, apiKey)
+	client := s.NewDSClient(r)
 	actorFilter := discovery.JoinDomains(domains)
 	result, err := client.StreamQuery(since, limit, "", actorFilter, "")
 	if err != nil {
@@ -4253,8 +4626,7 @@ func (s *Server) handleWidgetPublish(w http.ResponseWriter, r *http.Request) {
 		Metadata map[string]interface{} `json:"metadata"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if isBodyTooLargeError(err) {
-			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		if s.handleBodyTooLarge(w, r, err) {
 			return
 		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
@@ -4292,8 +4664,7 @@ func (s *Server) handleWidgetComment(w http.ResponseWriter, r *http.Request) {
 		Text   string `json:"text"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if isBodyTooLargeError(err) {
-			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		if s.handleBodyTooLarge(w, r, err) {
 			return
 		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
@@ -4404,12 +4775,15 @@ func (s *Server) handleWidgetFollow(w http.ResponseWriter, r *http.Request) {
 
 	followingPath := following.DefaultPath(s.DataDir)
 	followDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
-	discoveryClient := discovery.NewAuthenticatedClient(s.DiscoveryURL, s.DiscoveryKey, followDomain, s.PrivateKey)
+	discoveryClient := s.NewAuthDSClient(r, followDomain)
 	remoteClient := remote.NewClient()
 
 	switch r.Method {
 	case http.MethodPost:
-		result, err := following.FollowWithBlessing(followingPath, authorURL, discoveryClient, remoteClient, s.PrivateKey)
+		privPath, pubPath := policy.DefaultPaths(s.DataDir)
+		widgetPolicies, _ := policy.LoadPolicies(privPath, pubPath)
+
+		result, err := following.FollowWithBlessing(followingPath, authorURL, discoveryClient, remoteClient, s.PrivateKey, widgetPolicies)
 		if err != nil {
 			s.LogError("widget follow failed: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -4427,7 +4801,10 @@ func (s *Server) handleWidgetFollow(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case http.MethodDelete:
-		result, err := following.UnfollowWithDenial(followingPath, authorURL, discoveryClient, remoteClient, s.PrivateKey)
+		privPath, pubPath := policy.DefaultPaths(s.DataDir)
+		widgetUnfollowPolicies, _ := policy.LoadPolicies(privPath, pubPath)
+
+		result, err := following.UnfollowWithDenial(followingPath, authorURL, discoveryClient, remoteClient, s.PrivateKey, widgetUnfollowPolicies)
 		if err != nil {
 			s.LogError("widget unfollow failed: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)

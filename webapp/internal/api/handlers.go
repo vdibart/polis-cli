@@ -11,7 +11,15 @@ import (
 
 // handlers holds the engine and provides HTTP handler methods.
 type handlers struct {
-	engine *ops.Engine
+	engine         *ops.Engine
+	securityLogger SecurityLogger
+}
+
+// logSecurity emits a security event if a logger is configured.
+func (h *handlers) logSecurity(event string, fields map[string]interface{}) {
+	if h.securityLogger != nil {
+		h.securityLogger(event, fields)
+	}
 }
 
 // handleContentList handles GET /v1/content/{type}
@@ -193,6 +201,38 @@ func (h *handlers) handleBundleGet(w http.ResponseWriter, r *http.Request, name 
 		}
 	}
 	writeError(w, http.StatusNotFound, "not_found", "bundle not found: "+name)
+}
+
+// handleDMDeliver handles POST /v1/content/dm/actions/deliver with signed-request auth.
+// The senderDomain has already been verified by the signed request middleware.
+func (h *handlers) handleDMDeliver(w http.ResponseWriter, r *http.Request, senderDomain string) {
+	payload, err := parsePayload(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+
+	// Pass the verified sender domain and raw envelope to the engine
+	payload["sender_domain"] = senderDomain
+
+	// The envelope is the full request body, re-marshal it
+	envelopeJSON, err := json.Marshal(payload)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "invalid envelope")
+		return
+	}
+	payload["envelope"] = string(envelopeJSON)
+
+	result, err := h.engine.Dispatch(context.Background(), ops.ActionRequest{
+		Action:      "deliver",
+		ContentType: "pub.polis.dm",
+		Payload:     payload,
+	})
+	if err != nil {
+		handleDispatchError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result.Data)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

@@ -28,8 +28,8 @@ func TestLoadBundle(t *testing.T) {
 	if loaded.Name != "pub.polis.core" {
 		t.Errorf("got name %q, want pub.polis.core", loaded.Name)
 	}
-	if len(loaded.Types) != 4 {
-		t.Errorf("got %d types, want 4", len(loaded.Types))
+	if len(loaded.Types) != 5 {
+		t.Errorf("got %d types, want 5", len(loaded.Types))
 	}
 }
 

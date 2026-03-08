@@ -1,4 +1,5 @@
-// Package signing provides Ed25519 key generation and SSH signature format signing.
+// Package signing provides Ed25519 key generation, SSH signature format signing,
+// and Ed25519↔X25519 key conversion for encryption.
 package signing
 
 import (
@@ -9,6 +10,8 @@ import (
 	"encoding/binary"
 	"encoding/pem"
 	"fmt"
+
+	"filippo.io/edwards25519"
 )
 
 const (
@@ -47,6 +50,11 @@ func GenerateKeypair() ([]byte, []byte, error) {
 func ValidatePrivateKey(pemData []byte) error {
 	_, err := parsePrivateKey(pemData)
 	return err
+}
+
+// ParsePrivateKey parses an OpenSSH PEM private key and returns the Ed25519 key.
+func ParsePrivateKey(pemData []byte) (ed25519.PrivateKey, error) {
+	return parsePrivateKey(pemData)
 }
 
 // SignContent signs content with the private key and returns an SSH signature.
@@ -400,6 +408,66 @@ func readBytes(b []byte) ([]byte, []byte, error) {
 		return nil, b, fmt.Errorf("buffer too short for data")
 	}
 	return b[4 : 4+length], b[4+length:], nil
+}
+
+// Ed25519PrivateKeyToX25519 converts an Ed25519 private key (OpenSSH PEM) to
+// an X25519 private key (32 bytes). This follows the standard derivation:
+// SHA-512 the 32-byte seed, clamp the lower 32 bytes.
+func Ed25519PrivateKeyToX25519(privateKeyPEM []byte) ([32]byte, error) {
+	privKey, err := parsePrivateKey(privateKeyPEM)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("parse private key: %w", err)
+	}
+	return Ed25519PrivateKeyBytesToX25519(privKey)
+}
+
+// Ed25519PrivateKeyBytesToX25519 converts raw Ed25519 private key bytes to X25519.
+func Ed25519PrivateKeyBytesToX25519(privKey ed25519.PrivateKey) ([32]byte, error) {
+	if len(privKey) != ed25519.PrivateKeySize {
+		return [32]byte{}, fmt.Errorf("invalid private key size: %d", len(privKey))
+	}
+
+	// Ed25519 private key is seed (32 bytes) || public key (32 bytes)
+	seed := privKey.Seed()
+	h := sha512.Sum512(seed)
+
+	// Clamp (standard X25519 scalar clamping)
+	h[0] &= 248
+	h[31] &= 127
+	h[31] |= 64
+
+	var x25519Key [32]byte
+	copy(x25519Key[:], h[:32])
+	return x25519Key, nil
+}
+
+// Ed25519PublicKeyToX25519 converts an Ed25519 public key (OpenSSH format string)
+// to an X25519 public key (32 bytes). Uses Edwards→Montgomery point conversion.
+func Ed25519PublicKeyToX25519(publicKeySSH []byte) ([32]byte, error) {
+	pubKey, err := parsePublicKey(publicKeySSH)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("parse public key: %w", err)
+	}
+	return Ed25519PublicKeyBytesToX25519(pubKey)
+}
+
+// Ed25519PublicKeyBytesToX25519 converts raw Ed25519 public key bytes to X25519.
+func Ed25519PublicKeyBytesToX25519(pubKey ed25519.PublicKey) ([32]byte, error) {
+	if len(pubKey) != ed25519.PublicKeySize {
+		return [32]byte{}, fmt.Errorf("invalid public key size: %d", len(pubKey))
+	}
+
+	// Use filippo.io/edwards25519 for Edwards→Montgomery conversion
+	p, err := new(edwards25519.Point).SetBytes(pubKey)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("invalid Edwards point: %w", err)
+	}
+
+	// Convert Edwards point to Montgomery u-coordinate
+	montgomeryBytes := p.BytesMontgomery()
+	var x25519Key [32]byte
+	copy(x25519Key[:], montgomeryBytes)
+	return x25519Key, nil
 }
 
 func splitSSHKey(s string) []string {

@@ -382,6 +382,10 @@ func DefaultCoreBundle() *Bundle {
 				Mount:    "/feed",
 				Renderer: "html",
 			},
+			"pub.polis.dm": {
+				Dir:     "dm",
+				Storage: &StorageConfig{Pattern: "flat"},
+			},
 		},
 		Artifacts: []string{"index.jsonl"},
 	}

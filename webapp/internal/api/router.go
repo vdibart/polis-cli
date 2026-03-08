@@ -26,9 +26,16 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 )
 
+// SecurityLogger is called when security-relevant events occur in the API layer.
+type SecurityLogger func(event string, fields map[string]interface{})
+
 // SetupRoutes registers the /v1/ API routes on the given ServeMux.
-func SetupRoutes(mux *http.ServeMux, engine *ops.Engine, siteDir string) {
+// The optional securityLogger receives security events (auth failures, etc.).
+func SetupRoutes(mux *http.ServeMux, engine *ops.Engine, siteDir string, securityLogger ...SecurityLogger) {
 	h := &handlers{engine: engine}
+	if len(securityLogger) > 0 {
+		h.securityLogger = securityLogger[0]
+	}
 
 	// Bundle introspection (public, read-only)
 	mux.HandleFunc("/v1/bundles", cors(h.handleBundlesRoute))
@@ -90,18 +97,45 @@ func (h *handlers) routeContent(w http.ResponseWriter, r *http.Request, siteDir 
 	needsAuth := r.Method != http.MethodGet
 
 	if needsAuth {
+		// Check if this is a signed-request auth (for DM deliver)
+		if contentType == "dm" && len(segments) >= 3 && segments[1] == "actions" && segments[2] == "deliver" {
+			// Try signed-request auth first
+			if r.Header.Get("X-Polis-Domain") != "" {
+				senderDomain, err := verifySignedRequest(r)
+				if err != nil {
+					writeError(w, http.StatusForbidden, "forbidden", "Signed request verification failed: "+err.Error())
+					return
+				}
+				// Inject verified sender domain into the action dispatch
+				h.handleDMDeliver(w, r, senderDomain)
+				return
+			}
+		}
+
 		auth := r.Header.Get("Authorization")
 		if auth == "" {
+			h.logSecurity("pub.polis.security.auth_failed", map[string]interface{}{
+				"path": r.URL.Path, "method": r.Method, "reason": "missing_header",
+				"request_id": w.Header().Get("X-Request-Id"),
+			})
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authorization header required")
 			return
 		}
 		if !strings.HasPrefix(auth, "Bearer ") {
+			h.logSecurity("pub.polis.security.auth_failed", map[string]interface{}{
+				"path": r.URL.Path, "method": r.Method, "reason": "invalid_scheme",
+				"request_id": w.Header().Get("X-Request-Id"),
+			})
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Bearer token required")
 			return
 		}
 		token := strings.TrimPrefix(auth, "Bearer ")
 		_, valid := ops.ValidateAPIKey(siteDir, token)
 		if !valid {
+			h.logSecurity("pub.polis.security.auth_failed", map[string]interface{}{
+				"path": r.URL.Path, "method": r.Method, "reason": "invalid_key",
+				"request_id": w.Header().Get("X-Request-Id"),
+			})
 			writeError(w, http.StatusForbidden, "forbidden", "Invalid API key")
 			return
 		}

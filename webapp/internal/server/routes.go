@@ -55,7 +55,10 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/settings/view-mode", limitBody(s.handleViewMode, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/show-frontmatter", limitBody(s.handleShowFrontmatter, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/hide-read", limitBody(s.handleHideRead, MaxDefaultBodySize))
+	mux.HandleFunc("/api/settings/webapp-theme", limitBody(s.handleWebappTheme, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/site-title", limitBody(s.handleUpdateSiteTitle, MaxDefaultBodySize))
+	mux.HandleFunc("/api/settings/avatar", limitBody(s.handleUpdateAvatar, MaxDefaultBodySize))
+	mux.HandleFunc("/api/settings/author-name", limitBody(s.handleUpdateAuthorName, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/theme", limitBody(s.handleThemeSwitch, MaxDefaultBodySize))
 	mux.HandleFunc("/api/rotate-key", limitBody(s.handleRotateKey, MaxDefaultBodySize))
 	mux.HandleFunc("/api/download-site", s.handleDownloadSite)
@@ -79,6 +82,7 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/feed/read", limitBody(s.handleFeedRead, MaxDefaultBodySize))
 	mux.HandleFunc("/api/feed/counts", s.handleFeedCounts)
 	mux.HandleFunc("/api/feed/grouped", s.handleFeedGrouped)
+	mux.HandleFunc("/api/remote/avatar", s.handleRemoteAvatar)
 	mux.HandleFunc("/api/remote/post", s.handleRemotePost)
 
 	// Notification API routes

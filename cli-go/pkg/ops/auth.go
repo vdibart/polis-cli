@@ -159,7 +159,7 @@ func loadAPIKeys(path string) (*APIKeyFile, error) {
 }
 
 func saveAPIKeys(path string, keyFile *APIKeyFile) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(keyFile, "", "  ")

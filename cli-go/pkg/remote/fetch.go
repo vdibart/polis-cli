@@ -27,17 +27,29 @@ func NewClient() *Client {
 	}
 }
 
+// RemoteAvatarConfig represents custom avatar styling from a remote .well-known/polis.
+type RemoteAvatarConfig struct {
+	BG           string `json:"bg"`
+	FG           string `json:"fg"`
+	Border       string `json:"border,omitempty"`
+	BorderW      int    `json:"border_w,omitempty"`
+	Pattern      string `json:"pattern,omitempty"`
+	PatternColor string `json:"pattern_color,omitempty"`
+}
+
 // WellKnown represents the .well-known/polis file structure.
 type WellKnown struct {
-	Version    string `json:"version"`
-	Author     string `json:"author"`
-	Domain     string `json:"domain,omitempty"`
-	Email      string `json:"email,omitempty"`
-	PublicKey  string `json:"public_key"`
-	Created    string `json:"created"`
-	SiteTitle  string `json:"site_title,omitempty"`
-	BaseURL    string `json:"base_url,omitempty"`
-	Config     Config `json:"config,omitempty"`
+	Version    string              `json:"version"`
+	Author     string              `json:"author"`
+	Domain     string              `json:"domain,omitempty"`
+	Email      string              `json:"email,omitempty"`
+	PublicKey  string              `json:"public_key"`
+	Created    string              `json:"created"`
+	SiteTitle  string              `json:"site_title,omitempty"`
+	AuthorName string              `json:"author_name,omitempty"`
+	Avatar     *RemoteAvatarConfig `json:"avatar,omitempty"`
+	BaseURL    string              `json:"base_url,omitempty"`
+	Config     Config              `json:"config,omitempty"`
 }
 
 // Config holds the configuration section from .well-known/polis.

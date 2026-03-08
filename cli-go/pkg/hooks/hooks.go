@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 )
 
 // HookEvent represents the type of event that triggers a hook.
@@ -43,9 +44,10 @@ type HookPayload struct {
 
 // HookResult contains the result of running a hook.
 type HookResult struct {
-	Executed bool   `json:"executed"`
-	Output   string `json:"output,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Executed   bool   `json:"executed"`
+	Output     string `json:"output,omitempty"`
+	Error      string `json:"error,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
 }
 
 // RunHook executes a hook script if configured or discovered by convention.
@@ -114,18 +116,22 @@ func RunHook(siteDir string, config *HookConfig, payload *HookPayload) (*HookRes
 	}
 	cmd.Stdin = bytes.NewReader(jsonPayload)
 
+	hookStart := time.Now()
 	output, err := cmd.CombinedOutput()
+	durationMs := time.Since(hookStart).Milliseconds()
 	if err != nil {
 		return &HookResult{
-			Executed: true,
-			Output:   string(output),
-			Error:    err.Error(),
+			Executed:   true,
+			Output:     string(output),
+			Error:      err.Error(),
+			DurationMs: durationMs,
 		}, fmt.Errorf("hook failed: %w\nOutput: %s", err, output)
 	}
 
 	return &HookResult{
-		Executed: true,
-		Output:   string(output),
+		Executed:   true,
+		Output:     string(output),
+		DurationMs: durationMs,
 	}, nil
 }
 

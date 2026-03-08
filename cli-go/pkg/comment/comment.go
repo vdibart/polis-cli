@@ -15,6 +15,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
@@ -89,6 +90,7 @@ type CommentMeta struct {
 	Updated          string   `json:"updated,omitempty"`
 	Status           string   `json:"status"`
 	VersionHistory   []string `json:"version_history,omitempty"`
+	Excerpt          string   `json:"excerpt,omitempty"`
 }
 
 // SignedComment represents a fully signed comment ready for blessing request.
@@ -133,7 +135,7 @@ func SaveDraft(dataDir string, draft *CommentDraft) error {
 	draft.RootPost = polisurl.NormalizeToMD(draft.RootPost)
 
 	draftsDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", StatusDrafts)
-	if err := os.MkdirAll(draftsDir, 0755); err != nil {
+	if err := site.MkdirAllPrivate(dataDir, draftsDir); err != nil {
 		return fmt.Errorf("failed to create drafts directory: %w", err)
 	}
 
@@ -344,7 +346,7 @@ signature: %s
 
 	// Create pending directory (private)
 	pendingDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", StatusPending)
-	if err := os.MkdirAll(pendingDir, 0755); err != nil {
+	if err := site.MkdirAllPrivate(dataDir, pendingDir); err != nil {
 		return nil, fmt.Errorf("failed to create pending directory: %w", err)
 	}
 
@@ -431,7 +433,7 @@ func MoveComment(dataDir, commentID, fromStatus, toStatus string) error {
 		relativePath = filepath.Join("content", "pub.polis.core", "comment", dateDir, commentID+".md")
 	} else {
 		toDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", toStatus)
-		if err := os.MkdirAll(toDir, 0755); err != nil {
+		if err := site.MkdirAllPrivate(dataDir, toDir); err != nil {
 			return fmt.Errorf("failed to create directory: %w", err)
 		}
 		toPath = filepath.Join(toDir, commentID+".md")
@@ -660,6 +662,17 @@ func ListComments(dataDir, status string) ([]*CommentMeta, error) {
 			version = fm["comment_version"]
 		}
 
+		// Extract excerpt from body text
+		body := strings.TrimSpace(StripFrontmatter(content))
+		excerpt := body
+		if len(excerpt) > 140 {
+			cut := strings.LastIndex(excerpt[:140], " ")
+			if cut < 70 {
+				cut = 140
+			}
+			excerpt = excerpt[:cut] + "…"
+		}
+
 		meta := &CommentMeta{
 			ID:             strings.TrimSuffix(entry.Name(), ".md"),
 			Title:          fm["title"],
@@ -671,6 +684,7 @@ func ListComments(dataDir, status string) ([]*CommentMeta, error) {
 			Timestamp:      timestamp,
 			Updated:        fm["updated"],
 			Status:         status,
+			Excerpt:        excerpt,
 		}
 		comments = append(comments, meta)
 	}
@@ -747,6 +761,17 @@ func listBlessedComments(dataDir string) ([]*CommentMeta, error) {
 				version = fm["comment_version"]
 			}
 
+			// Extract excerpt from body text
+			body := strings.TrimSpace(StripFrontmatter(content))
+			excerpt := body
+			if len(excerpt) > 140 {
+				cut := strings.LastIndex(excerpt[:140], " ")
+				if cut < 70 {
+					cut = 140
+				}
+				excerpt = excerpt[:cut] + "…"
+			}
+
 			meta := &CommentMeta{
 				ID:             strings.TrimSuffix(file.Name(), ".md"),
 				Title:          fm["title"],
@@ -758,6 +783,7 @@ func listBlessedComments(dataDir string) ([]*CommentMeta, error) {
 				Timestamp:      timestamp,
 				Updated:        fm["updated"],
 				Status:         StatusBlessed,
+				Excerpt:        excerpt,
 			}
 			comments = append(comments, meta)
 		}

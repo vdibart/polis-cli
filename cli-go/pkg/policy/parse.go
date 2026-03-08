@@ -9,7 +9,7 @@ import (
 //
 // Grammar:
 //
-//	<allow|deny> <type|all|none> from <all|none|following|followers> [at <domain>] [on <target>]
+//	<allow|deny|emit|omit> <type|all|none> from <all|none|following|followers|self|thread-blessed> [at <domain>] [on <target>]
 func Parse(rule string) (*ParsedRule, error) {
 	tokens := strings.Fields(rule)
 	if len(tokens) < 4 {
@@ -18,8 +18,11 @@ func Parse(rule string) (*ParsedRule, error) {
 
 	// Token 0: action
 	action := tokens[0]
-	if action != "allow" && action != "deny" {
-		return nil, fmt.Errorf("invalid action %q: must be allow or deny", action)
+	switch action {
+	case "allow", "deny", "emit", "omit":
+		// valid
+	default:
+		return nil, fmt.Errorf("invalid action %q: must be allow, deny, emit, or omit", action)
 	}
 
 	// Token 1: type
@@ -36,10 +39,10 @@ func Parse(rule string) (*ParsedRule, error) {
 	// Token 3: source
 	source := tokens[3]
 	switch source {
-	case "all", "none", "following", "followers":
+	case "all", "none", "following", "followers", "self", "thread-blessed":
 		// valid
 	default:
-		return nil, fmt.Errorf("invalid source %q: must be all, none, following, or followers", source)
+		return nil, fmt.Errorf("invalid source %q: must be all, none, following, followers, self, or thread-blessed", source)
 	}
 
 	parsed := &ParsedRule{

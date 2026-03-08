@@ -43,6 +43,8 @@ func (h *FeedHandler) eventToItem(evt discovery.StreamEvent) (FeedItem, bool) {
 		return h.postEventToItem(evt), true
 	case "pub.polis.comment.published", "pub.polis.comment.republished":
 		return h.commentEventToItem(evt), true
+	case "pub.polis.comment.blessing.granted":
+		return h.blessingGrantedToItem(evt), true
 	default:
 		return FeedItem{}, false
 	}
@@ -124,6 +126,42 @@ func (h *FeedHandler) commentEventToItem(evt discovery.StreamEvent) FeedItem {
 		Hash:         version,
 		AuthorURL:    "https://" + evt.Actor,
 		AuthorDomain: evt.Actor,
+		TargetURL:    targetURL,
+		TargetDomain: targetDomain,
+	}
+}
+
+// blessingGrantedToItem extracts a FeedItem from a blessing.granted event.
+// The actor on this event is the post author (who blessed), not the comment author.
+// The comment author is in source_domain.
+func (h *FeedHandler) blessingGrantedToItem(evt discovery.StreamEvent) FeedItem {
+	// Comment URL: "comment_url" (auto-blessed via content register) or "source_url" (manual grant)
+	commentURL, _ := evt.Payload["comment_url"].(string)
+	if commentURL == "" {
+		commentURL, _ = evt.Payload["source_url"].(string)
+	}
+
+	// Target post URL
+	targetURL, _ := evt.Payload["in_reply_to"].(string)
+	if targetURL == "" {
+		targetURL, _ = evt.Payload["root_post"].(string)
+	}
+	if targetURL == "" {
+		targetURL, _ = evt.Payload["target_url"].(string)
+	}
+
+	targetDomain, _ := evt.Payload["target_domain"].(string)
+	sourceDomain, _ := evt.Payload["source_domain"].(string)
+
+	title, _ := evt.Payload["title"].(string)
+
+	return FeedItem{
+		Type:         "comment",
+		URL:          commentURL,
+		Title:        title,
+		Published:    evt.Timestamp,
+		AuthorURL:    "https://" + sourceDomain,
+		AuthorDomain: sourceDomain,
 		TargetURL:    targetURL,
 		TargetDomain: targetDomain,
 	}

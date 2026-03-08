@@ -209,7 +209,7 @@ func GetBlessedCommentsForPost(siteDir string, postPath string) ([]BlessedCommen
 	}
 
 	for _, pc := range bc.Comments {
-		if matchesPostPath(pc.Post, postPath) {
+		if MatchesPostPath(pc.Post, postPath) {
 			return pc.Blessed, nil
 		}
 	}
@@ -217,9 +217,10 @@ func GetBlessedCommentsForPost(siteDir string, postPath string) ([]BlessedCommen
 	return []BlessedComment{}, nil
 }
 
-// matchesPostPath checks if two post paths refer to the same post.
-// Handles exact match, .md/.html extension swaps, and full URL vs relative path.
-func matchesPostPath(stored, query string) bool {
+// MatchesPostPath checks if two post paths refer to the same post.
+// Handles exact match, .md/.html extension swaps, full URL vs relative path,
+// and source content path (singular /post/) vs mount path (plural /posts/).
+func MatchesPostPath(stored, query string) bool {
 	if stored == query {
 		return true
 	}
@@ -231,11 +232,16 @@ func matchesPostPath(stored, query string) bool {
 		return true
 	}
 
-	// Try extracting relative path from full URL
+	// Try extracting relative path from full URL or source content path
 	// e.g., "https://alice.polis.pub/posts/20260101/hello.md" matches "posts/20260101/hello.md"
+	// e.g., "content/pub.polis.core/post/20260101/hello.md" matches "posts/20260101/hello.md"
 	extractPath := func(s string) string {
 		if idx := strings.Index(s, "/posts/"); idx >= 0 {
-			return s[idx+1:]
+			return s[idx+1:] // "posts/20260101/hello.md"
+		}
+		// Also match source content path: .../post/YYYYMMDD/slug.md → posts/YYYYMMDD/slug.md
+		if idx := strings.Index(s, "/post/"); idx >= 0 {
+			return "posts/" + s[idx+len("/post/"):]
 		}
 		return s
 	}

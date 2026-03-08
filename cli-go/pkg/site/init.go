@@ -103,10 +103,15 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 
 	var dirsCreated []string
 	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		// .polis directory and its children use restrictive permissions (private data)
+		perm := os.FileMode(0755)
+		rel, _ := filepath.Rel(siteDir, dir)
+		if rel == ".polis" || strings.HasPrefix(rel, ".polis"+string(filepath.Separator)) {
+			perm = 0700
+		}
+		if err := os.MkdirAll(dir, perm); err != nil {
 			return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
-		rel, _ := filepath.Rel(siteDir, dir)
 		if rel != "." {
 			dirsCreated = append(dirsCreated, rel)
 		}
@@ -180,13 +185,27 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 		filesCreated = append(filesCreated, "site/snippets/about.md")
 	}
 
-	// Create default policy file
+	// Create default public policy file (emit rules for blessing)
 	policyPath := filepath.Join(siteDir, "policies", "rules.jsonl")
 	if _, err := os.Stat(policyPath); os.IsNotExist(err) {
-		if err := os.WriteFile(policyPath, []byte(policy.DefaultPolicyContent()), 0644); err != nil {
+		if err := os.WriteFile(policyPath, []byte(policy.DefaultPublicPolicyContent()), 0644); err != nil {
 			return nil, fmt.Errorf("failed to create default policy file: %w", err)
 		}
 		filesCreated = append(filesCreated, "policies/rules.jsonl")
+	}
+
+	// Create default private policy file (core type allows + DM + notification)
+	privatePolicyPath := filepath.Join(siteDir, ".polis", "policies", "rules.jsonl")
+	if _, err := os.Stat(privatePolicyPath); os.IsNotExist(err) {
+		if err := os.WriteFile(privatePolicyPath, []byte(policy.DefaultPrivatePolicyContent()), 0600); err != nil {
+			return nil, fmt.Errorf("failed to create default private policy file: %w", err)
+		}
+		filesCreated = append(filesCreated, ".polis/policies/rules.jsonl")
+	} else {
+		// Existing private policy file — ensure DM policies are present (backwards compat)
+		if err := EnsureDMPolicies(privatePolicyPath); err != nil {
+			return nil, fmt.Errorf("failed to ensure DM policies: %w", err)
+		}
 	}
 
 	// Create webapp config
@@ -218,6 +237,34 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 	result.Success = true
 	result.PublicKey = strings.TrimSpace(string(pubKey))
 	return result, nil
+}
+
+// EnsureDMPolicies appends default DM acceptance policies to the private rules file
+// if no pub.polis.dm rules exist yet. This is idempotent — safe to call on every init.
+func EnsureDMPolicies(privatePolicyPath string) error {
+	dmRules := `{"active":true,"policy":"allow pub.polis.dm from following"}` + "\n" +
+		`{"active":true,"policy":"deny pub.polis.dm from all"}` + "\n"
+
+	// Check if DM rules already exist
+	if data, err := os.ReadFile(privatePolicyPath); err == nil {
+		if strings.Contains(string(data), "pub.polis.dm") {
+			return nil // DM rules already present
+		}
+	}
+
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(privatePolicyPath), 0700); err != nil {
+		return err
+	}
+
+	// Append DM rules
+	f, err := os.OpenFile(privatePolicyPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(dmRules)
+	return err
 }
 
 // initContentFiles creates the initial content files for pub.polis.core.

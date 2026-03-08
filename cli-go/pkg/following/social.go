@@ -2,6 +2,7 @@ package following
 
 import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 )
@@ -25,10 +26,11 @@ type UnfollowResult struct {
 	WasFollowing   bool   `json:"was_following"`
 }
 
-// FollowWithBlessing adds an author to the following list and blesses any
-// pending or denied comments from that author. This matches the CLI behavior
-// where following someone auto-blesses their comments.
-func FollowWithBlessing(followingPath string, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte) (*FollowResult, error) {
+// FollowWithBlessing adds an author to the following list and re-evaluates
+// pending/denied comments against the site's policies. With default policies
+// containing "emit pub.polis.comment.blessing from following", this auto-blesses
+// comments from the newly followed author — matching the previous hardcoded behavior.
+func FollowWithBlessing(followingPath string, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy) (*FollowResult, error) {
 	result := &FollowResult{
 		AuthorURL: authorURL,
 	}
@@ -40,44 +42,7 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 	}
 	result.AuthorEmail = remoteWK.Email
 
-	// Fetch unblessed relationships from this author via relationship-query
-	authorDomain := discovery.ExtractDomainFromURL(authorURL)
-
-	pendingResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
-		"status": "pending",
-	})
-	deniedResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
-		"status": "denied",
-	})
-
-	// Filter to relationships where source is from the author's domain
-	var allUnblessed []discovery.RelationshipRecord
-	if pendingResp != nil {
-		for _, r := range pendingResp.Records {
-			if discovery.ExtractDomainFromURL(r.SourceURL) == authorDomain {
-				allUnblessed = append(allUnblessed, r)
-			}
-		}
-	}
-	if deniedResp != nil {
-		for _, r := range deniedResp.Records {
-			if discovery.ExtractDomainFromURL(r.SourceURL) == authorDomain {
-				allUnblessed = append(allUnblessed, r)
-			}
-		}
-	}
-	result.CommentsFound = len(allUnblessed)
-
-	// Bless all unblessed comments via relationship-update
-	for _, rel := range allUnblessed {
-		if err := discoveryClient.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "grant", privKey); err != nil {
-			result.CommentsFailed++
-			continue
-		}
-		result.CommentsBlessed++
-	}
-
-	// Add to following.json
+	// Add to following.json first (so policy eval includes this author)
 	f, err := Load(followingPath)
 	if err != nil {
 		return nil, err
@@ -98,6 +63,52 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 		return nil, err
 	}
 
+	// Build following set for policy evaluation (includes newly added author)
+	followingDomains := make(map[string]bool)
+	for _, entry := range f.Following {
+		d := discovery.ExtractDomainFromURL(entry.URL)
+		if d != "" {
+			followingDomains[d] = true
+		}
+	}
+
+	// Fetch pending/denied blessings and re-evaluate against policies
+	pendingResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
+		"status": "pending",
+	})
+	deniedResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
+		"status": "denied",
+	})
+
+	var allUnblessed []discovery.RelationshipRecord
+	if pendingResp != nil {
+		allUnblessed = append(allUnblessed, pendingResp.Records...)
+	}
+	if deniedResp != nil {
+		allUnblessed = append(allUnblessed, deniedResp.Records...)
+	}
+	result.CommentsFound = len(allUnblessed)
+
+	// Re-evaluate each unblessed comment against policies
+	ctx := policy.EvalContext{
+		FollowingDomains: followingDomains,
+	}
+	for _, rel := range allUnblessed {
+		sourceDomain := discovery.ExtractDomainFromURL(rel.SourceURL)
+		evt := policy.Event{
+			Type:        "pub.polis.comment.blessing",
+			ActorDomain: sourceDomain,
+		}
+		decision, matched := policy.EvaluateExplicit(policies, evt, ctx)
+		if matched && (decision == policy.Allow || decision == policy.Emit) {
+			if err := discoveryClient.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "grant", privKey); err != nil {
+				result.CommentsFailed++
+				continue
+			}
+			result.CommentsBlessed++
+		}
+	}
+
 	// Emit follow event to discovery stream (non-fatal)
 	stream.PublishEvent("pub.polis.follow.announced", map[string]interface{}{
 		"target_domain": discovery.ExtractDomainFromURL(authorURL),
@@ -106,38 +117,15 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 	return result, nil
 }
 
-// UnfollowWithDenial removes an author from the following list and denies
-// any blessed comments from that author. This matches the CLI behavior.
-func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte) (*UnfollowResult, error) {
+// UnfollowWithDenial removes an author from the following list and re-evaluates
+// granted blessings against policies. Blessings that no longer match an emit/allow
+// rule (because the author is no longer followed) get denied.
+func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy) (*UnfollowResult, error) {
 	result := &UnfollowResult{
 		AuthorURL: authorURL,
 	}
 
-	// Fetch author info (non-fatal if unreachable)
-	remoteWK, err := remoteClient.FetchWellKnown(authorURL)
-	if err == nil && remoteWK != nil {
-		authorDomain := discovery.ExtractDomainFromURL(authorURL)
-
-		// Fetch granted blessings where source is from the author's domain
-		grantedResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
-			"status": "granted",
-		})
-
-		if grantedResp != nil {
-			for _, rel := range grantedResp.Records {
-				if discovery.ExtractDomainFromURL(rel.SourceURL) == authorDomain {
-					result.CommentsFound++
-					if err := discoveryClient.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "deny", privKey); err != nil {
-						result.CommentsFailed++
-						continue
-					}
-					result.CommentsDenied++
-				}
-			}
-		}
-	}
-
-	// Remove from following.json
+	// Remove from following.json first (so policy eval excludes this author)
 	f, err := Load(followingPath)
 	if err != nil {
 		return nil, err
@@ -147,6 +135,43 @@ func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient 
 
 	if err := Save(followingPath, f); err != nil {
 		return nil, err
+	}
+
+	// Build following set for policy evaluation (excludes removed author)
+	followingDomains := make(map[string]bool)
+	for _, entry := range f.Following {
+		d := discovery.ExtractDomainFromURL(entry.URL)
+		if d != "" {
+			followingDomains[d] = true
+		}
+	}
+
+	// Fetch granted blessings and re-evaluate against policies
+	grantedResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
+		"status": "granted",
+	})
+
+	if grantedResp != nil {
+		ctx := policy.EvalContext{
+			FollowingDomains: followingDomains,
+		}
+		for _, rel := range grantedResp.Records {
+			sourceDomain := discovery.ExtractDomainFromURL(rel.SourceURL)
+			evt := policy.Event{
+				Type:        "pub.polis.comment.blessing",
+				ActorDomain: sourceDomain,
+			}
+			decision, matched := policy.EvaluateExplicit(policies, evt, ctx)
+			// If no emit/allow rule matches, deny the blessing
+			if !matched || decision == policy.Deny || decision == policy.Omit {
+				result.CommentsFound++
+				if err := discoveryClient.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "deny", privKey); err != nil {
+					result.CommentsFailed++
+					continue
+				}
+				result.CommentsDenied++
+			}
+		}
 	}
 
 	// Emit unfollow event to discovery stream (non-fatal)
