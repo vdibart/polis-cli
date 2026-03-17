@@ -19,6 +19,11 @@ import (
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
+var (
+	frontmatterStripRe = regexp.MustCompile(`(?s)^---\n.*?\n---\n*`)
+	frontmatterParseRe = regexp.MustCompile(`(?s)^---\n(.*?)\n---`)
+)
+
 // Version is set at startup by the cmd package.
 var Version = "dev"
 
@@ -868,8 +873,7 @@ func ParseFrontmatter(content string) map[string]string {
 	}
 
 	// Find frontmatter block
-	re := regexp.MustCompile(`(?s)^---\n(.*?)\n---`)
-	matches := re.FindStringSubmatch(content)
+	matches := frontmatterParseRe.FindStringSubmatch(content)
 	if len(matches) < 2 {
 		return result
 	}
@@ -898,8 +902,7 @@ func StripFrontmatter(content string) string {
 		return content
 	}
 
-	re := regexp.MustCompile(`(?s)^---\n.*?\n---\n*`)
-	return strings.TrimSpace(re.ReplaceAllString(content, ""))
+	return strings.TrimSpace(frontmatterStripRe.ReplaceAllString(content, ""))
 }
 
 // CanonicalizeContent normalizes content for consistent hashing.

@@ -38,7 +38,11 @@
         <div class="container">
             <div class="context-box">
                 <span class="context-label">In reply to:</span>
-                <a href="{{in_reply_to_url}}" class="context-link">{{in_reply_to_url}}</a>
+                <div class="context-card">
+                    <a href="{{in_reply_to_url}}" class="context-link">{{in_reply_to_title}}</a>
+                    <span class="context-domain">{{in_reply_to_domain}}</span>
+                    <p class="context-excerpt">{{in_reply_to_excerpt}}</p>
+                </div>
             </div>
         </div>
     </section>
@@ -63,6 +67,7 @@
                 {{> theme:blessed-comment}}
 {{/blessed_comments}}
             </div>
+            {{> theme:polis-widget}}
         </div>
     </section>
 
@@ -74,8 +79,6 @@
         </div>
         <a href="https://polis.pub" class="footer-logo">POLIS<span class="footer-tagline">Your content, free from platform control</span></a>
     </footer>
-
-    {{> theme:polis-widget}}
 
 <!-- Source: {{url}} | Version: {{version}} -->
 </body>

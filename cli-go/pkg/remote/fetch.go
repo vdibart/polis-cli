@@ -204,6 +204,110 @@ func (c *Client) FetchPublicIndex(baseURL string) ([]PublicIndexEntry, error) {
 	return entries, nil
 }
 
+// Policy represents a single line from a remote rules.jsonl file.
+// Duplicated from the policy package to avoid a circular import.
+type Policy struct {
+	Active bool   `json:"active"`
+	Rule   string `json:"policy"`
+}
+
+// FetchPolicies fetches and parses the public policies/rules.jsonl from a site.
+// Returns empty slice (not error) on 404.
+func (c *Client) FetchPolicies(baseURL string) ([]Policy, error) {
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	url := baseURL + "/policies/rules.jsonl"
+
+	resp, err := c.HTTPClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch policies: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("fetch policies failed with status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read policies response: %w", err)
+	}
+
+	var policies []Policy
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var p Policy
+		if err := json.Unmarshal([]byte(line), &p); err != nil {
+			continue // skip malformed
+		}
+		policies = append(policies, p)
+	}
+	return policies, nil
+}
+
+// FetchFollowingList fetches the following.json from a site and returns the
+// list of followed domains. Returns empty slice (not error) on 404.
+func (c *Client) FetchFollowingList(baseURL string) ([]string, error) {
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	url := baseURL + "/content/pub.polis.core/follow/following.json"
+
+	resp, err := c.HTTPClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch following.json: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("fetch following.json failed with status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read following.json response: %w", err)
+	}
+
+	var f struct {
+		Following []struct {
+			URL string `json:"url"`
+		} `json:"following"`
+	}
+	if err := json.Unmarshal(body, &f); err != nil {
+		return nil, fmt.Errorf("failed to parse following.json: %w", err)
+	}
+
+	domains := make([]string, 0, len(f.Following))
+	for _, entry := range f.Following {
+		domain := extractDomainFromURL(entry.URL)
+		if domain != "" {
+			domains = append(domains, domain)
+		}
+	}
+	return domains, nil
+}
+
+// extractDomainFromURL extracts the hostname from a URL string.
+func extractDomainFromURL(rawURL string) string {
+	s := rawURL
+	if idx := strings.Index(s, "://"); idx != -1 {
+		s = s[idx+3:]
+	}
+	if idx := strings.Index(s, "/"); idx != -1 {
+		s = s[:idx]
+	}
+	if idx := strings.Index(s, ":"); idx != -1 {
+		s = s[:idx]
+	}
+	return s
+}
+
 // ExtractBaseURL extracts the base URL (scheme + host) from a full URL.
 func ExtractBaseURL(fullURL string) string {
 	// Find the third slash (after scheme://)

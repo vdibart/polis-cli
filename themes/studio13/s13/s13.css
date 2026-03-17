@@ -775,26 +775,50 @@ textarea::placeholder {
 .context-box {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
+    border-radius: 6px;
     padding: 0.75rem 1rem;
-    display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
 }
 
 .context-label {
-    font-size: 0.8rem;
+    font-size: 0.75rem;
     color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.4rem;
+}
+
+.context-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
 }
 
 .context-link {
-    font-size: 0.85rem;
+    font-size: 1rem;
+    font-weight: 600;
     color: var(--color-orange);
     text-decoration: none;
-    word-break: break-all;
+    word-break: break-word;
 }
 
 .context-link:hover {
     text-decoration: underline;
+}
+
+.context-domain {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+}
+
+.context-excerpt {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    line-height: 1.4;
+    margin: 0.25rem 0 0;
+}
+
+.context-excerpt:empty {
+    display: none;
 }
 
 /* ============================================

@@ -31,8 +31,10 @@ All core packages live in `cli-go/pkg/`:
 | `version/` | Version history parsing/reconstruction |
 | `index/` | Index rebuilding |
 | `migrate/` | Domain migration |
+| `dm/` | Direct message encryption, storage, send/receive pipeline |
 | `ops/` | Content-type dispatch engine (wraps packages for API) |
 | `url/` | URL normalization |
+| `policy/` | Policy rule loading and evaluation |
 
 ## Import Rules
 
@@ -64,7 +66,7 @@ func Execute(version string) {
     comment.Version = version
     metadata.Version = version
     following.Version = version
-    // ... 9 packages total
+    // ... 10 packages total
 }
 ```
 

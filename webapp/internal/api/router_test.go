@@ -317,35 +317,32 @@ func TestUnknownContentType(t *testing.T) {
 	}
 }
 
-// ── CORS ────────────────────────────────────────────────────────────
+// ── CORS (same-origin only) ─────────────────────────────────────────
 
-func TestCORSHeaders(t *testing.T) {
+func TestNoCORSHeaders(t *testing.T) {
 	mux, _, _ := testSetup(t)
 
-	req := httptest.NewRequest(http.MethodOptions, "/v1/bundles", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/bundles", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200 for OPTIONS, got %d", w.Code)
+	if w.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Error("expected no CORS origin header (same-origin policy)")
 	}
-	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Error("expected CORS origin header")
-	}
-	if w.Header().Get("Access-Control-Allow-Methods") == "" {
-		t.Error("expected CORS methods header")
+	if w.Header().Get("Access-Control-Allow-Methods") != "" {
+		t.Error("expected no CORS methods header")
 	}
 }
 
-func TestCORSOnContentRoute(t *testing.T) {
+func TestNoCORSOnContentRoute(t *testing.T) {
 	mux, _, _ := testSetup(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/content/post", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
-	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Error("expected CORS origin header on content routes")
+	if w.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Error("expected no CORS origin header on content routes")
 	}
 }
 

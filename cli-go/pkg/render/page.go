@@ -3,15 +3,23 @@ package render
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/template"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 )
+
+// WidgetVersion is the single source of truth for the current polis widget version.
+// Update this constant when widget.js changes. Theme snippets reference it via
+// the {{widget_version}} template variable, so they never need manual version bumps.
+const WidgetVersion = "1.4.3"
 
 // PageConfig holds configuration for page rendering.
 type PageConfig struct {
@@ -30,10 +38,11 @@ type PageConfig struct {
 
 // PageRenderer renders polis pages using templates.
 type PageRenderer struct {
-	config    PageConfig
-	engine    *template.Engine
-	templates *theme.Templates
-	themeName string
+	config     PageConfig
+	engine     *template.Engine
+	templates  *theme.Templates
+	themeName  string
+	replyCache replyContextCache // lazily loaded cache for reply context
 }
 
 // RenderStats holds statistics from a render operation.
@@ -155,6 +164,7 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 
 	// Build render context — use mount path for URLs and relative paths
 	ctx := template.NewRenderContext()
+	ctx.WidgetVersion = WidgetVersion
 	ctx.Title = fm["title"]
 	ctx.Content = htmlContent
 	ctx.Published = fm["published"]
@@ -191,6 +201,22 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 		ctx.RootPostURL = fm["root_post"]
 		if ctx.RootPostURL == "" {
 			ctx.RootPostURL = parseNestedField(string(content), "in-reply-to", "root-post")
+		}
+		// Convert .md URL to .html for the link target
+		if strings.HasSuffix(ctx.InReplyToURL, ".md") {
+			ctx.InReplyToURL = strings.TrimSuffix(ctx.InReplyToURL, ".md") + ".html"
+		}
+		if strings.HasSuffix(ctx.RootPostURL, ".md") {
+			ctx.RootPostURL = strings.TrimSuffix(ctx.RootPostURL, ".md") + ".html"
+		}
+		// Resolve reply context: fetch from remote (with cache) or derive from URL
+		if ctx.InReplyToURL != "" {
+			if r.replyCache == nil {
+				r.replyCache = loadReplyContextCache(r.config.DataDir)
+			}
+			ctx.InReplyToTitle, ctx.InReplyToExcerpt, ctx.InReplyToDomain = resolveReplyContext(
+				r.config.DataDir, ctx.InReplyToURL, r.replyCache,
+			)
 		}
 	}
 
@@ -248,6 +274,7 @@ func (r *PageRenderer) RenderIndex() error {
 
 	// Build render context
 	ctx := template.NewRenderContext()
+	ctx.WidgetVersion = WidgetVersion
 	ctx.SiteURL = r.config.BaseURL
 	ctx.SiteTitle = r.getSiteTitle()
 	ctx.CSSPath = "styles.css"
@@ -326,6 +353,7 @@ func (r *PageRenderer) RenderArchive() error {
 
 	// Build render context with all posts (unlimited)
 	ctx := template.NewRenderContext()
+	ctx.WidgetVersion = WidgetVersion
 	ctx.SiteURL = r.config.BaseURL
 	ctx.SiteTitle = r.getSiteTitle()
 	ctx.CSSPath = "../styles.css"
@@ -459,6 +487,11 @@ func (r *PageRenderer) RenderAll(force bool) (*RenderStats, error) {
 		stats.ArchiveGenerated = true
 	}
 
+	// Persist reply context cache if it was populated during comment rendering
+	if r.replyCache != nil && len(r.replyCache) > 0 {
+		saveReplyContextCache(r.config.DataDir, r.replyCache)
+	}
+
 	return stats, nil
 }
 
@@ -507,7 +540,7 @@ func (r *PageRenderer) loadPublicIndex() ([]template.PostData, []template.Commen
 			}
 
 			posts = append(posts, template.PostData{
-				URL:            htmlPath,
+				URL:            "/" + htmlPath,
 				Title:          entry.Title,
 				Excerpt:        excerpt,
 				Published:      entry.Published,
@@ -522,7 +555,7 @@ func (r *PageRenderer) loadPublicIndex() ([]template.PostData, []template.Commen
 				inReplyToURL = entry.InReplyTo.URL
 			}
 			comments = append(comments, template.CommentData{
-				URL:            htmlPath,
+				URL:            "/" + htmlPath,
 				TargetAuthor:   extractDomain(inReplyToURL),
 				Published:      entry.Published,
 				PublishedHuman: template.FormatHumanDate(entry.Published),
@@ -743,6 +776,37 @@ func parseNestedField(content, section, field string) string {
 	return ""
 }
 
+// parseInReplyToDisplay derives a human-readable title and domain from an in_reply_to URL.
+// For example, "https://discover.polis.pub/posts/20260307/domain-names-cost-10-year.html"
+// returns ("Domain Names Cost 10 Year", "discover.polis.pub").
+func parseInReplyToDisplay(rawURL string) (title, domain string) {
+	if rawURL == "" {
+		return "", ""
+	}
+	domain = extractDomain(rawURL)
+
+	// Extract filename from the URL path, strip extension, and convert to title case
+	stripped := strings.TrimPrefix(rawURL, "https://")
+	stripped = strings.TrimPrefix(stripped, "http://")
+	parts := strings.Split(stripped, "/")
+	if len(parts) < 2 {
+		return domain, domain
+	}
+	filename := parts[len(parts)-1]
+	filename = strings.TrimSuffix(filename, ".html")
+	filename = strings.TrimSuffix(filename, ".md")
+
+	// Convert kebab-case to title case
+	words := strings.Split(filename, "-")
+	for i, w := range words {
+		if len(w) > 0 {
+			words[i] = strings.ToUpper(w[:1]) + w[1:]
+		}
+	}
+	title = strings.Join(words, " ")
+	return title, domain
+}
+
 // extractDomain extracts the domain from a URL.
 func extractDomain(url string) string {
 	url = strings.TrimPrefix(url, "https://")
@@ -760,4 +824,128 @@ func truncateText(text string, maxLen int) string {
 		return text
 	}
 	return text[:maxLen-3] + "..."
+}
+
+// replyContextEntry holds cached metadata about a remote post referenced by a comment.
+type replyContextEntry struct {
+	Title   string `json:"title"`
+	Excerpt string `json:"excerpt"`
+	Domain  string `json:"domain"`
+}
+
+// replyContextCache is the on-disk cache mapping in_reply_to URLs to metadata.
+type replyContextCache map[string]replyContextEntry
+
+const replyContextCachePath = ".polis/content/pub.polis.core/comments/reply-context-cache.json"
+
+// loadReplyContextCache loads the cache from disk.
+func loadReplyContextCache(dataDir string) replyContextCache {
+	cache := make(replyContextCache)
+	data, err := os.ReadFile(filepath.Join(dataDir, replyContextCachePath))
+	if err != nil {
+		return cache
+	}
+	_ = json.Unmarshal(data, &cache)
+	return cache
+}
+
+// saveReplyContextCache persists the cache to disk.
+func saveReplyContextCache(dataDir string, cache replyContextCache) {
+	data, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil {
+		return
+	}
+	fullPath := filepath.Join(dataDir, replyContextCachePath)
+	_ = os.MkdirAll(filepath.Dir(fullPath), 0755)
+	_ = os.WriteFile(filepath.Join(dataDir, replyContextCachePath), data, 0644)
+}
+
+// fetchReplyContext fetches a remote post's .md source and extracts title + excerpt.
+// Uses a short timeout so render doesn't hang if the source is unreachable.
+func fetchReplyContext(htmlURL string) (title, excerpt string, ok bool) {
+	// Try fetching the .md source (has frontmatter with title)
+	mdURL := htmlURL
+	if strings.HasSuffix(mdURL, ".html") {
+		mdURL = strings.TrimSuffix(mdURL, ".html") + ".md"
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(mdURL)
+	if err != nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return "", "", false
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024)) // 32KB max
+	if err != nil {
+		return "", "", false
+	}
+
+	content := string(body)
+
+	// Extract title from frontmatter
+	if idx := strings.Index(content, "---"); idx >= 0 {
+		if end := strings.Index(content[idx+3:], "---"); end >= 0 {
+			fm := content[idx+3 : idx+3+end]
+			for _, line := range strings.Split(fm, "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "title:") {
+					title = strings.TrimSpace(strings.TrimPrefix(line, "title:"))
+					title = strings.Trim(title, "\"'")
+					break
+				}
+			}
+		}
+	}
+
+	// Extract excerpt: first non-empty paragraph after frontmatter
+	bodyStart := content
+	if idx := strings.Index(content, "---"); idx >= 0 {
+		if end := strings.Index(content[idx+3:], "---"); end >= 0 {
+			bodyStart = content[idx+3+end+3:]
+		}
+	}
+	for _, line := range strings.Split(bodyStart, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "![") {
+			continue
+		}
+		excerpt = truncateText(line, 200)
+		break
+	}
+
+	return title, excerpt, title != "" || excerpt != ""
+}
+
+// resolveReplyContext looks up or fetches metadata for the post a comment replies to.
+// Returns title, excerpt, domain — using cache, fetch, or URL-derived fallback.
+func resolveReplyContext(dataDir, inReplyToURL string, cache replyContextCache) (title, excerpt, domain string) {
+	domain = extractDomain(inReplyToURL)
+
+	// Check cache first
+	if entry, ok := cache[inReplyToURL]; ok {
+		return entry.Title, entry.Excerpt, entry.Domain
+	}
+
+	// Try fetching from remote
+	fetchedTitle, fetchedExcerpt, ok := fetchReplyContext(inReplyToURL)
+	if ok {
+		if fetchedTitle == "" {
+			// Fallback: derive title from URL
+			fetchedTitle, _ = parseInReplyToDisplay(inReplyToURL)
+		}
+		cache[inReplyToURL] = replyContextEntry{
+			Title:   fetchedTitle,
+			Excerpt: fetchedExcerpt,
+			Domain:  domain,
+		}
+		return fetchedTitle, fetchedExcerpt, domain
+	}
+
+	// Fallback: URL-derived title, no excerpt
+	fallbackTitle, _ := parseInReplyToDisplay(inReplyToURL)
+	return fallbackTitle, "", domain
 }

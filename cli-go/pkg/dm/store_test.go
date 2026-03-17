@@ -13,12 +13,31 @@ func testStore(t *testing.T) *Store {
 	// Create .polis directory
 	os.MkdirAll(filepath.Join(siteDir, ".polis"), 0700)
 
+	// NewStore zeroes the seed, so each call needs a fresh copy
 	seed := []byte("test-seed-32bytes-for-testing!!")
-	store, err := NewStore(siteDir, seed)
+	store, err := NewStore(siteDir, seed) // seed is zeroed after this
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
 	return store
+}
+
+func TestStore_SeedZeroedAfterNewStore(t *testing.T) {
+	siteDir := t.TempDir()
+	os.MkdirAll(filepath.Join(siteDir, ".polis"), 0700)
+
+	seed := []byte("test-seed-32bytes-for-testing!!")
+	_, err := NewStore(siteDir, seed)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	// Verify seed has been zeroed
+	for i, b := range seed {
+		if b != 0 {
+			t.Fatalf("seed byte %d is %d, expected 0", i, b)
+		}
+	}
 }
 
 func TestStore_NewCreatesDirectories(t *testing.T) {
@@ -38,16 +57,18 @@ func TestStore_NewCreatesDirectories(t *testing.T) {
 func TestStore_SaltPersistence(t *testing.T) {
 	siteDir := t.TempDir()
 	os.MkdirAll(filepath.Join(siteDir, ".polis"), 0700)
-	seed := []byte("test-seed-32bytes-for-testing!!")
+	seedVal := "test-seed-32bytes-for-testing!!"
 
-	// First store creates salt
-	store1, err := NewStore(siteDir, seed)
+	// First store creates salt (seed is zeroed by NewStore)
+	seed1 := []byte(seedVal)
+	store1, err := NewStore(siteDir, seed1)
 	if err != nil {
 		t.Fatalf("first NewStore: %v", err)
 	}
 
-	// Second store reads same salt, derives same key
-	store2, err := NewStore(siteDir, seed)
+	// Second store reads same salt, derives same key (fresh seed copy)
+	seed2 := []byte(seedVal)
+	store2, err := NewStore(siteDir, seed2)
 	if err != nil {
 		t.Fatalf("second NewStore: %v", err)
 	}

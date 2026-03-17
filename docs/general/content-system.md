@@ -1,6 +1,6 @@
 # Content System
 
-The polis content system organizes all site data around **bundles** -- namespaced packages that declare content types, events, storage layout, and handler dispatch. The initial bundle `pub.polis.core` ships with four content types: post, comment, follow, and feed. Third-party bundles extend the system with custom types without modifying the core protocol.
+The polis content system organizes all site data around **bundles** -- namespaced packages that declare content types, events, storage layout, and handler dispatch. The initial bundle `pub.polis.core` ships with five content types: post, comment, follow, feed, and dm. Third-party bundles extend the system with custom types without modifying the core protocol.
 
 ---
 
@@ -38,14 +38,11 @@ content/                             # SOURCE OF TRUTH (all content lives here)
       blessed.json                   # blessed comments index (public artifact)
     follow/                          # pub.polis.follow data
       following.json
-      followers.json
-    feed/                            # pub.polis.feed
-      feed.json                      # aggregated feed (renderable as RSS/JSON feed)
 
 policies/                            # public policies (one rule per line, JSONL)
   rules.jsonl
 
-# RENDERED OUTPUT (generated from content/ via mount points, .gitignore these)
+# RENDERED OUTPUT (generated from content/ via mount points)
 posts/                               # mount: /posts (rendered HTML + copied .md)
   YYYYMMDD/slug.html
   YYYYMMDD/slug.md
@@ -53,13 +50,12 @@ comments/                            # mount: /comments
   YYYYMMDD/slug.html
   YYYYMMDD/slug.md
   blessed.json                       # copied from content/
-feed/                                # mount: /feed (rendered RSS/JSON feed)
-  feed.json
 
 .polis/                              # ALL PRIVATE STATE
   keys/
     id_ed25519
     id_ed25519.pub
+  storage-salt                     # 32 random bytes (hex), site-wide encryption salt
   api-keys.json                      # API key hashes (SHA-256)
   logs/                              # structured event logs
   policies/                          # private policies (evaluated before public)
@@ -83,6 +79,9 @@ feed/                                # mount: /feed (rendered RSS/JSON feed)
         drafts/
         pending/
         denied/
+      dm/                          # pub.polis.dm (private, encrypted at rest)
+        conversations.json
+        conv/
   webapp/
     config.json
     hooks/
@@ -93,7 +92,7 @@ feed/                                # mount: /feed (rendered RSS/JSON feed)
 | Category | Root | Purpose |
 |----------|------|---------|
 | **Public source** | `content/` | Authoritative content files. All posts, comments, and follow data live here. |
-| **Rendered output** | `posts/`, `comments/`, `feed/` | Generated from `content/` via mount points. Regeneratable, `.gitignore`d. |
+| **Rendered output** | `posts/`, `comments/` | Generated from `content/` via mount points. Regeneratable, but must be committed for self-hosting. |
 | **Site resources** | `site/` | Snippets, themes, and other rendering resources. |
 | **Identity** | `.well-known/polis` | Author identity, public key, bundle registry, site metadata. |
 | **Private state** | `.polis/` | Keys, logs, DS state/config, drafts, pending comments, API keys, webapp config. |
@@ -109,7 +108,7 @@ feed/                                # mount: /feed (rendered RSS/JSON feed)
 
 **Version storage.** When `storage.versions` is true, previous versions are stored in `.versions/` subdirectories alongside content. Example: `content/pub.polis.core/post/20260301/.versions/hello.md`.
 
-**Private mirroring.** Private state mirrors the public content path under `.polis/content/`. If bundle content is at `content/pub.polis.core/`, the private root is `.polis/content/pub.polis.core/`. The private directory uses plural names: `post` becomes `posts`, `comment` becomes `comments`. Example: `.polis/content/pub.polis.core/posts/drafts/`.
+**Private mirroring.** Private state mirrors the public content path under `.polis/content/`. If bundle content is at `content/pub.polis.core/`, the private root is `.polis/content/pub.polis.core/`. The private directory uses plural names for content types that have public mounts: `post` becomes `posts`, `comment` becomes `comments`. Private-only types like `dm` keep their original directory name. Example: `.polis/content/pub.polis.core/posts/drafts/`.
 
 **DS state scoping.** Discovery service state is scoped by DS domain and bundle name: `.polis/ds/<domain>/<bundle>/`. Each bundle maintains its own state and config directories. State files are safely deletable (recomputed from the stream). Config files hold user preferences and survive resets. All state filenames match their cursor key in `cursors.json` (e.g., cursor key `pub.polis.feed` corresponds to file `pub.polis.feed.jsonl`).
 
@@ -360,6 +359,10 @@ The following are the handler's business and are NOT declared in `bundle.json`:
       "dir": "feed",
       "mount": "/feed",
       "renderer": "html"
+    },
+    "pub.polis.dm": {
+      "dir": "dm",
+      "storage": {"pattern": "flat"}
     }
   },
   "artifacts": ["index.jsonl"]
@@ -432,7 +435,7 @@ The following constraints are enforced when loading a bundle:
 
 ## Content Types
 
-The `pub.polis.core` bundle declares four content types. Each has distinct storage patterns, actions, and lifecycle behavior.
+The `pub.polis.core` bundle declares five content types. Each has distinct storage patterns, actions, and lifecycle behavior.
 
 ### `pub.polis.post`
 
@@ -491,7 +494,7 @@ Comments are replies to posts or other comments, published on the commenter's ow
 
 **Events emitted:** `pub.polis.comment.published`, `pub.polis.comment.republished`, `pub.polis.comment.blessing.requested`, `pub.polis.comment.blessing.granted`, `pub.polis.comment.blessing.denied`
 
-**Lifecycle:** Create writes a signed comment with `in_reply_to` metadata, then beseeches the original author via the DS (emitting `pub.polis.comment.blessing.requested`). The post author can bless (emitting `pub.polis.comment.blessing.granted`) or deny (emitting `pub.polis.comment.blessing.denied`). Blessed comments are added to `blessed.json` and rendered alongside the original post. Comments from followed authors are auto-blessed.
+**Lifecycle:** Create writes a signed comment with `in_reply_to` metadata, then beseeches the original author via the DS (emitting `pub.polis.comment.blessing.requested`). The post author can bless (emitting `pub.polis.comment.blessing.granted`) or deny (emitting `pub.polis.comment.blessing.denied`). Blessed comments are added to `blessed.json` and rendered alongside the original post. Blessing decisions are policy-driven: by default, comments from self, followed authors, and thread-trusted authors are auto-blessed via `emit` rules in `policies/rules.jsonl`. See `docs/cli/user/policies.md`.
 
 ### `pub.polis.follow`
 
@@ -501,7 +504,7 @@ Follow is the social graph primitive. It manages the list of authors a site trus
 **Mount path:** `follow/`
 **Public artifacts:**
 - `content/pub.polis.core/follow/following.json` -- authors this site follows
-- `content/pub.polis.core/follow/followers.json` -- domains following this site (from stream projection)
+**DS state:** `.polis/ds/<domain>/pub.polis.core/state/pub.polis.follow.json` -- materialized follower set (from stream projection)
 
 **Actions:**
 
@@ -533,6 +536,34 @@ Feed is an aggregated view of content from followed authors. It combines stream 
 | `refresh` | Pull new content from followed authors and update the cache. |
 
 **Lifecycle:** Feed items are collected from followed authors via stream events and direct site polling. The cache is stored as JSONL in the DS state directory. Staleness is tracked per-entry with configurable thresholds. The feed type has no events of its own -- it consumes events from other types.
+
+### `pub.polis.dm`
+
+Direct messages are private, end-to-end encrypted messages between polis instances. This is the first content type with **no mount point, no renderer, and no DS events** -- it validates that the bundle system handles private content types gracefully.
+
+**Source path:** `.polis/content/pub.polis.core/dm/`
+**Mount path:** None (private content, never rendered to public HTML)
+**Renderer:** None
+**Storage:** Flat (conversations stored as JSON files, not dated directories)
+**Encryption:** Transport: NaCl box (X25519 + XSalsa20-Poly1305). Storage: NaCl secretbox with HKDF-derived key.
+
+**Actions:**
+
+| Action | Auth | Description |
+|--------|------|-------------|
+| `list` | Bearer token | List conversation summaries with unread counts. |
+| `get` | Bearer token | Get a conversation with decrypted messages. |
+| `send` | Bearer token | Encrypt and deliver a DM to a remote instance. |
+| `deliver` | Signed request | Receive an encrypted DM from a remote instance. |
+| `mark_read` | Bearer token | Mark messages in a conversation as read. |
+| `delete` | Bearer token | Delete a conversation locally. |
+| `retry` | Bearer token | Retry delivering unsent messages. |
+
+The `deliver` action is the key innovation: it accepts **signed-request auth** (not Bearer token) so remote instances can push messages without a pre-shared API key. See the [security model](security-model.md) for details on instance-to-instance signed request authentication.
+
+**Events emitted:** None. DMs are private and do not register with the discovery service.
+
+**Lifecycle:** Sending encrypts the message with the recipient's public key (fetched from `.well-known/polis`), POSTs the encrypted envelope to the recipient's `/v1/content/dm/actions/deliver` endpoint with signed request headers, and stores a local copy encrypted with the storage key. On delivery failure, the message is saved locally as "unsent" and retryable via `retry`. Receiving verifies the signed request, checks DM acceptance policy, decrypts the transport encryption, re-encrypts with the local storage key, and stores the message.
 
 ---
 
@@ -620,15 +651,15 @@ These fields appear across multiple event types:
 | Field | Used In | Description |
 |-------|---------|-------------|
 | `target_domain` | follow, comment, blessing | The domain the action is directed at. |
-| `source_domain` | blessing | The domain that originated the action (commenter's domain). |
-| `source_url` | blessing | The URL of the comment being blessed/denied. |
-| `target_url` | blessing | The URL of the post being commented on. |
-| `post_url` | post | The canonical URL of the published post. |
+| `source_domain` | comment, blessing | The domain that originated the action (commenter's domain). |
+| `url` | post, comment | The canonical URL of the published content. |
 | `title` | post | The post title. |
-| `version` | post | SHA-256 content hash. |
-| `previous_version` | post (republished) | Previous SHA-256 content hash. |
-| `author` | post, comment | Author identifier. |
-| `published_at` | post | ISO 8601 publication timestamp. |
+| `version` | post, comment | SHA-256 content hash. |
+| `in_reply_to` | comment, blessing | URL of the content being replied to. |
+| `root_post` | comment, blessing | URL of the root post in the thread. |
+| `comment_url` | blessing | URL of the comment being blessed/denied/requested. |
+| `source_url` | blessing (manual grant/deny) | URL of the comment (manual blessing path). |
+| `target_url` | blessing (manual grant/deny) | URL of the post being commented on (manual blessing path). |
 | `post_name` | comment notification template | Name of the post being commented on (used in notification templates). |
 
 #### Example Payloads
@@ -636,11 +667,9 @@ These fields appear across multiple event types:
 **Post published:**
 ```json
 {
-  "post_url": "https://alice.com/posts/20260208/on-gardens.md",
-  "title": "On Gardens",
+  "url": "https://alice.com/posts/20260208/on-gardens.md",
   "version": "sha256:abc123...",
-  "author": "alice@alice.com",
-  "published_at": "2026-02-08T14:30:00Z"
+  "title": "On Gardens"
 }
 ```
 
@@ -654,11 +683,11 @@ These fields appear across multiple event types:
 **Blessing requested:**
 ```json
 {
-  "source_url": "https://carol.com/comments/20260210/reply.md",
-  "target_url": "https://alice.com/posts/20260208/on-gardens.md",
+  "comment_url": "https://carol.com/comments/20260210/reply.md",
+  "in_reply_to": "https://alice.com/posts/20260208/on-gardens.md",
+  "root_post": "https://alice.com/posts/20260208/on-gardens.md",
   "target_domain": "alice.com",
-  "source_domain": "carol.com",
-  "author": "carol@carol.com"
+  "source_domain": "carol.com"
 }
 ```
 

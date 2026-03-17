@@ -11,7 +11,7 @@ webapp/
 ├── internal/server/   # HTTP handlers, routing, server logic
 ├── internal/api/      # v1 REST API (content type operations)
 ├── internal/webui/    # Embedded SPA (index.html, app.js, style.css)
-└── testdata/          # Test fixtures
+└── internal/hosted/   # Multi-tenant hosted service (polis.pub)
 ```
 
 **Critical dependency rule:** The webapp imports core logic from `cli-go/pkg/`. It never shells out to any CLI binary, and shared logic never lives in `internal/`.

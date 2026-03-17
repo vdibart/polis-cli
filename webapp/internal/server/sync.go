@@ -35,6 +35,12 @@ type SyncResult struct {
 // runUnifiedSync performs a single unified sync cycle: queries the DS stream
 // with a single cursor, fans out events to all registered handlers, then
 // advances the cursor and renders if needed.
+// generateBackgroundRequestID creates a prefixed UUIDv4 for background DS calls
+// that aren't part of the unified sync cycle (e.g., comment-sync, feed-sync).
+func generateBackgroundRequestID(prefix string) string {
+	return prefix + "-" + generateSyncID()
+}
+
 // generateSyncID creates a UUIDv4 for sync cycle correlation.
 func generateSyncID() string {
 	var uuid [16]byte
@@ -77,7 +83,7 @@ func (s *Server) runUnifiedSync() SyncResult {
 	})
 
 	// Collect events from targeted queries (2-3 DS calls with a shared cursor)
-	allEvents, newCursor := s.queryStreamEvents(myDomain, cursor)
+	allEvents, newCursor := s.queryStreamEvents(myDomain, cursor, syncID)
 	if len(allEvents) == 0 {
 		// Still update cursor timestamp even if no new events
 		if newCursor != "" && cursorGreater(newCursor, cursor) {
@@ -187,97 +193,58 @@ func cursorLess(a, b string) bool {
 	return ai < bi
 }
 
-// queryStreamEvents makes 2-3 targeted DS queries with a shared cursor and
-// returns deduplicated events. The queries cover:
-// 1. Events targeting our domain (follows, blessing requests, comments on our posts)
-// 2. Events where we're the source (blessing grants/denials of our comments)
-// 3. Events from followed authors (new posts/comments for feed + notifications)
-func (s *Server) queryStreamEvents(myDomain, cursor string) ([]discovery.StreamEvent, string) {
-	client := s.NewAuthDSClient(nil, myDomain)
-	newCursor := cursor
-	seen := make(map[string]bool) // event ID -> already collected
-	var allEvents []discovery.StreamEvent
-	dsQueryErrors := 0
-	dsQueryCount := 0
-
-	addEvents := func(events []discovery.StreamEvent, resultCursor string) {
-		for _, evt := range events {
-			id := fmt.Sprintf("%v", evt.ID)
-			if !seen[id] {
-				seen[id] = true
-				allEvents = append(allEvents, evt)
-			}
-		}
-		if cursorGreater(resultCursor, newCursor) {
-			newCursor = resultCursor
-		}
-	}
-
-	// Query 1: Events targeting our domain
-	dsQueryCount++
-	result, err := client.StreamQuery(cursor, 1000, "", "", myDomain)
-	if err != nil {
-		dsQueryErrors++
-		s.LogDebug("unified sync: target_domain query failed: %v", err)
-	} else {
-		addEvents(result.Events, result.Cursor)
-	}
-
-	// Query 2: Events where we're the source (for blessing grant/deny)
-	dsQueryCount++
-	result, err = client.StreamQuery(cursor, 1000, "", "", "", myDomain)
-	if err != nil {
-		dsQueryErrors++
-		s.LogDebug("unified sync: source_domain query failed: %v", err)
-	} else {
-		addEvents(result.Events, result.Cursor)
-	}
-
-	// Query 3: Events from followed authors (feed + notifications)
-	followingPath := following.DefaultPath(s.DataDir)
-	f, err := following.Load(followingPath)
-	if err == nil && f.Count() > 0 {
-		var domains []string
-		for _, entry := range f.All() {
-			d := discovery.ExtractDomainFromURL(entry.URL)
-			if d != "" {
-				domains = append(domains, d)
-			}
-		}
-		if len(domains) > 0 {
-			dsQueryCount++
-			actorFilter := discovery.JoinDomains(domains)
-			result, err = client.StreamQuery(cursor, 1000, "", actorFilter, "")
-			if err != nil {
-				dsQueryErrors++
-				s.LogDebug("unified sync: followed_author query failed: %v", err)
-			} else {
-				addEvents(result.Events, result.Cursor)
-			}
-		}
-	}
-
-	// Load verification config and state
+// queryStreamEvents uses the unified DS endpoint to fetch all relevant events
+// in a single HTTP request and single DB query. Combines:
+// - Events involving our domain (target OR source) via involvedDomain
+// - Events from followed authors via actors[]
+// This replaces the previous 3-query approach (target + source + followed).
+func (s *Server) queryStreamEvents(myDomain, cursor, syncID string) ([]discovery.StreamEvent, string) {
+	// Check suspension before making any DS queries
 	discoveryDomain := s.GetDiscoveryDomain()
 	vStore := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
 	vCfg := stream.LoadVerificationConfig(vStore)
 	var vState stream.VerificationState
 	_ = vState.Load(vStore)
 
-	// Check if DS should be suspended due to repeated envelope failures
-	if vState.ShouldSuspendSync(vCfg.MaxConsecutiveDSFails) {
+	cooldown := time.Duration(vCfg.SuspendCooldownMin) * time.Minute
+	if vState.ShouldSuspendSync(vCfg.MaxConsecutiveDSFails, cooldown) {
 		s.LogWarn("unified sync: [x] DS may be compromised or misconfigured — sync suspended (%d consecutive failures)", vState.DSFailures.Consecutive)
-		_ = vState.Save(vStore)
 		return nil, cursor
 	}
 
-	// Track DS envelope verification results
-	if dsQueryErrors > 0 && dsQueryErrors == dsQueryCount {
-		// All queries failed — likely DS signature issue
+	client := s.NewAuthDSClient(nil, myDomain)
+	client.RequestID = syncID
+
+	// Build followed authors list
+	var followedDomains []string
+	followingPath := following.DefaultPath(s.DataDir)
+	f, err := following.Load(followingPath)
+	if err == nil && f.Count() > 0 {
+		for _, entry := range f.All() {
+			d := discovery.ExtractDomainFromURL(entry.URL)
+			if d != "" {
+				followedDomains = append(followedDomains, d)
+			}
+		}
+	}
+
+	// Single unified query: involved domain OR followed actors
+	// Limit 3000 to match combined capacity of the previous 3×1000 model
+	result, err := client.StreamQueryUnified(cursor, 3000, myDomain, followedDomains)
+
+	var allEvents []discovery.StreamEvent
+	newCursor := cursor
+
+	if err != nil {
 		vState.RecordDSFailure()
-		s.LogWarn("unified sync: [!] All %d DS queries failed — possible signature verification issue", dsQueryCount)
-	} else if len(allEvents) > 0 {
+		s.LogWarn("unified sync: [!] DS query failed — possible signature verification issue")
+		s.LogDebug("unified sync: unified query failed: %v", err)
+	} else {
 		vState.RecordDSSuccess()
+		allEvents = result.Events
+		if cursorGreater(result.Cursor, newCursor) {
+			newCursor = result.Cursor
+		}
 	}
 
 	// Verify author signatures on all events before processing
@@ -476,9 +443,28 @@ func (h *feedSyncHandler) Process(events []discovery.StreamEvent) stream.Handler
 		}
 	}
 
+	// Load policies for event filtering
+	privPath, pubPath := policy.DefaultPaths(s.DataDir)
+	policies, _ := policy.LoadPolicies(privPath, pubPath)
+
+	// Load follower state for policy evaluation
+	discoveryDomain2 := s.GetDiscoveryDomain()
+	store := stream.NewStore(s.DataDir, discoveryDomain2, "pub.polis.core")
+	var followerDomains map[string]bool
+	if len(policies) > 0 {
+		var followerState stream.FollowerState
+		_ = store.LoadState("pub.polis.follow", &followerState)
+		followerDomains = make(map[string]bool, len(followerState.Followers))
+		for _, fl := range followerState.Followers {
+			followerDomains[fl] = true
+		}
+	}
+
 	handler := &feed.FeedHandler{
 		MyDomain:        myDomain,
 		FollowedDomains: followedDomains,
+		Policies:        policies,
+		FollowerDomains: followerDomains,
 	}
 
 	items := handler.Process(events)
@@ -609,6 +595,7 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 		}
 
 		client := s.NewAuthDSClient(nil, myDomain)
+		client.RequestID = generateSyncID()
 		hc := s.getHookConfig()
 
 		for _, evt := range events {

@@ -3,7 +3,9 @@ package hooks
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunHook_AutoDiscover(t *testing.T) {
@@ -124,6 +126,80 @@ func TestGetHookPathWithDiscovery_AutoDiscover(t *testing.T) {
 	path = GetHookPathWithDiscovery(nil, EventPostRepublish, dir)
 	if path != "" {
 		t.Errorf("Expected empty for non-existent hook, got %q", path)
+	}
+}
+
+func TestRunHook_PathContainment(t *testing.T) {
+	dir := t.TempDir()
+
+	config := &HookConfig{
+		PostPublish: "../../etc/passwd",
+	}
+	payload := &HookPayload{
+		Event: EventPostPublish,
+		Path:  "posts/20250101/test.md",
+		Title: "Test Post",
+	}
+
+	_, err := RunHook(dir, config, payload)
+	if err == nil {
+		t.Fatal("Expected error for path traversal")
+	}
+	if !strings.Contains(err.Error(), "outside site directory") {
+		t.Errorf("Expected 'outside site directory' error, got: %v", err)
+	}
+}
+
+func TestRunHook_AbsolutePathOutsideSite(t *testing.T) {
+	dir := t.TempDir()
+
+	config := &HookConfig{
+		PostPublish: "/usr/bin/true",
+	}
+	payload := &HookPayload{
+		Event: EventPostPublish,
+		Path:  "posts/20250101/test.md",
+		Title: "Test Post",
+	}
+
+	_, err := RunHook(dir, config, payload)
+	if err == nil {
+		t.Fatal("Expected error for absolute path outside site")
+	}
+	if !strings.Contains(err.Error(), "outside site directory") {
+		t.Errorf("Expected 'outside site directory' error, got: %v", err)
+	}
+}
+
+func TestRunHook_Timeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timeout test in short mode")
+	}
+
+	dir := t.TempDir()
+
+	// Create a hook that sleeps for 60 seconds
+	hookDir := filepath.Join(dir, ".polis", "webapp", "hooks")
+	os.MkdirAll(hookDir, 0755)
+	scriptPath := filepath.Join(hookDir, "post-publish.sh")
+	os.WriteFile(scriptPath, []byte("#!/bin/sh\nsleep 60\n"), 0755)
+
+	payload := &HookPayload{
+		Event: EventPostPublish,
+		Path:  "posts/20250101/test.md",
+		Title: "Test Post",
+	}
+
+	start := time.Now()
+	_, err := RunHook(dir, nil, payload)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Expected error from timeout")
+	}
+	// Should complete well under 60s (the hook's sleep time)
+	if elapsed > 35*time.Second {
+		t.Errorf("Hook took too long (%v), timeout may not be working", elapsed)
 	}
 }
 

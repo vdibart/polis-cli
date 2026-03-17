@@ -5,6 +5,42 @@ All notable changes to the Go CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.59.0] - 2026-03-17
+
+This release focuses on security hardening across the Go CLI and webapp, enriched comment context cards that fetch the title and excerpt of the parent post, a Milkdown WYSIWYG editor in the webapp, and theme improvements including dynamic widget versioning.
+
+### Added
+
+- **HTML sanitization for markdown rendering**: `pkg/render/markdown.go` now sanitizes rendered HTML through bluemonday, stripping dangerous elements (scripts, iframes, event handlers) while preserving structural HTML like `details`, `video`, `audio`, `figure`, and author-defined `class`/`id` attributes.
+- **`pkg/policycheck`**: Reusable remote policy evaluation for DM eligibility. Two-phase: evaluate the recipient's public DM policy rules first; fall back to mutual-follow check if no DM rules exist. Concurrent checks with 5-minute caching in the webapp.
+- **`FetchPolicies` and `FetchFollowingList` in `pkg/remote`**: Fetch a remote site's published `policies/rules.jsonl` and `following.json` for policy-based DM eligibility evaluation.
+- **`StreamQueryInvolved` and `StreamQueryBatch` in `pkg/discovery`**: Unified DS stream endpoints — `StreamQueryInvolved` fetches events by involved domain; `StreamQueryBatch` sends multiple filter sets in one HTTP request.
+- **`Bundle.MergeDefaults` in `pkg/bundle`**: Adds content types from a default bundle to a site bundle without overwriting existing entries. Returns true if any types were added.
+- **`ValidatePublicKey` and `ZeroKey` in `pkg/signing`**: `ValidatePublicKey` checks OpenSSH Ed25519 key format. `ZeroKey` overwrites key material with zeros after signing to minimize the window where private key bytes exist in memory.
+- **Hook path containment and timeout in `pkg/hooks`**: Hooks now verify the script resolves within the site directory (path traversal prevention). Execution limited to `HookTimeout` (30 seconds) via `context.WithTimeout`. `HookTimeout` is exported as a package constant.
+- **`WidgetVersion` constant in `pkg/render/page.go`**: Single source of truth for the current widget JS version. Theme snippets use `{{widget_version}}` template variable instead of hardcoded strings.
+- **Reply context enrichment**: Comment pages now resolve the title, excerpt, and domain of the parent post by fetching its `.md` source. Results are cached in `.polis/content/pub.polis.core/comments/reply-context-cache.json`.
+- **Default policies**: The default private policy set now includes `omit pub.polis.feed from self` (suppresses your own posts from your feed) and `deny all from all` (unknown content types are denied by default).
+
+### Changed
+
+- **Domain case-normalization (RFC 1123)**: DNS hostnames are consistently lowercased throughout `pkg/dm`, `pkg/discovery`, `pkg/following`, `pkg/policy`, and `pkg/stream`, preventing case-mismatch failures in domain comparisons and DM conversation IDs.
+- **Compile-time regex precompilation**: Frontmatter parsing regexes in `pkg/comment`, `pkg/publish`, and `pkg/render/page` are now package-level variables (`var frontmatterStripRe`, `frontmatterParseRe`) instead of being recompiled on every call.
+- **`ShouldSuspendSync` cooldown window**: Sync suspension now lifts after a configurable cooldown period (default 5 minutes, controlled by `SuspendCooldownMin` in `verification.json`) to allow retry attempts after consecutive DS failures.
+- **DM store zeroes private key seed**: `dm.NewStore` zeroes the seed bytes immediately after deriving the storage key.
+- **Feed handler uses policy evaluation**: `pkg/feed/Handler` now evaluates events against the site's loaded policies (via `policy.EvaluateWithLog`) instead of a hardcoded self-event skip. Falls back to legacy hardcoded skip when no policies are loaded.
+- **[Webapp] Same-origin CORS policy**: CORS middleware passes requests through without adding headers, letting the browser enforce same-origin policy.
+- **[Webapp] Unified DS stream query**: Background sync uses `StreamQueryBatch` / `StreamQueryInvolved` for a single DS request instead of three separate target/source/followed queries.
+- **[Webapp] `StopSync()` method on `Server`**: Gracefully stops the background sync goroutine; called automatically by `Close()`.
+- **[Webapp] DM unread count in `/api/status`**: Response now includes `dm_unread` count from the DM store.
+- **[Webapp] DM recipients endpoint**: `GET /api/dm/recipients` performs concurrent remote policy checks on all followed authors to indicate DM eligibility, with 5-minute result caching.
+- **`.md` URL normalization**: Comment `in_reply_to_url` and `root_post_url` values ending in `.md` are converted to `.html` for rendered output.
+- **Site index page URL paths**: Index page item URLs now include a leading `/` (e.g., `/posts/2025/01/my-post.html` instead of `posts/2025/01/my-post.html`).
+
+### Fixed
+
+- **[Webapp] Sync goroutine leak**: Fixed goroutine leak on server close by tracking the background sync goroutine with a `syncDone` channel.
+
 ## [0.58.0] - 2026-03-07
 
 This release adds end-to-end encrypted direct messages, DS signature verification with two-layer cryptographic trust, policy engine extensions, and a migration of all hardcoded blessing/notification logic to user-configurable declarative policies. The webapp gets a major UI redesign with a new topbar layout, dual-theme support, excerpt cards, and avatar support.

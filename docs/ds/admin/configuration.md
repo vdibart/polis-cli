@@ -8,42 +8,75 @@ Tuning reference and admin API for the Polis Discovery Service.
 
 ## Admin API
 
-All admin endpoints are mounted under `/admin/*` and require the `OPERATOR_API_KEY` as a Bearer token.
+All admin endpoints are mounted under `/v1/admin/` and require an operator API
+key as a Bearer token. Set via `OPERATOR_API_KEYS` (comma-separated for key
+rotation) or legacy `OPERATOR_API_KEY` env var.
+
+### Operator Policies
+
+Content blocking decisions are driven by the `ds_operator_policies` table.
+Rules use the same grammar as site policies and are evaluated in insertion
+order (first match wins).
 
 ```bash
-# View blocks and stream config
-curl -H "Authorization: Bearer $KEY" "$DS_URL/admin/blocks"
+# List all operator policies
+curl -H "Authorization: Bearer $KEY" "$DS_URL/v1/admin/policies"
 
-# Block a domain
+# Add a policy rule
 curl -X POST -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
-  -d '{"domain":"spam.example.com","scope":"all","reason":"spam"}' \
-  "$DS_URL/admin/blocks-domains"
+  -d '{"policy":"deny all from all at spam.example.com","reason":"spam"}' \
+  "$DS_URL/v1/admin/policies"
 
-# Unblock a domain
+# Remove a policy by ID
+curl -X DELETE -H "Authorization: Bearer $KEY" \
+  "$DS_URL/v1/admin/policies/42"
+
+# Disable a policy without removing it
+curl -X PATCH -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"active":false}' \
+  "$DS_URL/v1/admin/policies/42"
+```
+
+### Convenience: Domain Blocking
+
+```bash
+# Block a domain (adds "deny all from all at <domain>" policy)
+curl -X POST -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"domain":"spam.example.com","reason":"spam"}' \
+  "$DS_URL/v1/admin/block/domain"
+
+# Unblock a domain (removes matching deny rule)
 curl -X DELETE -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
   -d '{"domain":"spam.example.com"}' \
-  "$DS_URL/admin/blocks-domains"
+  "$DS_URL/v1/admin/block/domain"
+```
 
-# Block an event type (cannot block core polis.* types)
-curl -X POST -H "Authorization: Bearer $KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"type":"custom.spam","reason":"abuse"}' \
-  "$DS_URL/admin/blocks-types"
+### Stream Purge
 
-# Switch stream to allowlist mode
-curl -X POST -H "Authorization: Bearer $KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"mode":"allowlist","allowed_types":["custom.approved"]}' \
-  "$DS_URL/admin/stream-mode"
-
-# Purge events by actor
+```bash
+# Purge events by actor (not a policy action — cleans event data)
 curl -X POST -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
   -d '{"actor":"spam.example.com"}' \
-  "$DS_URL/admin/stream-purge"
+  "$DS_URL/v1/admin/stream/purge"
 ```
+
+### Key Rotation
+
+To rotate operator API keys without downtime:
+
+1. Set `OPERATOR_API_KEYS=oldkey,newkey` in env
+2. Deploy — both keys now work
+3. Update clients to use `newkey`
+4. Set `OPERATOR_API_KEYS=newkey` (remove old)
+5. Deploy — old key is rejected
+
+The audit log records which key index authenticated each request (never the
+key value itself).
 
 ---
 
@@ -102,12 +135,12 @@ These limits are per-domain per hour. They restrict how many operations a single
 
 | Env Var | Default | Endpoint |
 |---------|---------|----------|
-| `DS_RATE_DOMAIN_SITES_REGISTER` | 5 | `POST /ds-sites-register` |
-| `DS_RATE_DOMAIN_SITES_UNREGISTER` | 5 | `POST /ds-sites-unregister` |
-| `DS_RATE_DOMAIN_CONTENT_REGISTER` | 50 | `POST /ds-content-register` |
-| `DS_RATE_DOMAIN_CONTENT_UNREGISTER` | 20 | `POST /ds-content-unregister` |
-| `DS_RATE_DOMAIN_RELATIONSHIP_UPDATE` | 50 | `POST /ds-relationship-update` |
-| `DS_RATE_DOMAIN_STREAM_PUBLISH` | 100 | `POST /ds-stream-publish` |
+| `DS_RATE_DOMAIN_SITES_REGISTER` | 5 | `POST /v1/sites` |
+| `DS_RATE_DOMAIN_SITES_UNREGISTER` | 5 | `POST /v1/sites/unregister` |
+| `DS_RATE_DOMAIN_CONTENT_REGISTER` | 50 | `POST /v1/content` |
+| `DS_RATE_DOMAIN_CONTENT_UNREGISTER` | 20 | `POST /v1/content/unregister` |
+| `DS_RATE_DOMAIN_RELATIONSHIP_UPDATE` | 50 | `POST /v1/relationships` |
+| `DS_RATE_DOMAIN_STREAM_PUBLISH` | 100 | `POST /v1/stream` |
 
 **When to tune:** If you expect high-volume publishers, increase `DS_RATE_DOMAIN_CONTENT_REGISTER`. If you're running a small private instance and want tighter limits to prevent abuse, lower the values.
 
@@ -118,12 +151,12 @@ These limits are per-IP per hour. They apply before any payload parsing or authe
 | Env Var | Default | Endpoints |
 |---------|---------|-----------|
 | `DS_RATE_IP_WRITE_PREAUTH` | 120 | All `POST` endpoints |
-| `DS_RATE_IP_SITES_CHECK` | 300 | `GET /ds-sites-check` |
-| `DS_RATE_IP_CONTENT_CHECK` | 300 | `GET /ds-content-check` |
-| `DS_RATE_IP_CONTENT_QUERY` | 600 | `GET /ds-content-query` |
-| `DS_RATE_IP_RELATIONSHIP_QUERY` | 600 | `GET /ds-relationship-query` |
-| `DS_RATE_IP_STREAM` | 1200 | `GET /ds-stream` |
-| `DS_RATE_IP_STREAM_HEALTH` | 300 | `GET /ds-stream-health` |
+| `DS_RATE_IP_SITES_CHECK` | 300 | `GET /v1/sites/check` |
+| `DS_RATE_IP_CONTENT_CHECK` | 300 | `GET /v1/content/check` |
+| `DS_RATE_IP_CONTENT_QUERY` | 600 | `GET /v1/content` |
+| `DS_RATE_IP_RELATIONSHIP_QUERY` | 600 | `GET /v1/relationships` |
+| `DS_RATE_IP_STREAM` | 1200 | `GET /v1/stream` |
+| `DS_RATE_IP_STREAM_HEALTH` | 300 | `GET /v1/stream/health` |
 | `DS_RATE_IP_MIGRATIONS_QUERY` | 300 | `GET /ds-migrations` |
 
 **When to tune:** The stream endpoint has a higher default (1200/hr = 20/min) because clients poll it frequently for new events. If you're behind an additional rate limiter (e.g. Cloudflare), you may want to raise these.
@@ -159,8 +192,8 @@ These cap pagination parameters to prevent expensive queries.
 
 | Env Var | Default | What it caps |
 |---------|---------|--------------|
-| `DS_QUERY_CONTENT_MAX_LIMIT` | 100 | Max `limit` param on `/ds-content-query` and `/ds-relationship-query` |
-| `DS_QUERY_STREAM_MAX_LIMIT` | 1000 | Max `limit` param on `/ds-stream` |
+| `DS_QUERY_CONTENT_MAX_LIMIT` | 100 | Max `limit` param on `/v1/content` and `/v1/relationships` queries |
+| `DS_QUERY_STREAM_MAX_LIMIT` | 1000 | Max `limit` param on `/v1/stream` |
 | `DS_QUERY_MAX_OFFSET` | 10000 | Max `offset` param on all query endpoints |
 
 **When to tune:** The stream has a higher limit because clients often need to catch up on many events. If you have very large datasets and need deeper pagination, increase `DS_QUERY_MAX_OFFSET`.

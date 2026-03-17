@@ -56,6 +56,7 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/settings/show-frontmatter", limitBody(s.handleShowFrontmatter, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/hide-read", limitBody(s.handleHideRead, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/webapp-theme", limitBody(s.handleWebappTheme, MaxDefaultBodySize))
+	mux.HandleFunc("/api/settings/editor-panel-mode", limitBody(s.handleEditorPanelMode, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/site-title", limitBody(s.handleUpdateSiteTitle, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/avatar", limitBody(s.handleUpdateAvatar, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/author-name", limitBody(s.handleUpdateAuthorName, MaxDefaultBodySize))
@@ -89,6 +90,14 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/notifications", s.handleNotifications)
 	mux.HandleFunc("/api/notifications/count", s.handleNotificationCount)
 	mux.HandleFunc("/api/notifications/read", limitBody(s.handleNotificationRead, MaxDefaultBodySize))
+
+	// DM API routes
+	mux.HandleFunc("/api/dm/conversations", s.handleDMConversations)
+	mux.HandleFunc("/api/dm/conversations/", s.handleDMConversation)
+	mux.HandleFunc("/api/dm/send", limitBody(s.handleDMSend, MaxDefaultBodySize))
+	mux.HandleFunc("/api/dm/mark-read", limitBody(s.handleDMMarkRead, MaxDefaultBodySize))
+	mux.HandleFunc("/api/dm/retry", limitBody(s.handleDMRetry, MaxDefaultBodySize))
+	mux.HandleFunc("/api/dm/recipients", s.handleDMRecipients)
 
 	// Social plugin routes
 	mux.HandleFunc("/api/pulse", s.handlePulse)

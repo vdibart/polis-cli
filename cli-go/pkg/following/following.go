@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-// normalizeFollowURL ensures consistent URL comparison by trimming trailing slashes.
+// normalizeFollowURL ensures consistent URL comparison by lowercasing and trimming trailing slashes.
 func normalizeFollowURL(u string) string {
-	return strings.TrimRight(u, "/")
+	return strings.TrimRight(strings.ToLower(u), "/")
 }
 
 // Version is set at init time by cmd package.

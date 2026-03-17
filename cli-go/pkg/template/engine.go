@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+var variableRe = regexp.MustCompile(`\{\{(\w+)\}\}`)
+
 // MarkdownRenderer is a function that converts markdown to HTML.
 type MarkdownRenderer func(markdown string) (string, error)
 
@@ -58,14 +60,18 @@ type RenderContext struct {
 	ViewAllPostsLink string // Pre-rendered "View all N posts" link (empty if ≤10)
 
 	// Widget variables
-	AuthorDomain string // Site domain (e.g. "alice.polis.pub")
-	PageType     string // "post", "comment", or "index"
+	AuthorDomain  string // Site domain (e.g. "alice.polis.pub")
+	PageType      string // "post", "comment", or "index"
+	WidgetVersion string // Widget JS version (e.g. "1.4.1")
 
 	// Comment-specific
-	InReplyToURL string
-	RootPostURL  string
-	TargetAuthor string
-	Preview      string
+	InReplyToURL     string
+	InReplyToTitle   string // Human-readable title (fetched or URL-derived)
+	InReplyToDomain  string // Domain of the post being replied to
+	InReplyToExcerpt string // First paragraph excerpt from the parent post
+	RootPostURL      string
+	TargetAuthor     string
+	Preview          string
 
 	// Loop data (for sections)
 	Posts           []PostData
@@ -195,21 +201,24 @@ func (e *Engine) substituteVariables(template string, ctx *RenderContext) string
 		"view_all_posts": ctx.ViewAllPostsLink,
 
 		// Widget variables
-		"author_domain": ctx.AuthorDomain,
-		"page_type":     ctx.PageType,
+		"author_domain":  ctx.AuthorDomain,
+		"page_type":      ctx.PageType,
+		"widget_version": ctx.WidgetVersion,
 
 		// Comment-specific
-		"in_reply_to_url": ctx.InReplyToURL,
-		"root_post_url":   ctx.RootPostURL,
-		"target_author":   ctx.TargetAuthor,
-		"preview":         ctx.Preview,
+		"in_reply_to_url":     ctx.InReplyToURL,
+		"in_reply_to_title":   ctx.InReplyToTitle,
+		"in_reply_to_domain":  ctx.InReplyToDomain,
+		"in_reply_to_excerpt": ctx.InReplyToExcerpt,
+		"root_post_url":       ctx.RootPostURL,
+		"target_author":       ctx.TargetAuthor,
+		"preview":             ctx.Preview,
 	}
 
 	// Replace all {{variable}} patterns.
 	// Escape "{{" in substituted values to prevent template injection
 	// (see escapedOpenBrace in sections.go).
-	re := regexp.MustCompile(`\{\{(\w+)\}\}`)
-	return re.ReplaceAllStringFunc(template, func(match string) string {
+	return variableRe.ReplaceAllStringFunc(template, func(match string) string {
 		// Extract variable name from {{name}}
 		name := match[2 : len(match)-2]
 		if val, ok := vars[name]; ok {

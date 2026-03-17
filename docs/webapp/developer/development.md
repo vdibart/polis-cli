@@ -27,6 +27,7 @@ webapp/
 ├── internal/webui/
 │   ├── assets.go               # Shared embedded FS (//go:embed www/*)
 │   └── www/                    # SPA source (index.html, app.js, style.css)
+└── internal/hosted/            # Multi-tenant service (polis.pub)
 ```
 
 ## Adding an API Endpoint

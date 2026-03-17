@@ -557,3 +557,82 @@ func TestValidateInnerPayload_HTMLStripping(t *testing.T) {
 		t.Errorf("content = %q, want 'Hello alert(1)world'", result.Content)
 	}
 }
+
+func TestReceiveMessage_CaseInsensitiveDomains(t *testing.T) {
+	rcv, senderPriv, senderPub, _, receiverPub := testReceiver(t)
+
+	// Sender uses mixed case for both domains — should still succeed
+	senderX25519PK, _ := signing.Ed25519PublicKeyToX25519(senderPub)
+	rcv.keyCache["alice.example.com"] = &cachedKey{
+		publicKeySSH: senderPub,
+		x25519PK:     senderX25519PK,
+		fetchedAt:    time.Now(),
+	}
+
+	// Write permissive DM policy
+	os.MkdirAll(filepath.Join(rcv.SiteDir, ".polis", "policies"), 0700)
+	os.WriteFile(
+		filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl"),
+		[]byte("{\"active\":true,\"policy\":\"allow pub.polis.dm from all\"}\n"),
+		0600,
+	)
+
+	// Build envelope with mixed-case domains (simulates david.polis.pub's bug)
+	envelope := buildEnvelope(t, senderPriv, senderPub, receiverPub,
+		"Alice.Example.COM",  // sender uses uppercase
+		"Bob.Example.COM",    // recipient uses uppercase
+		"Hello with mixed case!")
+
+	msg, err := rcv.ReceiveMessage("Alice.Example.COM", envelope, map[string]bool{
+		"Alice.Example.COM": true, // following list also has mixed case
+	})
+	if err != nil {
+		t.Fatalf("ReceiveMessage should succeed with mixed-case domains: %v", err)
+	}
+	if msg == nil {
+		t.Fatal("expected message")
+	}
+	if msg.Status != "received" {
+		t.Errorf("status = %q, want received", msg.Status)
+	}
+	// Verify the stored from/to use the lowercase-normalized sender domain
+	if msg.From != "alice.example.com" {
+		t.Errorf("msg.From = %q, want lowercase 'alice.example.com'", msg.From)
+	}
+}
+
+func TestVerifySignedRequest_NormalizesDomain(t *testing.T) {
+	// VerifySignedRequest should normalize X-Polis-Domain to lowercase
+	// while still verifying the signature with the original case.
+	privPEM, pubSSH, _ := signing.GenerateKeypair()
+
+	// Sign with mixed-case domain (as the sender would)
+	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	canonical, _ := MakeDeliverAuthCanonicalJSON("deliver", "Alice.Example.COM", timestamp)
+	sig, err := signing.SignContent(canonical, privPEM)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	compactSig := strings.ReplaceAll(sig, "\n", "")
+
+	req := httptest.NewRequest(http.MethodPost, "/deliver", nil)
+	req.Header.Set("X-Polis-Domain", "Alice.Example.COM")
+	req.Header.Set("X-Polis-Signature", compactSig)
+	req.Header.Set("X-Polis-Timestamp", timestamp)
+
+	// fetchPublicKey is called with the lowercased domain
+	var fetchedDomain string
+	domain, err := VerifySignedRequest(req, func(d string) ([]byte, error) {
+		fetchedDomain = d
+		return pubSSH, nil
+	})
+	if err != nil {
+		t.Fatalf("VerifySignedRequest failed: %v", err)
+	}
+	if domain != "alice.example.com" {
+		t.Errorf("returned domain = %q, want lowercase 'alice.example.com'", domain)
+	}
+	if fetchedDomain != "alice.example.com" {
+		t.Errorf("fetchPublicKey received domain = %q, want lowercase 'alice.example.com'", fetchedDomain)
+	}
+}

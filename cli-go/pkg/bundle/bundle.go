@@ -93,6 +93,22 @@ func LoadBundle(path string) (*Bundle, error) {
 	return &b, nil
 }
 
+// MergeDefaults adds any content types from defaults that are missing in b.
+// Existing types in b are never overwritten. Returns true if any types were added.
+func (b *Bundle) MergeDefaults(defaults *Bundle) bool {
+	if b.Types == nil {
+		b.Types = make(map[string]ContentType)
+	}
+	added := false
+	for name, ct := range defaults.Types {
+		if _, exists := b.Types[name]; !exists {
+			b.Types[name] = ct
+			added = true
+		}
+	}
+	return added
+}
+
 // SaveBundle writes a bundle to disk as JSON.
 func SaveBundle(path string, b *Bundle) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {

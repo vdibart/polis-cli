@@ -74,6 +74,9 @@ func SignContent(content, privateKeyPEM []byte) (string, error) {
 	// Sign the blob, not the raw content
 	sig := ed25519.Sign(privKey, signingBlob)
 
+	// Zero the private key bytes after signing
+	ZeroKey(privKey)
+
 	// Format as SSH signature
 	sshSig, err := formatSSHSignature(privKey.Public().(ed25519.PublicKey), sig)
 	if err != nil {
@@ -269,6 +272,13 @@ func parsePrivateKey(pemData []byte) (ed25519.PrivateKey, error) {
 	return ed25519.PrivateKey(privKeyBytes), nil
 }
 
+// ValidatePublicKey checks whether sshData contains a valid Ed25519 public key
+// in OpenSSH format. Returns nil if valid, an error otherwise.
+func ValidatePublicKey(sshData []byte) error {
+	_, err := parsePublicKey(sshData)
+	return err
+}
+
 // parsePublicKey parses an OpenSSH public key.
 func parsePublicKey(sshData []byte) (ed25519.PublicKey, error) {
 	parts := splitSSHKey(string(sshData))
@@ -368,6 +378,14 @@ func parseSSHSignature(sshSig string) ([]byte, error) {
 	rawSig, _, _ := readBytes(sigBlob)
 
 	return rawSig, nil
+}
+
+// ZeroKey overwrites key material with zeros. Call after signing operations
+// to minimize the window where private key bytes exist in memory.
+func ZeroKey(key []byte) {
+	for i := range key {
+		key[i] = 0
+	}
 }
 
 // Helper functions for SSH wire format

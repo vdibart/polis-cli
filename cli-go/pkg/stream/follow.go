@@ -2,6 +2,7 @@ package stream
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 )
@@ -43,17 +44,18 @@ func (h *FollowHandler) Process(events []discovery.StreamEvent, state interface{
 	}
 
 	for _, evt := range events {
-		// Only process events targeted at our domain
+		// Only process events targeted at our domain (case-insensitive)
 		targetDomain, _ := evt.Payload["target_domain"].(string)
-		if targetDomain == "" || targetDomain != h.MyDomain {
+		if targetDomain == "" || strings.ToLower(targetDomain) != strings.ToLower(h.MyDomain) {
 			continue
 		}
 
+		actor := strings.ToLower(evt.Actor)
 		switch evt.Type {
 		case "pub.polis.follow.announced":
-			followerSet[evt.Actor] = true
+			followerSet[actor] = true
 		case "pub.polis.follow.removed":
-			delete(followerSet, evt.Actor)
+			delete(followerSet, actor)
 		}
 	}
 

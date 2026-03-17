@@ -430,6 +430,32 @@ func TestRenderFile_AuthorDomainAndPageType(t *testing.T) {
 	}
 }
 
+func TestRenderFile_WidgetVersionPopulated(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	// Template that uses widget_version
+	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
+	postTmpl := `<script src="https://polis.pub/widget-{{widget_version}}.js"></script><h1>{{title}}</h1>`
+	os.WriteFile(filepath.Join(themesDir, "post.html"), []byte(postTmpl), 0644)
+
+	postsDir := filepath.Join(tempDir, "content", "pub.polis.core", "post")
+	os.MkdirAll(postsDir, 0755)
+	os.WriteFile(filepath.Join(postsDir, "t.md"), []byte("---\ntitle: Test\n---\nContent"), 0644)
+
+	renderer, _ := NewPageRenderer(PageConfig{DataDir: tempDir, BaseURL: "https://example.com"})
+
+	html, _, err := renderer.RenderFile("content/pub.polis.core/post/t.md", "post", true)
+	if err != nil {
+		t.Fatalf("RenderFile failed: %v", err)
+	}
+
+	expected := fmt.Sprintf("widget-%s.js", WidgetVersion)
+	if !strings.Contains(html, expected) {
+		t.Errorf("Expected %s in rendered HTML, got: %s", expected, html)
+	}
+}
+
 func TestRenderFile_AuthorDomainFromBaseURLConfig(t *testing.T) {
 	tempDir := t.TempDir()
 	setupTestSite(t, tempDir)
@@ -875,9 +901,9 @@ func TestRenderIndex_MountDirURLs(t *testing.T) {
 	content, _ := os.ReadFile(filepath.Join(tempDir, "index.html"))
 	html := string(content)
 
-	// URL should use mount path, not source path
-	if !strings.Contains(html, "posts/hello.html") {
-		t.Errorf("Expected mount path URL (posts/hello.html), got: %s", html)
+	// URL should use absolute mount path, not source path
+	if !strings.Contains(html, "/posts/hello.html") {
+		t.Errorf("Expected absolute mount path URL (/posts/hello.html), got: %s", html)
 	}
 	if strings.Contains(html, "content/pub.polis.core/post/hello.html") {
 		t.Errorf("URL should NOT use source path, got: %s", html)

@@ -66,7 +66,7 @@ func matches(rule *ParsedRule, evt Event, ctx EvalContext) bool {
 	if !matchesSource(rule.Source, evt.ActorDomain, ctx) {
 		return false
 	}
-	if rule.Domain != "" && rule.Domain != evt.ActorDomain {
+	if rule.Domain != "" && !strings.EqualFold(rule.Domain, evt.ActorDomain) {
 		return false
 	}
 	if rule.Target != "" && rule.Target != evt.TargetPath {
@@ -96,18 +96,20 @@ func matchesType(ruleType, eventType string) bool {
 }
 
 // matchesSource checks if the event actor matches the rule source.
+// Domain lookups are case-insensitive (DNS hostnames per RFC 1123).
 func matchesSource(source, actorDomain string, ctx EvalContext) bool {
+	lowerActor := strings.ToLower(actorDomain)
 	switch source {
 	case "all":
 		return true
 	case "none":
 		return false
 	case "following":
-		return ctx.FollowingDomains[actorDomain]
+		return ctx.FollowingDomains[lowerActor]
 	case "followers":
-		return ctx.FollowerDomains[actorDomain]
+		return ctx.FollowerDomains[lowerActor]
 	case "self":
-		return ctx.MyDomain != "" && actorDomain == ctx.MyDomain
+		return ctx.MyDomain != "" && strings.EqualFold(actorDomain, ctx.MyDomain)
 	case "thread-blessed":
 		// thread-blessed is resolved by the DS via storage query.
 		// Client-side, it always returns false (no local resolution).

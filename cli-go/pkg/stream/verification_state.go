@@ -73,12 +73,23 @@ func (v *VerificationState) RecentAuthorFailures(window time.Duration) map[strin
 	return result
 }
 
-// ShouldSuspendSync returns true if consecutive DS failures exceed the threshold.
-func (v *VerificationState) ShouldSuspendSync(maxConsecutive int) bool {
+// ShouldSuspendSync returns true if consecutive DS failures exceed the threshold
+// and the cooldown period has not yet elapsed since the last failure.
+// After the cooldown, suspension is lifted to allow a retry attempt.
+func (v *VerificationState) ShouldSuspendSync(maxConsecutive int, cooldown time.Duration) bool {
 	if maxConsecutive <= 0 {
 		maxConsecutive = 3
 	}
-	return v.DSFailures.Consecutive >= maxConsecutive
+	if v.DSFailures.Consecutive < maxConsecutive {
+		return false
+	}
+	// Allow retry after cooldown period
+	if cooldown > 0 && v.DSFailures.LastFailure != nil {
+		if time.Since(*v.DSFailures.LastFailure) >= cooldown {
+			return false
+		}
+	}
+	return true
 }
 
 // Load reads verification state from a store.
@@ -107,6 +118,7 @@ type VerificationConfig struct {
 	AuthorKeyCacheTTLMin    int  `json:"author_key_cache_ttl_minutes,omitempty"`
 	DSKeyCacheTTLMin        int  `json:"ds_key_cache_ttl_minutes,omitempty"`
 	MaxConsecutiveDSFails   int  `json:"max_consecutive_ds_failures,omitempty"`
+	SuspendCooldownMin      int  `json:"suspend_cooldown_minutes,omitempty"`
 }
 
 // DefaultVerificationConfig returns the default verification config.
@@ -116,6 +128,7 @@ func DefaultVerificationConfig() VerificationConfig {
 		AuthorKeyCacheTTLMin:    60,
 		DSKeyCacheTTLMin:        60,
 		MaxConsecutiveDSFails:   3,
+		SuspendCooldownMin:      5,
 	}
 }
 
@@ -134,6 +147,9 @@ func LoadVerificationConfig(store *Store) VerificationConfig {
 	}
 	if cfg.MaxConsecutiveDSFails <= 0 {
 		cfg.MaxConsecutiveDSFails = 3
+	}
+	if cfg.SuspendCooldownMin <= 0 {
+		cfg.SuspendCooldownMin = 5
 	}
 	return cfg
 }

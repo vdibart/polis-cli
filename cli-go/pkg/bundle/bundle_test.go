@@ -270,6 +270,52 @@ func TestSaveBundleCreatesDirectories(t *testing.T) {
 	}
 }
 
+func TestMergeDefaults_AddsMissingTypes(t *testing.T) {
+	b := &Bundle{
+		Name:    "pub.polis.core",
+		Version: "1.0.0",
+		Types: map[string]ContentType{
+			"pub.polis.post": {Dir: "post"},
+		},
+	}
+	defaults := DefaultCoreBundle()
+
+	added := b.MergeDefaults(defaults)
+	if !added {
+		t.Error("expected MergeDefaults to report additions")
+	}
+	if _, ok := b.Types["pub.polis.dm"]; !ok {
+		t.Error("expected pub.polis.dm to be added")
+	}
+	// Original type should be preserved, not overwritten
+	if b.Types["pub.polis.post"].Dir != "post" {
+		t.Error("existing type should not be overwritten")
+	}
+}
+
+func TestMergeDefaults_NoOpWhenComplete(t *testing.T) {
+	b := DefaultCoreBundle()
+	defaults := DefaultCoreBundle()
+
+	added := b.MergeDefaults(defaults)
+	if added {
+		t.Error("expected no additions when bundle already has all types")
+	}
+}
+
+func TestMergeDefaults_NilTypes(t *testing.T) {
+	b := &Bundle{Name: "pub.polis.core", Version: "1.0.0"}
+	defaults := DefaultCoreBundle()
+
+	added := b.MergeDefaults(defaults)
+	if !added {
+		t.Error("expected additions when types is nil")
+	}
+	if len(b.Types) != len(defaults.Types) {
+		t.Errorf("expected %d types, got %d", len(defaults.Types), len(b.Types))
+	}
+}
+
 func TestAllEmittedEvents(t *testing.T) {
 	b := DefaultCoreBundle()
 	events := b.AllEmittedEvents()

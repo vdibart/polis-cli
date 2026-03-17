@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 )
 
 func TestFeedHandler_PostEvent(t *testing.T) {
@@ -182,8 +183,67 @@ func TestFeedHandler_CommentEvent_RootPostFallback(t *testing.T) {
 }
 
 func TestFeedHandler_SkipsSelfEvents(t *testing.T) {
+	// Legacy behavior: no policies, hardcoded self-skip
 	h := &FeedHandler{
 		MyDomain: "me.polis.pub",
+	}
+
+	events := selfAndOtherEvents()
+
+	items := h.Process(events)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item (self-event skipped), got %d", len(items))
+	}
+	if items[0].Title != "Alice's Post" {
+		t.Errorf("expected Alice's Post, got %s", items[0].Title)
+	}
+}
+
+func TestFeedHandler_PolicySelfSkip(t *testing.T) {
+	// Policy-driven self-skip via "omit pub.polis.feed from self"
+	h := &FeedHandler{
+		MyDomain: "me.polis.pub",
+		Policies: []policy.Policy{
+			{Active: true, Rule: "omit pub.polis.feed from self"},
+		},
+	}
+
+	events := selfAndOtherEvents()
+
+	items := h.Process(events)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item (self-event omitted by policy), got %d", len(items))
+	}
+	if items[0].Title != "Alice's Post" {
+		t.Errorf("expected Alice's Post, got %s", items[0].Title)
+	}
+}
+
+func TestFeedHandler_RemovingOmitRuleCausesSelfEventsToAppear(t *testing.T) {
+	// Without the omit rule (but with policies loaded), self-events should appear
+	h := &FeedHandler{
+		MyDomain: "me.polis.pub",
+		Policies: []policy.Policy{
+			// Some other policy, but no self-omit
+			{Active: true, Rule: "allow pub.polis.feed from all"},
+		},
+	}
+
+	events := selfAndOtherEvents()
+
+	items := h.Process(events)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items (self-events appear without omit rule), got %d", len(items))
+	}
+}
+
+func TestFeedHandler_PolicyDenyDomain(t *testing.T) {
+	h := &FeedHandler{
+		MyDomain: "me.polis.pub",
+		Policies: []policy.Policy{
+			{Active: true, Rule: "deny pub.polis.feed from all at spam.com"},
+			{Active: true, Rule: "omit pub.polis.feed from self"},
+		},
 	}
 
 	events := []discovery.StreamEvent{
@@ -191,7 +251,47 @@ func TestFeedHandler_SkipsSelfEvents(t *testing.T) {
 			ID:        json.Number("1"),
 			Type:      "pub.polis.post.published",
 			Timestamp: "2026-02-01T10:00:00Z",
-			Actor:     "me.polis.pub", // Self-authored
+			Actor:     "spam.com",
+			Payload: map[string]interface{}{
+				"url":     "https://spam.com/posts/spam.md",
+				"version": "abc",
+				"metadata": map[string]interface{}{
+					"title": "Spam Post",
+				},
+			},
+		},
+		{
+			ID:        json.Number("2"),
+			Type:      "pub.polis.post.published",
+			Timestamp: "2026-02-01T11:00:00Z",
+			Actor:     "good.com",
+			Payload: map[string]interface{}{
+				"url":     "https://good.com/posts/hello.md",
+				"version": "def",
+				"metadata": map[string]interface{}{
+					"title": "Good Post",
+				},
+			},
+		},
+	}
+
+	items := h.Process(events)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item (spam denied by policy), got %d", len(items))
+	}
+	if items[0].Title != "Good Post" {
+		t.Errorf("expected Good Post, got %s", items[0].Title)
+	}
+}
+
+// selfAndOtherEvents returns a pair of events: one self-authored and one from alice.
+func selfAndOtherEvents() []discovery.StreamEvent {
+	return []discovery.StreamEvent{
+		{
+			ID:        json.Number("1"),
+			Type:      "pub.polis.post.published",
+			Timestamp: "2026-02-01T10:00:00Z",
+			Actor:     "me.polis.pub",
 			Payload: map[string]interface{}{
 				"url":     "https://me.polis.pub/posts/my-post.md",
 				"version": "abc",
@@ -204,7 +304,7 @@ func TestFeedHandler_SkipsSelfEvents(t *testing.T) {
 			ID:        json.Number("2"),
 			Type:      "pub.polis.post.published",
 			Timestamp: "2026-02-01T11:00:00Z",
-			Actor:     "alice.polis.pub", // Not self
+			Actor:     "alice.polis.pub",
 			Payload: map[string]interface{}{
 				"url":     "https://alice.polis.pub/posts/hello.md",
 				"version": "def",
@@ -213,14 +313,6 @@ func TestFeedHandler_SkipsSelfEvents(t *testing.T) {
 				},
 			},
 		},
-	}
-
-	items := h.Process(events)
-	if len(items) != 1 {
-		t.Fatalf("expected 1 item (self-event skipped), got %d", len(items))
-	}
-	if items[0].Title != "Alice's Post" {
-		t.Errorf("expected Alice's Post, got %s", items[0].Title)
 	}
 }
 

@@ -991,6 +991,53 @@ Example:
 
 **Precedence:** Global trust (following) takes priority. If you follow someone, thread-specific trust is irrelevant - they're trusted everywhere.
 
+### `polis dm`
+
+> **Go CLI only.** DM commands are not available in the Bash CLI due to cryptographic requirements (NaCl box encryption, X25519 key conversion).
+
+Manage end-to-end encrypted direct messages between polis instances.
+
+```bash
+polis dm <subcommand> [options]
+```
+
+**Subcommands:**
+
+| Subcommand | Usage | Description |
+|------------|-------|-------------|
+| `list` | `polis dm list` | List DM conversations with unread counts |
+| `read` | `polis dm read <conversation_id>` | Read messages in a conversation (marks as read) |
+| `send` | `polis dm send <recipient_url> <message>` | Send a DM to a recipient |
+| `retry` | `polis dm retry [conversation_id]` | Retry delivering unsent messages |
+| `config` | `polis dm config` | Show DM acceptance policy from rules.jsonl |
+
+**Examples:**
+
+```bash
+# List conversations
+polis dm list
+
+# Read a conversation
+polis dm read f8e7d6c5b4a3f2e1
+
+# Send a DM
+polis dm send https://bob.example.com "Hello Bob!"
+
+# Retry failed deliveries
+polis dm retry
+
+# Show DM policy configuration
+polis dm config
+```
+
+**Sending:** Fetches the recipient's public key from `.well-known/polis`, encrypts the message with NaCl box (X25519 + XSalsa20-Poly1305), and POSTs to the recipient's `/v1/content/dm/actions/deliver` endpoint. On delivery failure, the message is saved locally as "unsent" and retryable via `polis dm retry`.
+
+**Receiving:** Requires running the webapp or headless API server. CLI-only users can send DMs but cannot receive them (no server to accept incoming deliveries).
+
+**Policy:** DM acceptance is controlled via policy rules in `.polis/policies/rules.jsonl`. By default, `allow pub.polis.dm from following` + `deny pub.polis.dm from all` restricts DMs to followed domains. The policy system also supports `emit`/`omit` verbs for blessing and notification control, and `self`/`thread-blessed` sources. See `docs/cli/user/policies.md` for the full grammar and common recipes. Use `polis dm config` to view current rules.
+
+All subcommands support `--json` for machine-readable output.
+
 ## File Frontmatter
 
 Published files include YAML frontmatter with metadata:

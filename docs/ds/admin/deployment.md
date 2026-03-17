@@ -30,7 +30,7 @@ Optional infrastructure variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8080` | HTTP listen port |
-| `DISCOVERY_SERVICE_PUBLIC_KEY` | *(empty)* | Public key served at `GET /ds-sites-public-key` |
+| `DISCOVERY_SERVICE_PUBLIC_KEY` | *(empty)* | Public key served at `GET /v1/sites/public-key` |
 | `DISCOVERY_SERVICE_KEY_ID` | `ds-primary` | Key ID served alongside the public key |
 
 ---
@@ -166,15 +166,15 @@ curl "$DS_URL/health"
 # → {"status":"ok","service":"polis-ds"}
 
 # Public key endpoint
-curl "$DS_URL/ds-sites-public-key"
+curl "$DS_URL/v1/sites/public-key"
 # → {"public_key":"ssh-ed25519 AAAA...","key_id":"ds-primary"}
 
 # Stream health (confirms database connectivity)
-curl "$DS_URL/ds-stream-health"
+curl "$DS_URL/v1/stream/health"
 # → {"status":"ok","latest_cursor":"0","oldest_cursor":"0","event_count":0}
 
 # Admin endpoint (requires OPERATOR_API_KEY)
-curl -H "Authorization: Bearer $OPERATOR_API_KEY" "$DS_URL/admin/blocks"
+curl -H "Authorization: Bearer $OPERATOR_API_KEY" "$DS_URL/v1/admin/blocks"
 # → {"blocked_domains":[],"blocked_types":[],"stream_config":{"mode":"blocklist"}}
 ```
 

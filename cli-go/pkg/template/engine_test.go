@@ -542,6 +542,39 @@ func TestAuthorDomainAndPageTypeSubstitution(t *testing.T) {
 	}
 }
 
+func TestWidgetVersionSubstitution(t *testing.T) {
+	engine := New(Config{})
+	ctx := NewRenderContext()
+	ctx.WidgetVersion = "1.4.1"
+
+	tmpl := `<script src="https://polis.pub/widget-{{widget_version}}.js"></script>`
+
+	result, err := engine.Render(tmpl, ctx)
+	if err != nil {
+		t.Fatalf("Render failed: %v", err)
+	}
+
+	if !strings.Contains(result, `widget-1.4.1.js`) {
+		t.Errorf("Expected widget_version substitution, got: %s", result)
+	}
+}
+
+func TestWidgetVersionEmptyWhenUnset(t *testing.T) {
+	engine := New(Config{})
+	ctx := NewRenderContext()
+
+	tmpl := `<script src="https://polis.pub/widget-{{widget_version}}.js"></script>`
+
+	result, err := engine.Render(tmpl, ctx)
+	if err != nil {
+		t.Fatalf("Render failed: %v", err)
+	}
+
+	if !strings.Contains(result, `widget-.js`) {
+		t.Errorf("Expected empty widget_version, got: %s", result)
+	}
+}
+
 func TestAuthorDomainEmptyWhenUnset(t *testing.T) {
 	engine := New(Config{})
 	ctx := NewRenderContext()

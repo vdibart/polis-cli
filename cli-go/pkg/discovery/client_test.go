@@ -553,6 +553,281 @@ func TestStreamQuery_WithoutTargetFilter(t *testing.T) {
 }
 
 // ============================================================================
+// StreamQueryInvolved Tests
+// ============================================================================
+
+func TestStreamQueryInvolved_SendsInvolvedParam(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("Expected GET request, got %s", r.Method)
+		}
+		if r.URL.Path != "/v1/stream" {
+			t.Errorf("Expected /v1/stream, got %s", r.URL.Path)
+		}
+
+		involved := r.URL.Query().Get("involved")
+		if involved != "alice.com" {
+			t.Errorf("Expected involved=alice.com, got %q", involved)
+		}
+		since := r.URL.Query().Get("since")
+		if since != "42" {
+			t.Errorf("Expected since=42, got %q", since)
+		}
+		limit := r.URL.Query().Get("limit")
+		if limit != "1000" {
+			t.Errorf("Expected limit=1000, got %q", limit)
+		}
+
+		// Should NOT have target or source params
+		if r.URL.Query().Has("target") {
+			t.Error("Expected no target parameter")
+		}
+		if r.URL.Query().Has("source") {
+			t.Error("Expected no source parameter")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"events": []interface{}{
+				map[string]interface{}{
+					"id":         1,
+					"type":       "polis.follow",
+					"created_at": "2026-01-15T12:00:00Z",
+					"actor":      "bob.com",
+					"signature":  "sig1",
+					"payload":    map[string]interface{}{"target_domain": "alice.com"},
+				},
+			},
+			"cursor":   "1",
+			"has_more": false,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-api-key")
+	client.DSKeyCache = nil
+	result, err := client.StreamQueryInvolved("42", 1000, "alice.com")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if len(result.Events) != 1 {
+		t.Errorf("Expected 1 event, got %d", len(result.Events))
+	}
+	if result.Cursor != "1" {
+		t.Errorf("Expected cursor=1, got %s", result.Cursor)
+	}
+}
+
+func TestStreamQueryInvolved_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"Cannot combine involved with target"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-api-key")
+	_, err := client.StreamQueryInvolved("0", 1000, "alice.com")
+	if err == nil {
+		t.Error("Expected error for 400 response")
+	}
+}
+
+// ============================================================================
+// StreamQueryBatch Tests
+// ============================================================================
+
+func TestStreamQueryBatch_SendsCorrectRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Errorf("Expected POST request, got %s", r.Method)
+		}
+		if r.URL.Path != "/v1/stream/batch" {
+			t.Errorf("Expected /v1/stream/batch, got %s", r.URL.Path)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Expected Content-Type application/json, got %s", ct)
+		}
+
+		var body struct {
+			Queries []StreamBatchFilter `json:"queries"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Failed to decode request body: %v", err)
+		}
+		if len(body.Queries) != 2 {
+			t.Errorf("Expected 2 queries, got %d", len(body.Queries))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"results": []interface{}{
+				map[string]interface{}{"events": []interface{}{}, "cursor": "0", "has_more": false},
+				map[string]interface{}{"events": []interface{}{}, "cursor": "5", "has_more": true},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-api-key")
+	client.DSKeyCache = nil
+	result, err := client.StreamQueryBatch([]StreamBatchFilter{
+		{Since: "0", Limit: 1000, Involved: "alice.com"},
+		{Since: "0", Limit: 1000, Actors: []string{"bob.com", "charlie.com"}},
+	})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if len(result.Results) != 2 {
+		t.Errorf("Expected 2 results, got %d", len(result.Results))
+	}
+	if result.Results[0].Cursor != "0" {
+		t.Errorf("Expected first cursor=0, got %s", result.Results[0].Cursor)
+	}
+	if !result.Results[1].HasMore {
+		t.Error("Expected second result has_more=true")
+	}
+}
+
+func TestStreamQueryBatch_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"Maximum 5 queries per batch"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-api-key")
+	_, err := client.StreamQueryBatch([]StreamBatchFilter{
+		{Since: "0", Limit: 100},
+	})
+	if err == nil {
+		t.Error("Expected error for 400 response")
+	}
+}
+
+// ============================================================================
+// StreamQueryUnified Tests
+// ============================================================================
+
+func TestStreamQueryUnified_SendsCorrectParams(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("Expected GET request, got %s", r.Method)
+		}
+		if r.URL.Path != "/v1/stream/unified" {
+			t.Errorf("Expected /v1/stream/unified, got %s", r.URL.Path)
+		}
+
+		involved := r.URL.Query().Get("involved")
+		if involved != "alice.com" {
+			t.Errorf("Expected involved=alice.com, got %q", involved)
+		}
+		actor := r.URL.Query().Get("actor")
+		if actor != "bob.com,charlie.com" {
+			t.Errorf("Expected actor=bob.com,charlie.com, got %q", actor)
+		}
+		since := r.URL.Query().Get("since")
+		if since != "100" {
+			t.Errorf("Expected since=100, got %q", since)
+		}
+		limit := r.URL.Query().Get("limit")
+		if limit != "3000" {
+			t.Errorf("Expected limit=3000, got %q", limit)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"events": []interface{}{
+				map[string]interface{}{
+					"id": 101, "type": "polis.follow", "created_at": "2026-01-15T12:00:00Z",
+					"actor": "bob.com", "signature": "sig1",
+					"payload": map[string]interface{}{"target_domain": "alice.com"},
+				},
+				map[string]interface{}{
+					"id": 102, "type": "polis.post", "created_at": "2026-01-15T12:01:00Z",
+					"actor": "charlie.com", "signature": "sig2",
+					"payload": map[string]interface{}{"title": "Hello"},
+				},
+			},
+			"cursor":   "102",
+			"has_more": false,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-api-key")
+	client.DSKeyCache = nil
+	result, err := client.StreamQueryUnified("100", 3000, "alice.com", []string{"bob.com", "charlie.com"})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if len(result.Events) != 2 {
+		t.Errorf("Expected 2 events, got %d", len(result.Events))
+	}
+	if result.Cursor != "102" {
+		t.Errorf("Expected cursor=102, got %s", result.Cursor)
+	}
+}
+
+func TestStreamQueryUnified_NoFollowedAuthors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// actor param should NOT be present when no actors
+		if r.URL.Query().Has("actor") {
+			t.Error("Expected no actor parameter when actors list is empty")
+		}
+		involved := r.URL.Query().Get("involved")
+		if involved != "alice.com" {
+			t.Errorf("Expected involved=alice.com, got %q", involved)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"events":   []interface{}{},
+			"cursor":   "0",
+			"has_more": false,
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-api-key")
+	client.DSKeyCache = nil
+	_, err := client.StreamQueryUnified("0", 3000, "alice.com", nil)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+}
+
+func TestStreamQueryUnified_AuthHeadersSent(t *testing.T) {
+	privKey, _, err := generateTestKeypair()
+	if err != nil {
+		t.Fatalf("Failed to generate keypair: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Polis-Domain") != "alice.com" {
+			t.Errorf("Expected X-Polis-Domain=alice.com, got %s", r.Header.Get("X-Polis-Domain"))
+		}
+		if r.Header.Get("X-Polis-Signature") == "" {
+			t.Error("Expected X-Polis-Signature to be present")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"events":   []interface{}{},
+			"cursor":   "0",
+			"has_more": false,
+		})
+	}))
+	defer server.Close()
+
+	client := NewAuthenticatedClient(server.URL, "test-key", "alice.com", privKey)
+	client.DSKeyCache = nil
+	_, err = client.StreamQueryUnified("0", 3000, "alice.com", []string{"bob.com"})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+}
+
+// ============================================================================
 // Key Rotation Tests
 // ============================================================================
 

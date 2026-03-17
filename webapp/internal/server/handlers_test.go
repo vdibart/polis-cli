@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -5700,6 +5701,82 @@ func TestHandleSettings_IncludesWebappTheme(t *testing.T) {
 }
 
 // ============================================================================
+// handleEditorPanelMode Tests
+// ============================================================================
+
+func TestHandleEditorPanelMode_Success(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	body := jsonBody(t, map[string]string{"mode": "markdown"})
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/editor-panel-mode", body)
+	w := httptest.NewRecorder()
+	s.handleEditorPanelMode(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["editor_panel_mode"] != "markdown" {
+		t.Errorf("expected markdown, got %v", resp["editor_panel_mode"])
+	}
+
+	if s.Config.EditorPanelMode != "markdown" {
+		t.Errorf("expected config to be saved as markdown, got %s", s.Config.EditorPanelMode)
+	}
+}
+
+func TestHandleEditorPanelMode_InvalidMode(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	body := jsonBody(t, map[string]string{"mode": "invalid"})
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/editor-panel-mode", body)
+	w := httptest.NewRecorder()
+	s.handleEditorPanelMode(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleEditorPanelMode_WrongMethod(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/editor-panel-mode", nil)
+	w := httptest.NewRecorder()
+	s.handleEditorPanelMode(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestHandleSettings_IncludesEditorPanelMode(t *testing.T) {
+	s := newConfiguredServer(t)
+	s.Config.EditorPanelMode = "browse"
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	w := httptest.NewRecorder()
+	s.handleSettings(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+
+	mode, ok := resp["editor_panel_mode"]
+	if !ok {
+		t.Error("expected editor_panel_mode in settings response")
+	}
+	if mode != "browse" {
+		t.Errorf("expected browse, got %v", mode)
+	}
+}
+
+// ============================================================================
 // handleNotifications Tests
 // ============================================================================
 
@@ -7787,5 +7864,385 @@ func TestContentRedirectMethodNotAllowed(t *testing.T) {
 
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405 for POST, got %d", w.Code)
+	}
+}
+
+// --- DM handler tests ---
+
+func TestHandleDMConversations_Empty(t *testing.T) {
+	s := newConfiguredServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/dm/conversations", nil)
+	w := httptest.NewRecorder()
+	s.handleDMConversations(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["count"] != float64(0) {
+		t.Errorf("expected count 0, got %v", resp["count"])
+	}
+}
+
+func TestHandleDMConversations_MethodNotAllowed(t *testing.T) {
+	s := newConfiguredServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/dm/conversations", nil)
+	w := httptest.NewRecorder()
+	s.handleDMConversations(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestHandleDMConversation_NotFound(t *testing.T) {
+	s := newConfiguredServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/dm/conversations/nonexistent", nil)
+	w := httptest.NewRecorder()
+	s.handleDMConversation(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleDMSend_MissingRecipient(t *testing.T) {
+	s := newConfiguredServer(t)
+	body := jsonBody(t, map[string]string{"content": "hello"})
+	req := httptest.NewRequest(http.MethodPost, "/api/dm/send", body)
+	w := httptest.NewRecorder()
+	s.handleDMSend(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleDMSend_MissingContent(t *testing.T) {
+	s := newConfiguredServer(t)
+	body := jsonBody(t, map[string]string{"recipient_url": "https://peer.example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/api/dm/send", body)
+	w := httptest.NewRecorder()
+	s.handleDMSend(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleDMSend_MethodNotAllowed(t *testing.T) {
+	s := newConfiguredServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/dm/send", nil)
+	w := httptest.NewRecorder()
+	s.handleDMSend(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestHandleDMMarkRead_MissingConvID(t *testing.T) {
+	s := newConfiguredServer(t)
+	body := jsonBody(t, map[string]string{})
+	req := httptest.NewRequest(http.MethodPost, "/api/dm/mark-read", body)
+	w := httptest.NewRecorder()
+	s.handleDMMarkRead(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleDMRetry_Empty(t *testing.T) {
+	s := newConfiguredServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/dm/retry", strings.NewReader("{}"))
+	w := httptest.NewRecorder()
+	s.handleDMRetry(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["unsent_count"] != float64(0) {
+		t.Errorf("expected unsent_count 0, got %v", resp["unsent_count"])
+	}
+}
+
+func TestHandleDMRecipients_Empty(t *testing.T) {
+	s := newConfiguredServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/dm/recipients", nil)
+	w := httptest.NewRecorder()
+	s.handleDMRecipients(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleDMConversation_MethodNotAllowed(t *testing.T) {
+	s := newConfiguredServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/dm/conversations/some-id", nil)
+	w := httptest.NewRecorder()
+	s.handleDMConversation(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+// ============================================================================
+// handleDMRecipients Tests
+// ============================================================================
+
+func TestHandleDMRecipients_PolicyCheck(t *testing.T) {
+	// Mock two remote sites: one allows DMs, one denies
+	allowSite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/policies/rules.jsonl":
+			fmt.Fprintln(w, `{"active":true,"policy":"allow pub.polis.dm from all"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer allowSite.Close()
+
+	denySite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/policies/rules.jsonl":
+			fmt.Fprintln(w, `{"active":true,"policy":"deny pub.polis.dm from all"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer denySite.Close()
+
+	s := newConfiguredServer(t)
+	s.DiscoveryURL = "https://ds.test.polis.pub"
+
+	// Write following.json with the two mock sites
+	followingPath := following.DefaultPath(s.DataDir)
+	f := &following.FollowingFile{
+		Version: "test",
+		Following: []following.FollowingEntry{
+			{URL: allowSite.URL, AuthorName: "Alice"},
+			{URL: denySite.URL, AuthorName: "Bob"},
+		},
+	}
+	following.Save(followingPath, f)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dm/recipients", nil)
+	w := httptest.NewRecorder()
+	s.handleDMRecipients(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Recipients []struct {
+			URL        string `json:"url"`
+			AuthorName string `json:"author_name"`
+			Status     string `json:"status"`
+			Reason     string `json:"reason"`
+		} `json:"recipients"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if len(resp.Recipients) != 2 {
+		t.Fatalf("expected 2 recipients, got %d", len(resp.Recipients))
+	}
+
+	// First site allows all DMs
+	if resp.Recipients[0].Status != "open" {
+		t.Errorf("expected 'open' for allow-all site, got %q", resp.Recipients[0].Status)
+	}
+	// Second site denies all DMs
+	if resp.Recipients[1].Status != "no-dm" {
+		t.Errorf("expected 'no-dm' for deny-all site, got %q", resp.Recipients[1].Status)
+	}
+}
+
+func TestHandleDMRecipients_MethodNotAllowed(t *testing.T) {
+	s := newConfiguredServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/dm/recipients", nil)
+	w := httptest.NewRecorder()
+	s.handleDMRecipients(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestHandleDMRecipients_NoPrivateKey(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/dm/recipients", nil)
+	w := httptest.NewRecorder()
+	s.handleDMRecipients(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleDMRecipients_FollowerStateCorrection(t *testing.T) {
+	// Mock a site with public DM policies that follows our domain
+	s := newConfiguredServer(t)
+	s.DiscoveryURL = "https://ds.test.polis.pub"
+	s.BaseURL = "https://mysite.com"
+
+	remoteSite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/policies/rules.jsonl":
+			fmt.Fprintln(w, `{"active":true,"policy":"allow pub.polis.dm from following"}`)
+			fmt.Fprintln(w, `{"active":true,"policy":"deny pub.polis.dm from all"}`)
+		case "/content/pub.polis.core/follow/following.json":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"version": "1.0",
+				"following": []map[string]string{
+					{"url": "https://mysite.com", "added_at": "2026-01-01T00:00:00Z"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer remoteSite.Close()
+
+	followingPath := following.DefaultPath(s.DataDir)
+	f := &following.FollowingFile{
+		Version: "test",
+		Following: []following.FollowingEntry{
+			{URL: remoteSite.URL, AuthorName: "RemotePeer"},
+		},
+	}
+	following.Save(followingPath, f)
+
+	store := stream.NewStore(s.DataDir, "ds.test.polis.pub", "pub.polis.core")
+	store.SaveState("pub.polis.follow", &stream.FollowerState{
+		Followers: []string{},
+		Count:     0,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dm/recipients", nil)
+	w := httptest.NewRecorder()
+	s.handleDMRecipients(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify follower state was corrected
+	var fs stream.FollowerState
+	if err := store.LoadState("pub.polis.follow", &fs); err != nil {
+		t.Fatalf("failed to load follower state: %v", err)
+	}
+
+	remoteDomain := strings.TrimPrefix(remoteSite.URL, "http://")
+	if idx := strings.Index(remoteDomain, "/"); idx != -1 {
+		remoteDomain = remoteDomain[:idx]
+	}
+	if idx := strings.Index(remoteDomain, ":"); idx != -1 {
+		remoteDomain = remoteDomain[:idx]
+	}
+	found := false
+	for _, f := range fs.Followers {
+		if f == remoteDomain {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected follower state to include %s, got %v", remoteDomain, fs.Followers)
+	}
+}
+
+func TestHandleDMRecipients_MutualFollowFallback(t *testing.T) {
+	// No public DM policies — falls back to mutual-follow check
+	s := newConfiguredServer(t)
+	s.DiscoveryURL = "https://ds.test.polis.pub"
+	s.BaseURL = "https://mysite.com"
+
+	// Site that follows us but has no public DM policies
+	followsSite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/policies/rules.jsonl":
+			http.NotFound(w, r) // no public policies
+		case "/content/pub.polis.core/follow/following.json":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"version": "1.0",
+				"following": []map[string]string{
+					{"url": "https://mysite.com", "added_at": "2026-01-01T00:00:00Z"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer followsSite.Close()
+
+	// Site that doesn't follow us and has no public DM policies
+	noFollowSite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/policies/rules.jsonl":
+			http.NotFound(w, r)
+		case "/content/pub.polis.core/follow/following.json":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"version":   "1.0",
+				"following": []map[string]string{},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer noFollowSite.Close()
+
+	followingPath := following.DefaultPath(s.DataDir)
+	f := &following.FollowingFile{
+		Version: "test",
+		Following: []following.FollowingEntry{
+			{URL: followsSite.URL, AuthorName: "Mutual"},
+			{URL: noFollowSite.URL, AuthorName: "OneWay"},
+		},
+	}
+	following.Save(followingPath, f)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dm/recipients", nil)
+	w := httptest.NewRecorder()
+	s.handleDMRecipients(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Recipients []struct {
+			AuthorName string `json:"author_name"`
+			Status     string `json:"status"`
+			FollowsUs  bool   `json:"follows_us"`
+		} `json:"recipients"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+
+	if len(resp.Recipients) != 2 {
+		t.Fatalf("expected 2 recipients, got %d", len(resp.Recipients))
+	}
+
+	// Mutual follow → open + follows_us
+	if resp.Recipients[0].Status != "open" {
+		t.Errorf("expected 'open' for mutual follow, got %q", resp.Recipients[0].Status)
+	}
+	if !resp.Recipients[0].FollowsUs {
+		t.Error("expected follows_us=true for mutual follow")
+	}
+
+	// One-way follow → no-follow
+	if resp.Recipients[1].Status != "no-follow" {
+		t.Errorf("expected 'no-follow' for one-way follow, got %q", resp.Recipients[1].Status)
+	}
+	if resp.Recipients[1].FollowsUs {
+		t.Error("expected follows_us=false for one-way follow")
+	}
+}
+
+func TestCountsIncludeDMUnread(t *testing.T) {
+	s := newConfiguredServer(t)
+	counts := s.computeAllCounts()
+	// With no DM store data, DMUnread should be 0
+	if counts.DMUnread != 0 {
+		t.Errorf("expected DMUnread 0, got %d", counts.DMUnread)
 	}
 }

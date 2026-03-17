@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
@@ -15,6 +16,11 @@ import (
 
 // md is the configured goldmark markdown renderer
 var md goldmark.Markdown
+
+// sanitizer is the HTML sanitization policy applied after markdown rendering.
+// It strips dangerous elements (script, iframe, object, embed, form) and event
+// handlers while preserving structural HTML that polis authors commonly use.
+var sanitizer *bluemonday.Policy
 
 func init() {
 	md = goldmark.New(
@@ -28,18 +34,32 @@ func init() {
 		goldmark.WithRendererOptions(
 			goldhtml.WithHardWraps(),
 			goldhtml.WithXHTML(),
-			goldhtml.WithUnsafe(), // Allow raw HTML in markdown
+			goldhtml.WithUnsafe(), // Allow raw HTML through so bluemonday can make allow/deny decisions
 		),
 	)
+
+	sanitizer = bluemonday.UGCPolicy()
+	// Structural HTML elements authors use in posts
+	sanitizer.AllowElements("details", "summary", "video", "audio", "source", "picture", "figure", "figcaption", "mark", "kbd", "abbr", "dfn", "ins", "del", "sub", "sup", "ruby", "rt", "rp", "time", "meter", "progress", "dialog")
+	// Video/audio attributes
+	sanitizer.AllowAttrs("src", "type", "controls", "autoplay", "loop", "muted", "poster", "preload", "width", "height").OnElements("video", "audio", "source")
+	// Data attributes for custom styling
+	sanitizer.AllowDataAttributes()
+	// Class attributes (themes depend on this)
+	sanitizer.AllowAttrs("class").Globally()
+	// ID attributes (heading anchors, in-page links)
+	sanitizer.AllowAttrs("id").Globally()
 }
 
 // MarkdownToHTML converts markdown content to HTML.
+// The output is sanitized to remove dangerous elements (script, iframe, etc.)
+// and event handlers while preserving safe structural HTML.
 func MarkdownToHTML(markdown string) (string, error) {
 	var buf bytes.Buffer
 	if err := md.Convert([]byte(markdown), &buf); err != nil {
 		return "", err
 	}
-	return buf.String(), nil
+	return sanitizer.Sanitize(buf.String()), nil
 }
 
 // htmlTagPattern matches HTML tags for stripping.

@@ -57,10 +57,11 @@ When you start the webapp:
 
 1. The data directory is created if it doesn't exist
 2. Your site configuration is loaded (keys, `.env`, `.well-known/polis`)
-3. Background sync starts for notifications and your conversations feed
-4. A port is automatically found on localhost
-5. Your default browser opens after a brief delay
-6. The server prints its URL and data directory to the terminal
+3. Any old-format draft directories are automatically migrated to the new layout
+4. Background sync starts — but only fires when browser tabs are connected via SSE
+5. A port is automatically found on localhost
+6. Your default browser opens after a brief delay
+7. The server prints its URL and data directory to the terminal
 
 There is no `--port` flag — the port is always dynamically allocated. The URL is printed to the terminal so you can find it.
 
@@ -74,8 +75,9 @@ If the data directory has no site configured, the webapp shows a **Welcome scree
 - A new Ed25519 keypair for signing your content
 - A `.well-known/polis` identity file
 - The directory structure for posts, comments, and snippets
+- A default `site/snippets/about.md` for your About section
 
-You can optionally provide a site title, base URL, and discovery service credentials. These can also be configured later.
+You can optionally provide a site title, base URL, and discovery service URL. These can also be configured later.
 
 **Link Existing Site** — Points the webapp at a directory that already contains a Polis site. The directory must have a `.well-known/polis` file and a keypair in `.polis/keys/`.
 
@@ -88,51 +90,70 @@ After creating or linking a site, the webapp shows a setup wizard if your site i
 
 You can dismiss the wizard and complete these steps later. If dismissed before registering, a persistent banner reminds you to finish.
 
+### Lifecycle Stages
+
+The UI adapts to where you are in the setup process:
+
+- **just_arrived** — No site configured yet. Only the welcome/init flow is shown.
+- **first_post** — Site is initialized but no posts published yet. A welcome panel with onboarding steps is shown. Social features are available but sub-tabs may show empty states.
+- **active** — At least one post published. Full navigation is visible.
+
 ---
 
 ## Layout & Navigation
 
-The webapp has three main areas:
+The webapp uses a centered-column layout with a thin top navigation bar:
 
-### Header Bar
+### Top Nav Bar
 
-- **Left**: "Polis" title
-- **Center**: View mode toggle (list view or split-pane browser view)
-- **Right**: Your domain name and the notification bell
+The top bar contains (left to right within a centered 640px column):
 
-The notification bell shows a red dot when you have unread notifications. Click it to open the notification panel.
+- **Logo**: "Polis" with your domain shown on hover (links to your public site)
+- **Mode Toggle**: Segmented control with "Feed" and "Posts" buttons
+- **Icon Buttons** (right-aligned):
+  - **Sun/Moon** — Toggle between light and dark theme
+  - **Bell** — Notifications (red dot when unread)
+  - **Heart** — Blessing requests (amber dot when pending)
+  - **People** — Following/followers network
+  - **Gear** — Settings
 
-### Sidebar
+### Mode Toggle
 
-The sidebar has two modes, toggled by tabs at the top:
+The Feed/Posts segmented control switches between two primary views:
 
-**My Site** — Everything about your own content:
+**Feed** — Social content from authors you follow:
+- Conversations (posts + comments from your network)
+- Pulse (community activity stream)
+- Activity events
 
-| Section | Items |
-|---------|-------|
-| **Posts** | Published, Drafts |
-| **My Comments** | Drafts, Pending, Blessed, Denied |
-| **On My Posts** | Pending, Blessed |
-| **Snippets** | All Snippets, Global, Theme |
-| **Settings** | (at sidebar footer) |
+**Posts** — Your own site content, with sub-tabs:
+- Published, Drafts, Comments, Blessings, Snippets
 
-**Social** — Content from authors you follow:
+### Centered Content Column
 
-| Section | Items |
-|---------|-------|
-| **Discover** | Conversations, Activity |
-| **Authors** | Following |
-| **Stats** | Followers |
+All content is rendered in a 640px centered column below the top bar. This includes feed cards, post lists, settings, and all other views.
 
-Some sidebar items show count badges. Pending items (blessing requests awaiting your action, comments awaiting approval) show orange warning badges.
-
-### Content Area
-
-The main area to the right of the sidebar. Displays lists, editors, detail panels, and settings depending on what you've selected.
-
-**Toasts** appear in the bottom-right corner for success, error, warning, and info messages. They auto-dismiss after a few seconds.
+**Toasts** appear in the bottom-right corner for success, error, warning, and info messages. They auto-dismiss after a few seconds. Some toasts include action buttons — for example, after blessing a comment you may see a suggestion to follow the commenter back.
 
 **Confirmation modals** appear centered on screen for destructive or important actions (publishing, revoking blessings, unfollowing).
+
+### Deep-Linking
+
+The webapp supports bookmarkable URLs via the `/_/` path prefix. You can navigate directly to any view:
+
+| URL | View |
+|-----|------|
+| `/_/posts` | Published posts |
+| `/_/posts/drafts` | Draft posts |
+| `/_/comments` | My Comments |
+| `/_/comments/pending` | My Comments (pending tab) |
+| `/_/blessings` | Blessing Requests |
+| `/_/snippets` | About editor |
+| `/_/social/pulse` | Community Pulse |
+| `/_/social/conversations` | Conversations |
+| `/_/social/following` | Following |
+| `/_/social/followers` | Followers |
+| `/_/settings` | Settings |
 
 ---
 
@@ -145,9 +166,9 @@ The main area to the right of the sidebar. Displays lists, editors, detail panel
 3. Enter a filename (auto-generated from your title, editable before first save)
 4. Write your content in markdown
 5. Click **Publish** — a confirmation modal appears
-6. The post is signed with your Ed25519 key and saved to `posts/YYYYMMDD/`
+6. The post is signed with your Ed25519 key and saved to `content/pub.polis.core/post/YYYYMMDD/`
 
-After publishing, the post appears in your Published list.
+After publishing, the post appears in your Published list. A brief pulsing "broadcast" animation appears below the post to indicate it was just published.
 
 ### Editing and Republishing
 
@@ -156,9 +177,19 @@ After publishing, the post appears in your Published list.
 3. Click **Republish** — the version number increments and the post is re-signed
 4. The version history in the post's frontmatter is updated automatically
 
+### Unpublishing a Post
+
+To remove a published post:
+
+1. Click the post in the Published list
+2. Click **Unpublish** in the post detail panel
+3. Confirm the action
+
+Unpublishing removes the post from the public index. The source file is deleted. This cannot be undone from the UI — if you still have the file in version control, you can recover it manually.
+
 ### Drafts
 
-Click **Save Draft** at any time while writing. Drafts are stored in `.polis/drafts/` with auto-numbered IDs. Open a draft from the Drafts sidebar view to continue editing, then publish when ready.
+Click **Save Draft** at any time while writing. Drafts are stored in `.polis/content/pub.polis.core/posts/drafts/` with auto-numbered IDs. Open a draft from the Drafts sidebar view to continue editing, then publish when ready.
 
 ### Commenting on Other Authors' Posts
 
@@ -173,42 +204,48 @@ This signs your comment and sends a blessing request to the post's author. Possi
 - **Pending**: The comment is saved and awaits the author's manual approval
 - **Signed but request failed**: The comment is signed locally, but the blessing request couldn't reach the discovery service (a warning toast explains what happened)
 
-Your comment then appears in **My Comments > Pending** until the author blesses or denies it. Use the **Sync** button in the Pending view to check for updates.
+Your comment then appears in **My Comments > Pending** until the author blesses or denies it. Use the **Sync** button in the Pending tab to check for updates.
 
 ### Blessing Workflow
 
 > For CLI blessing commands, see the [CLI Command Reference](USAGE.md). For terminology, see the [Glossary](GLOSSARY.md).
 
-When other authors comment on your posts, their blessing requests appear in **On My Posts > Pending**.
+When other authors comment on your posts, their blessing requests appear in **Blessing Requests**.
 
 **To review a request:**
 
-1. Click any pending request to open a detail panel
-2. The panel shows who commented, on which post, and when
-3. Click **Bless** to approve or **Deny** to reject
+1. Click **Blessing Requests** in the sidebar to open the consolidated view
+2. Use the tabs to filter: All, Pending, or Blessed
+3. Click any pending request to open a detail panel
+4. The panel shows who commented, on which post, and when
+5. Click **Bless** to approve or **Deny** to reject
 
-**Blessed comments** become part of your site's public content. They appear in **On My Posts > Blessed**.
+After blessing a comment, a suggestion toast may appear offering to follow the commenter back. Click the Follow button in the toast to follow them without opening the full follow panel.
+
+**Blessed comments** become part of your site's public content. They appear in the Blessed tab.
 
 **To revoke a blessing:**
 
-1. Go to **On My Posts > Blessed**
+1. Go to **Blessing Requests > Blessed**
 2. Click the blessed comment
 3. Click **Revoke Blessing** in the detail panel
 4. Confirm the action
 
 Revoking removes the comment from your blessed index.
 
-### Snippets
+### About Page
 
-Snippets are reusable content blocks you can include in posts with `{{> snippet-name}}`.
+The **Snippets** sidebar item opens the About editor — a full-screen markdown editor for your site's About section. This edits `site/snippets/about.md`, which is included by your theme's About template.
 
-**Global snippets** live in `snippets/` and are your own creations.
+Changes are saved immediately when you click **Save**. The site is re-rendered automatically after saving.
 
-**Theme snippets** live in `.polis/themes/<theme>/snippets/` and are part of your site's theme. Editing a theme snippet shows a warning because changes affect all sites using that theme and may be overwritten on theme updates.
+If `site/snippets/about.md` does not exist yet (older sites), the editor pre-populates with default welcome text. Saving creates the file.
 
-To create a snippet, click **New Snippet** in the Snippets section. Enter a filename (must end with `.html` or `.md`) and content. The snippet editor has a live preview with sample data so you can test template variables.
+### Snippets in Posts
 
-Snippet resolution order: `.md` first, then `.html`, then exact name match.
+You can include reusable content in posts using `{{> snippet-name}}`.
+
+Snippet resolution order: `.md` first, then `.html`, then exact name match. Global snippets live in `site/snippets/`. Theme snippets are part of your active theme.
 
 ---
 
@@ -216,32 +253,41 @@ Snippet resolution order: `.md` first, then `.html`, then exact name match.
 
 ### Following Authors
 
-Go to **Social > Authors > Following** and click **Follow Author**. Enter the author's site URL (must start with `https://`).
+Go to **Social > Authors > Following** and click **Follow Author**. Enter the author's URL in any of these formats:
+- Full URL: `https://example.com/`
+- Bare domain: `example.com`
+- Follow link: `polis.pub/f/handle`
 
-When your following list is empty, the webapp suggests `discover.polis.pub` as a community hub to get started.
+When your following list is empty, the webapp suggests `discover.polis.pub` as a community hub to get started. You can follow it with one click.
 
 Each followed author shows their domain, full URL, and when they were last checked. Click **Unfollow** to remove them (requires confirmation).
 
-### Conversations Feed
+**Important side effects:**
+- Following an author automatically blesses any of their pending blessing requests on your posts.
+- Unfollowing an author automatically denies any of their pending blessing requests on your posts.
 
-**Social > Discover > Conversations** shows posts from authors you follow. The feed:
+### Conversations
 
-- Refreshes automatically in the background (every 60 seconds)
+**Social > Discover > Conversations** shows a combined view of posts from authors you follow and activity from the discovery network. It has three subtabs:
+
+- **All** — Merged view of Feed and Activity together
+- **Feed** — Posts from authors you follow only
+- **Activity** — Chronological stream of events from the discovery service (follows, comments, blessings, etc.)
+
+The feed:
+- Refreshes automatically in the background (every 30 seconds server-side when a browser tab is connected via SSE)
 - Shows a badge with your unread count
 - Supports manual refresh with the Refresh button
 - Lets you mark items as read/unread individually or in bulk
+- Has an **Unread From Here** button — marks the clicked item and everything above it as unread
+- Has a **Mark All Read** button in the header
 - Shows a staleness banner if the feed hasn't updated in over 24 hours
 
-### Activity Stream
+### Community Pulse
 
-**Social > Discover > Activity** shows a chronological stream of events from the discovery service:
+**Social > Discover > Pulse** shows a dashboard of activity across the Polis network. The Pulse view displays summary cards with aggregate activity data from the discovery service.
 
-- Posts published or updated
-- Comments published or updated
-- Blessing requests, grants, and denials
-- Follow and unfollow events
-
-This is a broader view than the Conversations feed, which only shows posts from people you follow.
+Pulse data is fetched from the discovery service and cached locally.
 
 ### Followers
 
@@ -294,7 +340,7 @@ Your Ed25519 private key is read by the server process for signing but is never 
 
 **Protect these files:**
 - `.polis/keys/id_ed25519` — your private signing key
-- `.env` — discovery service credentials
+- `.env` — site URL and discovery service credentials
 - Your data directory — treat it like any directory with private files
 
 For the full cryptographic model, key management details, and threat analysis, see [SECURITY-MODEL.md](SECURITY-MODEL.md).
@@ -303,23 +349,52 @@ For the full cryptographic model, key management details, and threat analysis, s
 
 ## Settings
 
-Navigate to **My Site > Settings** to view and manage your site configuration.
+Navigate to **My Site > Settings** (gear icon at the sidebar footer) to view and manage your site configuration.
 
 ### Site Section
 
 | Field | Source | Description |
 |-------|--------|-------------|
-| Site Title | `.well-known/polis` | Your site's display name |
-| Public Key | `.polis/keys/id_ed25519.pub` | Your Ed25519 public key (truncated, with copy button) |
+| Site Title | `.well-known/polis` | Your site's display name (editable inline — click to edit) |
+| Public Key | `.polis/keys/id_ed25519.pub` | Your Ed25519 public key (truncated, with Copy and Rotate buttons) |
 | Data Directory | Startup flag or cwd | Where your site files live |
 
-### Theme Section
+**Rotating your key:**
 
-The Theme section displays a grid of all available themes with color palette previews. Each card shows 5 representative colors extracted from the theme's CSS variables.
+Click **Rotate Key** to generate a new keypair. This:
+1. Notifies the discovery service first (so your signature changes are attributed correctly)
+2. Generates a new Ed25519 keypair
+3. Writes the new keys to `.polis/keys/`
+4. Updates your `.well-known/polis` identity file
 
-- Click any theme card to switch immediately — this updates the manifest, copies the theme CSS, and re-renders your entire site.
-- The currently active theme is highlighted with a badge.
-- Theme data is stored in `metadata/manifest.json` (`active_theme` field) and the theme CSS is copied to `styles.css` at the site root.
+Key rotation requires your site to be registered with the discovery service and your `POLIS_BASE_URL` to be set in `.env`.
+
+### Webapp Appearance
+
+The Webapp Appearance section lets you toggle between light and dark color modes:
+
+- **Light**: Warm cream background with brown accents
+- **Dark**: Deep violet background with warm gold accents
+
+This controls only the webapp's color scheme — it does not affect your public site's theme. The preference is saved to `config.json` and synced via `localStorage` for instant loading.
+
+### Site Theme
+
+The Site Theme section has a dropdown selector showing all available themes:
+
+| Theme | Description |
+|-------|-------------|
+| `especial` | Dark gold and navy, inspired by Modelo Especial |
+| `especial-light` | Light variant of especial with warm fog tones |
+| `sols` | Violet and peach, inspired by Nine Sols |
+| `studio13` | Stark black and burnt orange, late-night studio energy |
+| `turbo` | Deep blue with bright cyan, retro computing aesthetic |
+| `vice` | Warm coral and sunset hues, Miami Vice vibes |
+| `zane` | Neutral dark with teal and salmon, based on a classic editor theme |
+
+Select a theme from the dropdown to switch immediately — this updates the manifest, copies the theme CSS, and re-renders your entire site.
+
+Theme data is stored in your site's manifest (`active_theme` field) and the theme CSS is copied to `styles.css` at the site root.
 
 ### Discovery Service Section
 
@@ -331,15 +406,26 @@ The Theme section displays a grid of all available themes with color palette pre
 
 If your site is registered, you'll see the registration date. If not, a **Register** button lets you register directly. You can also **Unregister** to remove your site from the discovery network.
 
-The discovery service has sensible defaults — if you don't set `DISCOVERY_SERVICE_URL` or `DISCOVERY_SERVICE_KEY` in your `.env`, the public Polis discovery service is used automatically.
+The discovery service uses sensible defaults — if you don't set `DISCOVERY_SERVICE_URL` in your `.env`, the public Polis discovery service (`ds.polis.pub`) is used automatically.
 
 ### View Preferences
 
 | Setting | Storage | Default | Description |
 |---------|---------|---------|-------------|
-| View mode | `webapp-config.json` | `list` | List view or split-pane browser view |
-| Show frontmatter | `webapp-config.json` | `true` | Toggle YAML frontmatter visibility in the editor |
-| Hide read items | `webapp-config.json` | `false` | Hide read items in feed views |
+| View mode | `.polis/webapp/config.json` | `list` | List view or split-pane browser view |
+| Show frontmatter | `.polis/webapp/config.json` | `true` | Toggle YAML frontmatter visibility in the editor |
+| Hide read items | `.polis/webapp/config.json` | `false` | Hide read items in feed views |
+| Webapp theme | `.polis/webapp/config.json` | `dark` | Light or dark color mode for the webapp UI |
+
+### Troubleshooting Section
+
+The Settings page includes a **Troubleshooting** section with:
+
+- **Re-render all pages** — Force-rebuilds all your published HTML from source markdown. Useful after changing your theme, updating snippets, or recovering from a corrupted render.
+
+### Export Section
+
+- **Download site** — Downloads your entire site directory as a zip archive, including your keys. Use this for backups or migrating to a new machine.
 
 ### Where Settings Come From
 
@@ -350,8 +436,8 @@ Settings are loaded from multiple places:
 | Source | What It Stores |
 |--------|---------------|
 | `.well-known/polis` | Site identity (title, author, email, public key) |
-| `.env` | Runtime secrets (`POLIS_BASE_URL`, `DISCOVERY_SERVICE_URL`, `DISCOVERY_SERVICE_KEY`) |
-| `.polis/webapp-config.json` | UI preferences (view mode, frontmatter toggle, hide read, hooks, log level) |
+| `.env` | Runtime config (`POLIS_BASE_URL`, `DISCOVERY_SERVICE_URL`, `DISCOVERY_SERVICE_KEY`, `LOG_LEVEL`, `LOG_RETENTION_DAYS`) |
+| `.polis/webapp/config.json` | UI preferences (view mode, frontmatter toggle, hide read, setup wizard state, hooks) |
 
 The `.env` file is searched in order: your data directory first, then the current working directory, then `~/.polis/`.
 
@@ -364,7 +450,7 @@ Hooks are shell scripts that run automatically after you publish, republish, or 
 ### The Three Hook Events
 
 | Event | When It Fires |
-|-------|--------------|
+|-------|--------------:|
 | `post-publish` | After a new post is published |
 | `post-republish` | After an existing post is updated |
 | `post-comment` | After a comment is auto-blessed |
@@ -377,7 +463,7 @@ In **Settings**, find the **Help Me...** section with two wizards:
 1. Choose a deployment method (Vercel, GitHub Pages, or Git-only)
 2. Select which hook events to configure
 3. Review the generated script
-4. Confirm — scripts are created in `.polis/hooks/`
+4. Confirm — scripts are created in `.polis/webapp/hooks/`
 
 **Custom Script Wizard** — creates starter scripts for you to customize:
 1. Review the three hook types and available environment variables
@@ -386,16 +472,16 @@ In **Settings**, find the **Help Me...** section with two wizards:
 
 ### Configuring Hooks on the Filesystem
 
-Hook scripts live at `.polis/hooks/`:
+Hook scripts live at `.polis/webapp/hooks/`:
 
 ```
-.polis/hooks/
+.polis/webapp/hooks/
 ├── post-publish.sh
 ├── post-republish.sh
 └── post-comment.sh
 ```
 
-Each script must be executable (`chmod +x`). The webapp also records hook paths in `.polis/webapp-config.json`.
+Each script must be executable (`chmod +x`). Hooks are resolved by checking the explicit paths in `.polis/webapp/config.json`, then auto-discovering scripts in `.polis/webapp/hooks/`.
 
 ### Built-In Templates
 
@@ -413,7 +499,7 @@ Every hook script receives these environment variables:
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `POLIS_EVENT` | The hook event type | `post-publish` |
-| `POLIS_PATH` | Relative path to the file | `posts/20260213/my-post.md` |
+| `POLIS_PATH` | Relative path to the file | `content/pub.polis.core/post/20260213/my-post.md` |
 | `POLIS_TITLE` | Post title (or reply-to URL for comments) | `My First Post` |
 | `POLIS_VERSION` | Version string | `1` |
 | `POLIS_TIMESTAMP` | ISO 8601 timestamp | `2026-02-13T15:04:05Z` |
@@ -428,7 +514,7 @@ In addition to environment variables, the same data is passed as JSON on **stdin
 ```json
 {
   "event": "post-publish",
-  "path": "posts/20260213/my-post.md",
+  "path": "content/pub.polis.core/post/20260213/my-post.md",
   "title": "My First Post",
   "version": "1",
   "timestamp": "2026-02-13T15:04:05Z",
@@ -468,16 +554,16 @@ Notifications tell you when something happens on the discovery network that's re
 
 ### How Notifications Work
 
-1. The webapp polls the discovery service every **60 seconds** for new events
+1. The webapp syncs with the discovery service every **30 seconds** when at least one browser tab is connected via SSE
 2. Events are matched against your **notification rules** to decide what's relevant
 3. Matching events are written to a local state file as notification entries
 4. The notification bell shows a red dot when you have unread notifications
 
-An initial sync runs immediately on startup, then repeats every 60 seconds.
+An immediate sync runs when you first open a browser tab, then repeats every 30 seconds as long as a tab remains open. Sync pauses when all tabs are closed.
 
 ### The Notification Bell & Panel
 
-Click the bell icon in the header to open the notification panel. The panel shows your notifications newest-first, with unread items highlighted by a teal left border.
+Click the bell icon in the top nav bar to open the notification panel. The panel shows your notifications newest-first, with unread items highlighted.
 
 Each notification shows an icon, a message, and a relative timestamp (e.g., "2 days ago").
 
@@ -491,15 +577,15 @@ The panel supports infinite scroll — older notifications load as you scroll do
 
 | Rule | Event | Enabled | Filter | Message |
 |------|-------|---------|--------|---------|
-| `new-follower` | `polis.follow.announced` | Yes | target_domain | `{{actor}} started following you` |
-| `lost-follower` | `polis.follow.removed` | Yes | target_domain | `{{actor}} unfollowed you` |
-| `blessing-requested` | `polis.blessing.requested` | Yes | target_domain | `{{actor}} requested a blessing on {{post_name}}` |
-| `blessing-granted` | `polis.blessing.granted` | Yes | source_domain | `{{actor}} blessed your comment` |
-| `blessing-denied` | `polis.blessing.denied` | Yes | source_domain | `{{actor}} denied your comment` |
-| `new-comment` | `polis.comment.published` | Yes | target_domain | `{{actor}} commented on {{post_name}}` |
-| `updated-comment` | `polis.comment.republished` | No | target_domain | `{{actor}} updated their comment on {{post_name}}` |
-| `new-post` | `polis.post.published` | Yes | followed_author | `{{actor}} published a new post` |
-| `updated-post` | `polis.post.republished` | No | followed_author | `{{actor}} updated a post` |
+| `new-follower` | `pub.polis.follow.announced` | Yes | target_domain | `{{actor}} started following you` |
+| `lost-follower` | `pub.polis.follow.removed` | Yes | target_domain | `{{actor}} unfollowed you` |
+| `blessing-requested` | `pub.polis.comment.blessing.requested` | Yes | target_domain | `{{actor}} requested a blessing on {{post_name}}` |
+| `blessing-granted` | `pub.polis.comment.blessing.granted` | Yes | source_domain | `{{actor}} blessed your comment` |
+| `blessing-denied` | `pub.polis.comment.blessing.denied` | Yes | source_domain | `{{actor}} denied your comment` |
+| `new-comment` | `pub.polis.comment.published` | Yes | target_domain | `{{actor}} commented on {{post_name}}` |
+| `updated-comment` | `pub.polis.comment.republished` | No | target_domain | `{{actor}} updated their comment on {{post_name}}` |
+| `new-post` | `pub.polis.post.published` | Yes | followed_author | `{{actor}} published a new post` |
+| `updated-post` | `pub.polis.post.republished` | No | followed_author | `{{actor}} updated a post` |
 
 Two rules are disabled by default (`updated-comment` and `updated-post`) to reduce noise from content updates.
 
@@ -515,14 +601,14 @@ Each rule uses a filter to determine which events are relevant to you:
 
 ### Enabling and Disabling Rules
 
-Rules are stored in `.polis/ds/<domain>/config/notifications.json`. You can edit this file to enable or disable specific rules by changing the `enabled` field:
+Rules are stored in `.polis/ds/<domain>/pub.polis.core/config/notifications.json`. You can edit this file to enable or disable specific rules by changing the `enabled` field:
 
 ```json
 {
   "rules": [
     {
       "id": "new-follower",
-      "event_type": "polis.follow.announced",
+      "event_type": "pub.polis.follow.announced",
       "enabled": true,
       ...
     }
@@ -561,8 +647,8 @@ Events from muted domains are silently skipped, regardless of which rules match.
 
 | File | Path | Purpose |
 |------|------|---------|
-| Config | `.polis/ds/<domain>/config/notifications.json` | Your rules and muted domains (user preferences) |
-| State | `.polis/ds/<domain>/state/polis.notification.jsonl` | Notification entries (computed, safely deletable) |
+| Config | `.polis/ds/<domain>/pub.polis.core/config/notifications.json` | Your rules and muted domains (user preferences) |
+| State | `.polis/ds/<domain>/pub.polis.core/state/pub.polis.notification.jsonl` | Notification entries (computed, safely deletable) |
 
 The config file survives resets and reflects your preferences. The state file is append-only JSONL — each line is one notification entry. Deleting the state file is safe; notifications will be rebuilt on the next sync.
 
@@ -580,41 +666,50 @@ Your Polis site is a directory of files. Understanding the structure helps with 
 
 ```
 your-site/
-├── .well-known/polis              # Site identity
-├── .env                           # Runtime secrets
+├── .well-known/polis              # Site identity (JSON)
+├── .env                           # Runtime config
 ├── .polis/
 │   ├── keys/
 │   │   ├── id_ed25519            # Private key (never share)
 │   │   └── id_ed25519.pub        # Public key
-│   ├── drafts/                    # Post drafts
-│   ├── comments/
-│   │   ├── drafts/               # Comment drafts
-│   │   ├── pending/              # Awaiting blessing
-│   │   └── denied/               # Rejected comments
-│   ├── hooks/                     # Hook scripts
-│   │   ├── post-publish.sh
-│   │   ├── post-republish.sh
-│   │   └── post-comment.sh
-│   ├── themes/                    # Theme snippet overrides
+│   ├── content/pub.polis.core/
+│   │   ├── posts/drafts/         # Post drafts (JSON)
+│   │   └── comments/
+│   │       ├── drafts/           # Comment drafts
+│   │       ├── pending/          # Awaiting blessing
+│   │       └── denied/           # Rejected comments
 │   ├── ds/<discovery-domain>/
-│   │   ├── config/               # User preferences
-│   │   │   ├── notifications.json
-│   │   │   └── feed.json
-│   │   └── state/                # Computed data
-│   │       ├── cursors.json
-│   │       ├── polis.notification.jsonl
-│   │       ├── polis.feed.jsonl
-│   │       ├── polis.follow.json
-│   │       └── polis.blessing.json
-│   └── webapp-config.json         # UI preferences
-├── posts/YYYYMMDD/                # Published posts
-├── comments/YYYYMMDD/             # Blessed comments
-├── snippets/                      # Reusable content blocks
-├── metadata/
-│   ├── public.jsonl               # Index of published content
-│   ├── blessed-comments.json      # Index of blessed comments
-│   └── following.json             # Authors you follow
-└── logs/                          # Daily logs (if logging enabled)
+│   │   └── pub.polis.core/
+│   │       ├── config/           # User preferences (survives resets)
+│   │       │   ├── notifications.json
+│   │       │   └── feed.json
+│   │       └── state/            # Computed data (safely deletable)
+│   │           ├── cursors.json
+│   │           ├── pub.polis.notification.jsonl
+│   │           ├── pub.polis.feed.jsonl
+│   │           ├── pub.polis.follow.json
+│   │           └── pub.polis.comment.blessing.json
+│   ├── logs/                      # Daily logs (YYYY-MM-DD.log)
+│   └── webapp/
+│       ├── config.json            # UI preferences
+│       └── hooks/                 # Hook scripts
+│           ├── post-publish.sh
+│           ├── post-republish.sh
+│           └── post-comment.sh
+├── content/pub.polis.core/
+│   ├── bundle.json               # Bundle definition
+│   ├── index.jsonl               # Public content index
+│   ├── post/YYYYMMDD/            # Source posts (markdown)
+│   ├── comment/
+│   │   ├── YYYYMMDD/             # Source comments (markdown)
+│   │   └── blessed.json          # Blessed comments index
+│   └── follow/following.json     # Following list
+├── posts/                        # Rendered posts (HTML, served publicly)
+├── comments/                     # Rendered comments (HTML, served publicly)
+├── site/
+│   └── snippets/
+│       └── about.md              # About section content (editable in webapp)
+└── styles.css                    # Active theme CSS (copied from theme)
 ```
 
 ### Config vs State
@@ -622,17 +717,17 @@ your-site/
 This distinction is important for troubleshooting:
 
 **Config files** contain your preferences. They survive resets and should be preserved:
-- `.polis/webapp-config.json` — UI preferences
-- `.polis/ds/<domain>/config/notifications.json` — notification rules and muted domains
-- `.polis/ds/<domain>/config/feed.json` — feed display preferences
+- `.polis/webapp/config.json` — UI preferences and hook paths
+- `.polis/ds/<domain>/pub.polis.core/config/notifications.json` — notification rules and muted domains
+- `.polis/ds/<domain>/pub.polis.core/config/feed.json` — feed display preferences
 - `.env` — discovery service credentials and site URL
 
 **State files** contain computed data derived from the discovery service. They can be safely deleted and will be rebuilt on the next sync:
-- `.polis/ds/<domain>/state/cursors.json` — sync positions
-- `.polis/ds/<domain>/state/polis.notification.jsonl` — notification entries
-- `.polis/ds/<domain>/state/polis.feed.jsonl` — feed cache
-- `.polis/ds/<domain>/state/polis.follow.json` — followers list
-- `.polis/ds/<domain>/state/polis.blessing.json` — blessing decisions
+- `.polis/ds/<domain>/pub.polis.core/state/cursors.json` — sync positions
+- `.polis/ds/<domain>/pub.polis.core/state/pub.polis.notification.jsonl` — notification entries
+- `.polis/ds/<domain>/pub.polis.core/state/pub.polis.feed.jsonl` — feed cache
+- `.polis/ds/<domain>/pub.polis.core/state/pub.polis.follow.json` — followers list
+- `.polis/ds/<domain>/pub.polis.core/state/pub.polis.comment.blessing.json` — blessing decisions
 
 ### Key Files Explained
 
@@ -642,19 +737,27 @@ Your site's identity file. Contains your author name, email, public key, site ti
 
 #### `.env`
 
-Runtime configuration. The three key variables:
+Runtime configuration. Key variables:
 
 ```
 POLIS_BASE_URL=https://your-domain.com
 DISCOVERY_SERVICE_URL=https://...
 DISCOVERY_SERVICE_KEY=eyJ...
+LOG_LEVEL=1
+LOG_RETENTION_DAYS=7
 ```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POLIS_BASE_URL` | — | Your site's public URL (required for registration and key rotation) |
+| `DISCOVERY_SERVICE_URL` | `https://ds.polis.pub` | Discovery service endpoint |
+| `DISCOVERY_SERVICE_KEY` | — | Discovery service API key (optional — public service works without one) |
+| `LOG_LEVEL` | `1` | `0` = off, `1` = basic, `2` = verbose |
+| `LOG_RETENTION_DAYS` | `7` | How many days of logs to keep |
 
 The `.env` file is searched in order: your data directory, current working directory, then `~/.polis/`. The first one found is used.
 
-If `DISCOVERY_SERVICE_URL` and `DISCOVERY_SERVICE_KEY` are not set, the public Polis discovery service is used by default.
-
-#### `.polis/webapp-config.json`
+#### `.polis/webapp/config.json`
 
 Stores webapp UI preferences:
 
@@ -663,11 +766,11 @@ Stores webapp UI preferences:
   "view_mode": "list",
   "show_frontmatter": true,
   "hide_read": false,
+  "webapp_theme": "dark",
   "setup_wizard_dismissed": true,
   "hooks": {
-    "post-publish": ".polis/hooks/post-publish.sh"
-  },
-  "log_level": 0
+    "post-publish": ".polis/webapp/hooks/post-publish.sh"
+  }
 }
 ```
 
@@ -676,9 +779,11 @@ Stores webapp UI preferences:
 | `view_mode` | `"list"` | `"list"` or `"browser"` |
 | `show_frontmatter` | `true` | Show YAML frontmatter in editor |
 | `hide_read` | `false` | Hide read items in feed views |
+| `webapp_theme` | `"dark"` | `"light"` or `"dark"` — webapp color mode |
 | `setup_wizard_dismissed` | `false` | Whether the setup wizard has been dismissed |
 | `hooks` | — | Hook script paths by event type |
-| `log_level` | `0` | `0` = off, `1` = basic, `2` = verbose |
+
+Note: `log_level` is configured via `LOG_LEVEL` in `.env`, not in this file.
 
 #### `cursors.json`
 
@@ -687,11 +792,11 @@ Tracks your sync position with the discovery service. Each "cursor" is a stream 
 ```json
 {
   "cursors": {
-    "polis.notification": {
+    "pub.polis.notification": {
       "position": "12345",
       "last_updated": "2026-02-13T14:30:00Z"
     },
-    "polis.feed": {
+    "pub.polis.feed": {
       "position": "12340",
       "last_updated": "2026-02-13T14:25:00Z"
     }
@@ -699,7 +804,7 @@ Tracks your sync position with the discovery service. Each "cursor" is a stream 
 }
 ```
 
-The cursor name matches the state filename it corresponds to (e.g., cursor `polis.feed` corresponds to state file `polis.feed.jsonl`).
+The cursor name matches the state filename it corresponds to (e.g., cursor `pub.polis.feed` corresponds to state file `pub.polis.feed.jsonl`).
 
 #### `notifications.json` (Config)
 
@@ -725,16 +830,16 @@ Controls feed behavior:
 
 ### Content Directories
 
-**`posts/YYYYMMDD/`** — Published posts as markdown files with YAML frontmatter. Frontmatter includes title, publish date, content hash, version history, and Ed25519 signature.
+**`content/pub.polis.core/post/YYYYMMDD/`** — Published post source files as markdown with YAML frontmatter. Frontmatter includes title, publish date, content hash, version history, and Ed25519 signature.
 
-**`comments/YYYYMMDD/`** — Blessed (approved) comments. Same format as posts, with additional `in-reply-to` frontmatter linking to the original post.
+**`content/pub.polis.core/comment/YYYYMMDD/`** — Blessed (approved) comment source files. Same format as posts, with additional `in-reply-to` frontmatter linking to the original post.
 
-**`snippets/`** — Reusable content blocks in `.md` or `.html` format.
+**`site/snippets/`** — Global snippets, including `about.md` (your About page content).
 
-**`metadata/`** — Index files:
-- `public.jsonl` — index of all published posts and comments
-- `blessed-comments.json` — index of blessed comments
-- `following.json` — list of authors you follow
+**`content/pub.polis.core/`** — Index files:
+- `index.jsonl` — index of all published posts and comments
+- `comment/blessed.json` — index of blessed comments
+- `follow/following.json` — list of authors you follow
 
 ---
 
@@ -754,31 +859,31 @@ Discovery service credentials are optional — defaults are provided for the pub
 
 ### Discovery service unreachable
 
-Check that your `.env` has a valid `DISCOVERY_SERVICE_URL`. The default public service should work without configuration. If you're using a custom discovery service, verify the URL and API key.
+Check that your `.env` has a valid `DISCOVERY_SERVICE_URL`. The default public service (`ds.polis.pub`) should work without any configuration. If you're using a custom discovery service, verify the URL and API key.
 
 ### Notifications not updating
 
-Notifications sync every 60 seconds. If they're stuck:
+Notifications sync every 30 seconds, but only when a browser tab is connected via SSE. If they're stuck:
 
-1. Check that `DISCOVERY_SERVICE_URL` and `DISCOVERY_SERVICE_KEY` are set
-2. Check that your private key exists at `.polis/keys/id_ed25519`
-3. Check that `POLIS_BASE_URL` is set in `.env`
-4. Try deleting `.polis/ds/<domain>/state/polis.notification.jsonl` and restarting — it will be rebuilt
+1. Ensure a browser tab is open and connected to the webapp
+2. Check that `POLIS_BASE_URL` is set in `.env`
+3. Check that your private key exists at `.polis/keys/id_ed25519`
+4. Try deleting `.polis/ds/<domain>/pub.polis.core/state/pub.polis.notification.jsonl` and restarting — it will be rebuilt
 
 ### Feed shows stale content
 
-The feed refreshes every 60 seconds. If it seems stuck:
+The feed refreshes every 30 seconds while a browser tab is open. If it seems stuck:
 
 1. Click the **Refresh** button in the Conversations view
 2. Check that you're following at least one author (the feed only shows content from followed authors)
-3. Try deleting `.polis/ds/<domain>/state/polis.feed.jsonl` — it will be rebuilt
+3. Try deleting `.polis/ds/<domain>/pub.polis.core/state/pub.polis.feed.jsonl` — it will be rebuilt
 
 ### Hooks not running
 
 Common causes:
 
-- **Not executable**: Run `chmod +x .polis/hooks/post-publish.sh`
-- **Wrong path**: Check that `.polis/webapp-config.json` has the correct hook path
+- **Not executable**: Run `chmod +x .polis/webapp/hooks/post-publish.sh`
+- **Script not found**: Ensure scripts are in `.polis/webapp/hooks/` (not `.polis/hooks/`)
 - **Script errors**: Check the terminal output — hook failures are logged but don't prevent publishing
 - **Wrong shebang**: Ensure the first line is `#!/bin/bash` (or your preferred shell)
 - **Missing tools**: If your hook uses `git`, ensure `git` is on the system PATH
@@ -790,6 +895,10 @@ Publishing writes files locally. If your site doesn't update publicly:
 1. You need a deployment step (git push, file sync, etc.)
 2. Set up a [hook](#hooks--automations) to automate deployment
 3. Check your hosting provider's build status
+
+### Rendered pages look wrong after changing theme
+
+After switching themes or updating snippets, use **Settings > Re-render all pages** to force-rebuild all published HTML from source markdown. This is also useful after recovering from any rendering issue.
 
 ### "Site not registered" banner
 
@@ -812,12 +921,12 @@ Cursors track how far you've synced with the discovery service. Resetting one fo
 
 **Why**: If notifications or feed items seem wrong or incomplete.
 
-**How**: Edit `.polis/ds/<domain>/state/cursors.json` and set the cursor's `position` to `"0"`:
+**How**: Edit `.polis/ds/<domain>/pub.polis.core/state/cursors.json` and set the cursor's `position` to `"0"`:
 
 ```json
 {
   "cursors": {
-    "polis.notification": {
+    "pub.polis.notification": {
       "position": "0",
       "last_updated": "2026-02-13T14:30:00Z"
     }
@@ -829,19 +938,19 @@ Cursors track how far you've synced with the discovery service. Resetting one fo
 
 ### Deleting State Files
 
-All files in `.polis/ds/<domain>/state/` can be safely deleted. They will be rebuilt on the next sync cycle (within 60 seconds of the webapp running).
+All files in `.polis/ds/<domain>/pub.polis.core/state/` can be safely deleted. They will be rebuilt on the next sync cycle (within 30 seconds of a browser tab being open).
 
 To force a complete rebuild of all state:
 
 ```bash
-rm -rf .polis/ds/*/state/
+rm -rf .polis/ds/*/pub.polis.core/state/
 ```
 
-Restart the webapp or wait 60 seconds for the background sync to regenerate everything.
+Restart the webapp or open a browser tab — the background sync will regenerate everything on its next cycle.
 
 ### Manually Editing Notification Rules
 
-Edit `.polis/ds/<domain>/config/notifications.json` directly. You can:
+Edit `.polis/ds/<domain>/pub.polis.core/config/notifications.json` directly. You can:
 
 - Disable a rule: set `"enabled": false`
 - Change the message template: edit `"template.message"`
@@ -852,7 +961,7 @@ Changes take effect on the next sync cycle.
 
 ### Manually Editing Feed Config
 
-Edit `.polis/ds/<domain>/config/feed.json` to change:
+Edit `.polis/ds/<domain>/pub.polis.core/config/feed.json` to change:
 
 - `staleness_minutes` — how often the feed should refresh
 - `max_items` — how many items to keep
@@ -863,24 +972,31 @@ Edit `.polis/ds/<domain>/config/feed.json` to change:
 Delete the state file to remove all notification entries:
 
 ```bash
-rm .polis/ds/<domain>/state/polis.notification.jsonl
+rm .polis/ds/<domain>/pub.polis.core/state/pub.polis.notification.jsonl
 ```
 
 Optionally reset the cursor too if you want to regenerate from scratch:
 
 ```bash
-# Edit cursors.json and set polis.notification position to "0"
+# Edit cursors.json and set pub.polis.notification position to "0"
 ```
 
 ### Rebuilding the Blessed-Comments Index
 
-If your `metadata/blessed-comments.json` is out of date, use the CLI to rebuild it:
+If your `content/pub.polis.core/comment/blessed.json` is out of date, use the CLI to rebuild it:
 
 ```bash
 polis index rebuild
 ```
 
-This scans your `comments/` directory and regenerates the index from actual files.
+This scans your content directory and regenerates the index from actual files.
+
+### Downloading Your Site
+
+In Settings, click **Download site** to get a zip archive of your entire site, including keys. Use this for:
+- Full backups
+- Migrating to a new machine
+- Archiving a snapshot of your site
 
 ---
 
@@ -899,8 +1015,9 @@ The webapp is distributed as a binary. To update:
 The webapp re-initializes on every startup:
 
 - Configuration is reloaded from disk
+- Old-format directories are automatically migrated to the new layout
 - New default notification rules (if any) are merged into your config
-- Background sync resumes from your last cursor position
+- Background sync resumes from your last cursor position (when a tab connects)
 - No data migration is needed — file formats are forward-compatible
 
 ### Checking Your Version

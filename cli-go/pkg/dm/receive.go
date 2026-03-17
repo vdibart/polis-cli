@@ -79,11 +79,12 @@ type LogEvent struct {
 }
 
 // NewReceiver creates a Receiver for handling incoming DM deliveries.
+// The domain is normalized to lowercase (DNS hostnames are case-insensitive per RFC 1123).
 func NewReceiver(privateKeyPEM, publicKeySSH []byte, domain, siteDir string, store *Store, rl *RateLimiter) *Receiver {
 	return &Receiver{
 		PrivateKeyPEM:  privateKeyPEM,
 		PublicKeySSH:   publicKeySSH,
-		Domain:         domain,
+		Domain:         strings.ToLower(domain),
 		SiteDir:        siteDir,
 		Store:          store,
 		RateLimiter:    rl,
@@ -119,13 +120,17 @@ func VerifySignedRequestWithLogger(r *http.Request, fetchPublicKey func(domain s
 		logger = nopLogger{}
 	}
 
-	domain := r.Header.Get("X-Polis-Domain")
+	rawDomain := r.Header.Get("X-Polis-Domain")
 	signature := r.Header.Get("X-Polis-Signature")
 	timestamp := r.Header.Get("X-Polis-Timestamp")
 
-	if domain == "" || signature == "" || timestamp == "" {
+	if rawDomain == "" || signature == "" || timestamp == "" {
 		return "", fmt.Errorf("missing signed request headers")
 	}
+
+	// Use original case for signature verification (sender signed with their case),
+	// but return lowercase domain for all downstream use.
+	domain := strings.ToLower(rawDomain)
 
 	// Layer 2: Timestamp check (near-zero cost — replay protection)
 	ts, err := time.Parse("2006-01-02T15:04:05Z", timestamp)
@@ -139,8 +144,8 @@ func VerifySignedRequestWithLogger(r *http.Request, fetchPublicKey func(domain s
 		return "", fmt.Errorf("timestamp outside 5-minute window")
 	}
 
-	// Reconstruct canonical JSON
-	canonicalJSON, err := MakeDeliverAuthCanonicalJSON("deliver", domain, timestamp)
+	// Reconstruct canonical JSON using original domain case (sender signed with their case)
+	canonicalJSON, err := MakeDeliverAuthCanonicalJSON("deliver", rawDomain, timestamp)
 	if err != nil {
 		return "", fmt.Errorf("build canonical JSON: %w", err)
 	}
@@ -202,6 +207,9 @@ func restorePEMSignature(compact string) string {
 //
 // Each step produces a structured log event for abuse detection and debugging.
 func (rcv *Receiver) ReceiveMessage(senderDomain string, envelopeBody []byte, followingDomains map[string]bool) (*Message, error) {
+	// Normalize domain to lowercase — DNS hostnames are case-insensitive (RFC 1123)
+	senderDomain = strings.ToLower(senderDomain)
+
 	if err := rcv.ensureKeys(); err != nil {
 		return nil, fmt.Errorf("init receiver keys: %w", err)
 	}
@@ -249,10 +257,10 @@ func (rcv *Receiver) ReceiveMessage(senderDomain string, envelopeBody []byte, fo
 	if envelope.Version != 1 {
 		return nil, fmt.Errorf("unsupported envelope version: %d", envelope.Version)
 	}
-	if envelope.SenderDomain != senderDomain {
+	if !strings.EqualFold(envelope.SenderDomain, senderDomain) {
 		return nil, fmt.Errorf("sender domain mismatch: header=%s envelope=%s", senderDomain, envelope.SenderDomain)
 	}
-	if envelope.RecipientDomain != rcv.Domain {
+	if !strings.EqualFold(envelope.RecipientDomain, rcv.Domain) {
 		return nil, fmt.Errorf("recipient domain mismatch: expected=%s got=%s", rcv.Domain, envelope.RecipientDomain)
 	}
 
@@ -392,12 +400,18 @@ func (rcv *Receiver) checkPolicy(senderDomain string, followingDomains map[strin
 		return fmt.Errorf("load policies: %w", err)
 	}
 
+	// Normalize following domains to lowercase for consistent policy matching
+	normalizedFollowing := make(map[string]bool, len(followingDomains))
+	for d, v := range followingDomains {
+		normalizedFollowing[strings.ToLower(d)] = v
+	}
+
 	evt := policy.Event{
 		Type:        "pub.polis.dm",
-		ActorDomain: senderDomain,
+		ActorDomain: strings.ToLower(senderDomain),
 	}
 	ctx := policy.EvalContext{
-		FollowingDomains: followingDomains,
+		FollowingDomains: normalizedFollowing,
 	}
 
 	decision := policy.Evaluate(policies, evt, ctx)
@@ -409,8 +423,9 @@ func (rcv *Receiver) checkPolicy(senderDomain string, followingDomains map[strin
 
 // fetchSenderX25519Key fetches a sender's Ed25519 public key and converts to X25519.
 func (rcv *Receiver) fetchSenderX25519Key(senderDomain string) ([32]byte, error) {
+	cacheKey := strings.ToLower(senderDomain)
 	rcv.keyCacheMu.Lock()
-	if cached, ok := rcv.keyCache[senderDomain]; ok && time.Since(cached.fetchedAt) < keyCacheTTL {
+	if cached, ok := rcv.keyCache[cacheKey]; ok && time.Since(cached.fetchedAt) < keyCacheTTL {
 		rcv.keyCacheMu.Unlock()
 		return cached.x25519PK, nil
 	}
@@ -448,7 +463,7 @@ func (rcv *Receiver) fetchSenderX25519Key(senderDomain string) ([32]byte, error)
 	}
 
 	rcv.keyCacheMu.Lock()
-	rcv.keyCache[senderDomain] = &cachedKey{
+	rcv.keyCache[cacheKey] = &cachedKey{
 		publicKeySSH: []byte(wk.PublicKey),
 		x25519PK:    x25519PK,
 		fetchedAt:   time.Now(),
@@ -494,7 +509,7 @@ func FetchPublicKey(domain string) ([]byte, error) {
 // domainForPublicKey checks if the given public key matches the cached key for a domain.
 func (rcv *Receiver) domainForPublicKey(pubKeyStr, expectedDomain string) (string, error) {
 	rcv.keyCacheMu.Lock()
-	cached, ok := rcv.keyCache[expectedDomain]
+	cached, ok := rcv.keyCache[strings.ToLower(expectedDomain)]
 	rcv.keyCacheMu.Unlock()
 
 	if !ok {

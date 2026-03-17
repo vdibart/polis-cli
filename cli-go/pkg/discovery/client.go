@@ -1022,6 +1022,185 @@ func (c *Client) StreamQuery(since string, limit int, typeFilter string, actorFi
 	return &result, nil
 }
 
+// StreamQueryInvolved queries events where the domain is involved as either
+// target or source (OR). Replaces separate target + source queries.
+func (c *Client) StreamQueryInvolved(since string, limit int, domain string) (*StreamQueryResponse, error) {
+	params := url.Values{}
+	if since != "" {
+		params.Set("since", since)
+	}
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
+	params.Set("involved", domain)
+
+	endpoint := c.BaseURL + "/v1/stream?" + params.Encode()
+
+	httpReq, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	if err := c.addAuthHeaders(httpReq); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.doWithTiming(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("stream query (involved) failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result StreamQueryResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
+		return nil, fmt.Errorf("stream query (involved): %w", err)
+	}
+
+	return &result, nil
+}
+
+// StreamBatchFilter represents a single filter set in a batch request.
+type StreamBatchFilter struct {
+	Since    string   `json:"since"`
+	Limit    int      `json:"limit"`
+	Types    []string `json:"type,omitempty"`
+	Actors   []string `json:"actor,omitempty"`
+	Target   string   `json:"targetDomain,omitempty"`
+	Source   string   `json:"sourceDomain,omitempty"`
+	Involved string   `json:"involvedDomain,omitempty"`
+}
+
+// StreamBatchResponse is the response from POST /v1/stream/batch.
+type StreamBatchResponse struct {
+	Results     []StreamQueryResponse `json:"results"`
+	DSSignature string                `json:"ds_signature,omitempty"`
+	DSKeyID     string                `json:"ds_key_id,omitempty"`
+}
+
+// StreamQueryBatch sends multiple filter sets in a single HTTP request.
+func (c *Client) StreamQueryBatch(queries []StreamBatchFilter) (*StreamBatchResponse, error) {
+	endpoint := c.BaseURL + "/v1/stream/batch"
+
+	reqBody := struct {
+		Queries []StreamBatchFilter `json:"queries"`
+	}{Queries: queries}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal batch request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", endpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	if err := c.addAuthHeaders(httpReq); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.doWithTiming(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("stream batch query failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result StreamBatchResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
+		return nil, fmt.Errorf("stream batch query: %w", err)
+	}
+
+	return &result, nil
+}
+
+// StreamQueryUnified queries the stream with OR-combined filters in a single
+// DB query. Combines involved domain + followed actors for maximum efficiency.
+func (c *Client) StreamQueryUnified(since string, limit int, involvedDomain string, actors []string) (*StreamQueryResponse, error) {
+	params := url.Values{}
+	if since != "" {
+		params.Set("since", since)
+	}
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
+	if involvedDomain != "" {
+		params.Set("involved", involvedDomain)
+	}
+	if len(actors) > 0 {
+		params.Set("actor", JoinDomains(actors))
+	}
+
+	endpoint := c.BaseURL + "/v1/stream/unified?" + params.Encode()
+
+	httpReq, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	if err := c.addAuthHeaders(httpReq); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.doWithTiming(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("stream unified query failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result StreamQueryResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
+		return nil, fmt.Errorf("stream unified query: %w", err)
+	}
+
+	return &result, nil
+}
+
 // StreamPublish publishes an event to the discovery stream.
 func (c *Client) StreamPublish(eventType, actor string, payload map[string]interface{}, signature string) error {
 	endpoint := c.BaseURL + "/v1/stream"

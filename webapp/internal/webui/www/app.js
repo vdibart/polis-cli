@@ -47,6 +47,8 @@ const App = {
         feedUnread: 0,
         following: 0,
         followers: 0,
+        // DM
+        dmUnread: 0,
     },
 
     // SSE connection + polling fallback
@@ -59,6 +61,11 @@ const App = {
     // Conversations subtab state
     _conversationsSubtab: 'all',
     _conversationsRefreshing: false,
+
+    // Feed filter state
+    _feedShowNew: false,
+    _feedAuthorFilter: null, // null or domain string
+    _feedTimeFilter: '24h', // '1h', '4h', '8h', '24h', '7d', 'all'
 
     // Screen management
     screens: {
@@ -84,7 +91,124 @@ const App = {
     _remoteAvatarCache: {},
     _remoteAvatarFetching: {},
 
+    // Milkdown editor state
+    _rawMode: {},  // textareaId -> boolean
+    _milkdownReady: false,
+
+    // Right panel state
+    _rightPanelOpen: false,
+    _rightPanelMode: 'wysiwyg',  // 'wysiwyg' | 'markdown' | 'help' | 'browse'
+    _browsePosts: [],
+    _browseSelectedPath: null,
+
+    // Milkdown textarea-to-mount mapping
+    _milkdownIdFor(textareaId) {
+        const map = {
+            'markdown-input': 'milkdown-post',
+            'comment-input': 'milkdown-comment',
+            'about-editor-textarea': 'milkdown-about',
+        };
+        return map[textareaId] || null;
+    },
+
+    // Get content from Milkdown or textarea (abstraction layer)
+    getEditorContent(textareaId) {
+        const editorId = this._milkdownIdFor(textareaId);
+        if (editorId && window.MilkdownBridge?.isReady(editorId) && !this._rawMode[textareaId]) {
+            return window.MilkdownBridge.getMarkdown(editorId);
+        }
+        return document.getElementById(textareaId).value;
+    },
+
+    // Set content in both Milkdown and textarea (abstraction layer)
+    setEditorContent(textareaId, markdown) {
+        document.getElementById(textareaId).value = markdown;
+        const editorId = this._milkdownIdFor(textareaId);
+        if (editorId && window.MilkdownBridge?.isReady(editorId) && !this._rawMode[textareaId]) {
+            window.MilkdownBridge.setMarkdown(editorId, markdown);
+        }
+    },
+
+    // Initialize Milkdown for a screen's editor
+    async _initMilkdown(textareaId) {
+        const editorId = this._milkdownIdFor(textareaId);
+        if (!editorId || !window.MilkdownBridge) return;
+        // Use textarea value, but if the container already has user-typed text
+        // (milkdown module loaded late), prefer that content
+        const container = document.getElementById(editorId);
+        const userTyped = container ? container.textContent.trim() : '';
+        const content = userTyped || document.getElementById(textareaId).value;
+        try {
+            await window.MilkdownBridge.create(editorId, content);
+        } catch (err) {
+            console.warn('Milkdown init failed, falling back to textarea:', err);
+            this._showTextareaFallback(textareaId);
+        }
+    },
+
+    // Destroy Milkdown instance for a screen
+    _destroyMilkdown(textareaId) {
+        const editorId = this._milkdownIdFor(textareaId);
+        if (!editorId || !window.MilkdownBridge) return;
+        // Sync content back to textarea before destroying
+        if (window.MilkdownBridge.isReady(editorId) && !this._rawMode[textareaId]) {
+            document.getElementById(textareaId).value = window.MilkdownBridge.getMarkdown(editorId);
+        }
+        window.MilkdownBridge.destroy(editorId);
+    },
+
+    // Show textarea fallback when Milkdown fails to load
+    _showTextareaFallback(textareaId) {
+        const textarea = document.getElementById(textareaId);
+        if (textarea) textarea.classList.remove('hidden');
+        const editorId = this._milkdownIdFor(textareaId);
+        if (editorId) {
+            const mount = document.getElementById(editorId);
+            if (mount) mount.classList.add('hidden');
+        }
+    },
+
+    // Toggle raw mode for an editor
+    _toggleRawMode(textareaId, toggleBtn) {
+        const editorId = this._milkdownIdFor(textareaId);
+        const textarea = document.getElementById(textareaId);
+        const mount = editorId ? document.getElementById(editorId) : null;
+
+        if (this._rawMode[textareaId]) {
+            // Switch from raw to WYSIWYG
+            this._rawMode[textareaId] = false;
+            if (toggleBtn) toggleBtn.textContent = 'Raw';
+            if (mount && window.MilkdownBridge) {
+                mount.classList.remove('hidden');
+                textarea.classList.add('hidden');
+                window.MilkdownBridge.setMarkdown(editorId, textarea.value);
+            }
+        } else {
+            // Switch from WYSIWYG to raw
+            if (editorId && window.MilkdownBridge?.isReady(editorId)) {
+                textarea.value = window.MilkdownBridge.getMarkdown(editorId);
+            }
+            this._rawMode[textareaId] = true;
+            if (toggleBtn) toggleBtn.textContent = 'WYSIWYG';
+            if (mount) mount.classList.add('hidden');
+            textarea.classList.remove('hidden');
+            textarea.focus();
+        }
+    },
+
     showScreen(name) {
+        // Destroy Milkdown instances when leaving editor screens
+        const prevScreens = Object.entries(this.screens)
+            .filter(([, s]) => s && !s.classList.contains('hidden'))
+            .map(([k]) => k);
+        for (const prev of prevScreens) {
+            if (prev === 'editor') {
+                this._destroyMilkdown('markdown-input');
+            }
+            if (prev === 'comment') this._destroyMilkdown('comment-input');
+            if (prev === 'about') this._destroyMilkdown('about-editor-textarea');
+        }
+
         Object.values(this.screens).forEach(s => {
             if (s) s.classList.add('hidden');
         });
@@ -93,6 +217,30 @@ const App = {
         }
         if (name === 'editor') {
             this._updateTopbarMode('editor');
+            // Reset right panel state
+            this._rightPanelOpen = false;
+            document.getElementById('editor-right-panel').classList.add('collapsed');
+            document.getElementById('editor-right-panel-toggle').classList.remove('active-panel');
+            this._browsePosts = [];
+            this._browseSelectedPath = null;
+            // Reset editor mode toggle to WYSIWYG
+            this._rawMode['markdown-input'] = false;
+            document.getElementById('editor-wysiwyg-btn').classList.add('active');
+            document.getElementById('editor-markdown-btn').classList.remove('active');
+            // Re-enable left toggle (may have been disabled by panel)
+            document.getElementById('editor-wysiwyg-btn').disabled = false;
+            document.getElementById('editor-markdown-btn').disabled = false;
+            document.querySelector('.editor-mode-toggle')?.classList.remove('disabled');
+            // Ensure textarea hidden, milkdown mount visible for WYSIWYG default
+            document.getElementById('markdown-input').classList.add('hidden');
+            document.getElementById('milkdown-post').classList.remove('hidden');
+            this._initMilkdown('markdown-input');
+        }
+        if (name === 'comment') {
+            this._initMilkdown('comment-input');
+        }
+        if (name === 'about') {
+            this._initMilkdown('about-editor-textarea');
         }
     },
 
@@ -123,6 +271,18 @@ const App = {
     toggleTheme() {
         this.setWebappTheme(this.webappTheme === 'dark' ? 'light' : 'dark');
         this._updateThemeIcon();
+        // Update settings page label and button if visible
+        const rows = document.querySelectorAll('.settings-row');
+        for (const row of rows) {
+            const label = row.querySelector('.settings-row-label');
+            if (label && label.textContent === 'Color Mode:') {
+                const val = row.querySelector('.settings-row-value');
+                const btn = row.querySelector('.btn-copy');
+                if (val) val.textContent = this.webappTheme === 'light' ? 'Light' : 'Dark';
+                if (btn) btn.textContent = this.webappTheme === 'light' ? 'Switch to Dark' : 'Switch to Light';
+                break;
+            }
+        }
     },
 
     _updateThemeIcon() {
@@ -134,16 +294,16 @@ const App = {
             : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
     },
 
-    // Mode toggle: 'feed' or 'posts'
+    // Mode toggle: 'feed', 'posts', or 'messages'
     switchMode(mode) {
-        const btns = ['feed', 'posts', 'write'].map(m => document.getElementById(`mode-btn-${m}`));
+        const btns = ['feed', 'posts', 'messages'].map(m => document.getElementById(`mode-btn-${m}`));
         btns.forEach(b => b && b.classList.remove('active'));
         if (mode === 'feed') {
             btns[0] && btns[0].classList.add('active');
             this.navigateTo('/social/conversations');
-        } else if (mode === 'write') {
+        } else if (mode === 'messages') {
             btns[2] && btns[2].classList.add('active');
-            this.newPost();
+            this.navigateTo('/messages');
         } else {
             btns[1] && btns[1].classList.add('active');
             this.navigateTo('/posts');
@@ -152,11 +312,11 @@ const App = {
 
     // Update topbar mode buttons to reflect current view
     _updateTopbarMode(mode) {
-        const btns = ['feed', 'posts', 'write'].map(m => document.getElementById(`mode-btn-${m}`));
+        const btns = ['feed', 'posts', 'messages'].map(m => document.getElementById(`mode-btn-${m}`));
         btns.forEach(b => b && b.classList.remove('active'));
         if (mode === 'social') {
             btns[0] && btns[0].classList.add('active');
-        } else if (mode === 'editor') {
+        } else if (mode === 'messages') {
             btns[2] && btns[2].classList.add('active');
         } else {
             btns[1] && btns[1].classList.add('active');
@@ -165,16 +325,20 @@ const App = {
 
     // Update topbar badge dots from counts
     _updateTopbarBadges() {
-        const notifDot = document.getElementById('topbar-notification-dot');
-        const blessingDot = document.getElementById('topbar-blessing-dot');
+        const feedDot = document.getElementById('mode-dot-feed');
+        const postsDot = document.getElementById('mode-dot-posts');
+        const messagesDot = document.getElementById('mode-dot-messages');
 
-        if (notifDot) {
-            const hasUnread = (this.notificationState && this.notificationState.unreadCount > 0);
-            notifDot.classList.toggle('hidden', !hasUnread);
+        if (feedDot) {
+            feedDot.classList.toggle('hidden', !(this.counts.feedUnread > 0));
         }
-        if (blessingDot) {
+        if (postsDot) {
             const hasPending = this.counts.incomingPending > 0;
-            blessingDot.classList.toggle('hidden', !hasPending);
+            postsDot.classList.toggle('hidden', !hasPending);
+        }
+        if (messagesDot) {
+            const hasDMUnread = this.counts.dmUnread > 0;
+            messagesDot.classList.toggle('hidden', !hasDMUnread);
         }
     },
 
@@ -380,6 +544,9 @@ const App = {
         // Plugin routes injected by _registerPlugins()
         ['/social/following',            { mode: 'social',  view: 'following',        screen: 'dashboard' }],
         ['/social/followers',            { mode: 'social',  view: 'followers',        screen: 'dashboard' }],
+        ['/messages',                    { mode: 'messages', view: 'dm-list',    screen: 'dashboard' }],
+        ['/messages/new',                { mode: 'messages', view: 'dm-new',     screen: 'dashboard' }],
+        ['/messages/:id',                { mode: 'messages', view: 'dm-thread',  screen: 'dashboard' }],
         ['/settings',                    { view: 'settings', screen: 'dashboard' }],
         ['/posts/:path+',                { screen: 'editor', action: 'openPost' }],
     ],
@@ -393,6 +560,8 @@ const App = {
         'about':               '/snippets',
         'following':           '/social/following',
         'followers':           '/social/followers',
+        'dm-list':             '/messages',
+        'dm-new':              '/messages/new',
         'settings':            '/settings',
     },
 
@@ -502,6 +671,7 @@ const App = {
             }
             this.currentView = config.view;
             if (config.tabHint) this._commentsPublishedFilter = config.tabHint;
+            if (config.view === 'dm-thread') this._dmThreadId = params.id || '';
             this._updateSidebarActiveItem(config.view);
             await this.loadViewContent();
             if (gen !== this._navGeneration) return; // stale
@@ -743,6 +913,7 @@ const App = {
             }
             this.currentView = config.view;
             if (config.tabHint) this._commentsPublishedFilter = config.tabHint;
+            if (config.view === 'dm-thread') this._dmThreadId = params.id || '';
             this._updateSidebarActiveItem(config.view);
             await this.loadViewContent();
             this.showScreen('dashboard');
@@ -815,6 +986,7 @@ const App = {
             this.counts.feedUnread = c.feed_unread || 0;
             this.counts.following = c.following || 0;
             this.counts.followers = c.followers || 0;
+            this.counts.dmUnread = c.dm_unread || 0;
             this.notificationState.unreadCount = c.notifications_unread || 0;
 
             this.updateBadges();
@@ -840,6 +1012,7 @@ const App = {
         this.counts.feedUnread = c.feed_unread || 0;
         this.counts.following = c.following || 0;
         this.counts.followers = c.followers || 0;
+        this.counts.dmUnread = c.dm_unread || 0;
         this.notificationState.unreadCount = c.notifications_unread || 0;
 
         this.updateBadges();
@@ -848,7 +1021,7 @@ const App = {
         this._updateTopbarBadges();
 
         // If on a view that shows items affected by sync, refresh it
-        const autoRefreshViews = ['feed', 'blessing-requests', 'followers', 'comments-published',
+        const autoRefreshViews = ['feed', 'blessing-requests', 'followers', 'comments-published', 'dm-list',
             ...this.SOCIAL_PLUGINS.filter(p => p.autoRefresh).map(p => p.id)];
         if (autoRefreshViews.includes(this.currentView)) {
             const contentList = document.getElementById('content-list');
@@ -1055,10 +1228,13 @@ const App = {
         const postsViews = ['posts-published', 'posts-drafts', 'comments-published', 'blessing-requests'];
         // Feed-mode views hide header entirely
         const feedViews = ['following', 'followers'];
+        const dmViews = ['dm-list', 'dm-thread', 'dm-new'];
 
         if (postsViews.includes(this.currentView)) {
             if (contentHeader) contentHeader.classList.add('hidden');
         } else if (feedViews.includes(this.currentView)) {
+            if (contentHeader) contentHeader.classList.add('hidden');
+        } else if (dmViews.includes(this.currentView)) {
             if (contentHeader) contentHeader.classList.add('hidden');
         } else if (this.currentView === 'settings') {
             if (contentHeader) contentHeader.classList.add('hidden');
@@ -1095,19 +1271,27 @@ const App = {
 
             // Social views
             case 'following':
-                contentTitle.textContent = 'Following';
-                contentActions.innerHTML = '<button class="primary" onclick="App.openFollowPanel()">Follow Author</button>';
-                if (contentHeader) contentHeader.classList.remove('hidden');
                 await this.renderFollowingList(contentList);
                 break;
 
             case 'followers':
-                contentTitle.textContent = 'Followers';
-                contentActions.innerHTML = '<button class="secondary sync-btn" onclick="App.refreshFollowers(true)">Refresh</button>';
-                if (contentHeader) contentHeader.classList.remove('hidden');
                 await this.renderFollowersList(contentList);
                 break;
 
+            // DM views
+            case 'dm-list':
+                await this.renderDMConversationList(contentList);
+                break;
+
+            case 'dm-thread': {
+                const convId = this._dmThreadId || '';
+                await this.renderDMThread(contentList, convId);
+                break;
+            }
+
+            case 'dm-new':
+                await this.renderDMNewConversation(contentList);
+                break;
 
         }
     },
@@ -1213,7 +1397,7 @@ const App = {
             await this.publish();
         });
 
-        // Auto-generate filename from title and live preview as user types
+        // Auto-generate filename from title and live preview as user types (raw textarea mode)
         document.getElementById('markdown-input').addEventListener('input', (e) => {
             if (!this.filenameManuallySet && !this.currentPostPath) {
                 const markdown = e.target.value;
@@ -1222,8 +1406,107 @@ const App = {
                     document.getElementById('filename-input').value = this.slugify(title);
                 }
             }
+            // Live preview sync from raw textarea
             this.editorUpdatePreview();
         });
+
+        // Milkdown change event — auto-generate filename from title (WYSIWYG mode)
+        document.addEventListener('milkdown:change', (e) => {
+            const { editorId, markdown } = e.detail;
+            if (editorId === 'milkdown-post' && !this.filenameManuallySet && !this.currentPostPath) {
+                const title = this.extractTitleFromMarkdown(markdown);
+                if (title) {
+                    document.getElementById('filename-input').value = this.slugify(title);
+                }
+            }
+        });
+
+        // Editor mode toggle (WYSIWYG / Markdown)
+        document.getElementById('editor-wysiwyg-btn').addEventListener('click', () => {
+            this._setEditorMode('wysiwyg');
+        });
+        document.getElementById('editor-markdown-btn').addEventListener('click', () => {
+            this._setEditorMode('markdown');
+        });
+
+        // Right panel toggle
+        document.getElementById('editor-right-panel-toggle').addEventListener('click', () => {
+            if (this._rightPanelOpen) {
+                this.closeRightPanel();
+            } else {
+                this.openRightPanel();
+            }
+        });
+
+
+        // Right panel tab clicks (delegated since tabs are dynamic)
+        document.getElementById('panel-mode-toggle').addEventListener('click', (e) => {
+            const tab = e.target.closest('.panel-mode-btn');
+            if (tab && tab.dataset.panelMode) {
+                this.setRightPanelMode(tab.dataset.panelMode);
+            }
+        });
+
+        // Browse "Load into Editor" button
+        document.getElementById('browse-load-btn').addEventListener('click', () => {
+            this.loadBrowsePostIntoEditor();
+        });
+
+        // Sync from milkdown changes (left pane only)
+        document.addEventListener('milkdown:change', (e) => {
+            if (e.detail.editorId === 'milkdown-post') {
+                this.editorUpdatePreview();
+            }
+        });
+
+        // Right panel markdown textarea input → sync back to left
+        document.getElementById('panel-markdown-textarea').addEventListener('input', () => {
+            const md = document.getElementById('panel-markdown-textarea').value;
+            document.getElementById('markdown-input').value = md;
+            if (!this._rawMode['markdown-input'] && window.MilkdownBridge?.isReady('milkdown-post')) {
+                window.MilkdownBridge.setMarkdown('milkdown-post', md);
+            }
+        });
+
+        // Markdown keyboard shortcuts on both textareas
+        document.getElementById('markdown-input').addEventListener('keydown', (e) => {
+            this._handleMarkdownShortcut(document.getElementById('markdown-input'), e);
+        });
+        document.getElementById('panel-markdown-textarea').addEventListener('keydown', (e) => {
+            this._handleMarkdownShortcut(document.getElementById('panel-markdown-textarea'), e);
+        });
+
+        // About editor raw mode toggle
+        document.getElementById('about-raw-toggle').addEventListener('click', () => {
+            this._toggleRawMode('about-editor-textarea', document.getElementById('about-raw-toggle'));
+        });
+
+        // About editor preview pane toggle
+        document.getElementById('about-preview-toggle').addEventListener('click', () => {
+            const pane = document.getElementById('about-screen').querySelector('.preview-pane');
+            const btn = document.getElementById('about-preview-toggle');
+            pane.classList.toggle('collapsed');
+            btn.textContent = pane.classList.contains('collapsed') ? 'Show' : 'Hide';
+            if (!pane.classList.contains('collapsed')) {
+                this.updateAboutPreview();
+            }
+        });
+
+        // Graceful degradation: if Milkdown fails to load, show textareas
+        // Check if milkdown already loaded before this listener was registered
+        if (window.MilkdownBridge) {
+            this._milkdownReady = true;
+        }
+        window.addEventListener('milkdown:ready', () => {
+            this._milkdownReady = true;
+        });
+        setTimeout(() => {
+            if (!this._milkdownReady) {
+                console.warn('Milkdown did not load, falling back to textareas');
+                document.querySelectorAll('.milkdown-mount').forEach(m => m.classList.add('hidden'));
+                document.querySelectorAll('#markdown-input, #comment-input, #about-editor-textarea').forEach(t => t.classList.remove('hidden'));
+            }
+        }, 10000);
 
         // Editor frontmatter toggle
         const editorFmToggle = document.getElementById('editor-fm-toggle');
@@ -1279,11 +1562,7 @@ const App = {
         document.getElementById('about-publish-btn').addEventListener('click', () => {
             this.publishAbout();
         });
-        let aboutPreviewTimeout = null;
-        document.getElementById('about-editor-textarea').addEventListener('input', () => {
-            if (aboutPreviewTimeout) clearTimeout(aboutPreviewTimeout);
-            aboutPreviewTimeout = setTimeout(() => this.updateAboutPreview(), 300);
-        });
+        // About textarea input handler (raw mode only — no auto-preview since preview is on-demand now)
 
     },
 
@@ -1435,12 +1714,9 @@ const App = {
         this.currentPostPath = null;
         this.currentFrontmatter = '';
         this.filenameManuallySet = false;
-        document.getElementById('markdown-input').value = '';
+        this.setEditorContent('markdown-input', '');
         document.getElementById('filename-input').value = '';
         document.getElementById('filename-input').disabled = false;
-        document.getElementById('preview-content').innerHTML =
-            '<p class="empty-state">Start writing to see a preview.</p>';
-
         this.updateEditorFmToggle();
         this.updatePublishButton();
         if (opts.pushState !== false) {
@@ -1453,7 +1729,7 @@ const App = {
     newComment(opts = {}) {
         this.currentCommentDraftId = null;
         document.getElementById('reply-to-url').value = '';
-        document.getElementById('comment-input').value = '';
+        this.setEditorContent('comment-input', '');
         if (opts.pushState !== false) {
             window.history.pushState({}, '', this.pathForScreen('newComment'));
         }
@@ -3292,52 +3568,310 @@ echo "File: $POLIS_PATH"</code>
         };
     },
 
-    // Render markdown preview (always body-only, frontmatter shown separately)
-    async renderPreview() {
-        const body = document.getElementById('markdown-input').value;
-        const previewContent = document.getElementById('preview-content');
-
-        if (!body.trim()) {
-            previewContent.innerHTML = '<p class="empty-state">Start writing to see a preview.</p>';
-            return;
-        }
-
-        try {
-            const result = await this.api('POST', '/api/render', { markdown: body });
-            previewContent.innerHTML = result.html;
-        } catch (err) {
-            previewContent.innerHTML = `<p class="error">Render failed: ${this.escapeHtml(err.message)}</p>`;
+    // Called when left pane content changes — one-way sync to right panel
+    editorUpdatePreview() {
+        if (!this._rightPanelOpen) return;
+        const md = this.getEditorContent('markdown-input') || '';
+        if (this._rightPanelMode === 'wysiwyg') {
+            // Left is MARKDOWN, right shows rendered HTML (WYSIWYG view)
+            this._renderPreviewDebounced(md);
+        } else if (this._rightPanelMode === 'markdown') {
+            // Left is WYSIWYG, right shows raw markdown (only if not focused to avoid cursor jump)
+            const el = document.getElementById('panel-markdown-textarea');
+            if (el && el !== document.activeElement) el.value = md;
         }
     },
 
-    // Debounced live preview for editor (300ms, always body-only)
-    editorUpdatePreview: (function() {
-        let timeout = null;
-        return function() {
-            if (timeout) clearTimeout(timeout);
-            timeout = setTimeout(async () => {
-                const body = document.getElementById('markdown-input')?.value || '';
-                const previewContent = document.getElementById('preview-content');
-                if (!previewContent) return;
+    _previewTimeout: null,
+    _renderPreviewDebounced(md) {
+        if (this._previewTimeout) clearTimeout(this._previewTimeout);
+        this._previewTimeout = setTimeout(async () => {
+            const previewEl = document.getElementById('panel-preview-content');
+            if (!previewEl) return;
+            try {
+                const result = await this.api('POST', '/api/render', { markdown: md });
+                previewEl.innerHTML = result.html;
+            } catch (err) {
+                previewEl.innerHTML = `<p class="error">Render failed: ${this.escapeHtml(err.message)}</p>`;
+            }
+        }, 400);
+    },
 
-                if (!body.trim()) {
-                    previewContent.innerHTML = '<p class="empty-state">Start writing to see a preview.</p>';
-                    return;
-                }
+    // Switch left pane editor mode (two-button segmented control)
+    _setEditorMode(mode) {
+        const wysiwygBtn = document.getElementById('editor-wysiwyg-btn');
+        const markdownBtn = document.getElementById('editor-markdown-btn');
+        const editorId = this._milkdownIdFor('markdown-input');
+        const textarea = document.getElementById('markdown-input');
+        const mount = editorId ? document.getElementById(editorId) : null;
 
-                try {
-                    const result = await App.api('POST', '/api/render', { markdown: body });
-                    previewContent.innerHTML = result.html;
-                } catch (err) {
-                    // Don't show errors during typing — leave last good preview
-                }
-            }, 300);
+        if (mode === 'markdown') {
+            // Sync content from milkdown to textarea before switching
+            if (editorId && window.MilkdownBridge?.isReady(editorId)) {
+                textarea.value = window.MilkdownBridge.getMarkdown(editorId);
+            }
+            this._rawMode['markdown-input'] = true;
+            if (mount) mount.classList.add('hidden');
+            textarea.classList.remove('hidden');
+            textarea.focus();
+            wysiwygBtn.classList.remove('active');
+            markdownBtn.classList.add('active');
+        } else {
+            // Switch to WYSIWYG — always update UI state
+            this._rawMode['markdown-input'] = false;
+            if (mount && window.MilkdownBridge?.isReady(editorId)) {
+                mount.classList.remove('hidden');
+                textarea.classList.add('hidden');
+                window.MilkdownBridge.setMarkdown(editorId, textarea.value);
+            } else if (mount && window.MilkdownBridge) {
+                // Milkdown not ready yet — init it now
+                mount.classList.remove('hidden');
+                textarea.classList.add('hidden');
+                this._initMilkdown('markdown-input');
+            }
+            wysiwygBtn.classList.add('active');
+            markdownBtn.classList.remove('active');
+        }
+    },
+
+    // Markdown keyboard shortcuts for raw textareas (Ctrl+B, Ctrl+I, Ctrl+K, Ctrl+E)
+    _handleMarkdownShortcut(textarea, e) {
+        if (!e.ctrlKey && !e.metaKey) return;
+        const shortcuts = {
+            'b': { wrap: '**', placeholder: 'bold' },
+            'i': { wrap: '*', placeholder: 'italic' },
+            'e': { wrap: '`', placeholder: 'code' },
         };
-    })(),
+
+        const key = e.key.toLowerCase();
+
+        if (shortcuts[key]) {
+            e.preventDefault();
+            e.stopPropagation();
+            const { wrap, placeholder } = shortcuts[key];
+            const start = textarea.selectionStart;
+            const end = textarea.selectionEnd;
+            const selected = textarea.value.substring(start, end);
+            const text = selected || placeholder;
+            const before = textarea.value.substring(0, start);
+            const after = textarea.value.substring(end);
+            textarea.value = before + wrap + text + wrap + after;
+            // Place cursor: if had selection, select the wrapped text; otherwise select placeholder
+            if (selected) {
+                textarea.selectionStart = start + wrap.length;
+                textarea.selectionEnd = start + wrap.length + text.length;
+            } else {
+                textarea.selectionStart = start + wrap.length;
+                textarea.selectionEnd = start + wrap.length + placeholder.length;
+            }
+            textarea.focus();
+            return;
+        }
+
+        if (key === 'k') {
+            e.preventDefault();
+            e.stopPropagation();
+            const start = textarea.selectionStart;
+            const end = textarea.selectionEnd;
+            const selected = textarea.value.substring(start, end);
+            const before = textarea.value.substring(0, start);
+            const after = textarea.value.substring(end);
+            const linkText = selected || 'text';
+            textarea.value = before + '[' + linkText + '](url)' + after;
+            // Select "url" for easy replacement
+            const urlStart = start + 1 + linkText.length + 2;
+            textarea.selectionStart = urlStart;
+            textarea.selectionEnd = urlStart + 3;
+            textarea.focus();
+            return;
+        }
+    },
+
+    // Determine the opposite view for the right panel based on left editor mode
+    _getOppositeMode() {
+        return this._rawMode['markdown-input'] ? 'wysiwyg' : 'markdown';
+    },
+
+    // Build right panel tabs dynamically based on left editor mode
+    _buildPanelTabs() {
+        const toggle = document.getElementById('panel-mode-toggle');
+        if (!toggle) return;
+        const oppositeMode = this._getOppositeMode();
+        const oppositeLabel = oppositeMode === 'wysiwyg' ? 'WYSIWYG' : 'Markdown';
+        toggle.innerHTML = `
+            <button class="panel-mode-btn active" data-panel-mode="${oppositeMode}">${oppositeLabel}</button>
+            <button class="panel-mode-btn" data-panel-mode="help">Help</button>
+            <button class="panel-mode-btn" data-panel-mode="browse">Browse</button>
+        `;
+    },
+
+    // Open the right panel
+    openRightPanel(mode) {
+        const panel = document.getElementById('editor-right-panel');
+        panel.classList.remove('collapsed');
+        this._rightPanelOpen = true;
+        // Move toggle button to right panel header
+        const toggleBtn = document.getElementById('editor-right-panel-toggle');
+        const rightHeader = document.querySelector('.right-panel-header');
+        toggleBtn.classList.add('active-panel');
+        rightHeader.appendChild(toggleBtn);
+        // Disable left editor mode toggle while panel is open
+        document.getElementById('editor-wysiwyg-btn').disabled = true;
+        document.getElementById('editor-markdown-btn').disabled = true;
+        document.querySelector('.editor-mode-toggle')?.classList.add('disabled');
+        // Build tabs based on current left mode
+        this._buildPanelTabs();
+        // Determine default mode: opposite of current left mode
+        const defaultMode = this._getOppositeMode();
+        this.setRightPanelMode(mode || defaultMode);
+    },
+
+    // Close the right panel
+    closeRightPanel() {
+        // If markdown textarea was edited, sync final state back to left
+        if (this._rightPanelMode === 'markdown') {
+            const md = document.getElementById('panel-markdown-textarea').value;
+            document.getElementById('markdown-input').value = md;
+            if (!this._rawMode['markdown-input'] && window.MilkdownBridge?.isReady('milkdown-post')) {
+                window.MilkdownBridge.setMarkdown('milkdown-post', md);
+            }
+        }
+        const panel = document.getElementById('editor-right-panel');
+        panel.classList.add('collapsed');
+        this._rightPanelOpen = false;
+        // Move toggle button back to left pane header
+        const toggleBtn = document.getElementById('editor-right-panel-toggle');
+        const leftHeaderRight = document.querySelector('.pane-header-right');
+        toggleBtn.classList.remove('active-panel');
+        leftHeaderRight.appendChild(toggleBtn);
+        // Re-enable left editor mode toggle
+        document.getElementById('editor-wysiwyg-btn').disabled = false;
+        document.getElementById('editor-markdown-btn').disabled = false;
+        document.querySelector('.editor-mode-toggle')?.classList.remove('disabled');
+    },
+
+    // Set the active tab in the right panel
+    setRightPanelMode(mode) {
+        this._rightPanelMode = mode;
+        // Update tab active states
+        document.querySelectorAll('#panel-mode-toggle .panel-mode-btn').forEach(tab => {
+            tab.classList.toggle('active', tab.dataset.panelMode === mode);
+        });
+        // Show/hide panel bodies
+        document.getElementById('panel-opposite-preview').classList.toggle('hidden', mode !== 'wysiwyg');
+        document.getElementById('panel-opposite-markdown').classList.toggle('hidden', mode !== 'markdown');
+        document.getElementById('panel-help').classList.toggle('hidden', mode !== 'help');
+        document.getElementById('panel-browse').classList.toggle('hidden', mode !== 'browse');
+
+        // Get current content from left pane
+        const md = this.getEditorContent('markdown-input') || '';
+
+        if (mode === 'help') {
+            // Reorder help sections: show the relevant one first
+            const ref = document.querySelector('.help-reference');
+            if (ref) {
+                const wysiwygSection = document.getElementById('help-section-wysiwyg');
+                const markdownSection = document.getElementById('help-section-markdown');
+                if (this._rawMode['markdown-input']) {
+                    // Left is MARKDOWN → markdown syntax first
+                    ref.insertBefore(markdownSection, ref.firstChild);
+                } else {
+                    // Left is WYSIWYG → keyboard shortcuts first
+                    ref.insertBefore(wysiwygSection, ref.firstChild);
+                }
+            }
+        } else if (mode === 'wysiwyg') {
+            // Left is MARKDOWN, right shows server-rendered HTML (WYSIWYG view)
+            this._renderPreviewDebounced(md);
+        } else if (mode === 'markdown') {
+            // Left is WYSIWYG, right shows raw markdown textarea
+            document.getElementById('panel-markdown-textarea').value = md;
+        } else if (mode === 'browse') {
+            this._loadBrowsePosts();
+        }
+        // Persist (fire and forget)
+        this._saveEditorPanelMode(mode);
+    },
+
+    // Load posts for browse mode
+    async _loadBrowsePosts() {
+        if (this._browsePosts.length > 0) {
+            this._renderBrowseNavigator();
+            return;
+        }
+        const nav = document.querySelector('#panel-browse .browse-navigator');
+        try {
+            const result = await this.api('GET', '/api/posts');
+            this._browsePosts = result.posts || [];
+            this._renderBrowseNavigator();
+        } catch (err) {
+            if (nav) nav.innerHTML = '<p class="empty-state">Failed to load posts.</p>';
+        }
+    },
+
+    // Render horizontal browse card strip
+    _renderBrowseNavigator() {
+        const nav = document.querySelector('#panel-browse .browse-navigator');
+        if (!nav) return;
+        if (this._browsePosts.length === 0) {
+            nav.innerHTML = '<p class="empty-state">No posts yet.</p>';
+            return;
+        }
+        nav.innerHTML = this._browsePosts.map(post => {
+            const title = this.escapeHtml(post.title || post.path);
+            const date = post.date || '';
+            const selected = post.path === this._browseSelectedPath ? ' selected' : '';
+            return `<div class="browse-card${selected}" onclick="App.selectBrowsePost('${this.escapeHtml(post.path)}')">
+                <div class="browse-card-title">${title}</div>
+                <div class="browse-card-date">${this.escapeHtml(date)}</div>
+            </div>`;
+        }).join('');
+    },
+
+    // Select a post in browse mode
+    async selectBrowsePost(path) {
+        this._browseSelectedPath = path;
+        this._renderBrowseNavigator();
+        const previewEl = document.getElementById('browse-preview-content');
+        const loadBtn = document.getElementById('browse-load-btn');
+        previewEl.innerHTML = '<p class="empty-state">Loading...</p>';
+        loadBtn.classList.add('hidden');
+        try {
+            const result = await this.api('GET', `/api/posts/${encodeURIComponent(path)}`);
+            const rendered = await this.api('POST', '/api/render', { markdown: result.markdown || '' });
+            previewEl.innerHTML = rendered.html;
+            loadBtn.classList.remove('hidden');
+        } catch (err) {
+            previewEl.innerHTML = `<p class="empty-state">Failed to load post.</p>`;
+        }
+    },
+
+    // Load selected browse post into editor
+    loadBrowsePostIntoEditor() {
+        if (!this._browseSelectedPath) return;
+        const path = this._browseSelectedPath;
+        this.showConfirmModal(
+            'Load Post',
+            'This will replace the current editor content with the selected post. Continue?',
+            async () => {
+                this.closeRightPanel();
+                await this.openPost(path);
+            }
+        );
+    },
+
+    // Persist editor panel mode to server
+    _saveEditorPanelMode(mode) {
+        fetch('/api/settings/editor-panel-mode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode }),
+        }).catch(() => {});
+    },
 
     // Save draft
     async saveDraft() {
-        const markdown = document.getElementById('markdown-input').value;
+        const markdown = this.getEditorContent('markdown-input');
 
         if (!markdown.trim()) {
             this.showToast('Nothing to save', 'warning');
@@ -3373,7 +3907,7 @@ echo "File: $POLIS_PATH"</code>
 
     // Publish or republish post
     async publish() {
-        const markdown = document.getElementById('markdown-input').value;
+        const markdown = this.getEditorContent('markdown-input');
 
         if (!markdown.trim()) {
             this.showToast('Nothing to publish', 'warning');
@@ -3419,9 +3953,7 @@ echo "File: $POLIS_PATH"</code>
                 // Clear editor and return to dashboard
                 this.currentDraftId = null;
                 this.currentPostPath = null;
-                document.getElementById('markdown-input').value = '';
-                document.getElementById('preview-content').innerHTML =
-                    '<p class="empty-state">Start writing to see a preview.</p>';
+                this.setEditorContent('markdown-input', '');
 
                 // Switch to Published view
                 this.currentView = 'posts-published';
@@ -3459,7 +3991,7 @@ echo "File: $POLIS_PATH"</code>
             this.currentPostPath = null;
             this.currentFrontmatter = '';
             this.filenameManuallySet = true;  // Draft already has a filename
-            document.getElementById('markdown-input').value = result.markdown;
+            this.setEditorContent('markdown-input', result.markdown);
             document.getElementById('filename-input').value = id;  // Draft ID is the filename
             document.getElementById('filename-input').disabled = false;
 
@@ -3469,7 +4001,6 @@ echo "File: $POLIS_PATH"</code>
                 window.history.pushState({}, '', this.pathForScreen('openDraft', { id }));
             }
             this.showScreen('editor');
-            this.editorUpdatePreview();
         } catch (err) {
             this.showToast('Failed to load draft: ' + err.message, 'error');
         }
@@ -3509,7 +4040,7 @@ echo "File: $POLIS_PATH"</code>
                 const fmMatch = result.raw_markdown.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/);
                 if (fmMatch) this.currentFrontmatter = fmMatch[0];
             }
-            document.getElementById('markdown-input').value = result.markdown;
+            this.setEditorContent('markdown-input', result.markdown);
 
             this.updateEditorFmToggle();
             this.updatePublishButton();
@@ -3517,7 +4048,6 @@ echo "File: $POLIS_PATH"</code>
                 window.history.pushState({}, '', this.pathForScreen('openPost', { path: cleanPath }));
             }
             this.showScreen('editor');
-            this.editorUpdatePreview();
         } catch (err) {
             this.showToast('Failed to load post: ' + err.message, 'error');
         }
@@ -3559,7 +4089,7 @@ echo "File: $POLIS_PATH"</code>
             const draft = await this.api('GET', `/api/comments/drafts/${encodeURIComponent(id)}`);
             this.currentCommentDraftId = id;
             document.getElementById('reply-to-url').value = draft.in_reply_to || '';
-            document.getElementById('comment-input').value = draft.content || '';
+            this.setEditorContent('comment-input', draft.content || '');
             if (opts.pushState !== false) {
                 window.history.pushState({}, '', this.pathForScreen('openCommentDraft', { id }));
             }
@@ -3572,7 +4102,7 @@ echo "File: $POLIS_PATH"</code>
     // Save comment draft
     async saveCommentDraft() {
         const inReplyTo = document.getElementById('reply-to-url').value.trim();
-        const content = document.getElementById('comment-input').value;
+        const content = this.getEditorContent('comment-input');
 
         if (!inReplyTo) {
             this.showToast('Please enter the URL of the post you are replying to', 'warning');
@@ -3595,7 +4125,7 @@ echo "File: $POLIS_PATH"</code>
     // Sign and send comment for blessing
     async signAndSendComment() {
         const inReplyTo = document.getElementById('reply-to-url').value.trim();
-        const content = document.getElementById('comment-input').value;
+        const content = this.getEditorContent('comment-input');
 
         if (!inReplyTo) {
             this.showToast('Please enter the URL of the post you are replying to', 'warning');
@@ -3649,7 +4179,7 @@ echo "File: $POLIS_PATH"</code>
             this.currentCommentDraftId = null;
             this._intentComment = null;
             document.getElementById('reply-to-url').value = '';
-            document.getElementById('comment-input').value = '';
+            this.setEditorContent('comment-input', '');
 
             // Switch to comments published view with pending filter
             this._commentsPublishedFilter = 'pending';
@@ -3771,9 +4301,8 @@ echo "File: $POLIS_PATH"</code>
     async openAboutEditor() {
         try {
             const result = await this.api('GET', '/api/about');
-            document.getElementById('about-editor-textarea').value = result.content || '';
+            this.setEditorContent('about-editor-textarea', result.content || '');
             this.showScreen('about');
-            this.updateAboutPreview();
         } catch (err) {
             this.showToast('Failed to load about content: ' + err.message, 'error');
         }
@@ -3781,11 +4310,10 @@ echo "File: $POLIS_PATH"</code>
 
     // Update the about editor live preview
     async updateAboutPreview() {
-        const textarea = document.getElementById('about-editor-textarea');
         const preview = document.getElementById('about-editor-preview');
-        if (!textarea || !preview) return;
+        if (!preview) return;
 
-        const content = textarea.value;
+        const content = this.getEditorContent('about-editor-textarea');
         if (!content.trim()) {
             preview.innerHTML = '<p class="empty-state">Start writing to see a preview.</p>';
             return;
@@ -3806,8 +4334,8 @@ echo "File: $POLIS_PATH"</code>
         btn.disabled = true;
 
         try {
-            const textarea = document.getElementById('about-editor-textarea');
-            await this.api('POST', '/api/about', { content: textarea.value });
+            const content = this.getEditorContent('about-editor-textarea');
+            await this.api('POST', '/api/about', { content });
             await this.navigateTo('/posts');
             this.showToast('About page published', 'success');
         } catch (err) {
@@ -3888,6 +4416,30 @@ echo "File: $POLIS_PATH"</code>
         if (contentList) this.renderConversationsTabbed(contentList);
     },
 
+    toggleFeedFilter() {
+        this._feedShowNew = !this._feedShowNew;
+        const contentList = document.getElementById('content-list');
+        if (contentList) this.renderConversationsTabbed(contentList);
+    },
+
+    setFeedAuthorFilter(domain) {
+        this._feedAuthorFilter = domain || null;
+        const contentList = document.getElementById('content-list');
+        if (contentList) this.renderConversationsTabbed(contentList);
+    },
+
+    clearFeedAuthorFilter() {
+        this._feedAuthorFilter = null;
+        const contentList = document.getElementById('content-list');
+        if (contentList) this.renderConversationsTabbed(contentList);
+    },
+
+    setFeedTimeFilter(value) {
+        this._feedTimeFilter = value || '24h';
+        const contentList = document.getElementById('content-list');
+        if (contentList) this.renderConversationsTabbed(contentList);
+    },
+
     async renderConversationsTabbed(container) {
         await this._renderAllSubtab(container, '');
     },
@@ -3919,9 +4471,37 @@ echo "File: $POLIS_PATH"</code>
         const time = this.formatRelativeTime(group.last_activity);
         const markLabel = isUnread ? 'Mark read' : 'Mark unread';
 
+        // Build comment detail cards if available
+        let commentsHtml = '';
+        const comments = group.comments || [];
+        if (comments.length > 0) {
+            const shown = comments.slice(0, 3); // Show up to 3 inline
+            commentsHtml = shown.map(c => {
+                const cDomain = c.author_domain || '';
+                const cName = cDomain.replace(/\.polis\.pub$/, '').replace(/\./g, ' ');
+                const cAvatar = this.domainToAvatar(cDomain);
+                const cText = c.excerpt || c.title || '';
+                const cTime = this.formatRelativeTime(c.published);
+                return `
+                    <div class="comment-detail${c.unread ? ' unread' : ''}">
+                        <div class="comment-detail-header">
+                            <div class="comment-detail-avatar" style="background: ${cAvatar.color};">${cAvatar.initials}</div>
+                            <span class="comment-detail-author">${this.escapeHtml(cName)}</span>
+                            <span class="comment-detail-domain">&middot; ${this.escapeHtml(cDomain)}</span>
+                            <span class="comment-detail-time">${this.escapeHtml(cTime)}</span>
+                        </div>
+                        ${cText ? `<div class="comment-detail-text">${this.escapeHtml(cText)}</div>` : ''}
+                    </div>`;
+            }).join('');
+            if (comments.length > 3) {
+                commentsHtml += `<div class="comment-detail-more">+ ${comments.length - 3} more</div>`;
+            }
+        }
+
         let threadHtml = '';
         if (group.total_comments > 0) {
             threadHtml = `
+                <div class="comment-details-section">${commentsHtml}</div>
                 <div class="thread-row">
                     <svg class="thread-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
                         <path d="M4 6v6h8" stroke-linecap="round" stroke-linejoin="round"/>
@@ -3961,7 +4541,7 @@ echo "File: $POLIS_PATH"</code>
                     <button class="hover-btn" onclick="event.stopPropagation(); App.${isUnread ? 'markFeedRead' : 'markFeedUnread'}(JSON.parse(this.closest('.feed-item').dataset.ids))">${markLabel}</button>
                 </div>
                 <div class="item-top">
-                    <div class="author-row">
+                    <div class="author-row" onclick="event.stopPropagation(); App.setFeedAuthorFilter('${this.escapeHtml(domain)}')" title="Filter by ${this.escapeHtml(domain)}">
                         <div class="author-avatar" style="${hasCustomAvatar ? this._buildAvatarStyle(customAvatar) : `background: ${avatar.color};`}">${hasCustomAvatar ? '' : avatar.initials}</div>
                         <div>
                             <span class="author-name">${this.escapeHtml(authorName)}</span>
@@ -3989,6 +4569,7 @@ echo "File: $POLIS_PATH"</code>
             // Update counts and re-render (same pattern as markAllConversationsRead)
             this.counts.feedUnread = Math.max(0, (this.counts.feedUnread || 0) - 1);
             this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+            this._updateTopbarBadges();
             if (this.currentView === 'conversations') {
                 const contentList = document.getElementById('content-list');
                 if (contentList) await this.renderConversationsTabbed(contentList);
@@ -3997,7 +4578,7 @@ echo "File: $POLIS_PATH"</code>
             this.showToast('Failed to mark as read: ' + err.message, 'error');
         }
         // Open the URL in a background tab
-        if (url && url !== '#') window.open(url, '_blank', 'noopener');
+        if (url && url !== '#') window.location.href = url;
     },
 
     async _renderPostsCommentsSubtab(container, filterHtml) {
@@ -4008,6 +4589,7 @@ echo "File: $POLIS_PATH"</code>
 
             this.counts.feedUnread = result.unread_items || 0;
             this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+            this._updateTopbarBadges();
 
             if (groups.length === 0) {
                 const emptyMsg = this.counts.following === 0
@@ -4093,6 +4675,7 @@ echo "File: $POLIS_PATH"</code>
             const groups = groupedResult.groups || [];
             this.counts.feedUnread = groupedResult.unread_items || 0;
             this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+            this._updateTopbarBadges();
 
             const activityEvents = activityResult.events || [];
             if (activityEvents.length > 0) {
@@ -4135,19 +4718,119 @@ echo "File: $POLIS_PATH"</code>
                 return;
             }
 
-            const markReadBtn = (this.counts.feedUnread || 0) > 0
-                ? `<button class="feed-btn mark-read" onclick="App.markAllConversationsRead()">Mark all read</button>`
+            // Apply feed filters
+            let visibleEntries = entries;
+            const cutoffMap = { '1h': 3600000, '4h': 14400000, '8h': 28800000, '24h': 86400000, '7d': 604800000 };
+
+            // Time filter with auto-widen: if default 24h yields nothing, try 7d then all
+            let effectiveTimeFilter = this._feedTimeFilter || '24h';
+            if (effectiveTimeFilter !== 'all') {
+                const cutoff = Date.now() - (cutoffMap[effectiveTimeFilter] || 86400000);
+                visibleEntries = entries.filter(e => {
+                    const ts = e.timestamp ? new Date(e.timestamp).getTime() : 0;
+                    return ts >= cutoff;
+                });
+                // Auto-widen only from the default 24h when no other filters are active
+                if (visibleEntries.length === 0 && effectiveTimeFilter === '24h' && !this._feedAuthorFilter && !this._feedShowNew) {
+                    const cutoff7d = Date.now() - cutoffMap['7d'];
+                    visibleEntries = entries.filter(e => {
+                        const ts = e.timestamp ? new Date(e.timestamp).getTime() : 0;
+                        return ts >= cutoff7d;
+                    });
+                    if (visibleEntries.length > 0) {
+                        effectiveTimeFilter = '7d';
+                    } else {
+                        visibleEntries = entries;
+                        effectiveTimeFilter = 'all';
+                    }
+                }
+            }
+
+            // Show New filter (unread feed items only, hide activity)
+            if (this._feedShowNew) {
+                visibleEntries = visibleEntries.filter(e => {
+                    if (e.type === 'group') {
+                        return e.data.post_unread || (e.data.unread_comments || 0) > 0;
+                    }
+                    return false; // hide activity events in "Show New" mode
+                });
+            }
+
+            // Author filter
+            if (this._feedAuthorFilter) {
+                const af = this._feedAuthorFilter;
+                visibleEntries = visibleEntries.filter(e => {
+                    if (e.type === 'group') {
+                        const g = e.data;
+                        if (g.post_domain === af) return true;
+                        if (g.comments && g.comments.some(c => c.author_domain === af)) return true;
+                        return false;
+                    }
+                    return true;
+                });
+            }
+
+            // Collect visible unread item IDs for filtered mark-read
+            const visibleUnreadIds = [];
+            for (const e of visibleEntries) {
+                if (e.type === 'group' && e.data.item_ids) {
+                    if (e.data.post_unread || (e.data.unread_comments || 0) > 0) {
+                        visibleUnreadIds.push(...e.data.item_ids);
+                    }
+                }
+            }
+
+            this._visibleUnreadIds = visibleUnreadIds;
+            const markReadBtn = visibleUnreadIds.length > 0
+                ? `<button class="feed-btn mark-read" onclick="App.markVisibleFeedRead()">Mark all read</button>`
                 : '';
+            const filterBtn = `<button class="feed-btn" onclick="App.toggleFeedFilter()">${this._feedShowNew ? 'Show All' : 'Show New'}</button>`;
+
+            // Build time filter dropdown
+            const timeOpts = [
+                ['1h', 'Last hour'], ['4h', 'Last 4 hours'], ['8h', 'Last 8 hours'],
+                ['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['all', 'All time']
+            ];
+            const timeFilterHtml = `<select class="feed-author-select" onchange="App.setFeedTimeFilter(this.value)">
+                ${timeOpts.map(([v, label]) => `<option value="${v}"${effectiveTimeFilter === v ? ' selected' : ''}>${label}</option>`).join('')}
+            </select>`;
+
+            // Build author filter dropdown from unique domains in feed
+            const authorDomains = new Set();
+            for (const e of entries) {
+                if (e.type === 'group') {
+                    if (e.data.post_domain) authorDomains.add(e.data.post_domain);
+                    if (e.data.comments) e.data.comments.forEach(c => { if (c.author_domain) authorDomains.add(c.author_domain); });
+                }
+            }
+            const sortedAuthors = [...authorDomains].sort();
+            let authorFilterHtml = '';
+            if (this._feedAuthorFilter) {
+                authorFilterHtml = `<span class="feed-author-chip" onclick="App.clearFeedAuthorFilter()">${this.escapeHtml(this._feedAuthorFilter)} ×</span>`;
+            } else if (sortedAuthors.length > 1) {
+                const opts = sortedAuthors.map(d => {
+                    const label = d.replace(/\.polis\.pub$/, '');
+                    return `<option value="${this.escapeHtml(d)}">${this.escapeHtml(label)}</option>`;
+                }).join('');
+                authorFilterHtml = `<select class="feed-author-select" onchange="if(this.value) App.setFeedAuthorFilter(this.value); this.value='';">
+                    <option value="">By author</option>${opts}
+                </select>`;
+            }
+
             container.innerHTML = filterHtml + `
                 <div class="feed-list">
                     <div class="feed-date-sep">
-                        <span>Recent</span>
-                        ${markReadBtn}
+                        ${authorFilterHtml}
+                        ${timeFilterHtml}
+                        <div class="feed-actions">${filterBtn}${markReadBtn}</div>
                     </div>
-                    ${entries.map(e => {
-                        if (e.type === 'group') return this._renderGroupedItem(e.data);
-                        return this.renderActivityEvent(e.data);
-                    }).join('')}
+                    ${visibleEntries.length === 0
+                        ? `<div class="empty-state"><p>No items match the current filters.</p>
+                            <button class="feed-btn" onclick="App.setFeedTimeFilter('all'); App._feedShowNew = false; App.renderConversationsTabbed(document.getElementById('content-list'));">Show all</button></div>`
+                        : visibleEntries.map(e => {
+                            if (e.type === 'group') return this._renderGroupedItem(e.data);
+                            return this.renderActivityEvent(e.data);
+                        }).join('')}
                 </div>
             `;
 
@@ -4173,6 +4856,7 @@ echo "File: $POLIS_PATH"</code>
             this.counts.feed = result.total || 0;
             this.counts.feedUnread = result.unread || 0;
             this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+            this._updateTopbarBadges();
 
             if (newItems > 0) {
                 this.showToast(`${newItems} new item${newItems > 1 ? 's' : ''}`, 'success');
@@ -4205,6 +4889,7 @@ echo "File: $POLIS_PATH"</code>
             this.counts.feed = result.total || 0;
             this.counts.feedUnread = result.unread || 0;
             this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+            this._updateTopbarBadges();
 
             if (newItems > 0) {
                 this.showToast(`${newItems} new item${newItems > 1 ? 's' : ''}`, 'success');
@@ -4227,15 +4912,45 @@ echo "File: $POLIS_PATH"</code>
 
     async markAllConversationsRead() {
         try {
-            await this.api('POST', '/api/feed/read', { all: true });
+            await Promise.all([
+                this.api('POST', '/api/feed/read', { all: true }),
+                this.api('POST', '/api/notifications/read', { all: true }),
+            ]);
             this.counts.feedUnread = 0;
+            this.notificationState.unreadCount = 0;
             this.updateBadge('feed-count', 0);
+            this._updateTopbarBadges();
+            this._updateNotificationDot();
 
             if (this.currentView === 'conversations') {
                 const contentList = document.getElementById('content-list');
                 if (contentList) await this.renderConversationsTabbed(contentList);
             }
             this.showToast('All items marked as read', 'success');
+        } catch (err) {
+            this.showToast('Failed: ' + err.message, 'error');
+        }
+    },
+
+    // Mark only items visible in the current filtered view as read
+    async markVisibleFeedRead() {
+        const ids = this._visibleUnreadIds || [];
+        if (ids.length === 0) return;
+        try {
+            await Promise.all(ids.map(id =>
+                this.api('POST', '/api/feed/read', { id })
+            ));
+            // Fetch actual count from server to avoid drift
+            const counts = await this.api('GET', '/api/feed/counts');
+            this.counts.feedUnread = counts.unread || 0;
+            this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+            this._updateTopbarBadges();
+
+            if (this.currentView === 'conversations') {
+                const contentList = document.getElementById('content-list');
+                if (contentList) await this.renderConversationsTabbed(contentList);
+            }
+            this.showToast('Visible items marked as read', 'success');
         } catch (err) {
             this.showToast('Failed: ' + err.message, 'error');
         }
@@ -4248,6 +4963,7 @@ echo "File: $POLIS_PATH"</code>
             ));
             this.counts.feedUnread = Math.max(0, (this.counts.feedUnread || 0) - itemIds.length);
             this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+            this._updateTopbarBadges();
 
             if (this.currentView === 'conversations') {
                 const contentList = document.getElementById('content-list');
@@ -4265,6 +4981,7 @@ echo "File: $POLIS_PATH"</code>
             ));
             this.counts.feedUnread = Math.min((this.counts.feedUnread || 0) + 1, Infinity);
             this.updateBadge('feed-count', this.counts.feedUnread, true);
+            this._updateTopbarBadges();
 
             if (this.currentView === 'conversations') {
                 const contentList = document.getElementById('content-list');
@@ -4281,6 +4998,7 @@ echo "File: $POLIS_PATH"</code>
             const counts = await this.api('GET', '/api/feed/counts');
             this.counts.feedUnread = counts.unread || 0;
             this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+            this._updateTopbarBadges();
 
             if (this.currentView === 'conversations') {
                 const contentList = document.getElementById('content-list');
@@ -4328,28 +5046,77 @@ echo "File: $POLIS_PATH"</code>
                 return;
             }
 
+            // Fetch followers to show below following list
+            let followersHtml = '';
+            try {
+                const followersResult = await this.api('GET', '/api/followers/count');
+                const followers = followersResult.followers || [];
+                const fCount = followersResult.count || followers.length;
+                this.counts.followers = fCount;
+                this.updateBadge('followers-count', fCount);
+                if (followers.length > 0) {
+                    followersHtml = `
+                        <div class="followers-divider">
+                            <span class="section-label-inline">${fCount} Follower${fCount !== 1 ? 's' : ''}</span>
+                        </div>
+                        ${followers.map(domain => domain.toLowerCase()).map(domain => `
+                            <div class="content-item follower-item" onclick="window.open('https://${this.escapeHtml(domain)}', '_blank')" style="cursor: pointer;">
+                                <div class="item-info">
+                                    <div class="item-title">${this.escapeHtml(domain)}</div>
+                                </div>
+                                <div class="follower-actions">
+                                    <button class="feed-filter-link" onclick="event.stopPropagation(); window.open('https://${this.escapeHtml(domain)}', '_blank')">Visit</button>
+                                </div>
+                            </div>
+                        `).join('')}
+                    `;
+                } else {
+                    followersHtml = `
+                        <div class="followers-divider">
+                            <span class="section-label-inline">Followers</span>
+                        </div>
+                        <p class="followers-empty">No followers yet. When others follow you, they'll appear here.</p>
+                    `;
+                }
+            } catch (e) {
+                console.error('Failed to fetch followers:', e);
+                followersHtml = `
+                    <div class="followers-divider">
+                        <span class="section-label-inline">Followers</span>
+                    </div>
+                    <p class="followers-empty">Could not load followers.</p>
+                `;
+            }
+
             container.innerHTML = `
                 <div class="content-list">
+                    <div class="following-list-header">
+                        <span class="section-label-inline">${follows.length} Following</span>
+                        <button class="primary" onclick="App.openFollowPanel()">Follow Author</button>
+                    </div>
                     ${follows.map(f => {
-                        const domain = f.url.replace('https://', '').replace('http://', '').replace(/\/$/, '');
+                        const domain = f.url.replace('https://', '').replace('http://', '').replace(/\/$/, '').toLowerCase();
                         const title = f.site_title || f.author_name || domain;
                         const subtitle = f.author_name && f.author_name !== title
                             ? `${this.escapeHtml(f.author_name)} · ${this.escapeHtml(domain)}`
                             : this.escapeHtml(domain);
                         const addedAt = f.added_at ? this.formatDate(f.added_at) : '';
+                        const siteUrl = f.url.replace(/\/$/, '');
                         return `
-                            <div class="content-item following-item">
+                            <div class="content-item following-item" onclick="window.open('${this.escapeHtml(siteUrl)}', '_blank')" style="cursor: pointer;">
                                 <div class="item-info">
                                     <div class="item-title">${this.escapeHtml(title)}</div>
                                     <div class="item-path">${subtitle}</div>
                                 </div>
                                 <div class="following-item-actions">
                                     ${addedAt ? `<span class="item-date">Followed: ${addedAt}</span>` : ''}
+                                    <button class="feed-filter-link" onclick="event.stopPropagation(); App.setFeedAuthorFilter('${this.escapeHtml(domain)}'); App.navigateTo('/social/conversations');" title="Filter feed by this author">Posts</button>
                                     <button class="danger-small" onclick="event.stopPropagation(); App.unfollowAuthor('${this.escapeHtml(f.url)}')">Unfollow</button>
                                 </div>
                             </div>
                         `;
                     }).join('')}
+                    ${followersHtml}
                 </div>
             `;
         } catch (err) {
@@ -4362,7 +5129,21 @@ echo "File: $POLIS_PATH"</code>
         const input = document.getElementById('follow-url-input');
         const suggestion = document.getElementById('follow-suggestion');
         if (panel) panel.classList.remove('hidden');
-        if (input) { input.value = ''; input.focus(); }
+        if (input) {
+            input.value = '';
+            input.focus();
+            // Autocomplete bare handles to .polis.pub on blur
+            if (!input._polisBlurBound) {
+                input.addEventListener('blur', () => {
+                    const val = input.value.trim();
+                    // Bare handle: no dots, no protocol, no slashes — append .polis.pub
+                    if (val && !val.includes('.') && !val.includes('/') && !val.includes(':')) {
+                        input.value = val + '.polis.pub';
+                    }
+                });
+                input._polisBlurBound = true;
+            }
+        }
         if (suggestion) {
             if (this.counts.following === 0) {
                 suggestion.classList.remove('hidden');
@@ -4378,8 +5159,9 @@ echo "File: $POLIS_PATH"</code>
     },
 
     // Normalize follow input: accept bare domains, follow links, and full URLs.
+    // Always lowercases the domain for consistent display and comparison.
     normalizeFollowInput(raw) {
-        let val = raw.trim();
+        let val = raw.trim().toLowerCase();
         // Strip protocol for analysis
         const bare = val.replace(/^https?:\/\//, '');
 
@@ -4394,7 +5176,7 @@ echo "File: $POLIS_PATH"</code>
             try {
                 const u = new URL(val.startsWith('http') ? val : 'https://' + val);
                 const author = u.searchParams.get('author');
-                if (author) return 'https://' + author + '/';
+                if (author) return 'https://' + author.toLowerCase() + '/';
             } catch(e) {}
         }
 
@@ -4608,6 +5390,12 @@ echo "File: $POLIS_PATH"</code>
 
     renderActivityEvent(evt) {
         if (this._hiddenActivityTypes.has(evt.type)) return '';
+        // Normalize domains to lowercase for consistent display
+        const actor = (evt.actor || '').toLowerCase();
+        if (evt.payload) {
+            if (evt.payload.target_domain) evt.payload.target_domain = evt.payload.target_domain.toLowerCase();
+            if (evt.payload.source_domain) evt.payload.source_domain = evt.payload.source_domain.toLowerCase();
+        }
         const typeLabels = {
             'pub.polis.post.published': 'published a post',
             'pub.polis.post.republished': 'republished a post',
@@ -4645,12 +5433,12 @@ echo "File: $POLIS_PATH"</code>
         }
 
         const tag = linkUrl ? 'a' : 'div';
-        const linkAttrs = linkUrl ? ` href="${this.escapeHtml(linkUrl)}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit;"` : '';
+        const linkAttrs = linkUrl ? ` href="${this.escapeHtml(linkUrl)}" rel="noopener" style="text-decoration:none;color:inherit;"` : '';
 
         return `
             <${tag}${linkAttrs} class="activity-item">
                 <span class="act-dot"></span>
-                <span><span class="act-who">${this.escapeHtml(evt.actor)}</span> ${actionLabel}${detail ? ' — ' + detail : ''}</span>
+                <span><span class="act-who">${this.escapeHtml(actor)}</span> ${actionLabel}${detail ? ' — ' + detail : ''}</span>
                 <span class="act-when">${this.formatRelativeTime(evt.timestamp)}</span>
             </${tag}>
         `;
@@ -4796,11 +5584,17 @@ echo "File: $POLIS_PATH"</code>
 
             container.innerHTML = `
                 <div class="content-list">
-                    <div class="followers-summary">${count} follower${count !== 1 ? 's' : ''}</div>
-                    ${followers.map(domain => `
-                        <div class="content-item follower-item">
+                    <div class="following-list-header">
+                        <span class="section-label-inline">${count} Follower${count !== 1 ? 's' : ''}</span>
+                        <button class="secondary sync-btn" onclick="App.refreshFollowers(true)">Refresh</button>
+                    </div>
+                    ${followers.map(domain => domain.toLowerCase()).map(domain => `
+                        <div class="content-item follower-item" onclick="window.open('https://${this.escapeHtml(domain)}', '_blank')" style="cursor: pointer;">
                             <div class="item-info">
                                 <div class="item-title">${this.escapeHtml(domain)}</div>
+                            </div>
+                            <div class="follower-actions">
+                                <button class="feed-filter-link" onclick="event.stopPropagation(); window.open('https://${this.escapeHtml(domain)}', '_blank')">Visit</button>
                             </div>
                         </div>
                     `).join('')}
@@ -5272,6 +6066,11 @@ git push</pre>
                 this._initTheme(settings.webapp_theme);
             }
 
+            // Load editor panel mode preference
+            if (settings.editor_panel_mode) {
+                this._rightPanelMode = settings.editor_panel_mode;
+            }
+
             // Check registration status
             try {
                 const regStatus = await this.api('GET', '/api/site/registration-status');
@@ -5557,7 +6356,15 @@ git push</pre>
     // Called on dashboard init so the token is ready for the connect flow.
     async ensureWidgetToken() {
         try {
-            await fetch('/api/widget/token', { credentials: 'same-origin' });
+            const resp = await fetch('/api/widget/token', { credentials: 'same-origin' });
+            if (resp.ok) {
+                const data = await resp.json();
+                if (data.token) {
+                    // Set cross-tenant cookie so the widget recognizes us on other tenants
+                    document.cookie = 'polis_widget_token=' + encodeURIComponent(data.token) +
+                        '; domain=.polis.pub; path=/; max-age=31536000; SameSite=Lax; Secure';
+                }
+            }
         } catch (_) {
             // Non-fatal: token will be created on-demand during connect
         }
@@ -5636,7 +6443,7 @@ git push</pre>
 
         this.currentCommentDraftId = null;
         document.getElementById('reply-to-url').value = intent.target;
-        document.getElementById('comment-input').value = intent.text || '';
+        this.setEditorContent('comment-input', intent.text || '');
         this._intentComment = intent;  // stash for post-action CTAs
         window.history.replaceState({}, '', this.pathForScreen('newComment'));
         this.showScreen('comment');
@@ -5782,6 +6589,467 @@ git push</pre>
             const backdrop = document.querySelector('.sidebar-backdrop');
             if (backdrop) backdrop.classList.remove('visible');
         }
+    },
+
+    // ── DM Helpers ──────────────────────────────────────────────────────
+
+    _dmAvatarColor(domain) {
+        let hash = 0;
+        for (let i = 0; i < domain.length; i++) {
+            hash = domain.charCodeAt(i) + ((hash << 5) - hash);
+        }
+        const hue = Math.abs(hash) % 360;
+        return `hsl(${hue}, 35%, 45%)`;
+    },
+
+    _dmAvatarHtml(domain, size, cssClass) {
+        const initial = (domain || '?')[0].toUpperCase();
+        const bg = this._dmAvatarColor(domain);
+        return `<div class="${cssClass}" style="background: ${bg};">${initial}</div>`;
+    },
+
+    _dmFormatDate(isoString) {
+        if (!isoString) return '';
+        const d = new Date(isoString);
+        const now = new Date();
+        const isToday = d.toDateString() === now.toDateString();
+        const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+        const isYesterday = d.toDateString() === yesterday.toDateString();
+        if (isToday) return 'Today';
+        if (isYesterday) return 'Yesterday';
+        return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: d.getFullYear() !== now.getFullYear() ? 'numeric' : undefined });
+    },
+
+    // ── DM: Conversation List (Screen 1 + 6) ───────────────────────────
+
+    async renderDMConversationList(container) {
+        container.innerHTML = '<div class="empty-state"><p>Loading messages...</p></div>';
+        try {
+            const data = await this.api('GET', '/api/dm/conversations');
+            const conversations = data.conversations || [];
+
+            if (conversations.length === 0) {
+                container.innerHTML = `
+                    <div class="dm-header">
+                        <div class="dm-title">Messages</div>
+                        <div class="dm-header-actions">
+                            <button class="btn-ghost" onclick="App.navigateTo('/messages/new')">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                                New
+                            </button>
+                        </div>
+                    </div>
+                    <div class="conv-empty">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                        <p>No messages yet</p>
+                        <button class="btn-ghost" onclick="App.navigateTo('/messages/new')">Start a conversation</button>
+                    </div>
+                    <div class="e2e-badge">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                        End-to-end encrypted
+                    </div>`;
+                return;
+            }
+
+            // Sort by last_message_at descending
+            conversations.sort((a, b) => (b.last_message_at || '').localeCompare(a.last_message_at || ''));
+
+            const listHtml = conversations.map(c => {
+                const isUnread = c.unread_count > 0;
+                const preview = c.last_preview || '';
+                return `
+                <div class="conv-item${isUnread ? ' unread' : ''}" onclick="App.navigateTo('/messages/${this.escapeHtml(c.id)}')">
+                    ${this._dmAvatarHtml(c.peer_domain, 36, 'conv-avatar')}
+                    <div class="conv-body">
+                        <div class="conv-top">
+                            <div>
+                                <span class="conv-name">${this.escapeHtml(c.peer_domain.split('.')[0])}</span>
+                                <span class="conv-domain">${this.escapeHtml(c.peer_domain)}</span>
+                            </div>
+                            <span class="conv-time">${this.formatRelativeTime(c.last_message_at)}</span>
+                        </div>
+                        <div class="conv-preview">${this.escapeHtml(preview)}</div>
+                    </div>
+                    ${isUnread ? `<span class="conv-unread-badge">${c.unread_count}</span>` : ''}
+                </div>`;
+            }).join('');
+
+            container.innerHTML = `
+                <div class="dm-header">
+                    <div class="dm-title">Messages</div>
+                    <div class="dm-header-actions">
+                        <button class="btn-ghost" onclick="App.navigateTo('/messages/new')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            New
+                        </button>
+                    </div>
+                </div>
+                <div class="conv-list">${listHtml}</div>
+                <div class="e2e-badge">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                    End-to-end encrypted
+                </div>`;
+        } catch (err) {
+            container.innerHTML = `<div class="empty-state"><h3>Failed to load messages</h3><p>${this.escapeHtml(err.message)}</p></div>`;
+        }
+    },
+
+    // ── DM: Thread View (Screen 2 + 3) ──────────────────────────────────
+
+    async renderDMThread(container, convId) {
+        if (!convId) {
+            container.innerHTML = '<div class="empty-state"><p>No conversation selected</p></div>';
+            return;
+        }
+
+        // Handle new conversation (not yet created on backend)
+        const isNewConv = convId.startsWith('__new__');
+        if (isNewConv) {
+            const peerDomain = this._dmThreadPeerDomain || convId.replace('__new__', '');
+            const peerUrl = this._dmThreadPeerUrl || 'https://' + peerDomain;
+            const peerName = peerDomain.split('.')[0];
+
+            container.innerHTML = `
+                <div class="thread-header">
+                    <button class="thread-back" onclick="App.navigateTo('/messages')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                    </button>
+                    <div class="thread-peer">
+                        ${this._dmAvatarHtml(peerDomain, 28, 'thread-peer-avatar')}
+                        <div>
+                            <span class="thread-peer-name">${this.escapeHtml(peerName)}</span>
+                            <span class="thread-peer-domain">${this.escapeHtml(peerDomain)}</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="messages"></div>
+                <div class="compose-bar">
+                    <textarea class="compose-input" id="dm-compose-input" placeholder="Write a message..." rows="1" oninput="App._dmAutoGrow(this)" onkeydown="App._dmKeyDown(event, '${this.escapeHtml(convId)}', '${this.escapeHtml(peerUrl)}')"></textarea>
+                    <button class="compose-send" id="dm-send-btn" onclick="App.sendDM('${this.escapeHtml(convId)}', '${this.escapeHtml(peerUrl)}')" disabled>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    </button>
+                </div>
+                <div class="e2e-badge">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                    End-to-end encrypted
+                </div>`;
+
+            const input = document.getElementById('dm-compose-input');
+            const sendBtn = document.getElementById('dm-send-btn');
+            if (input && sendBtn) {
+                input.addEventListener('input', () => { sendBtn.disabled = !input.value.trim(); });
+                input.focus();
+            }
+            return;
+        }
+
+        container.innerHTML = '<div class="empty-state"><p>Loading conversation...</p></div>';
+        try {
+            const data = await this.api('GET', `/api/dm/conversations/${encodeURIComponent(convId)}`);
+            const messages = data.messages || [];
+            const peerDomain = data.peer_domain || '';
+            const peerUrl = data.peer_url || '';
+
+            // Build message HTML grouped by date
+            let messagesHtml = '';
+            let lastDate = '';
+            let lastDirection = '';
+            const myDomain = this.siteBaseUrl ? new URL(this.siteBaseUrl).hostname : '';
+
+            messages.forEach((msg, i) => {
+                const msgDate = this._dmFormatDate(msg.timestamp);
+                if (msgDate !== lastDate) {
+                    messagesHtml += `<div class="msg-date-sep">${this.escapeHtml(msgDate)}</div>`;
+                    lastDate = msgDate;
+                    lastDirection = '';
+                }
+
+                const isOutgoing = msg.from === myDomain;
+                const direction = isOutgoing ? 'outgoing' : 'incoming';
+                const nextMsg = messages[i + 1];
+                const nextDirection = nextMsg ? (nextMsg.from === myDomain ? 'outgoing' : 'incoming') : '';
+                const isGroupLast = nextDirection !== direction || (nextMsg && this._dmFormatDate(nextMsg.timestamp) !== msgDate);
+
+                // Reply reference
+                let replyRefHtml = '';
+                if (msg.reply_to_id) {
+                    const refMsg = messages.find(m => m.id === msg.reply_to_id);
+                    if (refMsg) {
+                        const refPreview = refMsg.content.length > 60 ? refMsg.content.slice(0, 60) + '...' : refMsg.content;
+                        const refAuthor = refMsg.from === myDomain ? 'You' : peerDomain.split('.')[0];
+                        replyRefHtml = `<div class="msg-reply-ref"><span class="ref-author">${this.escapeHtml(refAuthor)}</span> ${this.escapeHtml(refPreview)}</div>`;
+                    }
+                }
+
+                // Unsent indicator
+                let unsentHtml = '';
+                if (msg.status === 'unsent') {
+                    unsentHtml = `<div class="msg-unsent">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                        Not delivered — <a href="#" onclick="App.retryDMMessage('${convId}','${msg.id}'); return false;">Retry</a>
+                    </div>`;
+                }
+
+                const timeHtml = `<div class="msg-time">${new Date(msg.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</div>`;
+
+                messagesHtml += `
+                    <div class="msg-row ${direction}${isGroupLast ? ' msg-group-last' : ''}${msg.status === 'unsent' ? ' msg-unsent-row' : ''}">
+                        <div>
+                            ${replyRefHtml}
+                            <div class="msg-bubble">${this.escapeHtml(msg.content)}</div>
+                            ${timeHtml}
+                            ${unsentHtml}
+                        </div>
+                    </div>`;
+
+                lastDirection = direction;
+            });
+
+            const peerName = peerDomain.split('.')[0];
+
+            container.innerHTML = `
+                <div class="thread-header">
+                    <button class="thread-back" onclick="App.navigateTo('/messages')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                    </button>
+                    <div class="thread-peer">
+                        ${this._dmAvatarHtml(peerDomain, 28, 'thread-peer-avatar')}
+                        <div>
+                            <span class="thread-peer-name">${this.escapeHtml(peerName)}</span>
+                            <span class="thread-peer-domain">${this.escapeHtml(peerDomain)}</span>
+                        </div>
+                    </div>
+                    <div class="thread-actions">
+                        <button class="thread-action-btn" onclick="App.deleteDMConversation('${this.escapeHtml(convId)}')" title="Delete conversation">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="messages">${messagesHtml}</div>
+                <div class="compose-bar">
+                    <textarea class="compose-input" id="dm-compose-input" placeholder="Write a message..." rows="1" oninput="App._dmAutoGrow(this)" onkeydown="App._dmKeyDown(event, '${this.escapeHtml(convId)}', '${this.escapeHtml(peerUrl)}')"></textarea>
+                    <button class="compose-send" id="dm-send-btn" onclick="App.sendDM('${this.escapeHtml(convId)}', '${this.escapeHtml(peerUrl)}')" disabled>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    </button>
+                </div>
+                <div class="e2e-badge">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                    End-to-end encrypted
+                </div>`;
+
+            // Scroll to bottom of messages
+            const msgContainer = container.querySelector('.messages');
+            if (msgContainer) msgContainer.scrollTop = msgContainer.scrollHeight;
+
+            // Enable send button when input has content
+            const input = document.getElementById('dm-compose-input');
+            const sendBtn = document.getElementById('dm-send-btn');
+            if (input && sendBtn) {
+                input.addEventListener('input', () => {
+                    sendBtn.disabled = !input.value.trim();
+                });
+            }
+        } catch (err) {
+            container.innerHTML = `<div class="empty-state"><h3>Failed to load conversation</h3><p>${this.escapeHtml(err.message)}</p></div>`;
+        }
+    },
+
+    _dmAutoGrow(el) {
+        el.style.height = 'auto';
+        el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+    },
+
+    _dmKeyDown(event, convId, peerUrl) {
+        if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            this.sendDM(convId, peerUrl);
+        }
+    },
+
+    async sendDM(convId, recipientUrl) {
+        const input = document.getElementById('dm-compose-input');
+        const sendBtn = document.getElementById('dm-send-btn');
+        if (!input || !input.value.trim()) return;
+
+        const content = input.value.trim();
+        input.value = '';
+        input.style.height = 'auto';
+        if (sendBtn) sendBtn.disabled = true;
+
+        try {
+            const result = await this.api('POST', '/api/dm/send', {
+                recipient_url: recipientUrl,
+                content: content,
+            });
+
+            // If this was a new conversation, reload to get the real conv ID
+            if (convId.startsWith('__new__')) {
+                // Fetch conversations to find the new one
+                const convData = await this.api('GET', '/api/dm/conversations');
+                const convs = convData.conversations || [];
+                const recipientDomain = new URL(recipientUrl).hostname;
+                const newConv = convs.find(c => c.peer_domain === recipientDomain);
+                if (newConv) {
+                    this._dmThreadId = newConv.id;
+                    this.navigateTo('/messages/' + newConv.id, { replace: true });
+                    return;
+                }
+            }
+
+            // Re-render to show the new message
+            if (this.currentView === 'dm-thread') {
+                const contentList = document.getElementById('content-list');
+                if (contentList) await this.renderDMThread(contentList, this._dmThreadId || convId);
+            }
+
+            if (result.warning) {
+                this.showToast('Message saved but delivery pending', 'info');
+            }
+        } catch (err) {
+            this.showToast('Failed to send: ' + err.message, 'error');
+            // Restore the content so user can retry
+            input.value = content;
+            if (sendBtn) sendBtn.disabled = false;
+        }
+    },
+
+    async deleteDMConversation(convId) {
+        const confirmed = await this.showConfirmModal(
+            'Delete Conversation',
+            'This will permanently delete this conversation and all messages. This cannot be undone.',
+            'Delete', 'Cancel', 'danger'
+        );
+        if (!confirmed) return;
+
+        try {
+            await this.api('DELETE', `/api/dm/conversations/${encodeURIComponent(convId)}`);
+            this.showToast('Conversation deleted', 'success');
+            this.navigateTo('/messages');
+        } catch (err) {
+            this.showToast('Failed to delete: ' + err.message, 'error');
+        }
+    },
+
+    async retryDMMessage(convId, msgId) {
+        try {
+            await this.api('POST', '/api/dm/retry', {});
+            this.showToast('Retrying unsent messages...', 'info');
+            // Re-render
+            if (this.currentView === 'dm-thread') {
+                const contentList = document.getElementById('content-list');
+                if (contentList) await this.renderDMThread(contentList, convId);
+            }
+        } catch (err) {
+            this.showToast('Retry failed: ' + err.message, 'error');
+        }
+    },
+
+    // ── DM: New Conversation (Screen 4 + 5) ────────────────────────────
+
+    async renderDMNewConversation(container) {
+        container.innerHTML = '<div class="empty-state"><p>Loading recipients...</p></div>';
+        try {
+            const data = await this.api('GET', '/api/dm/recipients');
+            const recipients = data.recipients || [];
+
+            const recipientListHtml = recipients.map(r => {
+                const canDM = r.status === 'open';
+                const name = r.author_name || r.domain.split('.')[0];
+                const badge = r.follows_us ? 'Follows you' : ({ 'no-dm': 'No DM', 'no-follow': 'Not following you', unknown: '' }[r.status] || '');
+                const badgeClass = r.follows_us ? 'follows-you' : r.status;
+
+                return `
+                <div class="recipient-item${canDM ? '' : ' disabled'}" ${canDM ? `onclick="App._dmStartConversation('${this.escapeHtml(r.url)}', '${this.escapeHtml(r.domain)}')"` : ''}>
+                    ${this._dmAvatarHtml(r.domain, 32, 'recipient-avatar')}
+                    <div class="recipient-info">
+                        <div class="recipient-name">${this.escapeHtml(name)}</div>
+                        <div class="recipient-url">${this.escapeHtml(r.domain)}</div>
+                    </div>
+                    ${badge ? `<span class="recipient-status ${this.escapeHtml(badgeClass)}">${this.escapeHtml(badge)}</span>` : ''}
+                </div>`;
+            }).join('');
+
+            container.innerHTML = `
+                <div class="thread-header">
+                    <button class="thread-back" onclick="App.navigateTo('/messages')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                    </button>
+                    <div class="thread-peer">
+                        <span class="thread-peer-name">New Message</span>
+                    </div>
+                </div>
+                <div class="new-conv-search">
+                    <div class="new-conv-search-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                    </div>
+                    <input type="text" class="new-conv-input" id="dm-search-input" placeholder="Search by name or domain..." oninput="App._dmFilterRecipients()">
+                </div>
+                <div class="section-label">Following</div>
+                <div class="recipient-list" id="dm-recipient-list">
+                    ${recipientListHtml || '<div class="conv-empty"><p>No authors to message. Follow someone first.</p></div>'}
+                </div>
+                <div class="e2e-badge">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                    End-to-end encrypted
+                </div>
+                <div class="dm-policy-hint">Messages require a mutual follow</div>`;
+
+            // Store recipients for search filtering
+            this._dmRecipients = recipients;
+        } catch (err) {
+            container.innerHTML = `<div class="empty-state"><h3>Failed to load recipients</h3><p>${this.escapeHtml(err.message)}</p></div>`;
+        }
+    },
+
+    _dmRecipients: [],
+
+    _dmFilterRecipients() {
+        const input = document.getElementById('dm-search-input');
+        const listEl = document.getElementById('dm-recipient-list');
+        if (!input || !listEl) return;
+
+        const query = input.value.trim().toLowerCase();
+        const filtered = this._dmRecipients.filter(r => {
+            if (!query) return true;
+            return r.domain.toLowerCase().includes(query) || (r.author_name || '').toLowerCase().includes(query);
+        });
+
+        listEl.innerHTML = filtered.map(r => {
+            const canDM = r.status === 'open';
+            const name = r.author_name || r.domain.split('.')[0];
+            const badge = r.follows_us ? 'Follows you' : ({ 'no-dm': 'No DM', 'no-follow': 'Not following you', unknown: '' }[r.status] || '');
+            const badgeClass = r.follows_us ? 'follows-you' : r.status;
+
+            return `
+            <div class="recipient-item${canDM ? '' : ' disabled'}" ${canDM ? `onclick="App._dmStartConversation('${this.escapeHtml(r.url)}', '${this.escapeHtml(r.domain)}')"` : ''}>
+                ${this._dmAvatarHtml(r.domain, 32, 'recipient-avatar')}
+                <div class="recipient-info">
+                    <div class="recipient-name">${this.escapeHtml(name)}</div>
+                    <div class="recipient-url">${this.escapeHtml(r.domain)}</div>
+                </div>
+                ${badge ? `<span class="recipient-status ${this.escapeHtml(badgeClass)}">${this.escapeHtml(badge)}</span>` : ''}
+            </div>`;
+        }).join('') || '<div class="conv-empty"><p>No matching recipients</p></div>';
+    },
+
+    _dmStartConversation(recipientUrl, recipientDomain) {
+        // Compute conversation ID (same algorithm as backend: sha256(sorted domains)[:16])
+        const myDomain = this.siteBaseUrl ? new URL(this.siteBaseUrl).hostname : '';
+        if (!myDomain) {
+            this.showToast('Site URL not configured', 'error');
+            return;
+        }
+        const domains = [myDomain, recipientDomain].sort();
+        // Use a simple hash for the client-side; the server will create the real one
+        // Navigate to the conversation (backend auto-creates on first message)
+        this._dmPendingRecipient = { url: recipientUrl, domain: recipientDomain };
+        // For now, navigate to a new thread with the peer domain as ID placeholder
+        // The actual conv ID comes from the backend after first message
+        this._dmThreadPeerUrl = recipientUrl;
+        this._dmThreadPeerDomain = recipientDomain;
+        this._dmThreadId = '__new__' + recipientDomain;
+        this.currentView = 'dm-thread';
+        this.navigateTo('/messages/__new__' + recipientDomain);
     },
 };
 

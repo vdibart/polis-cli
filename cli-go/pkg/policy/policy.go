@@ -81,6 +81,8 @@ func DefaultPublicPolicyContent() string {
 //   - Core content types (post, comment, follow, site) allowed from all (user can remove to disable)
 //   - DMs accepted only from following (default social boundary)
 //   - Self-notifications suppressed (you don't need to see your own actions)
+//   - Self-authored feed events suppressed (you don't need to see your own posts in feed)
+//   - Default-deny catch-all: unknown content types are denied
 func DefaultPrivatePolicyContent() string {
 	return `{"version":1,"generator":"polis-cli-go/` + policyVersion + `"}
 {"active":true,"policy":"allow pub.polis.post from all"}
@@ -90,6 +92,8 @@ func DefaultPrivatePolicyContent() string {
 {"active":true,"policy":"allow pub.polis.dm from following"}
 {"active":true,"policy":"deny pub.polis.dm from all"}
 {"active":true,"policy":"omit pub.polis.notification from self"}
+{"active":true,"policy":"omit pub.polis.feed from self"}
+{"active":true,"policy":"deny all from all"}
 `
 }
 

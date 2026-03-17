@@ -11,6 +11,7 @@ Documentation is organized by component and audience. Each component directory h
 | [webapp/](webapp/) | Local web interface (Go SPA) | [webapp/README.md](webapp/README.md) |
 | [api/](api/) | Content Type REST API (`/v1/`) | [api/README.md](api/README.md) |
 | [ds/](ds/) | Discovery Service (coordination layer) | [ds/README.md](ds/README.md) |
+| [ops/](ops/) | Platform operations (polis.pub) | [ops/README.md](ops/README.md) |
 
 ## By Audience
 
@@ -45,6 +46,9 @@ Documentation is organized by component and audience. Each component directory h
 |----------|-----------|-------------|
 | [DS Deployment](ds/admin/deployment.md) | ds | Deploy on Fly.io, Docker, or bare Deno |
 | [DS Configuration](ds/admin/configuration.md) | ds | Admin API and 24 tuning parameters |
+| [Operations Runbook](ops/admin/runbook.md) | ops | Monitoring, backup, recovery, incident response |
+| [Structured Logging](ops/admin/logging.md) | ops | Log format, event catalog, Loki queries |
+| [Hosted Service](ops/admin/hosted-service.md) | ops | Multi-tenant hosted platform (polis.pub) |
 
 ### For Everyone
 
@@ -53,3 +57,6 @@ Documentation is organized by component and audience. Each component directory h
 | [Vision](general/vision.md) | general | Why Polis exists — manifesto and experience principles |
 | [Security Policy](general/security.md) | general | Vulnerability reporting |
 
+## Archived
+
+Historical planning documents are in [archive/](archive/).

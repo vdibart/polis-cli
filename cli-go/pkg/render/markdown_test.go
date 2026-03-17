@@ -95,17 +95,17 @@ func TestMarkdownToHTML_Links(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
-		contains string
+		contains []string
 	}{
 		{
 			"inline link",
 			"[text](https://example.com)",
-			`<a href="https://example.com">text</a>`,
+			[]string{`<a href="https://example.com"`, `>text</a>`},
 		},
 		{
 			"autolink",
 			"https://example.com",
-			`<a href="https://example.com">`,
+			[]string{`<a href="https://example.com"`},
 		},
 	}
 
@@ -115,8 +115,10 @@ func TestMarkdownToHTML_Links(t *testing.T) {
 			if err != nil {
 				t.Fatalf("MarkdownToHTML failed: %v", err)
 			}
-			if !strings.Contains(html, tt.contains) {
-				t.Errorf("Expected HTML to contain %q, got %q", tt.contains, html)
+			for _, want := range tt.contains {
+				if !strings.Contains(html, want) {
+					t.Errorf("Expected HTML to contain %q, got %q", want, html)
+				}
 			}
 		})
 	}
@@ -212,14 +214,110 @@ func TestMarkdownToHTML_Table(t *testing.T) {
 }
 
 func TestMarkdownToHTML_RawHTML(t *testing.T) {
-	// We enabled WithUnsafe(), so raw HTML should pass through
+	// Safe raw HTML should pass through (goldmark WithUnsafe + bluemonday allows it)
 	input := `<div class="custom">content</div>`
 	html, err := MarkdownToHTML(input)
 	if err != nil {
 		t.Fatalf("MarkdownToHTML failed: %v", err)
 	}
 	if !strings.Contains(html, `<div class="custom">`) {
-		t.Errorf("Raw HTML should be preserved, got %q", html)
+		t.Errorf("Safe raw HTML should be preserved, got %q", html)
+	}
+}
+
+func TestMarkdownToHTML_ScriptStripped(t *testing.T) {
+	input := `Hello <script>alert(1)</script> world`
+	html, err := MarkdownToHTML(input)
+	if err != nil {
+		t.Fatalf("MarkdownToHTML failed: %v", err)
+	}
+	if strings.Contains(html, "<script>") {
+		t.Errorf("Script tags should be stripped, got %q", html)
+	}
+	if strings.Contains(html, "alert(1)") {
+		t.Errorf("Script content should be stripped, got %q", html)
+	}
+	if !strings.Contains(html, "Hello") || !strings.Contains(html, "world") {
+		t.Errorf("Non-script text should be preserved, got %q", html)
+	}
+}
+
+func TestMarkdownToHTML_EventHandlerStripped(t *testing.T) {
+	input := `<img src="photo.jpg" onerror="alert(1)">`
+	html, err := MarkdownToHTML(input)
+	if err != nil {
+		t.Fatalf("MarkdownToHTML failed: %v", err)
+	}
+	if strings.Contains(html, "onerror") {
+		t.Errorf("Event handlers should be stripped, got %q", html)
+	}
+	if !strings.Contains(html, "<img") {
+		t.Errorf("Img tag should be preserved, got %q", html)
+	}
+}
+
+func TestMarkdownToHTML_IframeStripped(t *testing.T) {
+	input := `<iframe src="https://evil.com"></iframe>`
+	html, err := MarkdownToHTML(input)
+	if err != nil {
+		t.Fatalf("MarkdownToHTML failed: %v", err)
+	}
+	if strings.Contains(html, "<iframe") {
+		t.Errorf("Iframe should be stripped, got %q", html)
+	}
+}
+
+func TestMarkdownToHTML_SafeElementsPreserved(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		contains string
+	}{
+		{"details", "<details><summary>Toggle</summary>Content</details>", "<details>"},
+		{"video", `<video controls src="video.mp4"></video>`, "<video"},
+		{"kbd", "<kbd>Ctrl+C</kbd>", "<kbd>"},
+		{"mark", "<mark>highlighted</mark>", "<mark>"},
+		{"figure", "<figure><figcaption>Caption</figcaption></figure>", "<figure>"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			html, err := MarkdownToHTML(tt.input)
+			if err != nil {
+				t.Fatalf("MarkdownToHTML failed: %v", err)
+			}
+			if !strings.Contains(html, tt.contains) {
+				t.Errorf("Expected %q to be preserved, got %q", tt.contains, html)
+			}
+		})
+	}
+}
+
+func TestMarkdownToHTML_JavascriptURLStripped(t *testing.T) {
+	input := `<a href="javascript:alert(1)">click me</a>`
+	html, err := MarkdownToHTML(input)
+	if err != nil {
+		t.Fatalf("MarkdownToHTML failed: %v", err)
+	}
+	if strings.Contains(html, "javascript:") {
+		t.Errorf("javascript: URLs should be stripped, got %q", html)
+	}
+	if !strings.Contains(html, "click me") {
+		t.Errorf("Link text should be preserved, got %q", html)
+	}
+}
+
+func TestMarkdownToHTML_FormStripped(t *testing.T) {
+	input := `<form action="/steal"><input type="text" name="password"><button>Submit</button></form>`
+	html, err := MarkdownToHTML(input)
+	if err != nil {
+		t.Fatalf("MarkdownToHTML failed: %v", err)
+	}
+	if strings.Contains(html, "<form") {
+		t.Errorf("Form elements should be stripped, got %q", html)
+	}
+	if strings.Contains(html, "<input") {
+		t.Errorf("Input elements should be stripped, got %q", html)
 	}
 }
 

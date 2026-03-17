@@ -40,6 +40,11 @@ func NewStore(siteDir string, privateKeySeed []byte) (*Store, error) {
 	}
 
 	storageKey, err := DeriveStorageKey(privateKeySeed, salt, storageInfoDM)
+	// Zero the seed now that we've derived the storage key.
+	// Callers must not reuse the seed after calling NewStore.
+	for i := range privateKeySeed {
+		privateKeySeed[i] = 0
+	}
 	if err != nil {
 		return nil, fmt.Errorf("derive storage key: %w", err)
 	}

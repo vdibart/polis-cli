@@ -8,6 +8,17 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/style.css">
+    <script type="importmap">
+    {
+        "imports": {
+            "@milkdown/kit/core": "https://esm.sh/@milkdown/kit@7/core",
+            "@milkdown/kit/preset/commonmark": "https://esm.sh/@milkdown/kit@7/preset/commonmark",
+            "@milkdown/kit/utils": "https://esm.sh/@milkdown/kit@7/utils",
+            "@milkdown/plugin-listener": "https://esm.sh/@milkdown/plugin-listener@7?external=@milkdown/kit"
+        }
+    }
+    </script>
+    <script type="module" src="/milkdown-editor.js"></script>
 </head>
 <body>
     <div id="app">
@@ -143,9 +154,9 @@
                 <div class="topbar-inner">
                 <div class="topbar-menu">
                     <div class="mode-toggle">
-                        <button id="mode-btn-feed" class="mode-btn active" onclick="App.switchMode('feed')">Feed</button>
-                        <button id="mode-btn-posts" class="mode-btn" onclick="App.switchMode('posts')">Posts</button>
-                        <button id="mode-btn-write" class="mode-btn" onclick="App.switchMode('write')">Write</button>
+                        <button id="mode-btn-feed" class="mode-btn active" onclick="App.switchMode('feed')">Feed<span id="mode-dot-feed" class="badge-dot red hidden"></span></button>
+                        <button id="mode-btn-posts" class="mode-btn" onclick="App.switchMode('posts')">Posts<span id="mode-dot-posts" class="badge-dot amber hidden"></span></button>
+                        <button id="mode-btn-messages" class="mode-btn" onclick="App.switchMode('messages')">Messages<span id="mode-dot-messages" class="badge-dot red hidden"></span></button>
                     </div>
 
                     <div class="bar-icons">
@@ -161,19 +172,6 @@
                                 <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
                                 <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
                             </svg>
-                        </button>
-                        <button id="bar-icon-bell" class="bar-icon" onclick="App.toggleNotifications()" title="Notifications">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-                                <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
-                            </svg>
-                            <span id="topbar-notification-dot" class="badge-dot red hidden"></span>
-                        </button>
-                        <button id="bar-icon-heart" class="bar-icon" onclick="App.navigateTo('/blessings')" title="Blessing Requests">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
-                            </svg>
-                            <span id="topbar-blessing-dot" class="badge-dot amber hidden"></span>
                         </button>
                         <button id="bar-icon-people" class="bar-icon" onclick="App.navigateTo('/social/following')" title="Network">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -311,38 +309,102 @@
             <div class="editor-container">
                 <div class="editor-pane">
                     <div class="pane-header">
-                        <span>Markdown</span>
-                        <div class="pane-header-spacer"></div>
-                        <button id="editor-fm-toggle" class="pane-toggle-btn hidden" title="Toggle frontmatter display">Show FM</button>
+                        <span>Editor</span>
+                        <div class="editor-mode-toggle">
+                            <button id="editor-wysiwyg-btn" class="editor-mode-btn active">WYSIWYG</button>
+                            <button id="editor-markdown-btn" class="editor-mode-btn">Markdown</button>
+                        </div>
+                        <div class="pane-header-right">
+                            <button id="editor-fm-toggle" class="pane-toggle-btn hidden" title="Toggle frontmatter display">Show FM</button>
+                            <button id="editor-right-panel-toggle" class="pane-toggle-btn" title="Toggle right panel">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <rect x="3" y="3" width="18" height="18" rx="2"/>
+                                    <line x1="15" y1="3" x2="15" y2="21"/>
+                                </svg>
+                            </button>
+                        </div>
                     </div>
                     <div id="editor-fm-display" class="editor-fm-display hidden">
                         <pre id="editor-fm-content"></pre>
                     </div>
-                    <textarea id="markdown-input" placeholder="# Your Post Title
-
-Write your content here in markdown...
-
-**Bold text** and *italic text* work as expected.
-
-## Subheadings
-
-- Bullet points
-- Are supported
-
-1. As are
-2. Numbered lists
-
-> Blockquotes too!
-
-```
-code blocks
-```
-"></textarea>
+                    <div id="milkdown-post" class="milkdown-mount"></div>
+                    <textarea id="markdown-input" class="hidden"></textarea>
                 </div>
-                <div class="preview-pane">
-                    <div class="pane-header">Preview</div>
-                    <div id="preview-content" class="preview-content">
-                        <p class="empty-state">Start writing to see a preview.</p>
+                <div id="editor-right-panel" class="right-panel collapsed">
+                    <div class="right-panel-header">
+                        <div id="panel-mode-toggle" class="panel-mode-toggle">
+                            <!-- Tabs set dynamically by JS based on left editor mode -->
+                        </div>
+                    </div>
+                    <div id="panel-opposite-preview" class="right-panel-body panel-mode-content hidden">
+                        <div id="panel-preview-content" class="preview-content">
+                            <p class="empty-state">Start writing to see a preview.</p>
+                        </div>
+                    </div>
+                    <div id="panel-opposite-markdown" class="right-panel-body panel-mode-content panel-editor-body hidden">
+                        <textarea id="panel-markdown-textarea" class="panel-textarea" readonly></textarea>
+                    </div>
+                    <div id="panel-help" class="right-panel-body panel-mode-content hidden">
+                        <div class="help-reference">
+                            <div id="help-section-markdown" class="help-section">
+                            <h3>Markdown Syntax</h3>
+                            <table class="help-table">
+                                <tr><td><code># Heading 1</code></td><td>Top-level heading</td></tr>
+                                <tr><td><code>## Heading 2</code></td><td>Section heading</td></tr>
+                                <tr><td><code>### Heading 3</code></td><td>Sub-section heading</td></tr>
+                                <tr><td><code>**bold**</code></td><td><strong>Bold text</strong></td></tr>
+                                <tr><td><code>*italic*</code></td><td><em>Italic text</em></td></tr>
+                                <tr><td><code>[text](url)</code></td><td>Hyperlink</td></tr>
+                                <tr><td><code>![alt](url)</code></td><td>Image</td></tr>
+                                <tr><td><code>`code`</code></td><td><code>Inline code</code></td></tr>
+                                <tr><td><code>```...```</code></td><td>Code block</td></tr>
+                                <tr><td><code>> quote</code></td><td>Blockquote</td></tr>
+                                <tr><td><code>- item</code></td><td>Bullet list</td></tr>
+                                <tr><td><code>1. item</code></td><td>Numbered list</td></tr>
+                                <tr><td><code>---</code></td><td>Horizontal rule</td></tr>
+                            </table>
+                            </div>
+
+                            <div id="help-section-wysiwyg" class="help-section">
+                            <h3>WYSIWYG Keyboard Shortcuts</h3>
+                            <table class="help-table">
+                                <tr><td><kbd>Ctrl+B</kbd></td><td>Bold</td></tr>
+                                <tr><td><kbd>Ctrl+I</kbd></td><td>Italic</td></tr>
+                                <tr><td><kbd>Ctrl+K</kbd></td><td>Insert link</td></tr>
+                                <tr><td><kbd>Ctrl+E</kbd></td><td>Inline code</td></tr>
+                                <tr><td><kbd>Ctrl+Shift+7</kbd></td><td>Ordered list</td></tr>
+                                <tr><td><kbd>Ctrl+Shift+8</kbd></td><td>Bullet list</td></tr>
+                                <tr><td><kbd>Ctrl+Shift+9</kbd></td><td>Blockquote</td></tr>
+                            </table>
+                            </div>
+
+                            <div id="help-section-editor" class="help-section">
+                            <h3>Editor Shortcuts</h3>
+                            <table class="help-table">
+                                <tr><td><kbd>Ctrl+S</kbd></td><td>Save draft</td></tr>
+                                <tr><td><kbd>Ctrl+Enter</kbd></td><td>Publish</td></tr>
+                            </table>
+                            </div>
+
+                            <div id="help-section-tips" class="help-section">
+                            <h3>Tips</h3>
+                            <ul class="help-tips">
+                                <li><strong>Filename</strong> — auto-generated from the first heading, or set manually.</li>
+                                <li><strong>Frontmatter</strong> — preserved when editing existing posts. Use <em>Show FM</em> to inspect.</li>
+                                <li><strong>Drafts</strong> — saved locally in <code>.polis/</code>. Not published until you click Publish.</li>
+                                <li><strong>Images</strong> — use full URLs. Files are not uploaded; host images externally.</li>
+                            </ul>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="panel-browse" class="right-panel-body panel-mode-content hidden">
+                        <div class="browse-navigator"><p class="empty-state">Loading posts...</p></div>
+                        <div class="browse-preview">
+                            <div id="browse-preview-content" class="preview-content">
+                                <p class="empty-state">Select a post to preview.</p>
+                            </div>
+                            <button id="browse-load-btn" class="primary hidden">Load into Editor</button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -364,7 +426,8 @@ code blocks
                 </div>
                 <div class="comment-editor">
                     <div class="pane-header">Your Comment</div>
-                    <textarea id="comment-input" placeholder="Write your comment here...
+                    <div id="milkdown-comment" class="milkdown-mount"></div>
+                    <textarea id="comment-input" class="hidden" placeholder="Write your comment here...
 
 You can use **markdown** formatting."></textarea>
                 </div>
@@ -382,11 +445,20 @@ You can use **markdown** formatting."></textarea>
             </header>
             <div class="editor-container">
                 <div class="editor-pane">
-                    <div class="pane-header">Markdown</div>
-                    <textarea id="about-editor-textarea" placeholder="Write your about section in markdown..."></textarea>
+                    <div class="pane-header">
+                        <span>Editor</span>
+                        <div class="pane-header-spacer"></div>
+                        <button id="about-raw-toggle" class="pane-toggle-btn" title="Toggle raw markdown editing">Raw</button>
+                    </div>
+                    <div id="milkdown-about" class="milkdown-mount"></div>
+                    <textarea id="about-editor-textarea" class="hidden" placeholder="Write your about section in markdown..."></textarea>
                 </div>
-                <div class="preview-pane">
-                    <div class="pane-header">Preview</div>
+                <div class="preview-pane collapsed">
+                    <div class="pane-header">
+                        <span>Preview</span>
+                        <div class="pane-header-spacer"></div>
+                        <button id="about-preview-toggle" class="pane-toggle-btn" title="Toggle preview pane">Show</button>
+                    </div>
                     <div id="about-editor-preview" class="preview-content">
                         <p class="empty-state">Start writing to see a preview.</p>
                     </div>

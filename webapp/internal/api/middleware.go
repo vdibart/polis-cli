@@ -42,20 +42,11 @@ func authMiddleware(siteDir string, requireAuth bool, next http.HandlerFunc) htt
 	}
 }
 
-// corsMiddleware adds CORS headers for API access from external tools.
+// corsMiddleware is a no-op passthrough enforcing same-origin policy.
+// No CORS headers = browser enforces same-origin. Can be relaxed later
+// with configurable allowed origins if cross-origin access is needed.
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Polis-Domain, X-Polis-Signature, X-Polis-Timestamp")
-
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		next(w, r)
-	}
+	return next
 }
 
 // limitBody wraps a handler to cap request body size.

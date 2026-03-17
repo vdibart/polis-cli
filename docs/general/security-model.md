@@ -70,6 +70,54 @@ The hash is computed over the canonicalized body content (leading empty lines st
 
 API keys for the v1 REST API are hashed with SHA-256 before storage. Only the hash is persisted in `.polis/api-keys.json`; the plaintext key is shown once at generation time and never stored. Validation uses constant-time comparison (`crypto/subtle.ConstantTimeCompare`) to prevent timing attacks.
 
+### Ed25519 to X25519 Key Conversion
+
+Polis reuses existing Ed25519 signing keys for DM encryption by converting them to X25519 at runtime. This is a well-established pattern used by Signal and libsodium (`crypto_sign_ed25519_pk_to_curve25519`).
+
+| Conversion | Method |
+|------------|--------|
+| **Private key** | SHA-512 of Ed25519 seed + scalar clamping → X25519 scalar |
+| **Public key** | Edwards→Montgomery point conversion → X25519 point |
+| **Library** | `filippo.io/edwards25519` for point conversion |
+| **Caching** | Conversion is deterministic; results cached in memory |
+| **Storage** | No new key material stored on disk |
+
+### NaCl Box (Transport Encryption)
+
+Direct messages use NaCl box for transport encryption between sender and recipient:
+
+| Property | Detail |
+|----------|--------|
+| **Algorithm** | X25519 Diffie-Hellman key agreement + XSalsa20-Poly1305 authenticated encryption |
+| **Nonce** | Random 24 bytes per message (from `crypto/rand`) |
+| **Integrity** | Poly1305 MAC provides integrity and authenticity |
+| **Library** | `golang.org/x/crypto/nacl/box` |
+
+### NaCl Secretbox (Storage Encryption)
+
+After receiving a DM, content is re-encrypted with a local symmetric key for at-rest storage:
+
+| Property | Detail |
+|----------|--------|
+| **Algorithm** | XSalsa20-Poly1305 symmetric authenticated encryption |
+| **Key** | Derived via HKDF-SHA256 from private key seed + site-wide salt |
+| **Nonce** | Random 24 bytes per message |
+| **Library** | `golang.org/x/crypto/nacl/secretbox` |
+
+### HKDF Key Derivation
+
+Storage keys for encrypted content types are derived using HKDF:
+
+| Property | Detail |
+|----------|--------|
+| **Algorithm** | HKDF-SHA256 |
+| **Secret** | Ed25519 private key seed (32 bytes) |
+| **Salt** | `.polis/storage-salt` (32 random bytes, generated once per site) |
+| **Info** | Purpose string (e.g., `"polis-dm-storage-v1"`) |
+| **Output** | 32-byte symmetric key |
+
+The salt is not secret — its purpose is domain separation. Different content types derive different keys using different `info` strings from the same salt.
+
 ---
 
 ## 2. Key Management
@@ -174,6 +222,8 @@ The file is served as JSON. On disk it lives at `.well-known/polis` relative to 
   "created": "<ISO-8601 timestamp>",
   "email": "<optional contact email>",
   "site_title": "<optional site title>",
+  "author_name": "<optional full display name>",
+  "avatar": "<optional avatar styling config>",
   "active_theme": "<optional theme name>",
   "bundles": {
     "<bundle-id>": {
@@ -199,8 +249,23 @@ The file is served as JSON. On disk it lives at `.well-known/polis` relative to 
 |-------|------|---------|-------------|
 | `email` | string | omitted | Contact email. Private by default; only written if explicitly provided during `polis init`. |
 | `site_title` | string | omitted | Human-readable site title |
+| `author_name` | string | omitted | Full display name (distinct from `author` which is typically the domain handle) |
+| `avatar` | object | omitted | Custom avatar styling config (see Avatar Config below) |
 | `active_theme` | string | omitted | Currently active theme name (e.g., `sols`, `turbo`, `zane`) |
 | `bundles` | object | omitted | Bundle registry mapping bundle IDs to their configuration |
+
+#### Avatar Config
+
+The `avatar` object controls the visual representation of the site author:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `bg` | string | yes | Background color |
+| `fg` | string | yes | Foreground/text color |
+| `border` | string | no | Border color |
+| `border_w` | int | no | Border width in pixels |
+| `pattern` | string | no | Pattern name for avatar decoration |
+| `pattern_color` | string | no | Color for the pattern overlay |
 
 ### Bundle Registry
 
@@ -230,31 +295,6 @@ Each bundle entry has:
 
 The bundle ID follows reverse-domain notation (e.g., `pub.polis.core`, `com.example.photos`). The `pub.polis.core` bundle is always created during `polis init` and contains the standard content types (post, comment, follow, feed).
 
-### Removed v1 Fields
-
-The following fields from the v1 format are no longer used:
-
-| Removed Field | Reason | Replacement |
-|---------------|--------|-------------|
-| `manifest_url` | Replaced by bundle system | `bundles` field in `.well-known/polis` |
-| `posts_url` | Hardcoded content paths | Bundle `path` + content type directory |
-| `comments_url` | Hardcoded content paths | Bundle `path` + content type directory |
-| `following_url` | Hardcoded content paths | Bundle `path` + content type directory |
-| `manifest_version` | Redundant with `version` | `version` field |
-
-### Absorbed Fields from manifest.json
-
-The v1 `manifest.json` file has been eliminated. Its fields are now covered by `.well-known/polis`:
-
-| Former manifest.json field | Now in .well-known/polis |
-|---------------------------|------------------------|
-| `public_key` | `public_key` |
-| `author` | `author` |
-| `email` | `email` |
-| `site_title` | `site_title` |
-| `active_theme` | `active_theme` |
-| `created` | `created` |
-
 ### Validation Rules
 
 1. `version` must be a non-empty string
@@ -281,9 +321,21 @@ type WellKnown struct {
     Author      string                 `json:"author"`
     Email       string                 `json:"email,omitempty"`
     SiteTitle   string                 `json:"site_title,omitempty"`
+    AuthorName  string                 `json:"author_name,omitempty"`
+    Avatar      *AvatarConfig          `json:"avatar,omitempty"`
     Created     string                 `json:"created"`
     ActiveTheme string                 `json:"active_theme,omitempty"`
     Bundles     map[string]BundleEntry `json:"bundles,omitempty"`
+}
+
+// AvatarConfig controls the visual representation of the site author.
+type AvatarConfig struct {
+    BG           string `json:"bg"`
+    FG           string `json:"fg"`
+    Border       string `json:"border,omitempty"`
+    BorderW      int    `json:"border_w,omitempty"`
+    Pattern      string `json:"pattern,omitempty"`
+    PatternColor string `json:"pattern_color,omitempty"`
 }
 ```
 
@@ -307,6 +359,15 @@ type WellKnown struct {
   "author": "Alice",
   "email": "alice@example.com",
   "site_title": "Alice's Thoughts",
+  "author_name": "Alice Johnson",
+  "avatar": {
+    "bg": "#1a1a2e",
+    "fg": "#e0e0e0",
+    "border": "#16213e",
+    "border_w": 2,
+    "pattern": "dots",
+    "pattern_color": "#0f3460"
+  },
   "created": "2026-01-15T12:00:00Z",
   "active_theme": "sols",
   "bundles": {
@@ -365,6 +426,8 @@ Posts are signed during `polis post` (or `polis publish`). The signed content in
 title: My Post Title
 published: 2026-01-15T12:00:00Z
 current-version: sha256:abc123...
+version-history:
+  - sha256:abc123... (2026-01-15T12:00:00Z)
 generator: polis-cli-go/0.57.0
 signature: <SSH signature block>
 ---
@@ -382,11 +445,14 @@ Comments follow the same signing pattern but include additional `in-reply-to` me
 ---
 title: Re: Original Post Title
 type: comment
+author: alice.com
 published: 2026-01-15T14:00:00Z
 in-reply-to:
   url: https://author.com/content/pub.polis.core/post/original-post.md
-  version: sha256:def456...
+  root-post: https://author.com/content/pub.polis.core/post/original-post.md
 current-version: sha256:789abc...
+version-history:
+  - sha256:789abc... (2026-01-15T14:00:00Z)
 generator: polis-cli-go/0.57.0
 signature: <SSH signature block>
 ---
@@ -397,20 +463,6 @@ Comment body content here...
 #### Blessings
 
 Blessing requests are signed by the commenter and include the comment content. The site owner's blessing (approval) or denial is a separate signed action communicated through the discovery service.
-
-#### Domain Migrations
-
-When an author migrates to a new domain, the migration announcement is signed with the original key, creating a chain of trust from the old domain to the new one:
-
-```yaml
----
-type: migration
-from: olddomain.com
-to: newdomain.com
-migrated: 2026-03-01T00:00:00Z
-signature: <signed with old domain's key>
----
-```
 
 ### Verification Flow
 
@@ -444,6 +496,40 @@ Both checks must pass for content to be considered authentic and unmodified:
 | Forged | invalid | any | Content was not signed by the claimed author |
 | Unsigned | missing | any | Content has no cryptographic guarantee of authorship |
 
+### Instance-to-Instance Signed Requests
+
+For DM delivery, the sender's instance authenticates to the recipient's instance using signed request headers. This eliminates the need for pre-shared API keys between instances.
+
+**Headers:**
+
+| Header | Content |
+|--------|---------|
+| `X-Polis-Domain` | Sender's domain (e.g., `alice.example.com`) |
+| `X-Polis-Signature` | Ed25519 SSH signature over canonical JSON |
+| `X-Polis-Timestamp` | ISO-8601 timestamp of the request |
+
+**Canonical JSON:**
+```json
+{"action":"deliver","domain":"alice.example.com","timestamp":"2026-03-07T10:00:00Z"}
+```
+
+**Verification flow:**
+
+1. Receiver extracts `X-Polis-Domain` header
+2. Receiver checks `X-Polis-Timestamp` is within 5-minute window (replay protection)
+3. Receiver fetches sender's `.well-known/polis` to obtain public key (cached for 1 hour)
+4. Receiver reconstructs canonical JSON from headers
+5. Receiver verifies `X-Polis-Signature` against sender's public key
+
+This is the same pattern used by the discovery service client (`addAuthHeaders` in `discovery/client.go`), extended to instance-to-instance communication.
+
+**Dual auth model:** The v1 API accepts either auth method depending on the action:
+
+| Action | Auth Method | Who Uses It |
+|--------|------------|-------------|
+| `list`, `get`, `send`, `mark_read`, `delete`, `retry` | Bearer token | Site owner (local operations) |
+| `deliver` | Signed request headers | Remote instances (incoming DMs) |
+
 ---
 
 ## 5. Trust Model
@@ -471,18 +557,25 @@ Polis has a deliberately minimal trust model:
 
 ### Discovery Service Trust
 
-The discovery service (DS) is a coordination layer, not a trust authority:
+The discovery service (DS) is a coordination layer, not a trust authority. It provides two layers of cryptographic verification:
 
-| DS Responsibility | Security Implication |
-|------------------|---------------------|
-| Storing follow announcements | DS could fabricate follows (mitigated by client-side verification) |
-| Relaying blessing requests | DS could drop or fabricate requests (mitigated by signed content) |
-| Providing stream events | DS could inject events (mitigated by client-side filtering) |
-| Storing site registrations | DS knows which domains are using polis (metadata exposure) |
+**Layer 1: DS Envelope Signing** — The DS signs all query responses (`GET /v1/stream`, `/v1/content`, `/v1/relationships`, `/v1/sites/check`) with its Ed25519 private key. Clients verify the DS signature against the DS public key published at `https://ds.polis.pub/.well-known/polis`. This prevents response tampering by intermediaries (CDN compromise, DNS hijack) and detects a compromised DS instance serving altered data.
 
-**Key principle**: Clients NEVER trust DS data for authentication. The DS is a convenience layer; all security-critical verification happens by fetching content directly from the author's domain and checking signatures.
+**Layer 2: Author Signature Passthrough** — Stream events carry the original author's signature from publish time. Clients verify each event's author signature against the author's public key at `https://<actor>/.well-known/polis`. This prevents a compromised DS from fabricating events.
 
-The DS does verify signatures on certain operations (e.g., site registration, content announcements) to prevent spam, but this is defense-in-depth, not the primary trust model.
+| DS Responsibility | Security Implication | Mitigation |
+|------------------|---------------------|------------|
+| Storing follow announcements | DS could fabricate follows | Author signature verification on stream events |
+| Relaying blessing requests | DS could fabricate requests | Author signature verification on stream events |
+| Providing stream events | DS could inject events | DS envelope signature + author signature verification |
+| Storing site registrations | Metadata exposure | DS envelope signature prevents falsifying registration status |
+| Signing query responses | DS key compromise allows forged envelopes | Key rotation recovery (re-fetch on verification failure) |
+
+**Key principle**: Clients verify both the DS envelope signature (response authenticity) and the author signature on each event (content authenticity). The DS is a convenience layer; all security-critical verification happens through cryptographic signatures.
+
+The DS also verifies author signatures on ingest (site registration, content announcements, stream publishes) as defense-in-depth against spam.
+
+**Residual risk**: Even with both layers, a compromised DS can still suppress or delay events (censorship) and leak metadata about who follows whom. These are inherent to any centralized coordination service.
 
 ### following.json Trust
 
@@ -524,12 +617,15 @@ Private policies are loaded first and take precedence over public policies due t
 
 ### Format
 
-Each line in a `rules.jsonl` file is a JSON object with two fields:
+Policy files start with a version/generator header line, followed by one JSON object per rule:
 
 ```json
+{"version":1,"generator":"polis-cli-go/0.57.0"}
 {"active": true, "policy": "allow pub.polis.comment from following"}
 {"active": false, "policy": "deny all from all at spam.com"}
 ```
+
+The header line is not a rule — it records the file format version and the CLI version that created it. Parsers skip any line containing a `"version"` key.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -546,12 +642,21 @@ Inactive rules (`"active": false`) are skipped during evaluation. This allows di
 
 | Component | Values | Description |
 |-----------|--------|-------------|
-| `action` | `allow`, `deny` | What to do when the rule matches |
+| `action` | `allow`, `deny`, `emit`, `omit` | What to do when the rule matches |
 | `type-match` | `all`, `none`, dotted type prefix | Event type to match |
 | `from` | literal keyword | Required separator |
-| `source-match` | `all`, `none`, `following`, `followers` | Who the event is from |
+| `source-match` | `all`, `none`, `following`, `followers`, `self`, `thread-blessed` | Who the event is from |
 | `at <domain>` | optional | Restrict match to a specific actor domain |
 | `on <target>` | optional | Restrict match to a specific target path |
+
+**Verb semantics:**
+
+| Verb pair | Category | Purpose | Example |
+|-----------|----------|---------|---------|
+| `allow` / `deny` | Access control | Gate **incoming** events — determine whether content from a given source is accepted or rejected | `allow pub.polis.comment from following` accepts comments from followed authors |
+| `emit` / `omit` | Side-effect control | Trigger or suppress **outgoing** side-effects in response to events | `emit pub.polis.comment.blessing from following` auto-blesses comments from followed authors; `omit pub.polis.notification from self` suppresses self-notifications |
+
+Access control verbs (`allow`/`deny`) answer "should this event be accepted?" Side-effect verbs (`emit`/`omit`) answer "should this event trigger an automatic action?" Both use the same grammar and evaluation model. See `docs/cli/user/policies.md` for full usage guide.
 
 ### Type Matching
 
@@ -572,6 +677,8 @@ Type matching uses **prefix matching with dot boundary**: `pub.polis.comment` ma
 | `none` | No actor domain (effectively disables the rule) |
 | `following` | Actor domain is in the site's following list |
 | `followers` | Actor domain is in the site's followers list |
+| `self` | Actor domain matches the site's own domain |
+| `thread-blessed` | Actor has a prior granted blessing on the thread (DS-resolved) |
 
 ### Evaluation Order
 
@@ -579,13 +686,17 @@ Type matching uses **prefix matching with dot boundary**: `pub.polis.comment` ma
 2. **First match wins**: The first active rule that matches the event determines the outcome
 3. **Default allow**: If no rule matches, the event is allowed (permissive by default)
 
-This evaluation model is critical for the blessing workflow. `EvaluateExplicit` distinguishes between:
+This evaluation model is critical for the blessing workflow. `EvaluateExplicit` returns an `EvalResult` that distinguishes between all four decisions:
 
-| Outcome | Decision | Explicit | Meaning |
-|---------|----------|----------|---------|
+| Outcome | Decision | Matched | Meaning |
+|---------|----------|---------|---------|
 | Explicit allow | `Allow` | `true` | A rule explicitly permits this; auto-grant blessing |
 | Explicit deny | `Deny` | `true` | A rule explicitly forbids this; auto-deny blessing |
+| Explicit emit | `Emit` | `true` | A rule triggers an outgoing side-effect (e.g., auto-bless) |
+| Explicit omit | `Omit` | `true` | A rule suppresses an outgoing side-effect (e.g., skip notification) |
 | No match | `Allow` | `false` | No rule matched; requires manual review |
+
+The `EvalResult` also includes `Rule` (the raw policy string that matched) and `RuleIdx` (index in the policy list, -1 if no match), useful for logging and debugging.
 
 ### Examples
 
@@ -607,10 +718,10 @@ Non-comment events (follows, etc.) fall through both rules and are allowed by de
 **Auto-bless comments from followed authors**:
 
 ```jsonl
-{"active":true,"policy":"allow pub.polis.comment.blessing from following"}
+{"active":true,"policy":"emit pub.polis.comment.blessing from following"}
 ```
 
-When a blessing request arrives from a followed domain, `EvaluateExplicit` returns `(Allow, true)`, triggering automatic granting.
+When a blessing request arrives from a followed domain, `EvaluateExplicit` returns `(Emit, true)`, triggering automatic granting.
 
 **Post-specific deny** (disable comments on a specific post):
 
@@ -634,15 +745,56 @@ Public `policies/rules.jsonl`:
 
 Private blocklist rules fire first (blocking spam.com and troll.net for all event types), then public rules control comment access.
 
-### Default Policy
+### Default Policies
 
-New sites are initialized with a single default policy rule:
+New sites are initialized with two policy files containing 10 rules total.
+
+**Public** (`policies/rules.jsonl`) — visible to visitors, controls side-effects:
 
 ```jsonl
-{"active":true,"policy":"allow pub.polis.comment.blessing from following"}
+{"version":1,"generator":"polis-cli-go/0.57.0"}
+{"active":true,"policy":"emit pub.polis.comment.blessing from self"}
+{"active":true,"policy":"emit pub.polis.comment.blessing from following"}
+{"active":true,"policy":"emit pub.polis.comment.blessing from thread-blessed"}
 ```
 
-This default auto-grants blessing requests from followed authors while leaving all other events at the permissive default.
+These auto-bless comments from yourself, followed authors, and anyone already blessed in the thread.
+
+**Private** (`.polis/policies/rules.jsonl`) — not published, controls access and notifications:
+
+```jsonl
+{"version":1,"generator":"polis-cli-go/0.57.0"}
+{"active":true,"policy":"allow pub.polis.post from all"}
+{"active":true,"policy":"allow pub.polis.comment from all"}
+{"active":true,"policy":"allow pub.polis.follow from all"}
+{"active":true,"policy":"allow pub.polis.site from all"}
+{"active":true,"policy":"allow pub.polis.dm from following"}
+{"active":true,"policy":"deny pub.polis.dm from all"}
+{"active":true,"policy":"omit pub.polis.notification from self"}
+```
+
+The private defaults allow all standard content types from everyone, restrict DMs to followed domains (allow-then-deny ordering), and suppress self-notifications.
+
+### DM Acceptance Policy
+
+DM acceptance is controlled through the same policy rule system. The `pub.polis.dm` type prefix is used for DM-specific rules:
+
+```jsonl
+{"active":true,"policy":"allow pub.polis.dm from following"}
+{"active":true,"policy":"deny pub.polis.dm from all"}
+```
+
+These DM rules are part of the default private policies created during `polis init`. They restrict incoming DMs to followed domains by default.
+
+| Goal | Policy Rules |
+|------|-------------|
+| DMs from followed only (default) | `allow pub.polis.dm from following` + `deny pub.polis.dm from all` |
+| Accept from anyone | `allow pub.polis.dm from all` |
+| Block specific domain | `deny pub.polis.dm from all at spam.example.com` (before allow rules) |
+| Whitelist specific domain | `allow pub.polis.dm from all at trusted-friend.com` (before deny rules) |
+| Disable DMs entirely | `deny pub.polis.dm from all` |
+
+Policy evaluation happens before any cryptographic work in the DM receive pipeline, making it the cheapest rejection path.
 
 ### Integration Points
 
@@ -665,15 +817,16 @@ type Policy struct {
 
 // ParsedRule is the structured representation of a policy rule string.
 type ParsedRule struct {
-    Action string // "allow" or "deny"
+    Action string // "allow", "deny", "emit", or "omit"
     Type   string // event type prefix, "all", or "none"
-    Source string // "all", "none", "following", "followers"
+    Source string // "all", "none", "following", "followers", "self", "thread-blessed"
     Domain string // optional: actor domain filter (from "at <domain>")
     Target string // optional: target path filter (from "on <target>")
 }
 
 // EvalContext provides runtime context for source matching.
 type EvalContext struct {
+    MyDomain         string          // the local site's domain
     FollowingDomains map[string]bool
     FollowerDomains  map[string]bool
 }
@@ -686,6 +839,14 @@ type Event struct {
     TargetPath   string
 }
 
+// EvalResult is the structured outcome of policy evaluation.
+type EvalResult struct {
+    Decision Decision // Allow, Deny, Emit, or Omit
+    Matched  bool     // true if an explicit rule matched
+    Rule     string   // the raw policy string that matched, empty if no match
+    RuleIdx  int      // index in the policy list (-1 if no match)
+}
+
 // Evaluate returns the decision for an event against a set of policies.
 // First active matching rule wins. No match returns Allow (default permissive).
 func Evaluate(policies []Policy, evt Event, ctx EvalContext) Decision
@@ -693,6 +854,9 @@ func Evaluate(policies []Policy, evt Event, ctx EvalContext) Decision
 // EvaluateExplicit returns the decision and whether an explicit rule matched.
 // Returns (Allow, false) when no rule matched (default permissive).
 func EvaluateExplicit(policies []Policy, evt Event, ctx EvalContext) (Decision, bool)
+
+// EvaluateWithLog returns the full EvalResult including matched rule details.
+func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 ```
 
 ---
@@ -728,8 +892,9 @@ func EvaluateExplicit(policies []Policy, evt Event, ctx EvalContext) (Decision, 
 | Aspect | Detail |
 |--------|--------|
 | **Attack** | Attacker compromises the DS and injects false follow/content/blessing events |
-| **Mitigation** | Clients verify all content by fetching from origin domains and checking signatures |
-| **Residual risk** | DS can suppress events (denial of service) or leak metadata (who follows whom) |
+| **Mitigation** | Two-layer verification: (1) DS envelope signature on all query responses verified against DS public key at `/.well-known/polis`, (2) author signature on each stream event verified against author's public key. Clients reject responses with invalid DS signatures and skip events with invalid author signatures. Key rotation recovery: on DS verification failure, client re-fetches the DS key and retries once. |
+| **Detection** | Verification failures logged with actor domain, event type, and failure reason. Per-domain failure counters persisted across sync cycles. 3+ consecutive DS envelope failures suspend sync with warning. 5+ author failures from same domain in 24h trigger blocking recommendation. |
+| **Residual risk** | DS can suppress events (censorship/denial of service) or leak metadata (who follows whom). A compromised DS serving unsigned events from the pre-signing era could bypass author verification if `require_author_signatures` is false (transitional). |
 
 ### 7.5 Replay Attacks
 
@@ -803,6 +968,62 @@ func EvaluateExplicit(policies []Policy, evt Event, ctx EvalContext) (Decision, 
 | **Mitigation** | API key validation uses `crypto/subtle.ConstantTimeCompare` for hash comparison |
 | **Residual risk** | Standard constant-time comparison; no additional rate limiting on API auth endpoints |
 
+### 7.14 DM Spam / Flooding
+
+| Aspect | Detail |
+|--------|--------|
+| **Attack** | Attacker sends high volume of DMs to a target instance |
+| **Mitigation** | 7-layer defense: policy check → timestamp → global rate limit → signature verify → per-sender rate limit → size check → process |
+| **Residual risk** | Attacker controlling many verified domains could distribute load across senders; global rate limit is the backstop |
+
+### 7.15 DM Content Interception (Transport)
+
+| Aspect | Detail |
+|--------|--------|
+| **Attack** | Network attacker intercepts DM in transit between instances |
+| **Mitigation** | NaCl box encryption (X25519 + XSalsa20-Poly1305) provides confidentiality + integrity; HTTPS provides transport layer security |
+| **Residual risk** | Without forward secrecy, compromised long-term key exposes all past/future DMs with that peer |
+
+### 7.16 DM Storage Compromise (At Rest)
+
+| Aspect | Detail |
+|--------|--------|
+| **Attack** | Attacker gains filesystem access to `.polis/content/pub.polis.core/dm/` |
+| **Mitigation** | Message content encrypted with secretbox using HKDF-derived key; file permissions 0600; metadata (from, to, timestamp) remains cleartext |
+| **Residual risk** | Attacker with private key access can derive storage key and decrypt all stored DMs. Metadata (who you message, when, how often) is visible without decryption. |
+
+### 7.17 DM Sender Impersonation
+
+| Aspect | Detail |
+|--------|--------|
+| **Attack** | Attacker forges DM delivery pretending to be another domain |
+| **Mitigation** | Signed request headers verified against sender's `.well-known/polis` public key; sender public key inside encrypted payload provides second verification layer |
+| **Residual risk** | Domain takeover allows impersonation (same as 7.3); no key pinning for DM peers |
+
+### 7.18 DM Key Rotation Disruption
+
+| Aspect | Detail |
+|--------|--------|
+| **Attack** | Sender rotates key; previously sent DMs become unverifiable if receiver cached old key |
+| **Mitigation** | Transport encryption is per-delivery (receiver decrypts immediately); storage uses local key derived from receiver's own private key, unaffected by sender rotation |
+| **Residual risk** | DMs in flight during sender key rotation may fail signature verification; sender must retry after rotation completes |
+
+### 7.19 DM Metadata Exposure
+
+| Aspect | Detail |
+|--------|--------|
+| **Attack** | Observer analyzes cleartext metadata to learn communication patterns |
+| **Mitigation** | Metadata is local to each instance (not centralized); no intermediary server sees both sides |
+| **Residual risk** | Filesystem access reveals: who you message, when, frequency, message sizes. Conversation IDs are deterministic (derivable from both domains). |
+
+### 7.20 Malicious DM Content
+
+| Aspect | Detail |
+|--------|--------|
+| **Attack** | Sender delivers encrypted message containing malicious content (exploit payloads, phishing links, HTML injection) |
+| **Mitigation** | Post-decryption validation: strict UTF-8, HTML stripping, schema validation, field whitelist. Display-time: content always escaped, links not auto-linkified |
+| **Residual risk** | Server operator stores encrypted blobs they cannot inspect (inherent to E2E encryption). Social engineering content that passes validation cannot be prevented by technical controls. |
+
 ---
 
 ## 8. Feature Security Analysis
@@ -838,16 +1059,7 @@ func EvaluateExplicit(policies []Policy, evt Event, ctx EvalContext) (Decision, 
 | **Policy integration** | `EvaluateExplicit` determines auto-grant/auto-deny/manual |
 | **Trust boundary** | Site owner has full control over what appears on their site |
 
-### 8.4 Domain Migration
-
-| Aspect | Security Property |
-|--------|-------------------|
-| **Announcement** | Migration signed with the old domain's key |
-| **Chain of trust** | Old key vouches for the new domain |
-| **Limitation** | No way to revoke a fraudulent migration announcement |
-| **DS coordination** | DS can relay migration announcements to followers |
-
-### 8.5 Following
+### 8.4 Following
 
 | Aspect | Security Property |
 |--------|-------------------|
@@ -856,7 +1068,7 @@ func EvaluateExplicit(policies []Policy, evt Event, ctx EvalContext) (Decision, 
 | **Unfollowing** | Removing from `following.json` and announcing to DS |
 | **No mutual consent** | Following is unilateral; no approval required from the followed party |
 
-### 8.6 Nested Comments
+### 8.5 Nested Comments
 
 | Aspect | Security Property |
 |--------|-------------------|
@@ -865,7 +1077,7 @@ func EvaluateExplicit(policies []Policy, evt Event, ctx EvalContext) (Decision, 
 | **Site owner control** | Entire thread is subject to blessing on the site owner's domain |
 | **Cross-site threads** | Thread may span multiple domains; each segment verified independently |
 
-### 8.7 Webapp Security
+### 8.6 Webapp Security
 
 | Aspect | Security Property |
 |--------|-------------------|
@@ -878,7 +1090,7 @@ func EvaluateExplicit(policies []Policy, evt Event, ctx EvalContext) (Decision, 
 | **Static assets** | Embedded in binary via Go `embed` (no external file serving) |
 | **SPA routing** | `/_/` deep-linking prefix for client-side routes |
 
-### 8.8 Notifications
+### 8.7 Notifications
 
 | Aspect | Security Property |
 |--------|-------------------|
@@ -886,6 +1098,36 @@ func EvaluateExplicit(policies []Policy, evt Event, ctx EvalContext) (Decision, 
 | **Storage** | Local JSONL files in `.polis/ds/<domain>/pub.polis.core/state/` |
 | **Filtering** | Policy rules can suppress notifications from denied sources |
 | **No execution** | Notifications are data-only; no code execution or link auto-following |
+
+### 8.8 Direct Messages
+
+| Aspect | Security Property |
+|--------|-------------------|
+| **Confidentiality (transport)** | NaCl box: X25519 DH + XSalsa20-Poly1305 authenticated encryption |
+| **Confidentiality (storage)** | NaCl secretbox: HKDF-derived symmetric key + XSalsa20-Poly1305 |
+| **Sender authentication** | Ed25519 signed request headers + sender public key inside encrypted payload |
+| **Integrity** | Poly1305 MAC on both transport and storage encryption |
+| **Access control** | Configurable acceptance policy via `rules.jsonl` (followed/anyone/blocked) |
+| **Rate limiting** | Per-sender and global rate limits, checked before expensive crypto operations |
+| **Metadata protection** | No intermediary; metadata local to each instance. Cleartext metadata: sender, recipient, timestamp, size |
+| **Forward secrecy** | None in v1 (acknowledged limitation) |
+| **Key rotation** | Storage survives peer key rotation; local key rotation requires re-encryption migration |
+| **Spam resistance** | 7-layer defense: policy → timestamp → global rate → signature verify → per-sender rate → size → process |
+
+### 8.9 Hooks
+
+| Aspect | Security Property |
+|--------|-------------------|
+| **Availability** | Self-hosting only. Disabled on polis.pub (`EnableHooks = false`; all hook endpoints return 403) |
+| **Execution model** | Shell scripts invoked via `exec.CommandContext` with 30-second timeout |
+| **Path containment** | Hook scripts must resolve within the site directory. Symlinks within the site directory are followed, allowing controlled escape for system-installed scripts |
+| **Environment** | Inherits parent process environment plus `POLIS_*` variables (event, path, title, version, timestamp, site dir, config dir, commit message) |
+| **Input** | JSON payload on stdin containing event metadata |
+| **Output** | Combined stdout/stderr captured, capped at 32KB (`MaxHookBodySize`) |
+| **Discovery** | Explicit config (`.polis/webapp/config.json` hooks section) or convention (`.polis/webapp/hooks/{event}.sh`) |
+| **No sandboxing** | Scripts run with the same user/permissions as the polis process. No seccomp, no chroot, no capabilities restriction |
+| **No signature verification** | Hook scripts are not signed or verified. Any executable file at the configured/conventional path will be run |
+| **Trigger events** | `post-publish`, `post-republish`, `post-comment` (blessed) |
 
 ---
 
@@ -901,8 +1143,10 @@ func EvaluateExplicit(policies []Policy, evt Event, ctx EvalContext) (Decision, 
 | **Public following lists** | No way to follow someone privately | Private following list option |
 | **No rate limiting** | DS has limited rate limiting on incoming events | Per-domain rate limits at DS level |
 | **Single key per site** | No key delegation or sub-keys for different operations | Hierarchical key model |
-| **No content encryption** | All content is public; no private posts or DMs | Content encryption layer |
+| **No content encryption for public types** | Public content (posts, comments) is unencrypted by design. Direct messages are end-to-end encrypted (NaCl box) and encrypted at rest (NaCl secretbox). | Per-reader encryption for public content |
 | **No multi-signature** | No support for content requiring multiple signers | Multi-sig threshold signatures |
+| **No DM forward secrecy** | Compromised private key exposes all DM history with all peers. The Double Ratchet (Signal protocol) would address this but requires synchronized state incompatible with async delivery. | Double Ratchet protocol |
+| **DM metadata cleartext** | Sender/recipient domains, timestamps, and message sizes stored in cleartext for indexing. | Encrypt entire conversation files |
 
 ---
 
@@ -923,6 +1167,14 @@ A revocation mechanism could use:
 - Revocation certificates (signed by the key being revoked)
 - DS-mediated revocation announcements
 - Time-bounded key validity (expiration dates)
+
+### DS Signature Verification ✅ (Implemented)
+
+The discovery service now signs all query responses with its Ed25519 private key, and clients verify both the DS envelope signature and author signatures on stream events. See Section 5 (Discovery Service Trust) and Section 7.4 for details.
+
+Remaining future work:
+- **Certificate transparency for DS keys**: publish DS key rotations to a verifiable log
+- **Event-level DS co-signatures**: DS could co-sign individual events in addition to the response envelope, enabling offline verification of event batches
 
 ### TOFU Key Pinning
 
@@ -951,6 +1203,10 @@ Integration with hardware security modules (HSMs) or hardware keys:
 
 | Date | Change |
 |------|--------|
+| 2026-03-08 | Accuracy fixes: added `author_name` and `avatar` fields to well-known/polis schema; removed legacy manifest.json migration tables; replaced incorrect single default policy with actual 10-rule defaults across public/private files; added version header documentation for rules.jsonl; updated EvaluateExplicit outcome table with all four decisions (allow/deny/emit/omit) and EvalResult struct; fixed auto-bless example to use `emit` verb; expanded verb semantics documentation; added `version-history` to post frontmatter and `author` to comment frontmatter examples; simplified DM policy provenance text; added EvaluateWithLog to Go interface |
+| 2026-03-07 | DS signature verification: DS envelope signing on all query responses, client-side DS + author signature verification, verification failure tracking and anomaly detection, updated Section 5 (Discovery Service Trust), Section 7.4 (DS Compromise), Section 10 (Future Considerations) |
+| 2026-03-07 | Added DM security model: Ed25519→X25519 key conversion, NaCl box/secretbox encryption, instance-to-instance signed request auth, DM acceptance policies, attack vectors 7.14-7.20, feature analysis 8.8, updated known limitations |
+| 2026-03-03 | Removed deprecated domain migration section (feature removed); fixed comment `in-reply-to` structure (`root-post` not `version`); renumbered Feature Security Analysis subsections |
 | 2026-03-01 | Merged security model, .well-known/polis spec, and policies spec into unified document |
 
 ---

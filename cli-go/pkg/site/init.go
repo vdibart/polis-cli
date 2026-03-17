@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 )
@@ -27,7 +28,7 @@ type InitOptions struct {
 	SiteTitle string // Optional site title
 	Author    string // Optional author name (falls back to git config user.name)
 	Email     string // Optional email address — private by default, only written if explicitly provided
-	Theme     string // Optional initial theme (default: "sols")
+	Theme     string // Optional initial theme (default: empty, selected randomly on first render)
 }
 
 // InitResult contains the result of site initialization.
@@ -48,10 +49,6 @@ type InitResult struct {
 // This function has no webapp dependencies and can be used by CLI tools.
 // It will NOT overwrite existing keys or .well-known/polis — safety feature.
 func Init(siteDir string, opts InitOptions) (*InitResult, error) {
-	if opts.Theme == "" {
-		opts.Theme = "sols"
-	}
-
 	result := &InitResult{
 		Success: false,
 		SiteDir: siteDir,
@@ -89,6 +86,8 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 		filepath.Join(siteDir, ".polis", "content", "pub.polis.core", "comments", "drafts"),
 		filepath.Join(siteDir, ".polis", "content", "pub.polis.core", "comments", "pending"),
 		filepath.Join(siteDir, ".polis", "content", "pub.polis.core", "comments", "denied"),
+		// DM storage (encrypted conversations)
+		filepath.Join(siteDir, ".polis", "content", "pub.polis.core", "dm", "conv"),
 		// Site resources
 		filepath.Join(siteDir, "site", "snippets"),
 		filepath.Join(siteDir, "site", "themes"),
@@ -133,6 +132,11 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 
 	result.KeyPaths.Private = ".polis/keys/id_ed25519"
 	result.KeyPaths.Public = ".polis/keys/id_ed25519.pub"
+
+	// Create storage salt for DM encryption
+	if err := dm.EnsureSalt(siteDir); err != nil {
+		return nil, fmt.Errorf("failed to create storage salt: %w", err)
+	}
 
 	// Create .well-known/polis
 	setupTime := time.Now().UTC()

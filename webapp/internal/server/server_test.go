@@ -1278,3 +1278,105 @@ func TestRemoveSSEClient_ClosesChannel(t *testing.T) {
 		t.Error("expected channel to be closed after removeSSEClient")
 	}
 }
+
+// ── Handler() v1 API Tests ──────────────────────────────────────────
+
+func TestHandler_IncludesV1Routes(t *testing.T) {
+	s := newConfiguredServer(t)
+	handler := s.Handler()
+
+	// GET /v1/bundles is a public read endpoint — should return 200
+	req := httptest.NewRequest(http.MethodGet, "/v1/bundles", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for GET /v1/bundles, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify it returns JSON with bundle data
+	ct := w.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("expected application/json, got %s", ct)
+	}
+}
+
+func TestHandler_V1AuthRequired(t *testing.T) {
+	s := newConfiguredServer(t)
+	handler := s.Handler()
+
+	// POST /v1/content/post without auth should return 401
+	req := httptest.NewRequest(http.MethodPost, "/v1/content/post", strings.NewReader(`{"title":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for unauthenticated POST, got %d", w.Code)
+	}
+}
+
+// ============================================================================
+// StopSync Tests
+// ============================================================================
+
+func TestStopSync_StopsGoroutine(t *testing.T) {
+	s := &Server{}
+	s.syncTrigger = make(chan struct{}, 1)
+	s.syncDone = make(chan struct{})
+	s.sseClients = make(map[chan SSEEvent]struct{})
+
+	exited := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Hour) // won't fire during test
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.syncDone:
+				close(exited)
+				return
+			case <-ticker.C:
+			case <-s.syncTrigger:
+			}
+		}
+	}()
+
+	s.StopSync()
+
+	select {
+	case <-exited:
+		// goroutine exited as expected
+	case <-time.After(2 * time.Second):
+		t.Fatal("goroutine did not exit after StopSync()")
+	}
+}
+
+func TestStopSync_Idempotent(t *testing.T) {
+	s := &Server{}
+	s.syncDone = make(chan struct{})
+
+	// Calling StopSync twice must not panic
+	s.StopSync()
+	s.StopSync()
+}
+
+func TestStopSync_NilChannel(t *testing.T) {
+	s := &Server{}
+	// syncDone is nil — StopSync must not panic
+	s.StopSync()
+}
+
+func TestClose_StopsSync(t *testing.T) {
+	s := &Server{}
+	s.syncDone = make(chan struct{})
+
+	s.Close()
+
+	// syncDone should be closed
+	select {
+	case <-s.syncDone:
+		// closed as expected
+	default:
+		t.Fatal("Close() did not close syncDone")
+	}
+}

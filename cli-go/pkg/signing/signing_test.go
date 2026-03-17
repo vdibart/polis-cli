@@ -318,6 +318,16 @@ func BenchmarkSignContent(b *testing.B) {
 	}
 }
 
+func TestZeroKey(t *testing.T) {
+	key := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	ZeroKey(key)
+	for i, b := range key {
+		if b != 0 {
+			t.Errorf("byte %d not zeroed: got %d", i, b)
+		}
+	}
+}
+
 // Benchmark verification performance
 func BenchmarkVerifySignature(b *testing.B) {
 	privKey, pubKey, _ := GenerateKeypair()

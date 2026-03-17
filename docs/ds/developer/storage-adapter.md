@@ -39,7 +39,8 @@ interface StorageAdapter {
 
   // --- Stream ---
   publishEvent(type: string, data: any, namespace: string): Promise<EventRecord>
-  queryEvents(after?: string, type?: string, limit?: number): Promise<{ events: EventRecord[]; cursor: string; has_more: boolean }>
+  queryEvents(filters: StreamQueryFilters): Promise<StreamEvent[]>
+  queryEventsUnified(filters: StreamUnifiedFilters): Promise<StreamEvent[]>
   getStreamHealth(): Promise<{ mode: string; event_count: number }>
 
   // --- Admin ---

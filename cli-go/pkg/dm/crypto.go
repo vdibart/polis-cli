@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/crypto/nacl/box"
@@ -15,8 +16,9 @@ import (
 
 // ComputeConversationID returns a deterministic conversation ID for two domains.
 // Both parties compute the same ID: hex(sha256(sorted(domain_a, domain_b)))[:16]
+// Domains are normalized to lowercase since DNS hostnames are case-insensitive (RFC 1123).
 func ComputeConversationID(domainA, domainB string) string {
-	domains := []string{domainA, domainB}
+	domains := []string{strings.ToLower(domainA), strings.ToLower(domainB)}
 	sort.Strings(domains)
 	h := sha256.Sum256([]byte(domains[0] + "\n" + domains[1]))
 	return hex.EncodeToString(h[:])[:16]

@@ -3,12 +3,19 @@ package hooks
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
+)
+
+const (
+	// HookTimeout is the maximum execution time for a hook script.
+	HookTimeout = 30 * time.Second
 )
 
 // HookEvent represents the type of event that triggers a hook.
@@ -85,6 +92,19 @@ func RunHook(siteDir string, config *HookConfig, payload *HookPayload) (*HookRes
 		hookPath = filepath.Join(siteDir, hookPath)
 	}
 
+	// Path containment: hook must resolve within siteDir
+	absHook, err := filepath.Abs(hookPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve hook path: %w", err)
+	}
+	absSite, err := filepath.Abs(siteDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve site dir: %w", err)
+	}
+	if !strings.HasPrefix(absHook, absSite+string(filepath.Separator)) {
+		return nil, fmt.Errorf("hook path %s is outside site directory", hookPath)
+	}
+
 	// Check if hook exists
 	if _, err := os.Stat(hookPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("hook not found: %s", hookPath)
@@ -104,8 +124,11 @@ func RunHook(siteDir string, config *HookConfig, payload *HookPayload) (*HookRes
 		"POLIS_COMMIT_MESSAGE="+payload.CommitMessage,
 	)
 
-	// Execute hook
-	cmd := exec.Command(hookPath)
+	// Execute hook with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), HookTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, hookPath)
 	cmd.Env = env
 	cmd.Dir = siteDir // Run in site directory
 

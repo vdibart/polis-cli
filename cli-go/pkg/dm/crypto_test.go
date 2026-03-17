@@ -17,6 +17,22 @@ func TestComputeConversationID_Symmetric(t *testing.T) {
 	}
 }
 
+func TestComputeConversationID_CaseInsensitive(t *testing.T) {
+	// This was the exact bug: "Vdibart.polis.pub" vs "vdibart.polis.pub"
+	id1 := ComputeConversationID("david.polis.pub", "Vdibart.polis.pub")
+	id2 := ComputeConversationID("david.polis.pub", "vdibart.polis.pub")
+	if id1 != id2 {
+		t.Errorf("conversation ID should be case-insensitive: %s != %s", id1, id2)
+	}
+
+	// Mixed case on both sides
+	id3 := ComputeConversationID("Alice.Example.COM", "Bob.Example.COM")
+	id4 := ComputeConversationID("alice.example.com", "bob.example.com")
+	if id3 != id4 {
+		t.Errorf("conversation ID should be case-insensitive: %s != %s", id3, id4)
+	}
+}
+
 func TestComputeConversationID_Unique(t *testing.T) {
 	id1 := ComputeConversationID("alice.example.com", "bob.example.com")
 	id2 := ComputeConversationID("alice.example.com", "carol.example.com")

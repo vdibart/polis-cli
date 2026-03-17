@@ -44,11 +44,12 @@ type cachedKey struct {
 const keyCacheTTL = 1 * time.Hour
 
 // NewSender creates a Sender for delivering DMs.
+// The domain is normalized to lowercase (DNS hostnames are case-insensitive per RFC 1123).
 func NewSender(privateKeyPEM, publicKeySSH []byte, domain string, store *Store) *Sender {
 	return &Sender{
 		PrivateKeyPEM: privateKeyPEM,
 		PublicKeySSH:  publicKeySSH,
-		Domain:        domain,
+		Domain:        strings.ToLower(domain),
 		Store:         store,
 		Logger:        nopLogger{},
 		keyCache:      make(map[string]*cachedKey),
@@ -222,7 +223,7 @@ func MakeDeliverAuthCanonicalJSON(action, domain, timestamp string) ([]byte, err
 
 // fetchRecipientKey fetches and caches a recipient's public key from .well-known/polis.
 func (s *Sender) fetchRecipientKey(recipientURL string) ([]byte, [32]byte, error) {
-	domain := extractDomain(recipientURL)
+	domain := extractDomain(recipientURL) // already lowercased by extractDomain
 
 	s.keyCacheMu.Lock()
 	if cached, ok := s.keyCache[domain]; ok && time.Since(cached.fetchedAt) < keyCacheTTL {
@@ -281,11 +282,13 @@ func ExtractDomainFromURL(rawURL string) string {
 	return extractDomain(rawURL)
 }
 
-// extractDomain extracts the hostname from a URL.
+// extractDomain extracts the hostname from a URL, normalized to lowercase.
+// DNS hostnames are case-insensitive (RFC 1123), so we always lowercase
+// to prevent case-mismatch failures in domain comparisons and conversation IDs.
 func extractDomain(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return ""
 	}
-	return u.Hostname()
+	return strings.ToLower(u.Hostname())
 }

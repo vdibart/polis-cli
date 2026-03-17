@@ -30,6 +30,7 @@ func TestInit_BundleLayout(t *testing.T) {
 		".polis/content/pub.polis.core/comments/drafts",
 		".polis/content/pub.polis.core/comments/pending",
 		".polis/content/pub.polis.core/comments/denied",
+		".polis/content/pub.polis.core/dm/conv",
 		"site/snippets",
 		"site/themes",
 		"content/pub.polis.core/post",
@@ -67,9 +68,9 @@ func TestInit_BundleLayout(t *testing.T) {
 		t.Errorf("Bundle path = %q, want content/pub.polis.core/bundle.json", core.Path)
 	}
 
-	// Verify default theme
-	if wk.ActiveTheme != "sols" {
-		t.Errorf("ActiveTheme = %q, want sols", wk.ActiveTheme)
+	// Verify default theme is empty (selected randomly on first render)
+	if wk.ActiveTheme != "" {
+		t.Errorf("ActiveTheme = %q, want empty (deferred to first render)", wk.ActiveTheme)
 	}
 
 	// Verify content files exist
@@ -377,6 +378,56 @@ func TestInit_EmptyIndexFile(t *testing.T) {
 	}
 	if len(data) != 0 {
 		t.Errorf("index.jsonl should be empty initially, got %d bytes", len(data))
+	}
+}
+
+func TestInit_PassesAllPatrolChecks(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := Init(dir, InitOptions{})
+	if err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	// DM directories must exist with correct permissions
+	dmConvDir := filepath.Join(dir, ".polis", "content", "pub.polis.core", "dm", "conv")
+	info, err := os.Stat(dmConvDir)
+	if err != nil {
+		t.Fatalf("DM conv directory should exist: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal("DM conv path should be a directory")
+	}
+	if perm := info.Mode().Perm(); perm != 0700 {
+		t.Errorf("DM conv directory permissions = %04o, want 0700", perm)
+	}
+
+	// Storage salt must exist
+	saltPath := filepath.Join(dir, ".polis", "storage-salt")
+	saltData, err := os.ReadFile(saltPath)
+	if err != nil {
+		t.Fatalf("Storage salt should exist: %v", err)
+	}
+	if len(saltData) != 64 { // 32 bytes hex-encoded
+		t.Errorf("Storage salt should be 64 hex chars, got %d", len(saltData))
+	}
+	saltInfo, _ := os.Stat(saltPath)
+	if perm := saltInfo.Mode().Perm(); perm != 0600 {
+		t.Errorf("Storage salt permissions = %04o, want 0600", perm)
+	}
+
+	// Private policies must include DM rules
+	privatePolicyData, err := os.ReadFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"))
+	if err != nil {
+		t.Fatalf("Private policies should exist: %v", err)
+	}
+	if !strings.Contains(string(privatePolicyData), "pub.polis.dm") {
+		t.Error("Private policies should contain DM rules")
+	}
+
+	// Public policies must exist
+	if _, err := os.Stat(filepath.Join(dir, "policies", "rules.jsonl")); err != nil {
+		t.Fatalf("Public policies should exist: %v", err)
 	}
 }
 

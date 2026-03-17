@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/blessing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
+	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
@@ -25,6 +27,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
+	"github.com/vdibart/polis-cli/cli-go/pkg/policycheck"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
@@ -1807,6 +1810,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		webappTheme = s.Config.WebappTheme
 	}
 
+	// Editor panel mode preference
+	editorPanelMode := "wysiwyg"
+	if s.Config != nil && s.Config.EditorPanelMode != "" {
+		editorPanelMode = s.Config.EditorPanelMode
+	}
+
 	// Load theme data
 	themes, _ := theme.ListThemesWithPalettes(s.DataDir, s.CLIThemesDir)
 	activeTheme, _ := theme.GetActiveTheme(s.DataDir)
@@ -1839,6 +1848,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		"setup_wizard_dismissed":  setupWizardDismissed,
 		"hide_read":               s.Config != nil && s.Config.HideRead,
 		"webapp_theme":            webappTheme,
+		"editor_panel_mode":       editorPanelMode,
 		"active_theme":            activeTheme,
 		"themes":                  themes,
 	})
@@ -2433,6 +2443,45 @@ func (s *Server) handleWebappTheme(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":      true,
 		"webapp_theme": req.Theme,
+	})
+}
+
+// handleEditorPanelMode handles POST /api/settings/editor-panel-mode to persist the right panel mode.
+func (s *Server) handleEditorPanelMode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	validModes := map[string]bool{"wysiwyg": true, "markdown": true, "help": true, "browse": true}
+	if !validModes[req.Mode] {
+		http.Error(w, "Invalid mode", http.StatusBadRequest)
+		return
+	}
+
+	if s.Config == nil {
+		s.Config = &Config{}
+	}
+
+	s.Config.EditorPanelMode = req.Mode
+	if err := s.SaveConfig(); err != nil {
+		s.LogError("failed to save config: %v", err)
+		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":           true,
+		"editor_panel_mode": req.Mode,
 	})
 }
 
@@ -3394,6 +3443,9 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Normalize domain to lowercase for consistent storage and display
+		req.URL = strings.ToLower(req.URL)
+
 		if len(req.URL) < 8 || req.URL[:8] != "https://" {
 			http.Error(w, "Author URL must use HTTPS", http.StatusBadRequest)
 			return
@@ -3693,20 +3745,29 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Group items by post URL
+	type commentDetail struct {
+		URL          string `json:"url"`
+		AuthorDomain string `json:"author_domain"`
+		Title        string `json:"title,omitempty"`
+		Excerpt      string `json:"excerpt,omitempty"`
+		Published    string `json:"published"`
+		Unread       bool   `json:"unread"`
+	}
 	type feedGroup struct {
-		PostURL          string   `json:"post_url"`
-		PostTitle        string   `json:"post_title"`
-		PostDomain       string   `json:"post_domain"`
-		PostPublished    string   `json:"post_published"`
-		PostExcerpt      string   `json:"post_excerpt,omitempty"`
-		HasPost          bool     `json:"has_post"`
-		TotalComments    int      `json:"total_comments"`
-		NetworkComments  int      `json:"network_comments"`
-		ExternalComments int      `json:"external_comments"`
-		UnreadComments   int      `json:"unread_comments"`
-		LastActivity     string   `json:"last_activity"`
-		PostUnread       bool     `json:"post_unread"`
-		ItemIDs          []string `json:"item_ids"`
+		PostURL          string           `json:"post_url"`
+		PostTitle        string           `json:"post_title"`
+		PostDomain       string           `json:"post_domain"`
+		PostPublished    string           `json:"post_published"`
+		PostExcerpt      string           `json:"post_excerpt,omitempty"`
+		HasPost          bool             `json:"has_post"`
+		TotalComments    int              `json:"total_comments"`
+		NetworkComments  int              `json:"network_comments"`
+		ExternalComments int              `json:"external_comments"`
+		UnreadComments   int              `json:"unread_comments"`
+		LastActivity     string           `json:"last_activity"`
+		PostUnread       bool             `json:"post_unread"`
+		ItemIDs          []string         `json:"item_ids"`
+		Comments         []*commentDetail `json:"comments,omitempty"`
 	}
 
 	groups := make(map[string]*feedGroup)
@@ -3774,9 +3835,18 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 			} else {
 				g.ExternalComments++
 			}
-			if item.ReadAt == "" {
+			isUnread := item.ReadAt == ""
+			if isUnread {
 				g.UnreadComments++
 			}
+			g.Comments = append(g.Comments, &commentDetail{
+				URL:          item.URL,
+				AuthorDomain: item.AuthorDomain,
+				Title:        item.Title,
+				Excerpt:      item.Excerpt,
+				Published:    item.Published,
+				Unread:       isUnread,
+			})
 			g.ItemIDs = append(g.ItemIDs, item.ID)
 			if feed.PublishedBefore(g.LastActivity, item.Published) {
 				g.LastActivity = item.Published
@@ -3805,10 +3875,10 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 		"stale":        stale,
 	})
 
-	// Background: fetch excerpts for post items that don't have one yet
+	// Background: fetch excerpts for items that don't have one yet
 	var needExcerpts []int
 	for i, item := range items {
-		if item.Type == "post" && item.Excerpt == "" {
+		if item.Excerpt == "" {
 			needExcerpts = append(needExcerpts, i)
 		}
 	}
@@ -4502,6 +4572,10 @@ func (s *Server) handleFollowerCount(w http.ResponseWriter, r *http.Request) {
 	if followers == nil {
 		followers = []string{}
 	}
+	// Normalize follower domains to lowercase for consistent display
+	for i, f := range followers {
+		followers[i] = strings.ToLower(f)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -5003,4 +5077,503 @@ func (s *Server) handleCounts(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(counts)
+}
+
+// handleDMConversations returns the list of DM conversations.
+func (s *Server) handleDMConversations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	store, err := s.dmStore()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	idx, err := store.LoadIndex()
+	if err != nil {
+		s.LogError("dm conversations: %v", err)
+		http.Error(w, "Failed to load conversations", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"conversations": idx.Conversations,
+		"count":         len(idx.Conversations),
+	})
+}
+
+// handleDMConversation returns a single conversation with decrypted messages.
+// Also auto-marks the conversation as read.
+func (s *Server) handleDMConversation(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		s.handleDMDeleteConversation(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	convID := strings.TrimPrefix(r.URL.Path, "/api/dm/conversations/")
+	if convID == "" {
+		http.Error(w, "Missing conversation ID", http.StatusBadRequest)
+		return
+	}
+
+	store, err := s.dmStore()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	conv, err := store.LoadConversation(convID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, "Conversation not found", http.StatusNotFound)
+		} else {
+			s.LogError("dm conversation load: %v", err)
+			http.Error(w, "Failed to load conversation", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Decrypt messages
+	type decryptedMsg struct {
+		ID        string `json:"id"`
+		From      string `json:"from"`
+		To        string `json:"to"`
+		Content   string `json:"content"`
+		ReplyToID string `json:"reply_to_id,omitempty"`
+		Timestamp string `json:"timestamp"`
+		ReadAt    string `json:"read_at,omitempty"`
+		Status    string `json:"status"`
+	}
+	msgs := make([]decryptedMsg, 0, len(conv.Messages))
+	for _, msg := range conv.Messages {
+		plaintext, err := store.DecryptMessage(&msg)
+		if err != nil {
+			s.LogError("dm decrypt message %s: %v", msg.ID, err)
+			plaintext = "[decryption failed]"
+		}
+		msgs = append(msgs, decryptedMsg{
+			ID:        msg.ID,
+			From:      msg.From,
+			To:        msg.To,
+			Content:   plaintext,
+			ReplyToID: msg.ReplyToID,
+			Timestamp: msg.Timestamp,
+			ReadAt:    msg.ReadAt,
+			Status:    msg.Status,
+		})
+	}
+
+	// Auto-mark as read
+	if err := store.MarkRead(convID); err != nil {
+		s.LogError("dm mark read: %v", err)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"peer_domain": conv.PeerDomain,
+		"peer_url":    conv.PeerURL,
+		"messages":    msgs,
+	})
+}
+
+// handleDMDeleteConversation deletes a DM conversation.
+func (s *Server) handleDMDeleteConversation(w http.ResponseWriter, r *http.Request) {
+	convID := strings.TrimPrefix(r.URL.Path, "/api/dm/conversations/")
+	if convID == "" {
+		http.Error(w, "Missing conversation ID", http.StatusBadRequest)
+		return
+	}
+
+	store, err := s.dmStore()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := store.DeleteConversation(convID); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, "Conversation not found", http.StatusNotFound)
+		} else {
+			s.LogError("dm delete: %v", err)
+			http.Error(w, "Failed to delete conversation", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+	})
+}
+
+// handleDMSend sends a new DM to a remote recipient.
+func (s *Server) handleDMSend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	store, err := s.dmStore()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		RecipientURL string `json:"recipient_url"`
+		Content      string `json:"content"`
+		ReplyToID    string `json:"reply_to_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if s.handleBodyTooLarge(w, r, err) {
+			return
+		}
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.RecipientURL == "" {
+		http.Error(w, "recipient_url is required", http.StatusBadRequest)
+		return
+	}
+	if req.Content == "" {
+		http.Error(w, "content is required", http.StatusBadRequest)
+		return
+	}
+
+	// Validate recipient URL
+	if _, err := url.Parse(req.RecipientURL); err != nil {
+		http.Error(w, "Invalid recipient URL", http.StatusBadRequest)
+		return
+	}
+
+	domain := s.GetBaseURL()
+	if domain == "" {
+		http.Error(w, "Site base URL not configured", http.StatusBadRequest)
+		return
+	}
+
+	sender := dm.NewSender(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), store)
+
+	msg, err := sender.SendMessage(req.RecipientURL, req.Content, req.ReplyToID)
+	if err != nil {
+		// Even on delivery failure, the message may have been saved as "unsent"
+		if msg != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id": msg.ID,
+				"status":     msg.Status,
+				"warning":    err.Error(),
+			})
+			return
+		}
+		s.LogError("dm send: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message_id": msg.ID,
+		"status":     msg.Status,
+	})
+}
+
+// handleDMMarkRead marks a conversation as read.
+func (s *Server) handleDMMarkRead(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	store, err := s.dmStore()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		ConversationID string `json:"conversation_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if s.handleBodyTooLarge(w, r, err) {
+			return
+		}
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.ConversationID == "" {
+		http.Error(w, "conversation_id is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := store.MarkRead(req.ConversationID); err != nil {
+		s.LogError("dm mark read: %v", err)
+		http.Error(w, "Failed to mark read", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+	})
+}
+
+// handleDMRetry returns unsent messages (retry is handled client-side by re-sending).
+func (s *Server) handleDMRetry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	store, err := s.dmStore()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	unsent, err := store.GetUnsentMessages()
+	if err != nil {
+		s.LogError("dm retry: %v", err)
+		http.Error(w, "Failed to get unsent messages", http.StatusInternalServerError)
+		return
+	}
+
+	type unsentItem struct {
+		ConvID    string `json:"conv_id"`
+		MessageID string `json:"message_id"`
+		To        string `json:"to"`
+		Timestamp string `json:"timestamp"`
+	}
+	items := make([]unsentItem, 0, len(unsent))
+	for _, u := range unsent {
+		items = append(items, unsentItem{
+			ConvID:    u.ConvID,
+			MessageID: u.Message.ID,
+			To:        u.Message.To,
+			Timestamp: u.Message.Timestamp,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"unsent_count": len(items),
+		"unsent":       items,
+	})
+}
+
+// handleDMRecipients returns the following list with DM eligibility per recipient.
+// For each person we follow:
+//  1. Check their public policies — if explicit DM allow/deny, use that.
+//  2. If no public DM rules, fetch their following.json — if they follow us, allow.
+//
+// Side effects: updates local follower state and following metadata when remote data is fetched.
+func (s *Server) handleDMRecipients(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.PrivateKey == nil {
+		http.Error(w, "No private key configured", http.StatusBadRequest)
+		return
+	}
+
+	followingPath := following.DefaultPath(s.DataDir)
+	f, err := following.Load(followingPath)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"recipients": []interface{}{},
+		})
+		return
+	}
+
+	myDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
+
+	type recipient struct {
+		Domain     string `json:"domain"`
+		URL        string `json:"url"`
+		AuthorName string `json:"author_name,omitempty"`
+		Status     string `json:"status"`           // "open", "no-dm", "no-follow", "unknown"
+		Reason     string `json:"reason,omitempty"`  // human-readable explanation
+		FollowsUs  bool   `json:"follows_us"`        // whether they follow us
+	}
+
+	entries := f.All()
+	results := make([]recipient, len(entries))
+
+	type checkResult struct {
+		idx    int
+		result policycheck.Result
+	}
+	resultCh := make(chan checkResult, len(entries))
+	sem := make(chan struct{}, 5)
+	start := time.Now()
+
+	pendingCount := 0
+	for i, entry := range entries {
+		domain := dm.ExtractDomainFromURL(entry.URL)
+		results[i] = recipient{
+			Domain:     domain,
+			URL:        entry.URL,
+			AuthorName: entry.AuthorName,
+		}
+
+		// Check cache
+		cacheKey := domain + ":" + myDomain
+		if cached := s.getPolicyCacheEntry(cacheKey); cached != nil {
+			results[i].Status = cached.Status
+			results[i].Reason = cached.Reason
+			results[i].FollowsUs = cached.FollowsUs
+			continue
+		}
+
+		pendingCount++
+		idx := i
+		url := entry.URL
+		go func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			client := remote.NewClient()
+			res := policycheck.CheckDMEligibilityURL(client, url, myDomain)
+			resultCh <- checkResult{idx: idx, result: res}
+		}()
+	}
+
+	// Collect results
+	followingChanged := false
+	for range pendingCount {
+		cr := <-resultCh
+		results[cr.idx].Status = cr.result.Status
+		results[cr.idx].Reason = cr.result.Reason
+		results[cr.idx].FollowsUs = cr.result.FollowsUs
+
+		// Cache
+		cacheKey := results[cr.idx].Domain + ":" + myDomain
+		s.setPolicyCacheEntry(cacheKey, cr.result.Status, cr.result.Reason, cr.result.FollowsUs)
+
+		// Update local follower state from fetched data
+		if cr.result.FetchedFollowing != nil {
+			s.syncFollowerState(results[cr.idx].Domain, cr.result.FollowsUs)
+		}
+
+		// Opportunistic metadata sync: update author_name/site_title in following.json
+		// if the remote following.json was fetched and we can get .well-known metadata
+		// (skipped — would require extra fetch; metadata comes from other sync paths)
+	}
+
+	if followingChanged {
+		following.Save(followingPath, f)
+	}
+
+	// Log aggregate stats
+	duration := time.Since(start)
+	openCount, blockedCount, noFollowCount, unknownCount := 0, 0, 0, 0
+	for _, rec := range results {
+		switch rec.Status {
+		case "open":
+			openCount++
+		case "no-dm":
+			blockedCount++
+		case "no-follow":
+			noFollowCount++
+		case "unknown":
+			unknownCount++
+		}
+	}
+	s.LogEvent("pub.polis.dm.recipients_checked", map[string]interface{}{
+		"request_id":      RequestIDFromContext(r.Context()),
+		"total":           len(results),
+		"open_count":      openCount,
+		"blocked_count":   blockedCount,
+		"no_follow_count": noFollowCount,
+		"unknown_count":   unknownCount,
+		"duration_ms":     duration.Milliseconds(),
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"recipients": results,
+	})
+}
+
+// getPolicyCacheEntry returns a cached policy check result, or nil if expired/missing.
+func (s *Server) getPolicyCacheEntry(key string) *policyCacheEntry {
+	s.policyCacheMu.Lock()
+	defer s.policyCacheMu.Unlock()
+
+	if s.policyCache == nil {
+		return nil
+	}
+	entry, ok := s.policyCache[key]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		delete(s.policyCache, key)
+		return nil
+	}
+	return entry
+}
+
+// setPolicyCacheEntry stores a policy check result in the cache.
+func (s *Server) setPolicyCacheEntry(key, status, reason string, followsUs bool) {
+	s.policyCacheMu.Lock()
+	defer s.policyCacheMu.Unlock()
+
+	if s.policyCache == nil {
+		s.policyCache = make(map[string]*policyCacheEntry)
+	}
+	s.policyCache[key] = &policyCacheEntry{
+		Status:    status,
+		Reason:    reason,
+		FollowsUs: followsUs,
+		ExpiresAt: time.Now().Add(policyCheckCacheTTL),
+	}
+}
+
+// syncFollowerState updates local follower state if remote data disagrees.
+func (s *Server) syncFollowerState(remoteDomain string, theyFollowUs bool) {
+	dsDomain := discovery.ExtractDomainFromURL(s.DiscoveryURL)
+	if dsDomain == "" {
+		return
+	}
+	store := stream.NewStore(s.DataDir, dsDomain, "pub.polis.core")
+	var fs stream.FollowerState
+	if err := store.LoadState("pub.polis.follow", &fs); err != nil {
+		return
+	}
+
+	remoteLower := strings.ToLower(remoteDomain)
+	isLocal := false
+	for _, f := range fs.Followers {
+		if strings.ToLower(f) == remoteLower {
+			isLocal = true
+			break
+		}
+	}
+
+	if theyFollowUs && !isLocal {
+		fs.Followers = append(fs.Followers, remoteLower)
+		fs.Count = len(fs.Followers)
+		store.SaveState("pub.polis.follow", &fs)
+	} else if !theyFollowUs && isLocal {
+		filtered := fs.Followers[:0]
+		for _, f := range fs.Followers {
+			if strings.ToLower(f) != remoteLower {
+				filtered = append(filtered, f)
+			}
+		}
+		fs.Followers = filtered
+		fs.Count = len(fs.Followers)
+		store.SaveState("pub.polis.follow", &fs)
+	}
 }

@@ -41,19 +41,44 @@ func TestVerificationState_RecordDSSuccess_ResetsConsecutive(t *testing.T) {
 
 func TestVerificationState_ShouldSuspendSync(t *testing.T) {
 	v := &VerificationState{}
-	if v.ShouldSuspendSync(3) {
+	if v.ShouldSuspendSync(3, 5*time.Minute) {
 		t.Error("should not suspend with 0 failures")
 	}
 
 	v.RecordDSFailure()
 	v.RecordDSFailure()
-	if v.ShouldSuspendSync(3) {
+	if v.ShouldSuspendSync(3, 5*time.Minute) {
 		t.Error("should not suspend with 2 failures (threshold 3)")
 	}
 
 	v.RecordDSFailure()
-	if !v.ShouldSuspendSync(3) {
+	if !v.ShouldSuspendSync(3, 5*time.Minute) {
 		t.Error("should suspend with 3 consecutive failures")
+	}
+}
+
+func TestVerificationState_ShouldSuspendSync_CooldownRecovery(t *testing.T) {
+	v := &VerificationState{}
+	v.RecordDSFailure()
+	v.RecordDSFailure()
+	v.RecordDSFailure()
+
+	// Suspended with recent failures
+	if !v.ShouldSuspendSync(3, 5*time.Minute) {
+		t.Error("should suspend with 3 recent failures")
+	}
+
+	// Simulate cooldown elapsed by backdating LastFailure
+	old := time.Now().UTC().Add(-10 * time.Minute)
+	v.DSFailures.LastFailure = &old
+
+	if v.ShouldSuspendSync(3, 5*time.Minute) {
+		t.Error("should NOT suspend after cooldown elapsed — must allow retry")
+	}
+
+	// Zero cooldown means no recovery
+	if !v.ShouldSuspendSync(3, 0) {
+		t.Error("should suspend with zero cooldown (no recovery)")
 	}
 }
 

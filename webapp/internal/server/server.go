@@ -20,8 +20,10 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 	"github.com/vdibart/polis-cli/cli-go/pkg/resolve"
+	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/webapp/internal/api"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
@@ -115,6 +117,9 @@ type Config struct {
 
 	// Webapp theme: "light" or "dark" (default "dark")
 	WebappTheme string `json:"webapp_theme,omitempty"`
+
+	// Editor right panel mode: "preview", "help", or "browse" (default "preview")
+	EditorPanelMode string `json:"editor_panel_mode,omitempty"`
 }
 
 // SSEEvent is a server-sent event pushed to connected clients.
@@ -151,10 +156,27 @@ type Server struct {
 	syncTrigger    chan struct{} // non-blocking channel to trigger on-demand sync
 	AuthorKeyCache *discovery.AuthorKeyCache // cached author public keys for signature verification
 
+	// Policy check cache: key is "recipient:myDomain", value is cached result with expiry
+	policyCache   map[string]*policyCacheEntry
+	policyCacheMu sync.Mutex
+
 	// SSE client registry
 	sseClients map[chan SSEEvent]struct{}
 	sseMu      sync.Mutex
+
+	syncDone chan struct{} // closed by StopSync() to stop the background goroutine
 }
+
+// policyCacheEntry holds a cached policy check result with expiry.
+type policyCacheEntry struct {
+	Status    string
+	Reason    string
+	FollowsUs bool
+	ExpiresAt time.Time
+}
+
+// policyCheckCacheTTL is how long policy check results are cached.
+const policyCheckCacheTTL = 5 * time.Minute
 
 // Logger handles logging to files organized by date
 type Logger struct {
@@ -979,8 +1001,14 @@ func (s *Server) Initialize() {
 	s.Logger.Info("Server starting with log level %d", s.LogLevel)
 	s.Logger.Info("Data directory: %s", s.DataDir)
 
-	// Initialize author key cache for stream event signature verification
-	s.AuthorKeyCache = discovery.NewAuthorKeyCache(0, 0)
+	// Author key cache intentionally NOT initialized.
+	// When nil, FilterVerifiedEvents passes all events through, relying on
+	// DS envelope signature verification instead. Per-event author signature
+	// verification is not yet feasible because DS-emitted events carry the
+	// author's content-registration signature, not a stream-event signature.
+	// The verifier cannot reconstruct the original signed payload.
+	// See operational-hardening.md R6-1 for the tracked fix.
+	// s.AuthorKeyCache = discovery.NewAuthorKeyCache(0, 0)
 }
 
 // migrateDraftsDir migrates .polis/drafts to .polis/content/pub.polis.core/posts/drafts if needed.
@@ -1008,8 +1036,21 @@ func (s *Server) migrateDraftsDir() {
 
 // Close cleans up server resources.
 func (s *Server) Close() {
+	s.StopSync()
 	if s.Logger != nil {
 		s.Logger.Close()
+	}
+}
+
+// StopSync stops the background sync goroutine. Safe to call multiple times.
+func (s *Server) StopSync() {
+	if s.syncDone != nil {
+		select {
+		case <-s.syncDone:
+			// already closed
+		default:
+			close(s.syncDone)
+		}
 	}
 }
 
@@ -1034,6 +1075,7 @@ func (s *Server) TriggerSync() {
 func (s *Server) StartBackgroundSync() {
 	// Initialize infrastructure
 	s.syncTrigger = make(chan struct{}, 1)
+	s.syncDone = make(chan struct{})
 	s.sseClients = make(map[chan SSEEvent]struct{})
 
 	// Register handlers
@@ -1056,6 +1098,8 @@ func (s *Server) StartBackgroundSync() {
 
 		for {
 			select {
+			case <-s.syncDone:
+				return
 			case <-ticker.C:
 				if s.hasSSEClients() {
 					s.runUnifiedSync()
@@ -1153,6 +1197,7 @@ type CountsPayload struct {
 	Followers        int `json:"followers"`
 	NotificationsUnread int `json:"notifications_unread"`
 	BlessingRequests int `json:"blessing_requests"`
+	DMUnread         int `json:"dm_unread"`
 }
 
 // computeAllCounts reads all badge counts from local state/filesystem.
@@ -1288,7 +1333,30 @@ func (s *Server) computeAllCounts() CountsPayload {
 		}
 	}
 
+	// DM unread count
+	if s.PrivateKey != nil {
+		if dmStore, err := s.dmStore(); err == nil {
+			if idx, err := dmStore.LoadIndex(); err == nil {
+				for _, c := range idx.Conversations {
+					counts.DMUnread += c.UnreadCount
+				}
+			}
+		}
+	}
+
 	return counts
+}
+
+// dmStore creates a DM store from the server's data dir and private key.
+func (s *Server) dmStore() (*dm.Store, error) {
+	if s.PrivateKey == nil {
+		return nil, fmt.Errorf("no private key configured")
+	}
+	privKey, err := signing.ParsePrivateKey(s.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+	return dm.NewStore(s.DataDir, privKey.Seed())
 }
 
 // syncCommentStatuses checks pending comments against the discovery service
@@ -1312,6 +1380,7 @@ func (s *Server) syncCommentStatuses() {
 
 	myDomain := discovery.ExtractDomainFromURL(baseURL)
 	client := s.NewAuthDSClient(nil, myDomain)
+	client.RequestID = generateBackgroundRequestID("comment-sync")
 
 	hc := s.getHookConfig()
 
@@ -1400,6 +1469,7 @@ func (s *Server) syncNotifications() {
 
 	myDomainForAuth := discovery.ExtractDomainFromURL(s.GetBaseURL())
 	client := s.NewAuthDSClient(nil, myDomainForAuth)
+	client.RequestID = generateBackgroundRequestID("notification-sync")
 
 	// Group rules by relevance for targeted server-side filtering
 	groups := handler.RulesByRelevance()
@@ -1572,6 +1642,7 @@ func (s *Server) syncFeed() {
 
 	// Query DS stream with actor filter for followed domains
 	client := s.NewDSClient(nil)
+	client.RequestID = generateBackgroundRequestID("feed-sync")
 	typeFilter := "pub.polis.post.published,pub.polis.post.republished,pub.polis.comment.published,pub.polis.comment.republished"
 	actorFilter := discovery.JoinDomains(domains)
 
@@ -1619,6 +1690,14 @@ func (s *Server) syncFeed() {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	SetupRoutes(mux, s)
+
+	// Setup v1 content API routes (needed for DM delivery, content queries, etc.)
+	if apiEngine, err := s.newContentEngine(); err == nil {
+		api.SetupRoutes(mux, apiEngine, s.DataDir, func(event string, fields map[string]interface{}) {
+			s.LogEvent(event, fields)
+		})
+	}
+
 	return mux
 }
 

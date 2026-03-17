@@ -46,7 +46,7 @@ Seven principles governed every decision in this system.
 ### 1. Stream is the only source of truth for social signals
 
 There are no server-side follower tables, friend graphs, or activity feeds. The events
-table has exactly six columns: `id`, `type`, `timestamp`, `actor`, `signature`, `payload`.
+table has exactly six columns: `id`, `type`, `created_at`, `actor`, `signature`, `payload`.
 Everything else—follower counts, activity timelines, notification badges—is computed
 client-side from the raw event sequence.
 
@@ -54,17 +54,17 @@ This is a feature, not a limitation. If the server maintained a follower count, 
 be the server's assertion about your followers. With client-side projection, your follower
 count is *your computation* over events you can independently verify.
 
-### 2. All event emission happens inside edge functions
+### 2. All event emission happens inside server-side handlers
 
 There are two emission patterns, and both happen server-side:
 
-**Side-effect emission.** The Service mutation edge functions (posts-register, beseech,
-grant, deny) emit events as a non-fatal side effect after the primary operation succeeds.
-The client doesn't need to know about the stream—it just calls the Service, and the event
-happens automatically.
+**Side-effect emission.** The Service mutation handlers (`POST /v1/content`,
+`POST /v1/relationships`) emit events as a non-fatal side effect after the primary
+operation succeeds. The client doesn't need to know about the stream—it just calls the
+Service, and the event happens automatically.
 
-**Explicit emission.** Clients call `POST /stream-publish` with a signed payload. This is
-itself an edge function that validates signatures and inserts the event. Follow/unfollow
+**Explicit emission.** Clients call `POST /v1/stream` with a signed payload. This is
+itself a handler that validates signatures and inserts the event. Follow/unfollow
 events use this pattern—there's no Service mutation for "follow," so the client publishes
 the event directly.
 
@@ -74,7 +74,7 @@ write to the events table directly.
 ### 3. Fire-and-forget
 
 Primary operations always succeed regardless of stream health. If the events table is
-down, your post still publishes. If the stream-publish call fails, your follow is still
+down, your post still publishes. If the stream publish call fails, your follow is still
 recorded locally. Stream emission is wrapped in catch blocks and logged as warnings.
 
 This is non-negotiable. The stream is a social convenience, not a dependency. Every
@@ -98,8 +98,9 @@ mechanisms—domain blocking, type blocking, allowlist/blocklist modes, event pu
 prescribes no policy. One operator may run a permissive stream open to all registered sites.
 Another may maintain a strict allowlist. Both are valid deployments of the same protocol.
 
-What operators *cannot* do: block core `polis.*` event types (they're essential to protocol
-operation), or modify event content after insertion (events are immutable once written).
+What operators *cannot* do: block core `pub.polis.*` event types (they're essential to
+protocol operation), or modify event content after insertion (events are immutable once
+written).
 
 ### 6. Client-side projections
 
@@ -119,10 +120,10 @@ the server doesn't know what you're tracking.
 
 ### 7. Namespace extensibility
 
-Core event types live under the `polis.*` namespace. Third-party types use reverse-domain
+Core event types live under the `pub.polis.*` namespace. Third-party types use reverse-domain
 namespacing (`com.bookclub.recommendation`, `org.writers.prompt`) and pass through the
 stream untouched. No registration or permission required—if your site is registered and
-your signature is valid, you can publish events with any non-`polis.*` type.
+your signature is valid, you can publish events with any non-`pub.polis.*` type.
 
 ---
 
@@ -133,16 +134,14 @@ Every event in the stream has the same shape:
 ```json
 {
   "id": 4521,
-  "type": "polis.post.published",
-  "timestamp": "2026-02-08T14:30:00Z",
+  "type": "pub.polis.post.published",
+  "created_at": "2026-02-08T14:30:00Z",
   "actor": "alice.com",
   "signature": "-----BEGIN SSH SIGNATURE-----\n...",
   "payload": {
-    "post_url": "https://alice.com/posts/20260208/on-gardens.md",
-    "title": "On Gardens",
+    "url": "https://alice.com/posts/20260208/on-gardens.md",
     "version": "sha256:abc123...",
-    "author": "alice@alice.com",
-    "published_at": "2026-02-08T14:30:00Z"
+    "title": "On Gardens"
   }
 }
 ```
@@ -156,17 +155,27 @@ verification. The `payload` is type-specific data.
 
 | Type | Emitted by | Actor | Payload |
 |------|-----------|-------|---------|
-| `polis.post.published` | posts-register (new) | Author domain | post_url, title, version, author, published_at |
-| `polis.post.updated` | posts-register (update) | Author domain | post_url, title, version, previous_version, author |
-| `polis.blessing.requested` | comments-blessing-beseech | Commenter domain | comment_url, in_reply_to, root_post, author |
-| `polis.blessing.granted` | comments-blessing-grant, auto-bless | Post author domain | comment_url, version, root_post, blessed_by |
-| `polis.blessing.denied` | comments-blessing-deny | Post author domain | comment_url, version, root_post, denied_by |
-| `polis.follow.announced` | stream-publish (client) | Follower domain | target_domain |
-| `polis.follow.removed` | stream-publish (client) | Unfollower domain | target_domain |
+| `pub.polis.post.published` | `POST /v1/content` (new post) | Author domain | url, version, title |
+| `pub.polis.post.republished` | `POST /v1/content` (update post) | Author domain | url, version, title |
+| `pub.polis.post.removed` | `POST /v1/content/unregister` | Author domain | url, type |
+| `pub.polis.comment.published` | `POST /v1/content` (new comment) | Commenter domain | url, version, in_reply_to, root_post, target_domain, source_domain |
+| `pub.polis.comment.republished` | `POST /v1/content` (update comment) | Commenter domain | url, version, in_reply_to, root_post, target_domain, source_domain |
+| `pub.polis.comment.blessing.requested` | `POST /v1/content` (beseech) | Commenter domain | comment_url, in_reply_to, root_post, target_domain, source_domain |
+| `pub.polis.comment.blessing.granted` | `POST /v1/relationships`, auto-bless | Post author domain | source_url, target_url, action, target_domain, source_domain |
+| `pub.polis.comment.blessing.denied` | `POST /v1/relationships` | Post author domain | source_url, target_url, action, target_domain, source_domain |
+| `pub.polis.follow.announced` | `POST /v1/stream` (client) | Follower domain | target_domain |
+| `pub.polis.follow.removed` | `POST /v1/stream` (client) | Unfollower domain | target_domain |
+| `pub.polis.site.registered` | `POST /v1/sites` (new) | Site domain | domain, registry_url |
+| `pub.polis.site.reregistered` | `POST /v1/sites` (existing) | Site domain | domain, registry_url |
+| `pub.polis.site.key_rotated` | `POST /v1/sites/keys/rotate` | Site domain | old_key_id, new_key_id |
+
+**Auto-bless payloads** include additional fields: `auto_blessed`, `bless_reason`,
+`policy_rule`, `policy_source`, `blessed_by`, `source_domain`, `target_domain`
+(and conditionally `fallback_reason`).
 
 ### Canonical Signing
 
-For explicit events (those published via `stream-publish`), the signed payload is:
+For explicit events (those published via `POST /v1/stream`), the signed payload is:
 
 ```
 JSON.stringify({ type: eventType, payload: payloadObject })
@@ -243,16 +252,35 @@ The handler is the only piece that varies. Everything else is generic infrastruc
 
 ```go
 type ProjectionHandler interface {
-    TypePrefix() string                    // "polis.follow"
-    EventTypes() []string                  // ["polis.follow.announced", "polis.follow.removed"]
+    TypePrefix() string                    // "pub.polis.follow"
+    EventTypes() []string                  // ["pub.polis.follow.announced", "pub.polis.follow.removed"]
     NewState() interface{}                 // &FollowerState{}
-    Process(events, state) (state, error)  // The actual logic
+    Process(events []discovery.StreamEvent, state interface{}) (interface{}, error)
 }
 ```
 
 Adding a new projection means: implement this interface, register the handler, add an
 API endpoint that runs the projection loop and reads the state. The loop itself, the
 cursor management, the file I/O—all reused.
+
+The webapp uses a `SyncHandler` variant for its unified sync loop:
+
+```go
+type SyncHandler interface {
+    Name() string                                    // Human-readable handler name (for logging)
+    EventTypes() []string                            // Event types this handler processes
+    Process(events []discovery.StreamEvent) HandlerResult
+}
+
+type HandlerResult struct {
+    FilesChanged bool  // triggers RenderSite
+    NewItems     int   // count of items created (notifications, feed entries, etc.)
+    Error        error // non-fatal; logged but doesn't block other handlers
+}
+```
+
+`SyncHandler` is simpler than `ProjectionHandler`—it manages its own state internally
+and reports what changed via `HandlerResult`.
 
 ### Stateful vs. Stateless Projections
 
@@ -270,13 +298,21 @@ for all projections.
 
 ## The Stream Store
 
-Projection state lives on disk, namespaced by discovery service domain:
+Projection state lives on disk, namespaced by discovery service domain and bundle:
 
 ```
-.polis/stream/
+.polis/ds/
 └── ds.polis.pub/
-    ├── event-cursors.json              # Per-projection cursor positions
-    └── polis.follow-state.json         # Materialized follower set
+    └── pub.polis.core/
+        ├── config/                        # User preferences (survives resets)
+        │   ├── notifications.json         # Notification rules, muted domains
+        │   └── feed.json                  # Staleness, max items, max age
+        └── state/                         # Computed/derived (safely deletable)
+            ├── cursors.json               # Per-projection cursor positions
+            ├── pub.polis.follow.json       # Materialized follower set
+            ├── pub.polis.blessing.json     # Blessings state
+            ├── pub.polis.notification.jsonl # Notification entries
+            └── pub.polis.feed.jsonl         # Feed items
 ```
 
 ### Why namespaced by discovery service domain?
@@ -290,14 +326,18 @@ and debuggable.
 
 ```json
 {
-  "polis.follow": "4521",
-  "polis.post": "4600"
+  "cursors": {
+    "pub.polis.follow": {"position": "4521", "last_updated": "2026-03-01T00:00:00Z"},
+    "pub.polis.notification": {"position": "4600", "last_updated": "2026-03-01T00:00:00Z"}
+  }
 }
 ```
 
 Each projection type tracks its own cursor independently. The follow projection might
-be caught up to event 4521 while the post projection has advanced to 4600. This is by
-design—projections that process different event types naturally advance at different rates.
+be caught up to event 4521 while the notification projection has advanced to 4600. This
+is by design—projections that process different event types naturally advance at different
+rates. State filenames match their cursor key (e.g. cursor `pub.polis.feed` → file
+`pub.polis.feed.jsonl`).
 
 ### State file format
 
@@ -322,18 +362,18 @@ without requiring centralized approval.
 
 | Layer | Mechanism | Enforced by |
 |-------|-----------|-------------|
-| 1. Registration gate | Actor must be registered with discovery service | stream-publish, emitEvent |
-| 2. Signature verification | Ed25519 signature over canonical payload | stream-publish |
-| 3. Namespace restriction | `polis.*` types restricted to server-side emission | stream-publish validation |
-| 4. Rate limiting | 100 events/hour/actor | stream-publish |
-| 5. Payload constraints | JSON object, < 8KB serialized | stream-publish validation |
-| 6. Operator controls | Domain/type blocking, mode switching, event purging | Operator edge functions |
+| 1. Registration gate | Actor must be registered with discovery service | `POST /v1/stream`, emitEvent |
+| 2. Signature verification | Ed25519 signature over canonical payload | `POST /v1/stream` |
+| 3. Namespace restriction | `pub.polis.*` types restricted to server-side emission | `POST /v1/stream` validation |
+| 4. Rate limiting | 100 events/hour/actor | `POST /v1/stream` |
+| 5. Payload constraints | JSON object, < 8KB serialized | `POST /v1/stream` validation |
+| 6. Operator controls | Domain/type blocking, mode switching, event purging | Admin handlers |
 | 7. Community reporting | (Deferred—designed but not yet implemented) | — |
 | 8. Client-side filtering | Clients can ignore any event type or actor | Client code |
 
 ### Operator Controls
 
-Operators have five control surfaces:
+Operators have six control surfaces:
 
 - **Block a domain** — all events from that actor are rejected (scope: stream only or full)
 - **Block an event type** — all events of that type are rejected
@@ -341,10 +381,15 @@ Operators have five control surfaces:
   allowlist (default: everything blocked, exceptions allowed)
 - **Purge events** — hard-delete events by actor, type, or time range
 - **View current blocks** — inspect the current enforcement state
+- **Public policy statements** — operators publish per-content-type policies at
+  `/policies/rules.jsonl`, declaring what they allow/deny and under what conditions
+  (e.g. `allow pub.polis.comment from all`, `emit pub.polis.comment.blessing from following`).
+  Clients and other services can fetch these to understand the operator's stance before
+  interacting.
 
 What operators *cannot* do:
 
-- Block core `polis.*` event types—they're essential to protocol operation
+- Block core `pub.polis.*` event types—they're essential to protocol operation
 - Modify event content after insertion—events are immutable
 - Forge signatures—events carry the original actor's signature
 
@@ -357,9 +402,9 @@ for their community. The architecture enforces whatever they decide.
 
 ### Follow someone → their posts appear in your feed
 
-Alice follows Bob. Her client publishes a `polis.follow.announced` event to the stream.
+Alice follows Bob. Her client publishes a `pub.polis.follow.announced` event to the stream.
 Alice's feed aggregator already checks Bob's site directly (via RSS-like polling). But
-now the stream also carries Bob's `polis.post.published` events, giving Alice real-time
+now the stream also carries Bob's `pub.polis.post.published` events, giving Alice real-time
 awareness of new content across the network.
 
 No algorithm. No platform intermediary. Just events flowing through a stream and a client
@@ -367,12 +412,12 @@ projecting them locally.
 
 ### Your follower count is a verifiable computation
 
-Bob opens his webapp. The follower count handler queries the stream for `polis.follow.*`
+Bob opens his webapp. The follower count handler queries the stream for `pub.polis.follow.*`
 events, filters for those targeting `bob.com`, and materializes the current follower set.
 The count is the length of that set.
 
 Bob can replay from cursor 0 and arrive at the same number. He can inspect every event
-that contributed to the count. If Alice unfollows, the `polis.follow.removed` event
+that contributed to the count. If Alice unfollows, the `pub.polis.follow.removed` event
 removes her from the set. No server assertion—just deterministic computation over
 signed events.
 
@@ -419,14 +464,14 @@ access.
 ```
 Client                    Discovery Service              Events Table
   |                              |                           |
-  |  POST /posts-register        |                           |
-  |  {post_url, version, sig}    |                           |
+  |  POST /v1/content            |                           |
+  |  {url, version, sig, ...}    |                           |
   |----------------------------->|                           |
   |                              |  UPSERT posts_metadata    |
   |                              |-------------------------->|
   |                              |                           |
   |                              |  INSERT event             |
-  |                              |  type: polis.post.published
+  |                              |  type: pub.polis.post.published
   |                              |  (fire-and-forget)        |
   |                              |-------------------------->|
   |                              |                           |
@@ -437,9 +482,9 @@ Client                    Discovery Service              Events Table
 ### Explicit Emission (Follow)
 
 ```
-Client                    stream-publish               Events Table
+Client                    POST /v1/stream              Events Table
   |                              |                           |
-  |  POST /stream-publish        |                           |
+  |  POST /v1/stream             |                           |
   |  {type, actor, payload, sig} |                           |
   |----------------------------->|                           |
   |                              |  Verify registration      |
@@ -448,7 +493,7 @@ Client                    stream-publish               Events Table
   |                              |  Check rate limit         |
   |                              |                           |
   |                              |  INSERT event             |
-  |                              |  type: polis.follow.announced
+  |                              |  type: pub.polis.follow.announced
   |                              |-------------------------->|
   |                              |                           |
   |  201 {event_id: 4521}       |                           |
@@ -458,14 +503,14 @@ Client                    stream-publish               Events Table
 ### Client-Side Projection (Follower Count)
 
 ```
-Client                    Stream (GET /stream)         Local Disk
+Client                    Stream (GET /v1/stream)      Local Disk
   |                              |                           |
   |  Load cursor                 |                           |
   |<---------------------------------------------------------|
   |  cursor = "4500"             |                           |
   |                              |                           |
-  |  GET /stream?since=4500      |                           |
-  |  &type=polis.follow.*        |                           |
+  |  GET /v1/stream?since=4500   |                           |
+  |  &type=pub.polis.follow.*    |                           |
   |----------------------------->|                           |
   |                              |                           |
   |  {events: [...], cursor: "4521"}                         |

@@ -413,3 +413,24 @@ func TestSendMessage_EnvelopeStructure(t *testing.T) {
 		fmt.Printf("Note: recipient_domain is %q (expected for httptest)\n", receivedEnvelope.RecipientDomain)
 	}
 }
+
+func TestExtractDomainFromURL_LowercaseNormalization(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"https://Vdibart.polis.pub/", "vdibart.polis.pub"},
+		{"https://Alice.Example.COM", "alice.example.com"},
+		{"https://bob.example.com", "bob.example.com"},
+		{"https://UPPER.CASE.NET/path", "upper.case.net"},
+		{"", ""},
+		{"not-a-url", ""},
+	}
+
+	for _, tc := range tests {
+		got := ExtractDomainFromURL(tc.input)
+		if got != tc.want {
+			t.Errorf("ExtractDomainFromURL(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
