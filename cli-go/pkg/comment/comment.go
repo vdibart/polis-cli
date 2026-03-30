@@ -435,7 +435,7 @@ func MoveComment(dataDir, commentID, fromStatus, toStatus string) error {
 			return fmt.Errorf("failed to create directory: %w", err)
 		}
 		toPath = filepath.Join(toDir, commentID+".md")
-		relativePath = filepath.Join("content", "pub.polis.core", "comment", dateDir, commentID+".md")
+		relativePath = filepath.ToSlash(filepath.Join("content", "pub.polis.core", "comment", dateDir, commentID+".md"))
 	} else {
 		toDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", toStatus)
 		if err := site.MkdirAllPrivate(dataDir, toDir); err != nil {
@@ -556,7 +556,7 @@ func PublishComment(dataDir, commentID string) error {
 	// that gets overwritten anyway.
 
 	// Append to public.jsonl
-	relativePath := filepath.Join("content", "pub.polis.core", "comment", dateDir, commentID+".md")
+	relativePath := filepath.ToSlash(filepath.Join("content", "pub.polis.core", "comment", dateDir, commentID+".md"))
 
 	// Parse nested in-reply-to for the index entry
 	inReplyToURL, _ := ParseNestedInReplyTo(content)

@@ -5,210 +5,689 @@ All notable changes to the Go CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.59.0] - 2026-03-17
-
-This release focuses on security hardening across the Go CLI and webapp, enriched comment context cards that fetch the title and excerpt of the parent post, a Milkdown WYSIWYG editor in the webapp, and theme improvements including dynamic widget versioning.
+## [0.59.0]
 
 ### Added
 
-- **HTML sanitization for markdown rendering**: `pkg/render/markdown.go` now sanitizes rendered HTML through bluemonday, stripping dangerous elements (scripts, iframes, event handlers) while preserving structural HTML like `details`, `video`, `audio`, `figure`, and author-defined `class`/`id` attributes.
-- **`pkg/policycheck`**: Reusable remote policy evaluation for DM eligibility. Two-phase: evaluate the recipient's public DM policy rules first; fall back to mutual-follow check if no DM rules exist. Concurrent checks with 5-minute caching in the webapp.
-- **`FetchPolicies` and `FetchFollowingList` in `pkg/remote`**: Fetch a remote site's published `policies/rules.jsonl` and `following.json` for policy-based DM eligibility evaluation.
-- **`StreamQueryInvolved` and `StreamQueryBatch` in `pkg/discovery`**: Unified DS stream endpoints — `StreamQueryInvolved` fetches events by involved domain; `StreamQueryBatch` sends multiple filter sets in one HTTP request.
-- **`Bundle.MergeDefaults` in `pkg/bundle`**: Adds content types from a default bundle to a site bundle without overwriting existing entries. Returns true if any types were added.
-- **`ValidatePublicKey` and `ZeroKey` in `pkg/signing`**: `ValidatePublicKey` checks OpenSSH Ed25519 key format. `ZeroKey` overwrites key material with zeros after signing to minimize the window where private key bytes exist in memory.
-- **Hook path containment and timeout in `pkg/hooks`**: Hooks now verify the script resolves within the site directory (path traversal prevention). Execution limited to `HookTimeout` (30 seconds) via `context.WithTimeout`. `HookTimeout` is exported as a package constant.
-- **`WidgetVersion` constant in `pkg/render/page.go`**: Single source of truth for the current widget JS version. Theme snippets use `{{widget_version}}` template variable instead of hardcoded strings.
-- **Reply context enrichment**: Comment pages now resolve the title, excerpt, and domain of the parent post by fetching its `.md` source. Results are cached in `.polis/content/pub.polis.core/comments/reply-context-cache.json`.
-- **Default policies**: The default private policy set now includes `omit pub.polis.feed from self` (suppresses your own posts from your feed) and `deny all from all` (unknown content types are denied by default).
-
 ### Changed
-
-- **Domain case-normalization (RFC 1123)**: DNS hostnames are consistently lowercased throughout `pkg/dm`, `pkg/discovery`, `pkg/following`, `pkg/policy`, and `pkg/stream`, preventing case-mismatch failures in domain comparisons and DM conversation IDs.
-- **Compile-time regex precompilation**: Frontmatter parsing regexes in `pkg/comment`, `pkg/publish`, and `pkg/render/page` are now package-level variables (`var frontmatterStripRe`, `frontmatterParseRe`) instead of being recompiled on every call.
-- **`ShouldSuspendSync` cooldown window**: Sync suspension now lifts after a configurable cooldown period (default 5 minutes, controlled by `SuspendCooldownMin` in `verification.json`) to allow retry attempts after consecutive DS failures.
-- **DM store zeroes private key seed**: `dm.NewStore` zeroes the seed bytes immediately after deriving the storage key.
-- **Feed handler uses policy evaluation**: `pkg/feed/Handler` now evaluates events against the site's loaded policies (via `policy.EvaluateWithLog`) instead of a hardcoded self-event skip. Falls back to legacy hardcoded skip when no policies are loaded.
-- **[Webapp] Same-origin CORS policy**: CORS middleware passes requests through without adding headers, letting the browser enforce same-origin policy.
-- **[Webapp] Unified DS stream query**: Background sync uses `StreamQueryBatch` / `StreamQueryInvolved` for a single DS request instead of three separate target/source/followed queries.
-- **[Webapp] `StopSync()` method on `Server`**: Gracefully stops the background sync goroutine; called automatically by `Close()`.
-- **[Webapp] DM unread count in `/api/status`**: Response now includes `dm_unread` count from the DM store.
-- **[Webapp] DM recipients endpoint**: `GET /api/dm/recipients` performs concurrent remote policy checks on all followed authors to indicate DM eligibility, with 5-minute result caching.
-- **`.md` URL normalization**: Comment `in_reply_to_url` and `root_post_url` values ending in `.md` are converted to `.html` for rendered output.
-- **Site index page URL paths**: Index page item URLs now include a leading `/` (e.g., `/posts/2025/01/my-post.html` instead of `posts/2025/01/my-post.html`).
 
 ### Fixed
 
-- **[Webapp] Sync goroutine leak**: Fixed goroutine leak on server close by tracking the background sync goroutine with a `syncDone` channel.
-
-## [0.58.0] - 2026-03-07
-
-This release adds end-to-end encrypted direct messages, DS signature verification with two-layer cryptographic trust, policy engine extensions, and a migration of all hardcoded blessing/notification logic to user-configurable declarative policies. The webapp gets a major UI redesign with a new topbar layout, dual-theme support, excerpt cards, and avatar support.
+## [0.56.0]
 
 ### Added
 
-- **`polis dm` command**: End-to-end encrypted direct messages as a new `pub.polis.dm` content type. Ed25519-to-X25519 key conversion, NaCl box transport, secretbox storage. Subcommands: `list`, `read`, `send`, `retry`, `config`. Per-sender and global rate limiting; policy-based acceptance control.
-- **`pkg/dm/`**: Full DM implementation package — crypto, store, rate limiting, send, receive, types. 49 tests.
-- **`pkg/discovery/ds_verify.go`**: Discovery service response verification via Ed25519 envelope signatures. Cached with TTL, retries once on key rotation. Anomaly tracking: sync suspended after 3 consecutive DS failures.
-- **`pkg/discovery/author_verify.go`**: Per-event author signature verification on stream events to prevent DS impersonation attacks.
-- **`pkg/stream/verification_state.go`**: Per-domain verification counters and anomaly state.
-- **`pkg/site/dirs.go`**: Shared directory path constants.
-- **[Webapp] v2 UI redesign**: Topbar layout, dual-theme (dark/light), redesigned feed/posts/comments/blessings views. Unified outlined/ghost button styles. Excerpts on feed cards, post rows, and comment rows.
-- **[Webapp] Avatar support**: Remote site avatars in feed items; avatar randomizer and display name in Settings. Custom avatars suppress initials overlay.
-- **[Webapp] `internal/server/middleware.go`**: Request middleware extracted into dedicated file.
-
 ### Changed
 
-- **Discovery API paths**: All endpoint paths updated to match DS `/v1/` REST redesign (14 paths).
-- **Policy engine: `emit`/`omit` verbs and `self`/`thread-blessed` sources**: Policy rules now control event emission and can filter by thread-blessed status. All hardcoded blessing, notification, and event-gating logic migrated to configurable rules.
-- **`.polis/` directory permissions**: Changed to `0700`.
-- **[Webapp] Feed sort**: Timestamp parsing replaces string comparison for correct chronological ordering.
-- **[Webapp] Feed reply counts**: Blessed comments now counted as replies.
-- **[Webapp] Remote avatars**: Fetched and displayed in feed items.
+- **Discovery client: RESTful API paths** — Updated all 14 endpoint paths in
+  `pkg/discovery/client.go` to match the DS `/v1/` redesign. Since the webapp
+  imports `cli-go/pkg/discovery`, both CLI and webapp binaries get the new paths
+  automatically.
 
 ### Fixed
 
-- **[Webapp] Conversations**: Fixed SyntaxError in click handler; restored Mark Unread / Unread From Here hover actions.
-- **[Webapp] Mark Unread button**: Fixed button escaping and click bubbling.
-- **[Webapp] Following empty state**: Restored heading on empty state CTA.
-- **[Webapp] Blessed comments not rendering**: Fixed `/post/` vs `/posts/` path mismatch.
-- **[Webapp] Index page comment count**: Fixed comment count for source content paths.
-- **DS key format**: Fixed raw base64 DS key conversion to `ssh-ed25519` format.
-
-## [0.55.0] - 2026-02-24
-
-This release adds an About page editor to the webapp, introduces theme switching from the Settings panel, ships new `also-reading` and `polis-widget` snippets for all six built-in themes, and delivers a range of webapp usability improvements.
+## [0.55.0]
 
 ### Added
 
-- **`theme.ExtractPalette()` and `theme.ListThemesWithPalettes()`**: New functions parse CSS `--color-*` variables from theme stylesheets to produce color swatches for UI previews.
-- **`also-reading.html` and `polis-widget.html` snippets for all 6 themes**: New theme snippets shipped for especial, especial-light, sols, turbo, vice, and zane.
-- **[Webapp] Theme switcher in Settings**: Users can switch their site theme from the Settings panel. A grid of themes with color palette swatches allows one-click theme changes that immediately re-render the site.
-- **[Webapp] About page editor**: New full-screen editor for the global `about.html` snippet, accessible from the Snippets sidebar in all lifecycle stages.
-- **[Webapp] `POST /api/settings/theme` endpoint**: Switches the active theme with validation, CSS copy, and full site re-render.
-- **[Webapp] `POST /api/settings/sync` and widget DELETE endpoint**: New sync and widget management API endpoints.
-
 ### Changed
-
-- **[Webapp] Consolidated Conversations tab**: Social sidebar merges Activity and Posts & Comments into a single Conversations view with consistent green badge colors.
-- **[Webapp] My Comments tab order**: Reordered to All, Drafts, Blessed, Pending, Denied.
-- **[Webapp] Deep-link intent paths**: Follow intents redirect to `/_/social/following?intent=follow&target=X`; comment intents route to `/_/comments/new`. Legacy `/_/?intent=...` paths remain supported.
-- **[Webapp] Snippets sidebar**: Now visible in all lifecycle stages including `first_post`.
-- **"Space" terminology**: Post-init welcome message updated from "site" to "space".
 
 ### Fixed
 
-- **[Webapp] Widget follow/unfollow toggle**: Public site widget now includes a Follow/Unfollow toggle.
-- **[Webapp] CORS headers**: Metadata files and the widget DELETE endpoint include correct CORS headers.
-- **[Webapp] `blessing.granted` stream event actor**: Fixed to correctly identify the granter.
-- **[Webapp] Version in metadata files**: Fixed webapp writing `"dev"` instead of the actual version string.
-- **[Webapp] Feed item display**: Fixed grouped feed item title fallback, URL display, and link underlines.
-- **[Webapp] About editor and sidebar placement**: Fixed textarea styling and sidebar-section-snippets placement.
-
-## [0.54.0] - 2026-02-17
-
-This release shifts author identity from email to domain, simplifies the webapp with a streamlined sidebar and improved onboarding, and adds documentation for contributing, webapp usage, and security policy.
-
-### Changed
-
-- **Domain-based author identity**: Author identity now uses the domain from `.well-known/polis` instead of email. Affects comment frontmatter, discovery service registration, and blessing operations.
-- **Init flow simplified**: `site.Init()` accepts explicit Author and Email fields for headless provisioning.
-- **Package state refactored**: `publish`, `comment`, and `stream` packages accept discovery config as function parameters instead of package-level globals.
-- **[Webapp] Simplified UI**: Removed browser split-pane mode, replaced with a progressive sidebar adapting to site lifecycle stage. Merged blessing requests into a single view.
-- **[Webapp] Welcome flow**: New users see a "What just happened?" educational disclosure after init.
+## [0.54.0]
 
 ### Added
 
-- **New tests**: Added test suites for `comment`, `site/init`, `site/wellknown`, `render/page`, and `template/engine` packages.
-- **Render page helpers**: New page rendering utilities in `render/page.go` for index page generation.
+- **[Webapp] Deep-linking for all SPA views**: The webapp now supports shareable, bookmarkable URLs via `/_/` paths. All dashboard views (`/_/posts`, `/_/social/feed`, `/_/settings`, etc.), editor screens (`/_/posts/new`, `/_/posts/drafts/:id`, `/_/posts/:path+`), comment screens (`/_/comments/new`, `/_/comments/drafts/:id`), and snippet screens (`/_/snippets/:source/:path+`) have unique URLs. Browser back/forward navigation works across views. Page refresh restores the correct state.
+- **[Webapp] SPA fallback handler**: `spaHandler` in `server.go` serves `index.html` for any path that doesn't match a static asset, enabling deep-link URLs to load correctly on refresh.
+- **[Webapp] Intent deep-link paths**: Follow intents now redirect to `/_/social/following?intent=follow&target=X` instead of the root path. Comment intents route to `/_/comments/new`. Legacy root-path intents (`/_/?intent=follow`) remain supported for backwards compatibility.
+- **[Webapp] Theme switcher in dashboard Settings**: Users can now switch their site theme visually from the Settings panel. Shows a grid of all available themes with color palette swatches. Clicking a theme updates the manifest, copies the CSS, and re-renders the entire site immediately. Available to both localhost and hosted users.
+- **Theme palette extraction**: New `theme.ExtractPalette()` and `theme.ListThemesWithPalettes()` functions parse CSS `--color-*` variables from theme stylesheets to produce 5 representative colors for UI previews.
+- **`POST /api/settings/theme` endpoint**: Switches the active theme with validation, CSS copy, and full site re-render.
+
+### Changed
+
+- **[Hosted] Auth verify redirect uses deep-link path**: When a follow author is present in the magic link, the redirect now goes to `/_/social/following?intent=follow&target=...` instead of `/_/?intent=follow&target=...`.
 
 ### Fixed
 
-- **Verify command robustness**: Improved error handling for edge cases in signature verification.
-- **Template section rendering**: Additional test coverage for section rendering edge cases.
-
-## [0.53.0] - 2026-02-13
-
-This release improves homepage performance with limited post/comment sections and archive pages, adds quality of life improvements to the webapp (feed auto-refresh, following metadata display), and introduces authenticated discovery queries for privacy-sensitive operations.
+## [0.53.0]
 
 ### Breaking Changes
 
-- **[Discovery] Authenticated queries for sensitive data**: Discovery service read endpoints now enforce access controls. Unauthenticated callers to `ds-content-query` only see blessed comments (pending/denied are filtered). Querying `ds-relationship-query` for `status=pending` or `status=denied` blessing records requires signed authentication headers (`X-Polis-Domain`, `X-Polis-Signature`, `X-Polis-Timestamp`). The `ds-stream` endpoint filters out `polis.blessing.denied` events for unauthenticated consumers. CLI commands that query pending/denied blessings (`polis blessing requests`, `polis follow` auto-bless, `polis notifications`) now use authenticated clients. Clients older than 0.53.0 will see reduced data from these endpoints.
+- **[Discovery] Read endpoint access controls require signed auth for sensitive queries**:
+  `ds-content-query` now only returns blessed comments to unauthenticated callers.
+  `ds-relationship-query` requires signed auth headers (`X-Polis-Domain`,
+  `X-Polis-Signature`, `X-Polis-Timestamp`) to query `status=pending` or
+  `status=denied` blessing records. `ds-stream` filters out `polis.blessing.denied`
+  events for unauthenticated consumers. Clients older than 0.53.0 will see reduced
+  data from these endpoints — specifically, `polis blessing requests` and
+  `polis follow` auto-bless will fail without the updated client.
 
 ### Added
 
-- **Homepage post/comment limits**: New `{{#recent_posts}}` and `{{#recent_comments}}` template sections limit homepage display to the 10 most recent items. All 6 built-in themes updated to use these sections.
-- **Archive page**: Running `polis render` now generates `posts/index.html` with a chronological list of all posts. Themes with a `posts.html` template automatically get this page.
-- **"View all posts" link**: Homepage displays a "View all N posts" link when you have more than 10 posts.
-- **Signed GET authentication**: Discovery client supports optional domain ownership proof on GET requests via authentication headers. New `discovery.NewAuthenticatedClient()` constructor.
-- **Notification pruning**: `notification.Prune()` enforces configurable limits (default 500 items, 90 days) to prevent unbounded JSONL growth.
-- **Following metadata enrichment**: `following.json` now stores `site_title` and `author_name` from each followed author's `.well-known/polis`.
-- **[Webapp] Feed auto-refresh**: Conversations tab polls for new items every 60 seconds.
-- **[Webapp] Following metadata backfill**: Following list lazily enriches entries by fetching `.well-known/polis` from remote sites.
-- **[Webapp] Following list improvements**: Displays site titles and author names instead of bare domains.
-- **[Webapp] Activity stream cap**: Activity stream caps at 500 events, trimming oldest entries.
+- **Signed GET request authentication**: Discovery client supports optional domain
+  ownership proof on GET requests via `X-Polis-Domain` / `X-Polis-Signature` /
+  `X-Polis-Timestamp` headers. New `discovery.NewAuthenticatedClient()` constructor.
+- **`authenticateGetRequest()` shared helper**: Edge functions can verify domain
+  ownership on read endpoints using the same Ed25519 `.well-known/polis` mechanism
+  as write endpoints.
 
 ### Changed
 
-- **Authenticated discovery queries**: Commands that query pending or denied blessings now use authenticated clients with signed request headers.
-- **[Webapp] Authenticated discovery queries**: Handlers that query pending or denied blessings now use authenticated clients.
+- **`discovery.Client` struct expanded**: Added optional `Domain` and
+  `PrivateKeyPEM` fields for authenticated GET requests. `NewClient()` still works
+  for unauthenticated queries (backward compatible).
+- **All CLI commands that query pending/denied blessings now use authenticated client**:
+  `blessing requests`, `follow`, `notifications`, `comment sync`.
+- **[Webapp] All handlers that query pending/denied blessings now use authenticated client**:
+  Notification sync, comment sync, blessing requests, follow/unfollow.
+
+### Added
+
+- **Notification pruning**: `notification.Prune()` enforces `MaxItems` (default 500)
+  and `MaxAgeDays` (default 90) to prevent unbounded JSONL growth. Configurable via
+  `max_items`/`max_age_days` in `config/notifications.json`.
+- **Following author metadata**: `FollowingEntry` now stores `site_title` and
+  `author_name` from `.well-known/polis`, captured during follow. New helpers:
+  `UpdateMetadata()`, `EntriesMissingMetadata()`.
+- **[Webapp] Feed auto-refresh**: Conversations tab polls `/api/feed/counts` every
+  60s, updating sidebar badge and re-rendering the list when new items arrive.
+- **Homepage post/comment limits**: `{{#recent_posts}}` and `{{#recent_comments}}`
+  template sections now limit to 10 most recent items. All built-in themes updated
+  to use these instead of the unbounded `{{#posts}}`/`{{#comments}}` loops.
+- **Archive page**: `polis render` generates `posts/index.html` listing all posts.
+  Themes with a `posts.html` template get this automatically. All 6 built-in themes
+  include the new archive template. The "View all N posts" link on the homepage only
+  appears when there are more than 10 posts.
+- **[Webapp] Following metadata backfill**: GET `/api/following` lazily enriches
+  up to 3 entries per request by fetching `.well-known/polis` from remote sites.
+- **[Webapp] Following list display**: Shows site title and author name instead of
+  bare domain; uses `added_at` date instead of stale `last_checked` field.
+- **[Webapp] Activity stream cap**: Frontend caps activity events at 500, trimming
+  oldest entries to prevent unbounded memory growth.
+
+### Documentation
+
+- **Root README rewritten**: Replaced stale MVP-era README with current project
+  overview, repository structure, documentation index, and getting started guide.
+- **CONTRIBUTING.md rewritten**: Now covers all four components (Go CLI, webapp,
+  bash CLI, discovery service) with build commands, prerequisites, and conventions.
+- **USAGE.md updated**: Added frozen-CLI banner, Go CLI section, deprecated TUI
+  reference, and cross-references to webapp manual and security model.
+- **WEBAPP-USER-MANUAL.md updated**: Added "Deploying Your Site" section, trimmed
+  security section with cross-reference to SECURITY-MODEL.md, added cross-references
+  for blessing workflow and configuration.
+- **Fixed stale paths**: Updated key paths in SECURITY-MODEL.md (`polis_key` →
+  `id_ed25519`), version table and scope in SECURITY.md, broken cross-references
+  in DISCOVERY-STREAM-ARCHITECTURE.md and discovery-service/README.md.
+- **Skills paths updated**: Replaced 98 occurrences of `./cli/bin/polis` with
+  `polis` across SKILL.md and reference files.
+- **cli-go/README.md**: Replaced stale 3-command list with full parity statement.
+- **New docs/README.md**: Navigation index for the docs directory.
+- **TUI.md archived**: Replaced with redirect to webapp manual.
+- **GLOSSARY.md**: Added TUI deprecation note.
+
+## [0.52.2]
+
+### Fixed
+
+- **Template injection via user data in section loops**: Post titles (or other
+  loop variables) containing Mustache syntax like `{{> partial}}` were
+  interpreted as partial includes, causing "partial not found" crashes. Now
+  escapes `{{` in substituted user values during loop rendering and processes
+  partials before variable substitution in all four section renderers
+  (`renderPostsSection`, `renderCommentsSection`, `renderBlessedCommentsSection`,
+  `renderRecentPostsSection`). This also closes a potential file-disclosure
+  vector where crafted titles could read arbitrary files via `{{> ../../path}}`.
+- **[Webapp] MY SITE tab missing timestamps**: Posts, drafts, and comments in
+  the MY SITE tab only showed dates (e.g. "Feb 11") while the SOCIAL tab showed
+  date + time. All three list renderers now use the same `item-date-group`
+  wrapper with `formatTime()`.
+
+### Changed
+
+- **DS state filenames standardized to match cursor keys**: Renamed
+  `notifications.jsonl` → `polis.notification.jsonl` and `feed-cache.jsonl` →
+  `polis.feed.jsonl` so every state file matches its cursor key in
+  `cursors.json`. Migration script: `scripts/migrate-state-filenames.sh`.
+  The `index rebuild` command handles both old and new filenames.
+
+## [0.52.1]
+
+### Fixed
+
+- **[Webapp] Notification cursor stuck at single-digit positions**: The cursor
+  comparison in `syncNotifications` used string comparison (`"30" > "4"` is
+  false lexicographically). Replaced with numeric comparison via `cursorGreater()`
+  so the notification cursor properly advances past position 9.
+- **[Webapp] All posts from same author collapsed into one notification**: Post
+  events use `url` instead of `source_url` in their payload, but `DedupeKey`
+  only checked `source_url` — falling back to `target_domain` and deduplicating
+  all posts from the same domain. Now checks `url` as a fallback before
+  `target_domain`.
+- **[Webapp] Slow notification bell open (2-3s)**: The synchronous
+  `syncNotifications()` call in `handleNotifications` made 3 HTTP requests
+  before returning data. Changed to async — the panel now reads cached data
+  immediately and triggers a background sync for the next open.
+- **[Webapp] Toggle color theming inconsistent**: The "Show All" / "Unread Only"
+  toggle in Conversations used the opposite active-class logic from the
+  notification flyout. Now both use the same mapping: teal = "Unread Only",
+  non-teal = "Show All".
+- **[Webapp] Conversations not loading fresh content**: After the stale banner
+  fix, the auto-refresh was gated on `stale === true` which no longer triggers
+  when the cache is up to date. Now always performs a silent background sync
+  when viewing the Conversations page, showing cached data immediately and
+  re-rendering if new items arrive.
+- **[Webapp] Feed title truncation**: Titles now use CSS ellipsis instead of
+  hard-clipping mid-character. Also increased `deriveTitle()` limit from 60 to
+  120 characters so discover.polis.pub quip titles show more of their text.
+- **[Webapp] "X new items" toast showed total count**: The feed refresh toast
+  was reporting `len(items)` (total items) instead of actual new items added.
+  Now correctly counts before/after sync to show only genuinely new items.
+- **[Webapp] Notifications not appearing for new posts**: The notification panel
+  only synced via a 60-second background timer — opening the panel or refreshing
+  the feed wouldn't trigger a sync. Now `handleFeedRefresh` fires a background
+  notification sync so the bell dot updates after feed refresh.
+
+### Added
+
+- **[Webapp] Local timestamps on feed items**: Each Conversations and Activity
+  item now shows the time (e.g., "8:30 PM") in the user's local timezone below
+  the date.
+- **[Webapp] "Unread Only" / "Show All" toggle**: Conversations tab has a toggle
+  button (matching the notification flyout style) that filters out read items.
+  Setting persists across reloads via `webapp-config.json`. Defaults to off.
+- **[Webapp] Auto-merge new notification rules**: When new default notification
+  rules are added in a release, they are automatically merged into existing
+  configs on next sync. The notification cursor resets so the new rules can
+  process past events.
+
+### Fixed
+
+- **[DS] ds-discover-publish content registration**: Replaced the internal HTTP
+  call to `ds-content-register` with a direct `ds_content_metadata` upsert.
+  The Supabase edge runtime doesn't properly pass JWTs for function-to-function
+  calls, causing persistent 401 errors. The direct upsert uses the existing
+  Supabase client (which handles auth automatically) and avoids the gateway
+  entirely. `ds-content-register` retains JWT verification for external callers.
+- **[DS] ds-discover-publish "remaining" count off by one**: The pending quip
+  count was queried before marking the current quip as published, so the count
+  was always 1 too high. Now queries after the status update.
+
+### Changed
+
+- **[DS] Deterministic random quip ordering**: The `ds_discover_queue` table now
+  has a `display_order` integer column with pre-shuffled values. The publish
+  function picks the lowest `display_order` where `status = 'pending'` instead
+  of random selection from a batch. To replay all quips, simply reset them to
+  `pending` — the shuffled order is preserved.
+
+## [0.52.0]
+
+### Added
+
+- **[Webapp] Following onboarding**: New users with 0 follows see a rich
+  onboarding card on the Following page recommending `discover.polis.pub` as
+  their first follow, with a one-click Follow button. The Follow Author flyout
+  also shows a suggestion to use `discover.polis.pub` when the user has no
+  follows yet.
+- **`polis.post.republished` notification rule**: New `updated-post` rule
+  (disabled by default) generates notifications when followed authors update
+  posts. Added `polis.post.republished` to `EventTypes()` list.
+
+### Changed
+
+- **`new-post` notification enabled by default**: The `polis.post.published`
+  rule is now enabled out of the box. This is the most valuable notification for
+  network building — users should know when authors they follow publish new
+  content.
+- **DS directory restructure (STATE vs CONFIG)**: The per-discovery-service
+  directory `.polis/ds/<domain>/` is reorganized from a flat `projections/`
+  layout into `config/` (user preferences, survives resets) and `state/`
+  (computed/derived, safely deletable):
+  ```
+  .polis/ds/<domain>/
+    config/
+      notifications.json   ← rules, muted_domains
+      feed.json             ← staleness, limits
+    state/
+      cursors.json          ← all stream cursors (consolidated)
+      polis.follow.json     ← computed followers
+      polis.blessing.json   ← computed blessings
+      notifications.jsonl   ← notification entries
+      feed-cache.jsonl      ← feed items
+  ```
+  Old layout: `projections/` (mixed config+state), `notifications/state.jsonl`,
+  `feed/cache.jsonl`. Run `scripts/migrate-ds-layout.sh <site-dir>` to migrate
+  existing sites. Nine default notification rules (was eight).
+- **Consolidated cursor storage**: All stream cursors are now stored in a single
+  `state/cursors.json` file instead of being embedded in each projection file.
+  Each entry has `position` and `last_updated` fields.
+- **[Webapp] Notification and feed sync updated**: `syncNotifications()` reads
+  rules from `config/notifications.json` via `store.LoadConfig()`.
+  `syncFeed()` uses `cm.GetCursor()`/`cm.SetCursor()` instead of
+  `LoadProjectionState()`/`SaveProjectionState()`.
+
+### Fixed
+
+- **[Webapp] Persistent "Cache is stale" banner**: `syncFeed()` only called
+  `SetCursor()` when the cursor position changed, so syncs with no new events
+  never refreshed `LastUpdated`, leaving the cache permanently stale. Now
+  `SetCursor()` is called after every successful sync regardless of whether the
+  position moved.
+
+## [0.51.0]
+
+### Added
+
+- **New themes: Vice and Especial**: Two new themes expanding the lineup to six.
+  Vice is inspired by GTA Vice City / Miami Vice (warm saturated blues, coral
+  pink, tropical teal). Especial is inspired by Modelo Especial with a dark
+  variant (gold on near-black) and a light variant, Especial Light (gold on warm
+  fog, WCAG AA compliant). Theme preview available at `themes/_preview.html`.
+
+- **Stream-driven feed**: Feed refresh now queries the DS stream instead of
+  polling each author's site directly. Single query per sync using
+  `?type=...&actor=...&since=<cursor>`.
+- **`ListFiltered()` with composable filters**: `?type=post&status=unread`
+  returns only unread posts. Both `type` and `status` params are optional and
+  composable.
+- **Feed state scoped per discovery service**: Cache lives at
+  `.polis/ds/<domain>/feed/cache.jsonl`, config + cursor in
+  `.polis/ds/<domain>/projections/polis.feed.json`.
+- **`FeedHandler`**: New stream event → `FeedItem` transformer
+  (`cli-go/pkg/feed/handler.go`). Handles post/comment published/republished
+  events, skips self-authored content.
+- **[Webapp] Background feed sync**: `syncFeed()` runs alongside notification
+  sync every 60 seconds, querying the DS stream for new content.
+- **[Discovery] `source_domain` on comment/blessing events**: All comment and
+  blessing stream events now include `source_domain` (the commenter's domain)
+  alongside the existing `target_domain` (the post owner). Enables separate
+  server-side filtering for "events about my posts" vs "events about my
+  comments."
+- **[Discovery] `source` query parameter on ds-stream**: Clients can now filter
+  stream events by `source_domain` (e.g., `?source=mydomain.com`), mirroring
+  the existing `?target=` filter. Used by the notification system to efficiently
+  fetch blessing grant/deny events for the commenter.
+- **[Discovery] Comment stream events**: New `polis.comment.published` and
+  `polis.comment.republished` event types emitted when comments are registered.
+  Previously comments only surfaced as blessing events, making it impossible to
+  track "new comments on posts I follow."
+- **[Discovery] `target_domain` on all stream events**: Every event in the
+  discovery stream now includes `target_domain` in the payload, identifying who
+  the event is about (e.g., the post owner for blessing requests). Enables
+  server-side filtering via the `?target=` query parameter.
+- **[Discovery] `target` query parameter on ds-stream**: Clients can now filter
+  stream events by `target_domain` (e.g., `?target=mydomain.com`), indexed for
+  performance. Reduces data transfer for clients that only need events relevant
+  to their domain.
+- **Rule-driven notification system**: Notifications are now generated by
+  matching stream events against configurable rules in
+  `.polis/ds/<domain>/projections/polis.notification.json`. Each rule specifies
+  an event type, relevance filter (`target_domain`, `source_domain`, or
+  `followed_author`), and a message template. Eight default rules cover all
+  event types. Users can enable/disable rules and mute domains by editing the
+  projection file.
+- **`notification.DefaultRules()`**: Returns the built-in rule set seeded on
+  first sync. Covers: new-follower, lost-follower, blessing-requested,
+  blessing-granted, blessing-denied, new-comment, updated-comment, new-post.
+- **`notification.ResolveTemplate()`**: Simple `{{var}}` substitution for
+  notification message templates (actor, post_name, timestamp, etc.).
+- **`notification.DedupeKey()`**: Deterministic dedupe key from rule ID +
+  event content, preventing duplicate notifications across syncs.
+
+### Changed
+
+- **Removed `--register` flag from `polis init`**: Init is now local-only (no
+  network calls). Users should deploy first, then run `polis register`. Updated
+  "Next steps" output to guide this workflow.
+- **Improved `polis register` error messaging**: When the discovery service can't
+  reach `.well-known/polis` (WELLKNOWN_FETCH_FAILED), now prints a helpful hint
+  asking if the site is deployed.
+- **Improved discovery registration warnings in `polis post`**: Changed warning
+  format from `[warning]` to `[!]` prefix and added `polis register` hint for
+  newly deployed sites.
+- **[Webapp] Setup wizard after init**: After initializing a new site, the webapp
+  now opens a 2-step setup wizard guiding users through Deploy and Register. The
+  wizard is dismissable ("Do this later") and re-openable from a dashboard
+  banner. Includes deployment polling that detects when the site goes live.
+- **[Webapp] Init panel collects all configuration**: The "Initialize New Site"
+  panel now includes Base URL, Discovery Service URL, and Discovery Service Key
+  inputs. DS fields are in a collapsible section, pre-populated with defaults.
+  All values are written to `.env` on init so users get a working setup without
+  manual configuration.
+- **[Webapp] Feed sync after follow**: Following a new author now triggers a
+  background feed sync immediately, so their content appears in Conversations
+  without waiting for the next 60-second sync cycle.
+- **Directory restructure**: `.polis/projections/<domain>/` moved to
+  `.polis/ds/<domain>/projections/`. The new `.polis/ds/<domain>/` root serves
+  as the boundary for all per-discovery-service data, with `projections/` and
+  `notifications/` as siblings. No migration needed — just new paths.
+- **Notification state format**: Notifications stored in
+  `.polis/ds/<domain>/notifications/state.jsonl` with pre-rendered icon/message
+  fields. Old `.polis/notifications.jsonl` and `.polis/notifications-manifest.json`
+  are no longer read or written.
+- **`notification.NewManager()` signature**: Now takes `(dataDir, discoveryDomain)`
+  instead of just `(dataDir)`. All callers updated.
+- **`NotificationHandler` decoupled from `ProjectionHandler` interface**: Uses
+  a different processing model — `Process()` returns `[]notification.StateEntry`
+  instead of mutating in-memory state. Removed from `BuiltinHandlers` registry.
+- **`StreamQuery` signature**: Added optional `sourceFilter` variadic parameter
+  (6th argument). Backwards compatible — existing callers unchanged.
+- **[Discovery] Renamed `polis.post.updated` to `polis.post.republished`**:
+  Aligns stream event naming with CLI command naming convention. Existing events
+  in the database are migrated by `010_target_domain_index.sql`.
+- **[Webapp] Projection-based notification sync**: Replaced the ad-hoc
+  `syncNotifications()` (which polled relationship queries for pending blessings)
+  with a projection-based sync that issues separate stream queries per relevance
+  group (target_domain, source_domain, followed_author), applies rules, and
+  appends to `state.jsonl`.
+- **[Webapp] Generic notification rendering**: Frontend `renderNotification()`
+  uses pre-rendered `icon` and `message` from the backend. No more type-based
+  branching (`if type === 'blessing_request'`).
+- **`NewCacheManager()` signature**: Now takes `(dataDir, discoveryDomain)`
+  instead of just `(dataDir)`. All callers updated.
+- **`handleFeed` supports `?status=read|unread` query parameter**: Composable
+  with existing `?type=` filter.
+- **`polis discover` uses stream-based discovery**: Queries the DS stream
+  instead of polling each author's site. `--since` flag removed (stream cursor
+  replaces per-author timestamps).
+
+### Removed
+
+- **`feed.Aggregate()` and direct HTTP polling**: Removed `Aggregate()`,
+  `AggregateOptions`, `AggregateResult`, `NotFollowingError`, `extractDomain()`
+  from `cli-go/pkg/feed/feed.go`. Stream-based `FeedHandler` replaces all
+  polling logic.
+- **`last_checked` field from `following.json`**: Stream cursor in
+  `polis.feed.json` replaces per-author timestamps. `UpdateLastChecked()`
+  removed from `following` package.
+- **`.polis/social/feed-cache.jsonl` and `.polis/social/feed-manifest.json`**:
+  Moved to DS-scoped paths (`.polis/ds/<domain>/feed/cache.jsonl` and
+  `.polis/ds/<domain>/projections/polis.feed.json`).
+
+### Fixed
+
+- **[Discovery] `target_domain` consistency in blessing grant/deny**: Previously
+  `ds-relationship-update` set `target_domain` to the commenter's domain (a
+  notification-driven hack). Now consistently means the post owner's domain
+  across all event types. Commenter's domain available via `source_domain`.
+- **[Discovery] Blessing event payload inconsistency**: Blessing events emitted
+  from `ds-content-register` (auto-bless and pending requests) now include
+  `source_url` and `target_url` fields, matching the payload shape from
+  `ds-relationship-update`. Previously the Go `BlessingHandler` and
+  `NotificationHandler` silently dropped these events because the expected
+  fields were missing.
+- **[Discovery] Auto-blessed `target_domain` in `ds-content-register`**: Fixed
+  auto-granted blessing events to set `target_domain` to the post owner (was
+  incorrectly set to the commenter's domain).
+- **`site.Init()` default `view_mode`**: Fixed `webapp-config.json` to default
+  `view_mode` to `"list"` instead of `"browser"`.
+- **[Webapp] "Site: Not configured" with `POLIS_BASE_URL` set**: `GetSiteTitle()`
+  now falls back to the `POLIS_BASE_URL` env var when `.well-known/polis` has no
+  `site_title`. Previously it only checked deprecated fields (`base_url`,
+  `subdomain`) that are removed by upgrades.
+- **[Discovery] Re-registration after keypair regeneration**: `ds-sites-register`
+  now updates the stored public key when the domain's `.well-known/polis` key has
+  changed (e.g. after `polis init` regenerates the keypair). Previously the old
+  key stayed cached and required `polis unregister` with the destroyed key — now
+  `polis register` just works.
+- **CLI not loading `.env` file**: The Go CLI now loads `.env` files on startup
+  (search order: `cwd/.env` → `~/.polis/.env`), matching the bash CLI and webapp
+  behavior. Previously `DISCOVERY_SERVICE_URL`, `DISCOVERY_SERVICE_KEY`, and
+  `POLIS_BASE_URL` were only read from environment variables, causing all
+  discovery-dependent commands (`post`, `comment`, `register`, `follow`,
+  `unfollow`, `blessing`, `discover`, `notifications`, `migrate`, `about`,
+  `rebuild`) to silently skip or fail discovery operations when credentials
+  were only in `.env`.
+
+## [0.50.2]
+
+### Removed
+
+- **Notification subcommands `read`, `dismiss`, `sync`, `config`**: These are
+  better handled by the webapp (`read`/`dismiss`) or configured non-existent
+  infrastructure (`sync`/`config`). Only `polis notifications [list]` remains.
+  Also fixes a bug in the Go CLI `sync` subcommand that used a hardcoded time
+  format string instead of `time.Now()`.
+- Dead notification package methods: `SetPollInterval`, `EnableType`,
+  `DisableType`, `IsTypeEnabled`, `MuteDomain`, `UnmuteDomain`, `GetWatermark`,
+  `Remove`, `RemoveAll`, `RemoveOlderThan`. Methods used by the webapp
+  (`MarkRead`, `UpdateWatermark`, `Add`, etc.) are retained.
+
+### Changed
+
+- **Centralized discovery registration in CLI packages**: Post registration,
+  comment beseech, and stream event publishing moved from webapp handlers into
+  `cli-go/pkg/` packages. The webapp is now a thin HTTP layer — all business
+  logic lives in the CLI.
+  - `publish.RegisterPost()` — called automatically by `PublishPost()`/`RepublishPost()`
+  - `comment.BeseechComment()` — replaces ~130 lines of inline webapp logic
+  - `stream.PublishEvent()` — replaces webapp's `emitStreamEvent()`
+  - Follow/unfollow stream events moved into `following.FollowWithBlessing()`
+    and `UnfollowWithDenial()`, so both CLI and webapp emit them
+- **Single source of truth for author email**: Removed `AuthorEmail` from webapp
+  config struct. Email is now read exclusively from `.well-known/polis` via
+  `GetAuthorEmail()`. Deleted duplicate `WellKnownPolis` struct from server.go
+  in favor of `site.WellKnown`.
+- **[Webapp] Discovery config moved from webapp-config.json to .env**: Removed
+  `DiscoveryURL` and `DiscoveryKey` from `Config` struct (and `webapp-config.json`).
+  These are now fields on the `Server` struct, loaded exclusively from `.env` /
+  environment variables — matching the CLI's behavior. Eliminates duplication
+  between `.env` and `webapp-config.json`.
+- **Discovery config propagation**: `cmd/root.go` and webapp `Initialize()` both
+  propagate `DiscoveryURL`, `DiscoveryKey`, and `BaseURL` to `publish`, `comment`,
+  and `stream` packages at init time.
+
+### Changed (UI)
+
+- **[Webapp] Renamed "Feed" to "Conversations"**: The Social tab sidebar item
+  and content header now read "Conversations" instead of "Feed" for clarity.
+
+### Fixed
+
+- **[Webapp] Posts not appearing in discovery**: Posts published via webapp were
+  not registered with `ds-content-register` because `AuthorEmail` was empty in
+  `webapp-config.json` with no fallback to `.well-known/polis`.
+
+## [0.50.1]
+
+### Fixed
+
+- **[Discovery] Author email spoofing**: `ds-content-register` now verifies the
+  `author` email in the payload matches the `email` field published in the actor's
+  `.well-known/polis`. Returns 403 `AUTHOR_MISMATCH` on mismatch. Sites without
+  an email field are unaffected (backwards compatible).
+- **[Discovery] Blessing denial bypass**: Re-registering a comment that was explicitly
+  denied no longer resets the blessing status to `pending`. The denial is preserved —
+  only the post owner can re-grant via `ds-relationship-update`.
+
+### Added
+
+- **[Discovery] Rate limiting on all write endpoints**: Shared `checkRateLimit()`
+  helper using the existing `increment_rate_limit` database function. Limits per
+  hour per domain:
+  - `ds-content-register`: 50
+  - `ds-content-unregister`: 20
+  - `ds-relationship-update`: 50
+  - `ds-sites-register`: 5
+  - `ds-sites-unregister`: 5
+  - `ds-stream-publish`: 100 (refactored from inline to shared helper)
+- **[Discovery] Input size limits**: URL (2048 chars), email (254 chars, RFC 5321),
+  signature (2048 chars), metadata (4KB), total payload (64KB, returns 413).
+- **[Discovery] CORS hardening**: All endpoints now declare explicit
+  `Access-Control-Allow-Methods` (POST or GET per endpoint) and
+  `Access-Control-Max-Age: 600`.
+
+### Changed
+
+- **[Discovery] Stricter email validation**: Regex now requires standard local-part
+  characters, domain labels that don't start/end with hyphens, and TLD of 2+
+  alphabetic characters. Rejects edge cases like `a@b.c`.
+- **[Discovery] `fetchPublicKey()`** refactored as a thin wrapper around new
+  `fetchWellKnownPolis()` which returns both `publicKey` and `email`.
 
 ## [0.50.0]
 
 ### Breaking Changes
 
-- **[Discovery] Unified content model**: Separate `posts_metadata` and `comment_metadata` tables replaced by `ds_content_metadata` (type-keyed) and `ds_relationship_metadata`. Schema version 0.8.0.
-- **[Discovery] Table namespacing**: All tables renamed with `ds_` (user data) or `admin_` (operator data) prefixes.
-- **[Discovery] Edge function namespacing**: All endpoints renamed with `ds-` or `admin-` prefix. Legacy endpoints removed: `posts-register`, `posts-unregister`, `posts-check`, `posts` (query), `comments-blessing-beseech`, `comments-blessing-grant`, `comments-blessing-deny`, `comments-blessing-requests`, `comments` (query), `polis-version`.
-- **[Discovery] New endpoints**: `ds-content-register`, `ds-content-unregister`, `ds-content-check`, `ds-content-query`, `ds-relationship-update`, `ds-relationship-query`.
-- **[Discovery] Canonical signing format**: Unified format `{"type":"polis.post","url":"...","version":"...","author":"...","metadata":{...}}` for content; `{"type":"polis.blessing","source_url":"...","target_url":"...","action":"...","timestamp":"..."}` for relationships.
-- **[Discovery] Status terminology**: `blessed` → `granted` in relationship records.
-- **Discovery client rewrite** (`pkg/discovery/client.go`): Type-specific methods removed. Replaced by generic methods: `RegisterContent()`, `UnregisterContent()`, `CheckContent()`, `QueryContent()`, `UpdateRelationship()`, `QueryRelationships()`.
+- **[Discovery] Unified content model**: Separate `posts_metadata` and `comment_metadata`
+  tables replaced by `ds_content_metadata` (type-keyed) and `ds_relationship_metadata`.
+  Schema version bumped to 0.8.0.
+- **[Discovery] Table namespacing**: All tables renamed — `ds_` prefix for user data
+  (`ds_registered_sites`, `ds_events`, `ds_domain_migrations`), `admin_` prefix for
+  operator data (`admin_blocked_domains`, `admin_blocked_types`, `admin_stream_config`,
+  `admin_rate_limits`).
+- **[Discovery] Edge function namespacing**: All edge function endpoints renamed with
+  `ds-` or `admin-` prefix to match table naming. Discovery client updated for all
+  14 user-facing endpoints (`ds-content-*`, `ds-relationship-*`, `ds-sites-*`,
+  `ds-stream*`, `ds-migrations`).
+- **[Discovery] Endpoints removed**: `posts-register`, `posts-unregister`, `posts-check`,
+  `posts` (query), `comments-blessing-beseech`, `comments-blessing-grant`,
+  `comments-blessing-deny`, `comments-blessing-requests`, `comments` (query),
+  `polis-version`.
+- **[Discovery] Endpoints added**: `ds-content-register`, `ds-content-unregister`,
+  `ds-content-check`, `ds-content-query`, `ds-relationship-update`, `ds-relationship-query`.
+- **[Discovery] Signing format**: New unified canonical JSON format —
+  `{"type":"polis.post","url":"...","version":"...","author":"...","metadata":{...}}`
+  replaces type-specific formats.
+- **[Discovery] `polis_versions` table removed** from database.
+- **[Discovery] Status terminology**: Blessing status `blessed` → `granted` in
+  relationship records.
+- **Go client rewrite** (`pkg/discovery/client.go`): Type-specific methods removed
+  (`RegisterPost`, `BeseechBlessing`, `GrantBlessing`, `DenyBlessing`,
+  `GetPendingRequests`, `GetBlessedComments`, `GetCommentsByAuthor`,
+  `CheckBlessingStatus`, `CheckVersion`). Replaced by generic methods:
+  `RegisterContent()`, `UnregisterContent()`, `CheckContent()`, `QueryContent()`,
+  `UpdateRelationship()`, `QueryRelationships()`.
 - **`blessing.Deny()` signature changed**: Now takes `(commentURL, targetURL, client, privateKey)` instead of `(commentVersion, client, privateKey)`.
-- **[Webapp] Deny blessing API**: `POST /api/blessing/deny` now requires `{"comment_url": "...", "in_reply_to": "..."}` instead of `{"comment_version": "..."}`.
+- **[Webapp] Deny blessing API**: `POST /api/blessing/deny` now requires
+  `{"comment_url": "...", "in_reply_to": "..."}` instead of `{"comment_version": "..."}`.
+- **[Bash CLI] Unified content API**: All discovery service endpoints updated to match
+  the unified content/relationship API. Old endpoints (`comments-blessing-beseech`,
+  `comments-blessing-grant`, `comments-blessing-deny`, `comments-blessing-requests`,
+  `comments`) replaced by `ds-content-register`, `ds-content-query`, `ds-content-check`,
+  `ds-relationship-update`, `ds-relationship-query`.
+- **[Bash CLI] New canonical JSON signing format**: `cmd_comment` beseech payload uses
+  `{"type":"polis.comment","url":"...","version":"...","author":"...","metadata":{...}}`
+  instead of flat fields. Grant/deny use
+  `{"type":"polis.blessing","source_url":"...","target_url":"...","action":"...","timestamp":"..."}`.
+- **[Bash CLI] Status terminology**: `blessed` → `granted` in response parsing.
+- **[Bash CLI] Version check removed**: `check_version_update()` stubbed out —
+  `polis-version` endpoint no longer exists.
 
 ### Added
 
 - **`pkg/stream/` package**: Client-side projection framework for consuming the Discovery Stream
-  - `store.go`: `Store` manages per-projection cursors and materialized state (`.polis/projections/<domain>/`)
-  - `handler.go`: `ProjectionHandler` interface with built-in handler registry
-  - `follow.go`: `FollowHandler` maintains follower set from `polis.follow.announced`/`removed` events
-  - `blessing.go`: `BlessingHandler` processes blessing request/grant/deny events
-  - `notification.go`: `NotificationHandler` generates notifications from events
-- **Discovery client methods**: `RegisterContent()`, `UnregisterContent()`, `CheckContent()`, `QueryContent()`, `UpdateRelationship()`, `QueryRelationships()`, `StreamQuery()`, `StreamPublish()`, `StreamHealth()`, `MakeContentCanonicalJSON()`, `MakeStreamCanonicalJSON()`
-- **Post discovery registration**: `publish.RegisterPost()` automatically registers posts with `ds-content-register`
-- **Comment beseech extraction**: `comment.BeseechComment()` centralizes beseech logic (replaces ~130 lines of inline webapp code)
-- **Stream event publishing**: `stream.PublishEvent()` for emitting events; follow/unfollow emit `polis.follow.announced`/`removed`
-- **[Webapp] Activity stream**: `GET /api/activity` returns events from followed authors. New "Activity" view with timeline.
-- **[Webapp] Followers view**: `GET /api/followers/count` uses projection framework. New "Followers" view with refresh.
-- **[Webapp] Notification API**: `GET /api/notifications`, `GET /api/notifications/count`, `POST /api/notifications/read`. Background polling (60s) for blessing requests. Bell icon in header with badge and flyout.
-- **[Webapp] Domain name in header**: Displays domain from `POLIS_BASE_URL`.
-- **[Discovery] Pluggable validator registry**: `ContentTypeValidator` and `RelationshipTypeValidator` interfaces
-- **[Discovery] Rate limiting**: Shared rate limiting on write endpoints (50-100 req/hour per domain)
-- **[Discovery] Input validation**: URL (2048), email (RFC 5321), signature (2048), metadata (4KB), payload (64KB) limits
-- **[Discovery] CORS hardening**: Explicit `Access-Control-Allow-Methods` and `Access-Control-Max-Age: 600`
-- **[Discovery] Email verification**: `ds-content-register` verifies author email matches `.well-known/polis`
-- **[Discovery] Denial protection**: Re-registering denied comments preserves denial status
+  - `store.go`: `Store` manages per-projection cursors and materialized state on disk, namespaced by discovery service domain (`.polis/projections/<domain>/`)
+  - `handler.go`: `ProjectionHandler` interface with `TypePrefix()`, `EventTypes()`, `NewState()`, `Process()`. Built-in handler registry for extensibility.
+  - `follow.go`: `FollowHandler` — built-in projection that maintains a follower set from `polis.follow.announced` / `polis.follow.removed` events, filtered by target domain
+  - `blessing.go`: `BlessingHandler` — processes `polis.blessing.requested`, `polis.blessing.granted`, `polis.blessing.denied` events. Maintains `BlessingState` with entries list and granted/denied counts.
+  - `notification.go`: `NotificationHandler` — processes follow, blessing, and post events. Generates notification entries with type, actor, message, timestamp, and read status.
+- **Discovery client methods** (`pkg/discovery/client.go`):
+  - `RegisterContent()`, `UnregisterContent()`, `CheckContent()`, `QueryContent()` — unified content API
+  - `UpdateRelationship()`, `QueryRelationships()` — unified relationship API
+  - `StreamQuery()`, `StreamPublish()`, `StreamHealth()` — stream API
+  - `MakeContentCanonicalJSON()`, `MakeStreamCanonicalJSON()` — canonical payload builders for Ed25519 signing
+- **[Discovery] Pluggable validator registry**: `ContentTypeValidator` and
+  `RelationshipTypeValidator` interfaces in `_shared/validation.ts`. New content types
+  only require implementing a validator — zero edge function changes.
+- **[Discovery] Migration 009**: `009_unified_content.sql` — creates new tables, renames
+  existing tables to namespaced names, drops old tables.
+- **[Webapp] Activity stream**: `GET /api/activity` returns events from followed authors via the Discovery Stream. Loads following list, builds actor filter, queries stream with cursor pagination.
+- **[Webapp] Follower count**: `GET /api/followers/count` uses the projection framework — `FollowHandler` processes follow/unfollow events, `Store` persists the materialized follower set. Supports `?refresh=true` to replay from cursor 0.
+- **[Webapp] Stream event emission**: Fire-and-forget goroutines emit stream events after mutations:
+  - Follow → `polis.follow.announced` via `ds-stream-publish`
+  - Unfollow → `polis.follow.removed` via `ds-stream-publish`
+  - Publish/Republish → `ds-content-register` (edge function emits `polis.post.published`/`updated` as side effect)
+- **[Webapp] Activity view**: Sidebar navigation item under Discover section. Renders event timeline with actor, action type badges, and detail links. Cursor-based pagination with "Load more" button.
+- **[Webapp] Followers view**: New Stats sidebar section with follower count badge. Lists followers with refresh capability.
+- **[Webapp] Notification API**: Three new endpoints:
+  - `GET /api/notifications` — paginated notification list (offset, limit, include_read)
+  - `GET /api/notifications/count` — unread count for badge
+  - `POST /api/notifications/read` — mark notifications as read by IDs or all
+- **[Webapp] Background notification sync**: Server starts a goroutine that polls
+  the discovery service every 60s for pending blessing requests and creates
+  `blessing_request` notifications with deduplication.
+- **[Webapp] Notification bell UI**: Header now shows domain name (from
+  `POLIS_BASE_URL`) and a bell icon with red dot badge for unread notifications.
+  Click opens a flyout panel with notification list, "Show All" toggle, infinite
+  scroll pagination, and auto-mark-as-read on view.
+- **`notification.Manager` new methods**: `MarkRead(ids, markAll)`,
+  `CountUnread()`, `ListPaginated(offset, limit, includeRead)`.
 
 ### Changed
 
-- **Business logic centralization**: Post registration, comment beseech, stream events moved from webapp to CLI packages
-  - `publish.RegisterPost()` called by `PublishPost()`/`RepublishPost()`
-  - `comment.BeseechComment()` replaces inline webapp logic
-  - `stream.PublishEvent()` replaces webapp's `emitStreamEvent()`
-  - Follow/unfollow events in `following.FollowWithBlessing()`/`UnfollowWithDenial()`
-- **Single source for author email**: Removed `AuthorEmail` from webapp config. Read from `.well-known/polis` only.
-- **[Webapp] Discovery config consolidation**: Removed `DiscoveryURL`/`DiscoveryKey` from `webapp-config.json`. Load from `.env` only.
-- **[Webapp] "Feed" renamed to "Conversations"**: Sidebar and header updated.
-- **Generator string standardization**: Accepts `polis-cli-go/X.Y.Z`, `polis-cli-bash/X.Y.Z`, `polis-cli/X.Y.Z`. Deprecated `polis-webapp`.
-- **Discovery config propagation**: `cmd/root.go` and webapp `Initialize()` propagate config to `publish`, `comment`, `stream` packages
-- Module path alignment: Changed from `polis-planning` to `polis-cli`
+- Module path alignment: Go module paths changed from `polis-planning` to
+  `polis-cli` to eliminate import path rewriting during release
+- [Webapp] Post-comment hook description updated for accuracy
+- **Generator string standardization**: Accepted generator patterns are now
+  `polis-cli-go/X.Y.Z` (primary), `polis-cli-bash/X.Y.Z` (bash-lineage),
+  and `polis-cli/X.Y.Z` (legacy fallback). `polis-webapp` is deprecated and
+  no longer recognized.
+- **[Validator] Version-aware root-post check**: Missing `in-reply-to.root-post`
+  is now a warning (not a fail) for comments created with `polis-cli` < 0.44.0,
+  which did not include the field.
+- **[Discovery] `polis-version` endpoint**: Component names updated from
+  `cli`/`tui`/`upgrade` to `cli-bash`/`cli-go`. Default component is now
+  `cli-bash`.
+- **`pkg/stream/store.go`**: Root directory `.polis/projections/<domain>/`. Self-contained
+  projection files with embedded cursor (`{cursor, last_updated, state}`). File naming:
+  `<projection>.json`.
+- **`pkg/stream/handler.go`**: Built-in handler registry includes `FollowHandler`,
+  `BlessingHandler`, and `NotificationHandler`.
+- **`pkg/blessing/*`**: All 5 files rewritten to use unified relationship API methods.
+- **`pkg/comment/sync.go`**: Uses `QueryRelationships` for blessing status checks.
+- **`pkg/following/social.go`**: `FollowWithBlessing` and `UnfollowWithDenial` use generic
+  `QueryRelationships` + `UpdateRelationship`.
+- **`pkg/index/rebuild.go`**: `rebuildCommentsIndex` uses `QueryRelationships`.
+- **`pkg/cmd/notifications.go`**: Version check notification removed.
+- **`pkg/cmd/follow.go`**, **`pkg/cmd/unfollow.go`**: Use generic relationship API.
+- **[Webapp] `registerPostWithDiscovery`**: Uses `RegisterContent()` with unified
+  canonical JSON.
+- **[Webapp] Comment beseech handler**: Uses `RegisterContent()` with
+  `ContentRegisterRequest`.
+- **[Discovery] All 12 existing edge functions**: Updated table name references to use
+  `ds_`/`admin_` prefixed names.
+- **[Discovery] `schema.sql`**: Rewritten to v0.8.0 canonical reference.
+- **Generator-format version strings**: All metadata files now write version as
+  `polis-cli-go/X.Y.Z` (Go) or `polis-cli/X.Y.Z` (bash) instead of bare `X.Y.Z`.
+  Affected files: `.well-known/polis`, `manifest.json`, `blessed-comments.json`,
+  `following.json`, `notifications-manifest.json`, `feed-manifest.json`.
+  Added `GetGenerator()` to `site`, `metadata`, `following`, `notification`,
+  `index`, and `feed` packages. `publish.DefaultVersion()` now returns generator
+  format. `cmd/root.go` propagates `Version` to `site` package.
 
 ### Fixed
 
-- **[Webapp] Posts not in discovery**: Posts weren't registered because `AuthorEmail` was empty
-- **[Discovery] Email spoofing**: Verifies author email matches `.well-known/polis`
-- **[Discovery] Denial bypass**: Re-registering denied comments preserves denial
+- `EventPostComment` doc comment expanded to describe all trigger conditions
+  (grant, sync, auto-bless)
+- Test fixtures in `pkg/comment` and `pkg/site` updated from `polis-webapp`
+  to `polis-cli-go` to match actual generator output
+- **[Webapp] `author_name` registration bug**: `handleSiteRegister` was reading
+  `rawWKP["author_name"]` instead of `rawWKP["author"]` from `.well-known/polis`,
+  causing `author_name` to always be empty in `ds_registered_sites`.
+- **[Bash CLI] `author_name` registration bug**: `cmd_register` was reading
+  `.author_name` instead of `.author` from `.well-known/polis`, same root cause.
+
+### Tests
+
+- **`pkg/stream/`**: Store tests (cursor read/write, state load/save, self-contained projection files), FollowHandler tests (announce adds follower, remove deletes follower, filters by target domain, deduplication)
+- **[Webapp]**: 9 handler tests — activity stream, follower count, `extractDomainFromURL`
+- **`pkg/notification/`**: `TestMarkRead`, `TestCountUnread`, `TestListPaginated`,
+  updated `TestInitManifest_UsesGeneratorVersion`, `TestLoadManifest_DefaultUsesGeneratorVersion`
+- **[Webapp]**: `TestHandleNotificationCount`, `TestHandleNotificationCount_MethodNotAllowed`,
+  `TestHandleNotifications_EmptyList`, `TestHandleNotificationRead`,
+  `TestHandleNotificationRead_MethodNotAllowed`
+- Updated version assertion tests across `site`, `index`, `following`, `publish`,
+  `feed` packages for generator-format version strings
+
+### Docs
+
+- [Webapp] README.md created (architecture, build/run, frontend, API reference)
+- Bash CLI README expanded as reference implementation guide
+- `polis-tutorial` deprecated across documentation
 
 ## [0.49.0]
 
@@ -216,23 +695,24 @@ This release improves homepage performance with limited post/comment sections an
 
 - **`pkg/feed/` package**: New importable package that extracts feed aggregation logic from `cmd/discover.go`. `feed.Aggregate()` fetches public indexes from followed authors, filters by `last_checked`, merges, sorts by published date, and updates timestamps.
 - **`pkg/following/` social functions**: `FollowWithBlessing()` and `UnfollowWithDenial()` extract the blessing/denial side-effects from `cmd/follow.go` and `cmd/unfollow.go` into importable functions.
-- **`pkg/feed/cache.go` — Feed cache with read tracking**: Persistent JSONL cache (`.polis/social/feed-cache.jsonl`) with `CacheManager` that supports Merge (dedup by deterministic sha256 ID), MarkRead, MarkUnread, MarkAllRead, MarkUnreadFrom, Prune (by age and count), and staleness detection via manifest (`.polis/social/feed-manifest.json`).
 - **[Webapp] Social features — Following + Feed**: Two-mode sidebar ("My Site" / "Social") brings social reading into the webapp. Social mode includes Feed (aggregated posts from followed authors) and Following (author management with follow/unfollow).
 - **[Webapp] Follow/Unfollow**: Follow panel to add authors by HTTPS URL (auto-blesses pending/denied comments). Unfollow with confirmation modal (warns about denying blessed comments).
 - **[Webapp] Feed view**: Chronological feed of posts from followed authors with type badges, refresh button, unreachable-author warnings, and empty states.
-- **[Webapp] Remote post viewer**: Slide-out panel renders remote posts with dark theme styling, fetched via new `/api/remote/post` endpoint.
-- **[Webapp] API endpoints**: `GET/POST/DELETE /api/following`, `GET /api/feed`, `GET /api/remote/post?url=...`, `POST /api/feed/refresh`, `POST /api/feed/read`, `GET /api/feed/counts`
+- **[Webapp] Remote post viewer**: Slide-out panel renders remote posts with parchment-styled content, fetched via new `/api/remote/post` endpoint.
+- **[Webapp] API endpoints**: `GET/POST/DELETE /api/following`, `GET /api/feed`, `GET /api/remote/post?url=...`
+- **`pkg/feed/cache.go` — Feed cache with read tracking**: Persistent JSONL cache (`.polis/social/feed-cache.jsonl`) with `CacheManager` that supports Merge (dedup by deterministic sha256 ID), MarkRead, MarkUnread, MarkAllRead, MarkUnreadFrom, Prune (by age and count), and staleness detection via manifest (`.polis/social/feed-manifest.json`).
 - **[Webapp] Feed cache — instant load + background refresh**: `GET /api/feed` now loads instantly from local cache. `POST /api/feed/refresh` runs network aggregation and merges into cache. Auto-refresh fires in background when cache is stale (default 15 minutes).
 - **[Webapp] Feed read/unread tracking**: Unread items show bold title + teal dot indicator. Sidebar badge shows unread count. Opening an item marks it read (fire-and-forget). "Mark All Read" button in header.
 - **[Webapp] Feed type filtering**: Filter tabs (All / Posts / Comments) above feed list, passed as `?type=` query param.
 - **[Webapp] Feed hover actions**: "Mark Unread" and "Unread From Here" buttons appear on hover for read feed items only (hidden on unread items). "Unread From Here" marks the hovered item and all more recent items above it as unread. Styled like the FM toggle buttons, replaces the date column on hover.
-- **[Webapp] Live markdown preview**: Editor now renders a live preview as you type (300ms debounce), replacing the manual "Render Preview" button. Ctrl+Enter now triggers publish instead of render.
-- **[Webapp] Frontmatter toggle in editor**: Added "Hide FM" / "Show FM" toggle to the editor markdown pane header. When active, displays frontmatter in a non-editable mini-pane above the textarea. Frontmatter is never exposed in the editable textarea, preventing accidental edits to signatures and hashes. Shares the persisted setting with browser mode.
+- **[Webapp] API endpoints**: `POST /api/feed/refresh`, `POST /api/feed/read`, `GET /api/feed/counts`
 
 ### Changed
 
 - **`cmd/discover.go` refactored**: Now calls `feed.Aggregate()` instead of inline logic. Same CLI output format maintained.
 - **[Webapp] `following.Version` propagation**: `server.go` `Initialize()` now propagates CLI version to the `following` package alongside `publish`, `comment`, and `metadata`.
+- **[Webapp] Live markdown preview**: Editor now renders a live preview as you type (300ms debounce), replacing the manual "Render Preview" button. Ctrl+Enter now triggers publish instead of render.
+- **[Webapp] Frontmatter toggle in editor**: Added "Hide FM" / "Show FM" toggle to the editor markdown pane header. When active, displays frontmatter in a non-editable mini-pane above the textarea. Frontmatter is never exposed in the editable textarea, preventing accidental edits to signatures and hashes. Shares the persisted setting with browser mode.
 - **[Webapp] Hide browser mode toggle**: Browser mode toggle buttons hidden from the header (code retained, just not visible).
 - **[Webapp] Shared web assets package**: Moved `www/` from duplicated locations (`cmd/server/www/` and `cmd/polis-full/www/`) to a single `internal/webui/www/` package. Both entry points now import `internal/webui.Assets`, eliminating file drift between builds.
 
@@ -256,6 +736,8 @@ This release improves homepage performance with limited post/comment sections an
 ### Changed
 
 ### Fixed
+
+- **Hardcoded version strings in 4 packages**: `following`, `index/rebuild`, `notification`, and `theme` now use the propagated CLI version instead of hardcoded `"0.45.0"` / `"0.1.0"`. Affects `following.json`, `manifest.json`, `blessed-comments.json`, `notifications-manifest.json`, and theme manifest defaults.
 
 ### Security
 

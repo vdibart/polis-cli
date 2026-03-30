@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
+	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
@@ -21,6 +22,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
+	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 )
 
@@ -110,6 +112,7 @@ func Execute(args []string) {
 	feed.Version = Version
 	site.Version = Version
 	dm.Version = Version
+	tag.Version = Version
 
 	// Load .env file (does not override existing env vars, matches bash CLI)
 	loadEnv()
@@ -133,6 +136,10 @@ func Execute(args []string) {
 	stream.DiscoveryURL = discoveryURL
 	stream.DiscoveryKey = discoveryKey
 	stream.BaseURL = baseURL
+
+	tag.DiscoveryURL = discoveryURL
+	tag.DiscoveryKey = discoveryKey
+	tag.BaseURL = baseURL
 
 	if len(args) < 1 {
 		printUsage()
@@ -161,6 +168,16 @@ func Execute(args []string) {
 		os.Exit(1)
 	}
 
+	// Propagate DataDir to packages that need it for registration checks
+	resolvedDataDir := getDataDir()
+	stream.DataDir = resolvedDataDir
+	tag.DataDir = resolvedDataDir
+	following.DataDir = resolvedDataDir
+	following.DiscoveryURL = discoveryURL
+
+	// One-time migration: backfill registration marker for already-registered sites
+	discovery.MigrateRegistrationState(resolvedDataDir, discoveryURL, baseURL)
+
 	command := filteredArgs[0]
 	cmdArgs := filteredArgs[1:]
 
@@ -168,7 +185,7 @@ func Execute(args []string) {
 	defer func() {
 		switch command {
 		case "post", "republish", "comment", "follow", "unfollow", "discover",
-			"blessing", "register", "unregister", "dm", "clone", "rotate-key":
+			"blessing", "register", "unregister", "dm", "clone", "rotate-key", "tag":
 			logCLIAction(command, map[string]interface{}{
 				"args_count": len(cmdArgs),
 			})
@@ -220,6 +237,8 @@ func Execute(args []string) {
 		handleUnregister(cmdArgs)
 	case "dm":
 		handleDM(cmdArgs)
+	case "tag":
+		handleTag(cmdArgs)
 	case "serve":
 		handleServe(cmdArgs)
 	case "version", "--version", "-v":
@@ -285,6 +304,13 @@ Commands related to direct messages:
   polis dm read <conv_id>         Read messages in a conversation
   polis dm send <url> <message>   Send a DM to a recipient
   polis dm retry [conv_id]        Retry delivering unsent messages
+
+Commands related to tagging content:
+  polis tag list                   List all tags
+  polis tag show <name>            Show targets for a tag
+  polis tag apply <name> <uri>     Tag content with a tag name
+  polis tag remove <name> <uri>    Remove a target from a tag
+  polis tag delete <name>          Delete an entire tag
 
 Commands related to site administration:
   polis register                  Register site with discovery service

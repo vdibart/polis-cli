@@ -2,6 +2,7 @@ package site
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -575,5 +576,130 @@ func TestSaveWellKnownIndentation(t *testing.T) {
 	}
 	if !strings.HasSuffix(string(data), "\n") {
 		t.Error("Output should end with newline")
+	}
+}
+
+// ============================================================================
+// 11. Avatar Generation Tests
+// ============================================================================
+
+func TestGenerateDefaultAvatar_ReturnsValidConfig(t *testing.T) {
+	avatar := GenerateDefaultAvatar()
+	if avatar == nil {
+		t.Fatal("GenerateDefaultAvatar() returned nil")
+	}
+	if len(avatar.BG) != 7 || avatar.BG[0] != '#' {
+		t.Errorf("BG should be #rrggbb, got %q", avatar.BG)
+	}
+	if avatar.FG != "#ffffff" {
+		t.Errorf("FG should be #ffffff, got %q", avatar.FG)
+	}
+	if avatar.Border != "" {
+		t.Errorf("Border should be empty, got %q", avatar.Border)
+	}
+	if avatar.BorderW != 0 {
+		t.Errorf("BorderW should be 0, got %d", avatar.BorderW)
+	}
+	if avatar.Pattern != "" {
+		t.Errorf("Pattern should be empty, got %q", avatar.Pattern)
+	}
+}
+
+func TestGenerateDefaultAvatar_ContrastRatio(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		avatar := GenerateDefaultAvatar()
+		ratio := ContrastRatio(avatar.BG, avatar.FG)
+		if ratio < 4.5 {
+			t.Errorf("Iteration %d: contrast ratio %.2f < 4.5 for BG=%s FG=%s",
+				i, ratio, avatar.BG, avatar.FG)
+		}
+	}
+}
+
+func TestGenerateDefaultAvatar_Randomness(t *testing.T) {
+	colors := make(map[string]bool)
+	for i := 0; i < 10; i++ {
+		avatar := GenerateDefaultAvatar()
+		colors[avatar.BG] = true
+	}
+	if len(colors) < 2 {
+		t.Error("Expected at least 2 different colors from 10 generations")
+	}
+}
+
+func TestHslToHex_KnownValues(t *testing.T) {
+	tests := []struct {
+		h, s, l float64
+		want    string
+	}{
+		{0, 100, 50, "#ff0000"},
+		{120, 100, 50, "#00ff00"},
+		{240, 100, 50, "#0000ff"},
+		{0, 0, 0, "#000000"},
+		{0, 0, 100, "#ffffff"},
+		{0, 0, 50, "#808080"},
+	}
+	for _, tt := range tests {
+		got := hslToHex(tt.h, tt.s, tt.l)
+		if got != tt.want {
+			t.Errorf("hslToHex(%.0f, %.0f, %.0f) = %q, want %q", tt.h, tt.s, tt.l, got, tt.want)
+		}
+	}
+}
+
+func TestContrastRatio_KnownPairs(t *testing.T) {
+	// Black on white should be ~21:1
+	ratio := ContrastRatio("#ffffff", "#000000")
+	if math.Abs(ratio-21.0) > 0.1 {
+		t.Errorf("White/Black contrast = %.2f, want ~21.0", ratio)
+	}
+
+	// Same color should be 1:1
+	ratio = ContrastRatio("#888888", "#888888")
+	if math.Abs(ratio-1.0) > 0.01 {
+		t.Errorf("Same color contrast = %.2f, want 1.0", ratio)
+	}
+}
+
+func TestAvatarRoundTrip(t *testing.T) {
+	dir := setupTestDir(t)
+	avatar := &AvatarConfig{BG: "#2a5a6a", FG: "#ffffff"}
+	wk := &WellKnown{
+		Version:   "polis-cli-go/0.57.0",
+		Author:    "alice",
+		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		Created:   "2026-01-01T00:00:00Z",
+		Avatar:    avatar,
+	}
+	writeTestWellKnown(t, dir, wk)
+
+	loaded, err := LoadWellKnown(dir)
+	if err != nil {
+		t.Fatalf("Failed to load: %v", err)
+	}
+	if loaded.Avatar == nil {
+		t.Fatal("Avatar should not be nil after roundtrip")
+	}
+	if loaded.Avatar.BG != "#2a5a6a" {
+		t.Errorf("Avatar.BG = %q, want #2a5a6a", loaded.Avatar.BG)
+	}
+	if loaded.Avatar.FG != "#ffffff" {
+		t.Errorf("Avatar.FG = %q, want #ffffff", loaded.Avatar.FG)
+	}
+}
+
+func TestAvatarOmitempty_NotSerializedWhenNil(t *testing.T) {
+	dir := setupTestDir(t)
+	wk := &WellKnown{
+		Version:   "polis-cli-go/0.57.0",
+		Author:    "alice",
+		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		Created:   "2026-01-01T00:00:00Z",
+	}
+	writeTestWellKnown(t, dir, wk)
+
+	data, _ := os.ReadFile(filepath.Join(dir, ".well-known", "polis"))
+	if strings.Contains(string(data), `"avatar"`) {
+		t.Error("Avatar field should not be present when nil (omitempty)")
 	}
 }

@@ -28,7 +28,7 @@ set -eo pipefail
 #   4. Hardcoded defaults
 
 # Fixed constants (never configurable - required for discovery)
-VERSION="0.59.0"
+VERSION="0.60.0"
 WELL_KNOWN_DIR=".well-known"
 WELL_KNOWN_FILE="polis"
 
@@ -368,6 +368,18 @@ cmd_init() {
     if [ -n "$custom_site_title" ]; then
         wellknown_json=$(echo "$wellknown_json" | jq --arg site_title "$custom_site_title" '. + {site_title: $site_title}')
     fi
+
+    # Generate default avatar with a contrast-safe random background color
+    local avatar_palette=(
+        "#2d5a27" "#1a4a6a" "#6b2d5b" "#8b4513" "#2e4057"
+        "#5c3317" "#2f4f4f" "#483d8b" "#6b3fa0" "#8b0000"
+        "#006400" "#191970" "#800080" "#8b4726" "#2e3a59"
+        "#654321" "#3b5998" "#5b2c6f" "#7b3f00" "#1c3d5a"
+    )
+    local avatar_idx=$(( RANDOM % ${#avatar_palette[@]} ))
+    local avatar_bg="${avatar_palette[$avatar_idx]}"
+    wellknown_json=$(echo "$wellknown_json" | jq --arg bg "$avatar_bg" \
+        '. + {avatar: {bg: $bg, fg: "#ffffff"}}')
 
     echo "$wellknown_json" > "$WELL_KNOWN_DIR/polis"
     files_created+=(".well-known/polis")
@@ -1079,6 +1091,41 @@ extract_domain_from_url() {
     # ${domain%%/*} removes everything from the first / onwards
     domain="${domain%%/*}"
     echo "$domain"
+}
+
+# Check if the site is registered locally (no network call).
+# Returns 0 (true) if registered, 1 (false) if not.
+# Uses the local marker file at .polis/ds/{ds-domain}/registered.json.
+is_registered_locally() {
+    local ds_domain
+    ds_domain=$(extract_domain_from_url "$DISCOVERY_SERVICE_URL")
+    [[ -z "$ds_domain" ]] && return 1
+    [[ -f ".polis/ds/${ds_domain}/registered.json" ]]
+}
+
+# Write the local registration marker after successful registration.
+write_registration_marker() {
+    local ds_domain domain
+    ds_domain=$(extract_domain_from_url "$DISCOVERY_SERVICE_URL")
+    domain=$(extract_domain_from_url "$POLIS_BASE_URL")
+    [[ -z "$ds_domain" ]] && return 1
+    local marker_dir=".polis/ds/${ds_domain}"
+    mkdir -p "$marker_dir"
+    cat > "$marker_dir/registered.json" <<MARKER_EOF
+{
+  "domain": "$domain",
+  "ds_url": "$DISCOVERY_SERVICE_URL",
+  "registered_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+MARKER_EOF
+}
+
+# Remove the local registration marker after successful unregistration.
+remove_registration_marker() {
+    local ds_domain
+    ds_domain=$(extract_domain_from_url "$DISCOVERY_SERVICE_URL")
+    [[ -z "$ds_domain" ]] && return 0
+    rm -f ".polis/ds/${ds_domain}/registered.json"
 }
 
 # Normalize a URL to use .md extension instead of .html
@@ -2706,6 +2753,12 @@ _register_post_with_discovery() {
         return 0
     fi
 
+    # Skip if site is not registered with DS
+    if ! is_registered_locally; then
+        info_human "DS registration skipped: site not registered with discovery service"
+        return 0
+    fi
+
     # Get author email from .well-known/polis
     local author=""
     if [ -f "$WELL_KNOWN_DIR/polis" ]; then
@@ -2810,6 +2863,11 @@ _emit_stream_event() {
         return 0
     fi
 
+    # Skip if not registered (stream events are fire-and-forget)
+    if ! is_registered_locally; then
+        return 0
+    fi
+
     local keyfile="$KEYS_DIR/id_ed25519"
     if [ ! -f "$keyfile" ]; then
         return 0
@@ -2879,6 +2937,10 @@ _internal_beseech_from_file() {
 
     if [ ! -f "$input_file" ]; then
         json_error "beseech" "FILE_NOT_FOUND" "File not found: $input_file"
+    fi
+
+    if ! is_registered_locally; then
+        json_error "beseech" "NOT_REGISTERED" "Site not registered with discovery service. Run 'polis register' first."
     fi
 
     # Check if file has frontmatter
@@ -4781,31 +4843,36 @@ cmd_rotate_key() {
     success_human "Signed transition message"
 
     # 3. Notify DS of key rotation BEFORE local key swap (strict ordering)
-    info_human ""
-    info_human "Notifying discovery service of key rotation..."
-    local ds_url="${DISCOVERY_SERVICE_URL:-https://ds.polis.pub}"
-    local ds_payload
-    ds_payload=$(jq -cn \
-        --arg dom "$domain" \
-        --arg old "$old_pubkey" \
-        --arg new "$new_pubkey" \
-        --arg sig "$transition_sig" \
-        --arg ts "$timestamp" \
-        '{domain: $dom, old_key: $old, new_key: $new, transition_sig: $sig, timestamp: $ts}')
+    if is_registered_locally; then
+        info_human ""
+        info_human "Notifying discovery service of key rotation..."
+        local ds_url="${DISCOVERY_SERVICE_URL:-https://ds.polis.pub}"
+        local ds_payload
+        ds_payload=$(jq -cn \
+            --arg dom "$domain" \
+            --arg old "$old_pubkey" \
+            --arg new "$new_pubkey" \
+            --arg sig "$transition_sig" \
+            --arg ts "$timestamp" \
+            '{domain: $dom, old_key: $old, new_key: $new, transition_sig: $sig, timestamp: $ts}')
 
-    local ds_response
-    local ds_status
-    ds_response=$(curl -s -w "\n%{http_code}" -X POST "${ds_url}/v1/sites/keys/rotate" \
-        -H "Content-Type: application/json" \
-        ${DISCOVERY_SERVICE_KEY:+-H "Authorization: Bearer $DISCOVERY_SERVICE_KEY"} \
-        -d "$ds_payload" 2>/dev/null)
-    ds_status=$(echo "$ds_response" | tail -n 1)
-    ds_response=$(echo "$ds_response" | sed '$d')
+        local ds_response
+        local ds_status
+        ds_response=$(curl -s -w "\n%{http_code}" -X POST "${ds_url}/v1/sites/keys/rotate" \
+            -H "Content-Type: application/json" \
+            ${DISCOVERY_SERVICE_KEY:+-H "Authorization: Bearer $DISCOVERY_SERVICE_KEY"} \
+            -d "$ds_payload" 2>/dev/null)
+        ds_status=$(echo "$ds_response" | tail -n 1)
+        ds_response=$(echo "$ds_response" | sed '$d')
 
-    if [ "$ds_status" -ge 400 ] 2>/dev/null; then
-        json_error "rotate-key" "DS_ROTATION_FAILED" "Discovery service rejected key rotation (HTTP $ds_status): $ds_response"
+        if [ "$ds_status" -ge 400 ] 2>/dev/null; then
+            json_error "rotate-key" "DS_ROTATION_FAILED" "Discovery service rejected key rotation (HTTP $ds_status): $ds_response"
+        fi
+        success_human "Discovery service acknowledged key rotation"
+    else
+        info_human ""
+        info_human "DS notification skipped: site not registered with discovery service"
     fi
-    success_human "Discovery service acknowledged key rotation"
 
     # 4. Backup old keys
     mv "$KEYS_DIR/id_ed25519" "$KEYS_DIR/id_ed25519.old"
@@ -4925,27 +4992,31 @@ cmd_unpublish() {
         json_error "unpublish" "SIGN_FAILED" "Failed to sign unregister request"
     fi
 
-    # Call DS to unregister (now does soft-delete)
-    info_human "Removing from discovery service..."
-    local ds_url="${DISCOVERY_SERVICE_URL:-https://ds.polis.pub}"
-    local ds_payload
-    ds_payload=$(jq -cn \
-        --arg type "pub.polis.post" \
-        --arg url "$content_url" \
-        --arg sig "$signature" \
-        '{type: $type, url: $url, signature: $sig}')
+    # Call DS to unregister (now does soft-delete) — skip if not registered
+    if is_registered_locally; then
+        info_human "Removing from discovery service..."
+        local ds_url="${DISCOVERY_SERVICE_URL:-https://ds.polis.pub}"
+        local ds_payload
+        ds_payload=$(jq -cn \
+            --arg type "pub.polis.post" \
+            --arg url "$content_url" \
+            --arg sig "$signature" \
+            '{type: $type, url: $url, signature: $sig}')
 
-    local ds_response
-    ds_response=$(curl -s -X POST "${ds_url}/v1/content/unregister" \
-        -H "Content-Type: application/json" \
-        ${DISCOVERY_SERVICE_KEY:+-H "Authorization: Bearer $DISCOVERY_SERVICE_KEY"} \
-        -d "$ds_payload" 2>/dev/null)
+        local ds_response
+        ds_response=$(curl -s -X POST "${ds_url}/v1/content/unregister" \
+            -H "Content-Type: application/json" \
+            ${DISCOVERY_SERVICE_KEY:+-H "Authorization: Bearer $DISCOVERY_SERVICE_KEY"} \
+            -d "$ds_payload" 2>/dev/null)
 
-    # Non-fatal: DS might be unreachable
-    if [ -n "$ds_response" ]; then
-        success_human "Removed from discovery service"
+        # Non-fatal: DS might be unreachable
+        if [ -n "$ds_response" ]; then
+            success_human "Removed from discovery service"
+        else
+            warn_human "Warning: could not reach discovery service"
+        fi
     else
-        warn_human "Warning: could not reach discovery service"
+        info_human "DS unregister skipped: site not registered with discovery service"
     fi
 
     # Delete local .md file
@@ -5103,6 +5174,10 @@ cmd_blessing_requests() {
 cmd_blessing_grant() {
     local input_hash="$1"
 
+    if ! is_registered_locally; then
+        json_error "blessing-grant" "NOT_REGISTERED" "Site not registered with discovery service. Run 'polis register' first."
+    fi
+
     # Validate arguments
     if [ -z "$input_hash" ]; then
         json_error "blessing-grant" "INVALID_INPUT" "Usage: polis blessing grant <hash>"
@@ -5247,6 +5322,10 @@ cmd_blessing_grant() {
 # Command: polis blessing deny <hash>
 cmd_blessing_deny() {
     local input_hash="$1"
+
+    if ! is_registered_locally; then
+        json_error "blessing-deny" "NOT_REGISTERED" "Site not registered with discovery service. Run 'polis register' first."
+    fi
 
     # Validate arguments
     if [ -z "$input_hash" ]; then
@@ -6201,6 +6280,9 @@ cmd_register() {
             fi
         fi
 
+        # Ensure local marker exists (backfill for pre-marker sites)
+        write_registration_marker
+
         if [ "$JSON_MODE" = true ]; then
             local result=$(jq -n \
                 --arg domain "$domain" \
@@ -6292,7 +6374,9 @@ cmd_register() {
     local response_body=$(echo "$response" | sed '$d')
 
     if [ "$http_code" = "201" ] || [ "$http_code" = "200" ]; then
-        # Success
+        # Success — write local registration marker
+        write_registration_marker
+
         local registry_url=$(echo "$response_body" | jq -r '.registry_url // "unknown"')
         local created_at=$(echo "$response_body" | jq -r '.created_at // "now"')
         local service_attestation=$(echo "$response_body" | jq -r '.service_attestation // ""')
@@ -6483,7 +6567,9 @@ cmd_unregister() {
     local response_body=$(echo "$response" | sed '$d')
 
     if [ "$http_code" = "200" ]; then
-        # Success
+        # Success — remove local registration marker
+        remove_registration_marker
+
         if [ "$JSON_MODE" = true ]; then
             local result=$(jq -n \
                 --arg domain "$domain" \
@@ -7227,6 +7313,365 @@ substitute_template() {
 extract_body_from_file() {
     local file="$1"
     awk '/^---$/{if(++count==2){skip=0; getline; print; next} skip=1; next} !skip' "$file"
+}
+
+# ============================================================================
+# TAG COMMAND
+# ============================================================================
+
+# Normalize a tag name: lowercase, trim, hyphens only, 1-64 chars
+normalize_tag_name() {
+    local name="$1"
+    name=$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' _' '--' | sed 's/[^a-z0-9-]//g')
+    # Collapse multiple hyphens
+    name=$(echo "$name" | sed 's/--*/-/g')
+    # Trim leading/trailing hyphens
+    name=$(echo "$name" | sed 's/^-//;s/-$//')
+    # Truncate to 64 chars
+    name=$(echo "$name" | cut -c1-64 | sed 's/-$//')
+    echo "$name"
+}
+
+# Return the path to a tag file
+tag_path() {
+    local tag_name="$1"
+    echo "content/pub.polis.core/tag/${tag_name}.json"
+}
+
+# Build canonical JSON for signing (excludes signature and current_version)
+tag_canonical_json() {
+    local file="$1"
+    jq -c '{tag, targets, created, updated, generator}' "$file"
+}
+
+# Sign a tag file and write it back
+sign_tag_file() {
+    local file="$1"
+    local keyfile="$2"
+
+    # Build canonical JSON
+    local canonical
+    canonical=$(tag_canonical_json "$file")
+
+    # Compute SHA-256 hash for version
+    local hash
+    hash=$(printf '%s' "$canonical" | sha256sum | awk '{print $1}')
+
+    # Sign canonical content
+    local temp_file=$(mktemp)
+    printf '%s' "$canonical" > "$temp_file"
+
+    ssh-keygen -Y sign -f "$keyfile" -n file "$temp_file" > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        rm -f "$temp_file" "$temp_file.sig"
+        return 1
+    fi
+
+    local signature
+    signature=$(cat "$temp_file.sig")
+    rm -f "$temp_file" "$temp_file.sig"
+
+    # Update file with version and signature
+    local updated
+    updated=$(jq --arg ver "sha256:$hash" --arg sig "$signature" \
+        '.current_version = $ver | .signature = $sig' "$file")
+    printf '%s\n' "$updated" | jq '.' > "$file"
+}
+
+cmd_tag() {
+    if [ $# -lt 1 ]; then
+        echo "Usage: polis tag <subcommand> [options]"
+        echo ""
+        echo "Subcommands:"
+        echo "  list                          List all tags"
+        echo "  show <name>                   Show targets for a tag"
+        echo "  apply <name> <target-uri>     Tag content"
+        echo "  remove <name> <target-uri>    Remove target from tag"
+        echo "  delete <name>                 Delete entire tag"
+        exit 1
+    fi
+
+    local subcmd="$1"
+    shift
+
+    case "$subcmd" in
+        list)   cmd_tag_list "$@" ;;
+        show)   cmd_tag_show "$@" ;;
+        apply)  cmd_tag_apply "$@" ;;
+        remove) cmd_tag_remove "$@" ;;
+        delete) cmd_tag_delete "$@" ;;
+        *)
+            if [ "$JSON_MODE" = true ]; then
+                json_error "tag" "UNKNOWN_SUBCOMMAND" "Unknown tag subcommand: $subcmd"
+            else
+                error "Unknown tag subcommand: $subcmd"
+            fi
+            ;;
+    esac
+}
+
+cmd_tag_list() {
+    local tag_dir="content/pub.polis.core/tag"
+
+    if [ ! -d "$tag_dir" ]; then
+        if [ "$JSON_MODE" = true ]; then
+            json_success "tag" '{"tags":[],"count":0}'
+        else
+            info "No tags found"
+        fi
+        return 0
+    fi
+
+    local tags=()
+    local tag_data='[]'
+
+    for file in "$tag_dir"/*.json; do
+        [ -f "$file" ] || continue
+        local tag_name
+        tag_name=$(jq -r '.tag' "$file" 2>/dev/null) || continue
+        local count
+        count=$(jq '.targets | length' "$file" 2>/dev/null) || continue
+        local updated
+        updated=$(jq -r '.updated // ""' "$file" 2>/dev/null)
+
+        tags+=("$tag_name:$count")
+        tag_data=$(echo "$tag_data" | jq --arg t "$tag_name" --argjson c "$count" --arg u "$updated" \
+            '. + [{"tag": $t, "count": $c, "updated": $u}]')
+    done
+
+    if [ "$JSON_MODE" = true ]; then
+        local total=${#tags[@]}
+        json_success "tag" "$(jq -n --argjson tags "$tag_data" --argjson count "$total" \
+            '{tags: $tags, count: $count}')"
+    else
+        if [ ${#tags[@]} -eq 0 ]; then
+            info "No tags found"
+        else
+            for t in "${tags[@]}"; do
+                local name="${t%%:*}"
+                local count="${t##*:}"
+                echo "  $name ($count targets)"
+            done
+        fi
+    fi
+}
+
+cmd_tag_show() {
+    if [ $# -lt 1 ]; then
+        if [ "$JSON_MODE" = true ]; then
+            json_error "tag" "MISSING_ARG" "Usage: polis tag show <name>"
+        else
+            error "Usage: polis tag show <name>"
+        fi
+    fi
+
+    local name
+    name=$(normalize_tag_name "$1")
+    if [ -z "$name" ]; then
+        if [ "$JSON_MODE" = true ]; then
+            json_error "tag" "INVALID_NAME" "Invalid tag name"
+        else
+            error "Invalid tag name"
+        fi
+    fi
+
+    local file
+    file=$(tag_path "$name")
+    if [ ! -f "$file" ]; then
+        if [ "$JSON_MODE" = true ]; then
+            json_error "tag" "NOT_FOUND" "Tag '$name' not found"
+        else
+            error "Tag '$name' not found"
+        fi
+    fi
+
+    if [ "$JSON_MODE" = true ]; then
+        local data
+        data=$(jq '{tag: .tag, targets: .targets, count: (.targets | length)}' "$file")
+        json_success "tag" "$data"
+    else
+        local count
+        count=$(jq '.targets | length' "$file")
+        info "Tag: $name ($count targets)"
+        jq -r '.targets[] | "  \(.uri) (added \(.added))"' "$file"
+    fi
+}
+
+cmd_tag_apply() {
+    if [ $# -lt 2 ]; then
+        if [ "$JSON_MODE" = true ]; then
+            json_error "tag" "MISSING_ARG" "Usage: polis tag apply <name> <target-uri>"
+        else
+            error "Usage: polis tag apply <name> <target-uri>"
+        fi
+    fi
+
+    local name
+    name=$(normalize_tag_name "$1")
+    local target_uri="$2"
+
+    if [ -z "$name" ]; then
+        if [ "$JSON_MODE" = true ]; then
+            json_error "tag" "INVALID_NAME" "Invalid tag name"
+        else
+            error "Invalid tag name"
+        fi
+    fi
+
+    if [ -z "$target_uri" ]; then
+        if [ "$JSON_MODE" = true ]; then
+            json_error "tag" "MISSING_TARGET" "Target URI is required"
+        else
+            error "Target URI is required"
+        fi
+    fi
+
+    local file
+    file=$(tag_path "$name")
+    local now
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local keyfile=".polis/keys/id_ed25519"
+
+    if [ ! -f "$keyfile" ]; then
+        if [ "$JSON_MODE" = true ]; then
+            json_error "tag" "NO_KEY" "Private key not found"
+        else
+            error "Private key not found at $keyfile"
+        fi
+    fi
+
+    # Ensure tag directory exists
+    mkdir -p "$(dirname "$file")"
+
+    if [ -f "$file" ]; then
+        # Check for duplicate
+        local existing
+        existing=$(jq -r --arg uri "$target_uri" '.targets[] | select(.uri == $uri) | .uri' "$file" 2>/dev/null)
+        if [ -n "$existing" ]; then
+            local count
+            count=$(jq '.targets | length' "$file")
+            if [ "$JSON_MODE" = true ]; then
+                json_success "tag" "$(jq -n --arg t "$name" --arg u "$target_uri" --argjson c "$count" \
+                    '{tag: $t, target_uri: $u, count: $c}')"
+            else
+                info "Target already tagged with '$name'"
+            fi
+            return 0
+        fi
+
+        # Add target to existing tag
+        jq --arg uri "$target_uri" --arg added "$now" --arg updated "$now" --arg gen "polis-cli/$VERSION" \
+            '.targets += [{"uri": $uri, "added": $added}] | .updated = $updated | .generator = $gen' \
+            "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    else
+        # Create new tag file
+        jq -n --arg tag "$name" --arg uri "$target_uri" --arg now "$now" --arg gen "polis-cli/$VERSION" \
+            '{tag: $tag, targets: [{"uri": $uri, "added": $now}], created: $now, updated: $now, generator: $gen}' \
+            > "$file"
+    fi
+
+    # Sign
+    sign_tag_file "$file" "$keyfile"
+
+    local count
+    count=$(jq '.targets | length' "$file")
+
+    if [ "$JSON_MODE" = true ]; then
+        json_success "tag" "$(jq -n --arg t "$name" --arg u "$target_uri" --argjson c "$count" \
+            '{tag: $t, target_uri: $u, count: $c}')"
+    else
+        success "Tagged $target_uri with '$name' ($count targets)"
+    fi
+}
+
+cmd_tag_remove() {
+    if [ $# -lt 2 ]; then
+        if [ "$JSON_MODE" = true ]; then
+            json_error "tag" "MISSING_ARG" "Usage: polis tag remove <name> <target-uri>"
+        else
+            error "Usage: polis tag remove <name> <target-uri>"
+        fi
+    fi
+
+    local name
+    name=$(normalize_tag_name "$1")
+    local target_uri="$2"
+
+    local file
+    file=$(tag_path "$name")
+    local keyfile=".polis/keys/id_ed25519"
+
+    if [ ! -f "$file" ]; then
+        if [ "$JSON_MODE" = true ]; then
+            json_error "tag" "NOT_FOUND" "Tag '$name' not found"
+        else
+            error "Tag '$name' not found"
+        fi
+    fi
+
+    # Check target exists
+    local existing
+    existing=$(jq -r --arg uri "$target_uri" '.targets[] | select(.uri == $uri) | .uri' "$file" 2>/dev/null)
+    if [ -z "$existing" ]; then
+        if [ "$JSON_MODE" = true ]; then
+            json_error "tag" "TARGET_NOT_FOUND" "Target '$target_uri' not found in tag '$name'"
+        else
+            error "Target '$target_uri' not found in tag '$name'"
+        fi
+    fi
+
+    local now
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Remove target
+    jq --arg uri "$target_uri" --arg updated "$now" --arg gen "polis-cli/$VERSION" \
+        '.targets = [.targets[] | select(.uri != $uri)] | .updated = $updated | .generator = $gen' \
+        "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+
+    # Re-sign
+    sign_tag_file "$file" "$keyfile"
+
+    local count
+    count=$(jq '.targets | length' "$file")
+
+    if [ "$JSON_MODE" = true ]; then
+        json_success "tag" "$(jq -n --arg t "$name" --arg u "$target_uri" --argjson c "$count" \
+            '{tag: $t, target_uri: $u, count: $c}')"
+    else
+        success "Removed $target_uri from '$name' ($count targets remaining)"
+    fi
+}
+
+cmd_tag_delete() {
+    if [ $# -lt 1 ]; then
+        if [ "$JSON_MODE" = true ]; then
+            json_error "tag" "MISSING_ARG" "Usage: polis tag delete <name>"
+        else
+            error "Usage: polis tag delete <name>"
+        fi
+    fi
+
+    local name
+    name=$(normalize_tag_name "$1")
+
+    local file
+    file=$(tag_path "$name")
+
+    if [ ! -f "$file" ]; then
+        if [ "$JSON_MODE" = true ]; then
+            json_error "tag" "NOT_FOUND" "Tag '$name' not found"
+        else
+            error "Tag '$name' not found"
+        fi
+    fi
+
+    rm -f "$file"
+
+    if [ "$JSON_MODE" = true ]; then
+        json_success "tag" "$(jq -n --arg t "$name" '{tag: $t, deleted: true}')"
+    else
+        success "Deleted tag '$name'"
+    fi
 }
 
 # Render blessed comments for a post
@@ -8495,6 +8940,9 @@ main() {
         clone)
             cmd_clone "$@"
             ;;
+        tag)
+            cmd_tag "$@"
+            ;;
         *)
             echo "Polis - Decentralized Social Network CLI"
             echo ""
@@ -8532,6 +8980,13 @@ main() {
             echo "Commands related to notifications:"
             echo "  polis notifications             List unread notifications"
             echo "  polis notifications list        List notifications (--type <types>)"
+            echo ""
+            echo "Commands related to tagging content:"
+            echo "  polis tag list                   List all tags"
+            echo "  polis tag show <name>            Show targets for a tag"
+            echo "  polis tag apply <name> <uri>     Tag content"
+            echo "  polis tag remove <name> <uri>    Remove target from tag"
+            echo "  polis tag delete <name>          Delete entire tag"
             echo ""
             echo "Commands related to site administration:"
             echo "  polis register                  List your site in the public directory (makes content discoverable)"

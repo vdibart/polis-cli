@@ -161,6 +161,8 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 		},
 	}
 
+	wk.Avatar = GenerateDefaultAvatar()
+
 	if err := SaveWellKnown(siteDir, wk); err != nil {
 		return nil, fmt.Errorf("failed to create .well-known/polis: %w", err)
 	}
@@ -217,7 +219,6 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 	if _, err := os.Stat(webappConfigPath); os.IsNotExist(err) {
 		webappConfig := map[string]interface{}{
 			"setup_at":         setupTime.Format(time.RFC3339),
-			"view_mode":        "list",
 			"show_frontmatter": false,
 		}
 		data, _ := json.MarshalIndent(webappConfig, "", "  ")

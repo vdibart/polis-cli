@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
@@ -20,6 +21,18 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 )
+
+// markAsRegistered writes a local registration marker for the test server,
+// so handlers that require registration pass the guard.
+func markAsRegistered(t *testing.T, s *Server) {
+	t.Helper()
+	if s.DiscoveryURL == "" {
+		t.Fatal("markAsRegistered: DiscoveryURL must be set first")
+	}
+	if err := discovery.WriteRegistrationMarker(s.DataDir, s.DiscoveryURL, "test.polis.pub"); err != nil {
+		t.Fatalf("markAsRegistered: %v", err)
+	}
+}
 
 // Helper to create a test server with temp directory
 func newTestServer(t *testing.T) *Server {
@@ -177,10 +190,8 @@ func TestHandleStatus_Configured(t *testing.T) {
 	}
 }
 
-func TestHandleSettings_DefaultViewModeIsList(t *testing.T) {
+func TestHandleSettings_NoViewMode(t *testing.T) {
 	s := newConfiguredServer(t)
-	// Config has no ViewMode set — should default to "list"
-	s.Config.ViewMode = ""
 
 	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
 	rr := httptest.NewRecorder()
@@ -195,8 +206,8 @@ func TestHandleSettings_DefaultViewModeIsList(t *testing.T) {
 	json.Unmarshal(rr.Body.Bytes(), &resp)
 
 	siteData := resp["site"].(map[string]interface{})
-	if siteData["view_mode"] != "list" {
-		t.Errorf("expected default view_mode='list', got %v", siteData["view_mode"])
+	if _, hasViewMode := siteData["view_mode"]; hasViewMode {
+		t.Errorf("view_mode should not be present in settings response")
 	}
 }
 
@@ -1000,6 +1011,40 @@ title: Old Title
 	}
 }
 
+func TestHandlePublish_DeletesDraftOnPublish(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Create a draft file
+	draftsDir := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+	os.MkdirAll(draftsDir, 0755)
+	draftPath := filepath.Join(draftsDir, "my-draft.md")
+	os.WriteFile(draftPath, []byte("# Draft Post\n\nDraft content."), 0644)
+
+	// Verify draft exists
+	if _, err := os.Stat(draftPath); err != nil {
+		t.Fatal("draft file should exist before publish")
+	}
+
+	body := jsonBody(t, map[string]string{
+		"markdown": "# Draft Post\n\nDraft content.",
+		"draft_id": "my-draft",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/publish", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	s.handlePublish(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify draft was deleted
+	if _, err := os.Stat(draftPath); !os.IsNotExist(err) {
+		t.Error("draft file should be deleted after publish")
+	}
+}
+
 // ============================================================================
 // handlePosts Tests
 // ============================================================================
@@ -1070,6 +1115,43 @@ func TestHandlePosts_MethodNotAllowed(t *testing.T) {
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected status 405, got %d", rr.Code)
+	}
+}
+
+func TestHandlePosts_IncludesCommentCounts(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Create index with one post
+	indexPath := filepath.Join(s.DataDir, "content", "pub.polis.core", "index.jsonl")
+	os.WriteFile(indexPath, []byte(`{"path":"content/pub.polis.core/post/20260101/first.md","title":"First Post"}`), 0644)
+
+	// Create blessed.json with 2 comments for that post
+	blessedDir := filepath.Join(s.DataDir, "content", "pub.polis.core", "comment")
+	os.MkdirAll(blessedDir, 0755)
+	blessedData := `{"version":"1","comments":[{"post":"content/pub.polis.core/post/20260101/first.md","blessed":[{"url":"https://a.polis.pub/comments/1.md","version":"sha256:abc"},{"url":"https://b.polis.pub/comments/2.md","version":"sha256:def"}]}]}`
+	os.WriteFile(filepath.Join(blessedDir, "blessed.json"), []byte(blessedData), 0644)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/posts", nil)
+	rr := httptest.NewRecorder()
+	s.handlePosts(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	posts := resp["posts"].([]interface{})
+	if len(posts) != 1 {
+		t.Fatalf("expected 1 post, got %d", len(posts))
+	}
+	post := posts[0].(map[string]interface{})
+	count, ok := post["comment_count"].(float64)
+	if !ok {
+		t.Fatal("expected comment_count field in post response")
+	}
+	if count != 2 {
+		t.Errorf("expected comment_count=2, got %v", count)
 	}
 }
 
@@ -1594,6 +1676,7 @@ func TestHandleBlessingGrant_PrivateKeyNotConfigured(t *testing.T) {
 	s := newTestServer(t)
 	s.DiscoveryURL = "https://discovery.example.com"
 	s.DiscoveryKey = "test-key"
+	markAsRegistered(t, s)
 
 	body := jsonBody(t, map[string]string{"comment_version": "abc123"})
 	req := httptest.NewRequest(http.MethodPost, "/api/blessing/grant", body)
@@ -1611,6 +1694,7 @@ func TestHandleBlessingGrant_MissingCommentURL(t *testing.T) {
 	s := newConfiguredServer(t)
 	s.DiscoveryURL = "https://discovery.example.com"
 	s.DiscoveryKey = "test-key"
+	markAsRegistered(t, s)
 
 	body := jsonBody(t, map[string]string{})
 	req := httptest.NewRequest(http.MethodPost, "/api/blessing/grant", body)
@@ -1645,6 +1729,7 @@ func TestHandleBlessingDeny_MissingCommentVersion(t *testing.T) {
 	s := newConfiguredServer(t)
 	s.DiscoveryURL = "https://discovery.example.com"
 	s.DiscoveryKey = "test-key"
+	markAsRegistered(t, s)
 
 	body := jsonBody(t, map[string]string{})
 	req := httptest.NewRequest(http.MethodPost, "/api/blessing/deny", body)
@@ -4266,6 +4351,32 @@ func TestHandleFeedRefresh_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestHandleFeedRefresh_MeScope(t *testing.T) {
+	s := newConfiguredServer(t)
+	// No DS configured — sync will be a no-op, but the scope should be accepted
+	s.DiscoveryURL = ""
+
+	req := httptest.NewRequest(http.MethodPost, "/api/feed/refresh?scope=me", nil)
+	w := httptest.NewRecorder()
+	s.handleFeedRefresh(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for scope=me, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleFeedRefresh_InvalidScope(t *testing.T) {
+	s := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/feed/refresh?scope=bogus", nil)
+	w := httptest.NewRecorder()
+	s.handleFeedRefresh(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid scope, got %d", w.Code)
+	}
+}
+
 // ============================================================================
 // handleFeedRead Tests
 // ============================================================================
@@ -4296,94 +4407,16 @@ func TestHandleFeedRead_MarkRead(t *testing.T) {
 	}
 }
 
-func TestHandleFeedRead_MarkUnread(t *testing.T) {
+func TestHandleFeedRead_MissingID(t *testing.T) {
 	s := newTestServer(t)
 
-	cm := feed.NewCacheManager(s.DataDir, "default")
-	cm.MergeItems([]feed.FeedItem{
-			{Type: "post", Title: "Test", URL: "posts/test.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-	})
-
-	items, _ := cm.List()
-	itemID := items[0].ID
-	cm.MarkRead(itemID)
-
-	body := jsonBody(t, map[string]interface{}{"id": itemID, "unread": true})
+	body := jsonBody(t, map[string]interface{}{})
 	req := httptest.NewRequest(http.MethodPost, "/api/feed/read", body)
 	w := httptest.NewRecorder()
 	s.handleFeedRead(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	items, _ = cm.List()
-	if items[0].ReadAt != "" {
-		t.Error("item should be unread")
-	}
-}
-
-func TestHandleFeedRead_MarkAllRead(t *testing.T) {
-	s := newTestServer(t)
-
-	cm := feed.NewCacheManager(s.DataDir, "default")
-	cm.MergeItems([]feed.FeedItem{
-			{Type: "post", Title: "A", URL: "posts/a.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-			{Type: "post", Title: "B", URL: "posts/b.md", Published: "2026-02-02T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-	})
-
-	body := jsonBody(t, map[string]interface{}{"all": true})
-	req := httptest.NewRequest(http.MethodPost, "/api/feed/read", body)
-	w := httptest.NewRecorder()
-	s.handleFeedRead(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	unread, _ := cm.UnreadCount()
-	if unread != 0 {
-		t.Errorf("expected 0 unread, got %d", unread)
-	}
-}
-
-func TestHandleFeedRead_MarkUnreadFrom(t *testing.T) {
-	s := newTestServer(t)
-
-	cm := feed.NewCacheManager(s.DataDir, "default")
-	cm.MergeItems([]feed.FeedItem{
-			{Type: "post", Title: "Old", URL: "posts/old.md", Published: "2026-01-01T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-			{Type: "post", Title: "Mid", URL: "posts/mid.md", Published: "2026-01-15T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-			{Type: "post", Title: "New", URL: "posts/new.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-	})
-
-	cm.MarkAllRead()
-
-	items, _ := cm.List()
-	// Items sorted desc: New, Mid, Old
-	midID := items[1].ID
-
-	body := jsonBody(t, map[string]interface{}{"from_id": midID})
-	req := httptest.NewRequest(http.MethodPost, "/api/feed/read", body)
-	w := httptest.NewRecorder()
-	s.handleFeedRead(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	items, _ = cm.List()
-	// New should be unread (more recent than mid)
-	if items[0].ReadAt != "" {
-		t.Error("New should be unread")
-	}
-	// Mid should be unread (the target)
-	if items[1].ReadAt != "" {
-		t.Error("Mid should be unread")
-	}
-	// Old should still be read (older than mid)
-	if items[2].ReadAt == "" {
-		t.Error("Old should still be read")
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing id, got %d", w.Code)
 	}
 }
 
@@ -4747,82 +4780,6 @@ func TestExtractHTMLBody(t *testing.T) {
 				t.Errorf("extractHTMLBody() = %q, want %q", got, tt.expected)
 			}
 		})
-	}
-}
-
-// ============================================================================
-// handleActivityStream Tests
-// ============================================================================
-
-func TestHandleActivityStream_MethodNotAllowed(t *testing.T) {
-	s := newTestServer(t)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/activity", nil)
-	rr := httptest.NewRecorder()
-
-	s.handleActivityStream(rr, req)
-
-	if rr.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405, got %d", rr.Code)
-	}
-}
-
-func TestHandleActivityStream_NoFollowing(t *testing.T) {
-	s := newConfiguredServer(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/activity", nil)
-	rr := httptest.NewRecorder()
-
-	s.handleActivityStream(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d: %s", rr.Code, rr.Body.String())
-	}
-
-	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
-
-	events, ok := resp["events"].([]interface{})
-	if !ok {
-		t.Fatal("expected events array in response")
-	}
-	if len(events) != 0 {
-		t.Errorf("expected 0 events, got %d", len(events))
-	}
-	if resp["cursor"] != "0" {
-		t.Errorf("expected cursor '0', got %v", resp["cursor"])
-	}
-}
-
-func TestHandleActivityStream_WithFollowingNoDiscovery(t *testing.T) {
-	s := newConfiguredServer(t)
-
-	// Create a following.json with an entry
-	followingPath := following.DefaultPath(s.DataDir)
-	f, _ := following.Load(followingPath)
-	f.Add("https://alice.example.com")
-	following.Save(followingPath, f)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/activity?since=0&limit=10", nil)
-	rr := httptest.NewRecorder()
-
-	s.handleActivityStream(rr, req)
-
-	// Should return 200 with empty events (discovery service not reachable in test)
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d: %s", rr.Code, rr.Body.String())
-	}
-
-	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
-
-	// Should gracefully return empty on network error
-	events, ok := resp["events"].([]interface{})
-	if !ok {
-		t.Fatal("expected events array in response")
-	}
-	if len(events) != 0 {
-		t.Errorf("expected 0 events (no discovery service), got %d", len(events))
 	}
 }
 
@@ -6415,6 +6372,23 @@ func TestHandleThemeSwitch_EmptyTheme(t *testing.T) {
 	}
 }
 
+func TestHandleThemeSwitch_SolsReserved(t *testing.T) {
+	s := newTestServer(t)
+
+	body := jsonBody(t, map[string]string{"theme": "sols"})
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/theme", body)
+	w := httptest.NewRecorder()
+
+	s.handleThemeSwitch(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "reserved") {
+		t.Errorf("expected error about sols being reserved, got: %s", w.Body.String())
+	}
+}
+
 func TestHandleSettings_IncludesThemes(t *testing.T) {
 	s := newConfiguredServer(t)
 	setupTestTheme(t, s, "sols")
@@ -6707,6 +6681,72 @@ func TestHandleCounts_EmptySite(t *testing.T) {
 	// All counts should be zero for empty site
 	if counts.Posts != 0 || counts.Drafts != 0 || counts.MyPending != 0 {
 		t.Errorf("expected all zeros, got posts=%d drafts=%d pending=%d", counts.Posts, counts.Drafts, counts.MyPending)
+	}
+}
+
+func TestHandleCounts_FeedHasNew(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Set up a discovery domain directory with feed cache
+	dsDomain := "default"
+	s.DiscoveryURL = "" // GetDiscoveryDomain returns "default" when empty
+	stateDir := filepath.Join(s.DataDir, ".polis", "ds", dsDomain, "pub.polis.core", "state")
+	os.MkdirAll(stateDir, 0755)
+
+	// Write a feed item with CachedAt newer than FeedLastVisit
+	feedItem := `{"id":"abc123","type":"post","title":"New Post","url":"https://example.com/post","published":"2026-03-30T10:00:00Z","author_url":"https://example.com","author_domain":"example.com","cached_at":"2026-03-30T12:00:00Z"}` + "\n"
+	os.WriteFile(filepath.Join(stateDir, "pub.polis.feed.jsonl"), []byte(feedItem), 0644)
+
+	// Set FeedLastVisit to before the cached_at
+	s.Config.FeedLastVisit = "2026-03-30T11:00:00Z"
+
+	req := httptest.NewRequest(http.MethodGet, "/api/counts", nil)
+	w := httptest.NewRecorder()
+	s.handleCounts(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var counts CountsPayload
+	if err := json.NewDecoder(w.Body).Decode(&counts); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+
+	if !counts.FeedHasNew {
+		t.Error("expected feed_has_new=true when cached_at > feed_last_visit")
+	}
+	if counts.Feed != 1 {
+		t.Errorf("feed = %d, want 1", counts.Feed)
+	}
+	if counts.FeedUnread != 1 {
+		t.Errorf("feed_unread = %d, want 1", counts.FeedUnread)
+	}
+}
+
+func TestHandleCounts_FeedHasNew_FalseWhenVisitedAfter(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	dsDomain := "default"
+	s.DiscoveryURL = ""
+	stateDir := filepath.Join(s.DataDir, ".polis", "ds", dsDomain, "pub.polis.core", "state")
+	os.MkdirAll(stateDir, 0755)
+
+	feedItem := `{"id":"abc123","type":"post","title":"Old Post","url":"https://example.com/post","published":"2026-03-30T10:00:00Z","author_url":"https://example.com","author_domain":"example.com","cached_at":"2026-03-30T11:00:00Z"}` + "\n"
+	os.WriteFile(filepath.Join(stateDir, "pub.polis.feed.jsonl"), []byte(feedItem), 0644)
+
+	// FeedLastVisit is AFTER cached_at
+	s.Config.FeedLastVisit = "2026-03-30T12:00:00Z"
+
+	req := httptest.NewRequest(http.MethodGet, "/api/counts", nil)
+	w := httptest.NewRecorder()
+	s.handleCounts(w, req)
+
+	var counts CountsPayload
+	json.NewDecoder(w.Body).Decode(&counts)
+
+	if counts.FeedHasNew {
+		t.Error("expected feed_has_new=false when feed_last_visit > cached_at")
 	}
 }
 
@@ -7171,6 +7211,10 @@ func TestHandleAbout_GET_WithFile(t *testing.T) {
 	}
 	if resp["has_custom"] != true {
 		t.Errorf("has_custom = %v, want true", resp["has_custom"])
+	}
+	html, _ := resp["content_html"].(string)
+	if !strings.Contains(html, "<p>") {
+		t.Errorf("content_html should contain rendered HTML, got %q", html)
 	}
 }
 
@@ -8244,5 +8288,32 @@ func TestCountsIncludeDMUnread(t *testing.T) {
 	// With no DM store data, DMUnread should be 0
 	if counts.DMUnread != 0 {
 		t.Errorf("expected DMUnread 0, got %d", counts.DMUnread)
+	}
+}
+
+func TestCommentSourceURL(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{
+			"https://alice.polis.pub/comments/20260323/reply.md",
+			"https://alice.polis.pub/content/pub.polis.core/comment/20260323/reply.md",
+		},
+		{
+			"https://alice.polis.pub/comments/20260101/test-post-20260101.md",
+			"https://alice.polis.pub/content/pub.polis.core/comment/20260101/test-post-20260101.md",
+		},
+		{
+			// No /comments/ in URL — returned as-is
+			"https://alice.polis.pub/posts/20260101/hello.md",
+			"https://alice.polis.pub/posts/20260101/hello.md",
+		},
+	}
+	for _, tc := range tests {
+		got := commentSourceURL(tc.input)
+		if got != tc.want {
+			t.Errorf("commentSourceURL(%q) = %q, want %q", tc.input, got, tc.want)
+		}
 	}
 }

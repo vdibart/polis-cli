@@ -1051,3 +1051,66 @@ func TestClient_LoggerCallback(t *testing.T) {
 		t.Errorf("Logger requestID = %q, want trace-456", loggedRequestID)
 	}
 }
+
+// ---------- WithHTTP constructor tests ----------
+
+func TestNewClientWithHTTP_Nil(t *testing.T) {
+	c := NewClientWithHTTP("https://ds.example.com", "key", nil)
+	if c == nil {
+		t.Fatal("returned nil")
+	}
+	if c.HTTPClient == nil {
+		t.Error("expected fallback HTTPClient")
+	}
+	if c.DSKeyCache == nil {
+		t.Error("expected DSKeyCache to be created")
+	}
+}
+
+func TestNewClientWithHTTP_Shared(t *testing.T) {
+	shared := &http.Client{}
+	c := NewClientWithHTTP("https://ds.example.com", "key", shared)
+	if c.HTTPClient != shared {
+		t.Error("expected shared HTTPClient")
+	}
+	if c.BaseURL != "https://ds.example.com" {
+		t.Errorf("BaseURL = %q, want https://ds.example.com", c.BaseURL)
+	}
+	if c.APIKey != "key" {
+		t.Errorf("APIKey = %q, want key", c.APIKey)
+	}
+	if c.DSKeyCache == nil {
+		t.Error("expected DSKeyCache")
+	}
+	if c.DSKeyCache.client != shared {
+		t.Error("DSKeyCache should use the shared client")
+	}
+}
+
+func TestNewAuthenticatedClientWithHTTP_Nil(t *testing.T) {
+	c := NewAuthenticatedClientWithHTTP("https://ds.example.com", "key", "test.local", nil, nil)
+	if c == nil {
+		t.Fatal("returned nil")
+	}
+	if c.HTTPClient == nil {
+		t.Error("expected fallback HTTPClient")
+	}
+	if c.Domain != "test.local" {
+		t.Errorf("Domain = %q, want test.local", c.Domain)
+	}
+}
+
+func TestNewAuthenticatedClientWithHTTP_Shared(t *testing.T) {
+	shared := &http.Client{}
+	privKey := []byte("fake-key")
+	c := NewAuthenticatedClientWithHTTP("https://ds.example.com", "key", "test.local", privKey, shared)
+	if c.HTTPClient != shared {
+		t.Error("expected shared HTTPClient")
+	}
+	if c.Domain != "test.local" {
+		t.Errorf("Domain = %q, want test.local", c.Domain)
+	}
+	if string(c.PrivateKeyPEM) != "fake-key" {
+		t.Error("PrivateKeyPEM not set correctly")
+	}
+}

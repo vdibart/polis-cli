@@ -80,6 +80,11 @@ func handleSiteRegister(client *discovery.Client, dir, domain string, privKey []
 		exitError("Failed to register site: %v", err)
 	}
 
+	// Write local registration marker
+	if err := discovery.WriteRegistrationMarker(dir, client.BaseURL, domain); err != nil {
+		fmt.Fprintf(os.Stderr, "[!] Warning: could not write registration marker: %v\n", err)
+	}
+
 	if jsonOutput {
 		outputJSON(map[string]interface{}{
 			"success":       result.Success,
@@ -132,6 +137,11 @@ func handleUnregister(args []string) {
 	result, err := client.UnregisterSite(domain, privKey)
 	if err != nil {
 		exitError("Failed to unregister site: %v", err)
+	}
+
+	// Remove local registration marker
+	if err := discovery.RemoveRegistrationMarker(dir, discoveryURL); err != nil {
+		fmt.Fprintf(os.Stderr, "[!] Warning: could not remove registration marker: %v\n", err)
 	}
 
 	if jsonOutput {

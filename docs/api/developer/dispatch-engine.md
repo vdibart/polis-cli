@@ -70,6 +70,10 @@ Handles all `pub.polis.core` content types by calling into `cli-go/pkg/` package
 - `pub.polis.post/list` → reads `index.jsonl`
 - `pub.polis.comment/create` → `blessing.Beseech()`
 - `pub.polis.follow/list` → `following.Load()`
+- `pub.polis.tag/list` → lists tags with optional filters
+- `pub.polis.tag/apply` → applies a tag to a target URL
+- `pub.polis.tag/remove` → removes a tag from a target URL
+- `pub.polis.tag/delete` → deletes a tag and all associations
 
 Each operation is a method on `BuiltinCoreHandler`. New operations are wired by adding a case to the action dispatch switch.
 

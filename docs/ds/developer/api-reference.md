@@ -168,6 +168,25 @@ Rate limit: per-domain 50/hr
 }
 ```
 
+For `pub.polis.tag` content, the metadata must include `tag` (the tag name) and `target` (the URL being tagged):
+
+```json
+// Tag registration request
+{
+  "type": "pub.polis.tag",
+  "url": "https://alice.com/tags/favorite",
+  "version": "sha256:abc123...",
+  "author": "alice",
+  "metadata": {
+    "tag": "favorite",
+    "target": "https://bob.com/posts/20260215/hello.md"
+  },
+  "signature": "-----BEGIN SSH SIGNATURE-----\n...\n-----END SSH SIGNATURE-----"
+}
+```
+
+Emits `pub.polis.tag.applied` on registration. Query by tag name with `metadata.tag=favorite` or by target URL with `metadata.target=https://...`.
+
 For `pub.polis.comment` content, the response includes a `relationship_status` field indicating the auto-blessing decision:
 
 ```json
@@ -783,6 +802,8 @@ Core event types (cannot be blocked by operators):
 | `pub.polis.comment.blessing.denied` | POST /v1/relationships |
 | `pub.polis.follow.announced` | POST /v1/stream (client-published) |
 | `pub.polis.follow.removed` | POST /v1/stream (client-published) |
+| `pub.polis.tag.applied` | POST /v1/content (tag registration) |
+| `pub.polis.tag.removed` | POST /v1/content/unregister (tag) |
 
 ---
 
@@ -845,3 +866,41 @@ Common error codes:
 | `PAYLOAD_TOO_LARGE` | 413 | Request body exceeds 64KB |
 | `RATE_LIMIT_EXCEEDED` | 429 | Too many requests (includes `Retry-After` header) |
 | `DB_UNAVAILABLE` | 503 | Database not responding (readiness probe) |
+
+---
+
+## Wake Callbacks (Outbound)
+
+After emitting events that affect a particular domain, the DS fires a **fire-and-forget** outbound callback to notify the domain that new events are available:
+
+```
+GET https://{domain}/v1/wake
+```
+
+This is a performance optimization — it triggers the domain's sync cycle so new events (auto-blessings, blessing decisions, comment notifications) are picked up promptly rather than waiting for the next poll cycle.
+
+### Behavior
+
+- **No payload** — the call carries no event data. It merely signals "check your stream."
+- **No auth headers** — the endpoint is public and exposes no data.
+- **Fire-and-forget** — the DS does not inspect the response. Failures (404, connection refused, timeout) are logged and silently discarded.
+- **Rate-limited** — at most one wake per domain per 30 seconds. Rapid events for the same domain are collapsed.
+- **3-second timeout** — the DS does not block on slow domains.
+- **Hardcoded path** — `/v1/wake` is not configurable. It is a well-known endpoint.
+
+### When wakes are sent
+
+| Trigger | Target domain |
+|---------|---------------|
+| Comment registered (`pub.polis.comment`) | Post author's domain (extracted from `in_reply_to`) |
+| Blessing granted or denied (manual) | Comment author's domain (extracted from `source_url`) |
+
+Auto-blessed comments trigger a wake because the `registerContent` handler emits the blessing event and then wakes the post author's domain.
+
+### For self-hosted sites
+
+Self-hosted polis sites do not implement `/v1/wake`. The DS will receive a 404 or connection refused, which it silently ignores. No action is needed — the wake mechanism is entirely optional. Sites that do not support it continue to discover events through their regular polling cycle.
+
+### Operator control
+
+Set `DS_WAKE_ENABLED=false` to disable all outbound wake callbacks (requires DS restart).

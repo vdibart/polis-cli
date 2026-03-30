@@ -54,10 +54,10 @@ brew install pandoc  # Optional: for polis render
 
 ```bash
 # Option 1: Add to PATH (quick start)
-export PATH="/path/to/polis-cli/cli-bash:$PATH"
+export PATH="/path/to/polis-cli/bin:$PATH"
 
 # Option 2: Create symlink
-sudo ln -s /path/to/polis-cli/cli-bash/polis /usr/local/bin/polis
+sudo ln -s /path/to/polis-cli/bin/polis /usr/local/bin/polis
 
 # Verify installation
 polis --help
@@ -76,8 +76,8 @@ mkdir my-site && cd my-site
 git init
 
 # Copy CLI tools and themes
-cp ../polis-cli/cli-bash/polis ./bin/
-cp ../polis-cli/cli-bash/polis-upgrade ./bin/
+cp ../polis-cli/bin/polis ./bin/
+cp ../polis-cli/bin/polis-upgrade ./bin/
 cp -r ../polis-cli/themes ./themes/
 
 # Initialize your site
@@ -174,11 +174,14 @@ polis init --site-title "My Blog" --register
 - `.polis/themes/` - Installed themes (turbo, zane, sols)
 - `posts/`, `comments/` - Content directories
 - `metadata/` - Metadata directory
-- `.well-known/polis` - Public metadata file
+- `.well-known/polis` - Public metadata file (includes a default avatar)
 - `metadata/public.jsonl` - Content index (JSONL format)
 - `metadata/blessed-comments.json` - Blessed comments index
 - `metadata/following.json` - Following list
 - `metadata/manifest.json` - Site metadata (includes `active_theme` if set)
+
+**Default Avatar:**
+A default avatar is automatically generated during init with a random background color and white foreground. The avatar displays as a circle with the first letter of your handle. You can customize or remove it later via the webapp settings page (Randomize/Save/Reset buttons).
 
 ### `polis post <file>`
 
@@ -1035,6 +1038,47 @@ polis dm config
 **Receiving:** Requires running the webapp or headless API server. CLI-only users can send DMs but cannot receive them (no server to accept incoming deliveries).
 
 **Policy:** DM acceptance is controlled via policy rules in `.polis/policies/rules.jsonl`. By default, `allow pub.polis.dm from following` + `deny pub.polis.dm from all` restricts DMs to followed domains. The policy system also supports `emit`/`omit` verbs for blessing and notification control, and `self`/`thread-blessed` sources. See `docs/cli/user/policies.md` for the full grammar and common recipes. Use `polis dm config` to view current rules.
+
+All subcommands support `--json` for machine-readable output.
+
+### `polis tag`
+
+> **Go CLI only.** Tag commands are not available in the Bash CLI.
+
+Manage tags on content. Tags are lightweight labels you apply to posts and feed items for personal organization.
+
+```bash
+polis tag <subcommand> [options]
+```
+
+**Subcommands:**
+
+| Subcommand | Usage | Description |
+|------------|-------|-------------|
+| `list` | `polis tag list [--tag <name>] [--target <url>]` | List tags, optionally filtered by tag name or target URL |
+| `show` | `polis tag show <name>` | Show all content tagged with a specific tag |
+| `apply` | `polis tag apply <name> <target-url>` | Apply a tag to a target URL |
+| `remove` | `polis tag remove <name> <target-url>` | Remove a tag from a target URL |
+| `delete` | `polis tag delete <name>` | Delete a tag and all its associations |
+
+**Examples:**
+
+```bash
+# List all tags
+polis tag list
+
+# List all content tagged "favorite"
+polis tag show favorite
+
+# Tag a post
+polis tag apply favorite https://alice.com/posts/20260301/on-gardens.md
+
+# Remove a tag from a post
+polis tag remove favorite https://alice.com/posts/20260301/on-gardens.md
+
+# Delete a tag entirely
+polis tag delete old-topic
+```
 
 All subcommands support `--json` for machine-readable output.
 

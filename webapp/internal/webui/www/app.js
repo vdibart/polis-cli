@@ -5,7 +5,7 @@ const App = {
     currentPostPath: null,  // Set when editing a published post
     currentFrontmatter: '',  // Stored frontmatter block for published posts
     currentCommentDraftId: null,
-    currentView: 'posts-published',  // Current active view in sidebar
+    currentView: 'conversations',  // Current active view in sidebar
     sidebarMode: 'my-site',  // 'my-site' or 'social'
     filenameManuallySet: false,  // Track if user manually edited the filename
     lifecycleStage: 'just_arrived',  // 'just_arrived', 'first_post', or 'active'
@@ -62,10 +62,24 @@ const App = {
     _conversationsSubtab: 'all',
     _conversationsRefreshing: false,
 
-    // Feed filter state
-    _feedShowNew: false,
-    _feedAuthorFilter: null, // null or domain string
-    _feedTimeFilter: '24h', // '1h', '4h', '8h', '24h', '7d', 'all'
+    // Feed filter state (natural-language sentence filter)
+    _feedShowNew: false,        // "New" vs "All" in sentence
+    _feedAuthorFilter: null,    // null or domain string (legacy, still used for by-author)
+    _feedTimeFilter: '24h',     // '1h', '24h', '2d', '7d', '30d'
+    _feedContentType: '',       // '' (items), 'post', 'comment', 'announcement'
+    _feedScope: 'network',      // 'network', 'followers', 'global'
+    _feedPopoverOpen: null,     // currently open popover filter name, or null
+    _feedFilterOnly: false,     // true when re-render is from filter change only (skip DS sync)
+    _feedObserver: null,        // IntersectionObserver for viewport-based read marking
+    _markReadQueue: [],         // batched item IDs waiting to be marked read
+    _markReadTimer: null,       // debounce timer for batch mark-read
+    _feedLastVisitedAt: localStorage.getItem('polis-feed-last-visit') || '', // ISO timestamp of last Feed page visit
+    _feedEditorOpen: false,
+    _feedEditorTitle: '',
+    _feedEditorBody: '',
+    _feedEditorStatus: '',
+    _feedEditorDraftId: null,
+    _feedEditorSaveTimer: null,
 
     // Screen management
     screens: {
@@ -91,24 +105,57 @@ const App = {
     _remoteAvatarCache: {},
     _remoteAvatarFetching: {},
 
+    // Auto-save state
+    _autoSaveTimer: null,
+    _focusMode: false,
+
+    // Inline comment editor state
+    _inlineCommentOpen: false,
+    _inlineCommentUrl: null,
+    _inlineCommentAuthor: '',
+    _inlineCommentTitle: '',
+    _inlineCommentBody: '',
+    _inlineCommentDraftId: null,
+    _inlineCommentSaveTimer: null,
+    _inlineCommentFocusMode: false,
+
+    // Slash menu state
+    _slashMenuVisible: false,
+    _slashMenuIndex: 0,
+    _slashActiveEditorId: null,
+    _linkEditorId: null,
+
     // Milkdown editor state
     _rawMode: {},  // textareaId -> boolean
     _milkdownReady: false,
 
-    // Right panel state
-    _rightPanelOpen: false,
-    _rightPanelMode: 'wysiwyg',  // 'wysiwyg' | 'markdown' | 'help' | 'browse'
-    _browsePosts: [],
-    _browseSelectedPath: null,
-
-    // Milkdown textarea-to-mount mapping
+    // Milkdown textarea-to-mount mapping (static + dynamic sibling lookup)
     _milkdownIdFor(textareaId) {
         const map = {
             'markdown-input': 'milkdown-post',
             'comment-input': 'milkdown-comment',
             'about-editor-textarea': 'milkdown-about',
+            'mc-about-textarea': 'mc-milkdown-about',
+            'inline-comment-body': 'milkdown-inline-comment',
+            'inline-comment-body-focus': 'milkdown-inline-comment-focus',
         };
-        return map[textareaId] || null;
+        if (map[textareaId]) return map[textareaId];
+        const el = document.getElementById(textareaId);
+        if (el) {
+            const mount = el.parentElement?.querySelector('.milkdown-mount');
+            if (mount?.id) return mount.id;
+        }
+        return null;
+    },
+
+    // Find which milkdown-mount contains the current selection
+    _getActiveEditorId() {
+        const sel = window.getSelection();
+        if (!sel.rangeCount) return null;
+        const node = sel.getRangeAt(0).commonAncestorContainer;
+        const el = node.nodeType === 1 ? node : node.parentElement;
+        const mount = el?.closest('.milkdown-mount');
+        return mount?.id || null;
     },
 
     // Get content from Milkdown or textarea (abstraction layer)
@@ -117,12 +164,14 @@ const App = {
         if (editorId && window.MilkdownBridge?.isReady(editorId) && !this._rawMode[textareaId]) {
             return window.MilkdownBridge.getMarkdown(editorId);
         }
-        return document.getElementById(textareaId).value;
+        const el = document.getElementById(textareaId);
+        return el ? el.value : '';
     },
 
     // Set content in both Milkdown and textarea (abstraction layer)
     setEditorContent(textareaId, markdown) {
-        document.getElementById(textareaId).value = markdown;
+        const el = document.getElementById(textareaId);
+        if (el) el.value = markdown;
         const editorId = this._milkdownIdFor(textareaId);
         if (editorId && window.MilkdownBridge?.isReady(editorId) && !this._rawMode[textareaId]) {
             window.MilkdownBridge.setMarkdown(editorId, markdown);
@@ -137,7 +186,8 @@ const App = {
         // (milkdown module loaded late), prefer that content
         const container = document.getElementById(editorId);
         const userTyped = container ? container.textContent.trim() : '';
-        const content = userTyped || document.getElementById(textareaId).value;
+        const textarea = document.getElementById(textareaId);
+        const content = userTyped || (textarea ? textarea.value : '');
         try {
             await window.MilkdownBridge.create(editorId, content);
         } catch (err) {
@@ -152,7 +202,8 @@ const App = {
         if (!editorId || !window.MilkdownBridge) return;
         // Sync content back to textarea before destroying
         if (window.MilkdownBridge.isReady(editorId) && !this._rawMode[textareaId]) {
-            document.getElementById(textareaId).value = window.MilkdownBridge.getMarkdown(editorId);
+            const el = document.getElementById(textareaId);
+            if (el) el.value = window.MilkdownBridge.getMarkdown(editorId);
         }
         window.MilkdownBridge.destroy(editorId);
     },
@@ -209,6 +260,14 @@ const App = {
             if (prev === 'about') this._destroyMilkdown('about-editor-textarea');
         }
 
+        // Hide editor controls when leaving editor
+        const editorControls = document.getElementById('editor-controls');
+        if (editorControls) editorControls.classList.add('hidden');
+
+        // Show global nav for all screens except welcome/error
+        const iconNav = document.getElementById('icon-nav');
+        if (iconNav) iconNav.classList.toggle('hidden', name === 'welcome' || name === 'error');
+
         Object.values(this.screens).forEach(s => {
             if (s) s.classList.add('hidden');
         });
@@ -216,24 +275,23 @@ const App = {
             this.screens[name].classList.remove('hidden');
         }
         if (name === 'editor') {
+            // Show editor controls in the nav
+            if (editorControls) editorControls.classList.remove('hidden');
+            // Highlight compose icon
             this._updateTopbarMode('editor');
-            // Reset right panel state
-            this._rightPanelOpen = false;
-            document.getElementById('editor-right-panel').classList.add('collapsed');
-            document.getElementById('editor-right-panel-toggle').classList.remove('active-panel');
-            this._browsePosts = [];
-            this._browseSelectedPath = null;
-            // Reset editor mode toggle to WYSIWYG
             this._rawMode['markdown-input'] = false;
-            document.getElementById('editor-wysiwyg-btn').classList.add('active');
-            document.getElementById('editor-markdown-btn').classList.remove('active');
-            // Re-enable left toggle (may have been disabled by panel)
-            document.getElementById('editor-wysiwyg-btn').disabled = false;
-            document.getElementById('editor-markdown-btn').disabled = false;
-            document.querySelector('.editor-mode-toggle')?.classList.remove('disabled');
-            // Ensure textarea hidden, milkdown mount visible for WYSIWYG default
             document.getElementById('markdown-input').classList.add('hidden');
             document.getElementById('milkdown-post').classList.remove('hidden');
+            const saveStatus = document.getElementById('editor-save-status');
+            saveStatus.textContent = '';
+            saveStatus.classList.remove('saved');
+            // Reset focus mode
+            if (this._focusMode) {
+                this._focusMode = false;
+                document.getElementById('editor-screen').classList.remove('focus-mode');
+                document.getElementById('icon-nav').classList.remove('focus-mode');
+                document.getElementById('editor-focus-hint').classList.add('hidden');
+            }
             this._initMilkdown('markdown-input');
         }
         if (name === 'comment') {
@@ -268,93 +326,141 @@ const App = {
         document.documentElement.dataset.theme = theme;
     },
 
-    toggleTheme() {
-        this.setWebappTheme(this.webappTheme === 'dark' ? 'light' : 'dark');
-        this._updateThemeIcon();
-        // Update settings page label and button if visible
-        const rows = document.querySelectorAll('.settings-row');
-        for (const row of rows) {
-            const label = row.querySelector('.settings-row-label');
-            if (label && label.textContent === 'Color Mode:') {
-                const val = row.querySelector('.settings-row-value');
-                const btn = row.querySelector('.btn-copy');
-                if (val) val.textContent = this.webappTheme === 'light' ? 'Light' : 'Dark';
-                if (btn) btn.textContent = this.webappTheme === 'light' ? 'Switch to Dark' : 'Switch to Light';
-                break;
+    // ── Icon Nav: Avatar, badges, dropdown, active state ──
+
+    // Render avatar button with user initial
+    _renderAvatar() {
+        const btn = document.getElementById('nav-avatar');
+        if (!btn) return;
+        const dot = btn.querySelector('.nav-dot');
+        if (this.avatarConfig) {
+            // Custom avatar: use the saved config with pattern/border/etc
+            btn.setAttribute('style', this._buildAvatarStyle(this.avatarConfig));
+            btn.textContent = '';  // custom avatars don't show initials
+        } else {
+            // Default: deterministic from domain
+            const domain = this.siteBaseUrl ? (() => { try { return new URL(this.siteBaseUrl).hostname; } catch(e) { return ''; } })() : '';
+            const det = this.domainToAvatar(domain || 'me');
+            btn.setAttribute('style', `background: ${det.color};`);
+            btn.textContent = det.initials;
+        }
+        if (dot) btn.appendChild(dot);
+    },
+
+    // Populate avatar hover menu with user data from /api/nav/state
+    async _renderAvatarMenu() {
+        const nameEl = document.getElementById('avatar-menu-name');
+        const handleEl = document.getElementById('avatar-menu-handle');
+        const statsEl = document.getElementById('avatar-menu-stats');
+
+        try {
+            const state = await this.api('GET', '/api/nav/state');
+
+            if (nameEl) nameEl.textContent = state.author_name || state.handle || 'Unknown';
+            if (handleEl) handleEl.textContent = state.handle || '';
+            if (statsEl) {
+                const c = state.counts || {};
+                statsEl.innerHTML = `<span><strong>${c.followers||0}</strong> followers</span><span><strong>${c.following||0}</strong> following</span><span><strong>${c.posts||0}</strong> posts</span>`;
+            }
+
+            // Update avatar if nav state includes avatar config
+            if (state.avatar) {
+                this.avatarConfig = state.avatar;
+                this._renderAvatar();
+            }
+        } catch (err) {
+            // Fallback to existing local data
+            if (nameEl) nameEl.textContent = this.authorName || 'Unknown';
+            if (handleEl) {
+                try { handleEl.textContent = new URL(this.siteBaseUrl).hostname; } catch(e) { handleEl.textContent = ''; }
+            }
+            if (statsEl) {
+                const f = this.counts.followers || 0;
+                const fw = this.counts.following || 0;
+                const p = this.counts.posts || 0;
+                statsEl.innerHTML = `<span><strong>${f}</strong> followers</span><span><strong>${fw}</strong> following</span><span><strong>${p}</strong> posts</span>`;
             }
         }
     },
 
-    _updateThemeIcon() {
-        const btn = document.getElementById('bar-icon-theme');
-        if (!btn) return;
-        const isDark = this.webappTheme === 'dark';
-        btn.innerHTML = isDark
-            ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>'
-            : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+    // Update which nav icon is highlighted based on current view
+    _updateNavActive(view) {
+        const map = {
+            'posts-published': 'posts', 'posts-drafts': 'posts',
+            'comments-published': 'comments', 'blessing-requests': 'comments',
+            'following': 'people', 'followers': 'people',
+            'dm-list': 'messages', 'dm-thread': 'messages', 'dm-new': 'messages',
+            'feed': 'feed', 'conversations': 'feed', 'pulse': 'feed',
+            'about': 'posts', 'settings': null
+        };
+        const active = map[view] || null;
+        ['feed', 'posts', 'comments', 'people', 'messages'].forEach(id => {
+            const btn = document.getElementById(`nav-btn-${id}`);
+            if (btn) btn.classList.toggle('active', id === active);
+        });
     },
 
-    // Mode toggle: 'feed', 'posts', or 'messages'
-    switchMode(mode) {
-        const btns = ['feed', 'posts', 'messages'].map(m => document.getElementById(`mode-btn-${m}`));
-        btns.forEach(b => b && b.classList.remove('active'));
-        if (mode === 'feed') {
-            btns[0] && btns[0].classList.add('active');
-            this.navigateTo('/social/conversations');
-        } else if (mode === 'messages') {
-            btns[2] && btns[2].classList.add('active');
-            this.navigateTo('/messages');
-        } else {
-            btns[1] && btns[1].classList.add('active');
-            this.navigateTo('/posts');
-        }
-    },
-
-    // Update topbar mode buttons to reflect current view
-    _updateTopbarMode(mode) {
-        const btns = ['feed', 'posts', 'messages'].map(m => document.getElementById(`mode-btn-${m}`));
-        btns.forEach(b => b && b.classList.remove('active'));
-        if (mode === 'social') {
-            btns[0] && btns[0].classList.add('active');
-        } else if (mode === 'messages') {
-            btns[2] && btns[2].classList.add('active');
-        } else {
-            btns[1] && btns[1].classList.add('active');
-        }
-    },
-
-    // Update topbar badge dots from counts
-    _updateTopbarBadges() {
-        const feedDot = document.getElementById('mode-dot-feed');
-        const postsDot = document.getElementById('mode-dot-posts');
-        const messagesDot = document.getElementById('mode-dot-messages');
+    // Update nav badge dots from counts
+    _updateNavBadges() {
+        const feedDot = document.getElementById('nav-dot-feed');
+        const commentsDot = document.getElementById('nav-dot-comments');
+        const messagesDot = document.getElementById('nav-dot-messages');
+        const avatarDot = document.getElementById('nav-dot-avatar');
 
         if (feedDot) {
-            feedDot.classList.toggle('hidden', !(this.counts.feedUnread > 0));
+            feedDot.classList.toggle('hidden', !this.counts.feedHasNew);
         }
-        if (postsDot) {
-            const hasPending = this.counts.incomingPending > 0;
-            postsDot.classList.toggle('hidden', !hasPending);
+        if (commentsDot) {
+            const hasItems = (this.counts.incomingPending || 0) > 0;
+            commentsDot.classList.toggle('hidden', !hasItems);
         }
         if (messagesDot) {
-            const hasDMUnread = this.counts.dmUnread > 0;
-            messagesDot.classList.toggle('hidden', !hasDMUnread);
+            const hasItems = (this.counts.dmUnread || 0) > 0;
+            messagesDot.classList.toggle('hidden', !hasItems);
+        }
+        if (avatarDot) {
+            const hasItems = (this.counts.notificationsUnread || 0) > 0;
+            avatarDot.classList.toggle('hidden', !hasItems);
         }
     },
 
-    // Populate topbar domain from site config
-    _updateTopbarDomain(baseUrl) {
-        const el = document.getElementById('topbar-domain');
-        const logo = document.getElementById('topbar-logo');
-        if (el && baseUrl) {
-            try {
-                const domain = new URL(baseUrl).hostname;
-                el.textContent = domain;
-                if (logo) logo.href = baseUrl;
-            } catch (e) {
-                el.textContent = '';
-            }
+    // Toggle + button dropdown
+    _toggleNewDropdown(event) {
+        event.stopPropagation();
+        const dd = document.getElementById('new-dropdown');
+        if (!dd) return;
+        const isOpen = dd.classList.contains('open');
+        dd.classList.toggle('open', !isOpen);
+        if (!isOpen) {
+            // Close on outside click
+            const close = () => { dd.classList.remove('open'); document.removeEventListener('click', close); };
+            setTimeout(() => document.addEventListener('click', close), 0);
         }
+    },
+
+    // Legacy compatibility stubs
+    switchMode(mode) {
+        if (mode === 'feed') this.navigateTo('/feed');
+        else if (mode === 'messages') this.navigateTo('/messages');
+        else this.navigateTo('/posts');
+    },
+
+    _updateTopbarMode(mode) {
+        // Map mode names to nav icon IDs
+        const map = { 'social': 'posts', 'messages': 'messages', 'my-site': 'posts', 'editor': 'compose' };
+        const active = map[mode] || 'posts';
+        ['feed', 'compose', 'posts', 'comments', 'people', 'messages'].forEach(id => {
+            const btn = document.getElementById(`nav-btn-${id}`);
+            if (btn) btn.classList.toggle('active', id === active);
+        });
+    },
+
+    _updateTopbarBadges() {
+        this._updateNavBadges();
+    },
+
+    _updateTopbarDomain(baseUrl) {
+        // No longer needed — avatar menu shows domain instead
     },
 
     // Toast notification system
@@ -525,7 +631,7 @@ const App = {
     // Route table: [pattern, config] pairs. Checked in order.
     // Parameterized segments: :id (single segment), :path+ (catch-all, one or more segments).
     ROUTES: [
-        ['/',                            { mode: 'my-site', view: 'posts-published', screen: 'dashboard' }],
+        ['/',                            { mode: 'social',  view: 'conversations',   screen: 'dashboard' }],
         ['/posts',                       { mode: 'my-site', view: 'posts-published', screen: 'dashboard' }],
         ['/posts/drafts',                { mode: 'my-site', view: 'posts-drafts',    screen: 'dashboard' }],
         ['/posts/new',                   { screen: 'editor', action: 'newPost' }],
@@ -539,11 +645,10 @@ const App = {
         ['/comments/drafts/:id',         { screen: 'comment', action: 'openCommentDraft' }],
         ['/blessings',                   { mode: 'my-site', view: 'blessing-requests',    screen: 'dashboard' }],
         ['/snippets',                    { mode: 'my-site', view: 'about',            screen: 'dashboard' }],
-        ['/social',                      { mode: 'social',  view: 'conversations',    screen: 'dashboard' }],
-        ['/social/feed',                 { mode: 'social',  view: 'conversations',    screen: 'dashboard' }],
+        ['/feed',                        { mode: 'social',  view: 'conversations',    screen: 'dashboard' }],
         // Plugin routes injected by _registerPlugins()
-        ['/social/following',            { mode: 'social',  view: 'following',        screen: 'dashboard' }],
-        ['/social/followers',            { mode: 'social',  view: 'followers',        screen: 'dashboard' }],
+        ['/following',                   { mode: 'social',  view: 'following',        screen: 'dashboard' }],
+        ['/followers',                   { mode: 'social',  view: 'followers',        screen: 'dashboard' }],
         ['/messages',                    { mode: 'messages', view: 'dm-list',    screen: 'dashboard' }],
         ['/messages/new',                { mode: 'messages', view: 'dm-new',     screen: 'dashboard' }],
         ['/messages/:id',                { mode: 'messages', view: 'dm-thread',  screen: 'dashboard' }],
@@ -558,8 +663,8 @@ const App = {
         'comments-published':  '/comments',
         'blessing-requests':   '/blessings',
         'about':               '/snippets',
-        'following':           '/social/following',
-        'followers':           '/social/followers',
+        'following':           '/following',
+        'followers':           '/followers',
         'dm-list':             '/messages',
         'dm-new':              '/messages/new',
         'settings':            '/settings',
@@ -568,8 +673,8 @@ const App = {
     // Social plugins: each entry defines a social view that gets a sidebar button,
     // route, and dispatch entry. Removing an entry removes the view entirely.
     SOCIAL_PLUGINS: [
-        { id: 'pulse',         label: 'Pulse',         path: '/social/pulse',         title: 'Community Pulse',  actions: '',                                                                                                                                                              render: 'renderPulse',                autoRefresh: true  },
-        { id: 'conversations', label: 'Feed', path: '/social/conversations', title: '',    actions: '', render: 'renderConversationsTabbed',   autoRefresh: true  },
+        { id: 'pulse',         label: 'Pulse',         path: '/pulse',         title: 'Community Pulse',  actions: '',                                                                                                                                                              render: 'renderPulse',                autoRefresh: true  },
+        { id: 'conversations', label: 'Feed', path: '/conversations', title: '',    actions: '', render: 'renderConversationsTabbed',   autoRefresh: true  },
     ],
 
     // Resolve a pathname against the route table.
@@ -635,6 +740,14 @@ const App = {
     // opts.replace: use replaceState instead of pushState
     // opts.skipRender: only update URL, don't render (used during init)
     async navigateTo(path, opts = {}) {
+        // Auto-save draft when navigating away from editor
+        if (this.screens.editor && !this.screens.editor.classList.contains('hidden') && !this.currentPostPath) {
+            const markdown = this._buildFullMarkdown();
+            if (markdown.trim()) {
+                await this.saveDraft(true);
+            }
+        }
+
         const route = this.resolveRoute(path);
         if (!route) {
             this.showToast('Page not found', 'warning');
@@ -745,6 +858,8 @@ const App = {
                 item.classList.add('active');
             }
         });
+        // Also update icon nav highlights
+        this._updateNavActive(view);
     },
 
     // Register social plugins: inject routes, view paths, and sidebar buttons.
@@ -753,7 +868,7 @@ const App = {
         const nav = document.getElementById('social-plugins-nav');
         for (const plugin of this.SOCIAL_PLUGINS) {
             // Inject route
-            const routeIdx = this.ROUTES.findIndex(([p]) => p === '/social/following');
+            const routeIdx = this.ROUTES.findIndex(([p]) => p === '/following');
             this.ROUTES.splice(routeIdx, 0, [plugin.path, { mode: 'social', view: plugin.id, screen: 'dashboard' }]);
 
             // Inject view path
@@ -794,17 +909,32 @@ const App = {
             switch (validation.status) {
                 case 'valid':
                     { const dd = document.getElementById('domain-display'); if (dd) dd.textContent = status.site_title || ''; }
-                    // Show domain in header and topbar
-                    this.updateDomainDisplay(status.base_url);
-                    this._updateTopbarDomain(status.base_url);
-                    this._updateThemeIcon();
+                    // Set data before rendering nav
                     this.siteBaseUrl = status.base_url || '';
                     this.avatarConfig = status.avatar || null;
                     this.authorName = status.author_name || '';
+                    // Set site theme for nav variable contract (Phase 0)
+                    if (status.active_theme) {
+                        this.siteTheme = status.active_theme;
+                        document.documentElement.dataset.siteTheme = status.active_theme;
+                    }
+                    // Now render nav with data available
+                    this.updateDomainDisplay(status.base_url);
+                    this._renderAvatar();
+                    this._renderAvatarMenu();
                     await this.loadAllCounts();
                     this._updateTopbarBadges();
                     this.initNotifications();
                     this.initSSE();
+                    // Re-observe unread feed items when tab becomes visible again
+                    document.addEventListener('visibilitychange', () => {
+                        if (!document.hidden) {
+                            const cl = document.getElementById('content-list');
+                            if (cl && this.currentView === 'conversations') {
+                                this._observeFeedItems(cl);
+                            }
+                        }
+                    });
                     this.checkSetupBanner();
 
                     // Show follow link footer in sidebar
@@ -887,22 +1017,20 @@ const App = {
         const route = this.resolveRoute(pathname);
 
         if (!route) {
-            // Unknown deep-link path — fall back to default
-            await this.loadViewContent();
-            this.showScreen('dashboard');
-            window.history.replaceState({}, '', this.basePath + '/posts');
+            // Unknown deep-link path — fall back to feed (home)
+            this.navigateTo('/feed');
             return;
         }
 
         const { config, params } = route;
 
-        // Normalize short-form URLs (e.g. /_/ → /_/posts, /_/social → /_/social/feed)
+        // Normalize short-form URLs (e.g. /_/ → /_/posts, /_/social → /_/feed)
         if (config.view) {
             const canonical = this.pathForView(config.view);
             if (canonical !== pathname && pathname !== this.basePath + '/' && pathname !== this.basePath) {
                 window.history.replaceState({}, '', canonical);
             } else if (pathname === this.basePath + '/' || pathname === this.basePath || pathname === '/') {
-                window.history.replaceState({}, '', this.basePath + '/posts');
+                window.history.replaceState({}, '', this.basePath + '/feed');
             }
         }
 
@@ -987,11 +1115,11 @@ const App = {
             this.counts.following = c.following || 0;
             this.counts.followers = c.followers || 0;
             this.counts.dmUnread = c.dm_unread || 0;
-            this.notificationState.unreadCount = c.notifications_unread || 0;
+            this.counts.feedNewestCached = c.feed_newest_cached || '';
+            this.counts.feedHasNew = !!c.feed_has_new;
 
             this.updateBadges();
             this.updateSidebar();
-            this._updateNotificationDot();
             this._updateTopbarBadges();
         } catch (err) {
             console.error('Failed to load counts:', err);
@@ -1010,14 +1138,14 @@ const App = {
         this.counts.incomingBlessed = c.incoming_blessed || 0;
         this.counts.feed = c.feed || 0;
         this.counts.feedUnread = c.feed_unread || 0;
+        this.counts.feedNewestCached = c.feed_newest_cached || '';
+        this.counts.feedHasNew = !!c.feed_has_new;
         this.counts.following = c.following || 0;
         this.counts.followers = c.followers || 0;
         this.counts.dmUnread = c.dm_unread || 0;
-        this.notificationState.unreadCount = c.notifications_unread || 0;
 
         this.updateBadges();
         this.updateSidebar();
-        this._updateNotificationDot();
         this._updateTopbarBadges();
 
         // If on a view that shows items affected by sync, refresh it
@@ -1140,7 +1268,7 @@ const App = {
             html = `
                 <div class="welcome-content">
                     <h3>Comment submitted</h3>
-                    <p>Your comment was delivered. The author will decide whether to bless it.</p>
+                    <p>Your comment has been delivered to the author.</p>
                     <div class="welcome-actions">
                         <button class="primary" onclick="App.newPost()">Write your first post</button>
                         ${intent.target ? `<a href="${this.escapeHtml(intent.target)}" class="secondary" target="_blank">Back to the post</a>` : ''}
@@ -1376,25 +1504,30 @@ const App = {
             });
         });
 
-        // Back button (editor)
-        document.getElementById('back-btn').addEventListener('click', async () => {
-            await this.loadAllCounts();
-            history.back();
-        });
+        // Back button removed — editor now uses shared nav
 
         // Popstate handler — browser back/forward navigation
         window.addEventListener('popstate', async () => {
+            // Auto-save draft when navigating away from editor via browser back/forward
+            if (this.screens.editor && !this.screens.editor.classList.contains('hidden') && !this.currentPostPath) {
+                const markdown = this._buildFullMarkdown();
+                if (markdown.trim()) {
+                    await this.saveDraft(true);
+                }
+            }
             await this._restoreRouteFromURL();
-        });
-
-        // Save draft button
-        document.getElementById('save-draft-btn').addEventListener('click', async () => {
-            await this.saveDraft();
         });
 
         // Publish button
         document.getElementById('publish-btn').addEventListener('click', async () => {
             await this.publish();
+        });
+
+        // Delete draft button (in editor header)
+        document.getElementById('delete-draft-btn').addEventListener('click', async () => {
+            if (this.currentDraftId) {
+                await this.deleteDraft(this.currentDraftId);
+            }
         });
 
         // Auto-generate filename from title and live preview as user types (raw textarea mode)
@@ -1410,71 +1543,99 @@ const App = {
             this.editorUpdatePreview();
         });
 
-        // Milkdown change event — auto-generate filename from title (WYSIWYG mode)
-        document.addEventListener('milkdown:change', (e) => {
-            const { editorId, markdown } = e.detail;
-            if (editorId === 'milkdown-post' && !this.filenameManuallySet && !this.currentPostPath) {
-                const title = this.extractTitleFromMarkdown(markdown);
-                if (title) {
-                    document.getElementById('filename-input').value = this.slugify(title);
-                }
+        // Editor help button
+        document.getElementById('editor-help-btn').addEventListener('click', () => {
+            document.getElementById('editor-help-modal').classList.toggle('hidden');
+        });
+
+        // Link modal — Enter to confirm, Escape to cancel
+        document.getElementById('editor-link-url').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); this._confirmLinkModal(); }
+            if (e.key === 'Escape') { e.preventDefault(); this._cancelLinkModal(); }
+        });
+
+        // Editor title input — Enter moves focus to body
+        document.getElementById('editor-title-input').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                // Focus the Milkdown editor
+                const prosemirror = document.querySelector('#milkdown-post .ProseMirror');
+                if (prosemirror) prosemirror.focus();
             }
         });
 
-        // Editor mode toggle (WYSIWYG / Markdown)
-        document.getElementById('editor-wysiwyg-btn').addEventListener('click', () => {
-            this._setEditorMode('wysiwyg');
-        });
-        document.getElementById('editor-markdown-btn').addEventListener('click', () => {
-            this._setEditorMode('markdown');
-        });
-
-        // Right panel toggle
-        document.getElementById('editor-right-panel-toggle').addEventListener('click', () => {
-            if (this._rightPanelOpen) {
-                this.closeRightPanel();
-            } else {
-                this.openRightPanel();
+        // Auto-generate filename slug from title input + toggle # indicator
+        document.getElementById('editor-title-input').addEventListener('input', (e) => {
+            const titleRow = e.target.closest('.editor-title-row');
+            if (titleRow) titleRow.classList.toggle('has-value', !!e.target.value.trim());
+            if (!this.filenameManuallySet && !this.currentPostPath) {
+                const title = e.target.value.trim();
+                document.getElementById('filename-input').value = title ? this.slugify(title) : '';
             }
         });
 
-
-        // Right panel tab clicks (delegated since tabs are dynamic)
-        document.getElementById('panel-mode-toggle').addEventListener('click', (e) => {
-            const tab = e.target.closest('.panel-mode-btn');
-            if (tab && tab.dataset.panelMode) {
-                this.setRightPanelMode(tab.dataset.panelMode);
-            }
-        });
-
-        // Browse "Load into Editor" button
-        document.getElementById('browse-load-btn').addEventListener('click', () => {
-            this.loadBrowsePostIntoEditor();
-        });
-
-        // Sync from milkdown changes (left pane only)
-        document.addEventListener('milkdown:change', (e) => {
-            if (e.detail.editorId === 'milkdown-post') {
-                this.editorUpdatePreview();
-            }
-        });
-
-        // Right panel markdown textarea input → sync back to left
-        document.getElementById('panel-markdown-textarea').addEventListener('input', () => {
-            const md = document.getElementById('panel-markdown-textarea').value;
-            document.getElementById('markdown-input').value = md;
-            if (!this._rawMode['markdown-input'] && window.MilkdownBridge?.isReady('milkdown-post')) {
-                window.MilkdownBridge.setMarkdown('milkdown-post', md);
-            }
-        });
-
-        // Markdown keyboard shortcuts on both textareas
+        // Markdown keyboard shortcuts on textarea
         document.getElementById('markdown-input').addEventListener('keydown', (e) => {
             this._handleMarkdownShortcut(document.getElementById('markdown-input'), e);
         });
-        document.getElementById('panel-markdown-textarea').addEventListener('keydown', (e) => {
-            this._handleMarkdownShortcut(document.getElementById('panel-markdown-textarea'), e);
+
+        // Auto-save: listen for content changes in Milkdown and title input
+        const autoSaveTrigger = () => {
+            if (this.screens.editor.classList.contains('hidden')) return;
+            if (this.currentPostPath) return; // Don't auto-save republishes
+            const status = document.getElementById('editor-save-status');
+            status.textContent = 'Unsaved';
+            status.classList.remove('saved');
+            if (this._autoSaveTimer) clearTimeout(this._autoSaveTimer);
+            this._autoSaveTimer = setTimeout(() => {
+                const markdown = this._buildFullMarkdown();
+                if (markdown.trim()) this.saveDraft(true);
+            }, 2000);
+        };
+        document.addEventListener('milkdown:change', (e) => {
+            if (e.detail && e.detail.editorId === 'milkdown-post') autoSaveTrigger();
         });
+        document.getElementById('editor-title-input').addEventListener('input', autoSaveTrigger);
+
+        // Floating selection toolbar
+        document.addEventListener('selectionchange', () => {
+            const toolbar = document.getElementById('editor-toolbar');
+            if (!toolbar) return;
+            const sel = window.getSelection();
+            if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+                toolbar.classList.add('hidden');
+                return;
+            }
+            const range = sel.getRangeAt(0);
+            const activeId = this._getActiveEditorId();
+            if (!activeId) { toolbar.classList.add('hidden'); return; }
+            const pm = document.querySelector(`#${activeId} .ProseMirror`);
+            if (!pm || !pm.contains(range.commonAncestorContainer)) {
+                toolbar.classList.add('hidden');
+                return;
+            }
+            const rect = range.getBoundingClientRect();
+            if (rect.width === 0) { toolbar.classList.add('hidden'); return; }
+            const toolbarW = 220; // approximate width
+            toolbar.style.left = `${Math.max(8, rect.left + rect.width / 2 - toolbarW / 2)}px`;
+            toolbar.style.top = `${rect.top - 40}px`;
+            toolbar.classList.remove('hidden');
+        });
+
+        // Toolbar button clicks (mousedown to prevent selection loss)
+        document.getElementById('editor-toolbar').addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            const btn = e.target.closest('.tb-btn');
+            if (btn) this._execToolbarCommand(btn.dataset.command);
+        });
+
+        // Hide toolbar on scroll
+        document.querySelector('.editor-container')?.addEventListener('scroll', () => {
+            document.getElementById('editor-toolbar').classList.add('hidden');
+        });
+
+        // Slash command menu
+        this._initSlashMenu();
 
         // About editor raw mode toggle
         document.getElementById('about-raw-toggle').addEventListener('click', () => {
@@ -1508,12 +1669,6 @@ const App = {
             }
         }, 10000);
 
-        // Editor frontmatter toggle
-        const editorFmToggle = document.getElementById('editor-fm-toggle');
-        if (editorFmToggle) {
-            editorFmToggle.addEventListener('click', () => this.toggleEditorFrontmatter());
-        }
-
         // Mark filename as manually set when user edits it
         document.getElementById('filename-input').addEventListener('input', () => {
             this.filenameManuallySet = true;
@@ -1537,6 +1692,36 @@ const App = {
 
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
+            // Inline comment editor shortcuts (highest priority when open)
+            if (this._inlineCommentFocusMode) {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    this._toggleInlineCommentFocusMode();
+                    return;
+                }
+                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                    e.preventDefault();
+                    this._sendFromFocusMode();
+                    return;
+                }
+            }
+            if (this._inlineCommentOpen) {
+                if (e.key === 'Escape' && !this._slashMenuVisible) {
+                    e.preventDefault();
+                    this.closeInlineCommentEditor();
+                    return;
+                }
+                if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'F') {
+                    e.preventDefault();
+                    this._toggleInlineCommentFocusMode();
+                    return;
+                }
+                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                    e.preventDefault();
+                    this.sendInlineComment();
+                    return;
+                }
+            }
             // Ctrl/Cmd + S to save
             if ((e.ctrlKey || e.metaKey) && e.key === 's') {
                 e.preventDefault();
@@ -1551,6 +1736,32 @@ const App = {
                 e.preventDefault();
                 if (!this.screens.editor.classList.contains('hidden')) {
                     this.publish();
+                }
+            }
+            // Ctrl/Cmd + Shift + F to toggle focus mode
+            if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'F') {
+                e.preventDefault();
+                if (!this.screens.editor.classList.contains('hidden')) {
+                    this._toggleFocusMode();
+                } else if (this._feedEditorOpen) {
+                    // Transfer inline editor content to full editor
+                    this._openFullEditorFromFeed();
+                }
+            }
+            // Ctrl/Cmd + Enter to publish from inline feed editor
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && this._feedEditorOpen && this.currentView === 'conversations') {
+                e.preventDefault();
+                this.publishFromFeed();
+            }
+            // Escape closes feed filter popovers, feed editor, or exits focus mode
+            if (e.key === 'Escape') {
+                if (this._feedPopoverOpen) {
+                    this._closeFeedPopovers();
+                } else if (this._focusMode) {
+                    e.preventDefault();
+                    this._toggleFocusMode();
+                } else if (this._feedEditorOpen) {
+                    this.closeFeedEditor();
                 }
             }
         });
@@ -1715,9 +1926,13 @@ const App = {
         this.currentFrontmatter = '';
         this.filenameManuallySet = false;
         this.setEditorContent('markdown-input', '');
+        document.getElementById('editor-title-input').value = '';
         document.getElementById('filename-input').value = '';
         document.getElementById('filename-input').disabled = false;
-        this.updateEditorFmToggle();
+        const saveStatus = document.getElementById('editor-save-status');
+        saveStatus.textContent = '';
+        saveStatus.classList.remove('saved');
+        if (this._autoSaveTimer) { clearTimeout(this._autoSaveTimer); this._autoSaveTimer = null; }
         this.updatePublishButton();
         if (opts.pushState !== false) {
             window.history.pushState({}, '', this.pathForScreen('newPost'));
@@ -1736,9 +1951,13 @@ const App = {
         this.showScreen('comment');
     },
 
-    // Alias for newComment (used by sidebar + button)
-    newCommentDraft() {
-        this.newComment();
+    // Open inline comment editor in feed, or fall back to full-screen
+    newCommentDraft(url) {
+        if (url && this.currentView === 'conversations') {
+            this.openInlineCommentEditor(url);
+        } else {
+            this.newComment();
+        }
     },
 
     // Render v3 sub-tabs for Posts mode
@@ -1772,113 +1991,158 @@ const App = {
         `;
     },
 
-    // Render posts list
+    // Render posts list (my-content view)
     async renderPostsList(container) {
+        if (!this._postsFilter) this._postsFilter = 'published';
         try {
-            const result = await this.api('GET', '/api/posts');
-            const posts = result.posts || [];
+            // Fetch posts, drafts, and about in parallel
+            const [postsResult, draftsResult, aboutResult] = await Promise.all([
+                this.api('GET', '/api/posts').catch(() => ({ posts: [] })),
+                this.api('GET', '/api/drafts').catch(() => ({ drafts: [] })),
+                this.api('GET', '/api/about').catch(() => ({ content: '' })),
+            ]);
+            const posts = postsResult.posts || [];
+            const drafts = draftsResult.drafts || [];
+            const aboutText = aboutResult.content || '';
+            const aboutHtml = aboutResult.content_html || '';
+            this._mcAboutText = aboutText;
             this.counts.posts = posts.length;
+            this.counts.drafts = drafts.length;
             this.updateBadge('posts-count', posts.length);
+            this.updateBadge('drafts-count', drafts.length);
 
-            if (posts.length === 0) {
-                const domain = this.siteBaseUrl ? new URL(this.siteBaseUrl).hostname : '';
-                const domainDisplay = domain ? `<a href="${this.escapeHtml(this.siteBaseUrl)}" target="_blank" rel="noopener">${this.escapeHtml(domain)}</a>` : 'your domain';
-                container.innerHTML = this._renderPostsSubTabs('posts-published') + `
-                    <div class="content-list">
-                        <div class="empty-state">
-                            <h3>No published posts yet</h3>
-                            <p class="subtitle">Write your first post to make your site come alive.</p>
-                            <button class="primary" onclick="App.newPost()">Write your first post</button>
-                        </div>
-                        <div class="welcome-divider"></div>
-                        <div class="welcome-panels">
-                            <details class="welcome-panel">
-                                <summary><span class="icon">&#9656;</span> What to do next</summary>
-                                <div class="welcome-panel-body">
-                                    <ol class="next-steps">
-                                        <li>
-                                            <span class="step-number">1</span>
-                                            <span class="step-content">
-                                                ${this.siteBaseUrl ? `<a href="${this.escapeHtml(this.siteBaseUrl)}" target="_blank" rel="noopener">Visit your site</a>` : `<span>Visit your site</span>`}
-                                                <span class="step-detail">See what readers see at ${domain ? this.escapeHtml(domain) : 'your domain'}.</span>
-                                            </span>
-                                        </li>
-                                        <li>
-                                            <span class="step-number">2</span>
-                                            <span class="step-content">
-                                                <a href="#" onclick="event.preventDefault(); navigator.clipboard.writeText(window.location.origin + '/_/').then(() => App.showToast('Dashboard URL copied!', 'success'))">Bookmark your dashboard</a>
-                                                <span class="step-detail">The <code>/_/</code> path is your private dashboard &mdash; only you can see it.</span>
-                                            </span>
-                                        </li>
-                                        <li>
-                                            <span class="step-number">3</span>
-                                            <span class="step-content">
-                                                <a href="#" onclick="event.preventDefault(); App.openAboutEditor()">Update your About</a>
-                                                <span class="step-detail">Tell visitors who you are.</span>
-                                            </span>
-                                        </li>
-                                        <li>
-                                            <span class="step-number">4</span>
-                                            <span class="step-content">
-                                                <a href="#" onclick="event.preventDefault(); App.navigateTo('/social/following')">Follow an author</a>
-                                                <span class="step-detail">Discover conversations and build your feed.</span>
-                                            </span>
-                                        </li>
-                                        <li>
-                                            <span class="step-number">5</span>
-                                            <span class="step-content">
-                                                <a href="#" onclick="event.preventDefault(); navigator.clipboard.writeText('${this.escapeHtml(this.siteBaseUrl || '')}').then(() => App.showToast('URL copied!', 'success'))">Share your link</a>
-                                                <span class="step-detail">Anyone can read your site &mdash; no account needed.</span>
-                                            </span>
-                                        </li>
-                                        <li>
-                                            <span class="step-number">6</span>
-                                            <span class="step-content">
-                                                <a href="#" onclick="event.preventDefault(); App.navigateTo('/settings')">Pick a theme</a>
-                                                <span class="step-detail">Make it feel like yours.</span>
-                                            </span>
-                                        </li>
-                                        <li>
-                                            <span class="step-number">7</span>
-                                            <span class="step-content">
-                                                <a href="#" onclick="event.preventDefault(); App.navigateTo('/settings')">Download your keys</a>
-                                                <span class="step-detail">Back them up somewhere safe. Everything you publish is cryptographically signed.</span>
-                                            </span>
-                                        </li>
-                                    </ol>
-                                </div>
-                            </details>
-                        </div>
-                    </div>
-                `;
-                return;
+            const domain = this.siteBaseUrl ? (() => { try { return new URL(this.siteBaseUrl).hostname; } catch { return ''; } })() : '';
+            const name = this.authorName || domain || 'Untitled';
+
+            // Avatar
+            let avatarHtml;
+            if (this.avatarConfig) {
+                avatarHtml = `<div class="mc-avatar" style="${this._buildAvatarStyle(this.avatarConfig)}"></div>`;
+            } else {
+                const det = this.domainToAvatar(domain || 'me');
+                avatarHtml = `<div class="mc-avatar" style="background: ${det.color};">${det.initials}</div>`;
             }
 
-            container.innerHTML = this._renderPostsSubTabs('posts-published') + `
-                <div class="post-list">
-                    ${posts.map(post => {
-                        const commentCount = post.comment_count || 0;
-                        const commentHtml = commentCount > 0 ? `
-                            <div class="comment-count${post.pending_comments ? ' has-pending' : ''}">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                                ${post.pending_comments ? `<span class="pending">${commentCount}</span>` : commentCount}
-                            </div>` : '';
-                        const excerptHtml = post.excerpt ? `<div class="post-excerpt">${this.escapeHtml(post.excerpt)}</div>` : '';
-                        return `
-                        <div class="post-row" onclick="App.openPost('${this.escapeHtml(post.path)}')">
-                            <div class="post-info">
-                                <div class="post-title">${this.escapeHtml(post.title)}</div>
-                                ${excerptHtml}
-                                <div class="post-meta"><span>${this.formatDate(post.published)}</span></div>
-                            </div>
-                            <div class="post-status">
-                                ${commentHtml}
-                                <span class="post-date">${this.formatRelativeTime(post.published)}</span>
-                            </div>
-                        </div>`;
-                    }).join('')}
+            const isPublished = this._postsFilter === 'published';
+            const items = isPublished ? posts : drafts;
+
+            // Build post list HTML
+            let listHtml;
+            if (items.length === 0) {
+                if (isPublished) {
+                    listHtml = `<div class="mc-empty">No published posts yet. <a href="#" onclick="event.preventDefault(); App.newPost()">Write your first post</a>.</div>`;
+                } else {
+                    listHtml = `<div class="mc-empty">No drafts. <a href="#" onclick="event.preventDefault(); App.newPost()">Start writing</a>.</div>`;
+                }
+            } else if (isPublished) {
+                listHtml = posts.map(post => {
+                    const excerptHtml = post.excerpt ? `<div class="mc-excerpt">${this.escapeHtml(post.excerpt)}</div>` : '';
+                    const commentCount = post.comment_count || 0;
+                    const commentHtml = `<div class="mc-comments"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M3 2C1.9 2 1 2.9 1 4v12c0 1.1.9 2 2 2h12l4 4V4c0-1.1-.9-2-2-2H3zm0 2h14v13.2L15.2 16H3V4z" fill="currentColor"/></svg> ${commentCount}</div>`;
+                    const editedHtml = post.modified ? `<span class="mc-edited">&middot; edited ${this.formatRelativeTime(post.modified)}</span>` : '';
+                    return `<div class="mc-post" onclick="App.openPost('${this.escapeHtml(post.path)}')">
+                        <div class="mc-date">${this.formatDate(post.published)} ${editedHtml}</div>
+                        <div class="mc-title">${this.escapeHtml(post.title)}</div>
+                        ${excerptHtml}
+                        ${commentHtml}
+                    </div>`;
+                }).join('');
+            } else {
+                listHtml = drafts.map(draft => {
+                    const draftTitle = draft.title || draft.id;
+                    const draftExcerpt = draft.excerpt ? `<div class="mc-excerpt">${this.escapeHtml(draft.excerpt)}</div>` : '';
+                    return `<div class="mc-post mc-post-draft" onclick="App.openDraft('${this.escapeHtml(draft.id)}')">
+                        <div class="mc-date">edited ${this.formatRelativeTime(draft.modified)}</div>
+                        <div class="mc-title">${this.escapeHtml(draftTitle)} <span class="mc-draft-badge">draft</span></div>
+                        ${draftExcerpt}
+                        <button class="mc-delete-draft" onclick="event.stopPropagation(); App.deleteDraft('${this.escapeHtml(draft.id)}')" title="Delete draft"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                    </div>`;
+                }).join('');
+            }
+
+            container.innerHTML = `
+                <style>
+                    .mc-header { padding: 24px 0 0 0; }
+                    .mc-identity { display: flex; align-items: flex-start; gap: 14px; }
+                    .mc-avatar { width: 48px; height: 48px; min-width: 48px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 600; color: #fff; }
+                    .mc-info { flex: 1; min-width: 0; }
+                    .mc-name { font-family: var(--font-content); font-size: 22px; color: var(--text-primary); line-height: 1.3; }
+                    .mc-handle { font-family: var(--font-mono); font-size: 13px; color: var(--text-tertiary); margin-top: 2px; }
+                    .mc-about-wrap { margin-top: 10px; padding-left: 0; position: relative; }
+                    .mc-about { font-family: var(--font-content); font-size: 15px; color: var(--text-secondary); line-height: 1.5; cursor: pointer; position: relative; }
+                    .mc-about p { margin: 0 0 0.6em 0; }
+                    .mc-about p:last-child { margin-bottom: 0; }
+                    .mc-about a { color: var(--accent); }
+                    .mc-about ul, .mc-about ol { margin: 0.4em 0; padding-left: 1.5em; }
+                    .mc-about li { margin: 0.2em 0; }
+                    .mc-about.clipped { max-height: 4.5em; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, black 60%, transparent); mask-image: linear-gradient(to bottom, black 60%, transparent); }
+                    .mc-about:hover { color: var(--text-primary); }
+                    .mc-about-edit-hint { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-tertiary); opacity: 0.5; transition: opacity 0.15s; cursor: pointer; margin-top: 6px; }
+                    .mc-about-edit-hint:hover { opacity: 1; color: var(--accent); }
+                    .mc-about-edit-hint svg { width: 12px; height: 12px; }
+                    .mc-about-edit-hint svg path, .mc-about-edit-hint svg line { stroke: currentColor; stroke-width: 2; fill: none; }
+                    .mc-about-show-more { font-size: 12px; color: var(--accent); cursor: pointer; background: none; border: none; padding: 4px 0; font-family: inherit; margin-top: 2px; }
+                    .mc-about-show-more:hover { text-decoration: underline; }
+                    .mc-about-edit { font-family: var(--font-content); font-size: 15px; color: var(--text-primary); background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; width: 100%; min-height: 80px; resize: vertical; line-height: 1.5; }
+                    .mc-about-edit:focus { outline: none; border-color: var(--accent); }
+                    .mc-about-actions { display: flex; gap: 8px; margin-top: 8px; }
+                    .mc-about-actions button { font-size: 13px; padding: 4px 12px; border-radius: var(--radius-sm); cursor: pointer; border: none; }
+                    .mc-about-actions .mc-save { background: var(--accent); color: #fff; }
+                    .mc-about-actions .mc-cancel { background: transparent; color: var(--text-secondary); border: 1px solid var(--border); }
+                    .mc-stats { font-size: 13px; color: var(--text-tertiary); display: flex; gap: 4px; align-items: center; }
+                    .mc-stat { cursor: pointer; padding: 0; background: none; border: none; font-size: 12px; color: var(--text-tertiary); font-family: inherit; }
+                    .mc-stat:hover { color: var(--text-secondary); }
+                    .mc-stat.active { font-weight: 700; color: var(--text-primary); }
+                    .mc-divider { border: none; border-top: 1px solid var(--border); margin: 18px 0 12px 0; }
+                    .mc-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 12px 0 4px; }
+                    .mc-new-post { font-size: 14px; color: var(--accent); background: none; border: none; cursor: pointer; font-family: inherit; padding: 4px 0; }
+                    .mc-new-post:hover { text-decoration: underline; }
+                    .mc-post { padding: 18px 0; cursor: pointer; border-radius: var(--radius-sm); transition: background 0.15s; }
+                    .mc-post:hover { background: var(--bg-hover); }
+                    .mc-date { font-size: 12px; color: var(--text-tertiary); margin-bottom: 4px; }
+                    .mc-edited { font-size: 11px; color: var(--text-tertiary); opacity: 0.7; }
+                    .mc-title { font-family: var(--font-content); font-size: 18px; color: var(--text-primary); line-height: 1.3; }
+                    .mc-excerpt { font-family: var(--font-content); font-size: 14.5px; color: var(--text-secondary); line-height: 1.5; margin-top: 4px; }
+                    .mc-comments { font-size: 12px; color: var(--text-secondary); opacity: 0.5; margin-top: 6px; display: flex; align-items: center; gap: 5px; }
+                    .mc-comments svg { flex-shrink: 0; }
+                    .mc-draft-badge { font-size: 11px; font-family: var(--font-ui, inherit); background: var(--border); color: var(--text-secondary); padding: 1px 6px; border-radius: 3px; margin-left: 6px; vertical-align: middle; }
+                    .mc-post-draft { position: relative; }
+                    .mc-delete-draft { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-tertiary); font-size: 18px; line-height: 1; padding: 4px 8px; cursor: pointer; opacity: 0; transition: opacity 0.15s, color 0.15s; border-radius: var(--radius-sm); }
+                    .mc-post-draft:hover .mc-delete-draft { opacity: 1; }
+                    .mc-delete-draft:hover { color: var(--salmon, #c4604a); background: var(--bg-hover); }
+                    .mc-empty { font-size: 14px; color: var(--text-tertiary); padding: 32px 0; text-align: center; }
+                    .mc-empty a { color: var(--accent); }
+                </style>
+                <div class="mc-header">
+                    <div class="mc-identity">
+                        ${avatarHtml}
+                        <div class="mc-info">
+                            <div class="mc-name">${this.escapeHtml(name)}</div>
+                            ${domain ? `<div class="mc-handle">${this.escapeHtml(domain)}</div>` : ''}
+                        </div>
+                    </div>
+                    <div class="mc-about-wrap">
+                        <div class="mc-about${aboutText && aboutText.length > 200 ? ' clipped' : ''}" id="mc-about-display" onclick="App._mcStartEditAbout()">${aboutHtml ? aboutHtml : (aboutText ? this.escapeHtml(aboutText) : '<span style="color:var(--text-tertiary);font-style:italic">Add a short bio&hellip;</span>')}</div>
+                        ${aboutText && aboutText.length > 200 ? '<button class="mc-about-show-more" onclick="event.stopPropagation(); var d=document.getElementById(\'mc-about-display\'); d.classList.toggle(\'clipped\'); this.textContent=d.classList.contains(\'clipped\')?\'show more\':\'show less\';">show more</button>' : ''}
+                        <span class="mc-about-edit-hint" onclick="App._mcStartEditAbout()"><svg viewBox="0 0 24 24"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><line x1="15" y1="5" x2="19" y2="9"/></svg> edit</span>
+                    </div>
+                </div>
+                <hr class="mc-divider">
+                <div class="mc-toolbar">
+                    <div class="mc-stats">
+                        <button class="mc-stat${isPublished ? ' active' : ''}" onclick="App._mcSetFilter('published')">${posts.length} post${posts.length !== 1 ? 's' : ''}</button>
+                        <span>&middot;</span>
+                        <button class="mc-stat${!isPublished ? ' active' : ''}" onclick="App._mcSetFilter('drafts')">${drafts.length} draft${drafts.length !== 1 ? 's' : ''}</button>
+                    </div>
+                    <button class="mc-new-post" onclick="App.newPost()">+ New post</button>
+                </div>
+                <div id="mc-list">
+                    ${listHtml}
                 </div>
             `;
+            // Store data for filter switching without refetch
+            this._mcPostsData = posts;
+            this._mcDraftsData = drafts;
         } catch (err) {
             container.innerHTML = `
                 <div class="content-list">
@@ -1888,6 +2152,95 @@ const App = {
                     </div>
                 </div>
             `;
+        }
+    },
+
+    // My-content: switch between published/drafts filter (re-renders list only)
+    _mcSetFilter(filter) {
+        this._postsFilter = filter;
+        const listEl = document.getElementById('mc-list');
+        if (!listEl) return;
+        const isPublished = filter === 'published';
+        const items = isPublished ? (this._mcPostsData || []) : (this._mcDraftsData || []);
+
+        let listHtml;
+        if (items.length === 0) {
+            if (isPublished) {
+                listHtml = `<div class="mc-empty">No published posts yet. <a href="#" onclick="event.preventDefault(); App.newPost()">Write your first post</a>.</div>`;
+            } else {
+                listHtml = `<div class="mc-empty">No drafts. <a href="#" onclick="event.preventDefault(); App.newPost()">Start writing</a>.</div>`;
+            }
+        } else if (isPublished) {
+            listHtml = items.map(post => {
+                const excerptHtml = post.excerpt ? `<div class="mc-excerpt">${this.escapeHtml(post.excerpt)}</div>` : '';
+                const editedHtml = post.modified ? `<span class="mc-edited">&middot; edited ${this.formatRelativeTime(post.modified)}</span>` : '';
+                return `<div class="mc-post" onclick="App.openPost('${this.escapeHtml(post.path)}')">
+                    <div class="mc-date">${this.formatDate(post.published)} ${editedHtml}</div>
+                    <div class="mc-title">${this.escapeHtml(post.title)}</div>
+                    ${excerptHtml}
+                </div>`;
+            }).join('');
+        } else {
+            listHtml = items.map(draft => {
+                const draftTitle = draft.title || draft.id;
+                const draftExcerpt = draft.excerpt ? `<div class="mc-excerpt">${this.escapeHtml(draft.excerpt)}</div>` : '';
+                return `<div class="mc-post mc-post-draft" onclick="App.openDraft('${this.escapeHtml(draft.id)}')">
+                    <div class="mc-date">edited ${this.formatRelativeTime(draft.modified)}</div>
+                    <div class="mc-title">${this.escapeHtml(draftTitle)} <span class="mc-draft-badge">draft</span></div>
+                    ${draftExcerpt}
+                    <button class="mc-delete-draft" onclick="event.stopPropagation(); App.deleteDraft('${this.escapeHtml(draft.id)}')" title="Delete draft"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                </div>`;
+            }).join('');
+        }
+        listEl.innerHTML = listHtml;
+
+        // Update stat button active states
+        document.querySelectorAll('.mc-stat').forEach(btn => {
+            const isPostsStat = btn.textContent.includes('post');
+            btn.classList.toggle('active', isPublished ? isPostsStat : !isPostsStat);
+        });
+    },
+
+    // My-content: start editing about text inline
+    _mcStartEditAbout() {
+        const display = document.getElementById('mc-about-display');
+        if (!display) return;
+        const wrap = display.parentElement;
+        const currentText = (this._mcAboutText != null) ? this._mcAboutText : '';
+        // Replace placeholder text
+        const text = (currentText === 'Add a short bio\u2026') ? '' : currentText;
+        wrap.innerHTML = `
+            <div id="mc-milkdown-about" class="milkdown-mount" style="min-height:120px;max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);"></div>
+            <textarea class="mc-about-edit hidden" id="mc-about-textarea">${this.escapeHtml(text)}</textarea>
+            <div class="mc-about-actions">
+                <button class="mc-save" onclick="App._mcSaveAbout()">Save</button>
+                <button class="mc-cancel" onclick="App._mcCancelEditAbout()">Cancel</button>
+            </div>
+        `;
+        this._rawMode['mc-about-textarea'] = false;
+        this._initMilkdown('mc-about-textarea');
+    },
+
+    // My-content: cancel about editing
+    _mcCancelEditAbout() {
+        this._destroyMilkdown('mc-about-textarea');
+        const container = document.getElementById('content-list');
+        if (container) this.renderPostsList(container);
+    },
+
+    // My-content: save about text
+    async _mcSaveAbout() {
+        const content = this.getEditorContent('mc-about-textarea');
+        try {
+            await this.api('POST', '/api/about', { content });
+            this._mcAboutText = content;
+            this._destroyMilkdown('mc-about-textarea');
+            this.showToast('About updated', 'success');
+            // Re-render to show updated text
+            const container = document.getElementById('content-list');
+            if (container) this.renderPostsList(container);
+        } catch (err) {
+            this.showToast('Failed to save: ' + err.message, 'error');
         }
     },
 
@@ -1914,17 +2267,21 @@ const App = {
 
             container.innerHTML = this._renderPostsSubTabs('posts-drafts') + `
                 <div class="post-list">
-                    ${drafts.map(draft => `
+                    ${drafts.map(draft => {
+                        const title = draft.title || draft.id;
+                        const excerpt = draft.excerpt || '';
+                        return `
                         <div class="post-row" onclick="App.openDraft('${this.escapeHtml(draft.id)}')">
                             <div class="post-info">
-                                <div class="post-title">${this.escapeHtml(draft.id)}</div>
+                                <div class="post-title">${this.escapeHtml(title)}</div>
+                                ${excerpt ? `<div class="post-excerpt">${this.escapeHtml(excerpt)}</div>` : ''}
                                 <div class="post-meta"><span>Edited ${this.formatDate(draft.modified)}</span></div>
                             </div>
                             <div class="post-status">
                                 <span class="draft-badge">Draft</span>
                             </div>
                         </div>
-                    `).join('')}
+                    `}).join('')}
                 </div>
             `;
         } catch (err) {
@@ -2216,7 +2573,7 @@ const App = {
             requests = reqResult.requests || [];
             for (const pc of (blessedResult.comments || [])) {
                 for (const c of (pc.blessed || [])) {
-                    allBlessed.push({ ...c, post: pc.post });
+                    allBlessed.push({ ...c, post: pc.post, post_title: pc.post_title });
                 }
             }
         } catch (err) {
@@ -2245,35 +2602,67 @@ const App = {
         this._pendingRequests = requests;
         this._blessedComments = allBlessed;
 
-        // Build items using post-row layout
-        let items = '';
+        // Build unified list with type tags for sorting
+        let allItems = [];
         if (currentFilter === 'pending' || currentFilter === 'all') {
-            items += requests.map((r, idx) => {
+            allItems.push(...requests.map((r, idx) => ({
+                type: 'pending', data: r, idx,
+                date: r.created_at || r.timestamp || '',
+            })));
+        }
+        if (currentFilter === 'blessed' || currentFilter === 'all') {
+            allItems.push(...allBlessed.map((c, idx) => ({
+                type: 'blessed', data: c, idx,
+                date: c.blessed_at || '',
+            })));
+        }
+        // Sort newest first
+        allItems.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+        let items = allItems.map(item => {
+            if (item.type === 'pending') {
+                const r = item.data;
                 const date = r.created_at || r.timestamp;
-                const slug = (r.in_reply_to || '').split('/').pop()?.replace(/\.md$/, '') || 'post';
-                const title = `Re: ${slug}`;
+                const excerpt = r.excerpt || '';
+                const domain = r.author || '';
+                // Derive post title from in_reply_to URL
+                let postLabel = 'a post';
+                if (r.in_reply_to) {
+                    postLabel = r.in_reply_to.split('/').pop().replace(/\.(md|html)$/, '').replace(/-/g, ' ');
+                }
+                const excerptHtml = excerpt ? `<div class="post-excerpt" style="font-size:13px;color:var(--text-secondary);margin-top:4px;line-height:1.4;">${this.escapeHtml(excerpt)}</div>` : '';
                 return `
-                <div class="post-row" onclick="App.openPendingRequestDetail(${idx})">
+                <div class="post-row" onclick="App.openPendingRequestDetail(${item.idx})">
                     <div class="post-info">
-                        <div class="post-title">${this.escapeHtml(title)}</div>
+                        <div class="post-title">${this.escapeHtml(postLabel)}</div>
+                        ${excerptHtml}
                         <div class="post-meta">
                             <span class="comment-status-badge pending">pending</span>
-                            ${r.author ? `<span class="sep">&middot;</span><span>${this.escapeHtml(r.author)}</span>` : ''}
+                            ${domain ? `<span class="sep">&middot;</span><span>${this.escapeHtml(domain)}</span>` : ''}
                         </div>
                     </div>
                     <div class="post-status">
                         <span class="post-date">${this.formatRelativeTime(date)}</span>
                     </div>
                 </div>`;
-            }).join('');
-        }
-        if (currentFilter === 'blessed' || currentFilter === 'all') {
-            items += allBlessed.map((c, idx) => {
-                const domain = this.extractDomainFromUrl(c.post);
+            } else {
+                const c = item.data;
+                const domain = this.extractDomainFromUrl(c.url) || this.extractDomainFromUrl(c.post);
+                const excerpt = c.excerpt || '';
+                const postTitle = c.post_title || '';
+                // Build post link
+                let postUrl = '';
+                let postLabel = '';
+                if (c.post) {
+                    postUrl = c.post.replace(/\.md$/, '.html');
+                    postLabel = postTitle || postUrl.split('/').pop().replace(/\.html$/, '').replace(/-/g, ' ');
+                }
+                const excerptHtml = excerpt ? `<div class="post-excerpt" style="font-size:13px;color:var(--text-secondary);margin-top:4px;line-height:1.4;">${this.escapeHtml(excerpt)}</div>` : '';
                 return `
-                <div class="post-row" onclick="App.openBlessedCommentDetail(${idx})">
+                <div class="post-row" onclick="App.openBlessedCommentDetail(${item.idx})">
                     <div class="post-info">
-                        <div class="post-title">${this.escapeHtml(c.url ? c.url.split('/').pop() : 'comment')}</div>
+                        <div class="post-title">${postLabel ? (postUrl ? `<a href="${this.escapeHtml(postUrl)}" onclick="event.stopPropagation()" style="color:var(--text-primary);text-decoration:none;">${this.escapeHtml(postLabel)}</a>` : this.escapeHtml(postLabel)) : this.escapeHtml(c.url ? c.url.split('/').pop() : 'comment')}</div>
+                        ${excerptHtml}
                         <div class="post-meta">
                             <span class="comment-status-badge blessed">blessed</span>
                             ${domain ? `<span class="sep">&middot;</span><span>${this.escapeHtml(domain)}</span>` : ''}
@@ -2283,8 +2672,8 @@ const App = {
                         <span class="post-date">${this.formatRelativeTime(c.blessed_at)}</span>
                     </div>
                 </div>`;
-            }).join('');
-        }
+            }
+        }).join('');
 
         if (!items) {
             const msg = currentFilter === 'pending'
@@ -2400,7 +2789,7 @@ const App = {
             // Store existing hooks for advanced panel
             this.existingHooks = settings.existing_hooks || [];
 
-            const themes = settings.themes || [];
+            const themes = (settings.themes || []).filter(t => t.name !== 'sols');
 
             let automationsHtml = '';
             if (automations.length === 0) {
@@ -2478,18 +2867,7 @@ const App = {
                         </div>
                     </div>
 
-                    <div class="settings-section">
-                        <div class="settings-section-label">Webapp Appearance</div>
-                        <div class="settings-card">
-                            <div class="settings-row">
-                                <span class="settings-row-label">Color Mode:</span>
-                                <span class="settings-row-value">${this.webappTheme === 'light' ? 'Light' : 'Dark'}</span>
-                                <div class="settings-row-actions">
-                                    <button class="btn-copy" onclick="App.toggleTheme()">${this.webappTheme === 'light' ? 'Switch to Dark' : 'Switch to Light'}</button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                    <!-- Webapp Appearance section removed — color mode is now driven by site theme -->
 
                     ${themes.length > 0 ? `
                     <div class="settings-section">
@@ -2906,6 +3284,10 @@ const App = {
             // Show the "view site" link
             const link = document.getElementById('theme-view-link');
             if (link) link.style.display = 'flex';
+            // Apply new theme to nav immediately
+            this.siteTheme = name;
+            document.documentElement.dataset.siteTheme = name;
+            this._renderAvatar();
         } catch (err) {
             this.showToast('Failed to switch theme: ' + err.message, 'error');
         }
@@ -3568,71 +3950,8 @@ echo "File: $POLIS_PATH"</code>
         };
     },
 
-    // Called when left pane content changes — one-way sync to right panel
-    editorUpdatePreview() {
-        if (!this._rightPanelOpen) return;
-        const md = this.getEditorContent('markdown-input') || '';
-        if (this._rightPanelMode === 'wysiwyg') {
-            // Left is MARKDOWN, right shows rendered HTML (WYSIWYG view)
-            this._renderPreviewDebounced(md);
-        } else if (this._rightPanelMode === 'markdown') {
-            // Left is WYSIWYG, right shows raw markdown (only if not focused to avoid cursor jump)
-            const el = document.getElementById('panel-markdown-textarea');
-            if (el && el !== document.activeElement) el.value = md;
-        }
-    },
-
-    _previewTimeout: null,
-    _renderPreviewDebounced(md) {
-        if (this._previewTimeout) clearTimeout(this._previewTimeout);
-        this._previewTimeout = setTimeout(async () => {
-            const previewEl = document.getElementById('panel-preview-content');
-            if (!previewEl) return;
-            try {
-                const result = await this.api('POST', '/api/render', { markdown: md });
-                previewEl.innerHTML = result.html;
-            } catch (err) {
-                previewEl.innerHTML = `<p class="error">Render failed: ${this.escapeHtml(err.message)}</p>`;
-            }
-        }, 400);
-    },
-
-    // Switch left pane editor mode (two-button segmented control)
-    _setEditorMode(mode) {
-        const wysiwygBtn = document.getElementById('editor-wysiwyg-btn');
-        const markdownBtn = document.getElementById('editor-markdown-btn');
-        const editorId = this._milkdownIdFor('markdown-input');
-        const textarea = document.getElementById('markdown-input');
-        const mount = editorId ? document.getElementById(editorId) : null;
-
-        if (mode === 'markdown') {
-            // Sync content from milkdown to textarea before switching
-            if (editorId && window.MilkdownBridge?.isReady(editorId)) {
-                textarea.value = window.MilkdownBridge.getMarkdown(editorId);
-            }
-            this._rawMode['markdown-input'] = true;
-            if (mount) mount.classList.add('hidden');
-            textarea.classList.remove('hidden');
-            textarea.focus();
-            wysiwygBtn.classList.remove('active');
-            markdownBtn.classList.add('active');
-        } else {
-            // Switch to WYSIWYG — always update UI state
-            this._rawMode['markdown-input'] = false;
-            if (mount && window.MilkdownBridge?.isReady(editorId)) {
-                mount.classList.remove('hidden');
-                textarea.classList.add('hidden');
-                window.MilkdownBridge.setMarkdown(editorId, textarea.value);
-            } else if (mount && window.MilkdownBridge) {
-                // Milkdown not ready yet — init it now
-                mount.classList.remove('hidden');
-                textarea.classList.add('hidden');
-                this._initMilkdown('markdown-input');
-            }
-            wysiwygBtn.classList.add('active');
-            markdownBtn.classList.remove('active');
-        }
-    },
+    // No-op: right panel removed in editor redesign
+    editorUpdatePreview() {},
 
     // Markdown keyboard shortcuts for raw textareas (Ctrl+B, Ctrl+I, Ctrl+K, Ctrl+E)
     _handleMarkdownShortcut(textarea, e) {
@@ -3687,194 +4006,22 @@ echo "File: $POLIS_PATH"</code>
         }
     },
 
-    // Determine the opposite view for the right panel based on left editor mode
-    _getOppositeMode() {
-        return this._rawMode['markdown-input'] ? 'wysiwyg' : 'markdown';
-    },
-
-    // Build right panel tabs dynamically based on left editor mode
-    _buildPanelTabs() {
-        const toggle = document.getElementById('panel-mode-toggle');
-        if (!toggle) return;
-        const oppositeMode = this._getOppositeMode();
-        const oppositeLabel = oppositeMode === 'wysiwyg' ? 'WYSIWYG' : 'Markdown';
-        toggle.innerHTML = `
-            <button class="panel-mode-btn active" data-panel-mode="${oppositeMode}">${oppositeLabel}</button>
-            <button class="panel-mode-btn" data-panel-mode="help">Help</button>
-            <button class="panel-mode-btn" data-panel-mode="browse">Browse</button>
-        `;
-    },
-
-    // Open the right panel
-    openRightPanel(mode) {
-        const panel = document.getElementById('editor-right-panel');
-        panel.classList.remove('collapsed');
-        this._rightPanelOpen = true;
-        // Move toggle button to right panel header
-        const toggleBtn = document.getElementById('editor-right-panel-toggle');
-        const rightHeader = document.querySelector('.right-panel-header');
-        toggleBtn.classList.add('active-panel');
-        rightHeader.appendChild(toggleBtn);
-        // Disable left editor mode toggle while panel is open
-        document.getElementById('editor-wysiwyg-btn').disabled = true;
-        document.getElementById('editor-markdown-btn').disabled = true;
-        document.querySelector('.editor-mode-toggle')?.classList.add('disabled');
-        // Build tabs based on current left mode
-        this._buildPanelTabs();
-        // Determine default mode: opposite of current left mode
-        const defaultMode = this._getOppositeMode();
-        this.setRightPanelMode(mode || defaultMode);
-    },
-
-    // Close the right panel
-    closeRightPanel() {
-        // If markdown textarea was edited, sync final state back to left
-        if (this._rightPanelMode === 'markdown') {
-            const md = document.getElementById('panel-markdown-textarea').value;
-            document.getElementById('markdown-input').value = md;
-            if (!this._rawMode['markdown-input'] && window.MilkdownBridge?.isReady('milkdown-post')) {
-                window.MilkdownBridge.setMarkdown('milkdown-post', md);
-            }
-        }
-        const panel = document.getElementById('editor-right-panel');
-        panel.classList.add('collapsed');
-        this._rightPanelOpen = false;
-        // Move toggle button back to left pane header
-        const toggleBtn = document.getElementById('editor-right-panel-toggle');
-        const leftHeaderRight = document.querySelector('.pane-header-right');
-        toggleBtn.classList.remove('active-panel');
-        leftHeaderRight.appendChild(toggleBtn);
-        // Re-enable left editor mode toggle
-        document.getElementById('editor-wysiwyg-btn').disabled = false;
-        document.getElementById('editor-markdown-btn').disabled = false;
-        document.querySelector('.editor-mode-toggle')?.classList.remove('disabled');
-    },
-
-    // Set the active tab in the right panel
-    setRightPanelMode(mode) {
-        this._rightPanelMode = mode;
-        // Update tab active states
-        document.querySelectorAll('#panel-mode-toggle .panel-mode-btn').forEach(tab => {
-            tab.classList.toggle('active', tab.dataset.panelMode === mode);
-        });
-        // Show/hide panel bodies
-        document.getElementById('panel-opposite-preview').classList.toggle('hidden', mode !== 'wysiwyg');
-        document.getElementById('panel-opposite-markdown').classList.toggle('hidden', mode !== 'markdown');
-        document.getElementById('panel-help').classList.toggle('hidden', mode !== 'help');
-        document.getElementById('panel-browse').classList.toggle('hidden', mode !== 'browse');
-
-        // Get current content from left pane
-        const md = this.getEditorContent('markdown-input') || '';
-
-        if (mode === 'help') {
-            // Reorder help sections: show the relevant one first
-            const ref = document.querySelector('.help-reference');
-            if (ref) {
-                const wysiwygSection = document.getElementById('help-section-wysiwyg');
-                const markdownSection = document.getElementById('help-section-markdown');
-                if (this._rawMode['markdown-input']) {
-                    // Left is MARKDOWN → markdown syntax first
-                    ref.insertBefore(markdownSection, ref.firstChild);
-                } else {
-                    // Left is WYSIWYG → keyboard shortcuts first
-                    ref.insertBefore(wysiwygSection, ref.firstChild);
-                }
-            }
-        } else if (mode === 'wysiwyg') {
-            // Left is MARKDOWN, right shows server-rendered HTML (WYSIWYG view)
-            this._renderPreviewDebounced(md);
-        } else if (mode === 'markdown') {
-            // Left is WYSIWYG, right shows raw markdown textarea
-            document.getElementById('panel-markdown-textarea').value = md;
-        } else if (mode === 'browse') {
-            this._loadBrowsePosts();
-        }
-        // Persist (fire and forget)
-        this._saveEditorPanelMode(mode);
-    },
-
-    // Load posts for browse mode
-    async _loadBrowsePosts() {
-        if (this._browsePosts.length > 0) {
-            this._renderBrowseNavigator();
-            return;
-        }
-        const nav = document.querySelector('#panel-browse .browse-navigator');
-        try {
-            const result = await this.api('GET', '/api/posts');
-            this._browsePosts = result.posts || [];
-            this._renderBrowseNavigator();
-        } catch (err) {
-            if (nav) nav.innerHTML = '<p class="empty-state">Failed to load posts.</p>';
-        }
-    },
-
-    // Render horizontal browse card strip
-    _renderBrowseNavigator() {
-        const nav = document.querySelector('#panel-browse .browse-navigator');
-        if (!nav) return;
-        if (this._browsePosts.length === 0) {
-            nav.innerHTML = '<p class="empty-state">No posts yet.</p>';
-            return;
-        }
-        nav.innerHTML = this._browsePosts.map(post => {
-            const title = this.escapeHtml(post.title || post.path);
-            const date = post.date || '';
-            const selected = post.path === this._browseSelectedPath ? ' selected' : '';
-            return `<div class="browse-card${selected}" onclick="App.selectBrowsePost('${this.escapeHtml(post.path)}')">
-                <div class="browse-card-title">${title}</div>
-                <div class="browse-card-date">${this.escapeHtml(date)}</div>
-            </div>`;
-        }).join('');
-    },
-
-    // Select a post in browse mode
-    async selectBrowsePost(path) {
-        this._browseSelectedPath = path;
-        this._renderBrowseNavigator();
-        const previewEl = document.getElementById('browse-preview-content');
-        const loadBtn = document.getElementById('browse-load-btn');
-        previewEl.innerHTML = '<p class="empty-state">Loading...</p>';
-        loadBtn.classList.add('hidden');
-        try {
-            const result = await this.api('GET', `/api/posts/${encodeURIComponent(path)}`);
-            const rendered = await this.api('POST', '/api/render', { markdown: result.markdown || '' });
-            previewEl.innerHTML = rendered.html;
-            loadBtn.classList.remove('hidden');
-        } catch (err) {
-            previewEl.innerHTML = `<p class="empty-state">Failed to load post.</p>`;
-        }
-    },
-
-    // Load selected browse post into editor
-    loadBrowsePostIntoEditor() {
-        if (!this._browseSelectedPath) return;
-        const path = this._browseSelectedPath;
-        this.showConfirmModal(
-            'Load Post',
-            'This will replace the current editor content with the selected post. Continue?',
-            async () => {
-                this.closeRightPanel();
-                await this.openPost(path);
-            }
-        );
-    },
-
-    // Persist editor panel mode to server
-    _saveEditorPanelMode(mode) {
-        fetch('/api/settings/editor-panel-mode', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode }),
-        }).catch(() => {});
-    },
-
     // Save draft
-    async saveDraft() {
-        const markdown = this.getEditorContent('markdown-input');
+    // Build full markdown with title heading prepended from the title input
+    _buildFullMarkdown() {
+        const title = (document.getElementById('editor-title-input')?.value || '').trim();
+        const body = this.getEditorContent('markdown-input');
+        if (title) {
+            return `# ${title}\n\n${body}`;
+        }
+        return body;
+    },
+
+    async saveDraft(silent = false) {
+        const markdown = this._buildFullMarkdown();
 
         if (!markdown.trim()) {
-            this.showToast('Nothing to save', 'warning');
+            if (!silent) this.showToast('Nothing to save', 'warning');
             return;
         }
 
@@ -3895,19 +4042,37 @@ echo "File: $POLIS_PATH"</code>
         }
 
         const id = this.currentDraftId || this.slugify(title);
+        const status = document.getElementById('editor-save-status');
+
+        if (silent) {
+            status.textContent = 'Saving...';
+            status.classList.remove('saved');
+        }
 
         try {
             const result = await this.api('POST', '/api/drafts', { id, markdown });
             this.currentDraftId = result.id;
-            this.showToast('Draft saved', 'success');
+            if (silent) {
+                status.textContent = 'Saved';
+                status.classList.add('saved');
+            } else {
+                this.showToast('Draft saved', 'success');
+                status.textContent = 'Saved';
+                status.classList.add('saved');
+            }
         } catch (err) {
-            this.showToast('Failed to save draft: ' + err.message, 'error');
+            if (silent) {
+                status.textContent = 'Save failed';
+                status.classList.remove('saved');
+            } else {
+                this.showToast('Failed to save draft: ' + err.message, 'error');
+            }
         }
     },
 
     // Publish or republish post
     async publish() {
-        const markdown = this.getEditorContent('markdown-input');
+        const markdown = this._buildFullMarkdown();
 
         if (!markdown.trim()) {
             this.showToast('Nothing to publish', 'warning');
@@ -3942,7 +4107,8 @@ echo "File: $POLIS_PATH"</code>
                 const filenameInput = document.getElementById('filename-input').value.trim();
                 result = await this.api('POST', '/api/publish', {
                     markdown,
-                    filename: filenameInput || ''
+                    filename: filenameInput || '',
+                    draft_id: this.currentDraftId || ''
                 });
             }
 
@@ -3991,11 +4157,15 @@ echo "File: $POLIS_PATH"</code>
             this.currentPostPath = null;
             this.currentFrontmatter = '';
             this.filenameManuallySet = true;  // Draft already has a filename
-            this.setEditorContent('markdown-input', result.markdown);
+            // Extract title into separate input, load body without heading into editor
+            const draftTitle = this.extractTitleFromMarkdown(result.markdown);
+            document.getElementById('editor-title-input').value = draftTitle || '';
+            const titleRow = document.querySelector('.editor-title-row');
+            if (titleRow) titleRow.classList.toggle('has-value', !!(draftTitle || '').trim());
+            this.setEditorContent('markdown-input', this._stripTitleHeading(result.markdown));
             document.getElementById('filename-input').value = id;  // Draft ID is the filename
             document.getElementById('filename-input').disabled = false;
 
-            this.updateEditorFmToggle();
             this.updatePublishButton();
             if (opts.pushState !== false) {
                 window.history.pushState({}, '', this.pathForScreen('openDraft', { id }));
@@ -4003,6 +4173,40 @@ echo "File: $POLIS_PATH"</code>
             this.showScreen('editor');
         } catch (err) {
             this.showToast('Failed to load draft: ' + err.message, 'error');
+        }
+    },
+
+    // Delete a draft
+    async deleteDraft(id) {
+        const confirmed = await this.showConfirmModal(
+            'Delete Draft',
+            'This draft will be permanently deleted.',
+            'Delete',
+            'Cancel',
+            'danger',
+        );
+        if (!confirmed) return;
+
+        try {
+            await this.api('DELETE', `/api/drafts/${encodeURIComponent(id)}`);
+            this.showToast('Draft deleted', 'success');
+
+            // If we're in the editor viewing this draft, go back
+            if (this.currentDraftId === id) {
+                this.currentDraftId = null;
+                this.setEditorContent('markdown-input', '');
+                this.currentView = 'posts-published';
+                await this.loadAllCounts();
+                await this.loadViewContent();
+                this.showScreen('dashboard');
+                window.history.replaceState({}, '', this.pathForView('posts-published'));
+            } else {
+                // Refresh the list
+                await this.loadAllCounts();
+                await this.loadViewContent();
+            }
+        } catch (err) {
+            this.showToast('Failed to delete draft: ' + err.message, 'error');
         }
     },
 
@@ -4040,9 +4244,13 @@ echo "File: $POLIS_PATH"</code>
                 const fmMatch = result.raw_markdown.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/);
                 if (fmMatch) this.currentFrontmatter = fmMatch[0];
             }
-            this.setEditorContent('markdown-input', result.markdown);
+            // Extract title into separate input, load body without heading into editor
+            const postTitle = this.extractTitleFromMarkdown(result.markdown);
+            document.getElementById('editor-title-input').value = postTitle || '';
+            const titleRow = document.querySelector('.editor-title-row');
+            if (titleRow) titleRow.classList.toggle('has-value', !!(postTitle || '').trim());
+            this.setEditorContent('markdown-input', this._stripTitleHeading(result.markdown));
 
-            this.updateEditorFmToggle();
             this.updatePublishButton();
             if (opts.pushState !== false) {
                 window.history.pushState({}, '', this.pathForScreen('openPost', { path: cleanPath }));
@@ -4053,33 +4261,20 @@ echo "File: $POLIS_PATH"</code>
         }
     },
 
-    // Show/hide frontmatter toggle based on editing context
-    updateEditorFmToggle() {
-        const btn = document.getElementById('editor-fm-toggle');
-        if (!btn) return;
-        if (this.currentPostPath) {
-            btn.classList.remove('hidden');
-            btn.textContent = 'Show FM';
-        } else {
-            btn.classList.add('hidden');
-        }
-    },
-
-    // Update publish button text and filename visibility based on current state
+    // Update publish button text and delete-draft button visibility based on current state
     updatePublishButton() {
         const btn = document.getElementById('publish-btn');
-        const filenameContainer = document.getElementById('filename-container');
-        const filenameInput = document.getElementById('filename-input');
-
+        const deleteBtn = document.getElementById('delete-draft-btn');
         if (this.currentPostPath) {
-            // Republishing - filename is locked
             btn.textContent = 'Republish';
-            filenameContainer.style.display = 'none';
         } else {
-            // New post - filename is editable
             btn.textContent = 'Publish';
-            filenameContainer.style.display = 'flex';
-            filenameInput.disabled = false;
+        }
+        // Show delete-draft button only when editing a draft
+        if (this.currentDraftId && !this.currentPostPath) {
+            deleteBtn.classList.remove('hidden');
+        } else {
+            deleteBtn.classList.add('hidden');
         }
     },
 
@@ -4186,7 +4381,8 @@ echo "File: $POLIS_PATH"</code>
             this.currentView = 'comments-published';
             await this.loadAllCounts();
             this.updateSidebar(); // Ensure lifecycle recalculated after count update
-            this.fetchNotificationCount(); // Immediate notification refresh after beseech
+            // Notification fetch disabled — UI bell removed
+            // this.fetchNotificationCount();
             await this.loadViewContent();
             this.showScreen('dashboard');
             window.history.replaceState({}, '', this.basePath + '/comments/pending');
@@ -4368,6 +4564,26 @@ echo "File: $POLIS_PATH"</code>
         return '';
     },
 
+    // Strip the first H1 heading from markdown (used when loading into editor
+    // since the title is displayed in a separate input field)
+    _stripTitleHeading(markdown) {
+        const lines = markdown.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+            const trimmed = lines[i].trim();
+            if (trimmed === '') continue;
+            if (trimmed.startsWith('# ')) {
+                // Remove the heading line and any immediately following blank line
+                lines.splice(i, 1);
+                if (i < lines.length && lines[i].trim() === '') {
+                    lines.splice(i, 1);
+                }
+                return lines.join('\n');
+            }
+            break; // First non-empty line isn't a heading — don't strip anything
+        }
+        return markdown;
+    },
+
     // Utility: slugify text for filename
     slugify(text) {
         return text
@@ -4440,7 +4656,118 @@ echo "File: $POLIS_PATH"</code>
         if (contentList) this.renderConversationsTabbed(contentList);
     },
 
+    // Natural-language sentence filter methods
+    setFeedSentenceFilter(filterName, value) {
+        switch (filterName) {
+            case 'readState':
+                this._feedShowNew = (value === 'New');
+                break;
+            case 'contentType': {
+                const typeMap = { 'posts': 'post', 'comments': 'comment', 'announcements': 'announcement', 'items': '' };
+                this._feedContentType = typeMap[value] || '';
+                break;
+            }
+            case 'scope': {
+                const scopeMap = { 'me': 'me', 'my network': 'network', 'my followers': 'followers', 'all of polis': 'global' };
+                const newScope = scopeMap[value] || 'network';
+                if (newScope !== this._feedScope) {
+                    this._feedScope = newScope;
+                    this._closeFeedPopovers();
+                    // Scope changes need a full re-fetch (different cache file)
+                    this._feedFilterOnly = false;
+                    const contentList = document.getElementById('content-list');
+                    if (contentList) this.renderConversationsTabbed(contentList);
+                    return;
+                }
+                break;
+            }
+            case 'timeRange': {
+                const timeMap = {
+                    'in the last hour': '1h', 'in the last day': '24h',
+                    'in the last 2 days': '2d', 'in the last week': '7d',
+                    'in the last month': '30d'
+                };
+                this._feedTimeFilter = timeMap[value] || '24h';
+                break;
+            }
+        }
+        this._closeFeedPopovers();
+        // Skip auto-refresh on filter-only changes (avoids unnecessary DS sync)
+        this._feedFilterOnly = true;
+        const contentList = document.getElementById('content-list');
+        if (contentList) this.renderConversationsTabbed(contentList);
+    },
+
+    openFeedPopover(filterName) {
+        if (this._feedPopoverOpen === filterName) {
+            this._closeFeedPopovers();
+            return;
+        }
+        this._closeFeedPopovers();
+        this._feedPopoverOpen = filterName;
+        const word = document.querySelector(`.feed-filter-word[data-filter="${filterName}"]`);
+        const popover = document.querySelector(`.feed-popover[data-for="${filterName}"]`);
+        const overlay = document.getElementById('feed-filter-overlay');
+        if (word) word.classList.add('active');
+        if (popover) popover.classList.add('visible');
+        if (overlay) overlay.classList.add('active');
+    },
+
+    _closeFeedPopovers() {
+        this._feedPopoverOpen = null;
+        document.querySelectorAll('.feed-filter-word.active').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.feed-popover.visible').forEach(el => el.classList.remove('visible'));
+        const overlay = document.getElementById('feed-filter-overlay');
+        if (overlay) overlay.classList.remove('active');
+    },
+
+    _buildFeedSentenceFilter(itemCount) {
+        const readLabel = this._feedShowNew ? 'New' : 'All';
+        const contentLabels = { '': 'items', 'post': 'posts', 'comment': 'comments', 'announcement': 'announcements' };
+        const contentLabel = contentLabels[this._feedContentType] || 'items';
+        const scopeLabels = { 'me': 'me', 'network': 'my network', 'followers': 'my followers', 'global': 'all of polis' };
+        const scopeLabel = scopeLabels[this._feedScope] || 'my network';
+        const timeLabels = { '1h': 'in the last hour', '24h': 'in the last day', '2d': 'in the last 2 days', '7d': 'in the last week', '30d': 'in the last month' };
+        const timeLabel = timeLabels[this._feedTimeFilter] || 'in the last day';
+
+        const isGlobal = this._feedScope === 'global';
+        const timeOptions = isGlobal
+            ? [['in the last hour', '1h'], ['in the last day', '24h']]
+            : [['in the last hour', '1h'], ['in the last day', '24h'], ['in the last 2 days', '2d'], ['in the last week', '7d'], ['in the last month', '30d']];
+
+        const word = (filterName, label, options) => {
+            const optHtml = options.map(([lbl]) =>
+                `<button class="feed-pop-opt${lbl === label ? ' selected' : ''}" onclick="App.setFeedSentenceFilter('${filterName}','${lbl.replace(/'/g, "\\'")}')">` +
+                `<span class="feed-pop-dot"></span>${this.escapeHtml(lbl)}</button>`
+            ).join('');
+            return `<span class="feed-filter-anchor"><span class="feed-filter-word${this._feedPopoverOpen === filterName ? ' active' : ''}" data-filter="${filterName}" onclick="App.openFeedPopover('${filterName}')">${this.escapeHtml(label)}<span class="feed-caret"></span></span>` +
+                `<div class="feed-popover${this._feedPopoverOpen === filterName ? ' visible' : ''}" data-for="${filterName}">${optHtml}</div></span>`;
+        };
+
+        return `
+            <div id="feed-filter-overlay" class="feed-overlay${this._feedPopoverOpen ? ' active' : ''}" onclick="App._closeFeedPopovers()"></div>
+            <div class="feed-sentence-area">
+                <div class="feed-sentence">
+                    ${word('readState', readLabel, [['New'], ['All']])}
+                    ${word('contentType', contentLabel, [['posts'], ['comments'], ['announcements'], ['items']])}
+                    from
+                    ${word('scope', scopeLabel, [['me'], ['my network'], ['my followers'], ['all of polis']])}
+                    ${word('timeRange', timeLabel, timeOptions)}
+                    <svg class="feed-sentence-return" viewBox="0 0 18 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 2h12v10"/><polyline points="11 9 14 12 17 9"/></svg>
+                </div>
+            </div>
+        `;
+    },
+
     async renderConversationsTabbed(container) {
+        // Record visit time for nav dot "new since last visit" logic
+        if (!this._feedFilterOnly) {
+            this._feedLastVisitedAt = new Date().toISOString();
+            localStorage.setItem('polis-feed-last-visit', this._feedLastVisitedAt);
+            this.counts.feedHasNew = false;
+            this._updateNavBadges();
+            this.api('POST', '/api/feed/visited', { at: this._feedLastVisitedAt }).catch(() => {});
+        }
         await this._renderAllSubtab(container, '');
     },
 
@@ -4452,6 +4779,30 @@ echo "File: $POLIS_PATH"</code>
         } catch (e) {
             return '(untitled)';
         }
+    },
+
+    _renderAnnouncementItem(a) {
+        const typeLabels = {
+            'pub.polis.follow.announced': 'followed someone',
+            'pub.polis.comment.blessing.granted': 'granted a blessing',
+            'pub.polis.comment.blessing.requested': 'requested a blessing',
+            'pub.polis.site.registered': 'joined polis',
+        };
+        const actionLabel = typeLabels[a.event_type] || a.event_type;
+        const actor = (a.author_domain || '').toLowerCase();
+        let detail = '';
+        if (a.title) {
+            detail = ` — <span class="activity-detail">${this.escapeHtml(a.title)}</span>`;
+        } else if (a.target_domain) {
+            detail = ` — <span class="activity-detail">${this.escapeHtml(a.target_domain)}</span>`;
+        }
+        return `
+            <div class="activity-item${a.unread ? ' unread' : ''}">
+                <span class="act-dot"></span>
+                <span><span class="act-who">${this.escapeHtml(actor)}</span> ${actionLabel}${detail}</span>
+                <span class="act-when">${this.formatRelativeTime(a.published)}</span>
+            </div>
+        `;
     },
 
     _renderGroupedItem(group) {
@@ -4469,7 +4820,6 @@ echo "File: $POLIS_PATH"</code>
         const defaultName = domain.replace(/\.polis\.pub$/, '').replace(/\./g, ' ');
         const authorName = (isMyDomain && this.authorName) ? this.authorName : (remoteCached && remoteCached.author_name) ? remoteCached.author_name : defaultName;
         const time = this.formatRelativeTime(group.last_activity);
-        const markLabel = isUnread ? 'Mark read' : 'Mark unread';
 
         // Build comment detail cards if available
         let commentsHtml = '';
@@ -4538,10 +4888,10 @@ echo "File: $POLIS_PATH"</code>
                data-url="${this.escapeHtml(linkUrl)}"
                onclick="App._handleGroupClick(this)">
                 <div class="item-hover-actions">
-                    <button class="hover-btn" onclick="event.stopPropagation(); App.${isUnread ? 'markFeedRead' : 'markFeedUnread'}(JSON.parse(this.closest('.feed-item').dataset.ids))">${markLabel}</button>
+                    <button class="hover-btn hover-btn-tag" onclick="event.stopPropagation(); App.showTagInput(this, '${this.escapeHtml(linkUrl)}')" title="Tag this post">Tag</button>
                 </div>
                 <div class="item-top">
-                    <div class="author-row" onclick="event.stopPropagation(); App.setFeedAuthorFilter('${this.escapeHtml(domain)}')" title="Filter by ${this.escapeHtml(domain)}">
+                    <div class="author-row" onclick="event.stopPropagation(); window.open('https://${this.escapeHtml(domain)}', '_blank')" title="${this.escapeHtml(domain)}">
                         <div class="author-avatar" style="${hasCustomAvatar ? this._buildAvatarStyle(customAvatar) : `background: ${avatar.color};`}">${hasCustomAvatar ? '' : avatar.initials}</div>
                         <div>
                             <span class="author-name">${this.escapeHtml(authorName)}</span>
@@ -4550,34 +4900,16 @@ echo "File: $POLIS_PATH"</code>
                     </div>
                     <span class="item-time">${this.escapeHtml(time)}</span>
                 </div>
-                <div class="item-title">${this.escapeHtml(title)}</div>
-                ${group.post_excerpt && !group.post_excerpt.toLowerCase().startsWith(title.toLowerCase().slice(0, 30)) ? `<div class="item-excerpt">${this.escapeHtml(group.post_excerpt)}</div>` : ''}
+                ${(() => { const strip = s => s.toLowerCase().replace(/[`*_~\[\]'"]/g, ''); return group.post_excerpt && strip(group.post_excerpt).startsWith(strip(title).slice(0, 30)); })()
+                    ? `<div class="item-excerpt">${this.escapeHtml(group.post_excerpt)}</div>`
+                    : `<div class="item-title">${this.escapeHtml(title)}</div>${group.post_excerpt ? `<div class="item-excerpt">${this.escapeHtml(group.post_excerpt)}</div>` : ''}`}
                 ${threadHtml}
             </div>
         `;
     },
 
-    async _handleGroupClick(el) {
-        const itemIds = JSON.parse(el.dataset.ids || '[]');
+    _handleGroupClick(el) {
         const url = el.dataset.url || '';
-        if (!itemIds || itemIds.length === 0) return;
-        try {
-            // Mark all items in this group as read on the server
-            await Promise.all(itemIds.map(id =>
-                this.api('POST', '/api/feed/read', { id })
-            ));
-            // Update counts and re-render (same pattern as markAllConversationsRead)
-            this.counts.feedUnread = Math.max(0, (this.counts.feedUnread || 0) - 1);
-            this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
-            this._updateTopbarBadges();
-            if (this.currentView === 'conversations') {
-                const contentList = document.getElementById('content-list');
-                if (contentList) await this.renderConversationsTabbed(contentList);
-            }
-        } catch (err) {
-            this.showToast('Failed to mark as read: ' + err.message, 'error');
-        }
-        // Open the URL in a background tab
         if (url && url !== '#') window.location.href = url;
     },
 
@@ -4597,7 +4929,8 @@ echo "File: $POLIS_PATH"</code>
                     : `<h3>No items</h3><p>No posts or comments in the feed yet. Click Refresh to check for new content.</p>`;
                 container.innerHTML = filterHtml + `<div class="feed-list"><div class="empty-state">${emptyMsg}</div></div>`;
 
-                if (!this._conversationsRefreshing) this._autoRefreshConversations();
+                if (!this._conversationsRefreshing && !this._feedFilterOnly) this._autoRefreshConversations();
+            this._feedFilterOnly = false;
                 return;
             }
 
@@ -4610,7 +4943,8 @@ echo "File: $POLIS_PATH"</code>
             // Fetch remote avatars for domains not yet cached
             this._fetchRemoteAvatarsForGroups(groups);
 
-            if (!this._conversationsRefreshing) this._autoRefreshConversations();
+            if (!this._conversationsRefreshing && !this._feedFilterOnly) this._autoRefreshConversations();
+            this._feedFilterOnly = false;
         } catch (err) {
             container.innerHTML = filterHtml + `<div class="feed-list"><div class="empty-state"><h3>Failed to load</h3><p>${this.escapeHtml(err.message)}</p></div></div>`;
         }
@@ -4666,39 +5000,23 @@ echo "File: $POLIS_PATH"</code>
         try {
             container.innerHTML = filterHtml + '<div class="feed-list"><div class="empty-state"><p>Loading...</p></div></div>';
 
-            // Fetch grouped feed and activity in parallel
-            const [groupedResult, activityResult] = await Promise.all([
-                this.api('GET', '/api/feed/grouped'),
-                this.api('GET', `/api/activity?since=${this._activityCursor}&limit=100`),
-            ]);
+            // Fetch grouped feed (includes announcements)
+            const scopeParam = this._feedScope && this._feedScope !== 'network' ? `?scope=${this._feedScope}` : '';
+            const groupedResult = await this.api('GET', `/api/feed/grouped${scopeParam}`);
 
             const groups = groupedResult.groups || [];
+            const announcements = groupedResult.announcements || [];
             this.counts.feedUnread = groupedResult.unread_items || 0;
             this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
             this._updateTopbarBadges();
 
-            const activityEvents = activityResult.events || [];
-            if (activityEvents.length > 0) {
-                this._mergeActivityEvents(activityEvents);
-                this._activityCursor = activityResult.cursor || this._activityCursor;
-            }
-
-            // Filter activity events that are already covered by feed groups
-            const feedEventTypes = new Set([
-                'pub.polis.post.published', 'pub.polis.post.republished',
-                'pub.polis.comment.published', 'pub.polis.comment.republished'
-            ]);
-            const filteredActivity = [...this._activityEvents].reverse().filter(
-                evt => !feedEventTypes.has(evt.type)
-            );
-
-            // Build merged timeline entries
+            // Build merged timeline entries from groups + announcements
             const entries = [];
             for (const g of groups) {
                 entries.push({ type: 'group', data: g, timestamp: g.last_activity });
             }
-            for (const evt of filteredActivity) {
-                entries.push({ type: 'activity', data: evt, timestamp: evt.timestamp });
+            for (const a of announcements) {
+                entries.push({ type: 'announcement', data: a, timestamp: a.published });
             }
 
             // Sort by timestamp descending (parse to handle non-ISO formats)
@@ -4708,30 +5026,54 @@ echo "File: $POLIS_PATH"</code>
                 return (tb || 0) - (ta || 0);
             });
 
+            // Auto-sync scoped feeds when stale or never-synced
+            if (groupedResult.stale && this._feedScope && this._feedScope !== 'network' && !this._feedScopeSyncing) {
+                this._feedScopeSyncing = true;
+                container.innerHTML = filterHtml + '<div class="feed-list"><div class="empty-state"><p>Syncing...</p></div></div>';
+                await this.api('POST', `/api/feed/refresh?scope=${this._feedScope}`);
+                this._feedScopeSyncing = false;
+                return this._renderAllSubtab(container, filterHtml);
+            }
+            this._feedScopeSyncing = false;
+
             if (entries.length === 0) {
                 const emptyMsg = this.counts.following === 0
                     ? `<h3>Your feed is empty</h3><p>Follow someone to see their posts here.</p><button class="primary" onclick="App.openFollowPanel()">Follow an author</button>`
                     : `<h3>Nothing new</h3><p>No items yet. Click Refresh to check for new content.</p>`;
-                container.innerHTML = filterHtml + `<div class="feed-list"><div class="empty-state">${emptyMsg}</div></div>`;
+                const emptySentence = this._buildFeedSentenceFilter(0);
+                container.innerHTML = filterHtml + emptySentence + `<div class="feed-list"><div class="empty-state">${emptyMsg}</div></div>`;
 
-                if (!this._conversationsRefreshing) this._autoRefreshConversations();
+                if (!this._conversationsRefreshing && !this._feedFilterOnly) this._autoRefreshConversations();
+                this._feedFilterOnly = false;
                 return;
             }
 
             // Apply feed filters
             let visibleEntries = entries;
-            const cutoffMap = { '1h': 3600000, '4h': 14400000, '8h': 28800000, '24h': 86400000, '7d': 604800000 };
+
+            // Content type filter
+            if (this._feedContentType) {
+                const ct = this._feedContentType;
+                visibleEntries = visibleEntries.filter(e => {
+                    if (ct === 'post') return e.type === 'group' && e.data.has_post;
+                    if (ct === 'comment') return e.type === 'group' && e.data.total_comments > 0;
+                    if (ct === 'announcement') return e.type === 'announcement';
+                    return true;
+                });
+            }
+
+            const cutoffMap = { '1h': 3600000, '24h': 86400000, '2d': 172800000, '7d': 604800000, '30d': 2592000000 };
 
             // Time filter with auto-widen: if default 24h yields nothing, try 7d then all
             let effectiveTimeFilter = this._feedTimeFilter || '24h';
             if (effectiveTimeFilter !== 'all') {
                 const cutoff = Date.now() - (cutoffMap[effectiveTimeFilter] || 86400000);
-                visibleEntries = entries.filter(e => {
+                visibleEntries = visibleEntries.filter(e => {
                     const ts = e.timestamp ? new Date(e.timestamp).getTime() : 0;
                     return ts >= cutoff;
                 });
-                // Auto-widen only from the default 24h when no other filters are active
-                if (visibleEntries.length === 0 && effectiveTimeFilter === '24h' && !this._feedAuthorFilter && !this._feedShowNew) {
+                // Auto-widen only from the default 24h when no content/author filters are active
+                if (visibleEntries.length === 0 && effectiveTimeFilter === '24h' && !this._feedAuthorFilter && !this._feedShowNew && !this._feedContentType) {
                     const cutoff7d = Date.now() - cutoffMap['7d'];
                     visibleEntries = entries.filter(e => {
                         const ts = e.timestamp ? new Date(e.timestamp).getTime() : 0;
@@ -4743,16 +5085,21 @@ echo "File: $POLIS_PATH"</code>
                         visibleEntries = entries;
                         effectiveTimeFilter = 'all';
                     }
+                    // Update the sentence filter label to match widened range
+                    this._feedTimeFilter = effectiveTimeFilter;
                 }
             }
 
-            // Show New filter (unread feed items only, hide activity)
+            // Show New filter (unread items only)
             if (this._feedShowNew) {
                 visibleEntries = visibleEntries.filter(e => {
                     if (e.type === 'group') {
                         return e.data.post_unread || (e.data.unread_comments || 0) > 0;
                     }
-                    return false; // hide activity events in "Show New" mode
+                    if (e.type === 'announcement') {
+                        return e.data.unread;
+                    }
+                    return false;
                 });
             }
 
@@ -4766,70 +5113,57 @@ echo "File: $POLIS_PATH"</code>
                         if (g.comments && g.comments.some(c => c.author_domain === af)) return true;
                         return false;
                     }
+                    if (e.type === 'announcement') {
+                        const a = e.data;
+                        return a.author_domain === af || a.target_domain === af;
+                    }
                     return true;
                 });
             }
 
-            // Collect visible unread item IDs for filtered mark-read
-            const visibleUnreadIds = [];
-            for (const e of visibleEntries) {
-                if (e.type === 'group' && e.data.item_ids) {
-                    if (e.data.post_unread || (e.data.unread_comments || 0) > 0) {
-                        visibleUnreadIds.push(...e.data.item_ids);
-                    }
-                }
-            }
+            const sentenceFilterHtml = this._buildFeedSentenceFilter(visibleEntries.length);
 
-            this._visibleUnreadIds = visibleUnreadIds;
-            const markReadBtn = visibleUnreadIds.length > 0
-                ? `<button class="feed-btn mark-read" onclick="App.markVisibleFeedRead()">Mark all read</button>`
-                : '';
-            const filterBtn = `<button class="feed-btn" onclick="App.toggleFeedFilter()">${this._feedShowNew ? 'Show All' : 'Show New'}</button>`;
-
-            // Build time filter dropdown
-            const timeOpts = [
-                ['1h', 'Last hour'], ['4h', 'Last 4 hours'], ['8h', 'Last 8 hours'],
-                ['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['all', 'All time']
-            ];
-            const timeFilterHtml = `<select class="feed-author-select" onchange="App.setFeedTimeFilter(this.value)">
-                ${timeOpts.map(([v, label]) => `<option value="${v}"${effectiveTimeFilter === v ? ' selected' : ''}>${label}</option>`).join('')}
-            </select>`;
-
-            // Build author filter dropdown from unique domains in feed
-            const authorDomains = new Set();
-            for (const e of entries) {
-                if (e.type === 'group') {
-                    if (e.data.post_domain) authorDomains.add(e.data.post_domain);
-                    if (e.data.comments) e.data.comments.forEach(c => { if (c.author_domain) authorDomains.add(c.author_domain); });
-                }
-            }
-            const sortedAuthors = [...authorDomains].sort();
-            let authorFilterHtml = '';
-            if (this._feedAuthorFilter) {
-                authorFilterHtml = `<span class="feed-author-chip" onclick="App.clearFeedAuthorFilter()">${this.escapeHtml(this._feedAuthorFilter)} ×</span>`;
-            } else if (sortedAuthors.length > 1) {
-                const opts = sortedAuthors.map(d => {
-                    const label = d.replace(/\.polis\.pub$/, '');
-                    return `<option value="${this.escapeHtml(d)}">${this.escapeHtml(label)}</option>`;
-                }).join('');
-                authorFilterHtml = `<select class="feed-author-select" onchange="if(this.value) App.setFeedAuthorFilter(this.value); this.value='';">
-                    <option value="">By author</option>${opts}
-                </select>`;
-            }
-
-            container.innerHTML = filterHtml + `
-                <div class="feed-list">
-                    <div class="feed-date-sep">
-                        ${authorFilterHtml}
-                        ${timeFilterHtml}
-                        <div class="feed-actions">${filterBtn}${markReadBtn}</div>
+            const metaRowHtml = `
+                <div class="feed-sentence-meta">
+                    <span class="feed-sentence-count">${visibleEntries.length} item${visibleEntries.length !== 1 ? 's' : ''}</span>
+                    <button class="feed-compose-btn${this._feedEditorOpen ? ' open' : ''}" onclick="App.toggleFeedEditor()" title="New post">${this._feedEditorOpen ? '\u00d7' : '+'}</button>
+                </div>
+                <div class="feed-editor-wrapper${this._feedEditorOpen ? ' open' : ''}" id="feed-editor-wrapper">
+                    <div class="feed-editor-card">
+                        <div class="feed-editor-title-row${(this._feedEditorTitle || '').trim() ? ' has-value' : ''}">
+                            <span class="feed-editor-hash">#</span>
+                            <input type="text" class="feed-editor-title" id="feed-editor-title"
+                                placeholder="title" value="${this.escapeHtml(this._feedEditorTitle || '')}"
+                                oninput="App._onFeedEditorInput()">
+                        </div>
+                        <div id="milkdown-feed" class="milkdown-mount"></div>
+                        <textarea id="feed-editor-body" class="hidden">${this.escapeHtml(this._feedEditorBody || '')}</textarea>
+                        <div class="feed-editor-footer">
+                            <span class="feed-editor-hint"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> focus</span>
+                            <span class="feed-editor-status" id="feed-editor-status">${this._feedEditorStatus || ''}</span>
+                            <button class="feed-editor-publish" onclick="App.publishFromFeed()"
+                                ${(this._feedEditorTitle || '').trim() || (this._feedEditorBody || '').trim() ? '' : 'disabled'}>Publish</button>
+                        </div>
                     </div>
+                </div>
+            `;
+
+            // Save inline comment state before re-render destroys DOM
+            const _savedInlineCommentUrl = this._inlineCommentOpen ? this._inlineCommentUrl : null;
+            if (this._inlineCommentOpen) {
+                this._inlineCommentBody = this.getEditorContent('inline-comment-body') || this._inlineCommentBody;
+                this._destroyMilkdown('inline-comment-body');
+            }
+
+            container.innerHTML = filterHtml + sentenceFilterHtml + metaRowHtml + `
+                <div class="feed-list">
                     ${visibleEntries.length === 0
                         ? `<div class="empty-state"><p>No items match the current filters.</p>
-                            <button class="feed-btn" onclick="App.setFeedTimeFilter('all'); App._feedShowNew = false; App.renderConversationsTabbed(document.getElementById('content-list'));">Show all</button></div>`
+                            <button class="feed-btn" onclick="App._feedTimeFilter='24h'; App._feedShowNew=false; App._feedContentType=''; App.renderConversationsTabbed(document.getElementById('content-list'));">Show all</button></div>`
                         : visibleEntries.map(e => {
                             if (e.type === 'group') return this._renderGroupedItem(e.data);
-                            return this.renderActivityEvent(e.data);
+                            if (e.type === 'announcement') return this._renderAnnouncementItem(e.data);
+                            return '';
                         }).join('')}
                 </div>
             `;
@@ -4838,7 +5172,17 @@ echo "File: $POLIS_PATH"</code>
             const feedGroups = entries.filter(e => e.type === 'group').map(e => e.data);
             this._fetchRemoteAvatarsForGroups(feedGroups);
 
-            if (!this._conversationsRefreshing) this._autoRefreshConversations();
+            // Observe unread items for viewport-based auto-marking
+            this._observeFeedItems(container);
+
+            // Restore inline comment editor if it was open
+            if (_savedInlineCommentUrl) {
+                this._inlineCommentOpen = false; // Reset so openInlineCommentEditor doesn't try to close
+                this.openInlineCommentEditor(_savedInlineCommentUrl);
+            }
+
+            if (!this._conversationsRefreshing && !this._feedFilterOnly) this._autoRefreshConversations();
+            this._feedFilterOnly = false;
         } catch (err) {
             container.innerHTML = filterHtml + `<div class="feed-list"><div class="empty-state"><h3>Failed to load</h3><p>${this.escapeHtml(err.message)}</p></div></div>`;
         }
@@ -4870,7 +5214,8 @@ echo "File: $POLIS_PATH"</code>
                 if (contentList) await this.renderConversationsTabbed(contentList);
             }
 
-            this.fetchNotificationCount();
+            // Notification fetch disabled — UI bell removed
+            // this.fetchNotificationCount();
         } catch (err) {
             this.showToast('Refresh failed: ' + err.message, 'error');
         } finally {
@@ -4905,108 +5250,523 @@ echo "File: $POLIS_PATH"</code>
         }
     },
 
-    _updateMarkAllReadBtn() {
-        const btn = document.getElementById('mark-all-read-btn');
-        if (btn) btn.disabled = (this.counts.feedUnread || 0) === 0;
-    },
-
-    async markAllConversationsRead() {
-        try {
-            await Promise.all([
-                this.api('POST', '/api/feed/read', { all: true }),
-                this.api('POST', '/api/notifications/read', { all: true }),
-            ]);
-            this.counts.feedUnread = 0;
-            this.notificationState.unreadCount = 0;
-            this.updateBadge('feed-count', 0);
-            this._updateTopbarBadges();
-            this._updateNotificationDot();
-
-            if (this.currentView === 'conversations') {
-                const contentList = document.getElementById('content-list');
-                if (contentList) await this.renderConversationsTabbed(contentList);
-            }
-            this.showToast('All items marked as read', 'success');
-        } catch (err) {
-            this.showToast('Failed: ' + err.message, 'error');
+    // Inline feed editor
+    toggleFeedEditor() {
+        this._feedEditorOpen = !this._feedEditorOpen;
+        const wrapper = document.getElementById('feed-editor-wrapper');
+        const btn = document.querySelector('.feed-compose-btn');
+        if (wrapper) wrapper.classList.toggle('open', this._feedEditorOpen);
+        if (btn) {
+            btn.classList.toggle('open', this._feedEditorOpen);
+            btn.textContent = this._feedEditorOpen ? '\u00d7' : '+';
+        }
+        if (this._feedEditorOpen) {
+            setTimeout(async () => {
+                await this._initMilkdown('feed-editor-body');
+                // Wire Milkdown change events to autosave
+                document.getElementById('milkdown-feed')?.addEventListener('milkdown:change', () => {
+                    this._onFeedEditorInput();
+                });
+                const title = document.getElementById('feed-editor-title');
+                if (title) title.focus();
+            }, 350);
+        } else {
+            this._destroyMilkdown('feed-editor-body');
         }
     },
 
-    // Mark only items visible in the current filtered view as read
-    async markVisibleFeedRead() {
-        const ids = this._visibleUnreadIds || [];
+    closeFeedEditor() {
+        this._destroyMilkdown('feed-editor-body');
+        this._feedEditorOpen = false;
+        this._feedEditorTitle = '';
+        this._feedEditorBody = '';
+        this._feedEditorStatus = '';
+        this._feedEditorDraftId = null;
+        const wrapper = document.getElementById('feed-editor-wrapper');
+        const btn = document.querySelector('.feed-compose-btn');
+        if (wrapper) wrapper.classList.remove('open');
+        if (btn) {
+            btn.classList.remove('open');
+            btn.textContent = '+';
+        }
+    },
+
+    _autoGrowFeedEditor(el) {
+        el.style.height = 'auto';
+        el.style.height = el.scrollHeight + 'px';
+    },
+
+    _onFeedEditorInput() {
+        const title = document.getElementById('feed-editor-title');
+        if (title) this._feedEditorTitle = title.value;
+        const titleRow = document.querySelector('.feed-editor-title-row');
+        if (titleRow) titleRow.classList.toggle('has-value', !!(this._feedEditorTitle || '').trim());
+        this._feedEditorBody = this.getEditorContent('feed-editor-body') || '';
+        const hasContent = (this._feedEditorTitle || '').trim() || (this._feedEditorBody || '').trim();
+        const pub = document.querySelector('.feed-editor-publish');
+        if (pub) pub.disabled = !hasContent;
+        if (!hasContent) { this._updateFeedEditorStatus(''); return; }
+        this._updateFeedEditorStatus('Unsaved');
+        if (this._feedEditorSaveTimer) clearTimeout(this._feedEditorSaveTimer);
+        this._feedEditorSaveTimer = setTimeout(() => this._saveFeedEditorDraft(), 2000);
+    },
+
+    _updateFeedEditorStatus(text, saved) {
+        this._feedEditorStatus = text;
+        const el = document.getElementById('feed-editor-status');
+        if (el) {
+            el.textContent = text;
+            el.classList.toggle('saved', !!saved);
+        }
+    },
+
+    _slugFromTitle(title) {
+        return title.trim().toLowerCase()
+            .replace(/[^a-z0-9\s-]/g, '')
+            .replace(/\s+/g, '-')
+            .replace(/-+/g, '-')
+            .substring(0, 60)
+            .replace(/-$/, '') || '';
+    },
+
+    async _saveFeedEditorDraft() {
+        const title = this._feedEditorTitle || '';
+        const body = this._feedEditorBody || '';
+        if (!title.trim() && !body.trim()) return;
+        this._updateFeedEditorStatus('Saving...');
+        try {
+            // Generate a slug-based ID from the title on first save
+            if (!this._feedEditorDraftId && title.trim()) {
+                this._feedEditorDraftId = this._slugFromTitle(title);
+            }
+            const markdown = title.trim() ? `# ${title}\n\n${body}` : body;
+            const result = await this.api('POST', '/api/drafts', {
+                id: this._feedEditorDraftId || '',
+                markdown,
+            });
+            if (result.id) this._feedEditorDraftId = result.id;
+            this._updateFeedEditorStatus('Saved', true);
+        } catch (e) {
+            this._updateFeedEditorStatus('Save failed');
+        }
+    },
+
+    async publishFromFeed() {
+        const title = this._feedEditorTitle || '';
+        const body = this._feedEditorBody || '';
+        if (!title.trim() && !body.trim()) return;
+        const markdown = title.trim() ? `# ${title}\n\n${body}` : body;
+        const pub = document.querySelector('.feed-editor-publish');
+        if (pub) { pub.disabled = true; pub.textContent = 'Publishing...'; }
+        try {
+            const result = await this.api('POST', '/api/publish', {
+                markdown,
+                filename: '',
+                draft_id: this._feedEditorDraftId || '',
+            });
+            if (result.success) {
+                this.showToast(`Published: ${result.title || 'Post'}`, 'success');
+                this.closeFeedEditor();
+                await this.loadAllCounts();
+                const cl = document.getElementById('content-list');
+                if (cl) await this.renderConversationsTabbed(cl);
+            }
+        } catch (e) {
+            this.showToast('Failed to publish: ' + e.message, 'error');
+            if (pub) { pub.disabled = false; pub.textContent = 'Publish'; }
+        }
+    },
+
+    _openFullEditorFromFeed() {
+        // Save current inline content as draft, then open full editor in focus mode
+        const title = this._feedEditorTitle || '';
+        const body = this.getEditorContent('feed-editor-body') || '';
+        this._focusFromFeed = true;
+        this.closeFeedEditor();
+        this.navigateTo('/posts/new');
+        // Set content and enter focus mode after editor screen opens
+        setTimeout(() => {
+            const titleInput = document.getElementById('editor-title-input');
+            if (titleInput && title.trim()) titleInput.value = title;
+            const textarea = document.getElementById('markdown-input');
+            if (textarea) textarea.value = body;
+            this.setEditorContent('markdown-input', body);
+            // Enter focus mode
+            if (!this._focusMode) this._toggleFocusMode();
+        }, 300);
+    },
+
+    // ── Inline Comment Editor (in-feed reply) ──
+
+    openInlineCommentEditor(postUrl) {
+        // Close any existing inline comment editor
+        if (this._inlineCommentOpen) {
+            this._closeInlineCommentEditorImmediate();
+        }
+
+        // Find the feed item by URL
+        const feedItem = document.querySelector(`.feed-item[data-url="${CSS.escape(postUrl)}"]`);
+        if (!feedItem) {
+            this.newComment();
+            return;
+        }
+
+        this._inlineCommentOpen = true;
+        this._inlineCommentUrl = postUrl;
+        this._inlineCommentBody = '';
+        this._inlineCommentDraftId = null;
+
+        // Extract context from the feed item DOM
+        this._inlineCommentAuthor = feedItem.querySelector('.author-name')?.textContent || '';
+        this._inlineCommentTitle = (feedItem.querySelector('.item-title') || feedItem.querySelector('.item-excerpt'))?.textContent || '';
+
+        // Highlight the Reply button
+        feedItem.querySelector('.reply-btn')?.classList.add('active');
+
+        // Create editor element
+        const editorEl = document.createElement('div');
+        editorEl.id = 'inline-comment-wrapper';
+        editorEl.className = 'inline-comment-wrapper';
+        editorEl.innerHTML = `
+            <div class="inline-comment-card">
+                <div class="inline-comment-context">
+                    <svg class="inline-comment-reply-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="9 17 4 12 9 7"/>
+                        <path d="M20 18v-2a4 4 0 0 0-4-4H4"/>
+                    </svg>
+                    <span>Replying to</span>
+                    <span class="inline-comment-context-author">${this.escapeHtml(this._inlineCommentAuthor)}</span>
+                    <span class="inline-comment-context-title">&mdash; ${this.escapeHtml(this._inlineCommentTitle)}</span>
+                </div>
+                <div id="milkdown-inline-comment" class="milkdown-mount"></div>
+                <textarea id="inline-comment-body" class="hidden"></textarea>
+                <div class="inline-comment-footer">
+                    <span class="inline-comment-hint"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> focus &middot; <kbd>Esc</kbd> cancel</span>
+                    <span class="inline-comment-status" id="inline-comment-status"></span>
+                    <button class="inline-comment-cancel" onclick="App.closeInlineCommentEditor()">Cancel</button>
+                    <button class="inline-comment-send" id="inline-comment-send" disabled onclick="App.sendInlineComment()">Sign &amp; Send</button>
+                </div>
+            </div>
+        `;
+
+        // Insert after the feed item (as sibling in .feed-list)
+        feedItem.insertAdjacentElement('afterend', editorEl);
+
+        // Animate open
+        requestAnimationFrame(() => {
+            editorEl.classList.add('open');
+        });
+
+        // Init Milkdown after animation
+        setTimeout(async () => {
+            await this._initMilkdown('inline-comment-body');
+            // milkdown:change is dispatched on document, not the mount element
+            this._inlineCommentChangeHandler = (e) => {
+                if (e.detail?.editorId === 'milkdown-inline-comment') {
+                    this._onInlineCommentInput();
+                }
+            };
+            document.addEventListener('milkdown:change', this._inlineCommentChangeHandler);
+            document.querySelector('#milkdown-inline-comment .ProseMirror')?.focus();
+        }, 350);
+
+        // Load existing draft
+        this._loadInlineCommentDraft(postUrl);
+
+        // Scroll into view
+        setTimeout(() => {
+            editorEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }, 100);
+    },
+
+    closeInlineCommentEditor() {
+        if (!this._inlineCommentOpen) return;
+        this._destroyMilkdown('inline-comment-body');
+        if (this._inlineCommentChangeHandler) {
+            document.removeEventListener('milkdown:change', this._inlineCommentChangeHandler);
+            this._inlineCommentChangeHandler = null;
+        }
+        if (this._inlineCommentSaveTimer) clearTimeout(this._inlineCommentSaveTimer);
+
+        // Remove active state from Reply button
+        document.querySelectorAll('.reply-btn.active').forEach(btn => btn.classList.remove('active'));
+
+        const wrapper = document.getElementById('inline-comment-wrapper');
+        if (wrapper) {
+            wrapper.classList.remove('open');
+            setTimeout(() => wrapper.remove(), 400);
+        }
+
+        this._inlineCommentOpen = false;
+        this._inlineCommentUrl = null;
+        this._inlineCommentAuthor = '';
+        this._inlineCommentTitle = '';
+        this._inlineCommentBody = '';
+        this._inlineCommentDraftId = null;
+        this._inlineCommentStatus = '';
+    },
+
+    // Immediate close without animation (for switching between items)
+    _closeInlineCommentEditorImmediate() {
+        this._destroyMilkdown('inline-comment-body');
+        if (this._inlineCommentChangeHandler) {
+            document.removeEventListener('milkdown:change', this._inlineCommentChangeHandler);
+            this._inlineCommentChangeHandler = null;
+        }
+        if (this._inlineCommentSaveTimer) clearTimeout(this._inlineCommentSaveTimer);
+        document.querySelectorAll('.reply-btn.active').forEach(btn => btn.classList.remove('active'));
+        document.getElementById('inline-comment-wrapper')?.remove();
+        this._inlineCommentOpen = false;
+        this._inlineCommentUrl = null;
+        this._inlineCommentAuthor = '';
+        this._inlineCommentTitle = '';
+        this._inlineCommentBody = '';
+        this._inlineCommentDraftId = null;
+        this._inlineCommentStatus = '';
+    },
+
+    _onInlineCommentInput() {
+        this._inlineCommentBody = this.getEditorContent('inline-comment-body') || '';
+        const hasContent = !!this._inlineCommentBody.trim();
+        const btn = document.getElementById('inline-comment-send');
+        if (btn) btn.disabled = !hasContent;
+        if (!hasContent) {
+            this._updateInlineCommentStatus('');
+            return;
+        }
+        this._updateInlineCommentStatus('Unsaved');
+        if (this._inlineCommentSaveTimer) clearTimeout(this._inlineCommentSaveTimer);
+        this._inlineCommentSaveTimer = setTimeout(() => this._saveInlineCommentDraft(), 2000);
+    },
+
+    _updateInlineCommentStatus(text, saved) {
+        const el = document.getElementById('inline-comment-status');
+        if (!el) return;
+        el.textContent = text;
+        if (saved) el.classList.add('saved');
+        else el.classList.remove('saved');
+    },
+
+    async _saveInlineCommentDraft() {
+        const body = this._inlineCommentBody || '';
+        if (!body.trim()) return;
+        this._updateInlineCommentStatus('Saving...');
+        try {
+            const result = await this.api('POST', '/api/comments/drafts', {
+                id: this._inlineCommentDraftId || '',
+                in_reply_to: this._inlineCommentUrl,
+                content: body,
+            });
+            if (result.id) this._inlineCommentDraftId = result.id;
+            this._updateInlineCommentStatus('Draft saved', true);
+        } catch (e) {
+            this._updateInlineCommentStatus('Save failed');
+        }
+    },
+
+    async _loadInlineCommentDraft(postUrl) {
+        try {
+            const result = await this.api('GET', '/api/comments/drafts');
+            const drafts = result.drafts || [];
+            const draft = drafts.find(d => d.in_reply_to === postUrl);
+            if (draft && this._inlineCommentUrl === postUrl) {
+                this._inlineCommentDraftId = draft.id;
+                this._inlineCommentBody = draft.content || '';
+                this.setEditorContent('inline-comment-body', this._inlineCommentBody);
+                this._updateInlineCommentStatus('Draft loaded', true);
+            }
+        } catch (e) {
+            // Start fresh if draft load fails
+        }
+    },
+
+    async sendInlineComment() {
+        const url = this._inlineCommentUrl;
+        const content = this.getEditorContent('inline-comment-body');
+        if (!url || !content?.trim()) {
+            this.showToast('Please write a comment', 'warning');
+            return;
+        }
+
+        const confirmed = await this.showConfirmModal(
+            'Send for Blessing',
+            `Sign this comment and send it to ${this._inlineCommentAuthor || 'the author'} for blessing?`,
+            'Sign & Send'
+        );
+        if (!confirmed) return;
+
+        const btn = document.getElementById('inline-comment-send');
+        if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
+
+        try {
+            const signResult = await this.api('POST', '/api/comments/sign', {
+                draft_id: this._inlineCommentDraftId || '',
+                in_reply_to: url,
+                content: content,
+            });
+
+            if (!signResult.success) throw new Error(signResult.error || 'Failed to sign comment');
+
+            try {
+                const beseechResult = await this.api('POST', '/api/comments/beseech', {
+                    comment_id: signResult.comment?.id || signResult.id,
+                });
+                if (beseechResult.status === 'blessed') {
+                    this.showToast('Comment auto-blessed!', 'success');
+                } else {
+                    this.showToast('Comment signed & sent for blessing', 'success');
+                }
+            } catch (beseechErr) {
+                this.showToast('Comment signed. Could not send blessing request: ' + beseechErr.message, 'warning', 6000);
+            }
+
+            this.closeInlineCommentEditor();
+            await this.loadAllCounts();
+            const cl = document.getElementById('content-list');
+            if (cl) await this.renderConversationsTabbed(cl);
+        } catch (err) {
+            this.showToast('Failed: ' + err.message, 'error');
+            if (btn) { btn.disabled = false; btn.textContent = 'Sign & Send'; }
+        }
+    },
+
+    // ── Inline Comment Focus Mode ──
+
+    _toggleInlineCommentFocusMode() {
+        if (!this._inlineCommentOpen) return;
+        this._inlineCommentFocusMode = !this._inlineCommentFocusMode;
+
+        if (this._inlineCommentFocusMode) {
+            // Save editor content before moving to focus overlay
+            this._inlineCommentBody = this.getEditorContent('inline-comment-body') || '';
+            this._destroyMilkdown('inline-comment-body');
+
+            const overlay = document.createElement('div');
+            overlay.id = 'inline-comment-focus';
+            overlay.className = 'inline-comment-focus';
+            overlay.innerHTML = `
+                <div class="icf-container">
+                    <div class="icf-post">
+                        <div class="icf-post-label">Original post</div>
+                        <iframe src="${this.escapeHtml(this._inlineCommentUrl)}" class="icf-post-frame" sandbox="allow-same-origin"></iframe>
+                    </div>
+                    <div class="icf-editor">
+                        <div class="icf-editor-label">Your reply to <strong>${this.escapeHtml(this._inlineCommentAuthor)}</strong></div>
+                        <div class="icf-editor-body">
+                            <div id="milkdown-inline-comment-focus" class="milkdown-mount"></div>
+                            <textarea id="inline-comment-body-focus" class="hidden">${this.escapeHtml(this._inlineCommentBody)}</textarea>
+                        </div>
+                        <div class="icf-footer">
+                            <span class="inline-comment-hint"><kbd>Esc</kbd> exit focus</span>
+                            <span class="inline-comment-status" id="inline-comment-status-focus"></span>
+                            <button class="inline-comment-cancel" onclick="App._toggleInlineCommentFocusMode()">Exit Focus</button>
+                            <button class="inline-comment-send" id="inline-comment-send-focus" onclick="App._sendFromFocusMode()">Sign &amp; Send</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(overlay);
+            document.getElementById('icon-nav')?.classList.add('focus-mode');
+
+            // Init Milkdown in focus overlay
+            setTimeout(async () => {
+                await this._initMilkdown('inline-comment-body-focus');
+                // milkdown:change is dispatched on document, not the mount element
+                this._inlineCommentFocusChangeHandler = (e) => {
+                    if (e.detail?.editorId === 'milkdown-inline-comment-focus') {
+                        this._inlineCommentBody = this.getEditorContent('inline-comment-body-focus') || '';
+                        const hasContent = !!this._inlineCommentBody.trim();
+                        const btn = document.getElementById('inline-comment-send-focus');
+                        if (btn) btn.disabled = !hasContent;
+                    }
+                };
+                document.addEventListener('milkdown:change', this._inlineCommentFocusChangeHandler);
+                document.querySelector('#milkdown-inline-comment-focus .ProseMirror')?.focus();
+            }, 200);
+        } else {
+            // Exit focus mode — restore content to inline editor
+            const content = this.getEditorContent('inline-comment-body-focus') || this._inlineCommentBody;
+            this._destroyMilkdown('inline-comment-body-focus');
+            if (this._inlineCommentFocusChangeHandler) {
+                document.removeEventListener('milkdown:change', this._inlineCommentFocusChangeHandler);
+                this._inlineCommentFocusChangeHandler = null;
+            }
+            document.getElementById('inline-comment-focus')?.remove();
+            document.getElementById('icon-nav')?.classList.remove('focus-mode');
+            this._inlineCommentBody = content;
+
+            // Re-init inline Milkdown with saved content
+            setTimeout(async () => {
+                await this._initMilkdown('inline-comment-body');
+                this.setEditorContent('inline-comment-body', content);
+                this._inlineCommentChangeHandler = (e) => {
+                    if (e.detail?.editorId === 'milkdown-inline-comment') {
+                        this._onInlineCommentInput();
+                    }
+                };
+                document.addEventListener('milkdown:change', this._inlineCommentChangeHandler);
+                document.querySelector('#milkdown-inline-comment .ProseMirror')?.focus();
+            }, 200);
+        }
+    },
+
+    async _sendFromFocusMode() {
+        // Sync content from focus editor back to state
+        this._inlineCommentBody = this.getEditorContent('inline-comment-body-focus') || '';
+        // Exit focus mode first
+        this._destroyMilkdown('inline-comment-body-focus');
+        if (this._inlineCommentFocusChangeHandler) {
+            document.removeEventListener('milkdown:change', this._inlineCommentFocusChangeHandler);
+            this._inlineCommentFocusChangeHandler = null;
+        }
+        document.getElementById('inline-comment-focus')?.remove();
+        document.getElementById('icon-nav')?.classList.remove('focus-mode');
+        this._inlineCommentFocusMode = false;
+        // Restore inline editor content and send
+        this.setEditorContent('inline-comment-body', this._inlineCommentBody);
+        await this.sendInlineComment();
+    },
+
+    // Viewport-based auto-mark-read: items are marked read when scrolled into view
+    _initFeedObserver() {
+        if (this._feedObserver) this._feedObserver.disconnect();
+        this._feedObserver = new IntersectionObserver((entries) => {
+            if (document.hidden) return;
+            for (const entry of entries) {
+                if (entry.isIntersecting && entry.target.classList.contains('unread')) {
+                    const ids = entry.target.dataset.ids;
+                    if (ids) {
+                        entry.target.classList.remove('unread');
+                        this._queueMarkRead(JSON.parse(ids));
+                    }
+                    this._feedObserver.unobserve(entry.target);
+                }
+            }
+        }, { threshold: 0.5 });
+    },
+
+    _queueMarkRead(ids) {
+        this._markReadQueue.push(...ids);
+        if (this._markReadTimer) clearTimeout(this._markReadTimer);
+        this._markReadTimer = setTimeout(() => this._flushMarkRead(), 1000);
+    },
+
+    async _flushMarkRead() {
+        const ids = [...this._markReadQueue];
+        this._markReadQueue = [];
         if (ids.length === 0) return;
         try {
-            await Promise.all(ids.map(id =>
-                this.api('POST', '/api/feed/read', { id })
-            ));
-            // Fetch actual count from server to avoid drift
-            const counts = await this.api('GET', '/api/feed/counts');
-            this.counts.feedUnread = counts.unread || 0;
-            this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+            await Promise.all(ids.map(id => this.api('POST', '/api/feed/read', { id })));
+            this.counts.feedUnread = Math.max(0, (this.counts.feedUnread || 0) - ids.length);
             this._updateTopbarBadges();
-
-            if (this.currentView === 'conversations') {
-                const contentList = document.getElementById('content-list');
-                if (contentList) await this.renderConversationsTabbed(contentList);
-            }
-            this.showToast('Visible items marked as read', 'success');
-        } catch (err) {
-            this.showToast('Failed: ' + err.message, 'error');
-        }
+        } catch (e) {}
     },
 
-    async markFeedRead(itemIds) {
-        try {
-            await Promise.all(itemIds.map(id =>
-                this.api('POST', '/api/feed/read', { id })
-            ));
-            this.counts.feedUnread = Math.max(0, (this.counts.feedUnread || 0) - itemIds.length);
-            this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
-            this._updateTopbarBadges();
-
-            if (this.currentView === 'conversations') {
-                const contentList = document.getElementById('content-list');
-                if (contentList) await this.renderConversationsTabbed(contentList);
-            }
-        } catch (err) {
-            this.showToast('Failed: ' + err.message, 'error');
-        }
-    },
-
-    async markFeedUnread(itemIds) {
-        try {
-            await Promise.all(itemIds.map(id =>
-                this.api('POST', '/api/feed/read', { id, unread: true })
-            ));
-            this.counts.feedUnread = Math.min((this.counts.feedUnread || 0) + 1, Infinity);
-            this.updateBadge('feed-count', this.counts.feedUnread, true);
-            this._updateTopbarBadges();
-
-            if (this.currentView === 'conversations') {
-                const contentList = document.getElementById('content-list');
-                if (contentList) await this.renderConversationsTabbed(contentList);
-            }
-        } catch (err) {
-            this.showToast('Failed: ' + err.message, 'error');
-        }
-    },
-
-    async markUnreadFromHere(id) {
-        try {
-            await this.api('POST', '/api/feed/read', { from_id: id });
-            const counts = await this.api('GET', '/api/feed/counts');
-            this.counts.feedUnread = counts.unread || 0;
-            this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
-            this._updateTopbarBadges();
-
-            if (this.currentView === 'conversations') {
-                const contentList = document.getElementById('content-list');
-                if (contentList) await this.renderConversationsTabbed(contentList);
-            }
-        } catch (err) {
-            this.showToast('Failed: ' + err.message, 'error');
-        }
+    _observeFeedItems(container) {
+        this._initFeedObserver();
+        container.querySelectorAll('.feed-item.unread').forEach(el => {
+            this._feedObserver.observe(el);
+        });
     },
 
     async renderFollowingList(container) {
@@ -5110,7 +5870,7 @@ echo "File: $POLIS_PATH"</code>
                                 </div>
                                 <div class="following-item-actions">
                                     ${addedAt ? `<span class="item-date">Followed: ${addedAt}</span>` : ''}
-                                    <button class="feed-filter-link" onclick="event.stopPropagation(); App.setFeedAuthorFilter('${this.escapeHtml(domain)}'); App.navigateTo('/social/conversations');" title="Filter feed by this author">Posts</button>
+                                    <button class="feed-filter-link" onclick="event.stopPropagation(); window.open('https://${this.escapeHtml(domain)}', '_blank')" title="Visit site">Visit</button>
                                     <button class="danger-small" onclick="event.stopPropagation(); App.unfollowAuthor('${this.escapeHtml(f.url)}')">Unfollow</button>
                                 </div>
                             </div>
@@ -5285,11 +6045,7 @@ echo "File: $POLIS_PATH"</code>
             await this.loadAllCounts();
             await this.loadViewContent();
 
-            // Filter unfollowed author from cached activity data
-            try {
-                const unfollowedDomain = new URL(url).hostname;
-                this._activityEvents = this._activityEvents.filter(evt => evt.actor !== unfollowedDomain);
-            } catch (e) {}
+            // Activity data is now cached server-side; no client-side filtering needed
         } catch (err) {
             this.showToast('Failed to unfollow: ' + err.message, 'error');
         }
@@ -5439,7 +6195,7 @@ echo "File: $POLIS_PATH"</code>
             <${tag}${linkAttrs} class="activity-item">
                 <span class="act-dot"></span>
                 <span><span class="act-who">${this.escapeHtml(actor)}</span> ${actionLabel}${detail ? ' — ' + detail : ''}</span>
-                <span class="act-when">${this.formatRelativeTime(evt.timestamp)}</span>
+                <span class="act-when">${this.formatRelativeTime(evt.created_at || evt.timestamp)}</span>
             </${tag}>
         `;
     },
@@ -5873,8 +6629,8 @@ echo "File: $POLIS_PATH"</code>
                     const hash = link.replace(/^\/_\/#/, '');
                     const legacyMap = {
                         'blessings': '/blessings',
-                        'followers': '/social/followers',
-                        'feed': '/social/conversations',
+                        'followers': '/followers',
+                        'feed': '/conversations',
                         'my-comments-blessed': '/comments/blessed',
                         'my-comments-denied': '/comments/denied',
                     };
@@ -6064,11 +6820,6 @@ git push</pre>
             // Sync theme from server if not already set locally
             if (!localStorage.getItem('polis-webapp-theme') && settings.webapp_theme) {
                 this._initTheme(settings.webapp_theme);
-            }
-
-            // Load editor panel mode preference
-            if (settings.editor_panel_mode) {
-                this._rightPanelMode = settings.editor_panel_mode;
             }
 
             // Check registration status
@@ -6544,7 +7295,7 @@ git push</pre>
         this.showIntentResult({
             icon: '&#10003;',
             title: 'Comment submitted to ' + targetDomain,
-            subtitle: 'The post author will decide whether to bless it.',
+            subtitle: 'Your comment has been delivered to the author.',
             actions: [
                 { label: 'Follow ' + targetDomain, primary: true, action: () => {
                     this.dismissIntentResult();
@@ -7050,6 +7801,303 @@ git push</pre>
         this._dmThreadId = '__new__' + recipientDomain;
         this.currentView = 'dm-thread';
         this.navigateTo('/messages/__new__' + recipientDomain);
+    },
+
+    // ── Tag Methods ──
+
+    _tagVocabulary: null,
+    _tagVocabularyPromise: null,
+
+    async _fetchTagVocabulary() {
+        if (this._tagVocabulary) return this._tagVocabulary;
+        if (this._tagVocabularyPromise) return this._tagVocabularyPromise;
+        this._tagVocabularyPromise = fetch('/api/tags')
+            .then(r => r.json())
+            .then(data => {
+                this._tagVocabulary = (data.tags || []).map(t => t.tag);
+                this._tagVocabularyPromise = null;
+                return this._tagVocabulary;
+            })
+            .catch(() => {
+                this._tagVocabularyPromise = null;
+                return [];
+            });
+        return this._tagVocabularyPromise;
+    },
+
+    async showTagInput(btn, targetURI) {
+        // Remove any existing tag input
+        this._removeTagInput();
+
+        const vocab = await this._fetchTagVocabulary();
+
+        const container = document.createElement('div');
+        container.className = 'tag-input-inline';
+        container.onclick = (e) => e.stopPropagation();
+
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.placeholder = 'Tag name...';
+        input.autocomplete = 'off';
+        container.appendChild(input);
+
+        const dropdown = document.createElement('div');
+        dropdown.className = 'tag-dropdown';
+        container.appendChild(dropdown);
+
+        const renderDropdown = (filter) => {
+            const lower = (filter || '').toLowerCase();
+            const matches = vocab.filter(t => !lower || t.includes(lower));
+            let html = '';
+            matches.forEach(t => {
+                html += `<div class="tag-dropdown-item" data-tag="${this.escapeHtml(t)}">${this.escapeHtml(t)}</div>`;
+            });
+            if (lower && !vocab.includes(lower)) {
+                html += `<div class="tag-dropdown-item tag-dropdown-create" data-tag="${this.escapeHtml(lower)}">+ Create "${this.escapeHtml(lower)}"</div>`;
+            }
+            dropdown.innerHTML = html;
+            dropdown.style.display = html ? '' : 'none';
+
+            dropdown.querySelectorAll('.tag-dropdown-item').forEach(item => {
+                item.onmousedown = (e) => {
+                    e.preventDefault();
+                    this._applyTag(item.dataset.tag, targetURI);
+                    this._removeTagInput();
+                };
+            });
+        };
+
+        input.oninput = () => renderDropdown(input.value);
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                const val = input.value.trim();
+                if (val) {
+                    this._applyTag(val, targetURI);
+                    this._removeTagInput();
+                }
+            } else if (e.key === 'Escape') {
+                this._removeTagInput();
+            }
+        };
+        input.onblur = () => {
+            setTimeout(() => this._removeTagInput(), 150);
+        };
+
+        // Position relative to the button's parent (item-hover-actions)
+        const actions = btn.closest('.item-hover-actions');
+        if (actions) {
+            actions.appendChild(container);
+        } else {
+            btn.parentElement.appendChild(container);
+        }
+
+        renderDropdown('');
+        input.focus();
+    },
+
+    async _applyTag(tagName, targetURI) {
+        try {
+            const resp = await fetch('/api/tags', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tag: tagName, target_uri: targetURI }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+                this.showToast(data.error || 'Failed to apply tag', 'error');
+                return;
+            }
+            // Invalidate cached vocabulary so new tags appear
+            this._tagVocabulary = null;
+            this.showToast(`Tagged as "${tagName}"`, 'success');
+        } catch (e) {
+            this.showToast('Failed to apply tag', 'error');
+        }
+    },
+
+    _removeTagInput() {
+        document.querySelectorAll('.tag-input-inline').forEach(el => el.remove());
+    },
+
+    // ── Floating Selection Toolbar ──
+
+    _execToolbarCommand(command) {
+        const editorId = this._getActiveEditorId() || 'milkdown-post';
+        if (!window.MilkdownBridge?.isReady(editorId)) return;
+        const pm = document.querySelector(`#${editorId} .ProseMirror`);
+        if (command === 'link') {
+            // Save selection before opening modal (modal will steal focus)
+            const sel = window.getSelection();
+            this._linkSelectedText = sel?.toString() || '';
+            this._linkSelectionRange = sel?.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+            this._linkEditorId = editorId;
+            const modal = document.getElementById('editor-link-modal');
+            const input = document.getElementById('editor-link-url');
+            modal.classList.remove('hidden');
+            input.value = '';
+            input.focus();
+            return;
+        }
+        window.MilkdownBridge.runCommand(editorId, command);
+        if (pm) pm.focus();
+    },
+
+    // ── Focus Mode ──
+
+    _toggleFocusMode() {
+        this._focusMode = !this._focusMode;
+        const screen = document.getElementById('editor-screen');
+        const nav = document.getElementById('icon-nav');
+        const hint = document.getElementById('editor-focus-hint');
+
+        if (this._focusMode) {
+            screen.classList.add('focus-mode');
+            nav.classList.add('focus-mode');
+            hint.classList.remove('hidden');
+        } else {
+            screen.classList.remove('focus-mode');
+            nav.classList.remove('focus-mode');
+            hint.classList.add('hidden');
+            // If we entered focus from the feed editor, return to feed with content
+            if (this._focusFromFeed) {
+                this._focusFromFeed = false;
+                // Grab content from the full editor before leaving
+                const title = document.getElementById('editor-title-input')?.value || '';
+                const body = this.getEditorContent('markdown-input') || '';
+                this._destroyMilkdown('markdown-input');
+                // Restore to feed with inline editor open
+                this._feedEditorTitle = title;
+                this._feedEditorBody = body;
+                this._feedEditorOpen = true;
+                this.navigateTo('/feed');
+                // Init Milkdown in the feed editor after render completes
+                setTimeout(async () => {
+                    await this._initMilkdown('feed-editor-body');
+                    document.getElementById('milkdown-feed')?.addEventListener('milkdown:change', () => {
+                        this._onFeedEditorInput();
+                    });
+                }, 500);
+            }
+        }
+    },
+
+    // TODO: paragraph dimming (iA Writer-style) — needs investigation into
+    // Milkdown/ProseMirror DOM structure for reliable cursor-to-block mapping
+
+    // ── Link Modal ──
+
+    _cancelLinkModal() {
+        document.getElementById('editor-link-modal').classList.add('hidden');
+        const pm = document.querySelector('#milkdown-post .ProseMirror');
+        if (pm) pm.focus();
+    },
+
+    _confirmLinkModal() {
+        const url = document.getElementById('editor-link-url').value.trim();
+        document.getElementById('editor-link-modal').classList.add('hidden');
+        if (!url) return;
+        const editorId = this._linkEditorId || 'milkdown-post';
+        const pm = document.querySelector(`#${editorId} .ProseMirror`);
+        if (!pm) return;
+        // Restore the saved selection
+        if (this._linkSelectionRange) {
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(this._linkSelectionRange);
+        }
+        // Use Milkdown's toggleLink command with the URL payload
+        if (window.MilkdownBridge?.isReady(editorId)) {
+            window.MilkdownBridge.runCommand(editorId, 'link', { href: url });
+        }
+        pm.focus();
+    },
+
+    // ── Slash Command Menu ──
+
+    _initSlashMenu() {
+        // Document-level delegation: works for all current and future milkdown mounts
+        document.addEventListener('input', (e) => {
+            const mount = e.target.closest('.milkdown-mount');
+            if (!mount) return;
+            const sel = window.getSelection();
+            if (!sel || !sel.rangeCount) return;
+            const node = sel.anchorNode;
+            if (!node || node.nodeType !== Node.TEXT_NODE) return;
+            const text = node.textContent;
+            if (text === '/' && sel.anchorOffset === 1) {
+                this._slashActiveEditorId = mount.id;
+                this._showSlashMenu(sel);
+            } else {
+                this._hideSlashMenu();
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (!this._slashMenuVisible) return;
+            const items = document.querySelectorAll('#editor-slash-menu .slash-item');
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                this._slashMenuIndex = Math.min(this._slashMenuIndex + 1, items.length - 1);
+                this._updateSlashSelection(items);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                this._slashMenuIndex = Math.max(this._slashMenuIndex - 1, 0);
+                this._updateSlashSelection(items);
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                const selected = items[this._slashMenuIndex];
+                if (selected) this._selectSlashItem(selected.dataset.type);
+            } else if (e.key === 'Escape') {
+                this._hideSlashMenu();
+            } else if (e.key !== '/') {
+                this._hideSlashMenu();
+            }
+        }, true);
+
+        document.getElementById('editor-slash-menu').addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            const item = e.target.closest('.slash-item');
+            if (item) this._selectSlashItem(item.dataset.type);
+        });
+    },
+
+    _showSlashMenu(sel) {
+        const range = sel.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+        const menu = document.getElementById('editor-slash-menu');
+        menu.style.left = `${rect.left}px`;
+        menu.style.top = `${rect.bottom + 4}px`;
+        menu.classList.remove('hidden');
+        this._slashMenuVisible = true;
+        this._slashMenuIndex = 0;
+        this._updateSlashSelection(menu.querySelectorAll('.slash-item'));
+    },
+
+    _hideSlashMenu() {
+        document.getElementById('editor-slash-menu')?.classList.add('hidden');
+        this._slashMenuVisible = false;
+    },
+
+    _updateSlashSelection(items) {
+        items.forEach((item, i) => {
+            item.classList.toggle('selected', i === this._slashMenuIndex);
+        });
+    },
+
+    _selectSlashItem(type) {
+        this._hideSlashMenu();
+        const editorId = this._slashActiveEditorId || this._getActiveEditorId() || 'milkdown-post';
+        if (!window.MilkdownBridge?.isReady(editorId)) return;
+        const pm = document.querySelector(`#${editorId} .ProseMirror`);
+
+        // Delete the "/" character using ProseMirror transaction
+        window.MilkdownBridge.deleteBeforeCursor(editorId, 1);
+
+        // Run the command via Milkdown's command API
+        window.MilkdownBridge.runCommand(editorId, type);
+
+        if (pm) pm.focus();
     },
 };
 

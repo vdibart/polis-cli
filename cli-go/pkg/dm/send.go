@@ -59,6 +59,22 @@ func NewSender(privateKeyPEM, publicKeySSH []byte, domain string, store *Store) 
 	}
 }
 
+// NewSenderWithHTTP creates a Sender using a shared HTTP client for connection pooling.
+func NewSenderWithHTTP(privateKeyPEM, publicKeySSH []byte, domain string, store *Store, hc *http.Client) *Sender {
+	if hc == nil {
+		return NewSender(privateKeyPEM, publicKeySSH, domain, store)
+	}
+	return &Sender{
+		PrivateKeyPEM: privateKeyPEM,
+		PublicKeySSH:  publicKeySSH,
+		Domain:        strings.ToLower(domain),
+		Store:         store,
+		Logger:        nopLogger{},
+		keyCache:      make(map[string]*cachedKey),
+		httpClient:    hc,
+	}
+}
+
 // ensureKeys derives the X25519 secret key once.
 func (s *Sender) ensureKeys() error {
 	s.initOnce.Do(func() {

@@ -1,6 +1,6 @@
 # Content System
 
-The polis content system organizes all site data around **bundles** -- namespaced packages that declare content types, events, storage layout, and handler dispatch. The initial bundle `pub.polis.core` ships with five content types: post, comment, follow, feed, and dm. Third-party bundles extend the system with custom types without modifying the core protocol.
+The polis content system organizes all site data around **bundles** -- namespaced packages that declare content types, events, storage layout, and handler dispatch. The initial bundle `pub.polis.core` ships with six content types: post, comment, follow, feed, dm, and tag. Third-party bundles extend the system with custom types without modifying the core protocol.
 
 ---
 
@@ -363,6 +363,12 @@ The following are the handler's business and are NOT declared in `bundle.json`:
     "pub.polis.dm": {
       "dir": "dm",
       "storage": {"pattern": "flat"}
+    },
+    "pub.polis.tag": {
+      "dir": "tag",
+      "mount": "/tags",
+      "storage": {"pattern": "flat"},
+      "emits": ["pub.polis.tag.applied", "pub.polis.tag.removed"]
     }
   },
   "artifacts": ["index.jsonl"]
@@ -435,7 +441,7 @@ The following constraints are enforced when loading a bundle:
 
 ## Content Types
 
-The `pub.polis.core` bundle declares five content types. Each has distinct storage patterns, actions, and lifecycle behavior.
+The `pub.polis.core` bundle declares six content types. Each has distinct storage patterns, actions, and lifecycle behavior.
 
 ### `pub.polis.post`
 
@@ -565,6 +571,28 @@ The `deliver` action is the key innovation: it accepts **signed-request auth** (
 
 **Lifecycle:** Sending encrypts the message with the recipient's public key (fetched from `.well-known/polis`), POSTs the encrypted envelope to the recipient's `/v1/content/dm/actions/deliver` endpoint with signed request headers, and stores a local copy encrypted with the storage key. On delivery failure, the message is saved locally as "unsent" and retryable via `retry`. Receiving verifies the signed request, checks DM acceptance policy, decrypts the transport encryption, re-encrypts with the local storage key, and stores the message.
 
+### `pub.polis.tag`
+
+Tags are lightweight labels applied to content (posts, feed items). A tag is a metadata association between a tag name and a target URL, stored as a flat JSON file on the author's own site.
+
+**Source path:** `content/pub.polis.core/tag/`
+**Mount path:** `/tags`
+**Renderer:** None
+**Storage:** Flat (single directory, no date-based subdirectories)
+
+**Actions:**
+
+| Action | Description |
+|--------|-------------|
+| `list` | List all tags, optionally filtered by tag name or target URL. |
+| `apply` | Apply a tag to a target URL. Creates the tag if it does not exist. |
+| `remove` | Remove a tag from a target URL. |
+| `delete` | Delete a tag and all its associations. |
+
+**Events emitted:** `pub.polis.tag.applied`, `pub.polis.tag.removed`
+
+**Lifecycle:** Apply writes a tag association linking a tag name to a target URL, registers with the discovery service (emitting `pub.polis.tag.applied`). Remove deletes the association and emits `pub.polis.tag.removed`. Tags are local to the author's site -- each author maintains their own tag vocabulary.
+
 ---
 
 ## Events
@@ -607,6 +635,13 @@ Core events use the `pub.polis.*` namespace. Third-party events use reverse-doma
 |-------|-----------|-------------|
 | `pub.polis.follow.announced` | Client (explicit via `stream-publish`) | A site started following another site. |
 | `pub.polis.follow.removed` | Client (explicit via `stream-publish`) | A site unfollowed another site. |
+
+#### Tag Events
+
+| Event | Emitted By | Description |
+|-------|-----------|-------------|
+| `pub.polis.tag.applied` | DS (side-effect of tag registration) | A tag was applied to content. |
+| `pub.polis.tag.removed` | DS (side-effect of tag removal) | A tag was removed from content. |
 
 #### Site Events
 
@@ -800,6 +835,8 @@ pub.polis.comment.republished
 pub.polis.comment.blessing.requested
 pub.polis.comment.blessing.granted
 pub.polis.comment.blessing.denied
+pub.polis.tag.applied
+pub.polis.tag.removed
 pub.polis.site.registered
 pub.polis.site.reregistered
 pub.polis.site.key_rotated

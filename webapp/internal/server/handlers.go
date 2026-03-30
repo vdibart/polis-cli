@@ -29,12 +29,12 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policycheck"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
-	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/snippet"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
+	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
@@ -126,14 +126,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		response["site_info"] = validation.SiteInfo
 	}
 
-	// Include view mode settings
 	showFrontmatter := true
 	if s.Config != nil && s.Config.ShowFrontmatter != nil {
 		showFrontmatter = *s.Config.ShowFrontmatter
 	}
 	response["show_frontmatter"] = showFrontmatter
 
-	// Include avatar and author_name from .well-known/polis
+	// Include avatar, author_name, and active_theme from .well-known/polis
 	if wk, err := site.LoadWellKnown(s.DataDir); err == nil {
 		if wk.Avatar != nil {
 			response["avatar"] = wk.Avatar
@@ -141,6 +140,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if wk.AuthorName != "" {
 			response["author_name"] = wk.AuthorName
 		}
+	}
+	if activeTheme, _ := theme.GetActiveTheme(s.DataDir); activeTheme != "" {
+		response["active_theme"] = activeTheme
 	}
 
 	json.NewEncoder(w).Encode(response)
@@ -467,7 +469,11 @@ func (s *Server) handleDrafts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		var drafts []map[string]interface{}
+		type draftEntry struct {
+			data    map[string]interface{}
+			modTime time.Time
+		}
+		var drafts []draftEntry
 		for _, entry := range entries {
 			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 				continue
@@ -476,16 +482,66 @@ func (s *Server) handleDrafts(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			drafts = append(drafts, map[string]interface{}{
-				"id":       strings.TrimSuffix(entry.Name(), ".md"),
+			draftID := strings.TrimSuffix(entry.Name(), ".md")
+			d := map[string]interface{}{
+				"id":       draftID,
 				"name":     entry.Name(),
 				"modified": info.ModTime().Format(time.RFC3339),
+			}
+			// Extract title and excerpt from draft content
+			if content, err := os.ReadFile(filepath.Join(draftsDir, entry.Name())); err == nil {
+				lines := strings.Split(string(content), "\n")
+				title := ""
+				bodyStart := 0
+				for i, line := range lines {
+					trimmed := strings.TrimSpace(line)
+					if title == "" && strings.HasPrefix(trimmed, "# ") {
+						title = strings.TrimPrefix(trimmed, "# ")
+						bodyStart = i + 1
+					} else if title == "" && trimmed != "" {
+						// First non-empty line without # prefix
+						bodyStart = i
+						break
+					}
+				}
+				if title != "" {
+					d["title"] = title
+				}
+				// Build excerpt from body lines (skip blank lines after title)
+				var excerptLines []string
+				for i := bodyStart; i < len(lines) && len(excerptLines) < 3; i++ {
+					trimmed := strings.TrimSpace(lines[i])
+					if trimmed != "" {
+						excerptLines = append(excerptLines, trimmed)
+					}
+				}
+				if len(excerptLines) > 0 {
+					excerpt := strings.Join(excerptLines, " ")
+					if len(excerpt) > 200 {
+						excerpt = excerpt[:200] + "..."
+					}
+					d["excerpt"] = excerpt
+				}
+			}
+			drafts = append(drafts, draftEntry{
+				data:    d,
+				modTime: info.ModTime(),
 			})
+		}
+
+		// Sort by most recently modified first
+		sort.Slice(drafts, func(i, j int) bool {
+			return drafts[i].modTime.After(drafts[j].modTime)
+		})
+
+		draftList := make([]map[string]interface{}, len(drafts))
+		for i, d := range drafts {
+			draftList[i] = d.data
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"drafts": drafts,
+			"drafts": draftList,
 		})
 
 	case http.MethodPost:
@@ -591,6 +647,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Markdown string `json:"markdown"`
 		Filename string `json:"filename"`
+		DraftID  string `json:"draft_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		if s.handleBodyTooLarge(w, r, err) {
@@ -632,6 +689,15 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if err := s.RenderSite(); err != nil {
 		// Log but don't fail - the post was published successfully
 		log.Printf("[warning] post-publish render failed: %v", err)
+	}
+
+	// Delete the draft if this was published from a draft
+	if req.DraftID != "" {
+		cleanID := draftIDSanitizer.ReplaceAllString(req.DraftID, "-")
+		draftPath := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts", cleanID+".md")
+		if err := os.Remove(draftPath); err != nil && !os.IsNotExist(err) {
+			s.LogWarn("Failed to remove draft after publish: %v", err)
+		}
 	}
 
 	// Run post-publish hook (checks explicit config, then auto-discovers .polis/webapp/hooks/)
@@ -681,6 +747,14 @@ func (s *Server) handlePosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Build blessed comment count map
+	commentCountMap := make(map[string]int)
+	if bc, err := metadata.LoadBlessedComments(s.DataDir); err == nil {
+		for _, pc := range bc.Comments {
+			commentCountMap[pc.Post] = len(pc.Blessed)
+		}
+	}
+
 	var posts []map[string]interface{}
 	lines := strings.Split(string(data), "\n")
 	for _, line := range lines {
@@ -698,13 +772,29 @@ func (s *Server) handlePosts(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		}
-		// Generate excerpt from source markdown
+		// Generate excerpt and get modification time from source markdown
 		if path, ok := entry["path"].(string); ok {
 			srcPath := filepath.Join(s.DataDir, path)
 			if raw, err := os.ReadFile(srcPath); err == nil {
 				body := stripFrontmatter(string(raw))
 				entry["excerpt"] = makeExcerpt(body, 140)
 			}
+			if info, err := os.Stat(srcPath); err == nil {
+				entry["modified"] = info.ModTime().Format(time.RFC3339)
+			}
+		}
+		// Attach blessed comment count
+		if path, ok := entry["path"].(string); ok {
+			count := commentCountMap[path]
+			if count == 0 {
+				for k, v := range commentCountMap {
+					if metadata.MatchesPostPath(k, path) {
+						count = v
+						break
+					}
+				}
+			}
+			entry["comment_count"] = count
 		}
 		posts = append(posts, entry)
 	}
@@ -923,11 +1013,13 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Call DS to unregister (soft-delete)
-	dsClient := s.NewDSClient(r)
-	if err := dsClient.UnregisterContent("pub.polis.post", contentURL, sig); err != nil {
-		s.LogError("DS unregister failed for %s: %v", req.Path, err)
-		// Non-fatal: still clean up locally
+	// Call DS to unregister (soft-delete) — skip if not registered
+	if s.IsRegisteredWithDS() {
+		dsClient := s.NewDSClient(r)
+		if err := dsClient.UnregisterContent("pub.polis.post", contentURL, sig); err != nil {
+			s.LogError("DS unregister failed for %s: %v", req.Path, err)
+			// Non-fatal: still clean up locally
+		}
 	}
 
 	// Delete local .md file
@@ -1554,6 +1646,11 @@ func (s *Server) handleBlessingGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.IsRegisteredWithDS() {
+		http.Error(w, "Site not registered with discovery service", http.StatusPreconditionFailed)
+		return
+	}
+
 	if s.PrivateKey == nil {
 		http.Error(w, "Private key not configured", http.StatusBadRequest)
 		return
@@ -1612,13 +1709,19 @@ func (s *Server) handleBlessingGrant(w http.ResponseWriter, r *http.Request) {
 	if commentRelPath := extractCommentRelPath(req.CommentURL); commentRelPath != "" {
 		localPath := filepath.Join(s.DataDir, commentRelPath)
 		if _, err := os.Stat(localPath); os.IsNotExist(err) {
-			rc := remote.NewClient()
-			if content, err := rc.FetchContent(polisurl.NormalizeToMD(req.CommentURL)); err == nil {
+			rc := s.NewRemoteClient()
+			mdURL := polisurl.NormalizeToMD(req.CommentURL)
+			content, fetchErr := rc.FetchContent(commentSourceURL(mdURL))
+			if fetchErr != nil {
+				// Fallback: try the mount path directly (non-hosted sites may serve .md there)
+				content, fetchErr = rc.FetchContent(mdURL)
+			}
+			if fetchErr == nil {
 				if err := os.MkdirAll(filepath.Dir(localPath), 0755); err == nil {
 					os.WriteFile(localPath, []byte(content), 0644)
 				}
 			} else {
-				log.Printf("[warning] could not fetch remote comment %s: %v", req.CommentURL, err)
+				log.Printf("[warning] could not fetch remote comment %s: %v", req.CommentURL, fetchErr)
 			}
 		}
 	}
@@ -1641,6 +1744,11 @@ func (s *Server) handleBlessingDeny(w http.ResponseWriter, r *http.Request) {
 
 	if s.DiscoveryURL == "" {
 		http.Error(w, "Discovery service not configured", http.StatusBadRequest)
+		return
+	}
+
+	if !s.IsRegisteredWithDS() {
+		http.Error(w, "Site not registered with discovery service", http.StatusPreconditionFailed)
 		return
 	}
 
@@ -1700,8 +1808,81 @@ func (s *Server) handleBlessedComments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enrich each blessed comment with an excerpt from the locally saved markdown
+	// and resolve the post title from the local post file
+	type enrichedComment struct {
+		URL       string `json:"url"`
+		Version   string `json:"version"`
+		BlessedAt string `json:"blessed_at"`
+		Excerpt   string `json:"excerpt,omitempty"`
+	}
+	type enrichedPostComments struct {
+		Post      string            `json:"post"`
+		PostTitle string            `json:"post_title,omitempty"`
+		Blessed   []enrichedComment `json:"blessed"`
+	}
+	enriched := make([]enrichedPostComments, 0, len(bc.Comments))
+	for _, pc := range bc.Comments {
+		epc := enrichedPostComments{Post: pc.Post}
+
+		// Resolve post title — try local file first, then derive from path
+		postPath := pc.Post
+		// Try local post file (works for posts on our own site)
+		localPostPath := postPath
+		if idx := strings.Index(localPostPath, "/posts/"); idx >= 0 {
+			localPostPath = "content/pub.polis.core/post/" + localPostPath[idx+len("/posts/"):]
+		}
+		localPostPath = strings.TrimSuffix(localPostPath, ".html")
+		if !strings.HasSuffix(localPostPath, ".md") {
+			localPostPath += ".md"
+		}
+		if raw, err := os.ReadFile(filepath.Join(s.DataDir, localPostPath)); err == nil {
+			epc.PostTitle = extractFrontmatterTitle(string(raw))
+		}
+		// Derive a readable title from the URL/path if no frontmatter title found
+		if epc.PostTitle == "" {
+			slug := postPath
+			if lastSlash := strings.LastIndex(slug, "/"); lastSlash >= 0 {
+				slug = slug[lastSlash+1:]
+			}
+			slug = strings.TrimSuffix(slug, ".md")
+			slug = strings.TrimSuffix(slug, ".html")
+			slug = strings.ReplaceAll(slug, "-", " ")
+			if slug != "" {
+				// Title case the first letter
+				epc.PostTitle = strings.ToUpper(slug[:1]) + slug[1:]
+			}
+		}
+
+		for _, c := range pc.Blessed {
+			ec := enrichedComment{
+				URL:       c.URL,
+				Version:   c.Version,
+				BlessedAt: c.BlessedAt,
+			}
+			// Try to read local copy of the comment markdown.
+			// Normalize URL to .md and try multiple path forms.
+			commentURL := c.URL
+			if strings.HasSuffix(commentURL, ".html") {
+				commentURL = strings.TrimSuffix(commentURL, ".html") + ".md"
+			}
+			if relPath := extractCommentRelPath(commentURL); relPath != "" {
+				localPath := filepath.Join(s.DataDir, relPath)
+				if raw, err := os.ReadFile(localPath); err == nil {
+					body := stripFrontmatter(string(raw))
+					ec.Excerpt = makeExcerpt(body, 140)
+				}
+			}
+			epc.Blessed = append(epc.Blessed, ec)
+		}
+		enriched = append(enriched, epc)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(bc)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"version":  bc.Version,
+		"comments": enriched,
+	})
 }
 
 func (s *Server) handleBlessingRevoke(w http.ResponseWriter, r *http.Request) {
@@ -1773,15 +1954,11 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	discoveryURL := s.DiscoveryURL
 	discoveryConfigured := s.DiscoveryURL != ""
 	siteTitle := s.GetSiteTitle() // From .well-known/polis with fallback to base_url
-	viewMode := "list"            // Default to list mode
 	showFrontmatter := true       // Default to showing frontmatter
 	baseURL := ""
 
 	if s.Config != nil {
 		subdomain = s.GetSubdomain()
-		if s.Config.ViewMode != "" {
-			viewMode = s.Config.ViewMode
-		}
 		if s.Config.ShowFrontmatter != nil {
 			showFrontmatter = *s.Config.ShowFrontmatter
 		}
@@ -1837,7 +2014,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"data_dir":             s.DataDir,
 			"discovery_url":        discoveryURL,
 			"discovery_configured": discoveryConfigured,
-			"view_mode":            viewMode,
 			"show_frontmatter":     showFrontmatter,
 			"base_url":             baseURL,
 			"avatar":               avatarConfig,
@@ -2249,6 +2425,10 @@ func (s *Server) handleThemeSwitch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "theme is required", http.StatusBadRequest)
 		return
 	}
+	if req.Theme == "sols" {
+		http.Error(w, "sols is reserved as the system theme and cannot be selected as a personal theme", http.StatusBadRequest)
+		return
+	}
 
 	// Validate that the theme exists
 	themes, err := theme.ListThemes(s.DataDir, s.CLIThemesDir)
@@ -2295,47 +2475,6 @@ func (s *Server) handleThemeSwitch(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"theme":   req.Theme,
-	})
-}
-
-// handleViewMode handles POST /api/settings/view-mode to switch between list and browser modes
-func (s *Server) handleViewMode(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		ViewMode string `json:"view_mode"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	// Validate view mode
-	if req.ViewMode != "list" && req.ViewMode != "browser" {
-		http.Error(w, "Invalid view mode: must be 'list' or 'browser'", http.StatusBadRequest)
-		return
-	}
-
-	// Ensure config exists
-	if s.Config == nil {
-		s.Config = &Config{}
-	}
-
-	// Update and save
-	s.Config.ViewMode = req.ViewMode
-	if err := s.SaveConfig(); err != nil {
-		s.LogError("failed to save config: %v", err)
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":   true,
-		"view_mode": req.ViewMode,
 	})
 }
 
@@ -2937,6 +3076,11 @@ func (s *Server) handleSiteRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Write local registration marker
+	if err := discovery.WriteRegistrationMarker(s.DataDir, s.DiscoveryURL, domain); err != nil {
+		s.LogWarn("Failed to write registration marker: %v", err)
+	}
+
 	s.LogEvent("pub.polis.site.register", map[string]interface{}{
 		"domain": domain,
 	})
@@ -2997,6 +3141,11 @@ func (s *Server) handleSiteUnregister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Remove local registration marker
+	if err := discovery.RemoveRegistrationMarker(s.DataDir, s.DiscoveryURL); err != nil {
+		s.LogWarn("Failed to remove registration marker: %v", err)
+	}
+
 	s.LogEvent("pub.polis.site.unregister", map[string]interface{}{
 		"domain": domain,
 	})
@@ -3039,8 +3188,11 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 
 	// Try to fetch .well-known/polis from the live domain
 	checkURL := fmt.Sprintf("https://%s/.well-known/polis", domain)
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(checkURL)
+	hc := s.SharedHTTPClient
+	if hc == nil {
+		hc = &http.Client{Timeout: 5 * time.Second}
+	}
+	resp, err := hc.Get(checkURL)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3096,17 +3248,21 @@ func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
 		data, err := os.ReadFile(aboutPath)
 		if err != nil {
 			// File doesn't exist — return default content
+			defaultHTML, _ := render.MarkdownToHTML(defaultAboutContent)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"content":    defaultAboutContent,
-				"has_custom": false,
+				"content":      defaultAboutContent,
+				"content_html": defaultHTML,
+				"has_custom":   false,
 			})
 			return
 		}
+		contentHTML, _ := render.MarkdownToHTML(string(data))
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"content":    string(data),
-			"has_custom": true,
+			"content":      string(data),
+			"content_html": contentHTML,
+			"has_custom":   true,
 		})
 
 	case http.MethodPost:
@@ -3404,7 +3560,7 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 			missing = missing[:3]
 		}
 		if len(missing) > 0 {
-			rc := remote.NewClient()
+			rc := s.NewRemoteClient()
 			dirty := false
 			for _, m := range missing {
 				wk, err := rc.FetchWellKnown(m.URL)
@@ -3461,7 +3617,7 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 
 		followDomain := ownDomain
 		discoveryClient := s.NewAuthDSClient(r, followDomain)
-		remoteClient := remote.NewClient()
+		remoteClient := s.NewRemoteClient()
 
 		privPath, pubPath := policy.DefaultPaths(s.DataDir)
 		policies, _ := policy.LoadPolicies(privPath, pubPath)
@@ -3484,9 +3640,15 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 			"data":    result,
 		})
 
-		// Trigger feed sync in the background so the new author's
-		// content is available by the time the user opens Conversations.
-		go s.syncFeed()
+		// Backfill historical posts from the new author, then sync feed
+		// for any recent events across all followed authors.
+		go func() {
+			newDomain := discovery.ExtractDomainFromURL(req.URL)
+			if newDomain != "" {
+				s.backfillFeedForAuthor(newDomain)
+			}
+			s.syncFeed()
+		}()
 
 	case http.MethodDelete:
 		if s.PrivateKey == nil {
@@ -3509,7 +3671,7 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 
 		unfollowDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
 		discoveryClient := s.NewAuthDSClient(r, unfollowDomain)
-		remoteClient := remote.NewClient()
+		remoteClient := s.NewRemoteClient()
 
 		privPath2, pubPath2 := policy.DefaultPaths(s.DataDir)
 		unfollowPolicies, _ := policy.LoadPolicies(privPath2, pubPath2)
@@ -3545,8 +3707,12 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	scope := r.URL.Query().Get("scope")
+	if scope != "" && !validFeedScopes[scope] {
+		http.Error(w, "Invalid scope", http.StatusBadRequest)
+		return
+	}
+	cm := s.feedCacheForScope(scope)
 	typeFilter := r.URL.Query().Get("type")
 	statusFilter := r.URL.Query().Get("status")
 
@@ -3587,15 +3753,23 @@ func (s *Server) handleFeedRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	scope := r.URL.Query().Get("scope")
+	if scope != "" && !validFeedScopes[scope] {
+		http.Error(w, "Invalid scope", http.StatusBadRequest)
+		return
+	}
+
 	// Count items before sync to determine how many are actually new
-	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := s.feedCacheForScope(scope)
 	beforeItems, _ := cm.List()
 	beforeCount := len(beforeItems)
 
-	// Trigger stream-based sync (feed + notifications so bell dot updates)
-	s.syncFeed()
-	go s.syncNotifications()
+	// Trigger stream-based sync (feed)
+	if scope == "" || scope == "network" {
+		s.syncFeed()
+	} else {
+		s.syncFeedScoped(scope)
+	}
 
 	items, _ := cm.List()
 	unread := 0
@@ -3625,9 +3799,9 @@ func (s *Server) handleFeedRefresh(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleFeedRead marks feed items as read/unread.
+// handleFeedRead marks a feed item as read (viewport-based auto-marking).
 // POST /api/feed/read
-// Body: {"id":"x"} | {"id":"x","unread":true} | {"all":true} | {"from_id":"x"}
+// Body: {"id":"x"}
 func (s *Server) handleFeedRead(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -3635,37 +3809,25 @@ func (s *Server) handleFeedRead(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		ID     string `json:"id"`
-		Unread bool   `json:"unread"`
-		All    bool   `json:"all"`
-		FromID string `json:"from_id"`
+		ID string `json:"id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "Missing id", http.StatusBadRequest)
 		return
 	}
 
 	discoveryDomain := s.GetDiscoveryDomain()
 	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
 
-	var err error
-	if req.All {
-		err = cm.MarkAllRead()
-	} else if req.FromID != "" {
-		err = cm.MarkUnreadFrom(req.FromID)
-	} else if req.ID != "" {
-		if req.Unread {
-			err = cm.MarkUnread(req.ID)
-		} else {
-			err = cm.MarkRead(req.ID)
+	if err := cm.MarkRead(req.ID); err != nil {
+		// Item not found is OK — may have been pruned
+		if err.Error() != "item not found: "+req.ID {
+			s.LogError("feed read failed: %v", err)
 		}
-	} else {
-		http.Error(w, "Missing id, all, or from_id", http.StatusBadRequest)
-		return
-	}
-
-	if err != nil {
-		s.LogError("feed read failed: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -3695,9 +3857,13 @@ func (s *Server) handleFeedCounts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	unread := 0
+	newestCachedAt := ""
 	for _, item := range items {
 		if item.ReadAt == "" {
 			unread++
+		}
+		if item.CachedAt > newestCachedAt {
+			newestCachedAt = item.CachedAt
 		}
 	}
 
@@ -3705,10 +3871,33 @@ func (s *Server) handleFeedCounts(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total":  len(items),
-		"unread": unread,
-		"stale":  stale,
+		"total":            len(items),
+		"unread":           unread,
+		"stale":            stale,
+		"newest_cached_at": newestCachedAt,
 	})
+}
+
+// handleFeedVisited records the timestamp of the user's last feed page visit.
+// POST /api/feed/visited  Body: {"at":"2026-03-28T01:00:00Z"}
+func (s *Server) handleFeedVisited(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		At string `json:"at"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.At == "" {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	s.Config.FeedLastVisit = req.At
+	if err := s.SaveConfig(); err != nil {
+		s.LogError("failed to save feed visit: %v", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
 // handleFeedGrouped returns feed items grouped by post URL.
@@ -3720,8 +3909,12 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	scope := r.URL.Query().Get("scope")
+	if scope != "" && !validFeedScopes[scope] {
+		http.Error(w, "Invalid scope", http.StatusBadRequest)
+		return
+	}
+	cm := s.feedCacheForScope(scope)
 
 	items, err := cm.List()
 	if err != nil {
@@ -3770,8 +3963,20 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 		Comments         []*commentDetail `json:"comments,omitempty"`
 	}
 
+	type announcementItem struct {
+		ID           string `json:"id"`
+		EventType    string `json:"event_type"`
+		AuthorDomain string `json:"author_domain"`
+		TargetDomain string `json:"target_domain,omitempty"`
+		Title        string `json:"title,omitempty"`
+		URL          string `json:"url,omitempty"`
+		Published    string `json:"published"`
+		Unread       bool   `json:"unread"`
+	}
+
 	groups := make(map[string]*feedGroup)
 	groupOrder := []string{} // track insertion order for stable iteration
+	var announcements []announcementItem
 
 	totalUnread := 0
 	for _, item := range items {
@@ -3779,7 +3984,19 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 			totalUnread++
 		}
 
-		if item.Type == "post" {
+		if item.Type == "announcement" {
+			announcements = append(announcements, announcementItem{
+				ID:           item.ID,
+				EventType:    item.EventType,
+				AuthorDomain: item.AuthorDomain,
+				TargetDomain: item.TargetDomain,
+				Title:        item.Title,
+				URL:          item.URL,
+				Published:    item.Published,
+				Unread:       item.ReadAt == "",
+			})
+			continue
+		} else if item.Type == "post" {
 			key := item.URL
 			g, exists := groups[key]
 			if !exists {
@@ -3869,16 +4086,17 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"groups":       result,
-		"total_items":  len(items),
-		"unread_items": totalUnread,
-		"stale":        stale,
+		"groups":        result,
+		"announcements": announcements,
+		"total_items":   len(items),
+		"unread_items":  totalUnread,
+		"stale":         stale,
 	})
 
 	// Background: fetch excerpts for items that don't have one yet
 	var needExcerpts []int
 	for i, item := range items {
-		if item.Excerpt == "" {
+		if item.Excerpt == "" && (item.Type == "post" || item.Type == "comment") && strings.HasPrefix(item.URL, "https://") {
 			needExcerpts = append(needExcerpts, i)
 		}
 	}
@@ -3890,15 +4108,23 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 // fetchFeedExcerpts fetches remote post content and caches excerpts.
 // Runs in background goroutine; errors are logged, never fatal.
 func (s *Server) fetchFeedExcerpts(cm *feed.CacheManager, items []feed.CachedFeedItem, indices []int) {
-	client := remote.NewClient()
+	client := s.NewRemoteClient()
 	updated := false
 
 	for _, idx := range indices {
 		item := &items[idx]
 		content, err := client.FetchContent(item.URL)
 		if err != nil {
-			s.LogDebug("excerpt fetch failed for %s: %v", item.URL, err)
-			continue
+			// Comment URLs use /comments/ for rendered HTML but the markdown
+			// source lives at /content/pub.polis.core/comment/. Try that path.
+			if strings.Contains(item.URL, "/comments/") {
+				altURL := strings.Replace(item.URL, "/comments/", "/content/pub.polis.core/comment/", 1)
+				content, err = client.FetchContent(altURL)
+			}
+			if err != nil {
+				s.LogDebug("excerpt fetch failed for %s: %v", item.URL, err)
+				continue
+			}
 		}
 		// If HTML, try markdown source
 		if looksLikeHTML(content) {
@@ -3946,7 +4172,7 @@ func (s *Server) handleRemoteAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := remote.NewClient()
+	client := s.NewRemoteClient()
 	client.HTTPClient.Timeout = 5 * time.Second
 
 	wk, err := client.FetchWellKnown("https://" + domain)
@@ -3992,7 +4218,7 @@ func (s *Server) handleRemotePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := remote.NewClient()
+	client := s.NewRemoteClient()
 
 	// Try fetching the URL as-is first
 	content, err := client.FetchContent(postURL)
@@ -4099,6 +4325,30 @@ func makeExcerpt(markdown string, maxLen int) string {
 	return text[:cut] + "…"
 }
 
+// extractFrontmatterTitle extracts the title field from YAML frontmatter.
+func extractFrontmatterTitle(content string) string {
+	if !strings.HasPrefix(strings.TrimSpace(content), "---") {
+		return ""
+	}
+	idx := strings.Index(content, "---")
+	if idx < 0 {
+		return ""
+	}
+	end := strings.Index(content[idx+3:], "---")
+	if end < 0 {
+		return ""
+	}
+	fm := content[idx+3 : idx+3+end]
+	for _, line := range strings.Split(fm, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "title:") {
+			t := strings.TrimSpace(strings.TrimPrefix(line, "title:"))
+			return strings.Trim(t, "\"'")
+		}
+	}
+	return ""
+}
+
 // stripFrontmatter removes YAML frontmatter (---...---) from content.
 func stripFrontmatter(content string) string {
 	if !strings.HasPrefix(content, "---") {
@@ -4137,6 +4387,17 @@ func extractCommentRelPath(commentURL string) string {
 	return "content/pub.polis.core/comment/" + commentURL[idx+len("/comments/"):]
 }
 
+// commentSourceURL converts a comment mount-path URL to the content source path URL.
+// e.g. "https://alice.polis.pub/comments/20260222/id.md" -> "https://alice.polis.pub/content/pub.polis.core/comment/20260222/id.md"
+// Returns the original URL if it doesn't contain /comments/.
+func commentSourceURL(commentURL string) string {
+	idx := strings.Index(commentURL, "/comments/")
+	if idx < 0 {
+		return commentURL
+	}
+	return commentURL[:idx] + "/content/pub.polis.core/comment/" + commentURL[idx+len("/comments/"):]
+}
+
 func extractHTMLBody(content string) string {
 	lower := strings.ToLower(content)
 
@@ -4164,81 +4425,6 @@ func extractHTMLBody(content string) string {
 	}
 
 	return content
-}
-
-// handleActivityStream returns stream events from followed authors.
-// GET /api/activity?since=<cursor>&limit=100
-func (s *Server) handleActivityStream(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Load following list to get followed domains
-	followingPath := following.DefaultPath(s.DataDir)
-	f, err := following.Load(followingPath)
-	if err != nil {
-		// No following.json yet — return empty
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"events":   []interface{}{},
-			"cursor":   "0",
-			"has_more": false,
-		})
-		return
-	}
-
-	// Build actor list from followed domains
-	var domains []string
-	for _, entry := range f.All() {
-		d := discovery.ExtractDomainFromURL(entry.URL)
-		if d != "" {
-			domains = append(domains, d)
-		}
-	}
-
-	if len(domains) == 0 {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"events":   []interface{}{},
-			"cursor":   "0",
-			"has_more": false,
-		})
-		return
-	}
-
-	since := r.URL.Query().Get("since")
-	if since == "" {
-		since = "0"
-	}
-	limitStr := r.URL.Query().Get("limit")
-	limit := 100
-	if limitStr != "" {
-		if n, err := fmt.Sscanf(limitStr, "%d", &limit); n == 0 || err != nil {
-			limit = 100
-		}
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
-
-	client := s.NewDSClient(r)
-	actorFilter := discovery.JoinDomains(domains)
-	result, err := client.StreamQuery(since, limit, "", actorFilter, "")
-	if err != nil {
-		s.LogWarn("activity stream query failed: %v", err)
-		// Return empty on error rather than failing
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"events":   []interface{}{},
-			"cursor":   since,
-			"has_more": false,
-		})
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
 }
 
 // ConversationComment is a comment in a conversation thread.
@@ -4850,7 +5036,7 @@ func (s *Server) handleWidgetFollow(w http.ResponseWriter, r *http.Request) {
 	followingPath := following.DefaultPath(s.DataDir)
 	followDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
 	discoveryClient := s.NewAuthDSClient(r, followDomain)
-	remoteClient := remote.NewClient()
+	remoteClient := s.NewRemoteClient()
 
 	switch r.Method {
 	case http.MethodPost:
@@ -5064,6 +5250,65 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleNavState returns nav state for the avatar menu and nav widget.
+// GET /api/nav/state
+func (s *Server) handleNavState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	counts := s.computeAllCounts()
+
+	// Read author name + avatar from .well-known/polis
+	authorName := ""
+	var avatarConfig map[string]interface{}
+	wkPath := filepath.Join(s.DataDir, ".well-known", "polis")
+	if data, err := os.ReadFile(wkPath); err == nil {
+		var wk map[string]interface{}
+		if json.Unmarshal(data, &wk) == nil {
+			if name, ok := wk["author_name"].(string); ok {
+				authorName = name
+			}
+			if av, ok := wk["avatar"].(map[string]interface{}); ok {
+				avatarConfig = av
+			}
+		}
+	}
+
+	// Build handle from base URL
+	handle := ""
+	baseURL := s.GetBaseURL()
+	if baseURL != "" {
+		if u, err := url.Parse(baseURL); err == nil {
+			parts := strings.SplitN(u.Hostname(), ".", 2)
+			if len(parts) > 0 {
+				handle = parts[0]
+			}
+		}
+	}
+
+	resp := map[string]interface{}{
+		"handle":      handle,
+		"author_name": authorName,
+		"home_url":    baseURL,
+		"counts": map[string]int{
+			"posts":              counts.Posts,
+			"following":          counts.Following,
+			"followers":          counts.Followers,
+			"feed_unread":        counts.FeedUnread,
+			"dm_unread":          counts.DMUnread,
+			"blessing_requests":  counts.BlessingRequests,
+		},
+	}
+	if avatarConfig != nil {
+		resp["avatar"] = avatarConfig
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
 // handleCounts returns all badge counts in a single response.
 // Replaces the need for 13 parallel API calls from loadAllCounts().
 // GET /_/api/counts
@@ -5098,6 +5343,7 @@ func (s *Server) handleDMConversations(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to load conversations", http.StatusInternalServerError)
 		return
 	}
+	store.DecryptIndexPreviews(idx)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -5261,7 +5507,7 @@ func (s *Server) handleDMSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sender := dm.NewSender(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), store)
+	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), store, s.SharedHTTPClient)
 
 	msg, err := sender.SendMessage(req.RecipientURL, req.Content, req.ReplyToID)
 	if err != nil {
@@ -5445,7 +5691,7 @@ func (s *Server) handleDMRecipients(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			client := remote.NewClient()
+			client := s.NewRemoteClient()
 			res := policycheck.CheckDMEligibilityURL(client, url, myDomain)
 			resultCh <- checkResult{idx: idx, result: res}
 		}()
@@ -5575,5 +5821,145 @@ func (s *Server) syncFollowerState(remoteDomain string, theyFollowUs bool) {
 		fs.Followers = filtered
 		fs.Count = len(fs.Followers)
 		store.SaveState("pub.polis.follow", &fs)
+	}
+}
+
+// handleTags handles GET (list all tags), POST (apply tag), and DELETE (remove target) for /api/tags.
+func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleTagsList(w, r)
+	case http.MethodPost:
+		s.handleTagApply(w, r)
+	case http.MethodDelete:
+		s.handleTagRemove(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleTagsList returns all tag files as JSON.
+func (s *Server) handleTagsList(w http.ResponseWriter, r *http.Request) {
+	tags, err := tag.ListTags(s.DataDir)
+	if err != nil {
+		s.LogError("list tags: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if tags == nil {
+		tags = []tag.TagFile{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"tags": tags,
+	})
+}
+
+// handleTagApply applies a tag to a target URI.
+func (s *Server) handleTagApply(w http.ResponseWriter, r *http.Request) {
+	if s.PrivateKey == nil {
+		http.Error(w, "Not configured: no signing key", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Tag       string `json:"tag"`
+		TargetURI string `json:"target_uri"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Tag == "" || req.TargetURI == "" {
+		http.Error(w, "tag and target_uri are required", http.StatusBadRequest)
+		return
+	}
+
+	tf, err := tag.ApplyTag(s.DataDir, req.Tag, req.TargetURI, s.PrivateKey)
+	if err != nil {
+		s.LogError("apply tag: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Sync with discovery service
+	dsCfg := s.tagDiscoveryConfig()
+	if dsCfg != nil {
+		if err := tag.SyncTag(s.DataDir, tf, s.PrivateKey, dsCfg); err != nil {
+			s.LogWarn("tag DS sync failed: %v", err)
+		}
+	}
+
+	s.LogEvent("pub.polis.tag.applied", map[string]interface{}{
+		"tag":        req.Tag,
+		"target_uri": req.TargetURI,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"tag":     tf,
+	})
+}
+
+// handleTagRemove removes a target URI from a tag.
+func (s *Server) handleTagRemove(w http.ResponseWriter, r *http.Request) {
+	if s.PrivateKey == nil {
+		http.Error(w, "Not configured: no signing key", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		Tag       string `json:"tag"`
+		TargetURI string `json:"target_uri"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Tag == "" || req.TargetURI == "" {
+		http.Error(w, "tag and target_uri are required", http.StatusBadRequest)
+		return
+	}
+
+	tf, err := tag.RemoveTarget(s.DataDir, req.Tag, req.TargetURI, s.PrivateKey)
+	if err != nil {
+		s.LogError("remove tag target: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Unregister from discovery service
+	dsCfg := s.tagDiscoveryConfig()
+	if dsCfg != nil {
+		if err := tag.UnregisterTarget(req.Tag, req.TargetURI, s.PrivateKey, dsCfg); err != nil {
+			s.LogWarn("tag DS unregister failed: %v", err)
+		}
+	}
+
+	s.LogEvent("pub.polis.tag.removed", map[string]interface{}{
+		"tag":        req.Tag,
+		"target_uri": req.TargetURI,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"tag":     tf,
+	})
+}
+
+// tagDiscoveryConfig returns a tag.DiscoveryConfig for the current server,
+// or nil if discovery is not configured.
+func (s *Server) tagDiscoveryConfig() *tag.DiscoveryConfig {
+	if s.DiscoveryURL == "" || s.BaseURL == "" {
+		return nil
+	}
+	return &tag.DiscoveryConfig{
+		DiscoveryURL: s.DiscoveryURL,
+		DiscoveryKey: s.DiscoveryKey,
+		BaseURL:      s.BaseURL,
+		HTTPClient:   s.SharedHTTPClient,
 	}
 }

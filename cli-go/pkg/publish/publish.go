@@ -314,7 +314,8 @@ version-history:
 	}
 
 	// Update index (path relative to site root for content access)
-	relativePath := filepath.Join("content", "pub.polis.core", "post", dateDir, filename+".md")
+	// Use filepath.ToSlash to ensure forward slashes on Windows (URLs must not contain backslashes)
+	relativePath := filepath.ToSlash(filepath.Join("content", "pub.polis.core", "post", dateDir, filename+".md"))
 
 	// Initialize version history with CLI-compatible format
 	// Pass content WITHOUT frontmatter (canonicalBody)

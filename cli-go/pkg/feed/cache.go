@@ -68,7 +68,8 @@ func GetGenerator() string {
 // CachedFeedItem represents a single item in the feed cache.
 type CachedFeedItem struct {
 	ID           string `json:"id"`
-	Type         string `json:"type"`
+	Type         string `json:"type"`                    // "post", "comment", or "announcement"
+	EventType    string `json:"event_type,omitempty"`    // Original DS event type (e.g. "pub.polis.post.published")
 	Title        string `json:"title"`
 	URL          string `json:"url"`
 	Published    string `json:"published"`
@@ -85,30 +86,91 @@ type CachedFeedItem struct {
 // FeedConfig holds user-editable feed configuration.
 type FeedConfig struct {
 	StalenessMinutes int `json:"staleness_minutes"`
-	MaxItems         int `json:"max_items"`
-	MaxAgeDays       int `json:"max_age_days"`
+	MaxItems         int `json:"max_items"`          // Legacy: used as fallback total cap when per-type limits are zero
+	MaxAgeDays       int `json:"max_age_days"`       // Age limit for posts and comments
+	// Per-type retention limits. When set, these override MaxItems.
+	MaxPosts            int `json:"max_posts,omitempty"`             // default 300
+	MaxComments         int `json:"max_comments,omitempty"`          // default 150
+	MaxAnnouncements    int `json:"max_announcements,omitempty"`     // default 50
+	MaxAnnouncementDays int `json:"max_announcement_days,omitempty"` // default 14
 }
 
 // DefaultFeedConfig returns the default feed configuration.
 func DefaultFeedConfig() FeedConfig {
 	return FeedConfig{
-		StalenessMinutes: 15,
-		MaxItems:         500,
-		MaxAgeDays:       90,
+		StalenessMinutes:    5,
+		MaxItems:            500,
+		MaxAgeDays:          90,
+		MaxPosts:            300,
+		MaxComments:         150,
+		MaxAnnouncements:    50,
+		MaxAnnouncementDays: 14,
 	}
+}
+
+// effectiveMaxPosts returns the posts cap, falling back to MaxItems if unset.
+func (cfg *FeedConfig) effectiveMaxPosts() int {
+	if cfg.MaxPosts > 0 {
+		return cfg.MaxPosts
+	}
+	if cfg.MaxItems > 0 {
+		return cfg.MaxItems
+	}
+	return 300
+}
+
+// effectiveMaxComments returns the comments cap, falling back to MaxItems if unset.
+func (cfg *FeedConfig) effectiveMaxComments() int {
+	if cfg.MaxComments > 0 {
+		return cfg.MaxComments
+	}
+	if cfg.MaxItems > 0 {
+		return cfg.MaxItems
+	}
+	return 150
+}
+
+// effectiveMaxAnnouncements returns the announcements cap.
+func (cfg *FeedConfig) effectiveMaxAnnouncements() int {
+	if cfg.MaxAnnouncements > 0 {
+		return cfg.MaxAnnouncements
+	}
+	return 50
+}
+
+// effectiveMaxAnnouncementDays returns the announcement age limit.
+func (cfg *FeedConfig) effectiveMaxAnnouncementDays() int {
+	if cfg.MaxAnnouncementDays > 0 {
+		return cfg.MaxAnnouncementDays
+	}
+	return 14
+}
+
+// effectiveMaxAgeDays returns the post/comment age limit.
+func (cfg *FeedConfig) effectiveMaxAgeDays() int {
+	if cfg.MaxAgeDays > 0 {
+		return cfg.MaxAgeDays
+	}
+	return 90
 }
 
 // CacheManager handles feed cache operations.
 type CacheManager struct {
 	mu         sync.Mutex
-	cacheFile  string        // state/polis.feed.jsonl
+	cacheFile  string        // state/pub.polis.feed.jsonl (or scoped variant)
 	configFile string        // config/feed.json
+	cursorKey  string        // cursor key in cursors.json (e.g. "pub.polis.feed" or "pub.polis.feed.global")
 	store      *stream.Store // for cursor operations
 }
 
 // CacheFile returns the path to pub.polis.feed.jsonl for a given DS domain.
 func CacheFile(dataDir, discoveryDomain string) string {
 	return filepath.Join(dataDir, ".polis", "ds", discoveryDomain, "pub.polis.core", "state", "pub.polis.feed.jsonl")
+}
+
+// ScopedCacheFile returns the path to a scoped feed cache file (e.g. pub.polis.feed.followers.jsonl).
+func ScopedCacheFile(dataDir, discoveryDomain, scope string) string {
+	return filepath.Join(dataDir, ".polis", "ds", discoveryDomain, "pub.polis.core", "state", "pub.polis.feed."+scope+".jsonl")
 }
 
 // ConfigFile returns the path to config/feed.json for a given DS domain.
@@ -121,6 +183,18 @@ func NewCacheManager(dataDir, discoveryDomain string) *CacheManager {
 	return &CacheManager{
 		cacheFile:  CacheFile(dataDir, discoveryDomain),
 		configFile: ConfigFile(dataDir, discoveryDomain),
+		cursorKey:  "pub.polis.feed",
+		store:      stream.NewStore(dataDir, discoveryDomain, "pub.polis.core"),
+	}
+}
+
+// NewScopedCacheManager creates a feed cache manager for a specific scope (e.g. "followers", "global").
+// Each scope gets its own JSONL file and cursor key.
+func NewScopedCacheManager(dataDir, discoveryDomain, scope string) *CacheManager {
+	return &CacheManager{
+		cacheFile:  ScopedCacheFile(dataDir, discoveryDomain, scope),
+		configFile: ConfigFile(dataDir, discoveryDomain),
+		cursorKey:  "pub.polis.feed." + scope,
 		store:      stream.NewStore(dataDir, discoveryDomain, "pub.polis.core"),
 	}
 }
@@ -165,6 +239,20 @@ func (cm *CacheManager) listLocked() ([]CachedFeedItem, error) {
 
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("failed to read cache: %w", err)
+	}
+
+	// Backfill EventType for items cached before the field was added.
+	for i := range items {
+		if items[i].EventType == "" {
+			switch items[i].Type {
+			case "post":
+				items[i].EventType = "pub.polis.post.published"
+			case "comment":
+				items[i].EventType = "pub.polis.comment.published"
+			case "announcement":
+				items[i].EventType = "pub.polis.follow.announced"
+			}
+		}
 	}
 
 	// Sort by Published descending to match the docstring contract.
@@ -247,12 +335,12 @@ func (cm *CacheManager) UnreadCount() (int, error) {
 
 // GetCursor returns the feed stream cursor position, or "0" if not set.
 func (cm *CacheManager) GetCursor() (string, error) {
-	return cm.store.GetCursor("pub.polis.feed")
+	return cm.store.GetCursor(cm.cursorKey)
 }
 
 // SetCursor stores the feed stream cursor position.
 func (cm *CacheManager) SetCursor(cursor string) error {
-	return cm.store.SetCursor("pub.polis.feed", cursor)
+	return cm.store.SetCursor(cm.cursorKey, cursor)
 }
 
 // LoadConfig loads the feed configuration, returning defaults if not found.
@@ -280,16 +368,14 @@ func (cm *CacheManager) SaveConfig(cfg *FeedConfig) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Ensure defaults
+	// Ensure defaults for required fields
 	if cfg.StalenessMinutes <= 0 {
-		cfg.StalenessMinutes = 15
-	}
-	if cfg.MaxItems <= 0 {
-		cfg.MaxItems = 500
+		cfg.StalenessMinutes = 5
 	}
 	if cfg.MaxAgeDays <= 0 {
 		cfg.MaxAgeDays = 90
 	}
+	// MaxItems kept as legacy fallback; per-type limits are optional (zero = use defaults)
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -301,7 +387,7 @@ func (cm *CacheManager) SaveConfig(cfg *FeedConfig) error {
 
 // IsStale returns true if the cache needs refreshing based on staleness_minutes.
 func (cm *CacheManager) IsStale() (bool, error) {
-	entry, err := cm.store.GetCursorEntry("pub.polis.feed")
+	entry, err := cm.store.GetCursorEntry(cm.cursorKey)
 	if err != nil {
 		return true, nil
 	}
@@ -322,7 +408,7 @@ func (cm *CacheManager) IsStale() (bool, error) {
 	cfg, _ := cm.LoadConfig()
 	staleness := cfg.StalenessMinutes
 	if staleness <= 0 {
-		staleness = 15
+		staleness = 5
 	}
 
 	return time.Since(lastUpdated) > time.Duration(staleness)*time.Minute, nil
@@ -330,7 +416,7 @@ func (cm *CacheManager) IsStale() (bool, error) {
 
 // LastUpdated returns the timestamp of the last feed sync, or empty string if never synced.
 func (cm *CacheManager) LastUpdated() string {
-	entry, err := cm.store.GetCursorEntry("pub.polis.feed")
+	entry, err := cm.store.GetCursorEntry(cm.cursorKey)
 	if err != nil {
 		return ""
 	}
@@ -369,6 +455,7 @@ func (cm *CacheManager) MergeItems(items []FeedItem) (int, error) {
 		existing = append(existing, CachedFeedItem{
 			ID:           id,
 			Type:         item.Type,
+			EventType:    item.EventType,
 			Title:        item.Title,
 			URL:          item.URL,
 			Published:    published,
@@ -531,31 +618,9 @@ func (cm *CacheManager) pruneLocked() (int, error) {
 	}
 
 	cfg, _ := cm.LoadConfig()
-
-	maxAgeDays := cfg.MaxAgeDays
-	if maxAgeDays <= 0 {
-		maxAgeDays = 90
-	}
-	maxItems := cfg.MaxItems
-	if maxItems <= 0 {
-		maxItems = 500
-	}
-
 	originalLen := len(items)
 
-	// Remove items older than MaxAgeDays
-	cutoff := time.Now().AddDate(0, 0, -maxAgeDays).UTC().Format(time.RFC3339)
-	var remaining []CachedFeedItem
-	for _, item := range items {
-		if item.Published >= cutoff {
-			remaining = append(remaining, item)
-		}
-	}
-
-	// Enforce MaxItems (keep most recent)
-	if len(remaining) > maxItems {
-		remaining = remaining[:maxItems]
-	}
+	remaining := pruneByType(items, cfg)
 
 	removed := originalLen - len(remaining)
 	if removed > 0 {
@@ -565,6 +630,63 @@ func (cm *CacheManager) pruneLocked() (int, error) {
 	}
 
 	return removed, nil
+}
+
+// pruneByType partitions items into posts, comments, and announcements,
+// applies per-type age and count limits, then merges back sorted by published descending.
+func pruneByType(items []CachedFeedItem, cfg *FeedConfig) []CachedFeedItem {
+	now := time.Now()
+	contentCutoff := now.AddDate(0, 0, -cfg.effectiveMaxAgeDays())
+	announcementCutoff := now.AddDate(0, 0, -cfg.effectiveMaxAnnouncementDays())
+
+	maxPosts := cfg.effectiveMaxPosts()
+	maxComments := cfg.effectiveMaxComments()
+	maxAnnouncements := cfg.effectiveMaxAnnouncements()
+
+	// Partition by type
+	var posts, comments, announcements []CachedFeedItem
+	for _, item := range items {
+		t := ParsePublished(item.Published)
+		switch item.Type {
+		case "announcement":
+			if !t.IsZero() && t.Before(announcementCutoff) {
+				continue // too old
+			}
+			announcements = append(announcements, item)
+		case "comment":
+			if !t.IsZero() && t.Before(contentCutoff) {
+				continue
+			}
+			comments = append(comments, item)
+		default: // "post" and any future types
+			if !t.IsZero() && t.Before(contentCutoff) {
+				continue
+			}
+			posts = append(posts, item)
+		}
+	}
+
+	// Apply per-type count limits (items already sorted by published desc from listLocked)
+	if len(posts) > maxPosts {
+		posts = posts[:maxPosts]
+	}
+	if len(comments) > maxComments {
+		comments = comments[:maxComments]
+	}
+	if len(announcements) > maxAnnouncements {
+		announcements = announcements[:maxAnnouncements]
+	}
+
+	// Merge back and sort by published descending
+	result := make([]CachedFeedItem, 0, len(posts)+len(comments)+len(announcements))
+	result = append(result, posts...)
+	result = append(result, comments...)
+	result = append(result, announcements...)
+	sort.Slice(result, func(i, j int) bool {
+		return PublishedBefore(result[j].Published, result[i].Published)
+	})
+
+	return result
 }
 
 // SetStalenessMinutes updates the staleness threshold.

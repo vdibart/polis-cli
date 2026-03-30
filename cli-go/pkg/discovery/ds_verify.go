@@ -40,6 +40,21 @@ func NewDSKeyCache(dsURL string, ttl time.Duration) *DSKeyCache {
 	}
 }
 
+// NewDSKeyCacheWithHTTP creates a key cache using a shared HTTP client.
+func NewDSKeyCacheWithHTTP(dsURL string, ttl time.Duration, hc *http.Client) *DSKeyCache {
+	if ttl == 0 {
+		ttl = time.Hour
+	}
+	if hc == nil {
+		return NewDSKeyCache(dsURL, ttl)
+	}
+	return &DSKeyCache{
+		dsURL:  dsURL,
+		ttl:    ttl,
+		client: hc,
+	}
+}
+
 // GetKey returns the cached DS public key, fetching it if expired or missing.
 func (c *DSKeyCache) GetKey() (publicKey, keyID string, err error) {
 	c.mu.Lock()
@@ -285,4 +300,56 @@ func (s sortedMap) MarshalJSON() ([]byte, error) {
 	}
 	buf = append(buf, '}')
 	return buf, nil
+}
+
+// VerifyAutoblessAttestation verifies a DS attestation signature on an autoblessed
+// comment. The attestation proves which DS instance made the autobless decision and
+// which policy rule matched. Returns nil if valid, error if verification fails.
+// If attestation is empty, returns nil (legacy record without attestation).
+func VerifyAutoblessAttestation(
+	cache *DSKeyCache,
+	commentURL, targetURL, policyRule, policySource, dsKeyID, attestation string,
+) error {
+	if attestation == "" {
+		return nil // Legacy record without attestation — skip verification
+	}
+
+	canonical := BuildCanonicalJSON(map[string]interface{}{
+		"type":          "pub.polis.comment.blessing",
+		"action":        "autobless",
+		"comment_url":   commentURL,
+		"target_url":    targetURL,
+		"policy_rule":   policyRule,
+		"policy_source": policySource,
+		"ds_key_id":     dsKeyID,
+	})
+
+	pubKey, _, err := cache.GetKey()
+	if err != nil {
+		return fmt.Errorf("failed to get DS public key for autobless verification: %w", err)
+	}
+
+	valid, err := signing.VerifySignature([]byte(canonical), []byte(pubKey), attestation)
+	if err == nil && valid {
+		return nil
+	}
+
+	// Retry with refreshed key (handles key rotation)
+	if refreshErr := cache.Refresh(); refreshErr != nil {
+		return fmt.Errorf("autobless attestation verification failed and key refresh failed: %w", refreshErr)
+	}
+
+	pubKey, _, err = cache.GetKey()
+	if err != nil {
+		return fmt.Errorf("failed to get DS public key after refresh: %w", err)
+	}
+
+	valid, err = signing.VerifySignature([]byte(canonical), []byte(pubKey), attestation)
+	if err != nil {
+		return fmt.Errorf("autobless attestation verification failed after key refresh: %w", err)
+	}
+	if !valid {
+		return fmt.Errorf("autobless attestation verification failed after key refresh — discarding")
+	}
+	return nil
 }

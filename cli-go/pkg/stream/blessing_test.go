@@ -2,9 +2,13 @@ package stream
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 )
 
 func TestBlessingHandler_EventTypes(t *testing.T) {
@@ -252,5 +256,243 @@ func TestBlessingHandler_FullLifecycle(t *testing.T) {
 	}
 	if bs2.Granted != 1 {
 		t.Errorf("after grant: granted = %d, want 1", bs2.Granted)
+	}
+}
+
+func TestBlessingHandler_AutoblessNoAttestation_Processes(t *testing.T) {
+	// Legacy autobless events without ds_attestation should be processed without warning
+	h := &BlessingHandler{MyDomain: "bob.com"}
+	state := h.NewState()
+
+	events := []discovery.StreamEvent{
+		{
+			ID:    json.Number("1"),
+			Type:  "pub.polis.comment.blessing.granted",
+			Actor: "bob.com",
+			Payload: map[string]interface{}{
+				"source_url":    "https://alice.com/comments/1.md",
+				"target_url":    "https://bob.com/posts/1.md",
+				"target_domain": "bob.com",
+				"auto_blessed":  true,
+				"policy_rule":   "emit pub.polis.comment.blessing from following",
+				"policy_source": "user-published",
+				// No ds_attestation — legacy
+			},
+			Timestamp: "2026-03-23T10:00:00Z",
+		},
+	}
+
+	result, err := h.Process(events, state)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	bs := result.(*BlessingState)
+	if len(bs.Blessings) != 1 {
+		t.Fatalf("expected 1 blessing, got %d", len(bs.Blessings))
+	}
+	if bs.Blessings[0].Status != "granted" {
+		t.Errorf("status = %q, want %q", bs.Blessings[0].Status, "granted")
+	}
+}
+
+func TestBlessingHandler_AutoblessCommentURLFields(t *testing.T) {
+	// DS auto-blessing events use comment_url/in_reply_to instead of source_url/target_url.
+	// Regression test: these events must not be silently skipped.
+	h := &BlessingHandler{MyDomain: "david.polis.pub"}
+	state := h.NewState()
+
+	events := []discovery.StreamEvent{
+		{
+			ID:    json.Number("1"),
+			Type:  "pub.polis.comment.blessing.granted",
+			Actor: "david.polis.pub",
+			Payload: map[string]interface{}{
+				"comment_url":   "https://vdibart.polis.pub/comments/20260323/ongoing-list-20260323.md",
+				"in_reply_to":   "https://david.polis.pub/posts/20260323/ongoing-list-of-ideas.md",
+				"target_domain": "david.polis.pub",
+				"source_domain": "vdibart.polis.pub",
+				"auto_blessed":  true,
+				"bless_reason":  "policy-match",
+				"policy_rule":   "emit pub.polis.comment.blessing from following",
+				"policy_source": "user-published",
+			},
+			Timestamp: "2026-03-23T10:00:00Z",
+		},
+	}
+
+	result, err := h.Process(events, state)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	bs := result.(*BlessingState)
+	if len(bs.Blessings) != 1 {
+		t.Fatalf("expected 1 blessing, got %d", len(bs.Blessings))
+	}
+	if bs.Blessings[0].Status != "granted" {
+		t.Errorf("status = %q, want %q", bs.Blessings[0].Status, "granted")
+	}
+	if bs.Blessings[0].SourceURL != "https://vdibart.polis.pub/comments/20260323/ongoing-list-20260323.md" {
+		t.Errorf("source_url = %q, want comment_url value", bs.Blessings[0].SourceURL)
+	}
+	if bs.Blessings[0].TargetURL != "https://david.polis.pub/posts/20260323/ongoing-list-of-ideas.md" {
+		t.Errorf("target_url = %q, want in_reply_to value", bs.Blessings[0].TargetURL)
+	}
+	if bs.Granted != 1 {
+		t.Errorf("granted = %d, want 1", bs.Granted)
+	}
+}
+
+func TestBlessingHandler_AutoblessWithValidAttestation_Processes(t *testing.T) {
+	privPEM, pubSSH, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"public_key": string(pubSSH),
+			"key_id":     "ds-primary",
+		})
+	}))
+	defer server.Close()
+
+	cache := discovery.NewDSKeyCache(server.URL, time.Hour)
+
+	commentURL := "https://alice.com/comments/1.md"
+	targetURL := "https://bob.com/posts/1.md"
+	policyRule := "emit pub.polis.comment.blessing from following"
+	policySource := "user-published"
+	dsKeyID := "ds-primary"
+
+	canonical := discovery.BuildCanonicalJSON(map[string]interface{}{
+		"type":          "pub.polis.comment.blessing",
+		"action":        "autobless",
+		"comment_url":   commentURL,
+		"target_url":    targetURL,
+		"policy_rule":   policyRule,
+		"policy_source": policySource,
+		"ds_key_id":     dsKeyID,
+	})
+	attestation, err := signing.SignContent([]byte(canonical), privPEM)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+
+	h := &BlessingHandler{MyDomain: "bob.com", DSKeyCache: cache}
+	state := h.NewState()
+
+	events := []discovery.StreamEvent{
+		{
+			ID:    json.Number("1"),
+			Type:  "pub.polis.comment.blessing.granted",
+			Actor: "bob.com",
+			Payload: map[string]interface{}{
+				"source_url":     commentURL,
+				"target_url":     targetURL,
+				"comment_url":    commentURL,
+				"in_reply_to":    targetURL,
+				"target_domain":  "bob.com",
+				"auto_blessed":   true,
+				"policy_rule":    policyRule,
+				"policy_source":  policySource,
+				"ds_attestation": attestation,
+				"ds_key_id":      dsKeyID,
+			},
+			Timestamp: "2026-03-23T10:00:00Z",
+		},
+	}
+
+	result, err := h.Process(events, state)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+
+	bs := result.(*BlessingState)
+	if len(bs.Blessings) != 1 {
+		t.Fatalf("expected 1 blessing, got %d", len(bs.Blessings))
+	}
+	if bs.Blessings[0].Status != "granted" {
+		t.Errorf("status = %q, want %q", bs.Blessings[0].Status, "granted")
+	}
+}
+
+func TestBlessingHandler_AutoblessWithInvalidAttestation_StillProcesses(t *testing.T) {
+	// Invalid attestation should log warning but still process the event
+	_, pubSSH, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+
+	// Sign with a different key
+	otherPrivPEM, _, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("keygen2: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"public_key": string(pubSSH),
+			"key_id":     "ds-primary",
+		})
+	}))
+	defer server.Close()
+
+	cache := discovery.NewDSKeyCache(server.URL, time.Hour)
+
+	// Sign with wrong key
+	canonical := discovery.BuildCanonicalJSON(map[string]interface{}{
+		"type":          "pub.polis.comment.blessing",
+		"action":        "autobless",
+		"comment_url":   "https://alice.com/comments/1.md",
+		"target_url":    "https://bob.com/posts/1.md",
+		"policy_rule":   "emit pub.polis.comment.blessing from following",
+		"policy_source": "user-published",
+		"ds_key_id":     "ds-primary",
+	})
+	badAttestation, err := signing.SignContent([]byte(canonical), otherPrivPEM)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+
+	h := &BlessingHandler{MyDomain: "bob.com", DSKeyCache: cache}
+	state := h.NewState()
+
+	events := []discovery.StreamEvent{
+		{
+			ID:    json.Number("1"),
+			Type:  "pub.polis.comment.blessing.granted",
+			Actor: "bob.com",
+			Payload: map[string]interface{}{
+				"source_url":     "https://alice.com/comments/1.md",
+				"target_url":     "https://bob.com/posts/1.md",
+				"comment_url":    "https://alice.com/comments/1.md",
+				"in_reply_to":    "https://bob.com/posts/1.md",
+				"target_domain":  "bob.com",
+				"auto_blessed":   true,
+				"policy_rule":    "emit pub.polis.comment.blessing from following",
+				"policy_source":  "user-published",
+				"ds_attestation": badAttestation,
+				"ds_key_id":      "ds-primary",
+			},
+			Timestamp: "2026-03-23T10:00:00Z",
+		},
+	}
+
+	result, err := h.Process(events, state)
+	if err != nil {
+		t.Fatalf("Process should not fail on bad attestation: %v", err)
+	}
+
+	// Event should still be processed (warn-only)
+	bs := result.(*BlessingState)
+	if len(bs.Blessings) != 1 {
+		t.Fatalf("expected 1 blessing (warn-only), got %d", len(bs.Blessings))
+	}
+	if bs.Blessings[0].Status != "granted" {
+		t.Errorf("status = %q, want %q", bs.Blessings[0].Status, "granted")
 	}
 }

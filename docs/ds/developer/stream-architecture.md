@@ -165,13 +165,15 @@ verification. The `payload` is type-specific data.
 | `pub.polis.comment.blessing.denied` | `POST /v1/relationships` | Post author domain | source_url, target_url, action, target_domain, source_domain |
 | `pub.polis.follow.announced` | `POST /v1/stream` (client) | Follower domain | target_domain |
 | `pub.polis.follow.removed` | `POST /v1/stream` (client) | Unfollower domain | target_domain |
+| `pub.polis.tag.applied` | `POST /v1/content` (tag) | Author domain | tag, target |
+| `pub.polis.tag.removed` | `POST /v1/content/unregister` (tag) | Author domain | tag, target |
 | `pub.polis.site.registered` | `POST /v1/sites` (new) | Site domain | domain, registry_url |
 | `pub.polis.site.reregistered` | `POST /v1/sites` (existing) | Site domain | domain, registry_url |
 | `pub.polis.site.key_rotated` | `POST /v1/sites/keys/rotate` | Site domain | old_key_id, new_key_id |
 
 **Auto-bless payloads** include additional fields: `auto_blessed`, `bless_reason`,
-`policy_rule`, `policy_source`, `blessed_by`, `source_domain`, `target_domain`
-(and conditionally `fallback_reason`).
+`policy_rule`, `policy_source`, `blessed_by`, `ds_attestation`, `ds_key_id`,
+`source_domain`, `target_domain` (and conditionally `fallback_reason`).
 
 ### Canonical Signing
 

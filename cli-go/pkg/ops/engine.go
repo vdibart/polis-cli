@@ -269,7 +269,8 @@ func isWriteAction(action string) bool {
 		"bless", "deny", "revoke", "sync",
 		"draft.save", "draft.delete",
 		"refresh",
-		"send", "deliver", "mark_read", "retry":
+		"send", "deliver", "mark_read", "retry",
+		"apply", "remove":
 		return true
 	default:
 		return false

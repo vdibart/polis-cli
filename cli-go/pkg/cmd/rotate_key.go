@@ -84,24 +84,28 @@ func handleRotateKey(args []string) {
 		dsURL = DefaultDiscoveryServiceURL
 	}
 
-	dsClient := discovery.NewClient(dsURL, dsKey)
-	if !jsonOutput {
-		fmt.Println("[i] Notifying discovery service of key rotation...")
-	}
+	if discovery.IsRegisteredLocally(dir, dsURL) {
+		dsClient := discovery.NewClient(dsURL, dsKey)
+		if !jsonOutput {
+			fmt.Println("[i] Notifying discovery service of key rotation...")
+		}
 
-	err = dsClient.RotateKey(discovery.KeyRotationRequest{
-		Domain:        domain,
-		OldKey:        oldPubKey,
-		NewKey:        newPubKey,
-		TransitionSig: transitionSig,
-		Timestamp:     timestamp,
-	})
-	if err != nil {
-		exitError("Discovery service rejected key rotation: %v", err)
-	}
+		err = dsClient.RotateKey(discovery.KeyRotationRequest{
+			Domain:        domain,
+			OldKey:        oldPubKey,
+			NewKey:        newPubKey,
+			TransitionSig: transitionSig,
+			Timestamp:     timestamp,
+		})
+		if err != nil {
+			exitError("Discovery service rejected key rotation: %v", err)
+		}
 
-	if !jsonOutput {
-		fmt.Println("[✓] Discovery service acknowledged key rotation")
+		if !jsonOutput {
+			fmt.Println("[✓] Discovery service acknowledged key rotation")
+		}
+	} else if !jsonOutput {
+		fmt.Println("[i] DS notification skipped: site not registered with discovery service")
 	}
 
 	// Backup old keys

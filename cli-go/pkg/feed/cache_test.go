@@ -578,8 +578,8 @@ func TestCacheManager_Config(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.StalenessMinutes != 15 {
-		t.Errorf("expected default staleness 15, got %d", cfg.StalenessMinutes)
+	if cfg.StalenessMinutes != 5 {
+		t.Errorf("expected default staleness 5, got %d", cfg.StalenessMinutes)
 	}
 	if cfg.MaxItems != 500 {
 		t.Errorf("expected default max items 500, got %d", cfg.MaxItems)
@@ -692,5 +692,256 @@ func TestCacheManager_ConfigRoundTrip(t *testing.T) {
 	// Verify config file at new path
 	if _, err := os.Stat(filepath.Join(dir, ".polis", "ds", testDiscoveryDomain, "pub.polis.core", "config", "feed.json")); err != nil {
 		t.Error("config file should exist at pub.polis.core/config/feed.json")
+	}
+}
+
+func TestCacheManager_PruneByType_AnnouncementsDoNotDisplacePosts(t *testing.T) {
+	dir := t.TempDir()
+	cm := NewCacheManager(dir, testDiscoveryDomain)
+
+	cm.SaveConfig(&FeedConfig{
+		StalenessMinutes: 15,
+		MaxPosts:         3,
+		MaxComments:      2,
+		MaxAnnouncements: 2,
+		MaxAgeDays:       90,
+		MaxAnnouncementDays: 14,
+	})
+
+	now := time.Now()
+	items := []FeedItem{
+		{Type: "post", Title: "Post 1", URL: "posts/1.md", Published: now.Add(-1 * time.Hour).UTC().Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Post 2", URL: "posts/2.md", Published: now.Add(-2 * time.Hour).UTC().Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Post 3", URL: "posts/3.md", Published: now.Add(-3 * time.Hour).UTC().Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Post 4", URL: "posts/4.md", Published: now.Add(-4 * time.Hour).UTC().Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "announcement", Title: "Follow 1", URL: "https://x.pub", Published: now.Add(-30 * time.Minute).UTC().Format(time.RFC3339), AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
+		{Type: "announcement", Title: "Follow 2", URL: "https://y.pub", Published: now.Add(-45 * time.Minute).UTC().Format(time.RFC3339), AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
+		{Type: "announcement", Title: "Follow 3", URL: "https://z.pub", Published: now.Add(-50 * time.Minute).UTC().Format(time.RFC3339), AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
+		{Type: "comment", Title: "Comment 1", URL: "comments/1.md", Published: now.Add(-1 * time.Hour).UTC().Format(time.RFC3339), AuthorURL: "https://c.pub", AuthorDomain: "c.pub"},
+	}
+
+	cm.MergeItems(items)
+
+	result, _ := cm.List()
+
+	// Count by type
+	counts := map[string]int{}
+	for _, item := range result {
+		counts[item.Type]++
+	}
+
+	if counts["post"] != 3 {
+		t.Errorf("expected 3 posts (MaxPosts=3), got %d", counts["post"])
+	}
+	if counts["announcement"] != 2 {
+		t.Errorf("expected 2 announcements (MaxAnnouncements=2), got %d", counts["announcement"])
+	}
+	if counts["comment"] != 1 {
+		t.Errorf("expected 1 comment, got %d", counts["comment"])
+	}
+
+	// Total should be 6 (3+2+1), not capped by a single global limit
+	if len(result) != 6 {
+		t.Errorf("expected 6 total items, got %d", len(result))
+	}
+}
+
+func TestCacheManager_PruneByType_AnnouncementAgeShorter(t *testing.T) {
+	dir := t.TempDir()
+	cm := NewCacheManager(dir, testDiscoveryDomain)
+
+	cm.SaveConfig(&FeedConfig{
+		StalenessMinutes:    15,
+		MaxPosts:            300,
+		MaxComments:         150,
+		MaxAnnouncements:    50,
+		MaxAgeDays:          90,
+		MaxAnnouncementDays: 14,
+	})
+
+	now := time.Now()
+	recentDate := now.Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+	oldPostDate := now.AddDate(0, 0, -30).UTC().Format(time.RFC3339)       // 30 days: within 90-day post limit
+	oldAnnouncementDate := now.AddDate(0, 0, -20).UTC().Format(time.RFC3339) // 20 days: beyond 14-day announcement limit
+
+	cm.MergeItems([]FeedItem{
+		{Type: "post", Title: "Recent Post", URL: "posts/recent.md", Published: recentDate, AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Old Post", URL: "posts/old.md", Published: oldPostDate, AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "announcement", Title: "Recent Follow", URL: "https://x.pub", Published: recentDate, AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
+		{Type: "announcement", Title: "Old Follow", URL: "https://y.pub", Published: oldAnnouncementDate, AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
+	})
+
+	result, _ := cm.List()
+
+	// Old post (30 days) should survive — within 90-day limit
+	// Old announcement (20 days) should be pruned — beyond 14-day limit
+	titles := map[string]bool{}
+	for _, item := range result {
+		titles[item.Title] = true
+	}
+
+	if !titles["Old Post"] {
+		t.Error("30-day-old post should survive (within 90-day limit)")
+	}
+	if titles["Old Follow"] {
+		t.Error("20-day-old announcement should be pruned (beyond 14-day limit)")
+	}
+	if !titles["Recent Post"] {
+		t.Error("recent post should survive")
+	}
+	if !titles["Recent Follow"] {
+		t.Error("recent announcement should survive")
+	}
+	if len(result) != 3 {
+		t.Errorf("expected 3 items, got %d", len(result))
+	}
+}
+
+func TestCacheManager_PruneByType_LegacyConfigFallback(t *testing.T) {
+	dir := t.TempDir()
+	cm := NewCacheManager(dir, testDiscoveryDomain)
+
+	// Save a legacy config with only MaxItems (no per-type limits)
+	cm.SaveConfig(&FeedConfig{
+		StalenessMinutes: 15,
+		MaxItems:         3,
+		MaxAgeDays:       90,
+	})
+
+	now := time.Now()
+	cm.MergeItems([]FeedItem{
+		{Type: "post", Title: "Post 1", URL: "posts/1.md", Published: now.Add(-1 * time.Hour).UTC().Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Post 2", URL: "posts/2.md", Published: now.Add(-2 * time.Hour).UTC().Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Post 3", URL: "posts/3.md", Published: now.Add(-3 * time.Hour).UTC().Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Post 4", URL: "posts/4.md", Published: now.Add(-4 * time.Hour).UTC().Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Post 5", URL: "posts/5.md", Published: now.Add(-5 * time.Hour).UTC().Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+	})
+
+	result, _ := cm.List()
+
+	// MaxItems=3 is used as fallback for MaxPosts when per-type limits are zero
+	if len(result) != 3 {
+		t.Errorf("expected 3 posts (legacy MaxItems fallback), got %d", len(result))
+	}
+	if result[0].Title != "Post 1" {
+		t.Errorf("expected most recent first, got %s", result[0].Title)
+	}
+}
+
+func TestNewScopedCacheManager_IsolatedFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create network and followers scope managers
+	network := NewCacheManager(dir, testDiscoveryDomain)
+	followers := NewScopedCacheManager(dir, testDiscoveryDomain, "followers")
+
+	now := time.Now()
+
+	// Add items to network
+	network.MergeItems([]FeedItem{
+		{Type: "post", Title: "Network Post", URL: "posts/net.md", Published: now.UTC().Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+	})
+
+	// Add items to followers
+	followers.MergeItems([]FeedItem{
+		{Type: "post", Title: "Follower Post", URL: "posts/fol.md", Published: now.UTC().Format(time.RFC3339), AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
+	})
+
+	// Each scope should have exactly 1 item
+	netItems, _ := network.List()
+	folItems, _ := followers.List()
+
+	if len(netItems) != 1 {
+		t.Errorf("network: expected 1 item, got %d", len(netItems))
+	}
+	if len(folItems) != 1 {
+		t.Errorf("followers: expected 1 item, got %d", len(folItems))
+	}
+	if netItems[0].Title != "Network Post" {
+		t.Errorf("network: expected 'Network Post', got %s", netItems[0].Title)
+	}
+	if folItems[0].Title != "Follower Post" {
+		t.Errorf("followers: expected 'Follower Post', got %s", folItems[0].Title)
+	}
+
+	// Cursors should be independent
+	network.SetCursor("100")
+	followers.SetCursor("200")
+
+	netCursor, _ := network.GetCursor()
+	folCursor, _ := followers.GetCursor()
+
+	if netCursor != "100" {
+		t.Errorf("network cursor: expected '100', got %s", netCursor)
+	}
+	if folCursor != "200" {
+		t.Errorf("followers cursor: expected '200', got %s", folCursor)
+	}
+
+	// Mark read in one scope shouldn't affect other
+	network.MarkAllRead()
+	folItems, _ = followers.List()
+	for _, item := range folItems {
+		if item.ReadAt != "" {
+			t.Error("marking network read shouldn't affect followers")
+		}
+	}
+}
+
+func TestPruneByType_Unit(t *testing.T) {
+	now := time.Now()
+	cfg := &FeedConfig{
+		MaxPosts:            2,
+		MaxComments:         1,
+		MaxAnnouncements:    1,
+		MaxAgeDays:          90,
+		MaxAnnouncementDays: 14,
+	}
+
+	items := []CachedFeedItem{
+		{ID: "p1", Type: "post", Published: now.Add(-1 * time.Hour).UTC().Format(time.RFC3339)},
+		{ID: "p2", Type: "post", Published: now.Add(-2 * time.Hour).UTC().Format(time.RFC3339)},
+		{ID: "p3", Type: "post", Published: now.Add(-3 * time.Hour).UTC().Format(time.RFC3339)},
+		{ID: "c1", Type: "comment", Published: now.Add(-1 * time.Hour).UTC().Format(time.RFC3339)},
+		{ID: "c2", Type: "comment", Published: now.Add(-2 * time.Hour).UTC().Format(time.RFC3339)},
+		{ID: "a1", Type: "announcement", Published: now.Add(-1 * time.Hour).UTC().Format(time.RFC3339)},
+		{ID: "a2", Type: "announcement", Published: now.Add(-2 * time.Hour).UTC().Format(time.RFC3339)},
+	}
+
+	result := pruneByType(items, cfg)
+
+	ids := map[string]bool{}
+	for _, item := range result {
+		ids[item.ID] = true
+	}
+
+	// Should keep 2 posts, 1 comment, 1 announcement = 4 total
+	if len(result) != 4 {
+		t.Errorf("expected 4 items, got %d", len(result))
+	}
+	if !ids["p1"] || !ids["p2"] {
+		t.Error("should keep 2 most recent posts")
+	}
+	if ids["p3"] {
+		t.Error("3rd post should be pruned")
+	}
+	if !ids["c1"] {
+		t.Error("should keep most recent comment")
+	}
+	if ids["c2"] {
+		t.Error("2nd comment should be pruned")
+	}
+	if !ids["a1"] {
+		t.Error("should keep most recent announcement")
+	}
+	if ids["a2"] {
+		t.Error("2nd announcement should be pruned")
+	}
+
+	// Result should be sorted by published descending
+	for i := 1; i < len(result); i++ {
+		if PublishedBefore(result[i-1].Published, result[i].Published) {
+			t.Errorf("result not sorted descending at index %d", i)
+		}
 	}
 }

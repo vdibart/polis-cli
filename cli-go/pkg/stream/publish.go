@@ -17,6 +17,7 @@ var (
 	DiscoveryURL string
 	DiscoveryKey string
 	BaseURL      string // POLIS_BASE_URL — actor domain is extracted from this
+	DataDir      string // Site data directory — used for registration check
 )
 
 // DiscoveryConfig holds per-tenant discovery service configuration.
@@ -26,6 +27,7 @@ type DiscoveryConfig struct {
 	DiscoveryURL string
 	DiscoveryKey string
 	BaseURL      string
+	DataDir      string
 }
 
 // PublishEvent publishes an event to the discovery stream.
@@ -54,6 +56,14 @@ func PublishEvent(eventType string, payload map[string]interface{}, privateKey [
 		}
 		fmt.Printf("[i] Stream event skipped: %s not set\n", strings.Join(missing, ", "))
 		return nil
+	}
+
+	dataDir := DataDir
+	if len(dsCfg) > 0 && dsCfg[0] != nil && dsCfg[0].DataDir != "" {
+		dataDir = dsCfg[0].DataDir
+	}
+	if !discovery.IsRegisteredLocally(dataDir, dsURL) {
+		return nil // silently skip — stream events are fire-and-forget
 	}
 	if privateKey == nil {
 		fmt.Println("[i] Stream event skipped: no private key")

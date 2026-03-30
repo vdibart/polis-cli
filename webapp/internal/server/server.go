@@ -33,9 +33,11 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
+	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
+	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
@@ -103,9 +105,6 @@ type Config struct {
 	// Hooks configuration
 	Hooks *hooks.HookConfig `json:"hooks,omitempty"`
 
-	// View mode: "list" or "browser"
-	ViewMode string `json:"view_mode,omitempty"`
-
 	// Show frontmatter in markdown pane (default true)
 	ShowFrontmatter *bool `json:"show_frontmatter,omitempty"`
 
@@ -120,6 +119,9 @@ type Config struct {
 
 	// Editor right panel mode: "preview", "help", or "browse" (default "preview")
 	EditorPanelMode string `json:"editor_panel_mode,omitempty"`
+
+	// ISO timestamp of last feed page visit (for "new since last visit" nav dot)
+	FeedLastVisit string `json:"feed_last_visit,omitempty"`
 }
 
 // SSEEvent is a server-sent event pushed to connected clients.
@@ -145,6 +147,15 @@ type Server struct {
 	BaseURL          string // From POLIS_BASE_URL env var (runtime config, not stored in .well-known/polis)
 	DiscoveryURL     string // From .env / env var DISCOVERY_SERVICE_URL (not stored in webapp/config.json)
 	DiscoveryKey     string // From .env / env var DISCOVERY_SERVICE_KEY (not stored in webapp/config.json)
+
+	// SharedHTTPClient is a process-level HTTP client using a shared transport
+	// for connection pooling. Set by the hosted entry point; nil in localhost mode
+	// (falls back to per-call clients).
+	SharedHTTPClient *http.Client
+
+	// ContentCache is a shared LRU cache for remote content fetches.
+	// Set by the hosted entry point; nil in localhost mode (no caching).
+	ContentCache *remote.LRUCache
 
 	// EnableHooks controls whether post-action hooks (post-publish, post-republish,
 	// post-comment) are allowed to execute. Defaults to false (safe for hosted/
@@ -470,8 +481,19 @@ func (s *Server) LogEvent(event string, fields map[string]interface{}) {
 
 // NewDSClient creates a discovery client with request ID propagation and timing.
 // Use for handlers that have an http.Request context.
+// IsRegisteredWithDS checks whether this site has a local registration marker
+// for the configured discovery service. Pure filesystem check — no network call.
+func (s *Server) IsRegisteredWithDS() bool {
+	return discovery.IsRegisteredLocally(s.DataDir, s.DiscoveryURL)
+}
+
 func (s *Server) NewDSClient(r *http.Request) *discovery.Client {
-	client := discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+	var client *discovery.Client
+	if s.SharedHTTPClient != nil {
+		client = discovery.NewClientWithHTTP(s.DiscoveryURL, s.DiscoveryKey, s.SharedHTTPClient)
+	} else {
+		client = discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+	}
 	if r != nil {
 		client.RequestID = RequestIDFromContext(r.Context())
 	}
@@ -481,7 +503,12 @@ func (s *Server) NewDSClient(r *http.Request) *discovery.Client {
 
 // NewAuthDSClient creates an authenticated discovery client with request ID propagation.
 func (s *Server) NewAuthDSClient(r *http.Request, domain string) *discovery.Client {
-	client := discovery.NewAuthenticatedClient(s.DiscoveryURL, s.DiscoveryKey, domain, s.PrivateKey)
+	var client *discovery.Client
+	if s.SharedHTTPClient != nil {
+		client = discovery.NewAuthenticatedClientWithHTTP(s.DiscoveryURL, s.DiscoveryKey, domain, s.PrivateKey, s.SharedHTTPClient)
+	} else {
+		client = discovery.NewAuthenticatedClient(s.DiscoveryURL, s.DiscoveryKey, domain, s.PrivateKey)
+	}
 	if r != nil {
 		client.RequestID = RequestIDFromContext(r.Context())
 	}
@@ -499,6 +526,14 @@ func (s *Server) setDSLogger(client *discovery.Client) {
 			"request_id":  requestID,
 		})
 	}
+}
+
+// NewRemoteClient creates a remote content client using the shared HTTP client
+// and content cache if available.
+func (s *Server) NewRemoteClient() *remote.Client {
+	rc := remote.NewClientWithHTTP(s.SharedHTTPClient)
+	rc.Cache = s.ContentCache
+	return rc
 }
 
 // GetBaseURL returns the site's base URL from POLIS_BASE_URL environment variable.
@@ -931,6 +966,7 @@ func (s *Server) Initialize() {
 		site.Version = s.CLIVersion
 		notification.Version = s.CLIVersion
 		theme.Version = s.CLIVersion
+		tag.Version = s.CLIVersion
 	}
 
 	// Migrate .polis/drafts -> .polis/content/pub.polis.core/posts/drafts if needed
@@ -961,6 +997,13 @@ func (s *Server) Initialize() {
 	stream.DiscoveryURL = s.DiscoveryURL
 	stream.DiscoveryKey = s.DiscoveryKey
 	stream.BaseURL = s.BaseURL
+	stream.DataDir = s.DataDir
+	tag.DataDir = s.DataDir
+	following.DataDir = s.DataDir
+	following.DiscoveryURL = s.DiscoveryURL
+
+	// One-time migration: backfill registration marker for already-registered sites
+	discovery.MigrateRegistrationState(s.DataDir, s.DiscoveryURL, s.GetBaseURL())
 
 	// Apply log defaults and write back to .env so settings are visible
 	if s.LogLevel == 0 {
@@ -1080,7 +1123,8 @@ func (s *Server) StartBackgroundSync() {
 
 	// Register handlers
 	s.syncHandlers = nil
-	s.RegisterSyncHandler(&notificationSyncHandler{server: s})
+	// Notification sync disabled — UI bell removed; re-enable when notification UI returns
+	// s.RegisterSyncHandler(&notificationSyncHandler{server: s})
 	s.RegisterSyncHandler(&feedSyncHandler{server: s})
 	s.RegisterSyncHandler(&followSyncHandler{server: s})
 	s.RegisterSyncHandler(&commentStatusSyncHandler{server: s})
@@ -1191,8 +1235,10 @@ type CountsPayload struct {
 	MyCommentDrafts  int `json:"my_comment_drafts"`
 	IncomingPending  int `json:"incoming_pending"`
 	IncomingBlessed  int `json:"incoming_blessed"`
-	Feed             int `json:"feed"`
-	FeedUnread       int `json:"feed_unread"`
+	Feed             int    `json:"feed"`
+	FeedUnread       int    `json:"feed_unread"`
+	FeedNewestCached string `json:"feed_newest_cached,omitempty"`
+	FeedHasNew       bool   `json:"feed_has_new,omitempty"`
 	Following        int `json:"following"`
 	Followers        int `json:"followers"`
 	NotificationsUnread int `json:"notifications_unread"`
@@ -1306,7 +1352,13 @@ func (s *Server) computeAllCounts() CountsPayload {
 			if item.ReadAt == "" {
 				counts.FeedUnread++
 			}
+			if item.CachedAt > counts.FeedNewestCached {
+				counts.FeedNewestCached = item.CachedAt
+			}
 		}
+	}
+	if counts.FeedNewestCached != "" && s.Config.FeedLastVisit != "" {
+		counts.FeedHasNew = counts.FeedNewestCached > s.Config.FeedLastVisit
 	}
 
 	// Followers (from cached state)
@@ -1316,11 +1368,11 @@ func (s *Server) computeAllCounts() CountsPayload {
 		counts.Followers = followerState.Count
 	}
 
-	// Notification unread count
-	mgr := notification.NewManager(s.DataDir, discoveryDomain)
-	if unread, err := mgr.CountUnread(); err == nil {
-		counts.NotificationsUnread = unread
-	}
+	// Notification unread count — disabled (UI bell removed)
+	// mgr := notification.NewManager(s.DataDir, discoveryDomain)
+	// if unread, err := mgr.CountUnread(); err == nil {
+	// 	counts.NotificationsUnread = unread
+	// }
 
 	// Incoming pending blessing requests — read from DS-cached blessing state
 	var blessingState stream.BlessingState
@@ -1643,7 +1695,7 @@ func (s *Server) syncFeed() {
 	// Query DS stream with actor filter for followed domains
 	client := s.NewDSClient(nil)
 	client.RequestID = generateBackgroundRequestID("feed-sync")
-	typeFilter := "pub.polis.post.published,pub.polis.post.republished,pub.polis.comment.published,pub.polis.comment.republished"
+	typeFilter := "pub.polis.post.published,pub.polis.post.republished,pub.polis.comment.published,pub.polis.comment.republished,pub.polis.comment.blessing.granted,pub.polis.comment.blessing.requested,pub.polis.follow.announced,pub.polis.site.registered"
 	actorFilter := discovery.JoinDomains(domains)
 
 	log.Printf("[feed-sync] querying stream: myDomain=%s actors=%s cursor=%q dsURL=%s", myDomain, actorFilter, cursor, s.DiscoveryURL)
@@ -1681,6 +1733,145 @@ func (s *Server) syncFeed() {
 	// Update cursor (always set to refresh LastUpdated, even if position unchanged)
 	if result.Cursor != "" {
 		_ = cm.SetCursor(result.Cursor)
+	}
+}
+
+// syncFeedScoped syncs a non-network feed scope ("followers" or "global").
+// For "followers": queries DS with follower domains as actors.
+// For "global": queries DS with no actor filter + created_after=24h ago.
+func (s *Server) syncFeedScoped(scope string) {
+	if s.DiscoveryURL == "" || scope == "" || scope == "network" {
+		return
+	}
+	baseURL := s.GetBaseURL()
+	if baseURL == "" {
+		return
+	}
+	myDomain := extractDomainFromURL(baseURL)
+	if myDomain == "" {
+		return
+	}
+
+	discoveryDomain := s.GetDiscoveryDomain()
+	cm := feed.NewScopedCacheManager(s.DataDir, discoveryDomain, scope)
+	cursor, _ := cm.GetCursor()
+
+	client := s.NewDSClient(nil)
+	client.RequestID = generateBackgroundRequestID("feed-sync-" + scope)
+	typeFilter := "pub.polis.post.published,pub.polis.post.republished,pub.polis.comment.published,pub.polis.comment.republished,pub.polis.comment.blessing.granted,pub.polis.comment.blessing.requested,pub.polis.follow.announced,pub.polis.site.registered"
+
+	var actorFilter string
+	followedDomains := make(map[string]bool)
+
+	switch scope {
+	case "followers":
+		store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+		var followerState stream.FollowerState
+		_ = store.LoadState("pub.polis.follow", &followerState)
+		if len(followerState.Followers) == 0 {
+			log.Printf("[feed-sync-%s] skip: no followers", scope)
+			return
+		}
+		actorFilter = discovery.JoinDomains(followerState.Followers)
+		for _, d := range followerState.Followers {
+			followedDomains[d] = true
+		}
+
+	case "global":
+		client.CreatedAfter = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+		// No actor filter — query all of polis
+
+	case "me":
+		actorFilter = myDomain
+	}
+
+	log.Printf("[feed-sync-%s] querying stream: cursor=%q actors=%q", scope, cursor, actorFilter)
+
+	result, err := client.StreamQuery(cursor, 1000, typeFilter, actorFilter, "")
+	if err != nil {
+		log.Printf("[feed-sync-%s] stream query failed: %v", scope, err)
+		return
+	}
+
+	log.Printf("[feed-sync-%s] stream returned %d events", scope, len(result.Events))
+
+	handler := &feed.FeedHandler{
+		MyDomain:        myDomain,
+		FollowedDomains: followedDomains,
+		IncludeSelf:     scope == "me",
+	}
+
+	items := handler.Process(result.Events)
+	if len(items) > 0 {
+		newCount, err := cm.MergeItems(items)
+		if err != nil {
+			log.Printf("[feed-sync-%s] merge failed: %v", scope, err)
+		} else {
+			log.Printf("[feed-sync-%s] merged %d new items", scope, newCount)
+		}
+	}
+
+	if result.Cursor != "" {
+		_ = cm.SetCursor(result.Cursor)
+	}
+}
+
+// backfillFeedForAuthor queries the DS stream from the beginning (since="0")
+// for a single author's events and merges them into the feed cache.
+// This ensures historical posts appear when following a new author.
+// It does NOT update the global feed cursor.
+func (s *Server) backfillFeedForAuthor(domain string) {
+	if s.DiscoveryURL == "" {
+		return
+	}
+	baseURL := s.GetBaseURL()
+	if baseURL == "" {
+		return
+	}
+
+	myDomain := extractDomainFromURL(baseURL)
+	if myDomain == "" {
+		return
+	}
+
+	discoveryDomain := s.GetDiscoveryDomain()
+
+	client := s.NewDSClient(nil)
+	client.RequestID = generateBackgroundRequestID("feed-backfill")
+	typeFilter := "pub.polis.post.published,pub.polis.post.republished,pub.polis.comment.published,pub.polis.comment.republished,pub.polis.comment.blessing.granted,pub.polis.comment.blessing.requested,pub.polis.follow.announced,pub.polis.site.registered"
+
+	handler := &feed.FeedHandler{
+		MyDomain:        myDomain,
+		FollowedDomains: map[string]bool{domain: true},
+	}
+
+	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+
+	// Page through all events from the beginning for this author
+	cursor := "0"
+	for {
+		result, err := client.StreamQuery(cursor, 1000, typeFilter, domain, "")
+		if err != nil {
+			log.Printf("[feed-backfill] stream query failed for %s: %v", domain, err)
+			return
+		}
+
+		log.Printf("[feed-backfill] %s: got %d events (cursor=%q hasMore=%v)", domain, len(result.Events), result.Cursor, result.HasMore)
+
+		items := handler.Process(result.Events)
+		if len(items) > 0 {
+			newCount, err := cm.MergeItems(items)
+			if err != nil {
+				log.Printf("[feed-backfill] merge failed for %s: %v", domain, err)
+				return
+			}
+			log.Printf("[feed-backfill] %s: merged %d new items", domain, newCount)
+		}
+
+		if !result.HasMore || result.Cursor == "" || result.Cursor == cursor {
+			break
+		}
+		cursor = result.Cursor
 	}
 }
 
@@ -1815,6 +2006,24 @@ func (s *Server) GetDiscoveryDomain() string {
 		return "default"
 	}
 	return domain
+}
+
+// validFeedScopes lists the accepted scope values for feed queries.
+var validFeedScopes = map[string]bool{
+	"network":   true,
+	"followers": true,
+	"global":    true,
+	"me":        true,
+}
+
+// feedCacheForScope returns a CacheManager for the given scope.
+// Valid scopes: "network" (default), "followers", "global".
+func (s *Server) feedCacheForScope(scope string) *feed.CacheManager {
+	discoveryDomain := s.GetDiscoveryDomain()
+	if scope == "" || scope == "network" {
+		return feed.NewCacheManager(s.DataDir, discoveryDomain)
+	}
+	return feed.NewScopedCacheManager(s.DataDir, discoveryDomain, scope)
 }
 
 // extractDomainFromURL extracts the hostname from a URL string.

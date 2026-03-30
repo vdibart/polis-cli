@@ -552,3 +552,151 @@ func TestBuildCanonicalJSON_MatchesTSStreamResponse(t *testing.T) {
 		t.Errorf("canonical JSON mismatch.\nGot:  %s\nWant: %s", got, expected)
 	}
 }
+
+// ============================================================================
+// Autobless Attestation Verification
+// ============================================================================
+
+func TestVerifyAutoblessAttestation_Valid(t *testing.T) {
+	privPEM, pubSSH, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"public_key": string(pubSSH),
+			"key_id":     "ds-primary",
+		})
+	}))
+	defer server.Close()
+
+	cache := NewDSKeyCache(server.URL, time.Hour)
+
+	// Build and sign attestation (simulating DS side)
+	commentURL := "https://commenter.example/content/pub.polis.core/comment/reply.md"
+	targetURL := "https://author.example/content/pub.polis.core/post/hello.md"
+	policyRule := "emit pub.polis.comment.blessing from following"
+	policySource := "user-published"
+	dsKeyID := "ds-primary"
+
+	canonical := BuildCanonicalJSON(map[string]interface{}{
+		"type":          "pub.polis.comment.blessing",
+		"action":        "autobless",
+		"comment_url":   commentURL,
+		"target_url":    targetURL,
+		"policy_rule":   policyRule,
+		"policy_source": policySource,
+		"ds_key_id":     dsKeyID,
+	})
+	attestation, err := signing.SignContent([]byte(canonical), privPEM)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+
+	err = VerifyAutoblessAttestation(cache, commentURL, targetURL, policyRule, policySource, dsKeyID, attestation)
+	if err != nil {
+		t.Fatalf("verification failed: %v", err)
+	}
+}
+
+func TestVerifyAutoblessAttestation_EmptyAttestation(t *testing.T) {
+	cache := NewDSKeyCache("http://localhost:1", time.Hour)
+
+	// Empty attestation should return nil (legacy record)
+	err := VerifyAutoblessAttestation(cache, "https://a.example/c.md", "https://b.example/p.md", "rule", "source", "key", "")
+	if err != nil {
+		t.Fatalf("expected nil for empty attestation, got: %v", err)
+	}
+}
+
+func TestVerifyAutoblessAttestation_InvalidSignature(t *testing.T) {
+	_, pubSSH, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+
+	// Sign with a different key
+	otherPrivPEM, _, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("keygen2: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"public_key": string(pubSSH),
+			"key_id":     "ds-primary",
+		})
+	}))
+	defer server.Close()
+
+	cache := NewDSKeyCache(server.URL, time.Hour)
+
+	canonical := BuildCanonicalJSON(map[string]interface{}{
+		"type":          "pub.polis.comment.blessing",
+		"action":        "autobless",
+		"comment_url":   "https://a.example/c.md",
+		"target_url":    "https://b.example/p.md",
+		"policy_rule":   "emit pub.polis.comment.blessing from following",
+		"policy_source": "user-published",
+		"ds_key_id":     "ds-primary",
+	})
+	attestation, err := signing.SignContent([]byte(canonical), otherPrivPEM)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+
+	err = VerifyAutoblessAttestation(cache, "https://a.example/c.md", "https://b.example/p.md",
+		"emit pub.polis.comment.blessing from following", "user-published", "ds-primary", attestation)
+	if err == nil {
+		t.Fatal("expected verification failure with wrong key")
+	}
+}
+
+func TestVerifyAutoblessAttestation_CanonicalJSONMatchesTS(t *testing.T) {
+	// This test verifies the Go autobless canonical JSON matches the TS buildCanonicalJSON
+	// output for the same input. Keys must be sorted alphabetically.
+	got := BuildCanonicalJSON(map[string]interface{}{
+		"type":          "pub.polis.comment.blessing",
+		"action":        "autobless",
+		"comment_url":   "https://commenter.example/content/pub.polis.core/comment/reply.md",
+		"target_url":    "https://author.example/content/pub.polis.core/post/hello.md",
+		"policy_rule":   "emit pub.polis.comment.blessing from following",
+		"policy_source": "user-published",
+		"ds_key_id":     "ds-primary",
+	})
+
+	expected := `{"action":"autobless","comment_url":"https://commenter.example/content/pub.polis.core/comment/reply.md","ds_key_id":"ds-primary","policy_rule":"emit pub.polis.comment.blessing from following","policy_source":"user-published","target_url":"https://author.example/content/pub.polis.core/post/hello.md","type":"pub.polis.comment.blessing"}`
+	if got != expected {
+		t.Errorf("autobless canonical JSON mismatch with expected TS output.\nGot:  %s\nWant: %s", got, expected)
+	}
+}
+
+func TestNewDSKeyCacheWithHTTP_Nil(t *testing.T) {
+	cache := NewDSKeyCacheWithHTTP("https://ds.example.com", 0, nil)
+	if cache == nil {
+		t.Fatal("returned nil")
+	}
+	if cache.client == nil {
+		t.Error("expected fallback client")
+	}
+	if cache.ttl != time.Hour {
+		t.Errorf("ttl = %v, want 1h", cache.ttl)
+	}
+}
+
+func TestNewDSKeyCacheWithHTTP_Shared(t *testing.T) {
+	shared := &http.Client{}
+	cache := NewDSKeyCacheWithHTTP("https://ds.example.com", 30*time.Minute, shared)
+	if cache.client != shared {
+		t.Error("expected shared client")
+	}
+	if cache.ttl != 30*time.Minute {
+		t.Errorf("ttl = %v, want 30m", cache.ttl)
+	}
+	if cache.dsURL != "https://ds.example.com" {
+		t.Errorf("dsURL = %q, want https://ds.example.com", cache.dsURL)
+	}
+}

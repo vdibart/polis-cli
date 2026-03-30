@@ -72,22 +72,45 @@ The theme's CSS will be copied to `styles.css` at your site root.
 
 ## Theme Structure
 
-Each theme is a self-contained folder in `.polis/themes/`:
+Themes use a **shared base layout** system. The `_base/` directory contains canonical HTML templates and snippets. Individual themes provide only a CSS file and optional template overrides.
 
 ```
-.polis/themes/turbo/
-├── index.html              # Homepage template
-├── post.html               # Individual post template
-├── comment.html            # Comment page template
-├── comment-inline.html     # Blessed comment (rendered inside posts)
-├── posts.html              # Archive page template (optional)
-├── turbo.css               # Theme stylesheet
-└── snippets/               # Theme-specific snippets
-    ├── about.html          # About section
-    ├── post-item.html      # Post list item
-    ├── comment-item.html   # Comment list item
-    └── blessed-comment.html # Blessed comment block
+.polis/themes/
+├── _base/                      # Shared base templates (system-managed)
+│   ├── index.html              # Homepage template
+│   ├── post.html               # Post page template
+│   ├── comment.html            # Comment page template
+│   ├── comment-inline.html     # Blessed comment template
+│   ├── posts.html              # Archive page template
+│   ├── tag.html                # Tag page template
+│   ├── tag-index.html          # Tag index template
+│   └── snippets/               # Shared snippets
+│       ├── about.html
+│       ├── post-item.html
+│       ├── comment-item.html
+│       ├── blessed-comment.html
+│       ├── also-reading.html
+│       └── polis-widget.html
+├── turbo/
+│   └── turbo.css               # CSS-only theme (inherits HTML from _base)
+├── sols/
+│   └── sols.css
+└── studio13/                   # Theme with structural overrides
+    ├── studio13.css
+    ├── index.html              # Overrides _base/index.html
+    ├── post.html               # Overrides _base/post.html
+    ├── posts.html              # Overrides _base/posts.html
+    └── snippets/
+        └── post-item.html      # Overrides _base/snippets/post-item.html
 ```
+
+### Template Resolution
+
+For each template file, the render pipeline checks:
+1. **Theme directory** — if the active theme has the file, use it
+2. **`_base/` directory** — fall back to the shared base template
+
+This means most themes only need a CSS file. The base templates provide the HTML structure, and CSS customizes the visual appearance.
 
 ## Snippets
 
@@ -99,6 +122,7 @@ When resolving `{{> path}}`:
 
 1. **Global snippets** - `./snippets/{path}.md` or `.html` (author overrides)
 2. **Theme snippets** - `.polis/themes/{active_theme}/snippets/{path}.html` or `.md`
+3. **Base snippets** - `.polis/themes/_base/snippets/{path}.html` or `.md`
 
 This allows you to override theme defaults by creating snippets in `./snippets/`.
 
@@ -338,54 +362,67 @@ The `{{#recent_posts}}` and `{{#recent_comments}}` sections display the 10 most 
 
 ## Creating Custom Themes
 
-### Copy an Existing Theme
+### CSS-Only Theme (Recommended)
+
+The simplest way to create a theme — just provide a CSS file:
 
 ```bash
-# Copy turbo as a starting point
-cp -r .polis/themes/turbo .polis/themes/mytheme
+# Create your theme directory
+mkdir .polis/themes/mytheme
 
-# Rename the CSS file
-mv .polis/themes/mytheme/turbo.css .polis/themes/mytheme/mytheme.css
-
-# Edit the templates and CSS
-vim .polis/themes/mytheme/index.html
+# Create your CSS file (must match directory name)
 vim .polis/themes/mytheme/mytheme.css
 
 # Activate your theme
-# Edit manifest.json: "active_theme": "mytheme"
+# Edit .well-known/polis: "active_theme": "mytheme"
 
 # Render
 polis render --force
 ```
 
-### Theme Requirements
+Your theme automatically inherits all HTML templates from `_base/`. Only customize CSS variables and styles.
 
-A valid theme must contain:
+### Theme with Template Overrides
+
+If you need different HTML structure for specific pages, override individual templates:
+
+```bash
+# Create CSS-only theme first
+mkdir -p .polis/themes/mytheme
+vim .polis/themes/mytheme/mytheme.css
+
+# Override just the homepage (other pages use _base)
+cp .polis/themes/_base/index.html .polis/themes/mytheme/index.html
+vim .polis/themes/mytheme/index.html
+
+# Override a snippet
+mkdir -p .polis/themes/mytheme/snippets
+cp .polis/themes/_base/snippets/post-item.html .polis/themes/mytheme/snippets/post-item.html
+vim .polis/themes/mytheme/snippets/post-item.html
+```
+
+### Theme Requirements
 
 | File | Required | Purpose |
 |------|----------|---------|
-| `index.html` | Yes | Homepage template |
-| `post.html` | Yes | Post page template |
-| `comment.html` | Yes | Comment page template |
-| `comment-inline.html` | Yes | Blessed comment template |
-| `posts.html` | Optional | Archive page template (all posts) |
 | `{themename}.css` | Yes | Theme stylesheet |
-| `snippets/` | Optional | Theme-specific snippets |
+| HTML templates | No | Inherited from `_base/` — override only if structural changes needed |
+| `snippets/` | No | Inherited from `_base/` — override only if needed |
 
 ### Template Documentation
 
-Each theme template includes a comment header documenting which snippets it loads:
+Base templates include comment headers documenting which snippets they load:
 
 ```html
 <!--
-    Polis Theme: Turbo - Homepage Template
+    Polis Base Theme - Homepage Template
 
     Snippets loaded by this template:
-    - about          - About section (theme: snippets/about.html, global: snippets/about.md)
-    - post-item      - Post list item (theme: snippets/post-item.html)
-    - comment-item   - Comment list item (theme: snippets/comment-item.html)
+    - theme:about        - About section
+    - theme:post-item    - Post list item
+    - theme:comment-item - Comment list item
 
-    Snippet lookup order: theme snippets -> global snippets
+    Lookup order: theme snippets -> base snippets -> global snippets
 -->
 ```
 

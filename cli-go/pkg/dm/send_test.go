@@ -434,3 +434,43 @@ func TestExtractDomainFromURL_LowercaseNormalization(t *testing.T) {
 		}
 	}
 }
+
+func TestNewSenderWithHTTP_Nil(t *testing.T) {
+	privPEM, pubSSH, _ := signing.GenerateKeypair()
+	privKey, _ := signing.ParsePrivateKey(privPEM)
+	siteDir := t.TempDir()
+	os.MkdirAll(filepath.Join(siteDir, ".polis"), 0700)
+	store, err := NewStore(siteDir, privKey.Seed())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	s := NewSenderWithHTTP(privPEM, pubSSH, "Test.Local", store, nil)
+	if s == nil {
+		t.Fatal("returned nil")
+	}
+	if s.httpClient == nil {
+		t.Error("expected fallback httpClient")
+	}
+	if s.Domain != "test.local" {
+		t.Errorf("Domain = %q, want test.local (lowercased)", s.Domain)
+	}
+}
+
+func TestNewSenderWithHTTP_Shared(t *testing.T) {
+	privPEM, pubSSH, _ := signing.GenerateKeypair()
+	privKey, _ := signing.ParsePrivateKey(privPEM)
+	siteDir := t.TempDir()
+	os.MkdirAll(filepath.Join(siteDir, ".polis"), 0700)
+	store, err := NewStore(siteDir, privKey.Seed())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	shared := &http.Client{}
+	s := NewSenderWithHTTP(privPEM, pubSSH, "test.local", store, shared)
+	if s.httpClient != shared {
+		t.Error("expected shared httpClient")
+	}
+	if s.keyCache == nil {
+		t.Error("expected keyCache to be initialized")
+	}
+}

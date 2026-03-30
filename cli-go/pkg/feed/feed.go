@@ -3,7 +3,8 @@ package feed
 
 // FeedItem represents a single item in the aggregated feed.
 type FeedItem struct {
-	Type         string `json:"type"`
+	Type         string `json:"type"`                    // "post", "comment", or "announcement"
+	EventType    string `json:"event_type,omitempty"`    // Original DS event type (e.g. "pub.polis.post.published")
 	Title        string `json:"title"`
 	URL          string `json:"url"`
 	Published    string `json:"published"`

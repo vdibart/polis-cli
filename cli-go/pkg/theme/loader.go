@@ -24,6 +24,8 @@ type Templates struct {
 	CommentInline string // comment-inline.html - required
 	Index         string // index.html - required
 	Archive       string // posts.html - optional (archive page)
+	Tag           string // tag.html - optional (single tag page)
+	TagIndex      string // tag-index.html - optional (tag index page)
 }
 
 // Manifest represents the site manifest (metadata/manifest.json).
@@ -36,39 +38,61 @@ type Manifest struct {
 
 // Load loads templates from the active theme.
 // It tries the local theme first (site/themes/{name}/), then falls back to CLI themes.
+// For each individual template, it checks the theme directory first, then falls back
+// to _base/ (shared base templates). This allows CSS-only themes that inherit all
+// HTML from _base, while still permitting per-theme template overrides.
 func Load(dataDir, cliThemesDir, themeName string) (*Templates, error) {
 	if themeName == "" {
 		return nil, fmt.Errorf("theme name is required")
 	}
 
-	// Try local theme first
-	localThemeDir := filepath.Join(dataDir, "site", "themes", themeName)
-	templates, err := loadFromDir(localThemeDir)
-	if err == nil {
-		return templates, nil
+	// Resolve theme directory (local first, then CLI)
+	themeDir := resolveDir(dataDir, cliThemesDir, themeName)
+	if themeDir == "" {
+		return nil, fmt.Errorf("theme %q not found", themeName)
 	}
 
-	// Fall back to CLI themes
-	if cliThemesDir != "" {
-		cliThemeDir := filepath.Join(cliThemesDir, themeName)
-		templates, err = loadFromDir(cliThemeDir)
-		if err == nil {
-			return templates, nil
-		}
-	}
+	// Resolve _base directory for fallback
+	baseDir := resolveDir(dataDir, cliThemesDir, "_base")
 
-	return nil, fmt.Errorf("theme %q not found in %s or %s", themeName, localThemeDir, cliThemesDir)
+	return loadWithFallback(themeDir, baseDir)
 }
 
-// loadFromDir loads all required templates from a theme directory.
-func loadFromDir(themeDir string) (*Templates, error) {
-	if _, err := os.Stat(themeDir); os.IsNotExist(err) {
-		return nil, fmt.Errorf("theme directory not found: %s", themeDir)
+// resolveDir finds a theme directory, checking local site first then CLI themes.
+func resolveDir(dataDir, cliThemesDir, name string) string {
+	localDir := filepath.Join(dataDir, "site", "themes", name)
+	if _, err := os.Stat(localDir); err == nil {
+		return localDir
 	}
+	if cliThemesDir != "" {
+		cliDir := filepath.Join(cliThemesDir, name)
+		if _, err := os.Stat(cliDir); err == nil {
+			return cliDir
+		}
+	}
+	return ""
+}
 
+// readWithFallback reads a template file from themeDir first, falling back to baseDir.
+func readWithFallback(themeDir, baseDir, filename string) (string, error) {
+	// Try theme directory first
+	if content, err := os.ReadFile(filepath.Join(themeDir, filename)); err == nil {
+		return string(content), nil
+	}
+	// Fall back to _base directory
+	if baseDir != "" {
+		if content, err := os.ReadFile(filepath.Join(baseDir, filename)); err == nil {
+			return string(content), nil
+		}
+	}
+	return "", fmt.Errorf("template %q not found in theme or _base", filename)
+}
+
+// loadWithFallback loads templates from themeDir, falling back to baseDir for missing files.
+func loadWithFallback(themeDir, baseDir string) (*Templates, error) {
 	templates := &Templates{}
 
-	// Load required templates
+	// Load required templates (theme dir first, then _base)
 	required := map[string]*string{
 		"post.html":           &templates.Post,
 		"comment.html":        &templates.Comment,
@@ -77,16 +101,22 @@ func loadFromDir(themeDir string) (*Templates, error) {
 	}
 
 	for filename, dest := range required {
-		content, err := os.ReadFile(filepath.Join(themeDir, filename))
+		content, err := readWithFallback(themeDir, baseDir, filename)
 		if err != nil {
-			return nil, fmt.Errorf("required template %q not found: %w", filename, err)
+			return nil, fmt.Errorf("required template %q: %w", filename, err)
 		}
-		*dest = string(content)
+		*dest = content
 	}
 
-	// Load optional templates
-	if content, err := os.ReadFile(filepath.Join(themeDir, "posts.html")); err == nil {
-		templates.Archive = string(content)
+	// Load optional templates (same fallback pattern)
+	if content, err := readWithFallback(themeDir, baseDir, "posts.html"); err == nil {
+		templates.Archive = content
+	}
+	if content, err := readWithFallback(themeDir, baseDir, "tag.html"); err == nil {
+		templates.Tag = content
+	}
+	if content, err := readWithFallback(themeDir, baseDir, "tag-index.html"); err == nil {
+		templates.TagIndex = content
 	}
 
 	return templates, nil
@@ -167,6 +197,29 @@ func SetActiveTheme(dataDir, themeName string) error {
 	return os.WriteFile(wkPath, append(out, '\n'), 0644)
 }
 
+// CopyBaseCSS copies the _base/base.css file to base.css at the site root.
+// This provides shared structural CSS that all themes inherit.
+func CopyBaseCSS(dataDir, cliThemesDir string) error {
+	destPath := filepath.Join(dataDir, "base.css")
+
+	// Try local _base first
+	localPath := filepath.Join(dataDir, "site", "themes", "_base", "base.css")
+	if _, err := os.Stat(localPath); err == nil {
+		return copyFile(localPath, destPath)
+	}
+
+	// Fall back to CLI themes _base
+	if cliThemesDir != "" {
+		cliPath := filepath.Join(cliThemesDir, "_base", "base.css")
+		if _, err := os.Stat(cliPath); err == nil {
+			return copyFile(cliPath, destPath)
+		}
+	}
+
+	// No base.css found — not an error (older themes may not have it)
+	return nil
+}
+
 // CopyCSS copies the theme's CSS file to styles.css at the site root.
 // The CSS filename should match the theme name ({themename}.css).
 func CopyCSS(dataDir, cliThemesDir, themeName string) error {
@@ -244,8 +297,23 @@ func ListThemes(dataDir, cliThemesDir string) ([]string, error) {
 	return themes, nil
 }
 
-// isValidTheme checks if a directory contains a valid theme (has required templates).
+// isValidTheme checks if a directory contains a valid theme.
+// A theme is valid if it has either all required HTML templates (legacy full theme)
+// or at least a CSS file (CSS-only theme that inherits templates from _base).
+// The _base directory is excluded — it's a system directory, not a selectable theme.
 func isValidTheme(themeDir string) bool {
+	name := filepath.Base(themeDir)
+	if name == "_base" {
+		return false
+	}
+
+	// CSS-only theme: has a {name}.css file (templates come from _base)
+	cssFile := filepath.Join(themeDir, name+".css")
+	if _, err := os.Stat(cssFile); err == nil {
+		return true
+	}
+
+	// Legacy full theme: has all 4 required templates
 	required := []string{"post.html", "comment.html", "comment-inline.html", "index.html"}
 	for _, file := range required {
 		if _, err := os.Stat(filepath.Join(themeDir, file)); err != nil {

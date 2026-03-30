@@ -77,27 +77,32 @@ func RunUnpublish(dataDir, postPath string) error {
 		return fmt.Errorf("failed to sign unregister request: %v", err)
 	}
 
-	// Call DS to unregister (now does soft-delete)
+	// Call DS to unregister (now does soft-delete) — skip if not registered
 	dsURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	dsKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if dsURL == "" {
 		dsURL = "https://ds.polis.pub"
 	}
-	dsClient := discovery.NewClient(dsURL, dsKey)
 
-	if !jsonOutput {
-		fmt.Println("[i] Removing from discovery service...")
-	}
+	if discovery.IsRegisteredLocally(dataDir, dsURL) {
+		dsClient := discovery.NewClient(dsURL, dsKey)
 
-	if err := dsClient.UnregisterContent("pub.polis.post", contentURL, sig); err != nil {
-		// Non-fatal: DS might be unreachable, still clean up locally
 		if !jsonOutput {
-			fmt.Printf("[!] Warning: DS unregister failed: %v\n", err)
+			fmt.Println("[i] Removing from discovery service...")
 		}
-	} else {
-		if !jsonOutput {
-			fmt.Println("[✓] Removed from discovery service")
+
+		if err := dsClient.UnregisterContent("pub.polis.post", contentURL, sig); err != nil {
+			// Non-fatal: DS might be unreachable, still clean up locally
+			if !jsonOutput {
+				fmt.Printf("[!] Warning: DS unregister failed: %v\n", err)
+			}
+		} else {
+			if !jsonOutput {
+				fmt.Println("[✓] Removed from discovery service")
+			}
 		}
+	} else if !jsonOutput {
+		fmt.Println("[i] DS unregister skipped: site not registered with discovery service")
 	}
 
 	// Delete local .md file

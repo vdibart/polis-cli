@@ -1,8 +1,10 @@
 package render
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"os"
@@ -16,10 +18,15 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 )
 
+// DefaultHTTPClient is an optional shared HTTP client for outbound requests
+// (e.g., fetching reply context during rendering). Set by the calling application
+// to enable connection pooling. If nil, a short-timeout client is created per call.
+var DefaultHTTPClient *http.Client
+
 // WidgetVersion is the single source of truth for the current polis widget version.
 // Update this constant when widget.js changes. Theme snippets reference it via
 // the {{widget_version}} template variable, so they never need manual version bumps.
-const WidgetVersion = "1.4.3"
+const WidgetVersion = "1.4.4"
 
 // PageConfig holds configuration for page rendering.
 type PageConfig struct {
@@ -53,6 +60,7 @@ type RenderStats struct {
 	CommentsSkipped  int
 	IndexGenerated   bool
 	ArchiveGenerated bool
+	TagsRendered     int
 }
 
 // NewPageRenderer creates a new page renderer.
@@ -180,6 +188,7 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 	ctx.SiteURL = r.config.BaseURL
 	ctx.SiteTitle = r.getSiteTitle()
 	ctx.CSSPath = theme.CalculateCSSPath(htmlMountRel)
+	ctx.BaseCSSPath = strings.Replace(theme.CalculateCSSPath(htmlMountRel), "styles.css", "base.css", 1)
 	ctx.HomePath = theme.CalculateHomePath(htmlMountRel)
 	ctx.AuthorName = r.getAuthorName()
 	if ctx.AuthorName == "" {
@@ -190,6 +199,9 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 	// Widget variables
 	ctx.AuthorDomain = r.getAuthorDomain()
 	ctx.PageType = fileType // "post" or "comment"
+
+	// Avatar for site header
+	ctx.AvatarHTML = r.buildAvatarHTML()
 
 	// Comment-specific fields
 	if fileType == "comment" {
@@ -220,11 +232,20 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 		}
 	}
 
-	// Load blessed comments for posts
+	// Load blessed comments and recent posts for post pages
 	if fileType == "post" {
 		blessedComments, _ := r.loadBlessedCommentsForPost(path)
 		ctx.BlessedComments = blessedComments
 		ctx.BlessedCount = len(blessedComments)
+
+		// Load recent posts for "More from this site" section
+		if posts, _, err := r.loadPublicIndex(); err == nil {
+			if len(posts) > 5 {
+				ctx.RecentPosts = posts[:5]
+			} else {
+				ctx.RecentPosts = posts
+			}
+		}
 	}
 
 	// Select template
@@ -253,14 +274,6 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 		return "", false, fmt.Errorf("failed to write output: %w", err)
 	}
 
-	// Copy source .md to mount dir (alongside HTML) if mount path differs from source
-	if mountPath != path {
-		mdMountPath := filepath.Join(r.config.DataDir, mountPath)
-		if err := copyFile(mdPath, mdMountPath); err != nil {
-			return "", false, fmt.Errorf("failed to copy source to mount: %w", err)
-		}
-	}
-
 	return rendered, true, nil
 }
 
@@ -278,6 +291,7 @@ func (r *PageRenderer) RenderIndex() error {
 	ctx.SiteURL = r.config.BaseURL
 	ctx.SiteTitle = r.getSiteTitle()
 	ctx.CSSPath = "styles.css"
+	ctx.BaseCSSPath = "base.css"
 	ctx.HomePath = "index.html"
 	ctx.AuthorName = r.getAuthorName()
 	if ctx.AuthorName == "" {
@@ -295,6 +309,7 @@ func (r *PageRenderer) RenderIndex() error {
 	followPath := following.DefaultPath(r.config.DataDir)
 	followFile, err := following.Load(followPath)
 	if err == nil && followFile.Count() > 0 {
+		ctx.FollowingCount = followFile.Count()
 		for _, entry := range followFile.All() {
 			domain := strings.TrimPrefix(entry.URL, "https://")
 			domain = strings.TrimPrefix(domain, "http://")
@@ -307,6 +322,9 @@ func (r *PageRenderer) RenderIndex() error {
 			})
 		}
 	}
+
+	// Build avatar HTML from .well-known/polis avatar config
+	ctx.AvatarHTML = r.buildAvatarHTML()
 
 	// Set recent posts (first 10)
 	if len(posts) > 10 {
@@ -357,6 +375,7 @@ func (r *PageRenderer) RenderArchive() error {
 	ctx.SiteURL = r.config.BaseURL
 	ctx.SiteTitle = r.getSiteTitle()
 	ctx.CSSPath = "../styles.css"
+	ctx.BaseCSSPath = "../base.css"
 	ctx.HomePath = "../index.html"
 	ctx.AuthorName = r.getAuthorName()
 	if ctx.AuthorName == "" {
@@ -367,6 +386,13 @@ func (r *PageRenderer) RenderArchive() error {
 	ctx.Posts = posts
 	ctx.AuthorDomain = r.getAuthorDomain()
 	ctx.PageType = "index"
+	ctx.AvatarHTML = r.buildAvatarHTML()
+
+	// Load following count for archive page stats
+	followPath := following.DefaultPath(r.config.DataDir)
+	if followFile, err := following.Load(followPath); err == nil {
+		ctx.FollowingCount = followFile.Count()
+	}
 
 	// Render template
 	rendered, err := r.engine.Render(r.templates.Archive, ctx)
@@ -391,6 +417,133 @@ func (r *PageRenderer) RenderArchive() error {
 	return nil
 }
 
+// tagFileData is a local type for parsing tag JSON files (avoids importing tag package).
+type tagFileData struct {
+	Tag     string          `json:"tag"`
+	Targets []tagTargetData `json:"targets"`
+	Updated string          `json:"updated"`
+}
+
+// tagTargetData represents a single target within a tag file.
+type tagTargetData struct {
+	URI   string `json:"uri"`
+	Added string `json:"added"`
+}
+
+// RenderTags renders tag pages and a tag index page.
+// Returns the number of tags rendered, or 0 if no tag template is available.
+func (r *PageRenderer) RenderTags() (int, error) {
+	if r.templates.Tag == "" || r.templates.TagIndex == "" {
+		return 0, nil
+	}
+
+	tagsDir := filepath.Join(r.config.DataDir, "content", "pub.polis.core", "tag")
+	entries, err := os.ReadDir(tagsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed to read tags directory: %w", err)
+	}
+
+	var allTags []template.TagData
+	count := 0
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		data, err := os.ReadFile(filepath.Join(tagsDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+
+		var tf tagFileData
+		if err := json.Unmarshal(data, &tf); err != nil {
+			continue
+		}
+
+		// Convert targets for template
+		var targets []template.TagTargetData
+		for _, t := range tf.Targets {
+			targets = append(targets, template.TagTargetData{
+				URI:   t.URI,
+				Added: t.Added,
+			})
+		}
+
+		// Render individual tag page at tags/<name>/index.html
+		tagPagePath := filepath.Join("tags", tf.Tag, "index.html")
+		ctx := template.NewRenderContext()
+		ctx.WidgetVersion = WidgetVersion
+		ctx.TagName = tf.Tag
+		ctx.TargetCount = len(tf.Targets)
+		ctx.Targets = targets
+		ctx.SiteTitle = r.getSiteTitle()
+		ctx.SiteURL = r.config.BaseURL
+		ctx.CSSPath = "../../styles.css"
+		ctx.BaseCSSPath = "../../base.css"
+		ctx.HomePath = "../../index.html"
+		ctx.AuthorDomain = r.getAuthorDomain()
+		ctx.PageType = "tag"
+
+		rendered, err := r.engine.Render(r.templates.Tag, ctx)
+		if err != nil {
+			return count, fmt.Errorf("failed to render tag page for %q: %w", tf.Tag, err)
+		}
+
+		outPath := filepath.Join(r.config.DataDir, tagPagePath)
+		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+			return count, fmt.Errorf("failed to create tag directory: %w", err)
+		}
+		if err := os.WriteFile(outPath, []byte(rendered), 0644); err != nil {
+			return count, fmt.Errorf("failed to write tag page: %w", err)
+		}
+
+		count++
+
+		// Collect for index
+		allTags = append(allTags, template.TagData{
+			TagName: tf.Tag,
+			Count:   len(tf.Targets),
+			Updated: tf.Updated,
+		})
+	}
+
+	if count == 0 {
+		return 0, nil
+	}
+
+	// Render tag index page at tags/index.html
+	ctx := template.NewRenderContext()
+	ctx.WidgetVersion = WidgetVersion
+	ctx.Tags = allTags
+	ctx.TagCount = len(allTags)
+	ctx.SiteTitle = r.getSiteTitle()
+	ctx.SiteURL = r.config.BaseURL
+	ctx.CSSPath = "../styles.css"
+	ctx.BaseCSSPath = "../base.css"
+	ctx.HomePath = "../index.html"
+	ctx.AuthorDomain = r.getAuthorDomain()
+	ctx.PageType = "tag-index"
+
+	rendered, err := r.engine.Render(r.templates.TagIndex, ctx)
+	if err != nil {
+		return count, fmt.Errorf("failed to render tag index: %w", err)
+	}
+
+	indexPath := filepath.Join(r.config.DataDir, "tags", "index.html")
+	if err := os.MkdirAll(filepath.Dir(indexPath), 0755); err != nil {
+		return count, fmt.Errorf("failed to create tags directory: %w", err)
+	}
+	if err := os.WriteFile(indexPath, []byte(rendered), 0644); err != nil {
+		return count, fmt.Errorf("failed to write tag index: %w", err)
+	}
+
+	return count, nil
+}
+
 // RenderAll renders all posts and comments, and generates the index.
 func (r *PageRenderer) RenderAll(force bool) (*RenderStats, error) {
 	stats := &RenderStats{}
@@ -398,6 +551,10 @@ func (r *PageRenderer) RenderAll(force bool) (*RenderStats, error) {
 	// Copy CSS first
 	if err := theme.CopyCSS(r.config.DataDir, r.config.CLIThemesDir, r.themeName); err != nil {
 		return nil, fmt.Errorf("failed to copy CSS: %w", err)
+	}
+	// Copy base CSS (shared structural styles)
+	if err := theme.CopyBaseCSS(r.config.DataDir, r.config.CLIThemesDir); err != nil {
+		return nil, fmt.Errorf("failed to copy base CSS: %w", err)
 	}
 
 	// Find all posts
@@ -486,6 +643,13 @@ func (r *PageRenderer) RenderAll(force bool) (*RenderStats, error) {
 	if r.templates.Archive != "" {
 		stats.ArchiveGenerated = true
 	}
+
+	// Generate tag pages
+	tagsRendered, err := r.RenderTags()
+	if err != nil {
+		return nil, fmt.Errorf("failed to render tags: %w", err)
+	}
+	stats.TagsRendered = tagsRendered
 
 	// Persist reply context cache if it was populated during comment rendering
 	if r.replyCache != nil && len(r.replyCache) > 0 {
@@ -692,6 +856,100 @@ func (r *PageRenderer) getAuthorDomain() string {
 	return extractDomain(r.config.BaseURL)
 }
 
+// avatarPatterns maps pattern names to SVG generator functions.
+// These match the patterns in nav.js and app.js.
+var avatarPatterns = map[string]func(color string) string{
+	"rings": func(c string) string {
+		return fmt.Sprintf(`<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><circle cx='14' cy='14' r='10' fill='none' stroke='%s' stroke-width='1.5'/><circle cx='14' cy='14' r='5' fill='none' stroke='%s' stroke-width='1'/></svg>`, c, c)
+	},
+	"cross": func(c string) string {
+		return fmt.Sprintf(`<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><line x1='4' y1='4' x2='24' y2='24' stroke='%s' stroke-width='1.5'/><line x1='24' y1='4' x2='4' y2='24' stroke='%s' stroke-width='1.5'/></svg>`, c, c)
+	},
+	"grid": func(c string) string {
+		return fmt.Sprintf(`<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><line x1='9' y1='0' x2='9' y2='28' stroke='%s' stroke-width='0.8'/><line x1='19' y1='0' x2='19' y2='28' stroke='%s' stroke-width='0.8'/><line x1='0' y1='9' x2='28' y2='9' stroke='%s' stroke-width='0.8'/><line x1='0' y1='19' x2='28' y2='19' stroke='%s' stroke-width='0.8'/></svg>`, c, c, c, c)
+	},
+	"dots": func(c string) string {
+		return fmt.Sprintf(`<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><circle cx='7' cy='7' r='2' fill='%s'/><circle cx='21' cy='7' r='2' fill='%s'/><circle cx='14' cy='14' r='2' fill='%s'/><circle cx='7' cy='21' r='2' fill='%s'/><circle cx='21' cy='21' r='2' fill='%s'/></svg>`, c, c, c, c, c)
+	},
+	"stripes": func(c string) string {
+		return fmt.Sprintf(`<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><line x1='-2' y1='6' x2='6' y2='-2' stroke='%s' stroke-width='1.5'/><line x1='5' y1='13' x2='13' y2='5' stroke='%s' stroke-width='1.5'/><line x1='12' y1='20' x2='20' y2='12' stroke='%s' stroke-width='1.5'/><line x1='19' y1='27' x2='27' y2='19' stroke='%s' stroke-width='1.5'/><line x1='26' y1='34' x2='34' y2='26' stroke='%s' stroke-width='1.5'/></svg>`, c, c, c, c, c)
+	},
+	"diamond": func(c string) string {
+		return fmt.Sprintf(`<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><polygon points='14,4 24,14 14,24 4,14' fill='none' stroke='%s' stroke-width='1.5'/></svg>`, c)
+	},
+	"halves": func(c string) string {
+		return fmt.Sprintf(`<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><rect x='0' y='14' width='28' height='14' fill='%s' opacity='0.4'/></svg>`, c)
+	},
+}
+
+// buildAvatarHTML returns pre-rendered HTML for the site avatar.
+// Uses avatar config from .well-known/polis if available, otherwise generates
+// a default initial-letter avatar. Supports bg, fg, border, and pattern rendering
+// matching the nav.js/app.js avatar implementation.
+func (r *PageRenderer) buildAvatarHTML() string {
+	authorName := r.getAuthorName()
+	if authorName == "" {
+		authorName = r.getAuthorDomain()
+	}
+
+	initial := "?"
+	if runes := []rune(authorName); len(runes) > 0 {
+		initial = string(runes[0])
+	}
+
+	// Try to load avatar config from .well-known/polis
+	wkPath := filepath.Join(r.config.DataDir, ".well-known", "polis")
+	data, err := os.ReadFile(wkPath)
+	if err == nil {
+		var wk struct {
+			Avatar *struct {
+				BG           string `json:"bg"`
+				FG           string `json:"fg"`
+				Border       string `json:"border"`
+				BorderW      int    `json:"border_w"`
+				Pattern      string `json:"pattern"`
+				PatternColor string `json:"pattern_color"`
+			} `json:"avatar"`
+		}
+		if err := json.Unmarshal(data, &wk); err == nil && wk.Avatar != nil && wk.Avatar.BG != "" {
+			av := wk.Avatar
+
+			// Build inline style matching nav.js buildAvatarStyle
+			style := fmt.Sprintf("background-color:%s;color:%s;",
+				html.EscapeString(av.BG),
+				html.EscapeString(av.FG))
+
+			if av.Border != "" && av.BorderW > 0 {
+				style += fmt.Sprintf("border:%dpx solid %s;",
+					av.BorderW, html.EscapeString(av.Border))
+			}
+
+			// Pattern support
+			hasPattern := false
+			if av.Pattern != "" && av.Pattern != "none" && av.PatternColor != "" {
+				if gen, ok := avatarPatterns[av.Pattern]; ok {
+					svg := gen(av.PatternColor)
+					b64 := base64.StdEncoding.EncodeToString([]byte(svg))
+					style += fmt.Sprintf("background-image:url(data:image/svg+xml;base64,%s);background-size:cover;", b64)
+					hasPattern = true
+				}
+			}
+
+			// Hide initial when custom pattern is set (matching nav.js behavior)
+			displayInitial := html.EscapeString(initial)
+			if hasPattern {
+				displayInitial = ""
+			}
+
+			return fmt.Sprintf(`<span class="avatar-initial" style="%s">%s</span>`,
+				style, displayInitial)
+		}
+	}
+
+	// Default: unstyled initial (theme CSS provides default avatar styling)
+	return fmt.Sprintf(`<span class="avatar-initial">%s</span>`, html.EscapeString(initial))
+}
+
 // buildURL builds a full URL for a file path.
 func (r *PageRenderer) buildURL(path string) string {
 	if r.config.BaseURL == "" {
@@ -869,13 +1127,28 @@ func fetchReplyContext(htmlURL string) (title, excerpt string, ok bool) {
 		mdURL = strings.TrimSuffix(mdURL, ".html") + ".md"
 	}
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := DefaultHTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 3 * time.Second}
+	}
 	resp, err := client.Get(mdURL)
 	if err != nil || resp.StatusCode != 200 {
 		if resp != nil {
 			resp.Body.Close()
 		}
-		return "", "", false
+		// Fallback: try content source path (hosted sites serve .md at /content/...)
+		sourceURL := mountToSourceURL(mdURL)
+		if sourceURL != mdURL {
+			resp, err = client.Get(sourceURL)
+			if err != nil || resp.StatusCode != 200 {
+				if resp != nil {
+					resp.Body.Close()
+				}
+				return "", "", false
+			}
+		} else {
+			return "", "", false
+		}
 	}
 	defer resp.Body.Close()
 
@@ -908,16 +1181,43 @@ func fetchReplyContext(htmlURL string) (title, excerpt string, ok bool) {
 			bodyStart = content[idx+3+end+3:]
 		}
 	}
+	var excerptParts []string
+	excerptLen := 0
 	for _, line := range strings.Split(bodyStart, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "![") {
+		if line == "" {
+			if len(excerptParts) > 0 {
+				break // stop at first blank line after collecting text
+			}
 			continue
 		}
-		excerpt = truncateText(line, 200)
-		break
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "![") {
+			continue
+		}
+		excerptParts = append(excerptParts, line)
+		excerptLen += len(line)
+		if excerptLen >= 400 {
+			break
+		}
+	}
+	if len(excerptParts) > 0 {
+		excerpt = truncateText(strings.Join(excerptParts, " "), 400)
 	}
 
 	return title, excerpt, title != "" || excerpt != ""
+}
+
+// mountToSourceURL converts a mount-path URL to a content source path URL.
+// e.g. "https://alice.polis.pub/posts/20260323/hello.md" → "https://alice.polis.pub/content/pub.polis.core/post/20260323/hello.md"
+// Returns the original URL unchanged if it doesn't contain a known mount path.
+func mountToSourceURL(u string) string {
+	if idx := strings.Index(u, "/posts/"); idx >= 0 {
+		return u[:idx] + "/content/pub.polis.core/post/" + u[idx+len("/posts/"):]
+	}
+	if idx := strings.Index(u, "/comments/"); idx >= 0 {
+		return u[:idx] + "/content/pub.polis.core/comment/" + u[idx+len("/comments/"):]
+	}
+	return u
 }
 
 // resolveReplyContext looks up or fetches metadata for the post a comment replies to.

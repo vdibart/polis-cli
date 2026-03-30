@@ -65,6 +65,10 @@ func BeseechComment(dataDir, commentID string, privateKey []byte, dsCfg ...*Disc
 		return nil, fmt.Errorf("POLIS_BASE_URL not configured")
 	}
 
+	if !discovery.IsRegisteredLocally(dataDir, dsURL) {
+		return nil, fmt.Errorf("site not registered with discovery service (run 'polis register' first)")
+	}
+
 	// Get the pending comment
 	signed, err := GetComment(dataDir, commentID, StatusPending)
 	if err != nil {

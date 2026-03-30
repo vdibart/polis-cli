@@ -283,6 +283,14 @@ The feed:
 - Has a **Mark All Read** button in the header
 - Shows a staleness banner if the feed hasn't updated in over 24 hours
 
+### Tagging Feed Items
+
+You can tag feed items for personal organization. Hover over any item in the Feed to reveal a **Tag** button. Clicking it opens an autocomplete input pre-populated with your existing tags. Type to filter or create a new tag, then press Enter or click a suggestion to apply it. Tags appear as small labels on the feed item.
+
+To remove a tag, click the "x" on the tag label. To view all items with a specific tag, click the tag name -- this filters the feed to show only items with that tag.
+
+Tags are stored locally at `content/pub.polis.core/tag/` and optionally registered with the discovery service.
+
 ### Community Pulse
 
 **Social > Discover > Pulse** shows a dashboard of activity across the Polis network. The Pulse view displays summary cards with aggregate activity data from the discovery service.
@@ -356,6 +364,7 @@ Navigate to **My Site > Settings** (gear icon at the sidebar footer) to view and
 | Field | Source | Description |
 |-------|--------|-------------|
 | Site Title | `.well-known/polis` | Your site's display name (editable inline — click to edit) |
+| Avatar | `.well-known/polis` | Your site's avatar (circle with initial letter). A default is generated on init — use **Randomize** to pick a new color scheme, **Save** to apply, or **Reset** to remove |
 | Public Key | `.polis/keys/id_ed25519.pub` | Your Ed25519 public key (truncated, with Copy and Rotate buttons) |
 | Data Directory | Startup flag or cwd | Where your site files live |
 

@@ -52,7 +52,6 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 
 	// Settings and automation API routes
 	mux.HandleFunc("/api/settings", s.handleSettings)
-	mux.HandleFunc("/api/settings/view-mode", limitBody(s.handleViewMode, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/show-frontmatter", limitBody(s.handleShowFrontmatter, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/hide-read", limitBody(s.handleHideRead, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/webapp-theme", limitBody(s.handleWebappTheme, MaxDefaultBodySize))
@@ -83,6 +82,7 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/feed/read", limitBody(s.handleFeedRead, MaxDefaultBodySize))
 	mux.HandleFunc("/api/feed/counts", s.handleFeedCounts)
 	mux.HandleFunc("/api/feed/grouped", s.handleFeedGrouped)
+	mux.HandleFunc("/api/feed/visited", limitBody(s.handleFeedVisited, MaxDefaultBodySize))
 	mux.HandleFunc("/api/remote/avatar", s.handleRemoteAvatar)
 	mux.HandleFunc("/api/remote/post", s.handleRemotePost)
 
@@ -99,9 +99,11 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/dm/retry", limitBody(s.handleDMRetry, MaxDefaultBodySize))
 	mux.HandleFunc("/api/dm/recipients", s.handleDMRecipients)
 
+	// Tag API routes
+	mux.HandleFunc("/api/tags", limitBody(s.handleTags, MaxDefaultBodySize))
+
 	// Social plugin routes
 	mux.HandleFunc("/api/pulse", s.handlePulse)
-	mux.HandleFunc("/api/activity", s.handleActivityStream)
 	mux.HandleFunc("/api/conversations", s.handleConversations)
 	mux.HandleFunc("/api/followers/count", s.handleFollowerCount)
 
@@ -111,6 +113,7 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	// SSE and consolidated counts routes
 	mux.HandleFunc("/api/sse", s.handleSSE)
 	mux.HandleFunc("/api/counts", s.handleCounts)
+	mux.HandleFunc("/api/nav/state", s.handleNavState)
 
 	// Content source path redirect (content/ .html → mount path)
 	mux.HandleFunc("/content/", s.handleContentRedirect)

@@ -91,6 +91,7 @@ func handleDMList() {
 	if err != nil {
 		exitError("Load conversations: %v", err)
 	}
+	store.DecryptIndexPreviews(idx)
 
 	if jsonOutput {
 		convMaps := make([]map[string]interface{}, 0, len(idx.Conversations))

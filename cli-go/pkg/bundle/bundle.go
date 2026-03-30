@@ -402,6 +402,12 @@ func DefaultCoreBundle() *Bundle {
 				Dir:     "dm",
 				Storage: &StorageConfig{Pattern: "flat"},
 			},
+			"pub.polis.tag": {
+				Dir:     "tag",
+				Mount:   "/tags",
+				Storage: &StorageConfig{Pattern: "flat"},
+				Emits:   []string{"pub.polis.tag.applied", "pub.polis.tag.removed"},
+			},
 		},
 		Artifacts: []string{"index.jsonl"},
 	}

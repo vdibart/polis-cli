@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.60.0] - 2026-03-30
+
+This release introduces the tag system, a registration marker architecture that eliminates network calls for checking registration state, five new Go packages for operational tooling, a Milkdown WYSIWYG editor in the webapp, shared base theme templates, and extensive test coverage improvements across the entire codebase.
+
+### Added
+
+- **[Bash CLI / Go CLI] `polis tag` command**: New content type `pub.polis.tag` lets authors tag their own and others' content across the network. Subcommands: `list`, `show`, `apply`, `remove`, `delete`. Tags are stored as signed JSON files with URI target lists and synced to the discovery service.
+- **[Bash CLI / Go CLI] Registration marker system**: Local marker file at `.polis/ds/{ds-domain}/registered.json` serves as source of truth for "is this site registered?" All DS write operations (publish, comment, beseech, bless, deny, stream) are gated on this marker — no network call needed. Includes one-time backfill migration for existing sites.
+- **[Bash CLI] Default avatar on init**: `polis init` now generates a default avatar with a random contrast-safe background color from a curated palette.
+- **[Go CLI] `pkg/httppool`**: Shared HTTP transport with tuned connection pooling (200 max idle, 20 per host) for efficient TCP/TLS reuse across all outbound clients.
+- **[Go CLI] `pkg/judge`**: Cross-boundary verification tool that validates the full trust chain — HTTP serving correctness, DS attestations, public key continuity, policy snapshots, index consistency, and cross-site comment signatures.
+- **[Go CLI] `pkg/medic`**: Auto-remediation system that consumes patrol findings and applies safe, reversible fixes (permission corrections, quarantine of suspicious files).
+- **[Go CLI] `pkg/tailor`**: Multi-version site diagnostic and auto-fixer that understands historical polis layouts and can upgrade from any version to current spec.
+- **[Go CLI] `pkg/remote/cache`**: Thread-safe LRU cache with per-entry TTL expiry for caching remote content fetches and reducing redundant HTTP requests.
+- **[Go CLI] `pkg/patrol` snapshot and volume checks**: New snapshot baseline system and volume-level integrity checks for detecting unauthorized modifications.
+- **[Go CLI] Extensive new test coverage**: Added tests for blessing workflows, bundle loading, clone operations, discovery client, DS verification, DM encryption, feed handling, snippet resolution, and version history.
+- **[Webapp] Milkdown WYSIWYG editor**: Rich text editing with live markdown preview, replacing the plain textarea for post and comment composition.
+- **[Webapp] Navigation theme CSS**: New `nav-themes.css` for theme-aware navigation styling.
+- **[Webapp] API handler and middleware tests**: New test suites for REST API dispatch layer and middleware (auth, CORS).
+- **[Docs] Registration and privacy guide**: New `docs/general/registration-and-privacy.md` documenting the read-vs-write model, registration lifecycle, rate limits, and self-hosting options.
+
+### Changed
+
+- **[Go CLI] DS write operation gating**: Register, unregister, beseech, blessing-grant, blessing-deny, post, and stream commands all check the local registration marker before calling the discovery service.
+- **[Go CLI] Key rotation conditional**: DS notification on key rotation only fires when the site is registered locally.
+- **[Go CLI] Feed architecture overhaul**: Feed items now support posts, comments, and announcements with event type tracking and improved cache management.
+- **[Go CLI] DM encryption improvements**: Enhanced send, receive, and store operations with improved error handling.
+- **[Webapp] Unified sync handler**: Background sync uses a `SyncResult` aggregator tracking new notifications, feed items, follower changes, and file changes that trigger re-renders.
+- **[Webapp] API middleware stack**: New `authMiddleware` for Bearer token validation on write routes and `corsMiddleware` enforcing same-origin policy.
+- **Themes: shared `_base/` templates**: All page templates (index, post, posts, comment, comment-inline, tag, tag-index) and snippets now live in `themes/_base/`. CSS-only themes no longer need to duplicate HTML — they inherit from `_base/` automatically.
+- **Docs**: Updated dispatch engine, command reference, JSON mode, templating, DS configuration, API reference, stream architecture, content system, security model, and webapp user manual.
+
+### Fixed
+
+- **[Bash CLI] Tag command path resolution**: Fixed undefined `$DATA_DIR` variable in tag functions — paths now use relative CWD-based resolution consistent with the rest of the bash CLI.
+
 ## [0.59.0] - 2026-03-17
 
 This release adds security hardening across the Go CLI and webapp, enriched comment context cards (showing the title and excerpt of the post being replied to), a Milkdown WYSIWYG editor in the webapp, and theme improvements including dynamic widget versioning.

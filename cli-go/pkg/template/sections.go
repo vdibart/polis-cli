@@ -62,6 +62,10 @@ func (e *Engine) processSections(template string, ctx *RenderContext, depth int)
 			output, err = e.renderRecentCommentsSection(sectionContent, ctx, depth)
 		case "following":
 			output, err = e.renderFollowingSection(sectionContent, ctx, depth)
+		case "targets":
+			output, err = e.renderTargetsSection(sectionContent, ctx, depth)
+		case "tags":
+			output, err = e.renderTagsSection(sectionContent, ctx, depth)
 		default:
 			// Unknown section - leave as-is and continue
 			break
@@ -76,7 +80,7 @@ func (e *Engine) processSections(template string, ctx *RenderContext, depth int)
 		result = result[:match[0]] + output + result[closeTagStart+len(closeTag):]
 
 		// Avoid checking unsupported section names again
-		if sectionName != "posts" && sectionName != "comments" && sectionName != "blessed_comments" && sectionName != "recent_posts" && sectionName != "recent_comments" && sectionName != "following" {
+		if sectionName != "posts" && sectionName != "comments" && sectionName != "blessed_comments" && sectionName != "recent_posts" && sectionName != "recent_comments" && sectionName != "following" && sectionName != "targets" && sectionName != "tags" {
 			// Skip to after this section to avoid infinite loop on unknown sections
 			result = result[:match[0]] + openTag + sectionContent + closeTag + result[match[0]:]
 			break
@@ -113,13 +117,18 @@ func (e *Engine) renderPostsSection(content string, ctx *RenderContext, depth in
 		}
 
 		// Substitute loop-specific variables
+		commentCountDisplay := ""
+		if post.CommentCount > 0 {
+			commentCountDisplay = fmt.Sprintf("%d", post.CommentCount)
+		}
 		rendered := e.substituteLoopVariables(processed, map[string]string{
-			"url":             post.URL,
-			"title":           post.Title,
-			"excerpt":         post.Excerpt,
-			"published":       post.Published,
-			"published_human": post.PublishedHuman,
-			"comment_count":   fmt.Sprintf("%d", post.CommentCount),
+			"url":                   post.URL,
+			"title":                 post.Title,
+			"excerpt":               post.Excerpt,
+			"published":             post.Published,
+			"published_human":       post.PublishedHuman,
+			"comment_count":         fmt.Sprintf("%d", post.CommentCount),
+			"comment_count_display": commentCountDisplay,
 		})
 
 		builder.WriteString(rendered)
@@ -245,13 +254,18 @@ func (e *Engine) renderRecentPostsSection(content string, ctx *RenderContext, de
 		}
 
 		// Substitute loop-specific variables
+		commentCountDisplay := ""
+		if post.CommentCount > 0 {
+			commentCountDisplay = fmt.Sprintf("%d", post.CommentCount)
+		}
 		rendered := e.substituteLoopVariables(processed, map[string]string{
-			"url":             post.URL,
-			"title":           post.Title,
-			"excerpt":         post.Excerpt,
-			"published":       post.Published,
-			"published_human": post.PublishedHuman,
-			"comment_count":   fmt.Sprintf("%d", post.CommentCount),
+			"url":                   post.URL,
+			"title":                 post.Title,
+			"excerpt":               post.Excerpt,
+			"published":             post.Published,
+			"published_human":       post.PublishedHuman,
+			"comment_count":         fmt.Sprintf("%d", post.CommentCount),
+			"comment_count_display": commentCountDisplay,
 		})
 
 		builder.WriteString(rendered)
@@ -340,6 +354,61 @@ func (e *Engine) renderFollowingSection(content string, ctx *RenderContext, dept
 			"domain":      f.Domain,
 			"author_name": displayName,
 			"site_title":  f.SiteTitle,
+		})
+
+		builder.WriteString(rendered)
+	}
+
+	return builder.String(), nil
+}
+
+// renderTargetsSection renders the {{#targets}} section for each tag target.
+func (e *Engine) renderTargetsSection(content string, ctx *RenderContext, depth int) (string, error) {
+	var builder strings.Builder
+
+	for _, target := range ctx.Targets {
+		iterCtx := &RenderContext{
+			SiteURL:   ctx.SiteURL,
+			SiteTitle: ctx.SiteTitle,
+			Year:      ctx.Year,
+		}
+
+		processed, err := e.processPartials(content, iterCtx, depth+1)
+		if err != nil {
+			return "", err
+		}
+
+		rendered := e.substituteLoopVariables(processed, map[string]string{
+			"uri":   target.URI,
+			"added": target.Added,
+		})
+
+		builder.WriteString(rendered)
+	}
+
+	return builder.String(), nil
+}
+
+// renderTagsSection renders the {{#tags}} section for the tag index.
+func (e *Engine) renderTagsSection(content string, ctx *RenderContext, depth int) (string, error) {
+	var builder strings.Builder
+
+	for _, tag := range ctx.Tags {
+		iterCtx := &RenderContext{
+			SiteURL:   ctx.SiteURL,
+			SiteTitle: ctx.SiteTitle,
+			Year:      ctx.Year,
+		}
+
+		processed, err := e.processPartials(content, iterCtx, depth+1)
+		if err != nil {
+			return "", err
+		}
+
+		rendered := e.substituteLoopVariables(processed, map[string]string{
+			"tag_name": tag.TagName,
+			"count":    fmt.Sprintf("%d", tag.Count),
+			"updated":  tag.Updated,
 		})
 
 		builder.WriteString(rendered)

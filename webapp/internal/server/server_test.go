@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
@@ -598,7 +599,7 @@ func TestSPAHandler_DeepLinkFallsBackToIndex(t *testing.T) {
 
 	deepPaths := []string{
 		"/_/posts",
-		"/_/social/feed",
+		"/_/feed",
 		"/_/posts/20260218/hello",
 		"/_/posts/drafts/my-draft",
 		"/_/comments/new",
@@ -1378,5 +1379,68 @@ func TestClose_StopsSync(t *testing.T) {
 		// closed as expected
 	default:
 		t.Fatal("Close() did not close syncDone")
+	}
+}
+
+func TestNewRemoteClient_NoSharedClient(t *testing.T) {
+	s := &Server{}
+	rc := s.NewRemoteClient()
+	if rc == nil {
+		t.Fatal("NewRemoteClient() returned nil")
+	}
+	if rc.HTTPClient == nil {
+		t.Error("expected fallback HTTPClient")
+	}
+	if rc.Cache != nil {
+		t.Error("expected nil cache when ContentCache not set")
+	}
+}
+
+func TestNewRemoteClient_WithShared(t *testing.T) {
+	shared := &http.Client{}
+	cache := remote.NewLRUCache(10)
+	s := &Server{
+		SharedHTTPClient: shared,
+		ContentCache:     cache,
+	}
+	rc := s.NewRemoteClient()
+	if rc.HTTPClient != shared {
+		t.Error("expected shared HTTPClient")
+	}
+	if rc.Cache != cache {
+		t.Error("expected ContentCache to be attached")
+	}
+}
+
+func TestNewDSClient_WithSharedHTTP(t *testing.T) {
+	shared := &http.Client{}
+	s := &Server{
+		SharedHTTPClient: shared,
+		DiscoveryURL:     "https://ds.example.com",
+		DiscoveryKey:     "test-key",
+	}
+	dc := s.NewDSClient(nil)
+	if dc == nil {
+		t.Fatal("NewDSClient() returned nil")
+	}
+	if dc.HTTPClient != shared {
+		t.Error("expected shared HTTPClient on discovery client")
+	}
+	if dc.BaseURL != "https://ds.example.com" {
+		t.Errorf("BaseURL = %q, want https://ds.example.com", dc.BaseURL)
+	}
+}
+
+func TestNewDSClient_WithoutSharedHTTP(t *testing.T) {
+	s := &Server{
+		DiscoveryURL: "https://ds.example.com",
+		DiscoveryKey: "test-key",
+	}
+	dc := s.NewDSClient(nil)
+	if dc == nil {
+		t.Fatal("NewDSClient() returned nil")
+	}
+	if dc.HTTPClient == nil {
+		t.Error("expected fallback HTTPClient")
 	}
 }

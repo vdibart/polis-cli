@@ -18,7 +18,6 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
-	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
@@ -89,6 +88,10 @@ func (s *Server) runUnifiedSync() SyncResult {
 		if newCursor != "" && cursorGreater(newCursor, cursor) {
 			_ = store.SetCursor("pub.polis.sync", newCursor)
 		}
+		// Broadcast counts even with 0 events — feed items may have been
+		// added by other paths (e.g. manual feed refresh) since the last
+		// broadcast, and SSE clients need the updated feed_has_new state.
+		s.broadcastCounts(result)
 		s.LogEvent("pub.polis.sync.complete", map[string]interface{}{
 			"sync_id":          syncID,
 			"events_processed": 0,
@@ -411,6 +414,10 @@ func (h *feedSyncHandler) EventTypes() []string {
 		"pub.polis.post.republished",
 		"pub.polis.comment.published",
 		"pub.polis.comment.republished",
+		"pub.polis.comment.blessing.granted",
+		"pub.polis.comment.blessing.requested",
+		"pub.polis.follow.announced",
+		"pub.polis.site.registered",
 	}
 }
 
@@ -685,9 +692,16 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 			continue
 		}
 
-		// Fetch comment markdown from the commenter's site
-		rc := remote.NewClient()
-		content, err := rc.FetchContent(polisurl.NormalizeToMD(commentURL))
+		// Fetch comment markdown from the commenter's site.
+		// Try the content source path first (where .md files live on hosted sites),
+		// then fall back to the mount path URL for non-hosted/legacy sites.
+		rc := s.NewRemoteClient()
+		mdURL := polisurl.NormalizeToMD(commentURL)
+		content, err := rc.FetchContent(commentSourceURL(mdURL))
+		if err != nil {
+			// Fallback: try the mount path directly (non-hosted sites may serve .md there)
+			content, err = rc.FetchContent(mdURL)
+		}
 		if err != nil {
 			s.LogWarn("blessing sync: failed to fetch comment %s: %v", commentURL, err)
 			continue

@@ -97,6 +97,25 @@ func NewReceiver(privateKeyPEM, publicKeySSH []byte, domain, siteDir string, sto
 	}
 }
 
+// NewReceiverWithHTTP creates a Receiver using a shared HTTP client for connection pooling.
+func NewReceiverWithHTTP(privateKeyPEM, publicKeySSH []byte, domain, siteDir string, store *Store, rl *RateLimiter, hc *http.Client) *Receiver {
+	if hc == nil {
+		return NewReceiver(privateKeyPEM, publicKeySSH, domain, siteDir, store, rl)
+	}
+	return &Receiver{
+		PrivateKeyPEM:  privateKeyPEM,
+		PublicKeySSH:   publicKeySSH,
+		Domain:         strings.ToLower(domain),
+		SiteDir:        siteDir,
+		Store:          store,
+		RateLimiter:    rl,
+		Logger:         nopLogger{},
+		MaxMessageSize: maxDMPayloadSize,
+		keyCache:       make(map[string]*cachedKey),
+		httpClient:     hc,
+	}
+}
+
 // ensureKeys derives the X25519 secret key once.
 func (rcv *Receiver) ensureKeys() error {
 	rcv.initOnce.Do(func() {

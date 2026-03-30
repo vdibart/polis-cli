@@ -43,10 +43,11 @@ type RenderContext struct {
 	SignatureShort string
 
 	// Site variables
-	SiteURL    string
-	SiteTitle  string
-	CSSPath    string
-	HomePath   string
+	SiteURL     string
+	SiteTitle   string
+	CSSPath     string
+	BaseCSSPath string
+	HomePath    string
 	AuthorName string
 	AuthorURL  string
 	Year       string
@@ -56,8 +57,12 @@ type RenderContext struct {
 	CommentCount int
 	PostCount    int
 
-	// Conditional HTML fragments
+	// Derived counts
+	FollowingCount int
+
+	// Pre-rendered HTML fragments
 	ViewAllPostsLink string // Pre-rendered "View all N posts" link (empty if ≤10)
+	AvatarHTML       string // Pre-rendered avatar: <img> or <span> with initial
 
 	// Widget variables
 	AuthorDomain  string // Site domain (e.g. "alice.polis.pub")
@@ -73,6 +78,11 @@ type RenderContext struct {
 	TargetAuthor     string
 	Preview          string
 
+	// Tag variables
+	TagName     string
+	TagCount    int
+	TargetCount int
+
 	// Loop data (for sections)
 	Posts           []PostData
 	Comments        []CommentData
@@ -80,6 +90,8 @@ type RenderContext struct {
 	RecentPosts     []PostData
 	RecentComments  []CommentData
 	Following       []FollowingData
+	Targets         []TagTargetData
+	Tags            []TagData
 }
 
 // FollowingData represents a followed author in a loop.
@@ -107,6 +119,19 @@ type CommentData struct {
 	Published      string
 	PublishedHuman string
 	Preview        string
+}
+
+// TagTargetData represents a tagged target in a tag page loop.
+type TagTargetData struct {
+	URI   string
+	Added string
+}
+
+// TagData represents a tag in the tag index loop.
+type TagData struct {
+	TagName string
+	Count   int
+	Updated string
 }
 
 // BlessedCommentData represents a blessed comment on a post.
@@ -186,24 +211,32 @@ func (e *Engine) substituteVariables(template string, ctx *RenderContext) string
 		// Site variables
 		"site_url":    ctx.SiteURL,
 		"site_title":  ctx.SiteTitle,
-		"css_path":    ctx.CSSPath,
-		"home_path":   ctx.HomePath,
+		"css_path":      ctx.CSSPath,
+		"base_css_path": ctx.BaseCSSPath,
+		"home_path":     ctx.HomePath,
 		"author_name": ctx.AuthorName,
 		"author_url":  ctx.AuthorURL,
 		"year":        ctx.Year,
 
 		// Counts
-		"blessed_count": fmt.Sprintf("%d", ctx.BlessedCount),
-		"comment_count": fmt.Sprintf("%d", ctx.CommentCount),
-		"post_count":    fmt.Sprintf("%d", ctx.PostCount),
+		"blessed_count":  fmt.Sprintf("%d", ctx.BlessedCount),
+		"comment_count":  fmt.Sprintf("%d", ctx.CommentCount),
+		"post_count":     fmt.Sprintf("%d", ctx.PostCount),
+		"following_count": fmt.Sprintf("%d", ctx.FollowingCount),
 
-		// Conditional fragments
+		// Pre-rendered HTML fragments
 		"view_all_posts": ctx.ViewAllPostsLink,
+		"avatar_html":    ctx.AvatarHTML,
 
 		// Widget variables
 		"author_domain":  ctx.AuthorDomain,
 		"page_type":      ctx.PageType,
 		"widget_version": ctx.WidgetVersion,
+
+		// Tag variables
+		"tag_name":     ctx.TagName,
+		"tag_count":    fmt.Sprintf("%d", ctx.TagCount),
+		"target_count": fmt.Sprintf("%d", ctx.TargetCount),
 
 		// Comment-specific
 		"in_reply_to_url":     ctx.InReplyToURL,

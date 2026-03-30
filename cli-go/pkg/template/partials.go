@@ -57,35 +57,34 @@ func (e *Engine) processPartials(template string, ctx *RenderContext, depth int)
 }
 
 // loadPartial loads a partial file from the appropriate location.
-// Returns content, resolved path, source ("global" or "theme"), and error.
+// Returns content, resolved path, source ("global", "theme", or "base"), and error.
 func (e *Engine) loadPartial(path string) (string, string, string, error) {
 	// Parse prefix (global: or theme:)
 	prefix, cleanPath := parsePartialPrefix(path)
 
-	// Determine lookup order based on prefix
-	var lookupOrder []struct {
+	// Determine lookup order based on prefix.
+	// _base snippets are always the last fallback before giving up.
+	type lookupEntry struct {
 		source string
 		dir    string
 	}
 
+	var lookupOrder []lookupEntry
+
 	switch prefix {
 	case "theme":
-		// Theme-first, then global fallback
-		lookupOrder = []struct {
-			source string
-			dir    string
-		}{
+		// Theme-first, then base, then global
+		lookupOrder = []lookupEntry{
 			{"theme", e.getThemeSnippetsDir()},
+			{"base", e.getBaseSnippetsDir()},
 			{"global", e.GetGlobalSnippetsDir()},
 		}
 	default: // "global" or no prefix
-		// Global-first (default), then theme fallback
-		lookupOrder = []struct {
-			source string
-			dir    string
-		}{
+		// Global-first, then theme, then base
+		lookupOrder = []lookupEntry{
 			{"global", e.GetGlobalSnippetsDir()},
 			{"theme", e.getThemeSnippetsDir()},
+			{"base", e.getBaseSnippetsDir()},
 		}
 	}
 
@@ -120,6 +119,26 @@ func (e *Engine) getThemeSnippetsDir() string {
 	// Fall back to CLI themes
 	if e.config.CLIThemesDir != "" {
 		cliDir := filepath.Join(e.config.CLIThemesDir, e.config.ActiveTheme, "snippets")
+		if _, err := os.Stat(cliDir); err == nil {
+			return cliDir
+		}
+	}
+
+	return ""
+}
+
+// getBaseSnippetsDir returns the _base theme snippets directory.
+// Tries local _base first, then CLI themes _base directory.
+func (e *Engine) getBaseSnippetsDir() string {
+	// Try local _base first
+	localDir := filepath.Join(e.config.DataDir, "site", "themes", "_base", "snippets")
+	if _, err := os.Stat(localDir); err == nil {
+		return localDir
+	}
+
+	// Fall back to CLI themes _base
+	if e.config.CLIThemesDir != "" {
+		cliDir := filepath.Join(e.config.CLIThemesDir, "_base", "snippets")
 		if _, err := os.Stat(cliDir); err == nil {
 			return cliDir
 		}

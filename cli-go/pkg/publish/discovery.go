@@ -60,6 +60,11 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 		return nil
 	}
 
+	if !discovery.IsRegisteredLocally(dataDir, dsURL) {
+		fmt.Println("[i] DS registration skipped: site not registered with discovery service")
+		return nil
+	}
+
 	// Determine author identity: email from .well-known/polis, or domain from baseURL
 	wk, err := site.LoadWellKnown(dataDir)
 	if err != nil {

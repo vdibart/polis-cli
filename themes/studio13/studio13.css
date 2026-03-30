@@ -200,33 +200,17 @@ button:focus-visible,
     max-width: var(--max-width);
 }
 
-.about-content {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-left: 3px solid var(--color-orange-dim);
-    padding: 1.25rem 1.5rem;
-}
-
-.about-content p {
-    margin: 0 0 0.85rem 0;
-    font-size: 1rem;
-}
-
-.about-content p:last-child {
-    margin-bottom: 0;
-}
-
-.about-content em {
+.site-bio em {
     color: var(--color-orange);
     font-style: normal;
 }
 
-.about-content a {
+.site-bio a {
     color: var(--color-orange);
     text-decoration: none;
 }
 
-.about-content a:hover {
+.site-bio a:hover {
     text-decoration: underline;
 }
 
@@ -742,9 +726,10 @@ textarea::placeholder {
     line-height: 1.3;
 }
 
-.context-link:hover {
+.context-link:hover, .context-readmore:hover {
     text-decoration: underline;
 }
+.context-readmore { color: var(--color-orange); }
 
 .context-domain {
     font-size: 0.7rem;
@@ -834,18 +819,15 @@ textarea::placeholder {
 
 .footer-logo {
     display: inline-flex;
-    flex-direction: row;
+    flex-direction: column;
     align-items: center;
-    font-family: var(--font-display);
-    font-size: 0.92rem;
-    font-weight: 600;
-    color: var(--color-cyan);
-    letter-spacing: 0.04em;
-    text-shadow: none;
+    font-family: 'Newsreader', Georgia, serif;
+    font-style: italic;
+    font-size: 1.4rem;
+    font-weight: 500;
+    color: var(--color-text-muted);
     text-decoration: none;
-    transition: color 0.2s ease;
-    gap: 0.45rem;
-    white-space: nowrap;
+    transition: color 0.2s;
 }
 
 .footer-logo:hover {
@@ -853,17 +835,12 @@ textarea::placeholder {
 }
 
 .footer-tagline {
-    font-family: var(--font-mono);
-    font-size: 0.78rem;
+    font-family: 'Newsreader', Georgia, serif;
+    font-style: italic;
+    font-size: 0.85rem;
     font-weight: 400;
     color: var(--color-text-muted);
-    letter-spacing: 0.01em;
-    text-shadow: none;
-    margin-top: 0;
-}
-
-.footer-logo:hover .footer-tagline {
-    color: var(--color-text-soft);
+    margin-top: 0.3rem;
 }
 
 /* ============================================
@@ -919,3 +896,21 @@ textarea::placeholder {
         padding-right: 0.75rem;
     }
 }
+
+/* ── Site header & post list (v3 mockup design) ────────────── */
+body { font-family: 'Inter', var(--font-mono); }
+.site-name { color: var(--color-text); font-family: 'Newsreader', Georgia, serif; }
+.site-handle { color: var(--color-text-muted); font-family: var(--font-mono); }
+.site-bio { color: var(--color-text-soft); font-family: 'Newsreader', Georgia, serif; }
+.site-stats { color: var(--color-text-muted); border-color: var(--color-border); }
+.site-stats strong { color: var(--color-text); }
+.site-avatar { background: linear-gradient(135deg, var(--color-orange-dim), var(--color-orange)); color: #fff; font-family: 'Newsreader', Georgia, serif; font-style: italic; }
+.sp-date { color: var(--color-text-muted); }
+.sp-title { color: var(--color-text); font-family: 'Newsreader', Georgia, serif; }
+.sp-excerpt { color: var(--color-text-soft); font-family: 'Newsreader', Georgia, serif; }
+.sp-comments { color: var(--color-text-muted); }
+.site-post:hover { background: rgba(244, 84, 26, 0.05); }
+.view-all { color: var(--color-orange); }
+.view-all:hover { color: var(--color-orange-soft); }
+.footer-logo { color: var(--color-text-muted); font-family: 'Newsreader', Georgia, serif; font-style: italic; }
+.footer-tagline { color: var(--color-text-muted); }

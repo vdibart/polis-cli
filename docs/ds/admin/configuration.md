@@ -243,6 +243,14 @@ All config values are validated at startup:
 
 This fail-fast behavior ensures you never run a production instance with silently broken configuration.
 
+### Wake Callbacks
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `DS_WAKE_ENABLED` | `true` | Set to `false` to disable all outbound wake callbacks. Requires DS restart. |
+
+When enabled, the DS fires `GET https://{domain}/v1/wake` after emitting events that affect a domain (e.g., auto-blessed comments, blessing decisions). This is a fire-and-forget notification with a 3-second timeout — it carries no data and simply tells the domain to check its stream. Domains that do not implement the endpoint (self-hosted sites, firewalled servers) receive a 404 or timeout, which the DS silently ignores. Rate-limited to one wake per domain per 30 seconds.
+
 ### Architecture Note
 
 The configuration system follows the same core/server split as the rest of the DS:

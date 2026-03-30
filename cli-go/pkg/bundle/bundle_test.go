@@ -28,8 +28,8 @@ func TestLoadBundle(t *testing.T) {
 	if loaded.Name != "pub.polis.core" {
 		t.Errorf("got name %q, want pub.polis.core", loaded.Name)
 	}
-	if len(loaded.Types) != 5 {
-		t.Errorf("got %d types, want 5", len(loaded.Types))
+	if len(loaded.Types) != 6 {
+		t.Errorf("got %d types, want 6", len(loaded.Types))
 	}
 }
 
@@ -321,8 +321,8 @@ func TestAllEmittedEvents(t *testing.T) {
 	events := b.AllEmittedEvents()
 
 	// pub.polis.core has 10 events total
-	if len(events) != 10 {
-		t.Errorf("got %d events, want 10", len(events))
+	if len(events) != 12 {
+		t.Errorf("got %d events, want 12", len(events))
 	}
 
 	// Check a few key events exist

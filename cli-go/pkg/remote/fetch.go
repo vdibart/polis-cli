@@ -16,15 +16,26 @@ const maxBodySize = 10 * 1024 * 1024
 // Client is an HTTP client for fetching remote content.
 type Client struct {
 	HTTPClient *http.Client
+	Cache      *LRUCache // Optional response cache; nil = no caching
 }
 
-// NewClient creates a new remote content client.
+// NewClient creates a new remote content client with a private HTTP client.
 func NewClient() *Client {
 	return &Client{
 		HTTPClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+// NewClientWithHTTP creates a remote content client using a shared HTTP client.
+// This enables connection pooling when multiple Client instances share the same
+// underlying http.Client (and its transport).
+func NewClientWithHTTP(hc *http.Client) *Client {
+	if hc == nil {
+		return NewClient()
+	}
+	return &Client{HTTPClient: hc}
 }
 
 // RemoteAvatarConfig represents custom avatar styling from a remote .well-known/polis.
@@ -104,7 +115,14 @@ func (e PublicIndexEntry) GetPath() string {
 }
 
 // FetchContent fetches content from a URL and returns it as a string.
+// If a Cache is configured, checks it first and stores successful responses.
 func (c *Client) FetchContent(url string) (string, error) {
+	if c.Cache != nil {
+		if cached, ok := c.Cache.Get(url); ok {
+			return cached, nil
+		}
+	}
+
 	resp, err := c.HTTPClient.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch %s: %w", url, err)
@@ -120,7 +138,12 @@ func (c *Client) FetchContent(url string) (string, error) {
 		return "", fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	return string(body), nil
+	content := string(body)
+	if c.Cache != nil {
+		c.Cache.Set(url, content, TTLForURL(url))
+	}
+
+	return content, nil
 }
 
 // FetchWellKnown fetches and parses the .well-known/polis file from a base URL.

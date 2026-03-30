@@ -199,6 +199,42 @@ func TestFeedHandler_SkipsSelfEvents(t *testing.T) {
 	}
 }
 
+func TestFeedHandler_IncludeSelf(t *testing.T) {
+	h := &FeedHandler{
+		MyDomain:    "me.polis.pub",
+		IncludeSelf: true,
+	}
+
+	events := selfAndOtherEvents()
+	items := h.Process(events)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items (self-event included), got %d", len(items))
+	}
+	// Self-event should be first (ID 1)
+	if items[0].Title != "My Own Post" {
+		t.Errorf("expected My Own Post, got %s", items[0].Title)
+	}
+}
+
+func TestFeedHandler_IncludeSelf_BypassesPolicy(t *testing.T) {
+	h := &FeedHandler{
+		MyDomain:    "me.polis.pub",
+		IncludeSelf: true,
+		Policies: []policy.Policy{
+			{Active: true, Rule: "omit pub.polis.feed from self"},
+		},
+	}
+
+	events := selfAndOtherEvents()
+	items := h.Process(events)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items (IncludeSelf bypasses policy), got %d", len(items))
+	}
+	if items[0].Title != "My Own Post" {
+		t.Errorf("expected My Own Post, got %s", items[0].Title)
+	}
+}
+
 func TestFeedHandler_PolicySelfSkip(t *testing.T) {
 	// Policy-driven self-skip via "omit pub.polis.feed from self"
 	h := &FeedHandler{
@@ -324,14 +360,14 @@ func TestFeedHandler_IgnoresUnknownTypes(t *testing.T) {
 	events := []discovery.StreamEvent{
 		{
 			ID:        json.Number("1"),
-			Type:      "pub.polis.follow.announced",
+			Type:      "pub.polis.tag.applied",
 			Timestamp: "2026-02-01T10:00:00Z",
 			Actor:     "bob.polis.pub",
 			Payload:   map[string]interface{}{},
 		},
 		{
 			ID:        json.Number("2"),
-			Type:      "pub.polis.comment.blessing.requested",
+			Type:      "pub.polis.some.future.type",
 			Timestamp: "2026-02-01T10:00:00Z",
 			Actor:     "charlie.polis.pub",
 			Payload:   map[string]interface{}{},
@@ -341,6 +377,102 @@ func TestFeedHandler_IgnoresUnknownTypes(t *testing.T) {
 	items := h.Process(events)
 	if len(items) != 0 {
 		t.Errorf("expected 0 items for non-feed events, got %d", len(items))
+	}
+}
+
+func TestFeedHandler_FollowAnnounced(t *testing.T) {
+	h := &FeedHandler{
+		MyDomain: "me.polis.pub",
+	}
+
+	events := []discovery.StreamEvent{
+		{
+			ID:        json.Number("1"),
+			Type:      "pub.polis.follow.announced",
+			Timestamp: "2026-02-01T10:00:00Z",
+			Actor:     "bob.polis.pub",
+			Payload: map[string]interface{}{
+				"target_domain": "alice.polis.pub",
+			},
+		},
+	}
+
+	items := h.Process(events)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Type != "announcement" {
+		t.Errorf("expected type announcement, got %s", items[0].Type)
+	}
+	if items[0].EventType != "pub.polis.follow.announced" {
+		t.Errorf("expected event_type pub.polis.follow.announced, got %s", items[0].EventType)
+	}
+	if items[0].AuthorDomain != "bob.polis.pub" {
+		t.Errorf("expected author bob.polis.pub, got %s", items[0].AuthorDomain)
+	}
+	if items[0].TargetDomain != "alice.polis.pub" {
+		t.Errorf("expected target alice.polis.pub, got %s", items[0].TargetDomain)
+	}
+}
+
+func TestFeedHandler_BlessingRequested(t *testing.T) {
+	h := &FeedHandler{
+		MyDomain: "me.polis.pub",
+	}
+
+	events := []discovery.StreamEvent{
+		{
+			ID:        json.Number("1"),
+			Type:      "pub.polis.comment.blessing.requested",
+			Timestamp: "2026-02-01T10:00:00Z",
+			Actor:     "charlie.polis.pub",
+			Payload: map[string]interface{}{
+				"source_domain": "charlie.polis.pub",
+				"target_domain": "alice.polis.pub",
+				"target_url":    "https://alice.polis.pub/posts/hello.html",
+			},
+		},
+	}
+
+	items := h.Process(events)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Type != "announcement" {
+		t.Errorf("expected type announcement, got %s", items[0].Type)
+	}
+	if items[0].EventType != "pub.polis.comment.blessing.requested" {
+		t.Errorf("expected event_type, got %s", items[0].EventType)
+	}
+}
+
+func TestFeedHandler_SiteRegistered(t *testing.T) {
+	h := &FeedHandler{
+		MyDomain: "me.polis.pub",
+	}
+
+	events := []discovery.StreamEvent{
+		{
+			ID:        json.Number("1"),
+			Type:      "pub.polis.site.registered",
+			Timestamp: "2026-02-01T10:00:00Z",
+			Actor:     "newuser.polis.pub",
+			Payload:   map[string]interface{}{},
+		},
+	}
+
+	items := h.Process(events)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Type != "announcement" {
+		t.Errorf("expected type announcement, got %s", items[0].Type)
+	}
+	if items[0].EventType != "pub.polis.site.registered" {
+		t.Errorf("expected event_type, got %s", items[0].EventType)
+	}
+	if items[0].AuthorDomain != "newuser.polis.pub" {
+		t.Errorf("expected author newuser.polis.pub, got %s", items[0].AuthorDomain)
 	}
 }
 
@@ -367,31 +499,32 @@ func TestFeedHandler_BlessingGrantedAutoBlessed(t *testing.T) {
 	}
 
 	items := h.Process(events)
-	if len(items) != 1 {
-		t.Fatalf("expected 1 item from blessing.granted, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items from blessing.granted (announcement + comment), got %d", len(items))
 	}
 
-	item := items[0]
-	if item.Type != "comment" {
-		t.Errorf("expected type comment, got %s", item.Type)
+	// First item: announcement (post author granted blessing)
+	ann := items[0]
+	if ann.Type != "announcement" {
+		t.Errorf("expected type announcement, got %s", ann.Type)
 	}
-	if item.URL != "https://me.polis.pub/comments/20260304/reply.md" {
-		t.Errorf("expected comment URL, got %s", item.URL)
+	if ann.AuthorDomain != "david.polis.pub" {
+		t.Errorf("expected author domain david.polis.pub (post author who granted), got %s", ann.AuthorDomain)
 	}
-	if item.AuthorDomain != "me.polis.pub" {
-		t.Errorf("expected author domain me.polis.pub (comment author), got %s", item.AuthorDomain)
+	if ann.TargetDomain != "me.polis.pub" {
+		t.Errorf("expected target domain me.polis.pub (comment author who received), got %s", ann.TargetDomain)
 	}
-	if item.AuthorURL != "https://me.polis.pub" {
-		t.Errorf("expected author URL https://me.polis.pub, got %s", item.AuthorURL)
+
+	// Second item: comment (so it groups under the post)
+	cmt := items[1]
+	if cmt.Type != "comment" {
+		t.Errorf("expected type comment, got %s", cmt.Type)
 	}
-	if item.TargetURL != "https://david.polis.pub/posts/20260304/hello-world.html" {
-		t.Errorf("expected target URL, got %s", item.TargetURL)
+	if cmt.AuthorDomain != "me.polis.pub" {
+		t.Errorf("expected comment author me.polis.pub, got %s", cmt.AuthorDomain)
 	}
-	if item.TargetDomain != "david.polis.pub" {
-		t.Errorf("expected target domain david.polis.pub, got %s", item.TargetDomain)
-	}
-	if item.Published != "2026-02-04T12:00:00Z" {
-		t.Errorf("expected published from event timestamp, got %s", item.Published)
+	if cmt.TargetURL != "https://david.polis.pub/posts/20260304/hello-world.html" {
+		t.Errorf("expected target URL, got %s", cmt.TargetURL)
 	}
 }
 
@@ -417,22 +550,33 @@ func TestFeedHandler_BlessingGrantedManual(t *testing.T) {
 	}
 
 	items := h.Process(events)
-	if len(items) != 1 {
-		t.Fatalf("expected 1 item from manual blessing.granted, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items from manual blessing.granted, got %d", len(items))
 	}
 
-	item := items[0]
-	if item.Type != "comment" {
-		t.Errorf("expected type comment, got %s", item.Type)
+	ann := items[0]
+	if ann.Type != "announcement" {
+		t.Errorf("expected type announcement, got %s", ann.Type)
 	}
-	if item.URL != "https://bob.polis.pub/comments/20260305/reply.md" {
-		t.Errorf("expected comment URL from source_url, got %s", item.URL)
+	if ann.URL != "https://bob.polis.pub/comments/20260305/reply.md" {
+		t.Errorf("expected comment URL from source_url, got %s", ann.URL)
 	}
-	if item.AuthorDomain != "bob.polis.pub" {
-		t.Errorf("expected author domain bob.polis.pub (comment author), got %s", item.AuthorDomain)
+	if ann.AuthorDomain != "alice.polis.pub" {
+		t.Errorf("expected author domain alice.polis.pub (post author who granted), got %s", ann.AuthorDomain)
 	}
-	if item.TargetURL != "https://alice.polis.pub/posts/20260301/post.html" {
-		t.Errorf("expected target URL from target_url, got %s", item.TargetURL)
+	if ann.TargetDomain != "bob.polis.pub" {
+		t.Errorf("expected target domain bob.polis.pub (comment author), got %s", ann.TargetDomain)
+	}
+
+	cmt := items[1]
+	if cmt.Type != "comment" {
+		t.Errorf("expected type comment, got %s", cmt.Type)
+	}
+	if cmt.AuthorDomain != "bob.polis.pub" {
+		t.Errorf("expected comment author bob.polis.pub, got %s", cmt.AuthorDomain)
+	}
+	if cmt.TargetURL != "https://alice.polis.pub/posts/20260301/post.html" {
+		t.Errorf("expected target URL from target_url, got %s", cmt.TargetURL)
 	}
 }
 
@@ -522,9 +666,9 @@ func TestFeedHandler_BlessingGranted_OwnCommentVisibleViaBlessingEvent(t *testin
 	}
 
 	items := h.Process(events)
-	// Should get 2 items: the post + the blessing.granted comment (comment.published was self-skipped)
-	if len(items) != 2 {
-		t.Fatalf("expected 2 items (post + blessed comment), got %d", len(items))
+	// Should get 3 items: the post + blessing announcement + comment (comment.published was self-skipped)
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items (post + announcement + comment), got %d", len(items))
 	}
 
 	// Verify the post
@@ -535,18 +679,23 @@ func TestFeedHandler_BlessingGranted_OwnCommentVisibleViaBlessingEvent(t *testin
 		t.Errorf("expected post title 'Hello World!', got %s", items[0].Title)
 	}
 
-	// Verify the comment came through via blessing.granted
-	if items[1].Type != "comment" {
-		t.Errorf("expected second item to be comment, got %s", items[1].Type)
+	// Verify the announcement
+	if items[1].Type != "announcement" {
+		t.Errorf("expected second item to be announcement, got %s", items[1].Type)
 	}
-	if items[1].URL != "https://me.polis.pub/comments/20260304/reply.md" {
-		t.Errorf("expected my comment URL, got %s", items[1].URL)
+	if items[1].AuthorDomain != "david.polis.pub" {
+		t.Errorf("expected announcement author david.polis.pub (granter), got %s", items[1].AuthorDomain)
 	}
-	if items[1].AuthorDomain != "me.polis.pub" {
-		t.Errorf("expected author to be me (comment author), got %s", items[1].AuthorDomain)
+
+	// Verify the comment (groups under the post)
+	if items[2].Type != "comment" {
+		t.Errorf("expected third item to be comment, got %s", items[2].Type)
 	}
-	if items[1].TargetURL != "https://david.polis.pub/posts/20260304/hello-world.html" {
-		t.Errorf("expected target URL, got %s", items[1].TargetURL)
+	if items[2].URL != "https://me.polis.pub/comments/20260304/reply.md" {
+		t.Errorf("expected my comment URL, got %s", items[2].URL)
+	}
+	if items[2].AuthorDomain != "me.polis.pub" {
+		t.Errorf("expected comment author me.polis.pub, got %s", items[2].AuthorDomain)
 	}
 }
 
@@ -576,8 +725,8 @@ func TestFeedHandler_BlessingGranted_FallbackFieldPrecedence(t *testing.T) {
 	}
 
 	items := h.Process(events)
-	if len(items) != 1 {
-		t.Fatalf("expected 1 item, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
 	}
 	if items[0].URL != "https://bob.polis.pub/comments/preferred.md" {
 		t.Errorf("expected comment_url to take precedence, got %s", items[0].URL)
@@ -605,14 +754,17 @@ func TestFeedHandler_BlessingGranted_EmptyPayload(t *testing.T) {
 	}
 
 	items := h.Process(events)
-	if len(items) != 1 {
-		t.Fatalf("expected 1 item even with empty payload, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items even with empty payload, got %d", len(items))
 	}
-	if items[0].Type != "comment" {
-		t.Errorf("expected type comment, got %s", items[0].Type)
+	if items[0].Type != "announcement" {
+		t.Errorf("expected type announcement, got %s", items[0].Type)
 	}
 	if items[0].Published != "2026-02-05T15:00:00Z" {
 		t.Errorf("expected timestamp fallback, got %s", items[0].Published)
+	}
+	if items[1].Type != "comment" {
+		t.Errorf("expected type comment, got %s", items[1].Type)
 	}
 }
 

@@ -1,11 +1,20 @@
 package following
 
 import (
+	"fmt"
+
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 )
+
+// DataDir is the site data directory, used for registration checks.
+// Set by the calling application during initialization.
+var DataDir string
+
+// DiscoveryURL is the DS URL, used for registration checks.
+var DiscoveryURL string
 
 // FollowResult contains the result of a follow operation.
 type FollowResult struct {
@@ -72,7 +81,12 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 		}
 	}
 
-	// Fetch pending/denied blessings and re-evaluate against policies
+	// DS operations: reads (queries) are always allowed, writes (grants, stream
+	// events) require registration. This lets unregistered sites follow authors
+	// locally and pull their feed, without announcing to the network.
+	registered := discovery.IsRegisteredLocally(DataDir, DiscoveryURL)
+
+	// Fetch pending/denied blessings and re-evaluate against policies (DS read — always allowed)
 	pendingResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 		"status": "pending",
 	})
@@ -89,30 +103,34 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 	}
 	result.CommentsFound = len(allUnblessed)
 
-	// Re-evaluate each unblessed comment against policies
-	ctx := policy.EvalContext{
-		FollowingDomains: followingDomains,
-	}
-	for _, rel := range allUnblessed {
-		sourceDomain := discovery.ExtractDomainFromURL(rel.SourceURL)
-		evt := policy.Event{
-			Type:        "pub.polis.comment.blessing",
-			ActorDomain: sourceDomain,
+	// Re-evaluate each unblessed comment against policies (DS write — requires registration)
+	if registered {
+		ctx := policy.EvalContext{
+			FollowingDomains: followingDomains,
 		}
-		decision, matched := policy.EvaluateExplicit(policies, evt, ctx)
-		if matched && (decision == policy.Allow || decision == policy.Emit) {
-			if err := discoveryClient.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "grant", privKey); err != nil {
-				result.CommentsFailed++
-				continue
+		for _, rel := range allUnblessed {
+			sourceDomain := discovery.ExtractDomainFromURL(rel.SourceURL)
+			evt := policy.Event{
+				Type:        "pub.polis.comment.blessing",
+				ActorDomain: sourceDomain,
 			}
-			result.CommentsBlessed++
+			decision, matched := policy.EvaluateExplicit(policies, evt, ctx)
+			if matched && (decision == policy.Allow || decision == policy.Emit) {
+				if err := discoveryClient.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "grant", privKey); err != nil {
+					result.CommentsFailed++
+					continue
+				}
+				result.CommentsBlessed++
+			}
 		}
-	}
 
-	// Emit follow event to discovery stream (non-fatal)
-	stream.PublishEvent("pub.polis.follow.announced", map[string]interface{}{
-		"target_domain": discovery.ExtractDomainFromURL(authorURL),
-	}, privKey)
+		// Emit follow event to discovery stream (DS write — non-fatal)
+		stream.PublishEvent("pub.polis.follow.announced", map[string]interface{}{
+			"target_domain": discovery.ExtractDomainFromURL(authorURL),
+		}, privKey)
+	} else {
+		fmt.Println("[i] DS blessing/announcement skipped: site not registered")
+	}
 
 	return result, nil
 }
@@ -146,12 +164,15 @@ func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient 
 		}
 	}
 
-	// Fetch granted blessings and re-evaluate against policies
+	// DS operations: reads always allowed, writes require registration
+	registered := discovery.IsRegisteredLocally(DataDir, DiscoveryURL)
+
+	// Fetch granted blessings and re-evaluate against policies (DS read — always allowed)
 	grantedResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 		"status": "granted",
 	})
 
-	if grantedResp != nil {
+	if registered && grantedResp != nil {
 		ctx := policy.EvalContext{
 			FollowingDomains: followingDomains,
 		}
@@ -172,12 +193,12 @@ func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient 
 				result.CommentsDenied++
 			}
 		}
-	}
 
-	// Emit unfollow event to discovery stream (non-fatal)
-	stream.PublishEvent("pub.polis.follow.removed", map[string]interface{}{
-		"target_domain": discovery.ExtractDomainFromURL(authorURL),
-	}, privKey)
+		// Emit unfollow event to discovery stream (DS write — non-fatal)
+		stream.PublishEvent("pub.polis.follow.removed", map[string]interface{}{
+			"target_domain": discovery.ExtractDomainFromURL(authorURL),
+		}, privKey)
+	}
 
 	return result, nil
 }

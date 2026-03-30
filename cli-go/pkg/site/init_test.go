@@ -137,8 +137,8 @@ func TestInit_BundleJsonIsValid(t *testing.T) {
 	}
 
 	types, _ := raw["types"].(map[string]interface{})
-	if len(types) != 5 {
-		t.Errorf("types count = %d, want 5", len(types))
+	if len(types) != 6 {
+		t.Errorf("types count = %d, want 6", len(types))
 	}
 }
 
@@ -259,8 +259,8 @@ func TestInit_CreatesWebappConfig(t *testing.T) {
 	if err := json.Unmarshal(data, &obj); err != nil {
 		t.Fatalf("webapp config should be valid JSON: %v", err)
 	}
-	if obj["view_mode"] != "list" {
-		t.Errorf("view_mode = %v, want list", obj["view_mode"])
+	if _, hasViewMode := obj["view_mode"]; hasViewMode {
+		t.Errorf("view_mode should not be set in new configs")
 	}
 	if obj["show_frontmatter"] != false {
 		t.Errorf("show_frontmatter = %v, want false", obj["show_frontmatter"])
@@ -428,6 +428,32 @@ func TestInit_PassesAllPatrolChecks(t *testing.T) {
 	// Public policies must exist
 	if _, err := os.Stat(filepath.Join(dir, "policies", "rules.jsonl")); err != nil {
 		t.Fatalf("Public policies should exist: %v", err)
+	}
+}
+
+func TestInit_CreatesDefaultAvatar(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := Init(dir, InitOptions{})
+	if err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	wk, err := LoadWellKnown(dir)
+	if err != nil {
+		t.Fatalf("Failed to load .well-known/polis: %v", err)
+	}
+	if wk.Avatar == nil {
+		t.Fatal("Avatar should not be nil after init")
+	}
+	if len(wk.Avatar.BG) != 7 || wk.Avatar.BG[0] != '#' {
+		t.Errorf("Avatar.BG should be #rrggbb, got %q", wk.Avatar.BG)
+	}
+	if wk.Avatar.FG != "#ffffff" {
+		t.Errorf("Avatar.FG = %q, want #ffffff", wk.Avatar.FG)
+	}
+	if ratio := ContrastRatio(wk.Avatar.BG, wk.Avatar.FG); ratio < 4.5 {
+		t.Errorf("Avatar contrast ratio %.2f < 4.5", ratio)
 	}
 }
 

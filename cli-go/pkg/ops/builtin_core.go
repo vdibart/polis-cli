@@ -14,6 +14,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
 )
 
 // BuiltinCoreHandler handles operations for the pub.polis.core bundle.
@@ -36,6 +37,8 @@ func (h *BuiltinCoreHandler) Handle(ctx context.Context, req ActionRequest, env 
 		return h.handleFeed(ctx, req, env)
 	case "pub.polis.dm":
 		return h.handleDM(ctx, req, env)
+	case "pub.polis.tag":
+		return h.handleTag(ctx, req, env)
 	default:
 		return nil, fmt.Errorf("unsupported content type: %s", req.ContentType)
 	}
@@ -54,6 +57,8 @@ func (h *BuiltinCoreHandler) Actions(contentType string) []string {
 		return []string{"list", "refresh"}
 	case "pub.polis.dm":
 		return []string{"list", "get", "send", "deliver", "mark_read", "delete", "retry"}
+	case "pub.polis.tag":
+		return []string{"list", "apply", "remove", "delete"}
 	default:
 		return nil
 	}
@@ -309,6 +314,7 @@ func (h *BuiltinCoreHandler) listDMConversations(env HandlerEnv) (*ActionResult,
 	if err != nil {
 		return nil, fmt.Errorf("load conversations: %w", err)
 	}
+	store.DecryptIndexPreviews(idx)
 
 	convMaps := make([]map[string]any, 0, len(idx.Conversations))
 	for _, c := range idx.Conversations {
@@ -552,6 +558,197 @@ func (h *BuiltinCoreHandler) retryDM(req ActionRequest, env HandlerEnv) (*Action
 		Data: map[string]any{
 			"unsent_count": len(unsent),
 			"unsent":       unsentMaps,
+		},
+	}, nil
+}
+
+// ── Tag operations ──────────────────────────────────────────────────
+
+func (h *BuiltinCoreHandler) handleTag(ctx context.Context, req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	switch req.Action {
+	case "list":
+		return h.listTags(req, env)
+	case "apply":
+		return h.applyTag(req, env)
+	case "remove":
+		return h.removeTag(req, env)
+	case "delete":
+		return h.deleteTag(req, env)
+	default:
+		return nil, fmt.Errorf("unsupported action %q for pub.polis.tag", req.Action)
+	}
+}
+
+func (h *BuiltinCoreHandler) listTags(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	siteDir := env.Resolver.SiteDir()
+
+	// If a specific tag name is requested, load just that one
+	if tagName, ok := req.Payload["tag"].(string); ok && tagName != "" {
+		path := tag.TagPath(siteDir, tagName)
+		tf, err := tag.Load(path)
+		if err != nil {
+			return nil, fmt.Errorf("load tag: %w", err)
+		}
+		targets := make([]map[string]any, 0, len(tf.Targets))
+		for _, t := range tf.Targets {
+			targets = append(targets, map[string]any{
+				"uri":   t.URI,
+				"added": t.Added,
+			})
+		}
+		return &ActionResult{
+			Status: "success",
+			Data: map[string]any{
+				"tag":     tf.Tag,
+				"targets": targets,
+				"count":   len(targets),
+			},
+		}, nil
+	}
+
+	tags, err := tag.ListTags(siteDir)
+	if err != nil {
+		return nil, fmt.Errorf("list tags: %w", err)
+	}
+
+	tagMaps := make([]map[string]any, 0, len(tags))
+	for _, tf := range tags {
+		tagMaps = append(tagMaps, map[string]any{
+			"tag":     tf.Tag,
+			"count":   len(tf.Targets),
+			"updated": tf.Updated,
+		})
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data: map[string]any{
+			"tags":  tagMaps,
+			"count": len(tagMaps),
+		},
+	}, nil
+}
+
+func (h *BuiltinCoreHandler) applyTag(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	tagName, _ := req.Payload["tag"].(string)
+	targetURI, _ := req.Payload["target_uri"].(string)
+
+	if tagName == "" {
+		return nil, fmt.Errorf("tag name required")
+	}
+	if targetURI == "" {
+		return nil, fmt.Errorf("target_uri required")
+	}
+
+	siteDir := env.Resolver.SiteDir()
+	tf, err := tag.ApplyTag(siteDir, tagName, targetURI, env.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("apply tag: %w", err)
+	}
+
+	// DS sync (non-fatal)
+	var dsCfg *tag.DiscoveryConfig
+	if env.DiscoveryURL != "" && env.BaseURL != "" {
+		dsCfg = &tag.DiscoveryConfig{
+			DiscoveryURL: env.DiscoveryURL,
+			DiscoveryKey: env.DiscoveryKey,
+			BaseURL:      env.BaseURL,
+		}
+	}
+	if err := tag.SyncTag(siteDir, tf, env.PrivateKey, dsCfg); err != nil {
+		fmt.Printf("[!] Tag DS sync skipped: %v\n", err)
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data: map[string]any{
+			"tag":        tf.Tag,
+			"target_uri": targetURI,
+			"count":      len(tf.Targets),
+		},
+	}, nil
+}
+
+func (h *BuiltinCoreHandler) removeTag(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	tagName, _ := req.Payload["tag"].(string)
+	targetURI, _ := req.Payload["target_uri"].(string)
+
+	if tagName == "" {
+		return nil, fmt.Errorf("tag name required")
+	}
+	if targetURI == "" {
+		return nil, fmt.Errorf("target_uri required")
+	}
+
+	siteDir := env.Resolver.SiteDir()
+	tf, err := tag.RemoveTarget(siteDir, tagName, targetURI, env.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("remove tag target: %w", err)
+	}
+
+	// DS unregister (non-fatal)
+	var dsCfg *tag.DiscoveryConfig
+	if env.DiscoveryURL != "" && env.BaseURL != "" {
+		dsCfg = &tag.DiscoveryConfig{
+			DiscoveryURL: env.DiscoveryURL,
+			DiscoveryKey: env.DiscoveryKey,
+			BaseURL:      env.BaseURL,
+		}
+	}
+	if err := tag.UnregisterTarget(tagName, targetURI, env.PrivateKey, dsCfg); err != nil {
+		fmt.Printf("[!] Tag DS unregister skipped: %v\n", err)
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data: map[string]any{
+			"tag":        tf.Tag,
+			"target_uri": targetURI,
+			"count":      len(tf.Targets),
+		},
+	}, nil
+}
+
+func (h *BuiltinCoreHandler) deleteTag(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	tagName, _ := req.Payload["tag"].(string)
+	if tagName == "" {
+		return nil, fmt.Errorf("tag name required")
+	}
+
+	siteDir := env.Resolver.SiteDir()
+
+	// Load tag to get all targets for DS cleanup
+	path := tag.TagPath(siteDir, tagName)
+	tf, err := tag.Load(path)
+	if err != nil {
+		return nil, fmt.Errorf("load tag for deletion: %w", err)
+	}
+
+	// Delete local file
+	if err := tag.DeleteTag(siteDir, tagName); err != nil {
+		return nil, fmt.Errorf("delete tag: %w", err)
+	}
+
+	// DS unregister all targets (non-fatal)
+	var dsCfg *tag.DiscoveryConfig
+	if env.DiscoveryURL != "" && env.BaseURL != "" {
+		dsCfg = &tag.DiscoveryConfig{
+			DiscoveryURL: env.DiscoveryURL,
+			DiscoveryKey: env.DiscoveryKey,
+			BaseURL:      env.BaseURL,
+		}
+	}
+	for _, target := range tf.Targets {
+		if err := tag.UnregisterTarget(tf.Tag, target.URI, env.PrivateKey, dsCfg); err != nil {
+			fmt.Printf("[!] Tag DS unregister skipped for %s: %v\n", target.URI, err)
+		}
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data: map[string]any{
+			"tag":     tf.Tag,
+			"deleted": true,
 		},
 	}, nil
 }

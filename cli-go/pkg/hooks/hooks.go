@@ -131,6 +131,7 @@ func RunHook(siteDir string, config *HookConfig, payload *HookPayload) (*HookRes
 	cmd := exec.CommandContext(ctx, hookPath)
 	cmd.Env = env
 	cmd.Dir = siteDir // Run in site directory
+	cmd.WaitDelay = 3 * time.Second // Force-close pipes if child processes linger after timeout
 
 	// Pass JSON payload to stdin
 	jsonPayload, err := json.Marshal(payload)

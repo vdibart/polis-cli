@@ -740,10 +740,10 @@ func TestRenderFile_MountDir(t *testing.T) {
 		t.Error("HTML should NOT be written to source dir")
 	}
 
-	// .md should be copied to mount dir
+	// .md should NOT be copied to mount dir
 	mountMD := filepath.Join(tempDir, "posts", "test-post.md")
-	if _, err := os.Stat(mountMD); os.IsNotExist(err) {
-		t.Error("Expected .md file copied to mount dir (posts/test-post.md)")
+	if _, err := os.Stat(mountMD); !os.IsNotExist(err) {
+		t.Error(".md file should NOT be copied to mount dir (posts/test-post.md)")
 	}
 }
 
@@ -849,8 +849,8 @@ func TestRenderAll_MountDir(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(tempDir, "posts", "post1.html")); os.IsNotExist(err) {
 		t.Error("Expected posts/post1.html in mount dir")
 	}
-	if _, err := os.Stat(filepath.Join(tempDir, "posts", "post1.md")); os.IsNotExist(err) {
-		t.Error("Expected posts/post1.md copied to mount dir")
+	if _, err := os.Stat(filepath.Join(tempDir, "posts", "post1.md")); !os.IsNotExist(err) {
+		t.Error(".md file should NOT be copied to mount dir (posts/post1.md)")
 	}
 	if _, err := os.Stat(filepath.Join(tempDir, "comments", "comment1.html")); os.IsNotExist(err) {
 		t.Error("Expected comments/comment1.html in mount dir")
@@ -951,6 +951,244 @@ func TestRenderArchive_MountDir(t *testing.T) {
 	legacyPath := filepath.Join(tempDir, "content", "pub.polis.core", "post", "index.html")
 	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
 		t.Error("Archive should NOT be in legacy source dir when mount dir is configured")
+	}
+}
+
+func TestBuildAvatarHTML_Default(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	renderer, err := NewPageRenderer(PageConfig{
+		DataDir: tempDir,
+		BaseURL: "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer failed: %v", err)
+	}
+
+	html := renderer.buildAvatarHTML()
+
+	// Default test site has author_name "Test Author", so initial should be "T"
+	if !strings.Contains(html, `class="avatar-initial"`) {
+		t.Error("expected avatar-initial class")
+	}
+	if !strings.Contains(html, ">T</span>") {
+		t.Errorf("expected initial 'T', got: %s", html)
+	}
+	// No inline style for default (no avatar config in .well-known/polis)
+	if strings.Contains(html, "style=") {
+		t.Errorf("default avatar should not have inline style, got: %s", html)
+	}
+}
+
+func TestBuildAvatarHTML_BGAndFG(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	// Overwrite .well-known/polis with avatar bg/fg config
+	wkPath := filepath.Join(tempDir, ".well-known", "polis")
+	os.WriteFile(wkPath, []byte(`{
+		"author_name": "Alice",
+		"avatar": {"bg": "#ff0000", "fg": "#ffffff"}
+	}`), 0644)
+
+	renderer, err := NewPageRenderer(PageConfig{
+		DataDir: tempDir,
+		BaseURL: "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer failed: %v", err)
+	}
+
+	html := renderer.buildAvatarHTML()
+
+	if !strings.Contains(html, "background-color:#ff0000") {
+		t.Errorf("expected bg color, got: %s", html)
+	}
+	if !strings.Contains(html, "color:#ffffff") {
+		t.Errorf("expected fg color, got: %s", html)
+	}
+	if !strings.Contains(html, ">A</span>") {
+		t.Errorf("expected initial 'A', got: %s", html)
+	}
+}
+
+func TestBuildAvatarHTML_Border(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	wkPath := filepath.Join(tempDir, ".well-known", "polis")
+	os.WriteFile(wkPath, []byte(`{
+		"author_name": "Bob",
+		"avatar": {"bg": "#000", "fg": "#fff", "border": "#gold", "border_w": 2}
+	}`), 0644)
+
+	renderer, err := NewPageRenderer(PageConfig{
+		DataDir: tempDir,
+		BaseURL: "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer failed: %v", err)
+	}
+
+	html := renderer.buildAvatarHTML()
+
+	if !strings.Contains(html, "border:2px solid #gold") {
+		t.Errorf("expected border style, got: %s", html)
+	}
+	// Initial should still show (no pattern)
+	if !strings.Contains(html, ">B</span>") {
+		t.Errorf("expected initial 'B', got: %s", html)
+	}
+}
+
+func TestBuildAvatarHTML_PatternHidesInitial(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	wkPath := filepath.Join(tempDir, ".well-known", "polis")
+	os.WriteFile(wkPath, []byte(`{
+		"author_name": "Carol",
+		"avatar": {"bg": "#1a2c50", "fg": "#fff", "pattern": "dots", "pattern_color": "#d06888"}
+	}`), 0644)
+
+	renderer, err := NewPageRenderer(PageConfig{
+		DataDir: tempDir,
+		BaseURL: "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer failed: %v", err)
+	}
+
+	html := renderer.buildAvatarHTML()
+
+	// Pattern should produce base64 SVG background-image
+	if !strings.Contains(html, "background-image:url(data:image/svg+xml;base64,") {
+		t.Errorf("expected SVG pattern background-image, got: %s", html)
+	}
+	// Initial should be hidden when pattern is set
+	if strings.Contains(html, ">C</span>") {
+		t.Errorf("initial should be hidden when pattern is set, got: %s", html)
+	}
+	if !strings.Contains(html, "></span>") {
+		t.Errorf("expected empty span content, got: %s", html)
+	}
+}
+
+func TestBuildAvatarHTML_PatternNoneShowsInitial(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	wkPath := filepath.Join(tempDir, ".well-known", "polis")
+	os.WriteFile(wkPath, []byte(`{
+		"author_name": "Dave",
+		"avatar": {"bg": "#123", "fg": "#fff", "pattern": "none", "pattern_color": "#abc"}
+	}`), 0644)
+
+	renderer, err := NewPageRenderer(PageConfig{
+		DataDir: tempDir,
+		BaseURL: "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer failed: %v", err)
+	}
+
+	html := renderer.buildAvatarHTML()
+
+	// "none" pattern should NOT produce background-image
+	if strings.Contains(html, "background-image") {
+		t.Errorf("pattern 'none' should not produce background-image, got: %s", html)
+	}
+	// Initial should show
+	if !strings.Contains(html, ">D</span>") {
+		t.Errorf("expected initial 'D' with pattern=none, got: %s", html)
+	}
+}
+
+func TestBuildAvatarHTML_AllPatterns(t *testing.T) {
+	patterns := []string{"rings", "cross", "grid", "dots", "stripes", "diamond", "halves"}
+
+	for _, pattern := range patterns {
+		t.Run(pattern, func(t *testing.T) {
+			tempDir := t.TempDir()
+			setupTestSite(t, tempDir)
+
+			wkPath := filepath.Join(tempDir, ".well-known", "polis")
+			os.WriteFile(wkPath, []byte(fmt.Sprintf(`{
+				"author_name": "Test",
+				"avatar": {"bg": "#000", "fg": "#fff", "pattern": "%s", "pattern_color": "#ff0"}
+			}`, pattern)), 0644)
+
+			renderer, err := NewPageRenderer(PageConfig{
+				DataDir: tempDir,
+				BaseURL: "https://example.com",
+			})
+			if err != nil {
+				t.Fatalf("NewPageRenderer failed: %v", err)
+			}
+
+			html := renderer.buildAvatarHTML()
+
+			if !strings.Contains(html, "background-image:url(data:image/svg+xml;base64,") {
+				t.Errorf("pattern %q should produce SVG background-image, got: %s", pattern, html)
+			}
+		})
+	}
+}
+
+func TestBuildAvatarHTML_UnknownPatternShowsInitial(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	wkPath := filepath.Join(tempDir, ".well-known", "polis")
+	os.WriteFile(wkPath, []byte(`{
+		"author_name": "Eve",
+		"avatar": {"bg": "#000", "fg": "#fff", "pattern": "unknown_pattern", "pattern_color": "#abc"}
+	}`), 0644)
+
+	renderer, err := NewPageRenderer(PageConfig{
+		DataDir: tempDir,
+		BaseURL: "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer failed: %v", err)
+	}
+
+	html := renderer.buildAvatarHTML()
+
+	// Unknown pattern should be ignored, no background-image
+	if strings.Contains(html, "background-image") {
+		t.Errorf("unknown pattern should not produce background-image, got: %s", html)
+	}
+	// Initial should show since pattern was not recognized
+	if !strings.Contains(html, ">E</span>") {
+		t.Errorf("expected initial 'E' with unknown pattern, got: %s", html)
+	}
+}
+
+func TestBuildAvatarHTML_FallbackToDomain(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+
+	// Overwrite .well-known/polis WITHOUT author_name
+	wkPath := filepath.Join(tempDir, ".well-known", "polis")
+	os.WriteFile(wkPath, []byte(`{
+		"base_url": "https://alice.polis.pub"
+	}`), 0644)
+
+	renderer, err := NewPageRenderer(PageConfig{
+		DataDir: tempDir,
+		BaseURL: "https://alice.polis.pub",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer failed: %v", err)
+	}
+
+	html := renderer.buildAvatarHTML()
+
+	// Should fall back to domain initial "a"
+	if !strings.Contains(html, ">a</span>") {
+		t.Errorf("expected domain initial 'a', got: %s", html)
 	}
 }
 

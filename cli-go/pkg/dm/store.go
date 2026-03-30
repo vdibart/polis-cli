@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -208,12 +209,16 @@ func (s *Store) AppendMessage(convID, peerDomain, peerURL, from, to, plaintext, 
 		return nil, err
 	}
 
-	// Update index
+	// Update index with encrypted preview
 	preview := plaintext
 	if len(preview) > 100 {
 		preview = preview[:100]
 	}
-	if err := s.updateIndex(convID, peerDomain, peerURL, now, preview, status == "received"); err != nil {
+	encPreview, err := s.encryptPreview(preview)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt preview: %w", err)
+	}
+	if err := s.updateIndex(convID, peerDomain, peerURL, now, encPreview, status == "received"); err != nil {
 		return nil, fmt.Errorf("update index: %w", err)
 	}
 
@@ -366,4 +371,95 @@ func (s *Store) updateIndex(convID, peerDomain, peerURL, timestamp, preview stri
 	}
 
 	return s.SaveIndex(idx)
+}
+
+const encryptedPreviewPrefix = "enc:"
+
+// IsEncryptedPreview returns true if the preview string uses the encrypted format
+// or is empty. This is usable without a Store (e.g., from Patrol).
+func IsEncryptedPreview(preview string) bool {
+	return preview == "" || strings.HasPrefix(preview, encryptedPreviewPrefix)
+}
+
+// encryptPreview encrypts a plaintext preview for index storage.
+// Returns "enc:base64(nonce)$base64(ciphertext)" or "" for empty input.
+func (s *Store) encryptPreview(plaintext string) (string, error) {
+	if plaintext == "" {
+		return "", nil
+	}
+	ciphertext, nonce, err := EncryptForStorage([]byte(plaintext), &s.storageKey)
+	if err != nil {
+		return "", err
+	}
+	return encryptedPreviewPrefix +
+		base64.StdEncoding.EncodeToString(nonce[:]) + "$" +
+		base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// DecryptPreview decrypts an encrypted preview, or returns plaintext as-is
+// if it doesn't have the "enc:" prefix (backwards compat during migration).
+// On any decryption error, returns "[preview unavailable]".
+func (s *Store) DecryptPreview(encoded string) string {
+	if encoded == "" {
+		return ""
+	}
+	if !strings.HasPrefix(encoded, encryptedPreviewPrefix) {
+		return encoded // legacy plaintext
+	}
+
+	payload := encoded[len(encryptedPreviewPrefix):]
+	parts := strings.SplitN(payload, "$", 2)
+	if len(parts) != 2 {
+		return "[preview unavailable]"
+	}
+
+	nonceBytes, err := base64.StdEncoding.DecodeString(parts[0])
+	if err != nil || len(nonceBytes) != 24 {
+		return "[preview unavailable]"
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "[preview unavailable]"
+	}
+
+	var nonce [24]byte
+	copy(nonce[:], nonceBytes)
+	plaintext, err := DecryptFromStorage(ciphertext, &nonce, &s.storageKey)
+	if err != nil {
+		return "[preview unavailable]"
+	}
+	return string(plaintext)
+}
+
+// DecryptIndexPreviews decrypts all encrypted previews in the index in-place.
+func (s *Store) DecryptIndexPreviews(idx *ConversationIndex) {
+	for i := range idx.Conversations {
+		idx.Conversations[i].LastPreview = s.DecryptPreview(idx.Conversations[i].LastPreview)
+	}
+}
+
+// EncryptPlaintextPreviews migrates any plaintext previews to encrypted format.
+func (s *Store) EncryptPlaintextPreviews() error {
+	idx, err := s.LoadIndex()
+	if err != nil {
+		return err
+	}
+
+	changed := false
+	for i := range idx.Conversations {
+		preview := idx.Conversations[i].LastPreview
+		if preview != "" && !IsEncryptedPreview(preview) {
+			encrypted, err := s.encryptPreview(preview)
+			if err != nil {
+				return fmt.Errorf("encrypt preview for %s: %w", idx.Conversations[i].ID, err)
+			}
+			idx.Conversations[i].LastPreview = encrypted
+			changed = true
+		}
+	}
+
+	if changed {
+		return s.SaveIndex(idx)
+	}
+	return nil
 }

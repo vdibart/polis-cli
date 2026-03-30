@@ -104,7 +104,42 @@ test_init_already_initialized() {
     return 0
 }
 
+# Test: Init creates default avatar in .well-known/polis
+test_init_creates_avatar() {
+    setup_test_env "init_avatar"
+    trap teardown_test_env EXIT
+
+    local result
+    result=$("$POLIS_BIN" --json init 2>&1)
+    local exit_code=$?
+
+    assert_exit_code 0 "$exit_code" || return 1
+
+    # Verify .well-known/polis has avatar field
+    assert_file_contains ".well-known/polis" '"avatar"' || return 1
+
+    # Extract and validate avatar bg and fg
+    local avatar_bg avatar_fg
+    avatar_bg=$(jq -r '.avatar.bg' ".well-known/polis")
+    avatar_fg=$(jq -r '.avatar.fg' ".well-known/polis")
+
+    # bg should be a 7-char hex color (#rrggbb)
+    if [[ ! "$avatar_bg" =~ ^#[0-9a-fA-F]{6}$ ]]; then
+        log "  FAIL: avatar.bg should be #rrggbb, got: $avatar_bg"
+        return 1
+    fi
+
+    # fg should be white
+    if [[ "$avatar_fg" != "#ffffff" ]]; then
+        log "  FAIL: avatar.fg should be #ffffff, got: $avatar_fg"
+        return 1
+    fi
+
+    return 0
+}
+
 # Run tests
 run_test "Init Basic" test_init_basic
 run_test "Init Custom Directories" test_init_custom_dirs
 run_test "Init Already Initialized" test_init_already_initialized
+run_test "Init Creates Avatar" test_init_creates_avatar

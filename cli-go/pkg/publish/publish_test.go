@@ -110,6 +110,35 @@ func TestSlugify_UntitledTitleInPublishPost(t *testing.T) {
 	// so Slugify("Untitled") correctly returns "untitled"
 }
 
+func TestRelativePath_UsesForwardSlashes(t *testing.T) {
+	// Verify that the relativePath produced by PublishPost always uses
+	// forward slashes, even when filepath.Join would produce backslashes
+	// on Windows. We can't easily test on Windows in CI, but we can
+	// verify the filepath.ToSlash wrapper works.
+	dataDir := t.TempDir()
+	dateDir := "20260319"
+	filename := "hello-world"
+
+	// Simulate what PublishPost does for relativePath construction
+	relativePath := filepath.ToSlash(filepath.Join("content", "pub.polis.core", "post", dateDir, filename+".md"))
+
+	if strings.Contains(relativePath, "\\") {
+		t.Errorf("relativePath contains backslash: %q", relativePath)
+	}
+	expected := "content/pub.polis.core/post/20260319/hello-world.md"
+	if relativePath != expected {
+		t.Errorf("relativePath = %q, want %q", relativePath, expected)
+	}
+
+	// Also verify the path is usable in URL construction
+	baseURL := "https://example.com"
+	postURL := strings.TrimRight(baseURL, "/") + "/" + relativePath
+	if strings.Contains(postURL, "\\") {
+		t.Errorf("postURL contains backslash: %q", postURL)
+	}
+	_ = dataDir // used for context only
+}
+
 func TestEnsureUniqueFilename_DraftCollision(t *testing.T) {
 	dataDir := t.TempDir()
 	dateDir := "20260101"

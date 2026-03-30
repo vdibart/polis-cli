@@ -265,6 +265,64 @@ func TestPartialResolutionOrder(t *testing.T) {
 	}
 }
 
+func TestBaseSnippetFallback(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create _base snippets
+	baseDir := filepath.Join(tempDir, "site", "themes", "_base", "snippets")
+	os.MkdirAll(baseDir, 0755)
+	os.WriteFile(filepath.Join(baseDir, "post-item.html"), []byte("BASE POST ITEM"), 0644)
+	os.WriteFile(filepath.Join(baseDir, "about.html"), []byte("BASE ABOUT"), 0644)
+
+	// Create theme with NO snippets (CSS-only)
+	themeDir := filepath.Join(tempDir, "site", "themes", "minimal")
+	os.MkdirAll(themeDir, 0755)
+
+	engine := New(Config{
+		DataDir:     tempDir,
+		ActiveTheme: "minimal",
+	})
+	ctx := NewRenderContext()
+
+	// theme: prefix with no theme snippets should fall back to _base
+	result, _ := engine.Render(`{{> theme:post-item}}`, ctx)
+	if !strings.Contains(result, "BASE POST ITEM") {
+		t.Errorf("Expected base snippet fallback for theme: prefix, got: %s", result)
+	}
+
+	// default prefix (global-first) should also fall back to _base when no global/theme exists
+	result, _ = engine.Render(`{{> about}}`, ctx)
+	if !strings.Contains(result, "BASE ABOUT") {
+		t.Errorf("Expected base snippet fallback for default prefix, got: %s", result)
+	}
+}
+
+func TestBaseSnippetOverriddenByTheme(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create _base snippets
+	baseDir := filepath.Join(tempDir, "site", "themes", "_base", "snippets")
+	os.MkdirAll(baseDir, 0755)
+	os.WriteFile(filepath.Join(baseDir, "post-item.html"), []byte("BASE POST ITEM"), 0644)
+
+	// Create theme with override snippet
+	themeDir := filepath.Join(tempDir, "site", "themes", "studio13", "snippets")
+	os.MkdirAll(themeDir, 0755)
+	os.WriteFile(filepath.Join(themeDir, "post-item.html"), []byte("STUDIO13 POST ITEM"), 0644)
+
+	engine := New(Config{
+		DataDir:     tempDir,
+		ActiveTheme: "studio13",
+	})
+	ctx := NewRenderContext()
+
+	// theme: prefix should use theme override, not _base
+	result, _ := engine.Render(`{{> theme:post-item}}`, ctx)
+	if !strings.Contains(result, "STUDIO13 POST ITEM") {
+		t.Errorf("Expected theme override over base, got: %s", result)
+	}
+}
+
 func TestMarkers(t *testing.T) {
 	content := WrapWithMarkers("<p>Hello</p>", "about.html", "global")
 
@@ -710,5 +768,50 @@ func TestFollowingSectionEmpty(t *testing.T) {
 	// Should produce empty content for the section
 	if result != "<div></div>" {
 		t.Errorf("Expected empty following section, got: %s", result)
+	}
+}
+
+func TestCommentCountDisplayVariable(t *testing.T) {
+	engine := New(Config{})
+	ctx := NewRenderContext()
+	ctx.Posts = []PostData{
+		{URL: "/posts/1.html", Title: "No Comments", CommentCount: 0},
+		{URL: "/posts/2.html", Title: "Has Comments", CommentCount: 3},
+	}
+
+	tmpl := `{{#posts}}<div class="sp-comments">{{comment_count_display}}</div>{{/posts}}`
+
+	result, err := engine.Render(tmpl, ctx)
+	if err != nil {
+		t.Fatalf("Render failed: %v", err)
+	}
+
+	// Post with 0 comments should produce empty div (for CSS :empty to hide)
+	if !strings.Contains(result, `<div class="sp-comments"></div>`) {
+		t.Errorf("Expected empty sp-comments div for 0 comments, got: %s", result)
+	}
+
+	// Post with 3 comments should show count
+	if !strings.Contains(result, `<div class="sp-comments">3</div>`) {
+		t.Errorf("Expected sp-comments div with '3', got: %s", result)
+	}
+}
+
+func TestCommentCountDisplayInRecentPosts(t *testing.T) {
+	engine := New(Config{})
+	ctx := NewRenderContext()
+	ctx.RecentPosts = []PostData{
+		{URL: "/posts/1.html", Title: "Recent", CommentCount: 5},
+	}
+
+	tmpl := `{{#recent_posts}}<span>{{comment_count_display}}</span>{{/recent_posts}}`
+
+	result, err := engine.Render(tmpl, ctx)
+	if err != nil {
+		t.Fatalf("Render failed: %v", err)
+	}
+
+	if !strings.Contains(result, "<span>5</span>") {
+		t.Errorf("Expected comment_count_display=5 in recent_posts, got: %s", result)
 	}
 }

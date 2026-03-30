@@ -28,6 +28,7 @@ type Client struct {
 	DSKeyCache    *DSKeyCache // optional: for DS response verification
 	RequestID     string      // optional: propagated as X-Request-Id for cross-boundary tracing
 	Logger        func(method, path string, durationMs int64, requestID string) // optional: DS roundtrip timing
+	CreatedAfter  string      // optional: ISO 8601 timestamp floor for stream queries
 }
 
 // NewClient creates a new discovery service client (unauthenticated GET requests).
@@ -54,6 +55,37 @@ func NewAuthenticatedClient(baseURL, apiKey, domain string, privateKeyPEM []byte
 			Timeout: 30 * time.Second,
 		},
 		DSKeyCache: NewDSKeyCache(baseURL, 0),
+	}
+}
+
+// NewClientWithHTTP creates a discovery client using a shared HTTP client.
+// This enables connection pooling when multiple Client instances share the same
+// underlying http.Client (and its transport).
+func NewClientWithHTTP(baseURL, apiKey string, hc *http.Client) *Client {
+	if hc == nil {
+		return NewClient(baseURL, apiKey)
+	}
+	return &Client{
+		BaseURL:    baseURL,
+		APIKey:     apiKey,
+		HTTPClient: hc,
+		DSKeyCache: NewDSKeyCacheWithHTTP(baseURL, 0, hc),
+	}
+}
+
+// NewAuthenticatedClientWithHTTP creates an authenticated discovery client
+// using a shared HTTP client for connection pooling.
+func NewAuthenticatedClientWithHTTP(baseURL, apiKey, domain string, privateKeyPEM []byte, hc *http.Client) *Client {
+	if hc == nil {
+		return NewAuthenticatedClient(baseURL, apiKey, domain, privateKeyPEM)
+	}
+	return &Client{
+		BaseURL:       baseURL,
+		APIKey:        apiKey,
+		Domain:        domain,
+		PrivateKeyPEM: privateKeyPEM,
+		HTTPClient:    hc,
+		DSKeyCache:    NewDSKeyCacheWithHTTP(baseURL, 0, hc),
 	}
 }
 
@@ -977,6 +1009,9 @@ func (c *Client) StreamQuery(since string, limit int, typeFilter string, actorFi
 	}
 	if len(sourceFilter) > 0 && sourceFilter[0] != "" {
 		params.Set("source", sourceFilter[0])
+	}
+	if c.CreatedAfter != "" {
+		params.Set("created_after", c.CreatedAfter)
 	}
 
 	endpoint := c.BaseURL + "/v1/stream"

@@ -516,6 +516,69 @@ Note: This command outputs JSON directly (not wrapped in success envelope) for c
 
 The `old_key` field is either `"archived"` or `"deleted"` depending on whether `--delete-old-key` was used.
 
+### `polis tag list`
+
+```json
+{
+  "status": "success",
+  "command": "tag-list",
+  "data": {
+    "count": 3,
+    "tags": [
+      {
+        "name": "favorite",
+        "targets": [
+          "https://alice.com/posts/20260301/on-gardens.md",
+          "https://bob.com/posts/20260215/hello.md"
+        ]
+      }
+    ]
+  }
+}
+```
+
+### `polis tag apply <name> <url>`
+
+```json
+{
+  "status": "success",
+  "command": "tag-apply",
+  "data": {
+    "tag": "favorite",
+    "target": "https://alice.com/posts/20260301/on-gardens.md",
+    "applied_at": "2026-03-19T12:00:00Z"
+  }
+}
+```
+
+### `polis tag remove <name> <url>`
+
+```json
+{
+  "status": "success",
+  "command": "tag-remove",
+  "data": {
+    "tag": "favorite",
+    "target": "https://alice.com/posts/20260301/on-gardens.md",
+    "removed_at": "2026-03-19T12:05:00Z"
+  }
+}
+```
+
+### `polis tag delete <name>`
+
+```json
+{
+  "status": "success",
+  "command": "tag-delete",
+  "data": {
+    "tag": "old-topic",
+    "associations_removed": 5,
+    "deleted_at": "2026-03-19T12:10:00Z"
+  }
+}
+```
+
 ## Error Codes
 
 | Code | Description | Common Causes | Example |

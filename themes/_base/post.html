@@ -1,0 +1,84 @@
+<!--
+    Polis Base Theme - Post Template
+
+    Snippets loaded by this template:
+    - theme:blessed-comment - Blessed comment block (theme: snippets/blessed-comment.html)
+    - theme:polis-widget    - Interactive comment/follow widget (theme: snippets/polis-widget.html)
+    - theme:post-item       - Post list item (theme: snippets/post-item.html)
+
+    To override a theme snippet, create a global snippet with the same name
+    and change the "theme:" prefix to use the global version instead.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{title}} - {{site_title}}</title>
+    <meta name="description" content="{{title}}">
+    <link rel="stylesheet" href="{{base_css_path}}">
+    <link rel="stylesheet" href="{{css_path}}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="content-col">
+        <!-- Site Header -->
+        <header class="site-header">
+            <div class="site-identity">
+                <a href="{{home_path}}" class="site-avatar-link">
+                    <div class="site-avatar">{{avatar_html}}</div>
+                </a>
+                <a href="{{home_path}}" class="site-identity-text">
+                    <div class="site-name">{{author_name}}</div>
+                    <div class="site-handle">{{author_domain}}</div>
+                </a>
+                <div class="site-follow" id="polis-widget-follow" data-author="{{author_domain}}"></div>
+            </div>
+        </header>
+
+        <!-- Post Content -->
+        <article class="post-content">
+            <div class="post-header">
+                <div class="post-date">{{published_human}}</div>
+                <div class="post-meta">
+                    <span class="meta-label">Version</span>
+                    <span class="meta-value">{{signature_short}}</span>
+                </div>
+            </div>
+            <div class="content-body">
+                {{content}}
+            </div>
+        </article>
+
+        <!-- Blessed Comments -->
+        <section class="comments">
+            <h2 class="comments-title">Comments ({{blessed_count}})</h2>
+            <div class="comments-list">
+{{#blessed_comments}}
+                {{> theme:blessed-comment}}
+{{/blessed_comments}}
+            </div>
+            {{> theme:polis-widget}}
+        </section>
+
+        <!-- Recent Posts -->
+        <section class="post-footer-nav">
+            <h2 class="section-title">More from this site</h2>
+            <div class="post-list">
+{{#recent_posts}}
+                {{> theme:post-item}}
+{{/recent_posts}}
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="site-footer">
+            <a href="https://polis.pub" class="footer-logo">polis<span class="footer-tagline">the space we share</span></a>
+        </footer>
+    </div>
+
+<!-- Source: {{url}} | Version: {{version}} -->
+</body>
+</html>

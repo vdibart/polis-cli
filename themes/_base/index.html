@@ -1,0 +1,56 @@
+<!--
+    Polis Base Theme - Homepage Template
+
+    Snippets loaded by this template:
+    - theme:about        - About section / bio
+    - theme:post-item    - Post list item
+    - theme:polis-widget - Interactive comment/follow widget
+    - theme:also-reading - "Also reading" list of followed authors
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{site_title}}</title>
+    <meta name="description" content="{{site_title}} - A polis site">
+    <link rel="stylesheet" href="base.css">
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="content-col">
+        <!-- Site Header -->
+        <header class="site-header">
+            <div class="site-identity">
+                <div class="site-avatar">{{avatar_html}}</div>
+                <div>
+                    <div class="site-name">{{author_name}}</div>
+                    <div class="site-handle">{{author_domain}}</div>
+                </div>
+                <div class="site-follow">{{> theme:polis-widget}}</div>
+            </div>
+            <div class="site-bio">{{> theme:about}}</div>
+            <div class="site-stats">
+                <span><strong>{{post_count}}</strong> posts</span>
+                <span><strong>{{following_count}}</strong> following</span>
+            </div>
+        </header>
+
+        <!-- Posts -->
+        <div class="post-list">
+{{#recent_posts}}
+            {{> theme:post-item}}
+{{/recent_posts}}
+            {{view_all_posts}}
+        </div>
+
+        <!-- Footer -->
+        <footer class="site-footer">
+            <a href="https://polis.pub" class="footer-logo">polis<span class="footer-tagline">the space we share</span></a>
+        </footer>
+    </div>
+</body>
+</html>

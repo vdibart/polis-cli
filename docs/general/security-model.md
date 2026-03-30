@@ -569,6 +569,7 @@ The discovery service (DS) is a coordination layer, not a trust authority. It pr
 | Relaying blessing requests | DS could fabricate requests | Author signature verification on stream events |
 | Providing stream events | DS could inject events | DS envelope signature + author signature verification |
 | Storing site registrations | Metadata exposure | DS envelope signature prevents falsifying registration status |
+| Auto-blessing comments based on policy evaluation | DS could fabricate autobless decisions | DS attestation signature on autobless decisions; clients verify against DS public key |
 | Signing query responses | DS key compromise allows forged envelopes | Key rotation recovery (re-fetch on verification failure) |
 
 **Key principle**: Clients verify both the DS envelope signature (response authenticity) and the author signature on each event (content authenticity). The DS is a convenience layer; all security-critical verification happens through cryptographic signatures.
@@ -894,7 +895,7 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 | **Attack** | Attacker compromises the DS and injects false follow/content/blessing events |
 | **Mitigation** | Two-layer verification: (1) DS envelope signature on all query responses verified against DS public key at `/.well-known/polis`, (2) author signature on each stream event verified against author's public key. Clients reject responses with invalid DS signatures and skip events with invalid author signatures. Key rotation recovery: on DS verification failure, client re-fetches the DS key and retries once. |
 | **Detection** | Verification failures logged with actor domain, event type, and failure reason. Per-domain failure counters persisted across sync cycles. 3+ consecutive DS envelope failures suspend sync with warning. 5+ author failures from same domain in 24h trigger blocking recommendation. |
-| **Residual risk** | DS can suppress events (censorship/denial of service) or leak metadata (who follows whom). A compromised DS serving unsigned events from the pre-signing era could bypass author verification if `require_author_signatures` is false (transitional). |
+| **Residual risk** | DS can suppress events (censorship/denial of service) or leak metadata (who follows whom). A compromised DS serving unsigned events from the pre-signing era could bypass author verification if `require_author_signatures` is false (transitional). For auto-blessed comments, the DS attestation signature creates an auditable trail tied to the DS key, but a compromised DS could still evaluate policies dishonestly — the attestation proves *which* DS signed, not that the evaluation was correct. |
 
 ### 7.5 Replay Attacks
 
@@ -1058,6 +1059,7 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 | **Beseech** | Commenter submits comment to DS for site owner review |
 | **Policy integration** | `EvaluateExplicit` determines auto-grant/auto-deny/manual |
 | **Trust boundary** | Site owner has full control over what appears on their site |
+| **Auto-bless attestation** | DS signs autobless decisions with its own Ed25519 key; clients verify the attestation to confirm the autobless was a legitimate policy evaluation, not a fabrication |
 
 ### 8.4 Following
 
@@ -1129,6 +1131,21 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 | **No signature verification** | Hook scripts are not signed or verified. Any executable file at the configured/conventional path will be run |
 | **Trigger events** | `post-publish`, `post-republish`, `post-comment` (blessed) |
 
+### 8.10 JUDGE (Automated Cross-Boundary Verification)
+
+| Aspect | Security Property |
+|--------|-------------------|
+| **Schedule** | Hourly background job on hosted service (`judgeTick = 1 * time.Hour`) |
+| **HTTP content verification** | Fetches posts via loopback HTTP and verifies Ed25519 signatures + SHA-256 content hashes, testing the full serving pipeline end-to-end |
+| **DS attestation audit** | Verifies structural integrity of blessed comments index; full DS attestation signature verification against DS public key planned for future iteration |
+| **Key continuity monitoring** | Tracks each tenant's public key fingerprint over time; alerts on unexpected key changes (proto-TOFU). Baselines stored at `/data/judge/{handle}/key_baseline.json` |
+| **Policy snapshot verification** | Snapshots policy file hashes; detects retroactive policy changes after blessings were granted. Snapshots stored at `/data/judge/{handle}/policy_snapshot.json` |
+| **Index consistency** | Verifies `index.jsonl` entries match real signed files on disk; detects orphaned entries (indexed but missing), phantom files (on disk but not indexed), and hash mismatches |
+| **Cross-site comment verification** | Verifies blessed comment signatures against the claimed author's current public key (fetched from the author's `.well-known/polis` via HTTPS) |
+| **State persistence** | Judge state survives restarts via `/data/judge/` directory on the Fly.io persistent volume |
+| **Observability** | All findings emitted as structured JSON events (`judge.sweep`, `judge.fail.*`, `judge.alert.*`, `judge.info.*`) to Axiom for monitoring and alerting |
+| **Graceful degradation** | External HTTP failures (item 6) are skipped gracefully with 5-second timeouts; unreachable domains are cached to avoid retry storms |
+
 ---
 
 ## 9. Known Limitations
@@ -1136,7 +1153,7 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 | Limitation | Impact | Potential Mitigation |
 |------------|--------|---------------------|
 | **No key revocation** | Compromised key remains valid until domain key is changed | Key revocation list or certificate transparency log |
-| **No key pinning** | Client fetches key on every verification; domain takeover = key replacement | TOFU (Trust On First Use) key pinning |
+| **No key pinning** | Client fetches key on every verification; domain takeover = key replacement | TOFU (Trust On First Use) key pinning. JUDGE's key continuity monitoring (Section 8.10) provides partial mitigation by alerting on unexpected key changes for hosted tenants |
 | **No forward secrecy** | Key compromise exposes all past signatures (though content is public anyway) | N/A for public content system |
 | **Unencrypted private keys** | Keys stored without password protection | Optional passphrase encryption |
 | **No trusted timestamps** | Self-reported timestamps could be backdated or future-dated | Timestamping authority or blockchain anchoring |
@@ -1147,6 +1164,7 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 | **No multi-signature** | No support for content requiring multiple signers | Multi-sig threshold signatures |
 | **No DM forward secrecy** | Compromised private key exposes all DM history with all peers. The Double Ratchet (Signal protocol) would address this but requires synchronized state incompatible with async delivery. | Double Ratchet protocol |
 | **DM metadata cleartext** | Sender/recipient domains, timestamps, and message sizes stored in cleartext for indexing. | Encrypt entire conversation files |
+| **Autobless trusts DS policy evaluation** | DS attestation proves which DS signed the autobless decision, but a compromised DS could evaluate policies dishonestly | Policy transparency logs; multi-DS cross-verification. JUDGE's policy snapshot verification (Section 8.10) detects retroactive policy changes after blessings are granted |
 
 ---
 
@@ -1174,7 +1192,8 @@ The discovery service now signs all query responses with its Ed25519 private key
 
 Remaining future work:
 - **Certificate transparency for DS keys**: publish DS key rotations to a verifiable log
-- **Event-level DS co-signatures**: DS could co-sign individual events in addition to the response envelope, enabling offline verification of event batches
+- **Event-level DS co-signatures**: Partially implemented — the DS now signs autobless decisions with attestation signatures on blessing relationships and stream events. Remaining: co-signatures on all individual stream events for offline verification of event batches
+- **Full DS attestation audit**: JUDGE currently verifies blessed.json structural integrity. Future iteration will query DS relationship records and verify each attestation signature against the DS public key via `discovery.VerifyAutoblessAttestation()`
 
 ### TOFU Key Pinning
 
@@ -1182,6 +1201,8 @@ Trust On First Use would allow clients to:
 1. Record the public key on first encounter
 2. Alert if the key changes unexpectedly
 3. Require explicit user approval for key changes
+
+**Partial implementation**: JUDGE's key continuity monitoring (Section 8.10) implements steps 1-2 for hosted tenants. It records a key baseline on first encounter and alerts via `judge.alert.key_change` events when the key changes. Full TOFU would extend this to client-side verification for all domains.
 
 ### Content Encryption
 
@@ -1203,6 +1224,8 @@ Integration with hardware security modules (HSMs) or hardware keys:
 
 | Date | Change |
 |------|--------|
+| 2026-03-27 | Added JUDGE automated verification system (Section 8.10): hourly cross-boundary verification covering HTTP content verification, DS attestation audit, key continuity monitoring, policy snapshots, index consistency, and cross-site comment verification. Updated Sections 9 (Known Limitations) and 10 (Future Considerations) to reference JUDGE capabilities |
+| 2026-03-23 | DS attestation signatures for autoblessed comments: DS signs autobless policy evaluation decisions, stored in blessing relationship signature field and stream event payload. Updated Sections 5, 7.4, 8.3, 9, 10 |
 | 2026-03-08 | Accuracy fixes: added `author_name` and `avatar` fields to well-known/polis schema; removed legacy manifest.json migration tables; replaced incorrect single default policy with actual 10-rule defaults across public/private files; added version header documentation for rules.jsonl; updated EvaluateExplicit outcome table with all four decisions (allow/deny/emit/omit) and EvalResult struct; fixed auto-bless example to use `emit` verb; expanded verb semantics documentation; added `version-history` to post frontmatter and `author` to comment frontmatter examples; simplified DM policy provenance text; added EvaluateWithLog to Go interface |
 | 2026-03-07 | DS signature verification: DS envelope signing on all query responses, client-side DS + author signature verification, verification failure tracking and anomaly detection, updated Section 5 (Discovery Service Trust), Section 7.4 (DS Compromise), Section 10 (Future Considerations) |
 | 2026-03-07 | Added DM security model: Ed25519→X25519 key conversion, NaCl box/secretbox encryption, instance-to-instance signed request auth, DM acceptance policies, attack vectors 7.14-7.20, feature analysis 8.8, updated known limitations |

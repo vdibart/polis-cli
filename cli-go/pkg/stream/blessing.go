@@ -2,6 +2,7 @@ package stream
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 )
@@ -12,6 +13,10 @@ type BlessingHandler struct {
 	// MyDomain is the domain to filter events for. Only events where
 	// the target_url belongs to MyDomain are processed.
 	MyDomain string
+
+	// DSKeyCache is used to verify DS attestation signatures on autoblessed
+	// comments. If nil, attestation verification is skipped.
+	DSKeyCache *discovery.DSKeyCache
 }
 
 // BlessingEntry represents a single blessing decision.
@@ -53,8 +58,15 @@ func (h *BlessingHandler) Process(events []discovery.StreamEvent, state interfac
 	}
 
 	for _, evt := range events {
+		// Auto-blessed events use comment_url/in_reply_to; manual grants use source_url/target_url
 		sourceURL, _ := evt.Payload["source_url"].(string)
+		if sourceURL == "" {
+			sourceURL, _ = evt.Payload["comment_url"].(string)
+		}
 		targetURL, _ := evt.Payload["target_url"].(string)
+		if targetURL == "" {
+			targetURL, _ = evt.Payload["in_reply_to"].(string)
+		}
 		if sourceURL == "" || targetURL == "" {
 			continue
 		}
@@ -82,6 +94,21 @@ func (h *BlessingHandler) Process(events []discovery.StreamEvent, state interfac
 			}
 
 		case "pub.polis.comment.blessing.granted":
+			// Verify DS attestation on autoblessed events (warn-only)
+			if autoBlessed, _ := evt.Payload["auto_blessed"].(bool); autoBlessed && h.DSKeyCache != nil {
+				dsAttestation, _ := evt.Payload["ds_attestation"].(string)
+				dsKeyID, _ := evt.Payload["ds_key_id"].(string)
+				policyRule, _ := evt.Payload["policy_rule"].(string)
+				policySource, _ := evt.Payload["policy_source"].(string)
+				commentURL, _ := evt.Payload["comment_url"].(string)
+				inReplyTo, _ := evt.Payload["in_reply_to"].(string)
+				if err := discovery.VerifyAutoblessAttestation(
+					h.DSKeyCache, commentURL, inReplyTo, policyRule, policySource, dsKeyID, dsAttestation,
+				); err != nil {
+					log.Printf("[!] Autobless attestation verification failed for %s: %v", sourceURL, err)
+				}
+			}
+
 			if entry, exists := blessingMap[sourceURL]; exists {
 				entry.Status = "granted"
 				entry.UpdatedAt = evt.Timestamp

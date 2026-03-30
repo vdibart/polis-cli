@@ -1,0 +1,263 @@
+/*
+ * nav-themes.css — Theme Variable Contract for Navigation & Page Chrome
+ *
+ * Phase 0 of unified UI integration. This file defines the visual contract
+ * between user-selectable site themes and the nav/page chrome layer.
+ *
+ * DERIVATION FORMULA (spec for future published themes):
+ * -------------------------------------------------------
+ * Given a theme's existing --color-* palette, derive as follows:
+ *
+ *   Nav variables:
+ *     --nav-bg           = --color-bg-light       (slightly lifted background)
+ *     --nav-bg-hover     = --color-surface         (hover state surface)
+ *     --nav-bg-active    = --color-panel            (active/pressed surface)
+ *     --nav-border       = rgba(border-color, low-alpha)  (subtle separation)
+ *     --nav-icon         = --color-text-muted       (idle icon color)
+ *     --nav-icon-hover   = --color-text-soft         (hovered icon color)
+ *     --nav-icon-active  = --color-text              (active/selected icon)
+ *     --nav-accent       = primary accent color      (highlights, active indicators)
+ *     --nav-dot          = warm alert color           (unread badges, must read on nav-bg)
+ *
+ *   Page variables:
+ *     --page-bg          = --color-bg                (main content background)
+ *     --page-text        = --color-text              (primary text)
+ *     --page-text-2      = --color-text-soft          (secondary text)
+ *     --page-text-3      = --color-text-muted         (tertiary/hint text)
+ *     --page-card        = --color-bg-light           (card/raised surface)
+ *     --page-card-shadow = dark: 0 1px 3px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.04)
+ *                          light: 0 1px 2px rgba(0,0,0,0.06), 0 0 0 1px rgba(0,0,0,0.04)
+ *     --page-border      = --color-border at reduced alpha
+ *     --page-accent      = primary accent color
+ *
+ *   Avatar:
+ *     --avatar-gradient   = linear-gradient using theme accent palette
+ *
+ * THEME INDEX:
+ *   vice            — dark, Miami neon
+ *   turbo           — dark, retro terminal
+ *   zane            — dark, warm editor
+ *   especial        — dark, premium gold
+ *   especial-light  — light, warm fog (ONLY light theme)
+ *   studio13        — dark, bold minimal
+ *
+ * NOTE: sols is the system/app theme and is NOT a user-selectable site theme.
+ *       It does not appear here.
+ */
+
+/* vice — dark, Miami */
+html[data-site-theme="vice"] {
+  --nav-bg: #1a2c50;
+  --nav-bg-hover: #223860;
+  --nav-bg-active: #2a4070;
+  --nav-border: rgba(208, 104, 136, 0.15);
+  --nav-icon: #8890a0;
+  --nav-icon-hover: #d0c4b8;
+  --nav-icon-active: #f0e8e0;
+  --nav-accent: #d06888;
+  --nav-dot: #e88050;
+  --page-bg: #122040;
+  --page-text: #f0e8e0;
+  --page-text-2: #d0c4b8;
+  --page-text-3: #8890a0;
+  --page-card: #1a2c50;
+  --page-card-shadow: 0 1px 3px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.04);
+  --page-border: rgba(208, 104, 136, 0.3);
+  --page-accent: #d06888;
+  --avatar-gradient: linear-gradient(135deg, #d06888, #50c8a0);
+  /* Body overrides */
+  --bg: #122040; --bg-card: #1a2c50; --bg-hover: #223860; --bg-warm: #162848;
+  --bar-bg: #1a2c50; --bar-text: #8890a0; --bar-text-hover: #d0c4b8; --bar-text-active: #f0e8e0;
+  --text-primary: #f0e8e0; --text-secondary: #d0c4b8; --text-tertiary: #8890a0; --text-faint: #5a6878;
+  --accent: #d06888; --accent-soft: rgba(208,104,136,0.1); --accent-mid: rgba(208,104,136,0.2); --accent-hover: #e080a0;
+  --border: rgba(208,104,136,0.15); --border-strong: rgba(208,104,136,0.25);
+  --shadow-card: 0 1px 3px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.04);
+  --shadow-hover: 0 3px 10px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.06);
+  --unread-bar: #e88050; --network-color: #50c8a0; --network-soft: rgba(80,200,160,0.1);
+  --red: #e88050; --amber: #e88050;
+  --success-color: #50c8a0; --warning-color: #e88050; --error-color: #d06888;
+  --bg-light: #223860; --surface-color: #1a2c50; --surface-hover: #223860;
+  --accent-color: #d06888; --text-color: #f0e8e0; --text-soft: #d0c4b8; --text-muted: #8890a0;
+  --border-color: rgba(208,104,136,0.15); --border-light: rgba(208,104,136,0.25);
+}
+
+/* turbo — dark, retro */
+html[data-site-theme="turbo"] {
+  --nav-bg: #001030;
+  --nav-bg-hover: #001448;
+  --nav-bg-active: #001a58;
+  --nav-border: rgba(0, 212, 255, 0.15);
+  --nav-icon: #7090a8;
+  --nav-icon-hover: #a0c0d8;
+  --nav-icon-active: #ffffff;
+  --nav-accent: #00d4ff;
+  --nav-dot: #c080c0;
+  --page-bg: #000818;
+  --page-text: #ffffff;
+  --page-text-2: #a0c0d8;
+  --page-text-3: #7090a8;
+  --page-card: #001030;
+  --page-card-shadow: 0 1px 3px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.04);
+  --page-border: rgba(0, 212, 255, 0.3);
+  --page-accent: #00d4ff;
+  --avatar-gradient: linear-gradient(135deg, #00d4ff, #c080c0);
+  /* Body overrides */
+  --bg: #000818; --bg-card: #001030; --bg-hover: #001448; --bg-warm: #000c20;
+  --bar-bg: #001030; --bar-text: #7090a8; --bar-text-hover: #a0c0d8; --bar-text-active: #ffffff;
+  --text-primary: #ffffff; --text-secondary: #a0c0d8; --text-tertiary: #7090a8; --text-faint: #405870;
+  --accent: #00d4ff; --accent-soft: rgba(0,212,255,0.1); --accent-mid: rgba(0,212,255,0.2); --accent-hover: #40e0ff;
+  --border: rgba(0,212,255,0.15); --border-strong: rgba(0,212,255,0.25);
+  --shadow-card: 0 1px 3px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.04);
+  --shadow-hover: 0 3px 10px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.06);
+  --unread-bar: #c080c0; --network-color: #00d4ff; --network-soft: rgba(0,212,255,0.1);
+  --red: #c080c0; --amber: #00d4ff;
+  --success-color: #00d4ff; --warning-color: #c080c0; --error-color: #c080c0;
+  --bg-light: #001448; --surface-color: #001030; --surface-hover: #001448;
+  --accent-color: #00d4ff; --text-color: #ffffff; --text-soft: #a0c0d8; --text-muted: #7090a8;
+  --border-color: rgba(0,212,255,0.15); --border-light: rgba(0,212,255,0.25);
+}
+
+/* zane — dark, editor */
+html[data-site-theme="zane"] {
+  --nav-bg: #303030;
+  --nav-bg-hover: #3a3a3a;
+  --nav-bg-active: #444444;
+  --nav-border: rgba(95, 175, 175, 0.12);
+  --nav-icon: #9a9a9a;
+  --nav-icon-hover: #d0d0d0;
+  --nav-icon-active: #f0f0f0;
+  --nav-accent: #d97054;
+  --nav-dot: #d97054;
+  --page-bg: #262626;
+  --page-text: #f0f0f0;
+  --page-text-2: #d0d0d0;
+  --page-text-3: #9a9a9a;
+  --page-card: #303030;
+  --page-card-shadow: 0 1px 3px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.04);
+  --page-border: rgba(95, 175, 175, 0.25);
+  --page-accent: #d97054;
+  --avatar-gradient: linear-gradient(135deg, #d97054, #5fafaf);
+  /* Body overrides */
+  --bg: #262626; --bg-card: #303030; --bg-hover: #3a3a3a; --bg-warm: #2c2c2c;
+  --bar-bg: #303030; --bar-text: #9a9a9a; --bar-text-hover: #d0d0d0; --bar-text-active: #f0f0f0;
+  --text-primary: #f0f0f0; --text-secondary: #d0d0d0; --text-tertiary: #9a9a9a; --text-faint: #666666;
+  --accent: #d97054; --accent-soft: rgba(217,112,84,0.1); --accent-mid: rgba(217,112,84,0.2); --accent-hover: #ea8673;
+  --border: rgba(95,175,175,0.12); --border-strong: rgba(95,175,175,0.2);
+  --shadow-card: 0 1px 3px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.04);
+  --shadow-hover: 0 3px 10px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.06);
+  --unread-bar: #d97054; --network-color: #5fafaf; --network-soft: rgba(95,175,175,0.1);
+  --red: #d97054; --amber: #d7af5f;
+  --success-color: #8aa858; --warning-color: #d7af5f; --error-color: #d97054;
+  --bg-light: #3a3a3a; --surface-color: #303030; --surface-hover: #3a3a3a;
+  --accent-color: #d97054; --text-color: #f0f0f0; --text-soft: #d0d0d0; --text-muted: #9a9a9a;
+  --border-color: rgba(95,175,175,0.12); --border-light: rgba(95,175,175,0.2);
+}
+
+/* especial — dark, premium */
+html[data-site-theme="especial"] {
+  --nav-bg: #1a1a20;
+  --nav-bg-hover: #22222a;
+  --nav-bg-active: #2a2a34;
+  --nav-border: rgba(212, 168, 24, 0.15);
+  --nav-icon: #78746c;
+  --nav-icon-hover: #c8c4b8;
+  --nav-icon-active: #f0ece4;
+  --nav-accent: #c8a014;
+  --nav-dot: #b87848;
+  --page-bg: #121216;
+  --page-text: #f0ece4;
+  --page-text-2: #c8c4b8;
+  --page-text-3: #78746c;
+  --page-card: #1a1a20;
+  --page-card-shadow: 0 1px 3px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.04);
+  --page-border: rgba(212, 168, 24, 0.3);
+  --page-accent: #c8a014;
+  --avatar-gradient: linear-gradient(135deg, #c8a014, #b87848);
+  /* Body overrides */
+  --bg: #121216; --bg-card: #1a1a20; --bg-hover: #22222a; --bg-warm: #161618;
+  --bar-bg: #1a1a20; --bar-text: #78746c; --bar-text-hover: #c8c4b8; --bar-text-active: #f0ece4;
+  --text-primary: #f0ece4; --text-secondary: #c8c4b8; --text-tertiary: #78746c; --text-faint: #504c44;
+  --accent: #c8a014; --accent-soft: rgba(200,160,20,0.1); --accent-mid: rgba(200,160,20,0.2); --accent-hover: #d8b028;
+  --border: rgba(212,168,24,0.15); --border-strong: rgba(212,168,24,0.25);
+  --shadow-card: 0 1px 3px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.04);
+  --shadow-hover: 0 3px 10px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.06);
+  --unread-bar: #b87848; --network-color: #c8a014; --network-soft: rgba(200,160,20,0.1);
+  --red: #b87848; --amber: #c8a014;
+  --success-color: #c8a014; --warning-color: #b87848; --error-color: #b87848;
+  --bg-light: #22222a; --surface-color: #1a1a20; --surface-hover: #22222a;
+  --accent-color: #c8a014; --text-color: #f0ece4; --text-soft: #c8c4b8; --text-muted: #78746c;
+  --border-color: rgba(212,168,24,0.15); --border-light: rgba(212,168,24,0.25);
+}
+
+/* especial-light — light, warm fog */
+html[data-site-theme="especial-light"] {
+  --nav-bg: #d8d6d2;
+  --nav-bg-hover: #eceae6;
+  --nav-bg-active: #d4d2ce;
+  --nav-border: rgba(138, 108, 4, 0.12);
+  --nav-icon: #605c56;
+  --nav-icon-hover: #3a3a48;
+  --nav-icon-active: #1c1c2a;
+  --nav-accent: #6e5600;
+  --nav-dot: #a04040;
+  --page-bg: #e0deda;
+  --page-text: #1c1c2a;
+  --page-text-2: #3a3a48;
+  --page-text-3: #605c56;
+  --page-card: #d8d6d2;
+  --page-card-shadow: 0 1px 2px rgba(0,0,0,0.06), 0 0 0 1px rgba(0,0,0,0.04);
+  --page-border: rgba(138, 108, 4, 0.25);
+  --page-accent: #6e5600;
+  --avatar-gradient: linear-gradient(135deg, #6e5600, #a04040);
+  /* Body overrides (LIGHT theme) */
+  --bg: #e0deda; --bg-card: #eceae6; --bg-hover: #d8d6d2; --bg-warm: #e4e2de;
+  --bar-bg: #d8d6d2; --bar-text: #605c56; --bar-text-hover: #3a3a48; --bar-text-active: #1c1c2a;
+  --text-primary: #1c1c2a; --text-secondary: #3a3a48; --text-tertiary: #605c56; --text-faint: #908880;
+  --accent: #6e5600; --accent-soft: rgba(110,86,0,0.08); --accent-mid: rgba(110,86,0,0.15); --accent-hover: #5a4600;
+  --border: rgba(138,108,4,0.12); --border-strong: rgba(138,108,4,0.2);
+  --shadow-card: 0 1px 2px rgba(0,0,0,0.06), 0 0 0 1px rgba(0,0,0,0.04);
+  --shadow-hover: 0 3px 10px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.04);
+  --unread-bar: #a04040; --network-color: #6e5600; --network-soft: rgba(110,86,0,0.08);
+  --red: #a04040; --amber: #8a5a28;
+  --success-color: #4a7a4a; --warning-color: #8a5a28; --error-color: #a04040;
+  --bg-light: #d8d6d2; --surface-color: #eceae6; --surface-hover: #d8d6d2;
+  --accent-color: #6e5600; --text-color: #1c1c2a; --text-soft: #3a3a48; --text-muted: #605c56;
+  --border-color: rgba(138,108,4,0.12); --border-light: rgba(138,108,4,0.2);
+  --text-inv: #f0ece4;
+}
+
+/* studio13 — dark, bold minimal */
+html[data-site-theme="studio13"] {
+  --nav-bg: #0a0a0a;
+  --nav-bg-hover: #1a1a1a;
+  --nav-bg-active: #2a2a2a;
+  --nav-border: rgba(244, 84, 26, 0.15);
+  --nav-icon: #a0a0a0;
+  --nav-icon-hover: #e0e0e0;
+  --nav-icon-active: #ffffff;
+  --nav-accent: #f4541a;
+  --nav-dot: #f4541a;
+  --page-bg: #000000;
+  --page-text: #ffffff;
+  --page-text-2: #e0e0e0;
+  --page-text-3: #a0a0a0;
+  --page-card: #0a0a0a;
+  --page-card-shadow: 0 1px 3px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.04);
+  --page-border: rgba(244, 84, 26, 0.3);
+  --page-accent: #f4541a;
+  --avatar-gradient: linear-gradient(135deg, #f4541a, #ff8040);
+  /* Body overrides */
+  --bg: #000000; --bg-card: #0a0a0a; --bg-hover: #1a1a1a; --bg-warm: #080808;
+  --bar-bg: #0a0a0a; --bar-text: #a0a0a0; --bar-text-hover: #e0e0e0; --bar-text-active: #ffffff;
+  --text-primary: #ffffff; --text-secondary: #e0e0e0; --text-tertiary: #a0a0a0; --text-faint: #606060;
+  --accent: #f4541a; --accent-soft: rgba(244,84,26,0.1); --accent-mid: rgba(244,84,26,0.2); --accent-hover: #ff6a30;
+  --border: rgba(244,84,26,0.15); --border-strong: rgba(244,84,26,0.25);
+  --shadow-card: 0 1px 3px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.04);
+  --shadow-hover: 0 3px 10px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.06);
+  --unread-bar: #f4541a; --network-color: #f4541a; --network-soft: rgba(244,84,26,0.1);
+  --red: #f4541a; --amber: #ff8040;
+  --success-color: #f4541a; --warning-color: #ff8040; --error-color: #f4541a;
+  --bg-light: #1a1a1a; --surface-color: #0a0a0a; --surface-hover: #1a1a1a;
+  --accent-color: #f4541a; --text-color: #ffffff; --text-soft: #e0e0e0; --text-muted: #a0a0a0;
+  --border-color: rgba(244,84,26,0.15); --border-light: rgba(244,84,26,0.25);
+}
