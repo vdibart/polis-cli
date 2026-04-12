@@ -42,8 +42,31 @@
  *   studio13        — dark, bold minimal
  *
  * NOTE: sols is the system/app theme and is NOT a user-selectable site theme.
- *       It does not appear here.
+ *       It does not appear here — but the default rule below ensures nav
+ *       variables are always defined (prevents FOUC on first load).
  */
+
+/* Default — derived from webapp base vars so nav is styled before JS sets data-site-theme */
+html:not([data-site-theme]), html[data-site-theme="sols"] {
+  --nav-bg: var(--bar-bg, #291e3f);
+  --nav-bg-hover: var(--bg-hover, #2a2538);
+  --nav-bg-active: var(--bg-card, #2a2838);
+  --nav-border: var(--border, rgba(255, 248, 240, 0.06));
+  --nav-icon: var(--bar-text, rgba(200, 190, 175, 0.45));
+  --nav-icon-hover: var(--bar-text-hover, rgba(220, 210, 195, 0.75));
+  --nav-icon-active: var(--bar-text-active, #e0d8cc);
+  --nav-accent: var(--accent, #c8a878);
+  --nav-dot: var(--unread-bar, #a87570);
+  --page-bg: var(--bg, #1a1520);
+  --page-text: var(--text-primary, #e0d8cc);
+  --page-text-2: var(--text-secondary, #a89e90);
+  --page-text-3: var(--text-tertiary, #8a8078);
+  --page-card: var(--bg-card, #2a2838);
+  --page-card-shadow: var(--shadow-card, 0 1px 3px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(255, 248, 240, 0.04));
+  --page-border: var(--border, rgba(255, 248, 240, 0.06));
+  --page-accent: var(--accent, #c8a878);
+  --avatar-gradient: linear-gradient(135deg, var(--accent, #c8a878), var(--bar-bg, #291e3f));
+}
 
 /* vice — dark, Miami */
 html[data-site-theme="vice"] {

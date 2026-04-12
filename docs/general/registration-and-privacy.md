@@ -35,7 +35,7 @@ In short: **you can read the entire network without registering.** You only need
 1. You run `polis register` (CLI) or click Register in the webapp settings.
 2. Your site's public key and domain are submitted to the DS with a cryptographic attestation.
 3. The DS verifies your `.well-known/polis` is publicly accessible and records your registration.
-4. A **local marker file** is written at `.polis/ds/{ds-domain}/registered.json`.
+4. A **local marker file** is written at `.polis/ds/{ds-domain}/registration.json`.
 5. From this point, all write operations (publish, comment, bless, etc.) are enabled.
 6. Your content is indexed by the DS and visible to other polis users.
 
@@ -69,7 +69,7 @@ For normal usage (a single site pulling its feed every few minutes), these limit
 Polis tracks registration state locally using a marker file:
 
 ```
-.polis/ds/{ds-domain}/registered.json
+.polis/ds/{ds-domain}/registration.json
 ```
 
 This file is the **local source of truth** for "is this site registered?" All write guards check this file — no network call is needed. The marker file is:
@@ -106,6 +106,6 @@ See [DS Deployment Guide](../ds/admin/deployment.md) for setup instructions.
 | Unregistered = invisible to network | All DS write operations gated on local marker file |
 | Reads are always allowed | Feed sync, content queries, relationship queries work without registration |
 | Follow is split | Local `following.json` always updated; DS announcement only when registered |
-| Local marker, no network check | `.polis/ds/{domain}/registered.json` checked by filesystem stat |
+| Local marker, no network check | `.polis/ds/{domain}/registration.json` checked by filesystem stat |
 | Hard delete on unregister | DS permanently removes all domain data |
 | Rate-limited public reads | IP-based limits on all DS read endpoints |

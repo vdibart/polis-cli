@@ -147,7 +147,7 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 
 	wk := &WellKnown{
 		Version:     GetGenerator(),
-		Author:      author,
+		AuthorName:  author,
 		Email:       opts.Email,
 		PublicKey:    strings.TrimSpace(string(pubKey)),
 		SiteTitle:   opts.SiteTitle,
@@ -165,6 +165,11 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 
 	if err := SaveWellKnown(siteDir, wk); err != nil {
 		return nil, fmt.Errorf("failed to create .well-known/polis: %w", err)
+	}
+
+	// Generate favicon from avatar config
+	if err := WriteFavicon(siteDir); err != nil {
+		return nil, fmt.Errorf("failed to create favicon.svg: %w", err)
 	}
 
 	// Create bundle.json

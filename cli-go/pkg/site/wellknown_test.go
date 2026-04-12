@@ -49,7 +49,7 @@ func TestWellKnownFileExists(t *testing.T) {
 	wk := &WellKnown{
 		Version:   "polis-cli-go/0.57.0",
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		Author:    "test",
+		AuthorName:    "test",
 		Created:   time.Now().UTC().Format(time.RFC3339),
 	}
 	writeTestWellKnown(t, dir, wk)
@@ -72,7 +72,7 @@ func TestWellKnownValidJSON(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
 		Version:     "polis-cli-go/0.57.0",
-		Author:      "Test Author",
+		AuthorName:      "Test Author",
 		Email:       "test@example.com",
 		PublicKey:    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		SiteTitle:   "Test Site",
@@ -92,8 +92,8 @@ func TestWellKnownValidJSON(t *testing.T) {
 	if loaded.Version != wk.Version {
 		t.Errorf("Version mismatch: got %q, want %q", loaded.Version, wk.Version)
 	}
-	if loaded.Author != wk.Author {
-		t.Errorf("Author mismatch: got %q, want %q", loaded.Author, wk.Author)
+	if loaded.AuthorName != wk.AuthorName {
+		t.Errorf("Author mismatch: got %q, want %q", loaded.AuthorName, wk.AuthorName)
 	}
 	if loaded.Email != wk.Email {
 		t.Errorf("Email mismatch: got %q, want %q", loaded.Email, wk.Email)
@@ -177,7 +177,7 @@ func TestBundleRegistryRoundTrip(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
 		Version:   "polis-cli-go/0.57.0",
-		Author:    "alice",
+		AuthorName:    "alice",
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:   "2026-01-01T00:00:00Z",
 		Bundles: map[string]BundleEntry{
@@ -211,7 +211,7 @@ func TestNoBundlesField(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
 		Version:   "polis-cli-go/0.57.0",
-		Author:    "alice",
+		AuthorName:    "alice",
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:   "2026-01-01T00:00:00Z",
 	}
@@ -234,7 +234,7 @@ func TestActiveThemeRoundTrip(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
 		Version:     "polis-cli-go/0.57.0",
-		Author:      "alice",
+		AuthorName:      "alice",
 		PublicKey:    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:     "2026-01-01T00:00:00Z",
 		ActiveTheme: "turbo",
@@ -250,7 +250,7 @@ func TestSetActiveTheme(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
 		Version:     "polis-cli-go/0.57.0",
-		Author:      "alice",
+		AuthorName:      "alice",
 		PublicKey:    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:     "2026-01-01T00:00:00Z",
 		ActiveTheme: "sols",
@@ -281,8 +281,8 @@ func TestLoadBashCLIWellKnown(t *testing.T) {
 	if wk.Version != "polis-cli/0.45.0" {
 		t.Errorf("Version = %q, want %q", wk.Version, "polis-cli/0.45.0")
 	}
-	if wk.Author != "John Doe" {
-		t.Errorf("Author = %q, want %q", wk.Author, "John Doe")
+	if wk.AuthorName != "John Doe" {
+		t.Errorf("Author = %q, want %q", wk.AuthorName, "John Doe")
 	}
 	if wk.Email != "john@example.com" {
 		t.Errorf("Email = %q, want %q", wk.Email, "john@example.com")
@@ -325,8 +325,8 @@ func TestLoadMinimalWellKnown(t *testing.T) {
 	if wk.Created != "2026-01-01T00:00:00Z" {
 		t.Errorf("Created = %q", wk.Created)
 	}
-	if wk.Author != "" {
-		t.Errorf("Author should be empty, got %q", wk.Author)
+	if wk.AuthorName != "" {
+		t.Errorf("Author should be empty, got %q", wk.AuthorName)
 	}
 }
 
@@ -348,7 +348,7 @@ func TestEmailOmitempty_NotSerializedWhenEmpty(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
 		Version:   "polis-cli-go/0.57.0",
-		Author:    "alice",
+		AuthorName:    "alice",
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:   "2026-01-01T00:00:00Z",
 	}
@@ -367,7 +367,7 @@ func TestEmailOmitempty_SerializedWhenSet(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
 		Version:   "polis-cli-go/0.57.0",
-		Author:    "alice",
+		AuthorName:    "alice",
 		Email:     "alice@example.com",
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:   "2026-01-01T00:00:00Z",
@@ -422,7 +422,7 @@ func TestSaveCreatesDirectory(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
 		Version:   "polis-cli-go/0.57.0",
-		Author:    "alice",
+		AuthorName:    "alice",
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:   "2026-01-01T00:00:00Z",
 	}
@@ -443,7 +443,7 @@ func TestGetSiteTitle(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
 		Version:   "polis-cli-go/0.57.0",
-		Author:    "alice",
+		AuthorName:    "alice",
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		SiteTitle: "My Awesome Site",
 		Created:   "2026-01-01T00:00:00Z",
@@ -460,7 +460,7 @@ func TestGetSiteTitleMissing(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
 		Version:   "polis-cli-go/0.57.0",
-		Author:    "alice",
+		AuthorName:    "alice",
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:   "2026-01-01T00:00:00Z",
 	}
@@ -477,7 +477,7 @@ func TestGetPublicKey(t *testing.T) {
 	expectedKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local"
 	wk := &WellKnown{
 		Version:   "polis-cli-go/0.57.0",
-		Author:    "alice",
+		AuthorName:    "alice",
 		PublicKey: expectedKey,
 		Created:   "2026-01-01T00:00:00Z",
 	}
@@ -527,7 +527,7 @@ func TestFieldOrderDoesNotMatter(t *testing.T) {
 		"created": "2026-01-01T00:00:00Z",
 		"version": "polis-cli-go/0.57.0",
 		"public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		"author": "Test Author"
+		"author_name": "Test Author"
 	}`
 
 	var wk WellKnown
@@ -538,8 +538,8 @@ func TestFieldOrderDoesNotMatter(t *testing.T) {
 	if wk.Version != "polis-cli-go/0.57.0" {
 		t.Error("Version mismatch")
 	}
-	if wk.Author != "Test Author" {
-		t.Error("Author mismatch")
+	if wk.AuthorName != "Test Author" {
+		t.Error("AuthorName mismatch")
 	}
 	if len(wk.Bundles) != 1 {
 		t.Errorf("Bundles count: got %d, want 1", len(wk.Bundles))
@@ -554,7 +554,7 @@ func TestSaveWellKnownIndentation(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
 		Version:   "polis-cli-go/0.57.0",
-		Author:    "alice",
+		AuthorName:    "alice",
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:   "2026-01-01T00:00:00Z",
 		Bundles: map[string]BundleEntry{
@@ -666,7 +666,7 @@ func TestAvatarRoundTrip(t *testing.T) {
 	avatar := &AvatarConfig{BG: "#2a5a6a", FG: "#ffffff"}
 	wk := &WellKnown{
 		Version:   "polis-cli-go/0.57.0",
-		Author:    "alice",
+		AuthorName:    "alice",
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:   "2026-01-01T00:00:00Z",
 		Avatar:    avatar,
@@ -692,7 +692,7 @@ func TestAvatarOmitempty_NotSerializedWhenNil(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
 		Version:   "polis-cli-go/0.57.0",
-		Author:    "alice",
+		AuthorName:    "alice",
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:   "2026-01-01T00:00:00Z",
 	}
@@ -701,5 +701,220 @@ func TestAvatarOmitempty_NotSerializedWhenNil(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(dir, ".well-known", "polis"))
 	if strings.Contains(string(data), `"avatar"`) {
 		t.Error("Avatar field should not be present when nil (omitempty)")
+	}
+}
+
+// ============================================================================
+// MigrateAuthorField Tests
+// ============================================================================
+
+func TestMigrateAuthorField_AuthorOnly(t *testing.T) {
+	dir := setupTestDir(t)
+	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
+	// Write raw JSON with deprecated "author" field
+	wkPath := filepath.Join(dir, ".well-known", "polis")
+	os.WriteFile(wkPath, []byte(`{"version":"1","public_key":"pk","author":"Alice","created":"2026-01-01T00:00:00Z"}`), 0644)
+
+	if err := MigrateAuthorField(dir); err != nil {
+		t.Fatalf("MigrateAuthorField: %v", err)
+	}
+
+	wk, err := LoadWellKnown(dir)
+	if err != nil {
+		t.Fatalf("LoadWellKnown: %v", err)
+	}
+	if wk.AuthorName != "Alice" {
+		t.Errorf("AuthorName = %q, want %q", wk.AuthorName, "Alice")
+	}
+	// Verify "author" key is gone from raw JSON
+	data, _ := os.ReadFile(wkPath)
+	if strings.Contains(string(data), `"author"`) && !strings.Contains(string(data), `"author_name"`) {
+		t.Error("deprecated author key should be removed from JSON")
+	}
+}
+
+func TestMigrateAuthorField_BothPresent(t *testing.T) {
+	dir := setupTestDir(t)
+	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
+	wkPath := filepath.Join(dir, ".well-known", "polis")
+	os.WriteFile(wkPath, []byte(`{"version":"1","public_key":"pk","author":"Old","author_name":"New","created":"2026-01-01T00:00:00Z"}`), 0644)
+
+	if err := MigrateAuthorField(dir); err != nil {
+		t.Fatalf("MigrateAuthorField: %v", err)
+	}
+
+	wk, _ := LoadWellKnown(dir)
+	if wk.AuthorName != "New" {
+		t.Errorf("AuthorName should preserve existing value, got %q", wk.AuthorName)
+	}
+}
+
+func TestMigrateAuthorField_AuthorNameOnly(t *testing.T) {
+	dir := setupTestDir(t)
+	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
+	wkPath := filepath.Join(dir, ".well-known", "polis")
+	os.WriteFile(wkPath, []byte(`{"version":"1","public_key":"pk","author_name":"Alice","created":"2026-01-01T00:00:00Z"}`), 0644)
+
+	if err := MigrateAuthorField(dir); err != nil {
+		t.Fatalf("MigrateAuthorField: %v", err)
+	}
+
+	wk, _ := LoadWellKnown(dir)
+	if wk.AuthorName != "Alice" {
+		t.Errorf("AuthorName = %q", wk.AuthorName)
+	}
+}
+
+func TestMigrateAuthorField_NoFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := MigrateAuthorField(dir); err != nil {
+		t.Errorf("should not error on missing file: %v", err)
+	}
+}
+
+// ============================================================================
+// Favicon Generation Tests
+// ============================================================================
+
+func TestGenerateFaviconSVG_BasicAvatar(t *testing.T) {
+	config := &AvatarConfig{BG: "#2a5a6a", FG: "#ffffff"}
+	svg := GenerateFaviconSVG(config, "A")
+
+	if !strings.Contains(svg, `fill="#2a5a6a"`) {
+		t.Error("SVG should contain background color")
+	}
+	if !strings.Contains(svg, `fill="#ffffff">A</text>`) {
+		t.Error("SVG should contain initial 'A' in foreground color")
+	}
+	if !strings.Contains(svg, `viewBox="0 0 128 128"`) {
+		t.Error("SVG should have 128x128 viewBox")
+	}
+}
+
+func TestGenerateFaviconSVG_NilConfig(t *testing.T) {
+	svg := GenerateFaviconSVG(nil, "V")
+
+	if !strings.Contains(svg, `fill="#888888"`) {
+		t.Error("Nil config should use grey fallback background")
+	}
+	if !strings.Contains(svg, ">V</text>") {
+		t.Error("SVG should contain initial 'V'")
+	}
+}
+
+func TestGenerateFaviconSVG_WithBorder(t *testing.T) {
+	config := &AvatarConfig{BG: "#2a5a6a", FG: "#ffffff", Border: "#d06888", BorderW: 2}
+	svg := GenerateFaviconSVG(config, "B")
+
+	if !strings.Contains(svg, `stroke="#d06888"`) {
+		t.Error("SVG should contain border stroke")
+	}
+}
+
+func TestGenerateFaviconSVG_WithPattern(t *testing.T) {
+	config := &AvatarConfig{BG: "#2a5a6a", FG: "#ffffff", Pattern: "dots", PatternColor: "#3a7a8a"}
+	svg := GenerateFaviconSVG(config, "P")
+
+	if !strings.Contains(svg, "<defs>") {
+		t.Error("SVG should contain pattern defs")
+	}
+	if !strings.Contains(svg, `fill="url(#p)"`) {
+		t.Error("SVG should reference the pattern fill")
+	}
+	// Initial should be hidden when pattern is set
+	if strings.Contains(svg, ">P</text>") {
+		t.Error("Initial should be hidden when pattern is set")
+	}
+}
+
+func TestGenerateFaviconSVG_MultiCharInitial(t *testing.T) {
+	svg := GenerateFaviconSVG(nil, "VD")
+
+	if !strings.Contains(svg, `font-size="56"`) {
+		t.Error("Multi-char initial should use smaller font size 56")
+	}
+}
+
+func TestWriteFavicon_CreatesFile(t *testing.T) {
+	dir := setupTestDir(t)
+	wk := &WellKnown{
+		Version:    "polis-cli-go/test",
+		AuthorName: "Alice",
+		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		Created:    "2026-01-01T00:00:00Z",
+		Avatar:     &AvatarConfig{BG: "#3a6a2a", FG: "#ffffff"},
+	}
+	writeTestWellKnown(t, dir, wk)
+
+	if err := WriteFavicon(dir); err != nil {
+		t.Fatalf("WriteFavicon: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "favicon.svg"))
+	if err != nil {
+		t.Fatalf("favicon.svg should exist: %v", err)
+	}
+	svg := string(data)
+	if !strings.Contains(svg, `fill="#3a6a2a"`) {
+		t.Error("favicon should use avatar BG color")
+	}
+	if !strings.Contains(svg, ">A</text>") {
+		t.Error("favicon should use first letter of author name")
+	}
+}
+
+func TestWriteFavicon_NoAvatar(t *testing.T) {
+	dir := setupTestDir(t)
+	wk := &WellKnown{
+		Version:    "polis-cli-go/test",
+		AuthorName: "Bob",
+		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		Created:    "2026-01-01T00:00:00Z",
+	}
+	writeTestWellKnown(t, dir, wk)
+
+	if err := WriteFavicon(dir); err != nil {
+		t.Fatalf("WriteFavicon: %v", err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(dir, "favicon.svg"))
+	if !strings.Contains(string(data), ">B</text>") {
+		t.Error("favicon should use initial from author name even without avatar config")
+	}
+}
+
+func TestWriteFavicon_MissingWellKnown(t *testing.T) {
+	dir := t.TempDir()
+	err := WriteFavicon(dir)
+	if err == nil {
+		t.Error("WriteFavicon should error when .well-known/polis is missing")
+	}
+}
+
+func TestWriteFavicon_OverwritesExisting(t *testing.T) {
+	dir := setupTestDir(t)
+	wk := &WellKnown{
+		Version:    "polis-cli-go/test",
+		AuthorName: "Carol",
+		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		Created:    "2026-01-01T00:00:00Z",
+		Avatar:     &AvatarConfig{BG: "#aa0000", FG: "#ffffff"},
+	}
+	writeTestWellKnown(t, dir, wk)
+
+	// Write initial favicon
+	WriteFavicon(dir)
+
+	// Update avatar and rewrite
+	wk.Avatar.BG = "#00aa00"
+	writeTestWellKnown(t, dir, wk)
+	WriteFavicon(dir)
+
+	data, _ := os.ReadFile(filepath.Join(dir, "favicon.svg"))
+	if !strings.Contains(string(data), `fill="#00aa00"`) {
+		t.Error("favicon should reflect updated avatar color")
+	}
+	if strings.Contains(string(data), `fill="#aa0000"`) {
+		t.Error("favicon should not contain old avatar color")
 	}
 }

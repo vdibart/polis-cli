@@ -15,8 +15,8 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
-	"github.com/vdibart/polis-cli/cli-go/pkg/patrol"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
+	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
@@ -1055,7 +1055,7 @@ func checkThemeConsolidation(ctx *runContext) CheckResult {
 			continue
 		}
 		themeDir := filepath.Join(themesDir, entry.Name())
-		staleFiles := patrol.StaleThemeFiles(themeDir, baseDir)
+		staleFiles := theme.StaleThemeFiles(themeDir, baseDir)
 		for _, sf := range staleFiles {
 			relP := filepath.Join("site", "themes", entry.Name(), sf)
 			if !ctx.dryRun {

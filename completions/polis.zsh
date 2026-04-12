@@ -7,7 +7,7 @@
 # Or copy to ~/.zsh/completions/_polis (create dir if needed)
 
 _polis() {
-    local -a commands blessing_subcommands notifications_subcommands
+    local -a commands blessing_subcommands dm_subcommands notifications_subcommands tag_subcommands
     local cmd_pos=2  # Default command position
 
     commands=(
@@ -16,6 +16,7 @@ _polis() {
         'clone:Clone a remote polis site (--full, --diff)'
         'comment:Create a comment on a post (--filename, --title for stdin)'
         'discover:Check followed authors for new content (--author, --since)'
+        'dm:Direct messages (list, read, send, retry, config)'
         'extract:Reconstruct a specific version of a file'
         'follow:Follow an author (--announce to broadcast)'
         'index:View content index'
@@ -29,6 +30,7 @@ _polis() {
         'republish:Update an already-published file'
         'rotate-key:Generate new keypair and re-sign content (--delete-old-key)'
         'serve:Start local web server (bundled binary only, -d/--data-dir)'
+        'tag:Manage content tags (list, show, apply, remove, delete)'
         'unfollow:Unfollow an author (--announce to broadcast)'
         'unpublish:Remove a published post and notify discovery service'
         'unregister:Unregister site from discovery service (--force to skip confirmation)'
@@ -44,8 +46,24 @@ _polis() {
         'sync:Sync auto-blessed comments from discovery service'
     )
 
+    dm_subcommands=(
+        'list:List DM conversations'
+        'read:Read messages in a conversation'
+        'send:Send a DM to a recipient'
+        'retry:Retry delivering unsent messages'
+        'config:Show DM acceptance policy'
+    )
+
     notifications_subcommands=(
         'list:List notifications (--type to filter)'
+    )
+
+    tag_subcommands=(
+        'list:List all tags'
+        'show:Show targets for a tag'
+        'apply:Tag content with a tag name'
+        'remove:Remove a target from a tag'
+        'delete:Delete an entire tag'
     )
 
     # Adjust command position if --json is first
@@ -76,6 +94,39 @@ _polis() {
                 blessing)
                     if [[ $CURRENT -eq $((cmd_pos + 1)) ]]; then
                         _describe -t subcommands 'blessing subcommands' blessing_subcommands
+                    fi
+                    ;;
+                dm)
+                    if [[ $CURRENT -eq $((cmd_pos + 1)) ]]; then
+                        _describe -t subcommands 'dm subcommands' dm_subcommands
+                    else
+                        local subcmd="$words[$((cmd_pos + 1))]"
+                        case $subcmd in
+                            read)
+                                _arguments ':conversation_id:'
+                                ;;
+                            send)
+                                _arguments ':recipient_url:' ':message:'
+                                ;;
+                            retry)
+                                _arguments ':conversation_id:'
+                                ;;
+                        esac
+                    fi
+                    ;;
+                tag)
+                    if [[ $CURRENT -eq $((cmd_pos + 1)) ]]; then
+                        _describe -t subcommands 'tag subcommands' tag_subcommands
+                    else
+                        local subcmd="$words[$((cmd_pos + 1))]"
+                        case $subcmd in
+                            show|delete)
+                                _arguments ':tag_name:'
+                                ;;
+                            apply|remove)
+                                _arguments ':tag_name:' ':target_uri:'
+                                ;;
+                        esac
                     fi
                     ;;
                 notifications)

@@ -51,7 +51,7 @@ type RemoteAvatarConfig struct {
 // WellKnown represents the .well-known/polis file structure.
 type WellKnown struct {
 	Version    string              `json:"version"`
-	Author     string              `json:"author"`
+	Author     string              `json:"author"`      // deprecated; use DisplayName()
 	Domain     string              `json:"domain,omitempty"`
 	Email      string              `json:"email,omitempty"`
 	PublicKey  string              `json:"public_key"`
@@ -61,6 +61,15 @@ type WellKnown struct {
 	Avatar     *RemoteAvatarConfig `json:"avatar,omitempty"`
 	BaseURL    string              `json:"base_url,omitempty"`
 	Config     Config              `json:"config,omitempty"`
+}
+
+// DisplayName returns the author display name, preferring author_name over
+// the deprecated author field. Remote sites may still use either.
+func (wk *WellKnown) DisplayName() string {
+	if wk.AuthorName != "" {
+		return wk.AuthorName
+	}
+	return wk.Author
 }
 
 // Config holds the configuration section from .well-known/polis.

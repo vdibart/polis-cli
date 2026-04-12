@@ -29,7 +29,7 @@ func markAsRegistered(t *testing.T, s *Server) {
 	if s.DiscoveryURL == "" {
 		t.Fatal("markAsRegistered: DiscoveryURL must be set first")
 	}
-	if err := discovery.WriteRegistrationMarker(s.DataDir, s.DiscoveryURL, "test.polis.pub"); err != nil {
+	if err := discovery.WriteRegistrationMarker(s.DataDir, s.DiscoveryURL, "test.polis.pub", ""); err != nil {
 		t.Fatalf("markAsRegistered: %v", err)
 	}
 }
@@ -4158,11 +4158,13 @@ func TestHandleFeed_WithTypeFilter(t *testing.T) {
 func TestHandleFeed_SortOrder(t *testing.T) {
 	s := newTestServer(t)
 
+	// Use dates relative to now so items don't get pruned by the 90-day max age
+	now := time.Now().UTC()
 	cm := feed.NewCacheManager(s.DataDir, "default")
 	cm.MergeItems([]feed.FeedItem{
-		{Type: "post", Title: "Oldest", URL: "posts/old.md", Published: "2026-01-01T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-		{Type: "post", Title: "Newest", URL: "posts/new.md", Published: "2026-01-03T10:00:00Z", AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
-		{Type: "post", Title: "Middle", URL: "posts/mid.md", Published: "2026-01-02T10:00:00Z", AuthorURL: "https://c.pub", AuthorDomain: "c.pub"},
+		{Type: "post", Title: "Oldest", URL: "posts/old.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Newest", URL: "posts/new.md", Published: now.Format(time.RFC3339), AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
+		{Type: "post", Title: "Middle", URL: "posts/mid.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://c.pub", AuthorDomain: "c.pub"},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/feed", nil)
@@ -4445,7 +4447,7 @@ func TestHandleFeedRead_MissingFields(t *testing.T) {
 	}
 }
 
-func TestHandleFeedRead_InvalidID(t *testing.T) {
+func TestHandleFeedRead_PrunedItem(t *testing.T) {
 	s := newTestServer(t)
 
 	body := jsonBody(t, map[string]string{"id": "nonexistent"})
@@ -4453,8 +4455,113 @@ func TestHandleFeedRead_InvalidID(t *testing.T) {
 	w := httptest.NewRecorder()
 	s.handleFeedRead(w, req)
 
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for pruned/missing item, got %d", w.Code)
+	}
+}
+
+// ============================================================================
+// handleFeedViewed Tests
+// ============================================================================
+
+func TestHandleFeedViewed_SetsCursor(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Set a sync cursor to simulate background sync having run
+	discoveryDomain := s.GetDiscoveryDomain()
+	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	_ = store.SetCursor("pub.polis.sync", "100")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/feed/viewed", nil)
+	w := httptest.NewRecorder()
+	s.handleFeedViewed(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	// Verify viewed cursor was set to sync cursor
+	viewedCursor, _ := store.GetCursor("pub.polis.feed.viewed")
+	if viewedCursor != "100" {
+		t.Errorf("expected viewed cursor '100', got %q", viewedCursor)
+	}
+}
+
+func TestHandleFeedViewed_MethodNotAllowed(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/feed/viewed", nil)
+	w := httptest.NewRecorder()
+	s.handleFeedViewed(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestHandleFeedViewed_SetsViewedAt(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	discoveryDomain := s.GetDiscoveryDomain()
+	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	_ = store.SetCursor("pub.polis.sync", "50")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/feed/viewed", nil)
+	w := httptest.NewRecorder()
+	s.handleFeedViewed(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	viewedAt, _ := store.GetCursor("pub.polis.feed.viewed_at")
+	if viewedAt == "" {
+		t.Error("expected pub.polis.feed.viewed_at to be set")
+	}
+	// Should be a valid RFC3339 timestamp
+	if _, err := time.Parse(time.RFC3339, viewedAt); err != nil {
+		t.Errorf("expected RFC3339 timestamp, got %q: %v", viewedAt, err)
+	}
+}
+
+func TestComputeAllCounts_HasNewFeed(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	discoveryDomain := s.GetDiscoveryDomain()
+	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+
+	// Add a feed item with a CachedAt timestamp
+	cm := s.feedCacheForScope("network")
+	_, _ = cm.MergeItems([]feed.FeedItem{{
+		Type:         "post",
+		Title:        "Test",
+		URL:          "https://alice.pub/posts/test",
+		AuthorDomain: "alice.pub",
+		AuthorURL:    "https://alice.pub",
+		Published:    "2026-04-01T12:00:00Z",
+	}})
+
+	// No viewed_at set yet — should show has_new_feed
+	counts := s.computeAllCounts()
+	if !counts.HasNewFeed {
+		t.Error("expected HasNewFeed=true when no viewed_at is set and feed items exist")
+	}
+
+	// Set viewed_at to the future — should clear has_new_feed
+	_ = store.SetCursor("pub.polis.feed.viewed_at", "2099-01-01T00:00:00Z")
+	counts = s.computeAllCounts()
+	if counts.HasNewFeed {
+		t.Error("expected HasNewFeed=false when viewed_at is after newest item")
+	}
+}
+
+func TestComputeAllCounts_NoNewFeed_Empty(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// No feed items at all — should not show has_new_feed
+	counts := s.computeAllCounts()
+	if counts.HasNewFeed {
+		t.Error("expected HasNewFeed=false with no feed items")
 	}
 }
 
@@ -5776,74 +5883,6 @@ func TestHandleNotifications_MethodNotAllowed(t *testing.T) {
 }
 
 // ============================================================================
-// handleUpdateSiteTitle Tests
-// ============================================================================
-
-func TestHandleUpdateSiteTitle_HappyPath(t *testing.T) {
-	s := newConfiguredServer(t)
-
-	body := jsonBody(t, map[string]string{"site_title": "My New Title"})
-	req := httptest.NewRequest(http.MethodPost, "/api/settings/site-title", body)
-	w := httptest.NewRecorder()
-
-	s.handleUpdateSiteTitle(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var resp map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp["success"] != true {
-		t.Error("expected success")
-	}
-	if resp["site_title"] != "My New Title" {
-		t.Errorf("expected title 'My New Title', got %q", resp["site_title"])
-	}
-
-	// Verify persisted
-	data, _ := os.ReadFile(filepath.Join(s.DataDir, ".well-known", "polis"))
-	var wk map[string]interface{}
-	json.Unmarshal(data, &wk)
-	if wk["site_title"] != "My New Title" {
-		t.Errorf("expected persisted title 'My New Title', got %q", wk["site_title"])
-	}
-}
-
-func TestHandleUpdateSiteTitle_EmptyTitle(t *testing.T) {
-	s := newConfiguredServer(t)
-
-	body := jsonBody(t, map[string]string{"site_title": ""})
-	req := httptest.NewRequest(http.MethodPost, "/api/settings/site-title", body)
-	w := httptest.NewRecorder()
-
-	s.handleUpdateSiteTitle(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var resp map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp["site_title"] != "" {
-		t.Errorf("expected empty title, got %q", resp["site_title"])
-	}
-}
-
-func TestHandleUpdateSiteTitle_MethodNotAllowed(t *testing.T) {
-	s := newConfiguredServer(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/settings/site-title", nil)
-	w := httptest.NewRecorder()
-
-	s.handleUpdateSiteTitle(w, req)
-
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405, got %d", w.Code)
-	}
-}
-
-// ============================================================================
 // handleUpdateAvatar Tests
 // ============================================================================
 
@@ -5885,6 +5924,14 @@ func TestHandleUpdateAvatar_Success(t *testing.T) {
 	json.Unmarshal(data, &wk)
 	if wk["avatar"] == nil {
 		t.Error("expected avatar in persisted file")
+	}
+
+	// Verify favicon.svg was regenerated
+	faviconData, err := os.ReadFile(filepath.Join(s.DataDir, "favicon.svg"))
+	if err != nil {
+		t.Error("favicon.svg should be regenerated after avatar update")
+	} else if !strings.Contains(string(faviconData), "#3a5f8a") {
+		t.Error("favicon.svg should contain updated avatar color")
 	}
 }
 
@@ -6681,72 +6728,6 @@ func TestHandleCounts_EmptySite(t *testing.T) {
 	// All counts should be zero for empty site
 	if counts.Posts != 0 || counts.Drafts != 0 || counts.MyPending != 0 {
 		t.Errorf("expected all zeros, got posts=%d drafts=%d pending=%d", counts.Posts, counts.Drafts, counts.MyPending)
-	}
-}
-
-func TestHandleCounts_FeedHasNew(t *testing.T) {
-	s := newConfiguredServer(t)
-
-	// Set up a discovery domain directory with feed cache
-	dsDomain := "default"
-	s.DiscoveryURL = "" // GetDiscoveryDomain returns "default" when empty
-	stateDir := filepath.Join(s.DataDir, ".polis", "ds", dsDomain, "pub.polis.core", "state")
-	os.MkdirAll(stateDir, 0755)
-
-	// Write a feed item with CachedAt newer than FeedLastVisit
-	feedItem := `{"id":"abc123","type":"post","title":"New Post","url":"https://example.com/post","published":"2026-03-30T10:00:00Z","author_url":"https://example.com","author_domain":"example.com","cached_at":"2026-03-30T12:00:00Z"}` + "\n"
-	os.WriteFile(filepath.Join(stateDir, "pub.polis.feed.jsonl"), []byte(feedItem), 0644)
-
-	// Set FeedLastVisit to before the cached_at
-	s.Config.FeedLastVisit = "2026-03-30T11:00:00Z"
-
-	req := httptest.NewRequest(http.MethodGet, "/api/counts", nil)
-	w := httptest.NewRecorder()
-	s.handleCounts(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var counts CountsPayload
-	if err := json.NewDecoder(w.Body).Decode(&counts); err != nil {
-		t.Fatalf("failed to decode: %v", err)
-	}
-
-	if !counts.FeedHasNew {
-		t.Error("expected feed_has_new=true when cached_at > feed_last_visit")
-	}
-	if counts.Feed != 1 {
-		t.Errorf("feed = %d, want 1", counts.Feed)
-	}
-	if counts.FeedUnread != 1 {
-		t.Errorf("feed_unread = %d, want 1", counts.FeedUnread)
-	}
-}
-
-func TestHandleCounts_FeedHasNew_FalseWhenVisitedAfter(t *testing.T) {
-	s := newConfiguredServer(t)
-
-	dsDomain := "default"
-	s.DiscoveryURL = ""
-	stateDir := filepath.Join(s.DataDir, ".polis", "ds", dsDomain, "pub.polis.core", "state")
-	os.MkdirAll(stateDir, 0755)
-
-	feedItem := `{"id":"abc123","type":"post","title":"Old Post","url":"https://example.com/post","published":"2026-03-30T10:00:00Z","author_url":"https://example.com","author_domain":"example.com","cached_at":"2026-03-30T11:00:00Z"}` + "\n"
-	os.WriteFile(filepath.Join(stateDir, "pub.polis.feed.jsonl"), []byte(feedItem), 0644)
-
-	// FeedLastVisit is AFTER cached_at
-	s.Config.FeedLastVisit = "2026-03-30T12:00:00Z"
-
-	req := httptest.NewRequest(http.MethodGet, "/api/counts", nil)
-	w := httptest.NewRecorder()
-	s.handleCounts(w, req)
-
-	var counts CountsPayload
-	json.NewDecoder(w.Body).Decode(&counts)
-
-	if counts.FeedHasNew {
-		t.Error("expected feed_has_new=false when feed_last_visit > cached_at")
 	}
 }
 
@@ -8315,5 +8296,425 @@ func TestCommentSourceURL(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("commentSourceURL(%q) = %q, want %q", tc.input, got, tc.want)
 		}
+	}
+}
+
+func TestHandleSettings_NoDataDir(t *testing.T) {
+	s := newConfiguredServer(t)
+	s.DiscoveryURL = "https://discovery.example.com"
+	s.DiscoveryKey = "test-key"
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	rr := httptest.NewRecorder()
+
+	s.handleSettings(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rr.Code)
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+
+	site := resp["site"].(map[string]interface{})
+	if _, ok := site["data_dir"]; ok {
+		t.Error("settings response should not expose data_dir")
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	s := newTestServer(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/status", s.handleStatus)
+
+	handler := securityHeadersMiddleware(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if v := rr.Header().Get("X-Content-Type-Options"); v != "nosniff" {
+		t.Errorf("expected X-Content-Type-Options=nosniff, got %q", v)
+	}
+	if v := rr.Header().Get("X-Frame-Options"); v != "SAMEORIGIN" {
+		t.Errorf("expected X-Frame-Options=SAMEORIGIN, got %q", v)
+	}
+}
+
+// ============================================================================
+// handleShowFrontmatter Tests
+// ============================================================================
+
+func TestHandleShowFrontmatter_Success(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	body := jsonBody(t, map[string]bool{"show_frontmatter": true})
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/show-frontmatter", body)
+	w := httptest.NewRecorder()
+
+	s.handleShowFrontmatter(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["success"] != true {
+		t.Error("expected success=true")
+	}
+	if resp["show_frontmatter"] != true {
+		t.Error("expected show_frontmatter=true")
+	}
+}
+
+func TestHandleShowFrontmatter_MethodNotAllowed(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/settings/show-frontmatter", nil)
+	w := httptest.NewRecorder()
+
+	s.handleShowFrontmatter(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestHandleShowFrontmatter_InvalidJSON(t *testing.T) {
+	s := newConfiguredServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/show-frontmatter", strings.NewReader("{bad"))
+	w := httptest.NewRecorder()
+
+	s.handleShowFrontmatter(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+// ============================================================================
+// handleNavState Tests
+// ============================================================================
+
+func TestHandleNavState_Configured(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/nav-state", nil)
+	w := httptest.NewRecorder()
+
+	s.handleNavState(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	if resp["handle"] != "test-site" {
+		t.Errorf("expected handle 'test-site', got %q", resp["handle"])
+	}
+	if resp["home_url"] != "https://test-site.polis.pub" {
+		t.Errorf("expected home_url, got %q", resp["home_url"])
+	}
+	if _, ok := resp["counts"]; !ok {
+		t.Error("expected counts in response")
+	}
+}
+
+func TestHandleNavState_Unconfigured(t *testing.T) {
+	s := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/nav-state", nil)
+	w := httptest.NewRecorder()
+
+	s.handleNavState(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	// Should return empty strings for unconfigured server
+	if resp["handle"] != "" {
+		t.Errorf("expected empty handle, got %q", resp["handle"])
+	}
+}
+
+func TestHandleNavState_MethodNotAllowed(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/nav-state", nil)
+	w := httptest.NewRecorder()
+
+	s.handleNavState(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+// ============================================================================
+// handleTags Tests
+// ============================================================================
+
+func TestHandleTagsList_Empty(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tags", nil)
+	w := httptest.NewRecorder()
+
+	s.handleTags(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+
+	tags, ok := resp["tags"].([]interface{})
+	if !ok {
+		t.Fatal("expected tags array in response")
+	}
+	if len(tags) != 0 {
+		t.Errorf("expected empty tags, got %d", len(tags))
+	}
+}
+
+func TestHandleTagApply_Success(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Create the tag directory
+	os.MkdirAll(filepath.Join(s.DataDir, "content", "pub.polis.core", "tag"), 0755)
+
+	body := jsonBody(t, map[string]string{
+		"tag":        "favorite",
+		"target_uri": "https://test-site.polis.pub/content/pub.polis.core/post/20240101/hello.md",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tags", body)
+	w := httptest.NewRecorder()
+
+	s.handleTags(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["success"] != true {
+		t.Error("expected success=true")
+	}
+}
+
+func TestHandleTagApply_NoKeys(t *testing.T) {
+	s := newTestServer(t)
+
+	body := jsonBody(t, map[string]string{
+		"tag":        "favorite",
+		"target_uri": "https://example.com/post.md",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/tags", body)
+	w := httptest.NewRecorder()
+
+	s.handleTags(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleTagApply_MissingFields(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	body := jsonBody(t, map[string]string{"tag": "favorite"})
+	req := httptest.NewRequest(http.MethodPost, "/api/tags", body)
+	w := httptest.NewRecorder()
+
+	s.handleTags(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleTagRemove_MissingFields(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	body := jsonBody(t, map[string]string{"tag": "favorite"})
+	req := httptest.NewRequest(http.MethodDelete, "/api/tags", body)
+	w := httptest.NewRecorder()
+
+	s.handleTags(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleTags_MethodNotAllowed(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPut, "/api/tags", nil)
+	w := httptest.NewRecorder()
+
+	s.handleTags(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+// ============================================================================
+// handleSnippets Tests
+// ============================================================================
+
+func TestHandleSnippets_ListEmpty(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/snippets", nil)
+	w := httptest.NewRecorder()
+
+	s.handleSnippets(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleSnippets_CreateSuccess(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	body := jsonBody(t, map[string]string{
+		"path":    "test-snippet.md",
+		"content": "Hello from snippet",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/snippets", body)
+	w := httptest.NewRecorder()
+
+	s.handleSnippets(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify snippet was created
+	snippetPath := filepath.Join(s.DataDir, "site", "snippets", "test-snippet.md")
+	content, err := os.ReadFile(snippetPath)
+	if err != nil {
+		t.Fatalf("snippet file not created: %v", err)
+	}
+	if string(content) != "Hello from snippet" {
+		t.Errorf("expected snippet content, got %q", string(content))
+	}
+}
+
+func TestHandleSnippets_CreateMissingPath(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	body := jsonBody(t, map[string]string{"content": "no path"})
+	req := httptest.NewRequest(http.MethodPost, "/api/snippets", body)
+	w := httptest.NewRecorder()
+
+	s.handleSnippets(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleSnippets_MethodNotAllowed(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodDelete, "/api/snippets", nil)
+	w := httptest.NewRecorder()
+
+	s.handleSnippets(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+// ============================================================================
+// handleDMDeleteConversation Tests
+// ============================================================================
+
+func TestHandleDMDeleteConversation_MissingID(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/dm/conversations/", nil)
+	w := httptest.NewRecorder()
+
+	s.handleDMDeleteConversation(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleDMDeleteConversation_Idempotent(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Deleting a nonexistent conversation is idempotent (succeeds silently)
+	req := httptest.NewRequest(http.MethodDelete, "/api/dm/conversations/nonexistent-id", nil)
+	w := httptest.NewRecorder()
+
+	s.handleDMDeleteConversation(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 (idempotent delete), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ============================================================================
+// handleSiteRegistrationStatus Tests
+// ============================================================================
+
+func TestHandleSiteRegistrationStatus_NoDiscovery(t *testing.T) {
+	s := newConfiguredServer(t)
+	// DiscoveryURL is empty by default
+
+	req := httptest.NewRequest(http.MethodGet, "/api/site/registration-status", nil)
+	w := httptest.NewRecorder()
+
+	s.handleSiteRegistrationStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["configured"] != false {
+		t.Error("expected configured=false when no discovery URL")
+	}
+}
+
+func TestHandleSiteRegistrationStatus_NoBaseURL(t *testing.T) {
+	s := newConfiguredServer(t)
+	s.DiscoveryURL = "https://ds.polis.pub"
+	s.BaseURL = ""
+
+	req := httptest.NewRequest(http.MethodGet, "/api/site/registration-status", nil)
+	w := httptest.NewRecorder()
+
+	s.handleSiteRegistrationStatus(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["error"] == nil {
+		t.Error("expected error when no base URL")
+	}
+}
+
+func TestHandleSiteRegistrationStatus_MethodNotAllowed(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/site/registration-status", nil)
+	w := httptest.NewRecorder()
+
+	s.handleSiteRegistrationStatus(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
 	}
 }

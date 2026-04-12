@@ -76,6 +76,7 @@ func loadDMStore() *dm.Store {
 	if err != nil {
 		exitError("Invalid private key: %v", err)
 	}
+	defer signing.ZeroKey(privKey)
 
 	store, err := dm.NewStore(dataDir, privKey.Seed())
 	if err != nil {

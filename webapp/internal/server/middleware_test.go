@@ -102,6 +102,7 @@ func TestShouldSkipRequestLog(t *testing.T) {
 	}{
 		{"/api/sse", true},
 		{"/favicon.ico", true},
+		{"/favicon.svg", true},
 		{"/assets/style.css", true},
 		{"/assets/app.js", true},
 		{"/api/status", false},

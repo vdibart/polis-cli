@@ -317,10 +317,16 @@ func TestCacheManager_MarkAllRead(t *testing.T) {
 func TestCacheManager_MarkUnreadFrom(t *testing.T) {
 	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
 
+	// Use relative dates to avoid 90-day prune window
+	now := time.Now().UTC()
+	oldDate := now.AddDate(0, 0, -30).Format(time.RFC3339)
+	midDate := now.AddDate(0, 0, -15).Format(time.RFC3339)
+	newDate := now.AddDate(0, 0, -1).Format(time.RFC3339)
+
 	cm.MergeItems([]FeedItem{
-		{Type: "post", Title: "Old", URL: "posts/old.md", Published: "2026-01-01T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
-		{Type: "post", Title: "Mid", URL: "posts/mid.md", Published: "2026-01-15T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
-		{Type: "post", Title: "New", URL: "posts/new.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "post", Title: "Old", URL: "posts/old.md", Published: oldDate, AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "post", Title: "Mid", URL: "posts/mid.md", Published: midDate, AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "post", Title: "New", URL: "posts/new.md", Published: newDate, AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
 	})
 
 	// Mark all read first
@@ -336,15 +342,15 @@ func TestCacheManager_MarkUnreadFrom(t *testing.T) {
 	}
 
 	items, _ = cm.List()
-	// New (2026-02-01) should be unread (more recent than mid)
+	// New (most recent) should be unread (more recent than mid)
 	if items[0].ReadAt != "" {
 		t.Error("New should be unread")
 	}
-	// Mid (2026-01-15) should be unread (the target)
+	// Mid should be unread (the target)
 	if items[1].ReadAt != "" {
 		t.Error("Mid should be unread")
 	}
-	// Old (2026-01-01) should still be read (older than mid)
+	// Old (oldest) should still be read (older than mid)
 	if items[2].ReadAt == "" {
 		t.Error("Old should still be read")
 	}

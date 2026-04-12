@@ -111,8 +111,23 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 		Signature: sig,
 	}
 
-	if _, err := client.RegisterContent(req); err != nil {
-		return fmt.Errorf("register: %w", err)
+	// Retry once on transient failures (e.g., DS timeout fetching public key).
+	var registerErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := client.RegisterContent(req); err != nil {
+			registerErr = err
+			if attempt == 0 {
+				fmt.Printf("[!] DS registration attempt failed, retrying: %v\n", err)
+				time.Sleep(3 * time.Second)
+				continue
+			}
+		} else {
+			registerErr = nil
+			break
+		}
+	}
+	if registerErr != nil {
+		return fmt.Errorf("register: %w", registerErr)
 	}
 
 	fmt.Printf("[✓] Registered with discovery service: %s\n", postURL)

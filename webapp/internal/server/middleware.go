@@ -60,13 +60,22 @@ func (w *statusResponseWriter) Write(b []byte) (int, error) {
 
 // shouldSkipRequestLog returns true for paths that are too noisy to log.
 func shouldSkipRequestLog(path string) bool {
-	if path == "/api/sse" || path == "/favicon.ico" {
+	if path == "/api/sse" || path == "/favicon.ico" || path == "/favicon.svg" {
 		return true
 	}
 	if strings.HasPrefix(path, "/assets/") {
 		return true
 	}
 	return false
+}
+
+// securityHeadersMiddleware adds standard security headers to all responses.
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // requestLoggingMiddleware logs every HTTP request as structured JSON and

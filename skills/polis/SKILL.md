@@ -3,9 +3,9 @@ name: polis
 description: |
   Polis CLI for decentralized social networking. Publish signed posts,
   discover conversations, comment on posts, manage blessing requests,
-  and view activity status. Use when user wants to: publish, comment,
-  discover topics, manage blessings, check status, or work with their
-  polis site.
+  send direct messages, tag content, and view activity status. Use when
+  user wants to: publish, comment, discover topics, manage blessings,
+  send/read DMs, tag posts, check status, or work with their polis site.
 allowed-tools:
   - Read
   - Write
@@ -478,6 +478,101 @@ Notifications are stored locally:
 ### Notes
 - Replaces the old `polis config` command
 - Shows version mismatch warnings (CLI vs manifest)
+
+---
+
+## Feature 10: Direct Messages
+
+**Trigger phrases**: "dm", "message", "send a message", "direct message", "read messages"
+
+### Workflow
+
+1. **List conversations**:
+   ```bash
+   polis --json dm list
+   ```
+
+2. **Present conversation list**:
+   - Show peer domain, unread count, last message preview
+   - Highlight conversations with unread messages
+
+3. **Read a conversation** when user picks one:
+   ```bash
+   polis --json dm read <conversation_id>
+   ```
+   - Auto-marks messages as read
+
+4. **Send a message** when requested:
+   ```bash
+   polis --json dm send <recipient_url> "<message>"
+   ```
+   - Message is encrypted end-to-end
+   - If delivery fails, message is saved locally for retry
+
+5. **Retry failed deliveries**:
+   ```bash
+   # Retry all unsent
+   polis --json dm retry
+
+   # Retry specific conversation
+   polis --json dm retry <conversation_id>
+   ```
+
+6. **Show DM acceptance policy**:
+   ```bash
+   polis --json dm config
+   ```
+   - Shows private and public policy rules
+   - Explains default (allow all) if no rules configured
+
+### Notes
+- DMs are encrypted with the recipient's public key
+- Messages that fail to deliver are saved locally with status "unsent"
+- Requires `POLIS_BASE_URL` to be set for sending
+- DM policies are managed via `.polis/policies/rules.jsonl`
+
+---
+
+## Feature 11: Content Tagging
+
+**Trigger phrases**: "tag", "label", "categorize", "tag this post", "show tags"
+
+### Workflow
+
+1. **List all tags**:
+   ```bash
+   polis --json tag list
+   ```
+
+2. **Show targets for a specific tag**:
+   ```bash
+   polis --json tag show <name>
+   ```
+
+3. **Apply a tag to content**:
+   ```bash
+   polis --json tag apply <name> <target-uri>
+   ```
+   - Tag names are normalized (lowercase, trimmed)
+   - Automatically syncs to discovery service if configured
+
+4. **Remove a target from a tag**:
+   ```bash
+   polis --json tag remove <name> <target-uri>
+   ```
+
+5. **Delete an entire tag**:
+   ```bash
+   polis --json tag delete <name>
+   ```
+   - Confirm before deleting (destructive)
+   - Unregisters all targets from discovery service
+
+### Notes
+- Tags are stored locally in the polis data directory
+- Tag operations are signed with the site's private key
+- Discovery service sync happens automatically but is non-fatal if it fails
+- Tags use content type `pub.polis.tag`
 
 ---
 

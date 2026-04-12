@@ -43,7 +43,6 @@ const App = {
         incomingPending: 0,
         incomingBlessed: 0,
         // Social
-        feed: 0,
         feedUnread: 0,
         following: 0,
         followers: 0,
@@ -73,7 +72,7 @@ const App = {
     _feedObserver: null,        // IntersectionObserver for viewport-based read marking
     _markReadQueue: [],         // batched item IDs waiting to be marked read
     _markReadTimer: null,       // debounce timer for batch mark-read
-    _feedLastVisitedAt: localStorage.getItem('polis-feed-last-visit') || '', // ISO timestamp of last Feed page visit
+    // _feedHasNewTimer removed — feed dot now driven by has_new_feed in counts payload
     _feedEditorOpen: false,
     _feedEditorTitle: '',
     _feedEditorBody: '',
@@ -332,7 +331,6 @@ const App = {
     _renderAvatar() {
         const btn = document.getElementById('nav-avatar');
         if (!btn) return;
-        const dot = btn.querySelector('.nav-dot');
         if (this.avatarConfig) {
             // Custom avatar: use the saved config with pattern/border/etc
             btn.setAttribute('style', this._buildAvatarStyle(this.avatarConfig));
@@ -344,7 +342,6 @@ const App = {
             btn.setAttribute('style', `background: ${det.color};`);
             btn.textContent = det.initials;
         }
-        if (dot) btn.appendChild(dot);
     },
 
     // Populate avatar hover menu with user data from /api/nav/state
@@ -403,13 +400,9 @@ const App = {
     // Update nav badge dots from counts
     _updateNavBadges() {
         const feedDot = document.getElementById('nav-dot-feed');
+        if (feedDot) feedDot.classList.toggle('hidden', !this.counts.hasNewFeed);
         const commentsDot = document.getElementById('nav-dot-comments');
         const messagesDot = document.getElementById('nav-dot-messages');
-        const avatarDot = document.getElementById('nav-dot-avatar');
-
-        if (feedDot) {
-            feedDot.classList.toggle('hidden', !this.counts.feedHasNew);
-        }
         if (commentsDot) {
             const hasItems = (this.counts.incomingPending || 0) > 0;
             commentsDot.classList.toggle('hidden', !hasItems);
@@ -417,10 +410,6 @@ const App = {
         if (messagesDot) {
             const hasItems = (this.counts.dmUnread || 0) > 0;
             messagesDot.classList.toggle('hidden', !hasItems);
-        }
-        if (avatarDot) {
-            const hasItems = (this.counts.notificationsUnread || 0) > 0;
-            avatarDot.classList.toggle('hidden', !hasItems);
         }
     },
 
@@ -917,6 +906,7 @@ const App = {
                     if (status.active_theme) {
                         this.siteTheme = status.active_theme;
                         document.documentElement.dataset.siteTheme = status.active_theme;
+                        try { localStorage.setItem('polis-site-theme', status.active_theme); } catch (e) {}
                     }
                     // Now render nav with data available
                     this.updateDomainDisplay(status.base_url);
@@ -1098,7 +1088,7 @@ const App = {
         await this.init();
     },
 
-    // Load all counts for sidebar badges via single consolidated endpoint
+    // Load all counts via single consolidated endpoint
     async loadAllCounts() {
         try {
             const c = await this.api('GET', '/api/counts');
@@ -1110,15 +1100,12 @@ const App = {
             this.counts.myCommentDrafts = c.my_comment_drafts || 0;
             this.counts.incomingPending = c.incoming_pending || 0;
             this.counts.incomingBlessed = c.incoming_blessed || 0;
-            this.counts.feed = c.feed || 0;
             this.counts.feedUnread = c.feed_unread || 0;
+            this.counts.hasNewFeed = c.has_new_feed || false;
             this.counts.following = c.following || 0;
             this.counts.followers = c.followers || 0;
             this.counts.dmUnread = c.dm_unread || 0;
-            this.counts.feedNewestCached = c.feed_newest_cached || '';
-            this.counts.feedHasNew = !!c.feed_has_new;
 
-            this.updateBadges();
             this.updateSidebar();
             this._updateTopbarBadges();
         } catch (err) {
@@ -1136,21 +1123,17 @@ const App = {
         this.counts.myCommentDrafts = c.my_comment_drafts || 0;
         this.counts.incomingPending = c.incoming_pending || 0;
         this.counts.incomingBlessed = c.incoming_blessed || 0;
-        this.counts.feed = c.feed || 0;
         this.counts.feedUnread = c.feed_unread || 0;
-        this.counts.feedNewestCached = c.feed_newest_cached || '';
-        this.counts.feedHasNew = !!c.feed_has_new;
+        this.counts.hasNewFeed = c.has_new_feed || false;
         this.counts.following = c.following || 0;
         this.counts.followers = c.followers || 0;
         this.counts.dmUnread = c.dm_unread || 0;
 
-        this.updateBadges();
         this.updateSidebar();
         this._updateTopbarBadges();
 
-        // If on a view that shows items affected by sync, refresh it
-        const autoRefreshViews = ['feed', 'blessing-requests', 'followers', 'comments-published', 'dm-list',
-            ...this.SOCIAL_PLUGINS.filter(p => p.autoRefresh).map(p => p.id)];
+        // Refresh non-feed views affected by sync
+        const autoRefreshViews = ['blessing-requests', 'followers', 'comments-published', 'dm-list'];
         if (autoRefreshViews.includes(this.currentView)) {
             const contentList = document.getElementById('content-list');
             if (contentList) this.loadViewContent();
@@ -1162,35 +1145,6 @@ const App = {
         const dot = document.getElementById('notification-dot');
         if (dot) {
             dot.classList.toggle('hidden', this.notificationState.unreadCount === 0);
-        }
-    },
-
-    // Update sidebar badges
-    updateBadges() {
-        this.updateBadge('posts-count', this.counts.posts);
-        this.updateBadge('drafts-count', this.counts.drafts);
-        // My comments (consolidated total)
-        const totalComments = (this.counts.myCommentDrafts || 0) + (this.counts.myPending || 0)
-                            + (this.counts.myBlessed || 0) + (this.counts.myDenied || 0);
-        this.updateBadge('comments-published-count', totalComments);
-        // Incoming (on my posts)
-        this.updateBadge('incoming-pending-count', this.counts.incomingPending, true);
-        // Social
-        this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
-        this.updateBadge('following-count', this.counts.following);
-        this.updateBadge('followers-count', this.counts.followers);
-    },
-
-    updateBadge(id, count, isWarning = false) {
-        const badge = document.getElementById(id);
-        if (badge) {
-            badge.textContent = count;
-            badge.style.display = count > 0 ? 'inline' : 'none';
-            if (isWarning && count > 0) {
-                badge.classList.add('warning');
-            } else {
-                badge.classList.remove('warning');
-            }
         }
     },
 
@@ -1211,40 +1165,9 @@ const App = {
         }
     },
 
-    // Update sidebar visibility based on lifecycle stage
+    // Update lifecycle stage and welcome panel
     updateSidebar() {
         this.detectLifecycleStage();
-        const stage = this.lifecycleStage;
-
-        // My Site sidebar sections
-        const sections = {
-            posts: document.getElementById('sidebar-section-posts'),
-            comments: document.getElementById('sidebar-section-comments'),
-            snippets: document.getElementById('sidebar-section-snippets'),
-        };
-
-        // Social sidebar sections
-        const socialSections = {
-            discover: document.getElementById('sidebar-section-discover'),
-        };
-
-        // just_arrived: Write (new post btn) + Snippets (About) + Feed + Settings only
-        // first_post: + Posts, Comments
-        // active: + On My Posts, full Social
-        if (stage === 'just_arrived') {
-            if (sections.posts) sections.posts.classList.add('hidden');
-            if (sections.comments) sections.comments.classList.add('hidden');
-            if (sections.snippets) sections.snippets.classList.remove('hidden');
-        } else if (stage === 'first_post') {
-            if (sections.posts) sections.posts.classList.remove('hidden');
-            if (sections.comments) sections.comments.classList.remove('hidden');
-            if (sections.snippets) sections.snippets.classList.remove('hidden');
-        } else {
-            // active: show everything
-            if (sections.posts) sections.posts.classList.remove('hidden');
-            if (sections.comments) sections.comments.classList.remove('hidden');
-            if (sections.snippets) sections.snippets.classList.remove('hidden');
-        }
         this.updateWelcomePanel();
     },
 
@@ -2008,8 +1931,8 @@ const App = {
             this._mcAboutText = aboutText;
             this.counts.posts = posts.length;
             this.counts.drafts = drafts.length;
-            this.updateBadge('posts-count', posts.length);
-            this.updateBadge('drafts-count', drafts.length);
+
+
 
             const domain = this.siteBaseUrl ? (() => { try { return new URL(this.siteBaseUrl).hostname; } catch { return ''; } })() : '';
             const name = this.authorName || domain || 'Untitled';
@@ -2250,7 +2173,7 @@ const App = {
             const result = await this.api('GET', '/api/drafts');
             const drafts = result.drafts || [];
             this.counts.drafts = drafts.length;
-            this.updateBadge('drafts-count', drafts.length);
+
 
             if (drafts.length === 0) {
                 container.innerHTML = this._renderPostsSubTabs('posts-drafts') + `
@@ -2354,7 +2277,7 @@ const App = {
         this.counts.myBlessed = blessed.length;
         this.counts.myDenied = denied.length;
         const total = drafts.length + pending.length + blessed.length + denied.length;
-        this.updateBadge('comments-published-count', total);
+
 
         // Build filter tabs matching view-tabs style
         const tabClass = (name) => name === currentFilter ? 'tab-item active' : 'tab-item';
@@ -2584,7 +2507,7 @@ const App = {
         // Update counts
         this.counts.incomingPending = requests.length;
         this.counts.incomingBlessed = allBlessed.length;
-        this.updateBadge('incoming-pending-count', requests.length, true);
+
 
         // Build filter tabs matching view-tabs style
         const tabClass = (name) => name === currentFilter ? 'tab-item active' : 'tab-item';
@@ -2828,9 +2751,6 @@ const App = {
                             <div class="settings-row">
                                 <span class="settings-row-label">Site:</span>
                                 <span class="settings-row-value" id="site-title-display">${this.escapeHtml(site.site_title || 'Not configured')}</span>
-                                <div class="settings-row-actions">
-                                    <button class="btn-copy" id="site-title-edit-btn" onclick="App.editSiteTitle()">Edit</button>
-                                </div>
                             </div>
                             <div class="settings-row">
                                 <span class="settings-row-label">Display Name:</span>
@@ -3089,39 +3009,6 @@ const App = {
         }
     },
 
-    editSiteTitle() {
-        const display = document.getElementById('site-title-display');
-        const btn = document.getElementById('site-title-edit-btn');
-        if (!display || !btn) return;
-
-        const current = display.textContent === 'Not configured' ? '' : display.textContent;
-        display.innerHTML = `<input type="text" id="site-title-input" value="${this.escapeHtml(current)}" style="font-size:0.85rem;font-family:var(--font-mono);background:var(--bg-light);border:1px solid var(--border-color);color:var(--text-color);padding:0.25rem 0.5rem;border-radius:3px;width:100%;">`;
-        btn.textContent = 'Save';
-        btn.onclick = () => App.saveSiteTitle();
-
-        const input = document.getElementById('site-title-input');
-        if (input) { input.focus(); input.select(); }
-    },
-
-    async saveSiteTitle() {
-        const input = document.getElementById('site-title-input');
-        const display = document.getElementById('site-title-display');
-        const btn = document.getElementById('site-title-edit-btn');
-        if (!input || !display || !btn) return;
-
-        const newTitle = input.value.trim();
-        try {
-            const result = await this.api('POST', '/api/settings/site-title', { site_title: newTitle });
-            display.textContent = result.site_title || 'Not configured';
-            { const dd = document.getElementById('domain-display'); if (dd) dd.textContent = result.site_title || ''; }
-            btn.textContent = 'Edit';
-            btn.onclick = () => App.editSiteTitle();
-            this.showToast('Site title updated', 'success');
-        } catch (err) {
-            this.showToast('Failed to update title: ' + err.message, 'error');
-        }
-    },
-
     editAuthorName() {
         const display = document.getElementById('author-name-display');
         const btn = document.getElementById('author-name-edit-btn');
@@ -3287,6 +3174,7 @@ const App = {
             // Apply new theme to nav immediately
             this.siteTheme = name;
             document.documentElement.dataset.siteTheme = name;
+            try { localStorage.setItem('polis-site-theme', name); } catch (e) {}
             this._renderAvatar();
         } catch (err) {
             this.showToast('Failed to switch theme: ' + err.message, 'error');
@@ -4751,7 +4639,7 @@ echo "File: $POLIS_PATH"</code>
                     ${word('readState', readLabel, [['New'], ['All']])}
                     ${word('contentType', contentLabel, [['posts'], ['comments'], ['announcements'], ['items']])}
                     from
-                    ${word('scope', scopeLabel, [['me'], ['my network'], ['my followers'], ['all of polis']])}
+                    ${word('scope', scopeLabel, [['my network'], ['my followers'], ['all of polis'], ['me']])}
                     ${word('timeRange', timeLabel, timeOptions)}
                     <svg class="feed-sentence-return" viewBox="0 0 18 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 2h12v10"/><polyline points="11 9 14 12 17 9"/></svg>
                 </div>
@@ -4760,14 +4648,10 @@ echo "File: $POLIS_PATH"</code>
     },
 
     async renderConversationsTabbed(container) {
-        // Record visit time for nav dot "new since last visit" logic
-        if (!this._feedFilterOnly) {
-            this._feedLastVisitedAt = new Date().toISOString();
-            localStorage.setItem('polis-feed-last-visit', this._feedLastVisitedAt);
-            this.counts.feedHasNew = false;
-            this._updateNavBadges();
-            this.api('POST', '/api/feed/visited', { at: this._feedLastVisitedAt }).catch(() => {});
-        }
+        // Clear the feed dot immediately and advance the viewed timestamp
+        this.counts.hasNewFeed = false;
+        this._updateTopbarBadges();
+        this.api('POST', '/api/feed/viewed').catch(() => {});
         await this._renderAllSubtab(container, '');
     },
 
@@ -4920,7 +4804,7 @@ echo "File: $POLIS_PATH"</code>
             const groups = result.groups || [];
 
             this.counts.feedUnread = result.unread_items || 0;
-            this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+
             this._updateTopbarBadges();
 
             if (groups.length === 0) {
@@ -5007,7 +4891,7 @@ echo "File: $POLIS_PATH"</code>
             const groups = groupedResult.groups || [];
             const announcements = groupedResult.announcements || [];
             this.counts.feedUnread = groupedResult.unread_items || 0;
-            this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+
             this._updateTopbarBadges();
 
             // Build merged timeline entries from groups + announcements
@@ -5197,9 +5081,8 @@ echo "File: $POLIS_PATH"</code>
             const result = await this.api('POST', '/api/feed/refresh');
             const newItems = result.new_items || 0;
 
-            this.counts.feed = result.total || 0;
             this.counts.feedUnread = result.unread || 0;
-            this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+
             this._updateTopbarBadges();
 
             if (newItems > 0) {
@@ -5231,22 +5114,84 @@ echo "File: $POLIS_PATH"</code>
             const result = await this.api('POST', '/api/feed/refresh');
             const newItems = result.new_items || 0;
 
-            this.counts.feed = result.total || 0;
             this.counts.feedUnread = result.unread || 0;
-            this.updateBadge('feed-count', this.counts.feedUnread, this.counts.feedUnread > 0);
+
             this._updateTopbarBadges();
 
             if (newItems > 0) {
                 this.showToast(`${newItems} new item${newItems > 1 ? 's' : ''}`, 'success');
                 if (this.currentView === 'conversations') {
-                    const contentList = document.getElementById('content-list');
-                    if (contentList) await this.renderConversationsTabbed(contentList);
+                    await this._patchFeedDOM();
                 }
             }
         } catch (err) {
             console.error('Auto-refresh failed:', err);
         } finally {
             this._conversationsRefreshing = false;
+        }
+    },
+
+    // Surgically update the feed DOM: prepend new groups, update existing ones with new comments.
+    async _patchFeedDOM() {
+        const feedList = document.querySelector('.feed-list');
+        if (!feedList) return;
+
+        const scopeParam = this._feedScope && this._feedScope !== 'network' ? `?scope=${this._feedScope}` : '';
+        const groupedResult = await this.api('GET', `/api/feed/grouped${scopeParam}`);
+        const groups = groupedResult.groups || [];
+
+        this.counts.feedUnread = groupedResult.unread_items || 0;
+        this._updateTopbarBadges();
+
+        // Index existing DOM items by post URL
+        const existingByUrl = new Map();
+        for (const el of feedList.querySelectorAll('.feed-item[data-url]')) {
+            existingByUrl.set(el.dataset.url, el);
+        }
+
+        // Walk new groups: prepend brand-new posts, update existing ones in-place
+        const toInsertBefore = feedList.querySelector('.feed-item, .activity-item');
+        for (const group of groups) {
+            const url = group.post_url ? group.post_url.replace(/\.md$/, '.html') : '';
+            const existing = url ? existingByUrl.get(url) : null;
+            const html = this._renderGroupedItem(group);
+
+            if (existing) {
+                // Skip items whose inline comment editor is open (editor is next sibling)
+                if (this._inlineCommentOpen && existing.dataset.url === this._inlineCommentUrl) continue;
+
+                // Update in-place: swap outer HTML to pick up new comments / unread state
+                const oldIds = existing.dataset.ids || '[]';
+                const newIds = JSON.stringify(group.item_ids);
+                if (oldIds !== newIds || existing.classList.contains('unread') !== (group.post_unread || group.unread_comments > 0)) {
+                    const tmp = document.createElement('div');
+                    tmp.innerHTML = html;
+                    const newEl = tmp.firstElementChild;
+                    existing.replaceWith(newEl);
+                    this._observeSingleFeedItem(newEl);
+                }
+            } else if (url) {
+                // New group — insert at top of feed list
+                const tmp = document.createElement('div');
+                tmp.innerHTML = html;
+                const newEl = tmp.firstElementChild;
+                if (toInsertBefore) {
+                    feedList.insertBefore(newEl, toInsertBefore);
+                } else {
+                    feedList.appendChild(newEl);
+                }
+                this._observeSingleFeedItem(newEl);
+            }
+        }
+
+        // Fetch avatars for any new domains
+        this._fetchRemoteAvatarsForGroups(groups);
+    },
+
+    // Observe a single feed item for viewport-based read tracking
+    _observeSingleFeedItem(el) {
+        if (el.classList.contains('unread') && this._feedObserver) {
+            this._feedObserver.observe(el);
         }
     },
 
@@ -5813,7 +5758,7 @@ echo "File: $POLIS_PATH"</code>
                 const followers = followersResult.followers || [];
                 const fCount = followersResult.count || followers.length;
                 this.counts.followers = fCount;
-                this.updateBadge('followers-count', fCount);
+
                 if (followers.length > 0) {
                     followersHtml = `
                         <div class="followers-divider">
@@ -6328,7 +6273,7 @@ echo "File: $POLIS_PATH"</code>
             const count = result.count || 0;
 
             this.counts.followers = count;
-            this.updateBadge('followers-count', count);
+
 
             if (followers.length === 0) {
                 container.innerHTML = `<div class="content-list"><div class="empty-state">
@@ -6369,7 +6314,7 @@ echo "File: $POLIS_PATH"</code>
                 try {
                     const result = await this.api('GET', '/api/followers/count?refresh=true');
                     this.counts.followers = result.count || 0;
-                    this.updateBadge('followers-count', this.counts.followers);
+
                     await this.renderFollowersList(contentList);
                 } catch (err) {
                     contentList.innerHTML = `<div class="content-list"><div class="empty-state"><h3>Refresh failed</h3><p>${this.escapeHtml(err.message)}</p></div></div>`;
@@ -6467,7 +6412,7 @@ echo "File: $POLIS_PATH"</code>
             }
         };
 
-        // Polling fallback: refresh counts every 60s regardless of SSE.
+        // Polling fallback: refresh counts every 30s regardless of SSE.
         // Catches local state changes (CLI edits, other tabs) that don't
         // go through the DS stream, and covers SSE connection gaps.
         this._startCountsPolling();
@@ -6479,7 +6424,7 @@ echo "File: $POLIS_PATH"</code>
         }
         this._countsPollTimer = setInterval(() => {
             this.loadAllCounts();
-        }, 60000);
+        }, 30000);
     },
 
     async toggleNotifications() {

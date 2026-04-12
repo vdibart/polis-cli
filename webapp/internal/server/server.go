@@ -119,9 +119,6 @@ type Config struct {
 
 	// Editor right panel mode: "preview", "help", or "browse" (default "preview")
 	EditorPanelMode string `json:"editor_panel_mode,omitempty"`
-
-	// ISO timestamp of last feed page visit (for "new since last visit" nav dot)
-	FeedLastVisit string `json:"feed_last_visit,omitempty"`
 }
 
 // SSEEvent is a server-sent event pushed to connected clients.
@@ -174,6 +171,12 @@ type Server struct {
 	// SSE client registry
 	sseClients map[chan SSEEvent]struct{}
 	sseMu      sync.Mutex
+
+	// Shared feed caches — one CacheManager per scope, lazily created.
+	// All code paths (background sync, manual refresh, counts) use these
+	// to avoid file-level TOCTOU races from concurrent CacheManager instances.
+	feedCaches  map[string]*feed.CacheManager
+	feedCacheMu sync.Mutex
 
 	syncDone chan struct{} // closed by StopSync() to stop the background goroutine
 }
@@ -1002,8 +1005,8 @@ func (s *Server) Initialize() {
 	following.DataDir = s.DataDir
 	following.DiscoveryURL = s.DiscoveryURL
 
-	// One-time migration: backfill registration marker for already-registered sites
-	discovery.MigrateRegistrationState(s.DataDir, s.DiscoveryURL, s.GetBaseURL())
+	// One-time migration: consolidate author → author_name in .well-known/polis
+	site.MigrateAuthorField(s.DataDir)
 
 	// Apply log defaults and write back to .env so settings are visible
 	if s.LogLevel == 0 {
@@ -1145,6 +1148,10 @@ func (s *Server) StartBackgroundSync() {
 			case <-s.syncDone:
 				return
 			case <-ticker.C:
+				// Only sync when browser tabs are connected — idle cached
+				// tenants skip the DS query entirely. On-demand sync via
+				// syncTrigger (SSE connect, wake endpoint) still fires
+				// immediately when a client arrives.
 				if s.hasSSEClients() {
 					s.runUnifiedSync()
 				}
@@ -1235,10 +1242,8 @@ type CountsPayload struct {
 	MyCommentDrafts  int `json:"my_comment_drafts"`
 	IncomingPending  int `json:"incoming_pending"`
 	IncomingBlessed  int `json:"incoming_blessed"`
-	Feed             int    `json:"feed"`
 	FeedUnread       int    `json:"feed_unread"`
-	FeedNewestCached string `json:"feed_newest_cached,omitempty"`
-	FeedHasNew       bool   `json:"feed_has_new,omitempty"`
+	HasNewFeed       bool   `json:"has_new_feed"`
 	Following        int `json:"following"`
 	Followers        int `json:"followers"`
 	NotificationsUnread int `json:"notifications_unread"`
@@ -1343,25 +1348,22 @@ func (s *Server) computeAllCounts() CountsPayload {
 		counts.Following = f.Count()
 	}
 
-	// Feed counts
-	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	// Feed unread count + newest cached timestamp
+	newestCachedAt := ""
+	cm := s.feedCacheForScope("network")
 	if items, err := cm.List(); err == nil {
-		counts.Feed = len(items)
 		for _, item := range items {
 			if item.ReadAt == "" {
 				counts.FeedUnread++
 			}
-			if item.CachedAt > counts.FeedNewestCached {
-				counts.FeedNewestCached = item.CachedAt
+			if item.CachedAt > newestCachedAt {
+				newestCachedAt = item.CachedAt
 			}
 		}
 	}
-	if counts.FeedNewestCached != "" && s.Config.FeedLastVisit != "" {
-		counts.FeedHasNew = counts.FeedNewestCached > s.Config.FeedLastVisit
-	}
 
 	// Followers (from cached state)
+	discoveryDomain := s.GetDiscoveryDomain()
 	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
 	var followerState stream.FollowerState
 	if store.LoadState("pub.polis.follow", &followerState) == nil {
@@ -1396,6 +1398,10 @@ func (s *Server) computeAllCounts() CountsPayload {
 		}
 	}
 
+	// Feed has-new: compare newest cached item timestamp against last viewed time
+	viewedAt, _ := store.GetCursor("pub.polis.feed.viewed_at")
+	counts.HasNewFeed = newestCachedAt != "" && newestCachedAt > viewedAt
+
 	return counts
 }
 
@@ -1408,6 +1414,7 @@ func (s *Server) dmStore() (*dm.Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
+	defer signing.ZeroKey(privKey)
 	return dm.NewStore(s.DataDir, privKey.Seed())
 }
 
@@ -1662,8 +1669,6 @@ func (s *Server) syncFeed() {
 		return
 	}
 
-	discoveryDomain := s.GetDiscoveryDomain()
-
 	// Load following list to get followed domains
 	followingPath := following.DefaultPath(s.DataDir)
 	f, err := following.Load(followingPath)
@@ -1688,8 +1693,8 @@ func (s *Server) syncFeed() {
 		return
 	}
 
-	// Load feed cursor
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	// Load feed cursor (shared instance to avoid concurrent write races)
+	cm := s.feedCacheForScope("network")
 	cursor, _ := cm.GetCursor()
 
 	// Query DS stream with actor filter for followed domains
@@ -1752,8 +1757,7 @@ func (s *Server) syncFeedScoped(scope string) {
 		return
 	}
 
-	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewScopedCacheManager(s.DataDir, discoveryDomain, scope)
+	cm := s.feedCacheForScope(scope)
 	cursor, _ := cm.GetCursor()
 
 	client := s.NewDSClient(nil)
@@ -1765,6 +1769,7 @@ func (s *Server) syncFeedScoped(scope string) {
 
 	switch scope {
 	case "followers":
+		discoveryDomain := s.GetDiscoveryDomain()
 		store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
 		var followerState stream.FollowerState
 		_ = store.LoadState("pub.polis.follow", &followerState)
@@ -1834,8 +1839,6 @@ func (s *Server) backfillFeedForAuthor(domain string) {
 		return
 	}
 
-	discoveryDomain := s.GetDiscoveryDomain()
-
 	client := s.NewDSClient(nil)
 	client.RequestID = generateBackgroundRequestID("feed-backfill")
 	typeFilter := "pub.polis.post.published,pub.polis.post.republished,pub.polis.comment.published,pub.polis.comment.republished,pub.polis.comment.blessing.granted,pub.polis.comment.blessing.requested,pub.polis.follow.announced,pub.polis.site.registered"
@@ -1845,7 +1848,7 @@ func (s *Server) backfillFeedForAuthor(domain string) {
 		FollowedDomains: map[string]bool{domain: true},
 	}
 
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := s.feedCacheForScope("network")
 
 	// Page through all events from the beginning for this author
 	cursor := "0"
@@ -1969,8 +1972,8 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 		OpenBrowser(url)
 	}()
 
-	// Wrap mux with request logging middleware for correlation IDs and access logs
-	handler := requestLoggingMiddleware(server.Logger, mux)
+	// Wrap mux with middleware: security headers (outermost) → request logging → mux
+	handler := securityHeadersMiddleware(requestLoggingMiddleware(server.Logger, mux))
 
 	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatal("Server error:", err)
@@ -2016,14 +2019,35 @@ var validFeedScopes = map[string]bool{
 	"me":        true,
 }
 
-// feedCacheForScope returns a CacheManager for the given scope.
-// Valid scopes: "network" (default), "followers", "global".
+// feedCacheForScope returns a shared CacheManager for the given scope.
+// All callers (background sync, manual refresh, counts) share the same
+// instance per scope to avoid file-level TOCTOU races.
 func (s *Server) feedCacheForScope(scope string) *feed.CacheManager {
-	discoveryDomain := s.GetDiscoveryDomain()
-	if scope == "" || scope == "network" {
-		return feed.NewCacheManager(s.DataDir, discoveryDomain)
+	// Normalize scope key
+	key := scope
+	if key == "" || key == "network" {
+		key = "network"
 	}
-	return feed.NewScopedCacheManager(s.DataDir, discoveryDomain, scope)
+
+	s.feedCacheMu.Lock()
+	defer s.feedCacheMu.Unlock()
+
+	if s.feedCaches == nil {
+		s.feedCaches = make(map[string]*feed.CacheManager)
+	}
+	if cm, ok := s.feedCaches[key]; ok {
+		return cm
+	}
+
+	discoveryDomain := s.GetDiscoveryDomain()
+	var cm *feed.CacheManager
+	if key == "network" {
+		cm = feed.NewCacheManager(s.DataDir, discoveryDomain)
+	} else {
+		cm = feed.NewScopedCacheManager(s.DataDir, discoveryDomain, key)
+	}
+	s.feedCaches[key] = cm
+	return cm
 }
 
 // extractDomainFromURL extracts the hostname from a URL string.

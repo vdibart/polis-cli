@@ -88,6 +88,86 @@ Re-request blessing for a comment (retry). Looks up request by database ID.
 polis --json blessing beseech 42
 ```
 
+## DM Commands
+
+### `polis dm list`
+List DM conversations with unread counts and previews.
+
+```bash
+polis --json dm list
+```
+
+### `polis dm read <conversation_id>`
+Read messages in a conversation. Auto-marks as read.
+
+```bash
+polis --json dm read conv_abc123
+```
+
+### `polis dm send <recipient_url> <message>`
+Send an encrypted DM to a recipient.
+
+```bash
+polis --json dm send https://alice.com "Hey, great post!"
+```
+
+Requires: `POLIS_BASE_URL` environment variable.
+
+### `polis dm retry [conversation_id]`
+Retry delivering unsent messages.
+
+```bash
+# Retry all unsent messages
+polis --json dm retry
+
+# Retry specific conversation
+polis --json dm retry conv_abc123
+```
+
+### `polis dm config`
+Show DM acceptance policy (private and public rules).
+
+```bash
+polis --json dm config
+```
+
+## Tag Commands
+
+### `polis tag list`
+List all tags with target counts.
+
+```bash
+polis --json tag list
+```
+
+### `polis tag show <name>`
+Show all targets for a specific tag.
+
+```bash
+polis --json tag show rust
+```
+
+### `polis tag apply <name> <target-uri>`
+Apply a tag to content. Creates the tag if it doesn't exist.
+
+```bash
+polis --json tag apply rust https://alice.com/posts/hello
+```
+
+### `polis tag remove <name> <target-uri>`
+Remove a target from a tag.
+
+```bash
+polis --json tag remove rust https://alice.com/posts/hello
+```
+
+### `polis tag delete <name>`
+Delete an entire tag and all its targets.
+
+```bash
+polis --json tag delete rust
+```
+
 ## Social Commands
 
 ### `polis follow <author-url>`
@@ -268,15 +348,6 @@ Options:
 
 Old keypair is archived at `.polis/keys/id_ed25519.old` unless `--delete-old-key` is specified.
 
-### `polis migrate <new-domain>`
-Migrate all content to a new domain (re-signs files, updates database).
-
-```bash
-polis --json migrate newdomain.com
-```
-
-Auto-detects current domain from published files. Updates all URLs, re-signs content, and updates discovery service database (preserves blessing status).
-
 ### `polis notifications`
 View and manage notifications about activity on your site and from followed authors.
 
@@ -352,18 +423,12 @@ polis notifications config --unmute spam.com
 - `.polis/notifications.jsonl` - Notification log
 - `.polis/notifications-manifest.json` - Preferences and sync state
 
-### `polis migrations apply`
-Interactively apply discovered domain migrations to local files.
+### `polis validate`
+Validate site structure and report errors.
 
 ```bash
-polis migrations apply
+polis --json validate
 ```
-
-For each migration:
-- Verifies public key continuity (same owner controls new domain)
-- Shows affected local files
-- Prompts for confirmation
-- Updates following.json, blessed-comments.json, and comment frontmatter
 
 ### `polis extract <file> <hash>`
 Reconstruct a specific version from history.

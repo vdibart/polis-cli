@@ -42,7 +42,7 @@ func TestRegisterPost_NoEmailButHasBaseURL(t *testing.T) {
 	BaseURL = "https://test.polis.pub"
 
 	dataDir := t.TempDir()
-	discovery.WriteRegistrationMarker(dataDir, DiscoveryURL, "test.polis.pub")
+	discovery.WriteRegistrationMarker(dataDir, DiscoveryURL, "test.polis.pub", "")
 
 	// Create .well-known/polis WITHOUT email — author derived from BaseURL
 	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
@@ -80,7 +80,7 @@ func TestRegisterPost_BaseURLDomainFallback(t *testing.T) {
 	BaseURL = "https://alice.polis.pub"
 
 	dataDir := t.TempDir()
-	discovery.WriteRegistrationMarker(dataDir, DiscoveryURL, "alice.polis.pub")
+	discovery.WriteRegistrationMarker(dataDir, DiscoveryURL, "alice.polis.pub", "")
 
 	// Create .well-known/polis without email — domain from BaseURL
 	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
@@ -117,7 +117,7 @@ func TestRegisterPost_EmailPreferredOverDomain(t *testing.T) {
 	BaseURL = "https://alice.polis.pub"
 
 	dataDir := t.TempDir()
-	discovery.WriteRegistrationMarker(dataDir, DiscoveryURL, "alice.polis.pub")
+	discovery.WriteRegistrationMarker(dataDir, DiscoveryURL, "alice.polis.pub", "")
 
 	// Create .well-known/polis with email (email preferred over BaseURL-derived domain)
 	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
@@ -190,7 +190,7 @@ func TestRegisterPost_WithExplicitConfig(t *testing.T) {
 	}
 
 	dataDir := t.TempDir()
-	discovery.WriteRegistrationMarker(dataDir, cfg.DiscoveryURL, "alice.polis.pub")
+	discovery.WriteRegistrationMarker(dataDir, cfg.DiscoveryURL, "alice.polis.pub", "")
 
 	// Create .well-known/polis with email
 	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)

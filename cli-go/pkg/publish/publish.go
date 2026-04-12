@@ -425,16 +425,20 @@ func computeUnifiedDiff(oldContent, newContent string) (string, error) {
 	}
 	defer newFile.Close()
 
-	// Write contents
+	// Write contents and close before diff (defer handles cleanup on error)
 	if _, err := oldFile.WriteString(oldContent); err != nil {
 		return "", fmt.Errorf("failed to write old content: %w", err)
 	}
-	oldFile.Close()
+	if err := oldFile.Close(); err != nil {
+		return "", fmt.Errorf("failed to close old content file: %w", err)
+	}
 
 	if _, err := newFile.WriteString(newContent); err != nil {
 		return "", fmt.Errorf("failed to write new content: %w", err)
 	}
-	newFile.Close()
+	if err := newFile.Close(); err != nil {
+		return "", fmt.Errorf("failed to close new content file: %w", err)
+	}
 
 	// Run diff -u
 	cmd := exec.Command("diff", "-u", oldFile.Name(), newFile.Name())

@@ -18,6 +18,11 @@ import (
 // maxDSResponseSize is the maximum response body size for DS API responses (5MB).
 const maxDSResponseSize = 5 * 1024 * 1024
 
+// maxDSResponseRecords is the maximum number of records/events in a single DS response.
+// Prevents memory exhaustion from responses with millions of tiny objects that fit the
+// byte limit but overwhelm struct allocation.
+const maxDSResponseRecords = 10_000
+
 // Client is an HTTP client for the discovery service.
 type Client struct {
 	BaseURL       string
@@ -453,6 +458,9 @@ func (c *Client) QueryContent(contentType string, filters map[string]string) (*C
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
+	if len(result.Records) > maxDSResponseRecords {
+		return nil, fmt.Errorf("DS response exceeds record limit: %d > %d", len(result.Records), maxDSResponseRecords)
+	}
 
 	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
 		return nil, fmt.Errorf("content query: %w", err)
@@ -564,6 +572,9 @@ func (c *Client) QueryRelationships(relType string, filters map[string]string) (
 	var result RelationshipQueryResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if len(result.Records) > maxDSResponseRecords {
+		return nil, fmt.Errorf("DS response exceeds record limit: %d > %d", len(result.Records), maxDSResponseRecords)
 	}
 
 	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
@@ -1049,6 +1060,9 @@ func (c *Client) StreamQuery(since string, limit int, typeFilter string, actorFi
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
+	if len(result.Events) > maxDSResponseRecords {
+		return nil, fmt.Errorf("DS response exceeds record limit: %d > %d", len(result.Events), maxDSResponseRecords)
+	}
 
 	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
 		return nil, fmt.Errorf("stream query: %w", err)
@@ -1100,6 +1114,9 @@ func (c *Client) StreamQueryInvolved(since string, limit int, domain string) (*S
 	var result StreamQueryResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if len(result.Events) > maxDSResponseRecords {
+		return nil, fmt.Errorf("DS response exceeds record limit: %d > %d", len(result.Events), maxDSResponseRecords)
 	}
 
 	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
@@ -1171,6 +1188,13 @@ func (c *Client) StreamQueryBatch(queries []StreamBatchFilter) (*StreamBatchResp
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
+	totalEvents := 0
+	for _, r := range result.Results {
+		totalEvents += len(r.Events)
+	}
+	if totalEvents > maxDSResponseRecords {
+		return nil, fmt.Errorf("DS response exceeds record limit: %d > %d", totalEvents, maxDSResponseRecords)
+	}
 
 	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
 		return nil, fmt.Errorf("stream batch query: %w", err)
@@ -1227,6 +1251,9 @@ func (c *Client) StreamQueryUnified(since string, limit int, involvedDomain stri
 	var result StreamQueryResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if len(result.Events) > maxDSResponseRecords {
+		return nil, fmt.Errorf("DS response exceeds record limit: %d > %d", len(result.Events), maxDSResponseRecords)
 	}
 
 	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {

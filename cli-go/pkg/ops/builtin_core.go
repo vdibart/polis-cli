@@ -301,6 +301,7 @@ func (h *BuiltinCoreHandler) dmStore(env HandlerEnv) (*dm.Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
+	defer signing.ZeroKey(privKey)
 	return dm.NewStore(siteDir, privKey.Seed())
 }
 

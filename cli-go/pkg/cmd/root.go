@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
-	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
@@ -175,8 +174,8 @@ func Execute(args []string) {
 	following.DataDir = resolvedDataDir
 	following.DiscoveryURL = discoveryURL
 
-	// One-time migration: backfill registration marker for already-registered sites
-	discovery.MigrateRegistrationState(resolvedDataDir, discoveryURL, baseURL)
+	// One-time migration: consolidate author → author_name in .well-known/polis
+	site.MigrateAuthorField(resolvedDataDir)
 
 	command := filteredArgs[0]
 	cmdArgs := filteredArgs[1:]

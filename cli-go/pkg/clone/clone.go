@@ -99,10 +99,19 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 		return nil, err
 	}
 	for _, entry := range entries {
-		data, _ := json.Marshal(entry)
-		indexFile.WriteString(string(data) + "\n")
+		data, err := json.Marshal(entry)
+		if err != nil {
+			indexFile.Close()
+			return nil, fmt.Errorf("marshal index entry: %w", err)
+		}
+		if _, err := indexFile.WriteString(string(data) + "\n"); err != nil {
+			indexFile.Close()
+			return nil, fmt.Errorf("write index entry: %w", err)
+		}
 	}
-	indexFile.Close()
+	if err := indexFile.Close(); err != nil {
+		return nil, fmt.Errorf("close index file: %w", err)
+	}
 
 	// Download posts
 	postsDir := filepath.Join(targetDir, "content", "pub.polis.core", "post")

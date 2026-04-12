@@ -48,6 +48,7 @@ type RenderContext struct {
 	CSSPath     string
 	BaseCSSPath string
 	HomePath    string
+	FaviconPath string
 	AuthorName string
 	AuthorURL  string
 	Year       string
@@ -214,6 +215,7 @@ func (e *Engine) substituteVariables(template string, ctx *RenderContext) string
 		"css_path":      ctx.CSSPath,
 		"base_css_path": ctx.BaseCSSPath,
 		"home_path":     ctx.HomePath,
+		"favicon_path":  ctx.FaviconPath,
 		"author_name": ctx.AuthorName,
 		"author_url":  ctx.AuthorURL,
 		"year":        ctx.Year,

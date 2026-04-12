@@ -1,8 +1,10 @@
 package discovery
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -35,7 +37,7 @@ func TestRegistrationMarkerRoundTrip(t *testing.T) {
 	}
 
 	// Write marker
-	if err := WriteRegistrationMarker(dir, dsURL, "mysite.example.com"); err != nil {
+	if err := WriteRegistrationMarker(dir, dsURL, "mysite.example.com", ""); err != nil {
 		t.Fatalf("WriteRegistrationMarker: %v", err)
 	}
 
@@ -77,7 +79,7 @@ func TestWriteRegistrationMarker_CreatesDirectory(t *testing.T) {
 	dir := t.TempDir()
 	dsURL := "https://ds.example.com"
 
-	if err := WriteRegistrationMarker(dir, dsURL, "test.com"); err != nil {
+	if err := WriteRegistrationMarker(dir, dsURL, "test.com", ""); err != nil {
 		t.Fatalf("WriteRegistrationMarker: %v", err)
 	}
 
@@ -111,13 +113,60 @@ func TestRegistrationMarkerPath_InvalidDSURL(t *testing.T) {
 	}
 }
 
+func TestRegistrationMarker_AttestationRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	dsURL := "https://ds.example.com"
+	attestation := "-----BEGIN SSH SIGNATURE-----\ntest-attestation-data\n-----END SSH SIGNATURE-----"
+
+	if err := WriteRegistrationMarker(dir, dsURL, "mysite.com", attestation); err != nil {
+		t.Fatalf("WriteRegistrationMarker: %v", err)
+	}
+
+	path := registrationMarkerPath(dir, dsURL)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+
+	var marker RegistrationMarker
+	if err := json.Unmarshal(data, &marker); err != nil {
+		t.Fatalf("unmarshal marker: %v", err)
+	}
+	if marker.ServiceAttestation != attestation {
+		t.Errorf("attestation mismatch: got %q", marker.ServiceAttestation)
+	}
+	if marker.Domain != "mysite.com" {
+		t.Errorf("domain mismatch: got %q", marker.Domain)
+	}
+}
+
+func TestRegistrationMarker_OmitsEmptyAttestation(t *testing.T) {
+	dir := t.TempDir()
+	dsURL := "https://ds.example.com"
+
+	if err := WriteRegistrationMarker(dir, dsURL, "mysite.com", ""); err != nil {
+		t.Fatalf("WriteRegistrationMarker: %v", err)
+	}
+
+	path := registrationMarkerPath(dir, dsURL)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+
+	// With omitempty, empty attestation should not appear in JSON
+	if strings.Contains(string(data), "service_attestation") {
+		t.Error("empty attestation should be omitted from JSON")
+	}
+}
+
 func TestIsRegisteredLocally_DifferentDS(t *testing.T) {
 	dir := t.TempDir()
 	ds1 := "https://ds1.example.com"
 	ds2 := "https://ds2.example.com"
 
 	// Register with ds1
-	if err := WriteRegistrationMarker(dir, ds1, "mysite.com"); err != nil {
+	if err := WriteRegistrationMarker(dir, ds1, "mysite.com", ""); err != nil {
 		t.Fatal(err)
 	}
 

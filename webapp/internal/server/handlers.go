@@ -2011,7 +2011,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"subdomain":            subdomain,
 			"site_title":           siteTitle,
 			"public_key":           publicKey,
-			"data_dir":             s.DataDir,
 			"discovery_url":        discoveryURL,
 			"discovery_configured": discoveryConfigured,
 			"show_frontmatter":     showFrontmatter,
@@ -2624,47 +2623,6 @@ func (s *Server) handleEditorPanelMode(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUpdateSiteTitle handles POST /api/settings/site-title to update the site title.
-func (s *Server) handleUpdateSiteTitle(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		SiteTitle string `json:"site_title"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	wk, err := site.LoadWellKnown(s.DataDir)
-	if err != nil {
-		s.LogError("failed to load .well-known/polis: %v", err)
-		http.Error(w, "Failed to load site config", http.StatusInternalServerError)
-		return
-	}
-
-	wk.SiteTitle = strings.TrimSpace(req.SiteTitle)
-
-	if err := site.SaveWellKnown(s.DataDir, wk); err != nil {
-		s.LogError("failed to save .well-known/polis: %v", err)
-		http.Error(w, "Failed to save site config", http.StatusInternalServerError)
-		return
-	}
-
-	s.LogEvent("pub.polis.site.title_update", map[string]interface{}{
-		"title": wk.SiteTitle,
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":    true,
-		"site_title": wk.SiteTitle,
-	})
-}
-
 // Valid hex color pattern for avatar config
 var hexColorRegex = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
@@ -2729,6 +2687,11 @@ func (s *Server) handleUpdateAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Regenerate favicon from updated avatar config
+	if err := site.WriteFavicon(s.DataDir); err != nil {
+		s.LogWarn("failed to regenerate favicon: %v", err)
+	}
+
 	s.LogEvent("pub.polis.site.avatar_update", map[string]interface{}{
 		"has_avatar": req.Avatar != nil,
 	})
@@ -2784,6 +2747,20 @@ func (s *Server) handleUpdateAuthorName(w http.ResponseWriter, r *http.Request) 
 		"success":     true,
 		"author_name": name,
 	})
+}
+
+// handleFavicon serves the generated favicon.svg from the data directory.
+// Falls back to 404 if no favicon has been generated yet.
+func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
+	faviconPath := filepath.Join(s.DataDir, "favicon.svg")
+	data, err := os.ReadFile(faviconPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Write(data)
 }
 
 // handleContent handles GET /api/content/{path} for browser mode navigation
@@ -3064,7 +3041,7 @@ func (s *Server) handleSiteRegister(w http.ResponseWriter, r *http.Request) {
 	// Get author_name from .well-known/polis (email is private, not sent to DS)
 	var authorName string
 	if wk, err := site.LoadWellKnown(s.DataDir); err == nil {
-		authorName = wk.Author
+		authorName = wk.AuthorName
 	}
 
 	// Register with discovery service (email omitted — private by default)
@@ -3077,7 +3054,7 @@ func (s *Server) handleSiteRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write local registration marker
-	if err := discovery.WriteRegistrationMarker(s.DataDir, s.DiscoveryURL, domain); err != nil {
+	if err := discovery.WriteRegistrationMarker(s.DataDir, s.DiscoveryURL, domain, result.ServiceAttestation); err != nil {
 		s.LogWarn("Failed to write registration marker: %v", err)
 	}
 
@@ -3568,7 +3545,7 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 					s.LogDebug("following backfill: failed to fetch %s: %v", m.URL, err)
 					continue
 				}
-				if f.UpdateMetadata(m.URL, wk.SiteTitle, wk.Author) {
+				if f.UpdateMetadata(m.URL, wk.SiteTitle, wk.DisplayName()) {
 					dirty = true
 				}
 			}
@@ -3745,6 +3722,31 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleFeedViewed advances the "viewed" cursor to the current sync position.
+// Called when the user views the feed page.
+// POST /api/feed/viewed
+func (s *Server) handleFeedViewed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	discoveryDomain := s.GetDiscoveryDomain()
+	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+
+	// Set viewed cursor to current sync cursor position
+	syncCursor, _ := store.GetCursor("pub.polis.sync")
+	if syncCursor != "" {
+		_ = store.SetCursor("pub.polis.feed.viewed", syncCursor)
+	}
+
+	// Record when the user last viewed the feed (used by has_new_feed in counts)
+	_ = store.SetCursor("pub.polis.feed.viewed_at", time.Now().UTC().Format(time.RFC3339))
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+}
+
 // handleFeedRefresh triggers a stream-based feed sync and returns the updated cache.
 // POST /api/feed/refresh
 func (s *Server) handleFeedRefresh(w http.ResponseWriter, r *http.Request) {
@@ -3820,14 +3822,16 @@ func (s *Server) handleFeedRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := s.feedCacheForScope("network")
 
 	if err := cm.MarkRead(req.ID); err != nil {
 		// Item not found is OK — may have been pruned
-		if err.Error() != "item not found: "+req.ID {
-			s.LogError("feed read failed: %v", err)
+		if err.Error() == "item not found: "+req.ID {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+			return
 		}
+		s.LogError("feed read failed: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -3846,8 +3850,7 @@ func (s *Server) handleFeedCounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := s.feedCacheForScope("network")
 
 	items, err := cm.List()
 	if err != nil {
@@ -3878,27 +3881,7 @@ func (s *Server) handleFeedCounts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleFeedVisited records the timestamp of the user's last feed page visit.
-// POST /api/feed/visited  Body: {"at":"2026-03-28T01:00:00Z"}
-func (s *Server) handleFeedVisited(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		At string `json:"at"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.At == "" {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-	s.Config.FeedLastVisit = req.At
-	if err := s.SaveConfig(); err != nil {
-		s.LogError("failed to save feed visit: %v", err)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
-}
+
 
 // handleFeedGrouped returns feed items grouped by post URL.
 // Comments are grouped with their target post; posts without comments appear as solo groups.
@@ -4471,8 +4454,7 @@ func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
 	var resp ConversationsResponse
 
 	// 1. Comment threads from feed cache (type=comment, last 30 days)
-	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := s.feedCacheForScope("network")
 	items, err := cm.List()
 	if err != nil {
 		items = nil
@@ -4539,6 +4521,7 @@ func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. Blessing activity from cached state
+	discoveryDomain := s.GetDiscoveryDomain()
 	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
 	var blessingState stream.BlessingState
 	_ = store.LoadState("pub.polis.comment.blessing", &blessingState)
@@ -4639,8 +4622,7 @@ func (s *Server) handlePulse(w http.ResponseWriter, r *http.Request) {
 	resp.Site.IncomingPending = counts.IncomingPending
 
 	// Recent highlights: top 5 feed items from last 7 days
-	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := s.feedCacheForScope("network")
 	items, err := cm.List()
 	if err != nil {
 		items = nil
@@ -5107,8 +5089,15 @@ var (
 	lastDownloadTime time.Time
 )
 
+const (
+	maxExportFileSize  = 50 << 20  // 50MB per file
+	maxExportTotalSize = 500 << 20 // 500MB total
+)
+
 // WriteZipArchive writes a ZIP archive of dataDir to w, excluding the named directories.
 // Directory names in excludeDirs are relative to dataDir (e.g. "logs", ".polis/keys").
+// Files exceeding maxExportFileSize are skipped. Returns an error if the total exceeds
+// maxExportTotalSize.
 func WriteZipArchive(w io.Writer, dataDir string, excludeDirs []string) error {
 	zw := zip.NewWriter(w)
 	defer zw.Close()
@@ -5120,6 +5109,8 @@ func WriteZipArchive(w io.Writer, dataDir string, excludeDirs []string) error {
 	for _, d := range excludeDirs {
 		excludeSet[filepath.Clean(d)] = true
 	}
+
+	var totalWritten int64
 
 	return filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -5146,6 +5137,11 @@ func WriteZipArchive(w io.Writer, dataDir string, excludeDirs []string) error {
 			}
 		}
 
+		// Skip oversized files
+		if info.Size() > maxExportFileSize {
+			return nil
+		}
+
 		header, err := zip.FileInfoHeader(info)
 		if err != nil {
 			return nil
@@ -5164,7 +5160,11 @@ func WriteZipArchive(w io.Writer, dataDir string, excludeDirs []string) error {
 		}
 		defer f.Close()
 
-		io.Copy(writer, f)
+		n, _ := io.Copy(writer, io.LimitReader(f, maxExportFileSize))
+		totalWritten += n
+		if totalWritten > maxExportTotalSize {
+			return fmt.Errorf("export exceeded total size limit of %d bytes", maxExportTotalSize)
+		}
 		return nil
 	})
 }
@@ -5215,6 +5215,8 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	// Register this client
 	ch := make(chan SSEEvent, 10)
@@ -5230,7 +5232,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// Stream events until client disconnects
 	ctx := r.Context()
-	keepalive := time.NewTicker(30 * time.Second)
+	keepalive := time.NewTicker(15 * time.Second)
 	defer keepalive.Stop()
 
 	for {

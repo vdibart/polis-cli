@@ -11,14 +11,16 @@ _polis_completion() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     # All top-level commands
-    local commands="about blessing clone comment discover extract follow
+    local commands="about blessing clone comment discover dm extract follow
         index init notifications post preview
-        rebuild register render republish rotate-key serve unfollow
+        rebuild register render republish rotate-key serve tag unfollow
         unpublish unregister validate version"
 
     # Subcommands for specific commands
     local blessing_subcommands="beseech deny grant requests sync"
+    local dm_subcommands="list read send retry config"
     local notifications_subcommands="list"
+    local tag_subcommands="list show apply remove delete"
 
     # Options for specific commands
     local notifications_list_opts="--type --json"
@@ -69,6 +71,16 @@ _polis_completion() {
                 blessing)
                     if [[ $effective_pos -eq 1 ]]; then
                         COMPREPLY=($(compgen -W "$blessing_subcommands --json" -- "$cur"))
+                    fi
+                    ;;
+                dm)
+                    if [[ $effective_pos -eq 1 ]]; then
+                        COMPREPLY=($(compgen -W "$dm_subcommands --json" -- "$cur"))
+                    fi
+                    ;;
+                tag)
+                    if [[ $effective_pos -eq 1 ]]; then
+                        COMPREPLY=($(compgen -W "$tag_subcommands --json" -- "$cur"))
                     fi
                     ;;
                 notifications)

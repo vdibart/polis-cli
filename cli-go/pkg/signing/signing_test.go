@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha512"
+	"encoding/pem"
 	"strings"
 	"testing"
 )
@@ -224,6 +225,32 @@ func TestParsePublicKey_Invalid(t *testing.T) {
 		if err == nil {
 			t.Errorf("Case %d: parsePublicKey should fail for invalid input", i)
 		}
+	}
+}
+
+func TestParseSSHSignature_Malformed(t *testing.T) {
+	tests := []struct {
+		name string
+		sig  string
+	}{
+		{"not PEM", "not a signature"},
+		{"wrong PEM type", "-----BEGIN CERTIFICATE-----\nYWJj\n-----END CERTIFICATE-----"},
+		{"empty PEM body", "-----BEGIN SSH SIGNATURE-----\n-----END SSH SIGNATURE-----"},
+		{"wrong magic", "-----BEGIN SSH SIGNATURE-----\nAAAA\n-----END SSH SIGNATURE-----"},
+		{"truncated after magic", func() string {
+			// SSHSIG magic (6 bytes) but nothing else
+			data := []byte("SSHSIG")
+			block := &pem.Block{Type: "SSH SIGNATURE", Bytes: data}
+			return string(pem.EncodeToMemory(block))
+		}()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseSSHSignature(tt.sig)
+			if err == nil {
+				t.Error("parseSSHSignature should return error for malformed input")
+			}
+		})
 	}
 }
 

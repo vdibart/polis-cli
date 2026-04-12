@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.61.0] - 2026-04-11
+
+This release adds security hardening across the DM and discovery service layers, DS attestation storage in registration files, webapp feed improvements, favicon support in themes, and shell completion updates. Hosted-only operational packages (judge, patrol, medic) have been removed from the public distribution, and shared theme utilities have been refactored into `pkg/theme`.
+
+### Added
+
+- **[Go CLI] DM input validation**: New `pkg/dm/validate.go` with domain and payload validation for DM receive path.
+- **[Go CLI] DS attestation storage**: Registration files now store the discovery service attestation signature; used for trust chain verification.
+- **[Go CLI] Private key zeroing**: All `ParsePrivateKey` callers now zero key material after use to minimize exposure window.
+- **[Webapp] Feed dot indicator**: Navigation shows a dot when new feed items arrive since the user last viewed the feed.
+- **[Webapp] Idle sync gating**: Background sync loop is gated on active SSE clients, eliminating unnecessary DS polling for idle sessions.
+- **[Completions] `dm` and `tag` subcommands**: Bash and zsh completions now include `dm` and `tag` subcommand completions.
+- **[Themes] Favicon support**: Base templates include adaptive SVG favicon links.
+- **[Docs] Feed architecture**: New `docs/webapp/developer/feed-architecture.md` documenting the feed system internals.
+
+### Changed
+
+- **[Go CLI] `pkg/theme/stale.go`**: Stale theme file detection (previously in `pkg/patrol`) refactored into the shared `pkg/theme` package so it can be used by `pkg/tailor` without depending on hosted-only packages.
+- **[Themes] Standardized tagline and wordmark**: Footer tagline and polis wordmark unified across all base and studio13 templates.
+- **[Themes] Avatar border-radius fix**: Corrected avatar edge bleed-through at cardinal points in `base.css`.
+
+### Fixed
+
+- **[Go CLI] DM key cache race**: Fixed race condition in concurrent DM key cache reads.
+- **[Go CLI] DS client response limits**: Added record count bounds to discovery service response deserialization to prevent memory exhaustion.
+- **[Go CLI] SSRF protection**: Domain validation added to DM receive path to prevent server-side request forgery.
+- **[Go CLI] ZIP archive size limits**: Per-file and total size caps on ZIP archive generation.
+- **[Webapp] Feed read 500 error**: Fixed `/api/feed/read` returning 500 for pruned feed items.
+- **[Webapp] Dead sidebar badges removed**: Cleaned up unused badge rendering and consolidated polling to a single 30s endpoint.
+
+### Removed
+
+- **[Go CLI] Hosted-only packages**: `pkg/judge`, `pkg/patrol`, `pkg/medic` removed from public distribution. These multi-tenant operational tools remain in the private repository and will be open-sourced with the hosted service code.
+
 ## [0.60.0] - 2026-03-30
 
 This release introduces the tag system, a registration marker architecture that eliminates network calls for checking registration state, five new Go packages for operational tooling, a Milkdown WYSIWYG editor in the webapp, shared base theme templates, and extensive test coverage improvements across the entire codebase.

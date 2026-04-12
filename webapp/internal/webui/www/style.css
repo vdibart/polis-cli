@@ -298,7 +298,7 @@ body {
 /* Avatar button */
 .nav-icon-btn.avatar-btn {
     width: 28px; height: 28px; border-radius: 50%;
-    background: var(--avatar-gradient, linear-gradient(135deg, #6a8a6a, #4a6a5a));
+    background: transparent;
     color: #fff; font-size: 11px; font-weight: 700;
     font-family: var(--font-ui); padding: 0;
     border: 2px solid transparent;
@@ -7070,6 +7070,8 @@ a.activity-event:hover {
     line-height: 1.8;
     color: var(--text-soft);
     outline: none;
+    white-space: pre-wrap;
+    word-wrap: break-word;
 }
 
 .milkdown-mount .ProseMirror > *:first-child {

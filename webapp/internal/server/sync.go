@@ -90,7 +90,7 @@ func (s *Server) runUnifiedSync() SyncResult {
 		}
 		// Broadcast counts even with 0 events — feed items may have been
 		// added by other paths (e.g. manual feed refresh) since the last
-		// broadcast, and SSE clients need the updated feed_has_new state.
+		// broadcast, and SSE clients need the updated counts.
 		s.broadcastCounts(result)
 		s.LogEvent("pub.polis.sync.complete", map[string]interface{}{
 			"sync_id":          syncID,
@@ -433,8 +433,6 @@ func (h *feedSyncHandler) Process(events []discovery.StreamEvent) stream.Handler
 		return stream.HandlerResult{}
 	}
 
-	discoveryDomain := s.GetDiscoveryDomain()
-
 	// Load followed domains for feed filtering
 	followingPath := following.DefaultPath(s.DataDir)
 	f, err := following.Load(followingPath)
@@ -479,7 +477,7 @@ func (h *feedSyncHandler) Process(events []discovery.StreamEvent) stream.Handler
 		return stream.HandlerResult{}
 	}
 
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := s.feedCacheForScope("network")
 	newCount, err := cm.MergeItems(items)
 	if err != nil {
 		return stream.HandlerResult{Error: err}

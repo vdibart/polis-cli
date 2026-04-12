@@ -1,18 +1,15 @@
 package cmd
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
-
-// Note: filepath is used by handleSiteRegister
 
 func handleRegister(args []string) {
 	fs := flag.NewFlagSet("register", flag.ExitOnError)
@@ -54,17 +51,10 @@ func handleRegister(args []string) {
 }
 
 func handleSiteRegister(client *discovery.Client, dir, domain string, privKey []byte) {
-	// Get author from .well-known/polis (email is private, not sent to DS)
+	// Get author_name from .well-known/polis (email is private, not sent to DS)
 	var authorName string
-	wellKnownPath := filepath.Join(dir, ".well-known", "polis")
-	data, err := os.ReadFile(wellKnownPath)
-	if err == nil {
-		var wkp map[string]interface{}
-		if json.Unmarshal(data, &wkp) == nil {
-			if a, ok := wkp["author"].(string); ok {
-				authorName = a
-			}
-		}
+	if wk, err := site.LoadWellKnown(dir); err == nil {
+		authorName = wk.AuthorName
 	}
 
 	result, err := client.RegisterSite(domain, privKey, "", authorName)
@@ -81,7 +71,7 @@ func handleSiteRegister(client *discovery.Client, dir, domain string, privKey []
 	}
 
 	// Write local registration marker
-	if err := discovery.WriteRegistrationMarker(dir, client.BaseURL, domain); err != nil {
+	if err := discovery.WriteRegistrationMarker(dir, client.BaseURL, domain, result.ServiceAttestation); err != nil {
 		fmt.Fprintf(os.Stderr, "[!] Warning: could not write registration marker: %v\n", err)
 	}
 

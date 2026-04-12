@@ -79,7 +79,7 @@ func handleAbout(args []string) {
 
 	if jsonOutput {
 		siteData := map[string]interface{}{
-			"author":          wk.Author,
+			"author_name":     wk.AuthorName,
 			"domain":          domain,
 			"created":         wk.Created,
 			"public_key":      wk.PublicKey,
@@ -120,7 +120,7 @@ func handleAbout(args []string) {
 		fmt.Println()
 
 		fmt.Println("=== Site Information ===")
-		fmt.Printf("  Author: %s\n", wk.Author)
+		fmt.Printf("  Author: %s\n", wk.AuthorName)
 		if domain != "" {
 			fmt.Printf("  Domain: %s\n", domain)
 		}

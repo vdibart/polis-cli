@@ -5,6 +5,7 @@ import { Editor, rootCtx, defaultValueCtx, editorViewCtx } from '@milkdown/kit/c
 import { commonmark } from '@milkdown/kit/preset/commonmark';
 import { getMarkdown, replaceAll } from '@milkdown/kit/utils';
 import { listener, listenerCtx } from '@milkdown/plugin-listener';
+import { history } from '@milkdown/kit/plugin/history';
 
 const editors = new Map();
 
@@ -35,6 +36,7 @@ async function create(containerId, initialMarkdown = '') {
             });
         })
         .use(commonmark)
+        .use(history)
         .use(listener)
         .create();
 

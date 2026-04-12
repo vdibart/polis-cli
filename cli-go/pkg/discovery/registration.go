@@ -12,19 +12,20 @@ import (
 // with a discovery service. Its presence is the local source of truth for
 // "is this site registered?" — avoiding any network call to check.
 type RegistrationMarker struct {
-	Domain       string `json:"domain"`
-	DSURL        string `json:"ds_url"`
-	RegisteredAt string `json:"registered_at"`
+	Domain             string `json:"domain"`
+	DSURL              string `json:"ds_url"`
+	RegisteredAt       string `json:"registered_at"`
+	ServiceAttestation string `json:"service_attestation,omitempty"`
 }
 
 // registrationMarkerPath returns the path to the registration marker file
-// for a given DS URL: .polis/ds/{ds-domain}/registered.json
+// for a given DS URL: .polis/ds/{ds-domain}/registration.json
 func registrationMarkerPath(dataDir, dsURL string) string {
 	dsDomain := ExtractDomainFromURL(dsURL)
 	if dsDomain == "" {
 		return ""
 	}
-	return filepath.Join(dataDir, ".polis", "ds", dsDomain, "registered.json")
+	return filepath.Join(dataDir, ".polis", "ds", dsDomain, "registration.json")
 }
 
 // IsRegisteredLocally checks whether the site has a local registration marker
@@ -45,7 +46,7 @@ func IsRegisteredLocally(dataDir, dsURL string) bool {
 
 // WriteRegistrationMarker writes the registration marker file after a
 // successful registration with the discovery service.
-func WriteRegistrationMarker(dataDir, dsURL, siteDomain string) error {
+func WriteRegistrationMarker(dataDir, dsURL, siteDomain, attestation string) error {
 	path := registrationMarkerPath(dataDir, dsURL)
 	if path == "" {
 		return fmt.Errorf("could not determine marker path (empty dsURL?)")
@@ -56,9 +57,10 @@ func WriteRegistrationMarker(dataDir, dsURL, siteDomain string) error {
 	}
 
 	marker := RegistrationMarker{
-		Domain:       siteDomain,
-		DSURL:        dsURL,
-		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
+		Domain:             siteDomain,
+		DSURL:              dsURL,
+		RegisteredAt:       time.Now().UTC().Format(time.RFC3339),
+		ServiceAttestation: attestation,
 	}
 
 	data, err := json.MarshalIndent(marker, "", "  ")
@@ -71,6 +73,23 @@ func WriteRegistrationMarker(dataDir, dsURL, siteDomain string) error {
 	}
 
 	return nil
+}
+
+// ReadRegistrationMarker reads and parses a registration marker file.
+// Returns nil and no error if the file does not exist.
+func ReadRegistrationMarker(path string) (*RegistrationMarker, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var marker RegistrationMarker
+	if err := json.Unmarshal(data, &marker); err != nil {
+		return nil, fmt.Errorf("parse marker: %w", err)
+	}
+	return &marker, nil
 }
 
 // RemoveRegistrationMarker deletes the registration marker file after a
@@ -87,54 +106,3 @@ func RemoveRegistrationMarker(dataDir, dsURL string) error {
 	return err
 }
 
-// migrationCheckedPath returns the path to the one-time migration flag file.
-func migrationCheckedPath(dataDir, dsURL string) string {
-	dsDomain := ExtractDomainFromURL(dsURL)
-	if dsDomain == "" {
-		return ""
-	}
-	return filepath.Join(dataDir, ".polis", "ds", dsDomain, "registration_checked")
-}
-
-// MigrateRegistrationState is a one-time migration for sites that registered
-// before the local marker file was introduced. On first run, it calls
-// CheckSiteRegistration on the DS. If the site is registered, it writes the
-// marker file. A flag file prevents repeating the check on subsequent startups.
-//
-// This is the one allowed DS network call for registration state — it runs
-// once per site per DS and is a no-op after that.
-func MigrateRegistrationState(dataDir, dsURL, baseURL string) {
-	if dataDir == "" || dsURL == "" || baseURL == "" {
-		return
-	}
-	if IsRegisteredLocally(dataDir, dsURL) {
-		return // already has marker
-	}
-
-	checkedPath := migrationCheckedPath(dataDir, dsURL)
-	if checkedPath == "" {
-		return
-	}
-	if _, err := os.Stat(checkedPath); err == nil {
-		return // already checked
-	}
-
-	domain := ExtractDomainFromURL(baseURL)
-	if domain == "" {
-		return
-	}
-
-	client := NewClient(dsURL, "")
-	result, err := client.CheckSiteRegistration(domain)
-	if err == nil && result.IsRegistered {
-		if err := WriteRegistrationMarker(dataDir, dsURL, domain); err != nil {
-			fmt.Printf("[!] Migration: could not write registration marker: %v\n", err)
-		} else {
-			fmt.Printf("[i] Migration: site already registered with DS, marker file created\n")
-		}
-	}
-
-	// Write checked-flag regardless of result to avoid repeating
-	os.MkdirAll(filepath.Dir(checkedPath), 0700)
-	os.WriteFile(checkedPath, []byte("1"), 0600)
-}

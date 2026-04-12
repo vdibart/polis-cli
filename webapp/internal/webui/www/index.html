@@ -4,18 +4,29 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Polis</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/style.css">
     <link rel="stylesheet" href="/nav-themes.css">
+    <script>
+    // Apply cached themes before first paint to prevent FOUC
+    try {
+        var t = localStorage.getItem('polis-webapp-theme');
+        if (t) document.documentElement.dataset.theme = t;
+        var st = localStorage.getItem('polis-site-theme');
+        if (st) document.documentElement.dataset.siteTheme = st;
+    } catch(e) {}
+    </script>
     <script type="importmap">
     {
         "imports": {
             "@milkdown/kit/core": "https://esm.sh/@milkdown/kit@7/core",
             "@milkdown/kit/preset/commonmark": "https://esm.sh/@milkdown/kit@7/preset/commonmark",
             "@milkdown/kit/utils": "https://esm.sh/@milkdown/kit@7/utils",
-            "@milkdown/plugin-listener": "https://esm.sh/@milkdown/plugin-listener@7?external=@milkdown/kit"
+            "@milkdown/plugin-listener": "https://esm.sh/@milkdown/plugin-listener@7?external=@milkdown/kit",
+            "@milkdown/kit/plugin/history": "https://esm.sh/@milkdown/kit@7/plugin/history"
         }
     }
     </script>
@@ -151,7 +162,7 @@
         <nav class="icon-nav" id="icon-nav">
             <!-- Avatar + hover menu -->
             <div class="avatar-wrap">
-                <button id="nav-avatar" class="nav-icon-btn avatar-btn" onclick="App.navigateTo('/feed')"><span class="nav-dot" id="nav-dot-avatar"></span></button>
+                <button id="nav-avatar" class="nav-icon-btn avatar-btn" onclick="App.navigateTo('/feed')"></button>
                 <div class="avatar-menu" id="avatar-menu">
                     <div class="avatar-menu-header">
                         <div class="avatar-menu-name" id="avatar-menu-name"></div>
@@ -219,79 +230,6 @@
                     </div>
                 </div>
             </div>
-
-            <!-- Legacy sidebar (hidden in v2 layout, kept for rollback) -->
-            <aside class="sidebar legacy-sidebar hidden">
-                <div class="sidebar-mode-toggle">
-                    <button class="mode-tab active" data-sidebar-mode="my-site">My Site</button>
-                    <button class="mode-tab" data-sidebar-mode="social">Social</button>
-                </div>
-                <div id="sidebar-my-site">
-                    <div id="sidebar-section-posts" class="sidebar-section">
-                        <div class="section-label">
-                            Posts
-                            <button class="section-add-btn" onclick="App.newPost()" title="New Post">+</button>
-                        </div>
-                        <nav>
-                            <button class="nav-item active" data-view="posts-published">
-                                Published
-                                <span id="posts-count" class="badge" style="display: none;">0</span>
-                            </button>
-                            <button class="nav-item" data-view="posts-drafts">
-                                Drafts
-                                <span id="drafts-count" class="badge" style="display: none;">0</span>
-                            </button>
-                        </nav>
-                    </div>
-                    <div id="sidebar-section-comments" class="sidebar-section">
-                        <div class="section-label">
-                            Comments
-                            <button class="section-add-btn" onclick="App.newCommentDraft()" title="New Comment">+</button>
-                        </div>
-                        <nav>
-                            <button class="nav-item" data-view="comments-published">
-                                Published
-                                <span id="comments-published-count" class="badge" style="display: none;">0</span>
-                            </button>
-                            <button class="nav-item" data-view="blessing-requests">
-                                Blessing Requests
-                                <span id="incoming-pending-count" class="badge warning" style="display: none;">0</span>
-                            </button>
-                        </nav>
-                    </div>
-                    <div id="sidebar-section-snippets" class="sidebar-section">
-                        <div class="section-label">Snippets</div>
-                        <nav>
-                            <button class="nav-item" data-view="about">About</button>
-                        </nav>
-                    </div>
-                </div>
-                <div id="sidebar-social" class="hidden">
-                    <div id="sidebar-section-discover" class="sidebar-section">
-                        <div class="section-label">Discover</div>
-                        <nav id="social-plugins-nav">
-                        </nav>
-                        <nav>
-                            <button class="nav-item" data-view="following">
-                                Following
-                            </button>
-                            <button class="nav-item" data-view="followers">
-                                Followers
-                                <span id="followers-count" class="badge" style="display: none;">0</span>
-                            </button>
-                        </nav>
-                    </div>
-                </div>
-                <div id="sidebar-follow-link" class="sidebar-footer hidden">
-                    <button id="copy-follow-link-btn" onclick="App.copyFollowLink()" title="Copy your follow link to share">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
-                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
-                        </svg>
-                        Copy Follow Link
-                    </button>
-                </div>
-            </aside>
 
         </div>
 

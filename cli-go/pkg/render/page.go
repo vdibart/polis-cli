@@ -190,6 +190,7 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 	ctx.CSSPath = theme.CalculateCSSPath(htmlMountRel)
 	ctx.BaseCSSPath = strings.Replace(theme.CalculateCSSPath(htmlMountRel), "styles.css", "base.css", 1)
 	ctx.HomePath = theme.CalculateHomePath(htmlMountRel)
+	ctx.FaviconPath = strings.Replace(ctx.HomePath, "index.html", "favicon.svg", 1)
 	ctx.AuthorName = r.getAuthorName()
 	if ctx.AuthorName == "" {
 		ctx.AuthorName = r.getAuthorDomain()
@@ -293,6 +294,7 @@ func (r *PageRenderer) RenderIndex() error {
 	ctx.CSSPath = "styles.css"
 	ctx.BaseCSSPath = "base.css"
 	ctx.HomePath = "index.html"
+	ctx.FaviconPath = "favicon.svg"
 	ctx.AuthorName = r.getAuthorName()
 	if ctx.AuthorName == "" {
 		ctx.AuthorName = r.getAuthorDomain()
@@ -377,6 +379,7 @@ func (r *PageRenderer) RenderArchive() error {
 	ctx.CSSPath = "../styles.css"
 	ctx.BaseCSSPath = "../base.css"
 	ctx.HomePath = "../index.html"
+	ctx.FaviconPath = "../favicon.svg"
 	ctx.AuthorName = r.getAuthorName()
 	if ctx.AuthorName == "" {
 		ctx.AuthorName = r.getAuthorDomain()
@@ -485,6 +488,7 @@ func (r *PageRenderer) RenderTags() (int, error) {
 		ctx.CSSPath = "../../styles.css"
 		ctx.BaseCSSPath = "../../base.css"
 		ctx.HomePath = "../../index.html"
+		ctx.FaviconPath = "../../favicon.svg"
 		ctx.AuthorDomain = r.getAuthorDomain()
 		ctx.PageType = "tag"
 
@@ -525,6 +529,7 @@ func (r *PageRenderer) RenderTags() (int, error) {
 	ctx.CSSPath = "../styles.css"
 	ctx.BaseCSSPath = "../base.css"
 	ctx.HomePath = "../index.html"
+	ctx.FaviconPath = "../favicon.svg"
 	ctx.AuthorDomain = r.getAuthorDomain()
 	ctx.PageType = "tag-index"
 

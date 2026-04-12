@@ -56,7 +56,6 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/settings/hide-read", limitBody(s.handleHideRead, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/webapp-theme", limitBody(s.handleWebappTheme, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/editor-panel-mode", limitBody(s.handleEditorPanelMode, MaxDefaultBodySize))
-	mux.HandleFunc("/api/settings/site-title", limitBody(s.handleUpdateSiteTitle, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/avatar", limitBody(s.handleUpdateAvatar, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/author-name", limitBody(s.handleUpdateAuthorName, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/theme", limitBody(s.handleThemeSwitch, MaxDefaultBodySize))
@@ -80,9 +79,9 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/feed", s.handleFeed)
 	mux.HandleFunc("/api/feed/refresh", limitBody(s.handleFeedRefresh, MaxDefaultBodySize))
 	mux.HandleFunc("/api/feed/read", limitBody(s.handleFeedRead, MaxDefaultBodySize))
+	mux.HandleFunc("/api/feed/viewed", limitBody(s.handleFeedViewed, MaxDefaultBodySize))
 	mux.HandleFunc("/api/feed/counts", s.handleFeedCounts)
 	mux.HandleFunc("/api/feed/grouped", s.handleFeedGrouped)
-	mux.HandleFunc("/api/feed/visited", limitBody(s.handleFeedVisited, MaxDefaultBodySize))
 	mux.HandleFunc("/api/remote/avatar", s.handleRemoteAvatar)
 	mux.HandleFunc("/api/remote/post", s.handleRemotePost)
 
@@ -114,6 +113,9 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/sse", s.handleSSE)
 	mux.HandleFunc("/api/counts", s.handleCounts)
 	mux.HandleFunc("/api/nav/state", s.handleNavState)
+
+	// Serve generated favicon from data dir (avatar-based, overrides embedded fallback)
+	mux.HandleFunc("/favicon.svg", s.handleFavicon)
 
 	// Content source path redirect (content/ .html → mount path)
 	mux.HandleFunc("/content/", s.handleContentRedirect)

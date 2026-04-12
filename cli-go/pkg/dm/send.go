@@ -243,8 +243,11 @@ func (s *Sender) fetchRecipientKey(recipientURL string) ([]byte, [32]byte, error
 
 	s.keyCacheMu.Lock()
 	if cached, ok := s.keyCache[domain]; ok && time.Since(cached.fetchedAt) < keyCacheTTL {
+		pubSSH := make([]byte, len(cached.publicKeySSH))
+		copy(pubSSH, cached.publicKeySSH)
+		x25519PK := cached.x25519PK // [32]byte is a value type, copied on assignment
 		s.keyCacheMu.Unlock()
-		return cached.publicKeySSH, cached.x25519PK, nil
+		return pubSSH, x25519PK, nil
 	}
 	s.keyCacheMu.Unlock()
 
@@ -276,6 +279,9 @@ func (s *Sender) fetchRecipientKey(recipientURL string) ([]byte, [32]byte, error
 	}
 
 	publicKeySSH := []byte(wk.PublicKey)
+	if err := signing.ValidatePublicKey(publicKeySSH); err != nil {
+		return nil, [32]byte{}, fmt.Errorf("invalid public key from %s: %w", wellKnownURL, err)
+	}
 	x25519PK, err := signing.Ed25519PublicKeyToX25519(publicKeySSH)
 	if err != nil {
 		return nil, [32]byte{}, fmt.Errorf("convert public key to X25519: %w", err)

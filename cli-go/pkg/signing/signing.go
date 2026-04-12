@@ -362,20 +362,45 @@ func parseSSHSignature(sshSig string) ([]byte, error) {
 	data = data[6:]
 
 	// Skip version, public key, namespace, reserved, hash algorithm
-	_, data, _ = readUint32(data)
-	_, data, _ = readBytes(data)
-	_, data, _ = readString(data)
-	_, data, _ = readString(data)
-	_, data, _ = readString(data)
+	var err error
+	_, data, err = readUint32(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse signature version: %w", err)
+	}
+	_, data, err = readBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse signature public key: %w", err)
+	}
+	_, data, err = readString(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse signature namespace: %w", err)
+	}
+	_, data, err = readString(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse signature reserved: %w", err)
+	}
+	_, data, err = readString(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse signature hash algorithm: %w", err)
+	}
 
 	// Signature blob
-	sigBlob, _, _ := readBytes(data)
+	sigBlob, _, err := readBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse signature blob: %w", err)
+	}
 
 	// Skip key type in signature blob
-	_, sigBlob, _ = readString(sigBlob)
+	_, sigBlob, err = readString(sigBlob)
+	if err != nil {
+		return nil, fmt.Errorf("parse signature key type: %w", err)
+	}
 
 	// Raw signature
-	rawSig, _, _ := readBytes(sigBlob)
+	rawSig, _, err := readBytes(sigBlob)
+	if err != nil {
+		return nil, fmt.Errorf("parse raw signature: %w", err)
+	}
 
 	return rawSig, nil
 }

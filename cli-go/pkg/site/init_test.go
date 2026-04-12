@@ -88,6 +88,20 @@ func TestInit_BundleLayout(t *testing.T) {
 		}
 	}
 
+	// Verify favicon.svg was generated from avatar config
+	faviconData, err := os.ReadFile(filepath.Join(dir, "favicon.svg"))
+	if err != nil {
+		t.Error("favicon.svg should be created during init")
+	} else {
+		svg := string(faviconData)
+		if !strings.Contains(svg, `viewBox="0 0 128 128"`) {
+			t.Error("favicon.svg should be a valid SVG")
+		}
+		if wk.Avatar != nil && !strings.Contains(svg, wk.Avatar.BG) {
+			t.Error("favicon.svg should use avatar background color")
+		}
+	}
+
 	// Verify keys exist
 	if _, err := os.Stat(filepath.Join(dir, ".polis/keys/id_ed25519")); err != nil {
 		t.Error("Private key should exist")

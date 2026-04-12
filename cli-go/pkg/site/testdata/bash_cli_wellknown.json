@@ -1,6 +1,6 @@
 {
     "version": "polis-cli/0.45.0",
-    "author": "John Doe",
+    "author_name": "John Doe",
     "email": "john@example.com",
     "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBashCLITestKeyXXXXXXXXXXXXXXXXXXXX polis-local",
     "site_title": "My Site",

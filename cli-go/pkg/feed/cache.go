@@ -79,7 +79,7 @@ type CachedFeedItem struct {
 	TargetURL    string `json:"target_url,omitempty"`
 	TargetDomain string `json:"target_domain,omitempty"`
 	CachedAt     string `json:"cached_at"`
-	ReadAt       string `json:"read_at,omitempty"`
+	ReadAt       string `json:"read_at"`
 	Excerpt      string `json:"excerpt,omitempty"`
 }
 

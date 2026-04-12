@@ -28,7 +28,7 @@ set -eo pipefail
 #   4. Hardcoded defaults
 
 # Fixed constants (never configurable - required for discovery)
-VERSION="0.60.0"
+VERSION="0.61.0"
 WELL_KNOWN_DIR=".well-known"
 WELL_KNOWN_FILE="polis"
 
@@ -348,12 +348,12 @@ cmd_init() {
     local wellknown_json
     wellknown_json=$(jq -n \
         --arg version "polis-cli/$VERSION" \
-        --arg author "$(git config user.name || echo 'Unknown')" \
+        --arg author_name "$(git config user.name || echo 'Unknown')" \
         --arg public_key "$PUBKEY" \
         --arg created "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
         '{
             version: $version,
-            author: $author,
+            author_name: $author_name,
             public_key: $public_key,
             created: $created,
             bundles: {
@@ -1095,29 +1095,33 @@ extract_domain_from_url() {
 
 # Check if the site is registered locally (no network call).
 # Returns 0 (true) if registered, 1 (false) if not.
-# Uses the local marker file at .polis/ds/{ds-domain}/registered.json.
+# Uses the local marker file at .polis/ds/{ds-domain}/registration.json.
 is_registered_locally() {
     local ds_domain
     ds_domain=$(extract_domain_from_url "$DISCOVERY_SERVICE_URL")
     [[ -z "$ds_domain" ]] && return 1
-    [[ -f ".polis/ds/${ds_domain}/registered.json" ]]
+    [[ -f ".polis/ds/${ds_domain}/registration.json" ]]
 }
 
 # Write the local registration marker after successful registration.
+# Usage: write_registration_marker [service_attestation]
 write_registration_marker() {
-    local ds_domain domain
+    local ds_domain domain attestation
     ds_domain=$(extract_domain_from_url "$DISCOVERY_SERVICE_URL")
     domain=$(extract_domain_from_url "$POLIS_BASE_URL")
+    attestation="${1:-}"
     [[ -z "$ds_domain" ]] && return 1
     local marker_dir=".polis/ds/${ds_domain}"
     mkdir -p "$marker_dir"
-    cat > "$marker_dir/registered.json" <<MARKER_EOF
-{
-  "domain": "$domain",
-  "ds_url": "$DISCOVERY_SERVICE_URL",
-  "registered_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-MARKER_EOF
+    local marker_json
+    marker_json=$(jq -n \
+        --arg domain "$domain" \
+        --arg ds_url "$DISCOVERY_SERVICE_URL" \
+        --arg registered_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg attestation "$attestation" \
+        '{domain: $domain, ds_url: $ds_url, registered_at: $registered_at} +
+         (if $attestation != "" then {service_attestation: $attestation} else {} end)')
+    echo "$marker_json" > "$marker_dir/registration.json"
 }
 
 # Remove the local registration marker after successful unregistration.
@@ -1125,7 +1129,7 @@ remove_registration_marker() {
     local ds_domain
     ds_domain=$(extract_domain_from_url "$DISCOVERY_SERVICE_URL")
     [[ -z "$ds_domain" ]] && return 0
-    rm -f ".polis/ds/${ds_domain}/registered.json"
+    rm -f ".polis/ds/${ds_domain}/registration.json"
 }
 
 # Normalize a URL to use .md extension instead of .html
@@ -6281,7 +6285,7 @@ cmd_register() {
         fi
 
         # Ensure local marker exists (backfill for pre-marker sites)
-        write_registration_marker
+        write_registration_marker "$service_attestation"
 
         if [ "$JSON_MODE" = true ]; then
             local result=$(jq -n \
@@ -6350,7 +6354,7 @@ cmd_register() {
     rm -f "$temp_file" "$temp_file.sig"
 
     # Get optional metadata from .well-known/polis
-    local author_name=$(jq -r '.author // empty' "$WELL_KNOWN_DIR/polis" 2>/dev/null || true)
+    local author_name=$(jq -r '.author_name // empty' "$WELL_KNOWN_DIR/polis" 2>/dev/null || true)
 
     # Create final payload with signature and optional fields (no email - privacy by default)
     local final_payload=$(jq -n \
@@ -6374,12 +6378,12 @@ cmd_register() {
     local response_body=$(echo "$response" | sed '$d')
 
     if [ "$http_code" = "201" ] || [ "$http_code" = "200" ]; then
-        # Success — write local registration marker
-        write_registration_marker
-
         local registry_url=$(echo "$response_body" | jq -r '.registry_url // "unknown"')
         local created_at=$(echo "$response_body" | jq -r '.created_at // "now"')
         local service_attestation=$(echo "$response_body" | jq -r '.service_attestation // ""')
+
+        # Success — write local registration marker with attestation
+        write_registration_marker "$service_attestation"
 
         if [ "$JSON_MODE" = true ]; then
             local result=$(jq -n \

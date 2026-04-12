@@ -1184,6 +1184,37 @@ func TestServerLogEvent_NilSafe(t *testing.T) {
 }
 
 // ============================================================================
+// feedCacheForScope Tests
+// ============================================================================
+
+func TestFeedCacheForScope_ReturnsSameInstance(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	cm1 := s.feedCacheForScope("network")
+	cm2 := s.feedCacheForScope("network")
+	cm3 := s.feedCacheForScope("")
+
+	if cm1 != cm2 {
+		t.Error("expected same instance for repeated 'network' calls")
+	}
+	if cm1 != cm3 {
+		t.Error("expected same instance for '' and 'network' (both map to network)")
+	}
+}
+
+func TestFeedCacheForScope_DifferentScopes(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	network := s.feedCacheForScope("network")
+	followers := s.feedCacheForScope("followers")
+	global := s.feedCacheForScope("global")
+
+	if network == followers || network == global || followers == global {
+		t.Error("expected different instances for different scopes")
+	}
+}
+
+// ============================================================================
 // SSE Client Gating Tests
 // ============================================================================
 

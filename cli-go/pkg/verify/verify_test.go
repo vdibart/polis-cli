@@ -3,7 +3,10 @@ package verify
 import (
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 )
 
 func TestParseFrontmatter_Valid(t *testing.T) {
@@ -157,6 +160,108 @@ func TestVerifyHash(t *testing.T) {
 		result := verifyHash(body, "")
 		if result.Status != "unknown" {
 			t.Errorf("expected 'unknown', got %q", result.Status)
+		}
+	})
+}
+
+func TestExtractContentToSign(t *testing.T) {
+	t.Run("stops before signature line", func(t *testing.T) {
+		content := "---\ntitle: Hello\nsignature: SIGDATA\n---\nBody\n"
+		result := extractContentToSign(content, "alice.example.com")
+		expected := "---\ntitle: Hello\n"
+		if result != expected {
+			t.Errorf("expected %q, got %q", expected, result)
+		}
+	})
+
+	t.Run("includes everything when no signature", func(t *testing.T) {
+		content := "---\ntitle: Hello\n---\nBody\n"
+		result := extractContentToSign(content, "alice.example.com")
+		expected := "---\ntitle: Hello\n---\nBody\n\n"
+		if result != expected {
+			t.Errorf("expected %q, got %q", expected, result)
+		}
+	})
+
+	t.Run("handles content with multiple fields before signature", func(t *testing.T) {
+		content := "---\ntitle: Test Post\npublished: 2024-01-01\ncurrent-version: sha256:abc\nsignature: MYSIG\ngenerator: polis-cli/0.50.0\n---\nContent body\n"
+		result := extractContentToSign(content, "test.polis.pub")
+		// Should include everything up to but not including the signature line
+		if !strings.Contains(result, "title: Test Post") {
+			t.Error("expected result to contain title")
+		}
+		if !strings.Contains(result, "current-version: sha256:abc") {
+			t.Error("expected result to contain current-version")
+		}
+		if strings.Contains(result, "signature:") {
+			t.Error("result should not contain signature line")
+		}
+		if strings.Contains(result, "generator:") {
+			t.Error("result should not contain lines after signature")
+		}
+	})
+}
+
+func TestVerifySignature(t *testing.T) {
+	// Generate a real keypair for testing
+	privPEM, pubSSH, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("failed to generate keypair: %v", err)
+	}
+	publicKey := string(pubSSH)
+
+	t.Run("valid signature", func(t *testing.T) {
+		// Build content without signature, sign it, then verify
+		contentWithoutSig := "---\ntitle: Test\npublished: 2024-01-01\n"
+		sig, err := signing.SignContent([]byte(contentWithoutSig), privPEM)
+		if err != nil {
+			t.Fatalf("failed to sign: %v", err)
+		}
+
+		// Full content includes the signature line (but verifySignature extracts pre-sig content)
+		fullContent := contentWithoutSig + "signature: " + sig + "\n---\nBody\n"
+
+		result := verifySignature(fullContent, publicKey, sig, "test.polis.pub")
+		if result.Status != "valid" {
+			t.Errorf("expected 'valid', got %q: %s", result.Status, result.Message)
+		}
+	})
+
+	t.Run("invalid signature", func(t *testing.T) {
+		content := "---\ntitle: Test\nsignature: BADSIG\n---\nBody\n"
+		result := verifySignature(content, publicKey, "BADSIG", "test.polis.pub")
+		if result.Status != "invalid" {
+			t.Errorf("expected 'invalid', got %q", result.Status)
+		}
+	})
+
+	t.Run("missing signature", func(t *testing.T) {
+		result := verifySignature("content", publicKey, "", "test.polis.pub")
+		if result.Status != "missing" {
+			t.Errorf("expected 'missing', got %q", result.Status)
+		}
+	})
+
+	t.Run("missing public key", func(t *testing.T) {
+		result := verifySignature("content", "", "somesig", "test.polis.pub")
+		if result.Status != "error" {
+			t.Errorf("expected 'error', got %q", result.Status)
+		}
+	})
+
+	t.Run("tampered content", func(t *testing.T) {
+		contentWithoutSig := "---\ntitle: Original\n"
+		sig, err := signing.SignContent([]byte(contentWithoutSig), privPEM)
+		if err != nil {
+			t.Fatalf("failed to sign: %v", err)
+		}
+
+		// Tamper with the content
+		tamperedContent := "---\ntitle: Tampered\nsignature: " + sig + "\n---\nBody\n"
+
+		result := verifySignature(tamperedContent, publicKey, sig, "test.polis.pub")
+		if result.Status != "invalid" {
+			t.Errorf("expected 'invalid' for tampered content, got %q", result.Status)
 		}
 	})
 }

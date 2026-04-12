@@ -229,6 +229,11 @@ func (rcv *Receiver) ReceiveMessage(senderDomain string, envelopeBody []byte, fo
 	// Normalize domain to lowercase — DNS hostnames are case-insensitive (RFC 1123)
 	senderDomain = strings.ToLower(senderDomain)
 
+	// SSRF protection: reject IPs, localhost, internal hostnames
+	if err := ValidateDomain(senderDomain); err != nil {
+		return nil, fmt.Errorf("invalid sender domain: %w", err)
+	}
+
 	if err := rcv.ensureKeys(); err != nil {
 		return nil, fmt.Errorf("init receiver keys: %w", err)
 	}
@@ -442,6 +447,9 @@ func (rcv *Receiver) checkPolicy(senderDomain string, followingDomains map[strin
 
 // fetchSenderX25519Key fetches a sender's Ed25519 public key and converts to X25519.
 func (rcv *Receiver) fetchSenderX25519Key(senderDomain string) ([32]byte, error) {
+	if err := ValidateDomain(senderDomain); err != nil {
+		return [32]byte{}, fmt.Errorf("invalid sender domain: %w", err)
+	}
 	cacheKey := strings.ToLower(senderDomain)
 	rcv.keyCacheMu.Lock()
 	if cached, ok := rcv.keyCache[cacheKey]; ok && time.Since(cached.fetchedAt) < keyCacheTTL {
@@ -475,6 +483,9 @@ func (rcv *Receiver) fetchSenderX25519Key(senderDomain string) ([32]byte, error)
 	if wk.PublicKey == "" {
 		return [32]byte{}, fmt.Errorf("no public_key in .well-known/polis")
 	}
+	if err := signing.ValidatePublicKey([]byte(wk.PublicKey)); err != nil {
+		return [32]byte{}, fmt.Errorf("invalid public key from %s: %w", senderDomain, err)
+	}
 
 	x25519PK, err := signing.Ed25519PublicKeyToX25519([]byte(wk.PublicKey))
 	if err != nil {
@@ -495,6 +506,9 @@ func (rcv *Receiver) fetchSenderX25519Key(senderDomain string) ([32]byte, error)
 // FetchPublicKey fetches the Ed25519 public key for a domain from .well-known/polis.
 // Used by the webapp middleware for signed-request verification.
 func FetchPublicKey(domain string) ([]byte, error) {
+	if err := ValidateDomain(domain); err != nil {
+		return nil, fmt.Errorf("invalid domain: %w", err)
+	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	wellKnownURL := "https://" + domain + "/.well-known/polis"
 	resp, err := client.Get(wellKnownURL)
@@ -521,6 +535,9 @@ func FetchPublicKey(domain string) ([]byte, error) {
 	if wk.PublicKey == "" {
 		return nil, fmt.Errorf("no public_key in .well-known/polis")
 	}
+	if err := signing.ValidatePublicKey([]byte(wk.PublicKey)); err != nil {
+		return nil, fmt.Errorf("invalid public key from %s: %w", domain, err)
+	}
 
 	return []byte(wk.PublicKey), nil
 }
@@ -529,13 +546,17 @@ func FetchPublicKey(domain string) ([]byte, error) {
 func (rcv *Receiver) domainForPublicKey(pubKeyStr, expectedDomain string) (string, error) {
 	rcv.keyCacheMu.Lock()
 	cached, ok := rcv.keyCache[strings.ToLower(expectedDomain)]
+	var cachedPubKey string
+	if ok {
+		cachedPubKey = string(cached.publicKeySSH) // string() copies the bytes, safe after unlock
+	}
 	rcv.keyCacheMu.Unlock()
 
 	if !ok {
 		return "", fmt.Errorf("no cached key for domain %s", expectedDomain)
 	}
 
-	if strings.TrimSpace(string(cached.publicKeySSH)) == strings.TrimSpace(pubKeyStr) {
+	if strings.TrimSpace(cachedPubKey) == strings.TrimSpace(pubKeyStr) {
 		return expectedDomain, nil
 	}
 	return "", fmt.Errorf("public key does not match domain %s", expectedDomain)
