@@ -272,15 +272,17 @@ For `pub.polis.comment` queries: granted blessings are visible to all; pending a
 
 ### POST /v1/content/unregister
 
-Remove content from the index (soft delete — status set to `removed`, relationships preserved as historical records).
+Remove tag content from the index (soft delete — status set to `removed`).
+
+**Tags only.** Posts and comments must use `POST /v1/content/unpublish`. Requests for non-tag types return `400`.
 
 Rate limit: per-domain 20/hr
 
 ```json
 // Request
 {
-  "type": "pub.polis.post",
-  "url": "https://alice.com/posts/hello.md",
+  "type": "pub.polis.tag",
+  "url": "https://alice.com/tags/reading/abc123",
   "signature": "-----BEGIN SSH SIGNATURE-----\n...\n-----END SSH SIGNATURE-----"
 }
 
@@ -291,7 +293,45 @@ Rate limit: per-domain 20/hr
 }
 ```
 
-Emits a `pub.polis.post.removed` stream event.
+Emits a `pub.polis.tag.removed` stream event.
+
+### POST /v1/content/unpublish
+
+Unpublish a post or comment (clean break retraction). Sets content status to `unpublished` and performs blessing cascades for posts.
+
+**Posts and comments only.** Tags must use `POST /v1/content/unregister`. Requests for tag types return `400`. Content must be in `active` status; already-unpublished or removed content returns `409`.
+
+Rate limit: per-domain 20/hr
+
+```json
+// Request
+{
+  "type": "pub.polis.post",
+  "url": "https://alice.com/content/pub.polis.core/post/20260201/my-post.md",
+  "signature": "-----BEGIN SSH SIGNATURE-----\n...\n-----END SSH SIGNATURE-----"
+}
+
+// Response 200
+{
+  "success": true,
+  "message": "Content unpublished",
+  "type": "pub.polis.post",
+  "url": "https://alice.com/content/pub.polis.core/post/20260201/my-post.md",
+  "orphaned_blessings": 2,
+  "denied_blessings": 1
+}
+```
+
+**Blessing cascade (posts only):**
+- Blessed (`granted`) comments → `orphaned` (permanent — not restored on republish)
+- Pending comments → `denied` (permanent)
+- Already denied → unchanged
+
+**Comment unpublish:** Resets the comment's own blessing relationship to `pending` so republish triggers fresh policy evaluation.
+
+**Clean break semantics:** Unpublish severs all ties to the published identity. If the content is republished later, it is treated as a completely fresh publication — orphaned blessings are NOT restored, and comment authors must re-beseech for blessing. See [Unpublish Lifecycle](unpublish-lifecycle.md) for full state transition rules.
+
+Emits `pub.polis.post.unpublished` or `pub.polis.comment.unpublished` stream event.
 
 ---
 
@@ -794,7 +834,8 @@ Core event types (cannot be blocked by operators):
 | `pub.polis.site.key_rotated` | POST /v1/sites/keys/rotate |
 | `pub.polis.post.published` | POST /v1/content (new post) |
 | `pub.polis.post.republished` | POST /v1/content (updated post) |
-| `pub.polis.post.removed` | POST /v1/content/unregister (post) |
+| `pub.polis.post.unpublished` | POST /v1/content/unpublish (post) |
+| `pub.polis.comment.unpublished` | POST /v1/content/unpublish (comment) |
 | `pub.polis.comment.published` | POST /v1/content (new comment) |
 | `pub.polis.comment.republished` | POST /v1/content (updated comment) |
 | `pub.polis.comment.blessing.requested` | POST /v1/content (comment, pending) |
@@ -816,7 +857,8 @@ Core event types (cannot be blocked by operators):
 | Site register/unregister | 5/hr |
 | Key rotation | 5/hr |
 | Content register | 50/hr |
-| Content unregister | 20/hr |
+| Content unregister (tags) | 20/hr |
+| Content unpublish | 20/hr |
 | Relationship update | 50/hr |
 | Stream publish | 100/hr |
 

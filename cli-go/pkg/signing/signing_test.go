@@ -355,6 +355,86 @@ func TestZeroKey(t *testing.T) {
 	}
 }
 
+func TestSignContent_EmbeddedPublicKey(t *testing.T) {
+	privKeyPEM, pubKeySSH, err := GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair failed: %v", err)
+	}
+	content := []byte("test content for embedded pubkey check")
+
+	sig, err := SignContent(content, privKeyPEM)
+	if err != nil {
+		t.Fatalf("SignContent failed: %v", err)
+	}
+
+	// Parse the SSH signature PEM to extract the embedded public key
+	block, _ := pem.Decode([]byte(sig))
+	if block == nil {
+		t.Fatal("failed to decode signature PEM")
+	}
+	data := block.Bytes
+	// Skip magic "SSHSIG" (6 bytes)
+	data = data[6:]
+	// Skip version (uint32)
+	_, data, _ = readUint32(data)
+	// Read public key blob
+	pubBlob, _, _ := readBytes(data)
+	// Inside the blob: key type string + raw key bytes
+	_, pubBlob, _ = readString(pubBlob)
+	keyBytes, _, _ := readBytes(pubBlob)
+
+	// Parse the expected public key
+	expectedPub, err := parsePublicKey(pubKeySSH)
+	if err != nil {
+		t.Fatalf("parsePublicKey failed: %v", err)
+	}
+
+	if !bytes.Equal(keyBytes, expectedPub) {
+		t.Errorf("embedded public key mismatch:\n  got  %x\n  want %x", keyBytes, expectedPub)
+	}
+
+	// Verify it's not all zeros (the bug this test guards against)
+	allZero := true
+	for _, b := range keyBytes {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		t.Error("embedded public key is all zeros — ZeroKey called before extracting pubkey")
+	}
+}
+
+func TestParsePrivateKey_Truncated(t *testing.T) {
+	privKeyPEM, _, _ := GenerateKeypair()
+	block, _ := pem.Decode(privKeyPEM)
+	magic := "openssh-key-v1\x00"
+
+	tests := []struct {
+		name    string
+		cutAt   int
+		wantErr string
+	}{
+		{"truncated at cipher", len(magic) + 2, "parse private key cipher"},
+		{"truncated at kdf", len(magic) + 10, "parse private key kdf"},
+		{"empty after magic", len(magic), "parse private key cipher"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			truncated := block.Bytes[:tt.cutAt]
+			pemBlock := &pem.Block{Type: "OPENSSH PRIVATE KEY", Bytes: truncated}
+			_, err := parsePrivateKey(pem.EncodeToMemory(pemBlock))
+			if err == nil {
+				t.Fatal("expected error for truncated key")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q should contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
 // Benchmark verification performance
 func BenchmarkVerifySignature(b *testing.B) {
 	privKey, pubKey, _ := GenerateKeypair()

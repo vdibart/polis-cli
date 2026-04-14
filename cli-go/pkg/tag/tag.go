@@ -134,7 +134,11 @@ func ListTags(dataDir string) ([]TagFile, error) {
 
 // ApplyTag adds a target URI to a tag, creating the tag file if it doesn't exist.
 // The file is signed after mutation.
-func ApplyTag(dataDir, tagName, targetURI string, privateKey []byte) (*TagFile, error) {
+func ApplyTag(dataDir, tagName, targetURI string, privateKey []byte, generator ...string) (*TagFile, error) {
+	gen := GetGenerator()
+	if len(generator) > 0 && generator[0] != "" {
+		gen = generator[0]
+	}
 	name, err := NormalizeTagName(tagName)
 	if err != nil {
 		return nil, fmt.Errorf("invalid tag name: %w", err)
@@ -177,7 +181,7 @@ func ApplyTag(dataDir, tagName, targetURI string, privateKey []byte) (*TagFile, 
 		Added: now,
 	})
 	tf.Updated = now
-	tf.Generator = GetGenerator()
+	tf.Generator = gen
 
 	// Sign and write
 	if err := signAndWrite(tf, path, privateKey); err != nil {
@@ -189,7 +193,11 @@ func ApplyTag(dataDir, tagName, targetURI string, privateKey []byte) (*TagFile, 
 
 // RemoveTarget removes a target URI from a tag and re-signs.
 // Returns the updated tag file, or an error if the tag or target doesn't exist.
-func RemoveTarget(dataDir, tagName, targetURI string, privateKey []byte) (*TagFile, error) {
+func RemoveTarget(dataDir, tagName, targetURI string, privateKey []byte, generator ...string) (*TagFile, error) {
+	gen := GetGenerator()
+	if len(generator) > 0 && generator[0] != "" {
+		gen = generator[0]
+	}
 	name, err := NormalizeTagName(tagName)
 	if err != nil {
 		return nil, fmt.Errorf("invalid tag name: %w", err)
@@ -218,7 +226,7 @@ func RemoveTarget(dataDir, tagName, targetURI string, privateKey []byte) (*TagFi
 
 	tf.Targets = remaining
 	tf.Updated = time.Now().UTC().Format(time.RFC3339)
-	tf.Generator = GetGenerator()
+	tf.Generator = gen
 
 	if err := signAndWrite(tf, path, privateKey); err != nil {
 		return nil, err

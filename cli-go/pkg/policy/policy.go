@@ -61,39 +61,39 @@ func DefaultPaths(dataDir string) (privatePath, publicPath string) {
 
 // DefaultPublicPolicyContent returns the default public policy file content for new sites.
 // Public policies are published at policies/rules.jsonl and visible to the network.
+// They declare the site's public posture — how it engages with the network.
 //
-// Default emit rules:
+// Default rules:
+//   - DMs accepted only from following (default social boundary)
+//   - DMs denied from everyone else (explicit deny before catch-all)
 //   - Self-comments are auto-blessed (you always bless your own comments)
 //   - Comments from followed authors are auto-blessed (trust your social graph)
 //   - Authors with prior thread blessings are auto-blessed (thread-trust)
+//   - Default-deny catch-all: unknown content types are denied
+//
+// DM rules must be in the public file because the sender-side pre-flight
+// check (policycheck.CheckDMEligibilityURL) fetches the recipient's public
+// policy to determine eligibility before sending.
 func DefaultPublicPolicyContent() string {
 	return `{"version":1,"generator":"polis-cli-go/` + policyVersion + `"}
+{"active":true,"policy":"allow pub.polis.dm from following"}
+{"active":true,"policy":"deny pub.polis.dm from all"}
 {"active":true,"policy":"emit pub.polis.comment.blessing from self"}
 {"active":true,"policy":"emit pub.polis.comment.blessing from following"}
 {"active":true,"policy":"emit pub.polis.comment.blessing from thread-blessed"}
+{"active":true,"policy":"deny all from all"}
 `
 }
 
 // DefaultPrivatePolicyContent returns the default private policy file content for new sites.
 // Private policies are stored at .polis/policies/rules.jsonl and never published.
+// They exist for user-specific overrides that shouldn't be advertised publicly
+// (e.g., "deny all from all at stalker.polis.pub" to silently block an actor).
 //
-// Default rules:
-//   - Core content types (post, comment, follow, site) allowed from all (user can remove to disable)
-//   - DMs accepted only from following (default social boundary)
-//   - Self-notifications suppressed (you don't need to see your own actions)
-//   - Self-authored feed events suppressed (you don't need to see your own posts in feed)
-//   - Default-deny catch-all: unknown content types are denied
+// Empty by default — a new site has nothing to hide. All standard rules live
+// in the public policy. Private overrides are added as needed.
 func DefaultPrivatePolicyContent() string {
 	return `{"version":1,"generator":"polis-cli-go/` + policyVersion + `"}
-{"active":true,"policy":"allow pub.polis.post from all"}
-{"active":true,"policy":"allow pub.polis.comment from all"}
-{"active":true,"policy":"allow pub.polis.follow from all"}
-{"active":true,"policy":"allow pub.polis.site from all"}
-{"active":true,"policy":"allow pub.polis.dm from following"}
-{"active":true,"policy":"deny pub.polis.dm from all"}
-{"active":true,"policy":"omit pub.polis.notification from self"}
-{"active":true,"policy":"omit pub.polis.feed from self"}
-{"active":true,"policy":"deny all from all"}
 `
 }
 
@@ -104,7 +104,7 @@ func DefaultPolicyContent() string {
 }
 
 // policyVersion is the current policy file version string.
-const policyVersion = "0.57.0"
+const policyVersion = "0.61.0"
 
 // LoadPolicies loads policies from private and public JSONL files.
 // Private policies are loaded first (higher priority), then public.

@@ -12,17 +12,13 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
-	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
-	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/index"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
-	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
-	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 )
 
 // Version is set at build time with -ldflags
@@ -35,6 +31,7 @@ var (
 	discoveryURL string
 	discoveryKey string
 	baseURL      string
+	generator    string   // "polis-cli-go/<version>" — computed once in Execute
 	requestID    string   // UUIDv4 for cross-boundary tracing
 	cliLogFile   *os.File // optional log file (POLIS_LOG_FILE env var)
 )
@@ -100,17 +97,17 @@ func Execute(args []string) {
 		}
 	}()
 
-	// Propagate CLI version to all packages that embed it in metadata
+	// Compute generator string for metadata files
+	generator = "polis-cli-go/" + Version
+
+	// Propagate CLI version to packages that still use package-level globals
+	// as fallback when no explicit generator parameter is passed.
 	publish.Version = Version
 	comment.Version = Version
 	metadata.Version = Version
 	following.Version = Version
 	index.Version = Version
-	notification.Version = Version
-	theme.Version = Version
-	feed.Version = Version
 	site.Version = Version
-	dm.Version = Version
 	tag.Version = Version
 
 	// Load .env file (does not override existing env vars, matches bash CLI)

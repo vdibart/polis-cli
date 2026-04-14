@@ -156,7 +156,7 @@ func handleTagApply(name, targetURI string) {
 	}
 	defer signing.ZeroKey(privKey)
 
-	tf, err := tag.ApplyTag(dataDir, name, targetURI, privKey)
+	tf, err := tag.ApplyTag(dataDir, name, targetURI, privKey, generator)
 	if err != nil {
 		exitError("Failed to apply tag: %v", err)
 	}
@@ -198,7 +198,7 @@ func handleTagRemove(name, targetURI string) {
 	}
 	defer signing.ZeroKey(privKey)
 
-	tf, err := tag.RemoveTarget(dataDir, name, targetURI, privKey)
+	tf, err := tag.RemoveTarget(dataDir, name, targetURI, privKey, generator)
 	if err != nil {
 		exitError("Failed to remove target: %v", err)
 	}

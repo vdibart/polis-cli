@@ -84,57 +84,6 @@ func TestGenerateBackgroundRequestID_Uniqueness(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// cursorLess Tests
-// ============================================================================
-
-func TestCursorLess_NumericComparison(t *testing.T) {
-	tests := []struct {
-		a, b string
-		want bool
-	}{
-		{"0", "1", true},
-		{"1", "0", false},
-		{"10", "20", true},
-		{"20", "10", false},
-		{"100", "100", false},
-		{"9", "10", true},  // numeric, not lexicographic
-		{"2", "10", true},  // numeric wins over string comparison
-	}
-	for _, tt := range tests {
-		got := cursorLess(tt.a, tt.b)
-		if got != tt.want {
-			t.Errorf("cursorLess(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
-		}
-	}
-}
-
-func TestCursorLess_StringFallback(t *testing.T) {
-	// Non-numeric strings fall back to lexicographic comparison
-	tests := []struct {
-		a, b string
-		want bool
-	}{
-		{"abc", "def", true},
-		{"def", "abc", false},
-		{"abc", "abc", false},
-	}
-	for _, tt := range tests {
-		got := cursorLess(tt.a, tt.b)
-		if got != tt.want {
-			t.Errorf("cursorLess(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
-		}
-	}
-}
-
-func TestCursorLess_MixedNumericAndString(t *testing.T) {
-	// One numeric, one not: falls back to string comparison
-	got := cursorLess("abc", "10")
-	// "abc" > "10" in string comparison
-	if got != false {
-		t.Errorf("cursorLess(\"abc\", \"10\") = true, want false")
-	}
-}
 
 // ============================================================================
 // cursorGreater Tests (defined in server.go but used heavily in sync.go)
@@ -311,52 +260,17 @@ func TestExtractPostPathFromURL_MultiplePostsSegments(t *testing.T) {
 // getUnifiedCursor Tests
 // ============================================================================
 
-func TestGetUnifiedCursor_ExistingUnifiedCursor(t *testing.T) {
+func TestGetUnifiedCursor_ExistingCursor(t *testing.T) {
 	s := newTestServer(t)
 	s.DiscoveryURL = "https://ds.polis.pub"
 	discoveryDomain := s.GetDiscoveryDomain()
 	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
 
-	// Set a unified cursor
 	_ = store.SetCursor("pub.polis.sync", "42")
 
 	got := s.getUnifiedCursor(store)
 	if got != "42" {
 		t.Errorf("expected cursor '42', got %q", got)
-	}
-}
-
-func TestGetUnifiedCursor_MigratesFromOldCursors(t *testing.T) {
-	s := newTestServer(t)
-	s.DiscoveryURL = "https://ds.polis.pub"
-	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
-
-	// Set old-style cursors (no unified cursor exists)
-	_ = store.SetCursor("pub.polis.notification", "50")
-	_ = store.SetCursor("pub.polis.follow", "30")
-	_ = store.SetCursor("pub.polis.feed", "40")
-
-	got := s.getUnifiedCursor(store)
-	// Should return the minimum: 30
-	if got != "30" {
-		t.Errorf("expected minimum old cursor '30', got %q", got)
-	}
-}
-
-func TestGetUnifiedCursor_MigratesFromLegacyKeys(t *testing.T) {
-	s := newTestServer(t)
-	s.DiscoveryURL = "https://ds.polis.pub"
-	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
-
-	// Set only old-style (polis.* without pub.) cursors
-	_ = store.SetCursor("polis.notification", "100")
-	_ = store.SetCursor("polis.follow", "80")
-
-	got := s.getUnifiedCursor(store)
-	if got != "80" {
-		t.Errorf("expected minimum legacy cursor '80', got %q", got)
 	}
 }
 
@@ -372,20 +286,17 @@ func TestGetUnifiedCursor_NoCursors(t *testing.T) {
 	}
 }
 
-func TestGetUnifiedCursor_UnifiedCursorZero(t *testing.T) {
+func TestGetUnifiedCursor_ZeroTreatedAsEmpty(t *testing.T) {
 	s := newTestServer(t)
 	s.DiscoveryURL = "https://ds.polis.pub"
 	discoveryDomain := s.GetDiscoveryDomain()
 	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
 
-	// Set unified cursor to "0" (should trigger migration)
 	_ = store.SetCursor("pub.polis.sync", "0")
-	_ = store.SetCursor("pub.polis.notification", "25")
 
 	got := s.getUnifiedCursor(store)
-	// "0" is treated as empty, should migrate and find "25"
-	if got != "25" {
-		t.Errorf("expected '25' from migration (unified was '0'), got %q", got)
+	if got != "0" {
+		t.Errorf("expected '0', got %q", got)
 	}
 }
 
@@ -1072,26 +983,6 @@ func TestFollowSyncHandler_Process_MultipleFolowers(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// Cursor migration: mixed old and new keys, minimum is chosen
-// ============================================================================
-
-func TestGetUnifiedCursor_MixedOldAndNewKeys(t *testing.T) {
-	s := newTestServer(t)
-	s.DiscoveryURL = "https://ds.polis.pub"
-	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
-
-	// Mix of new and old cursor keys
-	_ = store.SetCursor("pub.polis.notification", "200")
-	_ = store.SetCursor("polis.follow", "150")
-	_ = store.SetCursor("pub.polis.feed", "175")
-
-	got := s.getUnifiedCursor(store)
-	if got != "150" {
-		t.Errorf("expected minimum cursor '150' from mixed keys, got %q", got)
-	}
-}
 
 // ============================================================================
 // broadcastCounts on zero-event sync

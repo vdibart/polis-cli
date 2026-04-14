@@ -195,6 +195,7 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		Author:    req.Author,
 		Email:     req.Email,
 		Theme:     req.Theme,
+		Generator: "polis-cli-go/" + s.CLIVersion,
 	}
 
 	s.LogDebug("Initializing new site at: %s", s.DataDir)
@@ -967,32 +968,72 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Path string `json:"path"`
+		Path      string `json:"path"`
+		CommentID string `json:"comment_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
+	// Resolve comment path from ID if provided (blessed comments are in date dirs)
+	if req.CommentID != "" && req.Path == "" {
+		found, absPath := comment.FindBlessedComment(s.DataDir, req.CommentID)
+		if !found {
+			http.Error(w, "Comment not found", http.StatusNotFound)
+			return
+		}
+		// Convert absolute path to relative path from data dir
+		relPath, err := filepath.Rel(s.DataDir, absPath)
+		if err != nil {
+			http.Error(w, "Failed to resolve comment path", http.StatusInternalServerError)
+			return
+		}
+		req.Path = relPath
+	}
+
 	if req.Path == "" {
-		http.Error(w, "Post path required", http.StatusBadRequest)
+		http.Error(w, "Content path required", http.StatusBadRequest)
+		return
+	}
+
+	// Detect content type from path
+	isPost := strings.HasPrefix(req.Path, "content/pub.polis.core/post/")
+	isComment := strings.HasPrefix(req.Path, "content/pub.polis.core/comment/")
+
+	if !isPost && !isComment {
+		http.Error(w, "Path must be under content/pub.polis.core/post/ or content/pub.polis.core/comment/", http.StatusBadRequest)
 		return
 	}
 
 	// Validate path to prevent directory traversal
-	if err := validatePostPath(req.Path); err != nil {
+	if strings.Contains(req.Path, "..") || strings.Contains(req.Path, "\x00") {
 		s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
 			"path": req.Path, "request_id": RequestIDFromContext(r.Context()),
 		})
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
 	}
 
 	// Verify file exists
 	fullPath := filepath.Join(s.DataDir, req.Path)
 	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		http.Error(w, "Post not found", http.StatusNotFound)
+		http.Error(w, "Content not found", http.StatusNotFound)
 		return
+	}
+
+	// Read content for frontmatter extraction
+	contentBytes, err := os.ReadFile(fullPath)
+	if err != nil {
+		s.LogError("Failed to read content file %s: %v", req.Path, err)
+		http.Error(w, "Failed to read content file", http.StatusInternalServerError)
+		return
+	}
+	contentStr := string(contentBytes)
+	fm := publish.ParseFrontmatter(contentStr)
+	title := fm["title"]
+	if title == "" {
+		title = filepath.Base(req.Path)
 	}
 
 	// Build content URL from base URL + path
@@ -1001,47 +1042,104 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POLIS_BASE_URL not configured", http.StatusBadRequest)
 		return
 	}
-	contentPath := strings.TrimSuffix(req.Path, ".md")
-	contentURL := strings.TrimRight(polisBaseURL, "/") + "/" + contentPath + ".md"
+	contentURLPath := strings.TrimSuffix(req.Path, ".md")
+	contentURL := strings.TrimRight(polisBaseURL, "/") + "/" + contentURLPath + ".md"
 
-	// Sign unregister request
-	canonical := discovery.MakeContentUnregisterCanonicalJSON("pub.polis.post", contentURL)
+	// Determine DS content type
+	dsContentType := "pub.polis.post"
+	if isComment {
+		dsContentType = "pub.polis.comment"
+	}
+
+	// Sign unpublish request
+	canonical := discovery.MakeContentUnpublishCanonicalJSON(dsContentType, contentURL)
 	sig, err := signing.SignContent([]byte(canonical), s.PrivateKey)
 	if err != nil {
-		s.LogError("Failed to sign unregister request for %s: %v", req.Path, err)
-		http.Error(w, "Failed to sign unregister request", http.StatusInternalServerError)
+		s.LogError("Failed to sign unpublish request for %s: %v", req.Path, err)
+		http.Error(w, "Failed to sign unpublish request", http.StatusInternalServerError)
 		return
 	}
 
-	// Call DS to unregister (soft-delete) — skip if not registered
+	// Call DS to unpublish — skip if not registered
 	if s.IsRegisteredWithDS() {
 		dsClient := s.NewDSClient(r)
-		if err := dsClient.UnregisterContent("pub.polis.post", contentURL, sig); err != nil {
-			s.LogError("DS unregister failed for %s: %v", req.Path, err)
+		if err := dsClient.UnpublishContent(dsContentType, contentURL, sig); err != nil {
+			s.LogError("DS unpublish failed for %s: %v", req.Path, err)
 			// Non-fatal: still clean up locally
 		}
 	}
 
-	// Delete local .md file
-	if err := os.Remove(fullPath); err != nil {
-		s.LogError("Failed to delete post file %s: %v", req.Path, err)
-		http.Error(w, "Failed to delete post file", http.StatusInternalServerError)
+	// Strip frontmatter, preserve only title + body
+	body := publish.StripFrontmatter(contentStr)
+
+	// Build draft content
+	var draftContent string
+	if isPost {
+		draftContent = "# " + title + "\n\n" + body
+	} else {
+		// Preserve in-reply-to reference for comments
+		inReplyTo := fm["in-reply-to"]
+		var header string
+		if inReplyTo != "" {
+			header = "<!-- in-reply-to: " + inReplyTo + " -->\n"
+		}
+		draftContent = header + "# " + title + "\n\n" + body
+	}
+
+	// Determine draft destination
+	baseName := filepath.Base(req.Path)
+	var draftsDir string
+	if isPost {
+		draftsDir = filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+	} else {
+		draftsDir = filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "comments", "drafts")
+	}
+
+	// Create drafts directory and write draft
+	if err := os.MkdirAll(draftsDir, 0755); err != nil {
+		s.LogError("Failed to create drafts directory: %v", err)
+		http.Error(w, "Failed to create drafts directory", http.StatusInternalServerError)
+		return
+	}
+	draftPath := filepath.Join(draftsDir, baseName)
+	if err := os.WriteFile(draftPath, []byte(draftContent), 0644); err != nil {
+		s.LogError("Failed to write draft for %s: %v", req.Path, err)
+		http.Error(w, "Failed to write draft", http.StatusInternalServerError)
 		return
 	}
 
-	// Delete rendered .html file if exists
-	htmlPath := strings.TrimSuffix(fullPath, ".md") + ".html"
-	os.Remove(htmlPath) // Ignore error — may not exist
+	// Delete .versions/ history file (posts only)
+	if isPost {
+		dateDir := filepath.Base(filepath.Dir(req.Path))
+		versionsFile := filepath.Join(s.DataDir, "content", "pub.polis.core", "post", dateDir, ".versions", baseName)
+		os.Remove(versionsFile) // Ignore error — may not exist
+	}
 
-	// Remove from metadata/public.jsonl
+	// Delete the original published file
+	if err := os.Remove(fullPath); err != nil {
+		s.LogError("Failed to delete published file %s: %v", req.Path, err)
+		http.Error(w, "Failed to delete published file", http.StatusInternalServerError)
+		return
+	}
+
+	// Delete rendered HTML if exists
+	if isPost {
+		htmlPath := strings.TrimSuffix(fullPath, ".md") + ".html"
+		os.Remove(htmlPath)
+		// Also check posts mount point
+		dateDir := filepath.Base(filepath.Dir(req.Path))
+		htmlName := strings.TrimSuffix(baseName, ".md") + ".html"
+		mountHtmlPath := filepath.Join(s.DataDir, "posts", dateDir, htmlName)
+		os.Remove(mountHtmlPath)
+	} else {
+		htmlPath := strings.TrimSuffix(fullPath, ".md") + ".html"
+		os.Remove(htmlPath)
+	}
+
+	// Remove from index.jsonl
 	if err := metadata.RemoveIndexEntry(s.DataDir, req.Path); err != nil {
 		s.LogWarn("Could not remove index entry for %s: %v", req.Path, err)
 	}
-
-	// Remove version history if exists
-	baseName := filepath.Base(req.Path)
-	versionsPath := filepath.Join(s.DataDir, ".versions", baseName)
-	os.Remove(versionsPath) // Ignore error — may not exist
 
 	// Update manifest
 	if err := publish.UpdateManifest(s.DataDir); err != nil {
@@ -1053,7 +1151,11 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[warning] post-unpublish render failed: %v", err)
 	}
 
-	s.LogEvent("pub.polis.post.unpublish", map[string]interface{}{
+	eventType := "pub.polis.post.unpublish"
+	if isComment {
+		eventType = "pub.polis.comment.unpublish"
+	}
+	s.LogEvent(eventType, map[string]interface{}{
 		"path": req.Path,
 	})
 
@@ -1360,7 +1462,7 @@ func (s *Server) handleCommentSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	signed, err := comment.SignComment(s.DataDir, draft, authorDomain, siteURL, s.PrivateKey)
+	signed, err := comment.SignComment(s.DataDir, draft, authorDomain, siteURL, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
 	if err != nil {
 		s.LogError("failed to sign comment: %v", err)
 		http.Error(w, "Failed to sign comment", http.StatusInternalServerError)
@@ -3693,10 +3795,11 @@ func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
 	typeFilter := r.URL.Query().Get("type")
 	statusFilter := r.URL.Query().Get("status")
 
-	items, err := cm.ListFiltered(feed.FilterOptions{
-		Type:   typeFilter,
-		Status: statusFilter,
-	})
+	opts := s.feedFilterForScope(scope)
+	opts.Type = typeFilter
+	opts.Status = statusFilter
+
+	items, err := cm.ListFiltered(opts)
 	if err != nil {
 		s.LogError("feed list failed: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -3740,9 +3843,6 @@ func (s *Server) handleFeedViewed(w http.ResponseWriter, r *http.Request) {
 		_ = store.SetCursor("pub.polis.feed.viewed", syncCursor)
 	}
 
-	// Record when the user last viewed the feed (used by has_new_feed in counts)
-	_ = store.SetCursor("pub.polis.feed.viewed_at", time.Now().UTC().Format(time.RFC3339))
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
@@ -3763,17 +3863,19 @@ func (s *Server) handleFeedRefresh(w http.ResponseWriter, r *http.Request) {
 
 	// Count items before sync to determine how many are actually new
 	cm := s.feedCacheForScope(scope)
-	beforeItems, _ := cm.List()
+	opts := s.feedFilterForScope(scope)
+	beforeItems, _ := cm.ListFiltered(opts)
 	beforeCount := len(beforeItems)
 
-	// Trigger stream-based sync (feed)
-	if scope == "" || scope == "network" {
+	// Trigger stream-based sync. Runtime-filtered scopes (followers, me)
+	// use the unified sync since their data is in the network cache.
+	if scope == "" || scope == "network" || runtimeFilteredScopes[scope] {
 		s.syncFeed()
 	} else {
 		s.syncFeedScoped(scope)
 	}
 
-	items, _ := cm.List()
+	items, _ := cm.ListFiltered(opts)
 	unread := 0
 	for _, item := range items {
 		if item.ReadAt == "" {
@@ -3899,7 +4001,7 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 	}
 	cm := s.feedCacheForScope(scope)
 
-	items, err := cm.List()
+	items, err := cm.ListFiltered(s.feedFilterForScope(scope))
 	if err != nil {
 		s.LogError("feed grouped failed: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -4945,7 +5047,7 @@ func (s *Server) handleWidgetPublishComment(w http.ResponseWriter, r *http.Reque
 		Content:   text,
 	}
 
-	signed, err := comment.SignComment(s.DataDir, draft, authorDomain, siteURL, s.PrivateKey)
+	signed, err := comment.SignComment(s.DataDir, draft, authorDomain, siteURL, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
 	if err != nil {
 		s.LogError("widget publish comment: sign failed: %v", err)
 		http.Error(w, "Failed to sign comment", http.StatusInternalServerError)
@@ -5878,7 +5980,7 @@ func (s *Server) handleTagApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tf, err := tag.ApplyTag(s.DataDir, req.Tag, req.TargetURI, s.PrivateKey)
+	tf, err := tag.ApplyTag(s.DataDir, req.Tag, req.TargetURI, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
 	if err != nil {
 		s.LogError("apply tag: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -5925,7 +6027,7 @@ func (s *Server) handleTagRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tf, err := tag.RemoveTarget(s.DataDir, req.Tag, req.TargetURI, s.PrivateKey)
+	tf, err := tag.RemoveTarget(s.DataDir, req.Tag, req.TargetURI, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
 	if err != nil {
 		s.LogError("remove tag target: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -5963,5 +6065,6 @@ func (s *Server) tagDiscoveryConfig() *tag.DiscoveryConfig {
 		DiscoveryKey: s.DiscoveryKey,
 		BaseURL:      s.BaseURL,
 		HTTPClient:   s.SharedHTTPClient,
+		Generator:    "polis-cli-go/" + s.CLIVersion,
 	}
 }

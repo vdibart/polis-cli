@@ -14,9 +14,6 @@ import (
 	"strings"
 )
 
-// Version is set at init time by cmd package.
-var Version = "dev"
-
 // Templates holds the loaded theme templates.
 type Templates struct {
 	Post          string // post.html - required

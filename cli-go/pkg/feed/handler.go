@@ -2,32 +2,27 @@ package feed
 
 import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
-	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 )
 
 // FeedHandler transforms discovery stream events into FeedItems.
-// It uses policy evaluation to filter events (e.g., suppressing self-authored
-// content via "omit pub.polis.feed from self") and maps event payloads
-// to the common FeedItem structure.
+// It filters self-authored events (unless IncludeSelf is set) and maps
+// event payloads to the common FeedItem structure.
+//
+// Policy evaluation is NOT done here — policies govern network engagement
+// (DM acceptance, blessing auto-decision), while feed display is a separate
+// concern handled by this handler's own filtering logic.
 type FeedHandler struct {
 	// MyDomain is the local site's domain.
 	MyDomain string
 	// FollowedDomains is the set of domains we follow (for validation).
 	FollowedDomains map[string]bool
-	// Policies is the active policy set loaded from rules.jsonl files.
-	// When non-empty, events are evaluated against policies — deny/omit
-	// decisions cause the event to be skipped.
-	Policies []policy.Policy
-	// FollowerDomains is a set of domains that follow us. Used for policy
-	// evaluation when rules reference the "followers" source.
-	FollowerDomains map[string]bool
 	// IncludeSelf disables the self-event filter. When true, events where
 	// Actor == MyDomain are processed instead of skipped. Used for "me" scope.
 	IncludeSelf bool
 }
 
 // Process converts stream events into FeedItems.
-// It evaluates events against policies (skipping on deny/omit) and filters
+// It skips self-authored events (unless IncludeSelf) and filters
 // unknown event types.
 func (h *FeedHandler) Process(events []discovery.StreamEvent) []FeedItem {
 	var items []FeedItem
@@ -40,36 +35,9 @@ func (h *FeedHandler) Process(events []discovery.StreamEvent) []FeedItem {
 			continue
 		}
 
-		// Policy check: deny/omit events that match a deny or omit policy.
-		// The default private policy "omit pub.polis.feed from self" replaces
-		// the former hardcoded self-event skip.
-		//
-		// The event type is prefixed with "pub.polis.feed." so that
-		// feed-specific policies match via dot-boundary prefix matching
-		// without interfering with policies targeting the raw event types
-		// in other contexts (mirrors NotificationHandler pattern).
-		if len(h.Policies) > 0 {
-			pEvt := policy.Event{
-				Type:        "pub.polis.feed." + evt.Type,
-				ActorDomain: evt.Actor,
-			}
-			if td, ok := evt.Payload["target_domain"].(string); ok {
-				pEvt.TargetDomain = td
-			}
-			ctx := policy.EvalContext{
-				MyDomain:         h.MyDomain,
-				FollowingDomains: h.FollowedDomains,
-				FollowerDomains:  h.FollowerDomains,
-			}
-			result := policy.EvaluateWithLog(h.Policies, pEvt, ctx)
-			if result.Decision == policy.Deny || result.Decision == policy.Omit {
-				continue
-			}
-		} else {
-			// Fallback: no policies loaded, use legacy hardcoded self-skip
-			if evt.Actor == h.MyDomain {
-				continue
-			}
+		// Skip self-authored events — your own activity is noise in the feed.
+		if evt.Actor == h.MyDomain {
+			continue
 		}
 
 		results := h.eventToItems(evt)

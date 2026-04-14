@@ -119,14 +119,18 @@ func InitBlessedComments(siteDir string, version string) error {
 // AddBlessedComment adds a comment to the blessed comments index.
 // Creates the post entry if it doesn't exist.
 // This is an atomic read-modify-write operation.
-func AddBlessedComment(siteDir string, postPath string, comment BlessedComment) error {
+func AddBlessedComment(siteDir string, postPath string, comment BlessedComment, generator ...string) error {
+	gen := GetGenerator()
+	if len(generator) > 0 && generator[0] != "" {
+		gen = generator[0]
+	}
 	// Load current state
 	bc, err := LoadBlessedComments(siteDir)
 	if err != nil {
 		// If file doesn't exist, create new structure
 		if errors.Is(err, os.ErrNotExist) {
 			bc = &BlessedComments{
-				Version:  GetGenerator(),
+				Version:  gen,
 				Comments: []PostComments{},
 			}
 		} else {

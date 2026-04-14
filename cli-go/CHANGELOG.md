@@ -5,6 +5,26 @@ All notable changes to the Go CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.62.0]
+
+### Added
+
+- **Unpublish command**: `polis unpublish` supports posts and comments. Implements clean-break retraction: strips frontmatter (signature, versions), deletes `.versions/` history, saves title and body as a draft, and notifies the discovery service via `/v1/content/unpublish`. Includes a confirmation prompt with clear warnings.
+- **`UnpublishContent` discovery client method**: Posts to `/v1/content/unpublish`.
+- **Tag directory on init**: `pkg/site.Init()` now creates `content/pub.polis.core/tag/` so the tag system is ready immediately after site initialization.
+
+### Changed
+
+- **Feed scope consolidation**: The `followers` and `me` scopes are now runtime filters over the network cache rather than materialized files. Only `global` has its own file since it contains data outside the unified sync boundary.
+- **Policy system cleanup**: Network engagement rules and feed display rules separated in `pkg/policy`. The catch-all deny blocking feed sync items removed.
+- **Feed cursor management**: Cursor guarded against pruning losses; network feed auto-syncs on page load when stale.
+- **[Webapp] Unpublish UI**: Hover unpublish button on published posts and blessed comments. Confirmation modals explain clean-break semantics.
+
+### Fixed
+
+- **Comment author links**: Fixed rendered comment HTML linking to `.md` instead of `.html`.
+- **Feed test stability**: Fixed time-sensitive cache test failing at the 90-day retention boundary.
+
 ## [0.59.0]
 
 ### Added

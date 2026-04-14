@@ -93,8 +93,16 @@ func (h *handlers) routeContent(w http.ResponseWriter, r *http.Request, siteDir 
 	segments := strings.SplitN(path, "/", 4) // type[/seg2[/seg3[/rest]]]
 	contentType := segments[0]
 
-	// Determine auth requirement based on the operation
-	needsAuth := r.Method != http.MethodGet
+	// Determine auth requirement based on the operation.
+	// All non-GET requests require auth. Additionally, some content types
+	// contain private data and require auth even for reads:
+	//   - drafts: unpublished content
+	//   - dm: private encrypted messages
+	//   - feed: private social feed
+	//   - follow: private social graph
+	isDraftPath := len(segments) >= 2 && segments[1] == "drafts"
+	isPrivateType := isPrivateContentType(contentType)
+	needsAuth := r.Method != http.MethodGet || isDraftPath || isPrivateType
 
 	if needsAuth {
 		// Check if this is a signed-request auth (for DM deliver)
@@ -206,5 +214,20 @@ func (h *handlers) routeContent(w http.ResponseWriter, r *http.Request, siteDir 
 
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "unknown path")
+	}
+}
+
+// isPrivateContentType returns true for content types that contain private
+// data and should require auth even for GET/read operations.
+func isPrivateContentType(shortOrFull string) bool {
+	switch shortOrFull {
+	case "dm", "pub.polis.dm":
+		return true
+	case "feed", "pub.polis.feed":
+		return true
+	case "follow", "pub.polis.follow":
+		return true
+	default:
+		return false
 	}
 }

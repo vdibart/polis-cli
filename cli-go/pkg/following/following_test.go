@@ -101,8 +101,8 @@ func TestLoadNonExistent(t *testing.T) {
 		t.Errorf("Expected count 0 for non-existent file, got %d", f.Count())
 	}
 
-	if f.Version != GetGenerator() {
-		t.Errorf("default version = %q, want %q", f.Version, GetGenerator())
+	if f.Version != "" {
+		t.Errorf("default version = %q, want empty string for new file", f.Version)
 	}
 }
 

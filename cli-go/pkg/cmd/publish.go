@@ -47,7 +47,13 @@ func handlePublish(args []string) {
 	}
 
 	// Publish the post
-	result, err := publish.PublishPost(dir, markdown, *filename, privKey)
+	dsCfg := &publish.DiscoveryConfig{
+		DiscoveryURL: discoveryURL,
+		DiscoveryKey: discoveryKey,
+		BaseURL:      baseURL,
+		Generator:    generator,
+	}
+	result, err := publish.PublishPost(dir, markdown, *filename, privKey, dsCfg)
 	if err != nil {
 		exitError("Failed to publish: %v", err)
 	}
@@ -133,7 +139,13 @@ func handleRepublish(args []string) {
 	}
 
 	// Republish the post
-	result, err := publish.RepublishPost(dir, postPath, markdown, privKey)
+	dsCfg := &publish.DiscoveryConfig{
+		DiscoveryURL: discoveryURL,
+		DiscoveryKey: discoveryKey,
+		BaseURL:      baseURL,
+		Generator:    generator,
+	}
+	result, err := publish.RepublishPost(dir, postPath, markdown, privKey, dsCfg)
 	if err != nil {
 		exitError("Failed to republish: %v", err)
 	}

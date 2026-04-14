@@ -63,9 +63,10 @@ type Summary struct {
 
 // runContext carries shared state extracted before checks modify the site.
 type runContext struct {
-	siteDir string
-	dryRun  bool
-	baseURL string // extracted from .well-known/polis or POLIS_BASE_URL before legacy cleanup
+	siteDir   string
+	dryRun    bool
+	baseURL   string // extracted from .well-known/polis or POLIS_BASE_URL before legacy cleanup
+	generator string // e.g. "polis-cli-go/0.59.0"
 }
 
 // checkFunc is the signature for individual check functions.
@@ -96,8 +97,7 @@ func allChecks() []checkFunc {
 		// Phase 6: Provisioning
 		checkPoliciesPublic,
 		checkPoliciesPrivate,
-		checkPolicyFeedSelfOmit,
-		checkPolicyDenyAll,
+		checkPolicyContentConverge,
 		checkTagDirectory,
 		checkStorageSalt,
 		checkDMDirectories,
@@ -110,6 +110,8 @@ func allChecks() []checkFunc {
 		// Phase 8: Cleanup
 		checkManifestObsolete,
 		checkEmptyMetadataDir,
+		checkStaleScopedFeed,
+		checkStaleFeedViewedAt,
 		// Phase 9: CLI binary (network, runs last)
 		checkCLIUpdate,
 	}
@@ -147,17 +149,27 @@ func extractBaseURL(siteDir string) string {
 }
 
 // Diagnose runs all checks in dry-run mode.
-func Diagnose(siteDir string) *Result {
-	return run(siteDir, true, "")
+// Optional generator overrides the package-level default.
+func Diagnose(siteDir string, generator ...string) *Result {
+	gen := GetGenerator()
+	if len(generator) > 0 && generator[0] != "" {
+		gen = generator[0]
+	}
+	return run(siteDir, true, "", gen)
 }
 
 // Apply runs all checks and fixes issues, creating a backup first.
-func Apply(siteDir string) *Result {
+// Optional generator overrides the package-level default.
+func Apply(siteDir string, generator ...string) *Result {
+	gen := GetGenerator()
+	if len(generator) > 0 && generator[0] != "" {
+		gen = generator[0]
+	}
 	backupDir := createBackupDir(siteDir)
-	return run(siteDir, false, backupDir)
+	return run(siteDir, false, backupDir, gen)
 }
 
-func run(siteDir string, dryRun bool, backupDir string) *Result {
+func run(siteDir string, dryRun bool, backupDir string, generator string) *Result {
 	mode := "diagnose"
 	if !dryRun {
 		mode = "apply"
@@ -184,9 +196,10 @@ func run(siteDir string, dryRun bool, backupDir string) *Result {
 
 	// Extract base URL before legacy config check removes it from .well-known/polis
 	ctx := &runContext{
-		siteDir: siteDir,
-		dryRun:  dryRun,
-		baseURL: extractBaseURL(siteDir),
+		siteDir:   siteDir,
+		dryRun:    dryRun,
+		baseURL:   extractBaseURL(siteDir),
+		generator: generator,
 	}
 
 	checks := allChecks()

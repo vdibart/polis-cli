@@ -202,15 +202,107 @@ func TestListPostsWithEntries(t *testing.T) {
 	}
 }
 
-func TestListFollowingNoAuth(t *testing.T) {
+func TestListFollowingRequiresAuth(t *testing.T) {
 	mux, _, _ := testSetup(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/content/follow", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for GET follow without auth, got %d", w.Code)
+	}
+}
+
+func TestListFollowingWithAuth(t *testing.T) {
+	mux, _, apiKey := testSetup(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/content/follow", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
+		t.Errorf("expected follow list to pass auth, got %d", w.Code)
+	}
+}
+
+// ── Private content types require auth for reads ──────────────────
+
+func TestDMListRequiresAuth(t *testing.T) {
+	mux, _, _ := testSetup(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/content/dm", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for GET dm without auth, got %d", w.Code)
+	}
+}
+
+func TestDMGetByIDRequiresAuth(t *testing.T) {
+	mux, _, _ := testSetup(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/content/dm/conv-123", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for GET dm/{id} without auth, got %d", w.Code)
+	}
+}
+
+func TestDMListWithAuth(t *testing.T) {
+	mux, _, apiKey := testSetup(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/content/dm", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
+		t.Errorf("expected dm list to pass auth, got %d", w.Code)
+	}
+}
+
+func TestFeedListRequiresAuth(t *testing.T) {
+	mux, _, _ := testSetup(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/content/feed", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for GET feed without auth, got %d", w.Code)
+	}
+}
+
+func TestFeedListWithAuth(t *testing.T) {
+	mux, _, apiKey := testSetup(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/content/feed", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
+		t.Errorf("expected feed list to pass auth, got %d", w.Code)
+	}
+}
+
+func TestPrivateTypesFullNameRequiresAuth(t *testing.T) {
+	mux, _, _ := testSetup(t)
+
+	// Verify auth is required even when using fully-qualified type names
+	for _, typeName := range []string{"pub.polis.dm", "pub.polis.feed", "pub.polis.follow"} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/content/"+typeName, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401 for GET %s without auth, got %d", typeName, w.Code)
+		}
 	}
 }
 
@@ -351,18 +443,26 @@ func TestNoCORSOnContentRoute(t *testing.T) {
 func TestDraftsListRequiresAuth(t *testing.T) {
 	mux, _, _ := testSetup(t)
 
-	// Drafts are private content, but accessed via GET
-	// The current router treats GET as public. Drafts are a future concern
-	// per the plan (Gap 1). For now, drafts list is accessible without auth
-	// via the GET path.
 	req := httptest.NewRequest(http.MethodGet, "/v1/content/post/drafts", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
-	// Will fail at dispatch level (unsupported action) since draft.list
-	// isn't wired yet, but should reach the handler
-	if w.Code == http.StatusUnauthorized {
-		t.Error("GET on drafts should not require auth at router level")
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for GET drafts without auth, got %d", w.Code)
+	}
+}
+
+func TestDraftsListWithAuth(t *testing.T) {
+	mux, _, apiKey := testSetup(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/content/post/drafts", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	// Should reach handler, not be blocked by auth
+	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
+		t.Errorf("expected drafts list to pass auth, got %d", w.Code)
 	}
 }
 
@@ -482,17 +582,29 @@ func TestContentByIDMethodNotAllowed(t *testing.T) {
 
 // ── Drafts by ID ────────────────────────────────────────────────────
 
-func TestDraftsGetByID(t *testing.T) {
+func TestDraftsGetByIDRequiresAuth(t *testing.T) {
 	mux, _, _ := testSetup(t)
 
-	// GET on drafts/{id} is public via router (auth is GET=public)
 	req := httptest.NewRequest(http.MethodGet, "/v1/content/post/drafts/draft-123", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
-	// Should reach handler, not be blocked by routing
-	if w.Code == http.StatusMethodNotAllowed || w.Code == http.StatusUnauthorized {
-		t.Errorf("routing failed with %d for drafts GET by ID", w.Code)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for GET drafts/{id} without auth, got %d", w.Code)
+	}
+}
+
+func TestDraftsGetByIDWithAuth(t *testing.T) {
+	mux, _, apiKey := testSetup(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/content/post/drafts/draft-123", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	// Should reach handler, not be blocked by auth
+	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
+		t.Errorf("expected drafts get to pass auth, got %d", w.Code)
 	}
 }
 

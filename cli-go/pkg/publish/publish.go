@@ -171,7 +171,13 @@ func HashContent(content []byte) string {
 }
 
 // BuildFrontmatter creates the YAML frontmatter for a post.
+// Deprecated: Use buildFrontmatter with explicit generator parameter.
 func BuildFrontmatter(title, hash, timestamp, signature string) string {
+	return buildFrontmatter(title, hash, timestamp, signature, GetGenerator())
+}
+
+// buildFrontmatter creates the YAML frontmatter for a post with an explicit generator string.
+func buildFrontmatter(title, hash, timestamp, signature, generator string) string {
 	// Note: signature is base64-encoded, single line for YAML
 	return fmt.Sprintf(`---
 title: %s
@@ -184,7 +190,7 @@ signature: %s
 ---`,
 		escapeYAMLString(title),
 		timestamp,
-		GetGenerator(),
+		generator,
 		hash,
 		hash,
 		timestamp,
@@ -233,6 +239,13 @@ func escapeYAMLString(s string) string {
 // If dsCfg is non-nil, it overrides package-level discovery globals for
 // multi-tenant safety. Pass nil to use globals (single-tenant / CLI mode).
 func PublishPost(dataDir, markdown, filename string, privateKey []byte, dsCfg ...*DiscoveryConfig) (*PublishResult, error) {
+	// Resolve generator from config (or fall back to package global)
+	var cfgForGen *DiscoveryConfig
+	if len(dsCfg) > 0 {
+		cfgForGen = dsCfg[0]
+	}
+	gen := resolveGenerator(cfgForGen)
+
 	// Extract title
 	title := ExtractTitle(markdown)
 
@@ -275,7 +288,7 @@ version-history:
 ---`,
 		escapeYAMLString(title),
 		timestamp,
-		GetGenerator(),
+		gen,
 		hash,
 		hash,
 		timestamp,
@@ -296,7 +309,7 @@ version-history:
 	sigBase64 := extractSignatureBase64(signature)
 
 	// Build final frontmatter with signature
-	finalFrontmatter := BuildFrontmatter(title, hash, timestamp, sigBase64)
+	finalFrontmatter := buildFrontmatter(title, hash, timestamp, sigBase64, gen)
 
 	// Build final content
 	finalContent := finalFrontmatter + "\n\n" + canonicalBody
@@ -511,6 +524,7 @@ func AppendToIndex(dataDir string, meta *PostMeta) error {
 }
 
 // DefaultVersion returns the generator identifier for new manifests.
+// Deprecated: Callers should use the generator string from their DiscoveryConfig.
 func DefaultVersion() string {
 	return GetGenerator()
 }
@@ -609,6 +623,13 @@ func ExtractVersionHistory(content string) []string {
 
 // RepublishPost updates an existing published post.
 func RepublishPost(dataDir, postPath, markdown string, privateKey []byte, dsCfg ...*DiscoveryConfig) (*PublishResult, error) {
+	// Resolve generator from config (or fall back to package global)
+	var cfgForGen *DiscoveryConfig
+	if len(dsCfg) > 0 {
+		cfgForGen = dsCfg[0]
+	}
+	gen := resolveGenerator(cfgForGen)
+
 	// Read existing post to get original metadata
 	fullPath := filepath.Join(dataDir, postPath)
 	existingContent, err := os.ReadFile(fullPath)
@@ -664,7 +685,7 @@ version-history:%s
 		escapeYAMLString(title),
 		originalPublished,
 		updateTimestamp,
-		GetGenerator(),
+		gen,
 		hash,
 		versionHistoryYAML,
 	)
@@ -696,7 +717,7 @@ signature: %s
 		escapeYAMLString(title),
 		originalPublished,
 		updateTimestamp,
-		GetGenerator(),
+		gen,
 		hash,
 		versionHistoryYAML,
 		sigBase64,

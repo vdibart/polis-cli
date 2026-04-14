@@ -853,62 +853,47 @@ func TestBlessingSyncHandler_NoPolicyManualReview(t *testing.T) {
 	}
 }
 
-func TestNotificationSyncHandler_PolicyFromDisk(t *testing.T) {
-	// Integration test: write policy files to disk and verify they affect
-	// notification processing.
-	dir := t.TempDir()
-
-	// Create private policy that denies notifications from spam.com
-	privDir := filepath.Join(dir, ".polis", "policies")
-	os.MkdirAll(privDir, 0755)
-	os.WriteFile(
-		filepath.Join(privDir, "rules.jsonl"),
-		[]byte(`{"active":true,"policy":"deny all from all at spam.com"}`+"\n"),
-		0644,
-	)
-
-	// Load policies from disk
-	privPath, pubPath := policy.DefaultPaths(dir)
-	policies, err := policy.LoadPolicies(privPath, pubPath)
-	if err != nil {
-		t.Fatalf("failed to load policies: %v", err)
-	}
-	if len(policies) != 1 {
-		t.Fatalf("expected 1 policy, got %d", len(policies))
-	}
-
-	// Create notification handler with policies
+func TestNotificationHandler_SelfSkipAndMutedDomains(t *testing.T) {
+	// Verify that self-events are skipped and muted domains are filtered.
 	handler := &stream.NotificationHandler{
-		MyDomain: "bob.com",
-		Rules:    notification.DefaultRules(),
-		Policies: policies,
+		MyDomain:     "bob.com",
+		Rules:        notification.DefaultRules(),
+		MutedDomains: map[string]bool{"spam.com": true},
 	}
 
 	events := []discovery.StreamEvent{
 		{
 			ID:    json.Number("1"),
 			Type:  "pub.polis.follow.announced",
-			Actor: "spam.com",
+			Actor: "bob.com", // self-event — should be skipped
 			Payload: map[string]interface{}{
-				"target_domain": "bob.com",
+				"target_domain": "alice.com",
 			},
 			Timestamp: "2026-02-10T10:00:00Z",
 		},
 		{
 			ID:    json.Number("2"),
 			Type:  "pub.polis.follow.announced",
-			Actor: "good.com",
+			Actor: "spam.com", // muted — should be skipped
 			Payload: map[string]interface{}{
 				"target_domain": "bob.com",
 			},
 			Timestamp: "2026-02-10T10:01:00Z",
 		},
+		{
+			ID:    json.Number("3"),
+			Type:  "pub.polis.follow.announced",
+			Actor: "good.com", // should pass through
+			Payload: map[string]interface{}{
+				"target_domain": "bob.com",
+			},
+			Timestamp: "2026-02-10T10:02:00Z",
+		},
 	}
 
 	entries := handler.Process(events)
-	// spam.com should be denied, good.com should pass through
 	if len(entries) != 1 {
-		t.Fatalf("expected 1 notification (spam denied), got %d", len(entries))
+		t.Fatalf("expected 1 notification (self + muted skipped), got %d", len(entries))
 	}
 	if entries[0].Actor != "good.com" {
 		t.Errorf("actor = %q, want %q", entries[0].Actor, "good.com")
@@ -1206,12 +1191,35 @@ func TestFeedCacheForScope_DifferentScopes(t *testing.T) {
 	s := newConfiguredServer(t)
 
 	network := s.feedCacheForScope("network")
-	followers := s.feedCacheForScope("followers")
 	global := s.feedCacheForScope("global")
 
-	if network == followers || network == global || followers == global {
-		t.Error("expected different instances for different scopes")
+	if network == global {
+		t.Error("expected different instances for network and global scopes")
 	}
+}
+
+func TestFeedCacheForScope_RuntimeFilteredScopesUseNetwork(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	network := s.feedCacheForScope("network")
+	followers := s.feedCacheForScope("followers")
+	me := s.feedCacheForScope("me")
+
+	if network != followers {
+		t.Error("followers scope should return same instance as network (runtime-filtered)")
+	}
+	if network != me {
+		t.Error("me scope should return same instance as network (runtime-filtered)")
+	}
+}
+
+func TestSyncFeedScoped_SkipsRuntimeFilteredScopes(t *testing.T) {
+	s := newConfiguredServer(t)
+	// These should be no-ops — just verify they don't panic or error
+	s.syncFeedScoped("followers")
+	s.syncFeedScoped("me")
+	s.syncFeedScoped("network")
+	s.syncFeedScoped("")
 }
 
 // ============================================================================

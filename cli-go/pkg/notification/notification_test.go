@@ -324,9 +324,3 @@ func TestPrune_Empty(t *testing.T) {
 	}
 }
 
-func TestGetGenerator(t *testing.T) {
-	got := GetGenerator()
-	if got != "polis-cli-go/dev" {
-		t.Errorf("GetGenerator() = %q, want polis-cli-go/dev", got)
-	}
-}

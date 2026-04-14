@@ -26,6 +26,7 @@ type DiscoveryConfig struct {
 	DiscoveryURL string
 	DiscoveryKey string
 	BaseURL      string
+	Generator    string // e.g. "polis-cli-go/0.59.0" — used in comment metadata
 }
 
 // BeseechResult contains the result of a comment beseech request.

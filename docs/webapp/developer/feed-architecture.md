@@ -18,17 +18,20 @@ Frontend — client-side time/type/read filtering
 
 ## Scopes
 
-The feed supports three scopes, each with its own JSONL file and cursor:
+The feed supports four scopes. Two are **materialized** (separate JSONL + cursor) and two are **runtime-filtered** (predicates over the network cache):
 
-| Scope | Actors | File | Cursor Key |
-|---|---|---|---|
-| `network` (default) | Followed domains | `pub.polis.feed.jsonl` | `pub.polis.feed` |
-| `followers` | Follower domains | `pub.polis.feed.followers.jsonl` | `pub.polis.feed.followers` |
-| `global` | None (all of polis) | `pub.polis.feed.global.jsonl` | `pub.polis.feed.global` |
+| Scope | Type | Actors | File | Cursor Key |
+|---|---|---|---|---|
+| `network` (default) | materialized | Followed domains | `pub.polis.feed.jsonl` | `pub.polis.feed` |
+| `global` | materialized | None (all of polis) | `pub.polis.feed.global.jsonl` | `pub.polis.feed.global` |
+| `followers` | runtime filter | Follower domains | (network cache) | (network cursor) |
+| `me` | runtime filter | Self | (network cache) | (network cursor) |
 
-All files live in `.polis/ds/<ds-domain>/pub.polis.core/state/`.
+All materialized files live in `.polis/ds/<ds-domain>/pub.polis.core/state/`.
 
-Scopes are isolated: read state, cursors, and retention are independent. Marking items read in one scope does not affect others.
+**Why two types?** The `global` scope contains posts from domains you don't follow — data outside the unified sync boundary that can't be derived from the network cache. `followers` and `me` are strict subsets of the network cache (every follower's or self-authored post is already fetched by the unified sync). Materializing subsets as separate files would duplicate data, drift cursors, and create a new file for every future filter type. Runtime filtering over ~500 cached items is sub-millisecond.
+
+Runtime-filtered scopes use `FilterOptions.AuthorDomains` in `ListFiltered()` to restrict results by author domain at read time. The `feedFilterForScope()` helper populates this from the follower list or own domain.
 
 ## Content Types
 
@@ -56,8 +59,9 @@ Each content type has its own count cap and age limit, preventing announcement s
 | Scope | Posts | Comments | Announcements | Post/Comment MaxAge | Announcement MaxAge |
 |---|---|---|---|---|---|
 | network | 300 | 150 | 50 | 90 days | 14 days |
-| followers | 200 | 100 | 30 | 90 days | 14 days |
 | global | 100 | 50 | 30 | 7 days | 2 days |
+
+Runtime-filtered scopes (`followers`, `me`) inherit the network scope's retention since they read from the same cache.
 
 ### Why Per-Type Limits
 
@@ -68,6 +72,12 @@ Announcement events (follows, blessings, registrations) are more frequent than c
 A follow from 60 days ago isn't interesting; a post from 60 days ago might be. The 14-day announcement TTL keeps announcements fresh and prevents stale accumulation.
 
 ## Design Decisions
+
+### Materialized vs. runtime-filtered scopes
+
+A scope needs its own JSONL file only if it contains data **outside the unified sync boundary**. The global scope queries the DS with no actor filter, returning posts from domains the user doesn't follow — this data isn't in the network cache.
+
+Scopes that are subsets of the network cache (followers, me, and any future filters like "mutual follows" or text search) are runtime filters applied at read time against the single network cache. This prevents file proliferation: new filter types require zero new state files, just a predicate in `FilterOptions`.
 
 ### "All of polis" restricted to "last hour" and "last day"
 
@@ -87,9 +97,9 @@ This created real problems:
 
 Resolution: all event types now flow through the feed cache, giving uniform filtering, read tracking, and scope support. `/api/activity` was removed.
 
-### Follower and global scopes sync lazily
+### Global scope syncs lazily
 
-Background sync (30-second ticker) is reserved for the primary "my network" scope. Secondary scopes sync **on-demand only** — when the user switches to that scope and the cache is stale. This reduces DS query volume and avoids syncing data the user may never look at.
+Background sync (30-second ticker) is reserved for the primary "my network" scope. The global scope syncs **on-demand only** — when the user switches to that scope and the cache is stale. This reduces DS query volume and avoids syncing data the user may never look at. Runtime-filtered scopes (followers, me) use the unified sync since their data is already in the network cache.
 
 ### Global scope uses tighter retention
 
@@ -99,10 +109,10 @@ Global content is exploratory, not the user's primary feed. Tighter bounds (100 
 
 | File | Purpose |
 |---|---|
-| `cli-go/pkg/feed/cache.go` | CacheManager, CachedFeedItem, FeedConfig, per-type prune |
+| `cli-go/pkg/feed/cache.go` | CacheManager, CachedFeedItem, FeedConfig, FilterOptions, per-type prune |
 | `cli-go/pkg/feed/handler.go` | FeedHandler: DS events → FeedItems |
 | `cli-go/pkg/feed/feed.go` | FeedItem struct |
-| `webapp/internal/server/server.go` | syncFeed(), feedCacheForScope() |
+| `webapp/internal/server/server.go` | syncFeed(), syncFeedScoped(), feedCacheForScope(), feedFilterForScope() |
 | `webapp/internal/server/sync.go` | feedSyncHandler (unified sync) |
 | `webapp/internal/server/handlers.go` | /api/feed, /api/feed/grouped, /api/feed/refresh |
 

@@ -1,6 +1,6 @@
 module github.com/vdibart/polis-cli/webapp
 
-go 1.24.0
+go 1.24.4
 
 require github.com/vdibart/polis-cli/cli-go v0.0.0
 

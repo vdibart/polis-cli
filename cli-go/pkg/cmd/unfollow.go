@@ -56,9 +56,12 @@ func handleUnfollow(args []string) {
 	if remoteWK != nil {
 		authorDomain := discovery.ExtractDomainFromURL(authorURL)
 		// Fetch granted blessings where source is from the author's domain
-		grantedResp, _ := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
+		grantedResp, err := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 			"status": "granted",
 		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[!] Could not check granted blessings: %v\n", err)
+		}
 
 		if grantedResp != nil {
 			for _, rel := range grantedResp.Records {

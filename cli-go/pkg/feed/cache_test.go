@@ -2,6 +2,7 @@ package feed
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -459,6 +460,66 @@ func TestCacheManager_ListFiltered(t *testing.T) {
 	if len(all) != 3 {
 		t.Errorf("expected 3 total, got %d", len(all))
 	}
+
+	// AuthorDomains filter: only alice
+	alice, err := cm.ListFiltered(FilterOptions{AuthorDomains: map[string]bool{"alice.polis.pub": true}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(alice) != 2 {
+		t.Errorf("expected 2 items from alice, got %d", len(alice))
+	}
+
+	// AuthorDomains filter: only bob
+	bob, err := cm.ListFiltered(FilterOptions{AuthorDomains: map[string]bool{"bob.polis.pub": true}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(bob) != 1 {
+		t.Errorf("expected 1 item from bob, got %d", len(bob))
+	}
+
+	// AuthorDomains nil = all items (no-op)
+	nilDomains, err := cm.ListFiltered(FilterOptions{AuthorDomains: nil})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(nilDomains) != 3 {
+		t.Errorf("expected 3 items with nil AuthorDomains, got %d", len(nilDomains))
+	}
+
+	// Empty AuthorDomains map = nothing matches
+	empty, err := cm.ListFiltered(FilterOptions{AuthorDomains: map[string]bool{}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("expected 0 items with empty AuthorDomains, got %d", len(empty))
+	}
+
+	// Combined: AuthorDomains + Type filter
+	alicePosts, err := cm.ListFiltered(FilterOptions{
+		AuthorDomains: map[string]bool{"alice.polis.pub": true},
+		Type:          "post",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(alicePosts) != 2 {
+		t.Errorf("expected 2 posts from alice, got %d", len(alicePosts))
+	}
+
+	// Combined: AuthorDomains + Status filter
+	aliceUnread, err := cm.ListFiltered(FilterOptions{
+		AuthorDomains: map[string]bool{"alice.polis.pub": true},
+		Status:        "unread",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(aliceUnread) != 1 {
+		t.Errorf("expected 1 unread item from alice, got %d", len(aliceUnread))
+	}
 }
 
 func TestCacheManager_Prune(t *testing.T) {
@@ -837,9 +898,11 @@ func TestCacheManager_PruneByType_LegacyConfigFallback(t *testing.T) {
 func TestNewScopedCacheManager_IsolatedFiles(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create network and followers scope managers
+	// Create network and global scope managers.
+	// Uses "global" because "followers" and "me" cursor keys are now deprecated
+	// and cleaned up by loadCursors(). Global retains its own materialized cache.
 	network := NewCacheManager(dir, testDiscoveryDomain)
-	followers := NewScopedCacheManager(dir, testDiscoveryDomain, "followers")
+	global := NewScopedCacheManager(dir, testDiscoveryDomain, "global")
 
 	now := time.Now()
 
@@ -848,48 +911,48 @@ func TestNewScopedCacheManager_IsolatedFiles(t *testing.T) {
 		{Type: "post", Title: "Network Post", URL: "posts/net.md", Published: now.UTC().Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 	})
 
-	// Add items to followers
-	followers.MergeItems([]FeedItem{
-		{Type: "post", Title: "Follower Post", URL: "posts/fol.md", Published: now.UTC().Format(time.RFC3339), AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
+	// Add items to global
+	global.MergeItems([]FeedItem{
+		{Type: "post", Title: "Global Post", URL: "posts/glo.md", Published: now.UTC().Format(time.RFC3339), AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
 	})
 
 	// Each scope should have exactly 1 item
 	netItems, _ := network.List()
-	folItems, _ := followers.List()
+	globalItems, _ := global.List()
 
 	if len(netItems) != 1 {
 		t.Errorf("network: expected 1 item, got %d", len(netItems))
 	}
-	if len(folItems) != 1 {
-		t.Errorf("followers: expected 1 item, got %d", len(folItems))
+	if len(globalItems) != 1 {
+		t.Errorf("global: expected 1 item, got %d", len(globalItems))
 	}
 	if netItems[0].Title != "Network Post" {
 		t.Errorf("network: expected 'Network Post', got %s", netItems[0].Title)
 	}
-	if folItems[0].Title != "Follower Post" {
-		t.Errorf("followers: expected 'Follower Post', got %s", folItems[0].Title)
+	if globalItems[0].Title != "Global Post" {
+		t.Errorf("global: expected 'Global Post', got %s", globalItems[0].Title)
 	}
 
 	// Cursors should be independent
 	network.SetCursor("100")
-	followers.SetCursor("200")
+	global.SetCursor("200")
 
 	netCursor, _ := network.GetCursor()
-	folCursor, _ := followers.GetCursor()
+	globalCursor, _ := global.GetCursor()
 
 	if netCursor != "100" {
 		t.Errorf("network cursor: expected '100', got %s", netCursor)
 	}
-	if folCursor != "200" {
-		t.Errorf("followers cursor: expected '200', got %s", folCursor)
+	if globalCursor != "200" {
+		t.Errorf("global cursor: expected '200', got %s", globalCursor)
 	}
 
 	// Mark read in one scope shouldn't affect other
 	network.MarkAllRead()
-	folItems, _ = followers.List()
-	for _, item := range folItems {
+	globalItems, _ = global.List()
+	for _, item := range globalItems {
 		if item.ReadAt != "" {
-			t.Error("marking network read shouldn't affect followers")
+			t.Error("marking network read shouldn't affect global")
 		}
 	}
 }
@@ -949,5 +1012,153 @@ func TestPruneByType_Unit(t *testing.T) {
 		if PublishedBefore(result[i-1].Published, result[i].Published) {
 			t.Errorf("result not sorted descending at index %d", i)
 		}
+	}
+}
+
+// TestCacheManager_MergeAtMaxPosts_NewestSurvivesPrune reproduces a production
+// bug where a newly published post was lost when the cache was at the maxPosts
+// limit (300). The post was added by MergeItems, then immediately pruned by
+// pruneLocked, but the stream cursor still advanced past it — permanently
+// losing the item.
+func TestCacheManager_MergeAtMaxPosts_NewestSurvivesPrune(t *testing.T) {
+	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+
+	// Default config: MaxPosts=300
+	cfg := DefaultFeedConfig()
+	maxPosts := cfg.MaxPosts // 300
+
+	// Seed with exactly maxPosts posts
+	baseTime := time.Now().Add(-time.Duration(maxPosts) * 2 * time.Hour) // all items within 25 days
+	seed := make([]FeedItem, maxPosts)
+	for i := 0; i < maxPosts; i++ {
+		ts := baseTime.Add(time.Duration(i) * 2 * time.Hour)
+		idx := fmt.Sprintf("%04d", i)
+		seed[i] = FeedItem{
+			Type:         "post",
+			EventType:    "pub.polis.post.published",
+			Title:        "Post " + idx,
+			URL:          "https://author.test/post/" + idx + ".md",
+			Published:    ts.Format(time.RFC3339),
+			AuthorURL:    "https://author.test",
+			AuthorDomain: "author.test",
+		}
+	}
+	if _, err := cm.MergeItems(seed); err != nil {
+		t.Fatalf("seed merge: %v", err)
+	}
+
+	items, _ := cm.List()
+	if len(items) != maxPosts {
+		t.Fatalf("expected %d items after seed, got %d", maxPosts, len(items))
+	}
+
+	// Add one NEW post that is the newest
+	newestTime := baseTime.Add(time.Duration(maxPosts) * 2 * time.Hour)
+	newest := FeedItem{
+		Type:         "post",
+		EventType:    "pub.polis.post.published",
+		Title:        "THE NEWEST POST",
+		URL:          "https://author.test/post/newest.md",
+		Published:    newestTime.Format(time.RFC3339),
+		AuthorURL:    "https://author.test",
+		AuthorDomain: "author.test",
+	}
+
+	newCount, err := cm.MergeItems([]FeedItem{newest})
+	if err != nil {
+		t.Fatalf("newest merge: %v", err)
+	}
+	if newCount != 1 {
+		t.Errorf("expected newCount=1, got %d", newCount)
+	}
+
+	// The newest post MUST survive pruning
+	items, _ = cm.List()
+	if len(items) != maxPosts {
+		t.Errorf("expected %d items after prune, got %d", maxPosts, len(items))
+	}
+	if len(items) == 0 {
+		t.Fatal("cache is empty")
+	}
+	if items[0].Title != "THE NEWEST POST" {
+		t.Errorf("newest post should be first item, got %q (published=%s)", items[0].Title, items[0].Published)
+	}
+
+	// Verify the oldest seed post was the one pruned
+	for _, item := range items {
+		if item.Title == "Post "+fmt.Sprintf("%04d", 0) {
+			t.Error("oldest seed post should have been pruned")
+		}
+	}
+}
+
+// TestMergeItemsResult_ReportsRetained verifies that MergeItemsResult correctly
+// reports how many newly added items survived pruning.
+func TestMergeItemsResult_ReportsRetained(t *testing.T) {
+	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+
+	// Set maxPosts=3 for easy testing
+	cm.SaveConfig(&FeedConfig{
+		StalenessMinutes: 5,
+		MaxPosts:         3,
+		MaxAgeDays:       90,
+	})
+
+	now := time.Now()
+
+	// Seed with 3 posts (at limit)
+	seed := []FeedItem{
+		{Type: "post", Title: "A", URL: "https://a.test/1.md", Published: now.Add(-3 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.test", AuthorDomain: "a.test"},
+		{Type: "post", Title: "B", URL: "https://a.test/2.md", Published: now.Add(-2 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.test", AuthorDomain: "a.test"},
+		{Type: "post", Title: "C", URL: "https://a.test/3.md", Published: now.Add(-1 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.test", AuthorDomain: "a.test"},
+	}
+	cm.MergeItems(seed)
+
+	// Add 1 new post (newest) — should push out oldest
+	mr, err := cm.MergeItemsResult([]FeedItem{
+		{Type: "post", Title: "D", URL: "https://a.test/4.md", Published: now.Format(time.RFC3339), AuthorURL: "https://a.test", AuthorDomain: "a.test"},
+	})
+	if err != nil {
+		t.Fatalf("merge error: %v", err)
+	}
+	if mr.Added != 1 {
+		t.Errorf("expected Added=1, got %d", mr.Added)
+	}
+	if mr.Retained != 1 {
+		t.Errorf("expected Retained=1, got %d", mr.Retained)
+	}
+}
+
+// TestMergeItemsResult_DetectsPruneLoss verifies that MergeItemsResult detects
+// when a newly added item is lost to pruning (e.g., added but then pruned by age).
+func TestMergeItemsResult_DetectsPruneLoss(t *testing.T) {
+	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+
+	cm.SaveConfig(&FeedConfig{
+		StalenessMinutes: 5,
+		MaxPosts:         300,
+		MaxAgeDays:       30, // 30 days
+	})
+
+	now := time.Now()
+
+	// Add one recent post so the cache isn't empty
+	cm.MergeItems([]FeedItem{
+		{Type: "post", Title: "Recent", URL: "https://a.test/recent.md", Published: now.Format(time.RFC3339), AuthorURL: "https://a.test", AuthorDomain: "a.test"},
+	})
+
+	// Try to add a post that's older than 30 days — it will be pruned by age
+	old := now.AddDate(0, 0, -60)
+	mr, err := cm.MergeItemsResult([]FeedItem{
+		{Type: "post", Title: "Old", URL: "https://a.test/old.md", Published: old.Format(time.RFC3339), AuthorURL: "https://a.test", AuthorDomain: "a.test"},
+	})
+	if err != nil {
+		t.Fatalf("merge error: %v", err)
+	}
+	if mr.Added != 1 {
+		t.Errorf("expected Added=1, got %d", mr.Added)
+	}
+	if mr.Retained != 0 {
+		t.Errorf("expected Retained=0 (pruned by age), got %d", mr.Retained)
 	}
 }

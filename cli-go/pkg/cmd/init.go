@@ -22,6 +22,7 @@ func handleInit(args []string) {
 		Author:    *author,
 		Email:     *email,
 		Theme:     *theme,
+		Generator: generator,
 	}
 
 	result, err := site.Init(dir, opts)

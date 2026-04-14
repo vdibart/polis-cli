@@ -41,6 +41,7 @@ type RebuildOptions struct {
 	DiscoveryURL string
 	DiscoveryKey string
 	BaseURL      string // Site base URL (e.g., https://alice.polis.pub)
+	Generator    string // e.g. "polis-cli-go/0.59.0" — used in metadata
 }
 
 // RebuildResult contains the results of a rebuild operation.
@@ -176,6 +177,10 @@ func buildPostEntry(path, dataDir, baseURL string) (PostEntry, error) {
 // rebuildCommentsIndex rebuilds blessed-comments.json from the discovery service.
 // Falls back to an empty file if discovery is not configured.
 func rebuildCommentsIndex(dataDir string, opts RebuildOptions) (int, error) {
+	gen := opts.Generator
+	if gen == "" {
+		gen = GetGenerator()
+	}
 	commentDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment")
 	if err := os.MkdirAll(commentDir, 0755); err != nil {
 		return 0, err
@@ -198,7 +203,7 @@ func rebuildCommentsIndex(dataDir string, opts RebuildOptions) (int, error) {
 		if err == nil && len(resp.Records) > 0 {
 			// Build fresh blessed-comments.json
 			bc := &metadata.BlessedComments{
-				Version:  GetGenerator(),
+				Version:  gen,
 				Comments: []metadata.PostComments{},
 			}
 
@@ -236,7 +241,7 @@ func rebuildCommentsIndex(dataDir string, opts RebuildOptions) (int, error) {
 	blessedPath := filepath.Join(commentDir, "blessed.json")
 	if _, err := os.Stat(blessedPath); os.IsNotExist(err) {
 		bc := &metadata.BlessedComments{
-			Version:  GetGenerator(),
+			Version:  gen,
 			Comments: []metadata.PostComments{},
 		}
 		if err := metadata.SaveBlessedComments(dataDir, bc); err != nil {

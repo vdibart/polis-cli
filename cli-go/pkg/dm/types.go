@@ -6,14 +6,6 @@
 // messages to the recipient's /v1/content/dm/actions/deliver endpoint.
 package dm
 
-// Version is set at build time via -ldflags.
-var Version = "dev"
-
-// GetGenerator returns the generator string for metadata files.
-func GetGenerator() string {
-	return "polis-cli-go/" + Version
-}
-
 // Message represents a single DM, stored on disk with encrypted content.
 type Message struct {
 	ID               string `json:"id"`

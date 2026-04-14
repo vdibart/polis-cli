@@ -6,7 +6,6 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
-	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 )
 
 func TestNotificationHandler_EventTypes(t *testing.T) {
@@ -170,9 +169,6 @@ func TestNotificationHandler_SkipSelfEvents(t *testing.T) {
 	h := &NotificationHandler{
 		MyDomain: "bob.com",
 		Rules:    notification.DefaultRules(),
-		Policies: []policy.Policy{
-			{Active: true, Rule: "omit pub.polis.notification from self"},
-		},
 	}
 
 	events := []discovery.StreamEvent{
@@ -515,22 +511,19 @@ func TestNotificationHandler_AllDefaultRulesHaveLinks(t *testing.T) {
 	}
 }
 
-func TestNotificationHandler_PolicyDeniesEvent(t *testing.T) {
+func TestNotificationHandler_SelfEventsSkipped(t *testing.T) {
 	h := &NotificationHandler{
 		MyDomain: "bob.com",
 		Rules:    notification.DefaultRules(),
-		Policies: []policy.Policy{
-			{Active: true, Rule: "deny all from all at spam.com"},
-		},
 	}
 
 	events := []discovery.StreamEvent{
 		{
 			ID:    json.Number("1"),
 			Type:  "pub.polis.follow.announced",
-			Actor: "spam.com",
+			Actor: "bob.com", // self-event
 			Payload: map[string]interface{}{
-				"target_domain": "bob.com",
+				"target_domain": "alice.com",
 			},
 			Timestamp: "2026-02-10T10:00:00Z",
 		},
@@ -538,65 +531,6 @@ func TestNotificationHandler_PolicyDeniesEvent(t *testing.T) {
 
 	entries := h.Process(events)
 	if len(entries) != 0 {
-		t.Errorf("expected 0 notifications (policy deny), got %d", len(entries))
-	}
-}
-
-func TestNotificationHandler_PolicyAllowsEvent(t *testing.T) {
-	h := &NotificationHandler{
-		MyDomain: "bob.com",
-		Rules:    notification.DefaultRules(),
-		FollowedDomains: map[string]bool{"alice.com": true},
-		Policies: []policy.Policy{
-			{Active: true, Rule: "allow pub.polis.comment from following"},
-			{Active: true, Rule: "deny pub.polis.comment from all"},
-		},
-	}
-
-	events := []discovery.StreamEvent{
-		{
-			ID:    json.Number("1"),
-			Type:  "pub.polis.comment.published",
-			Actor: "alice.com",
-			Payload: map[string]interface{}{
-				"target_domain": "bob.com",
-				"source_url":    "https://alice.com/comments/1.md",
-				"target_url":    "https://bob.com/posts/welcome.md",
-			},
-			Timestamp: "2026-02-10T10:00:00Z",
-		},
-	}
-
-	entries := h.Process(events)
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 notification (policy allow from following), got %d", len(entries))
-	}
-	if entries[0].Actor != "alice.com" {
-		t.Errorf("actor = %q, want %q", entries[0].Actor, "alice.com")
-	}
-}
-
-func TestNotificationHandler_NoPolicies(t *testing.T) {
-	// Same as standard behavior — no policies means all events pass through
-	h := &NotificationHandler{
-		MyDomain: "bob.com",
-		Rules:    notification.DefaultRules(),
-	}
-
-	events := []discovery.StreamEvent{
-		{
-			ID:    json.Number("1"),
-			Type:  "pub.polis.follow.announced",
-			Actor: "alice.com",
-			Payload: map[string]interface{}{
-				"target_domain": "bob.com",
-			},
-			Timestamp: "2026-02-10T10:00:00Z",
-		},
-	}
-
-	entries := h.Process(events)
-	if len(entries) != 1 {
-		t.Errorf("expected 1 notification (no policies), got %d", len(entries))
+		t.Errorf("expected 0 notifications (self-event skipped), got %d", len(entries))
 	}
 }

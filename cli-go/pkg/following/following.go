@@ -48,7 +48,6 @@ func Load(path string) (*FollowingFile, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &FollowingFile{
-				Version:   GetGenerator(),
 				Following: []FollowingEntry{},
 			}, nil
 		}

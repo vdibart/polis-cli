@@ -28,7 +28,7 @@ set -eo pipefail
 #   4. Hardcoded defaults
 
 # Fixed constants (never configurable - required for discovery)
-VERSION="0.61.0"
+VERSION="0.62.0"
 WELL_KNOWN_DIR=".well-known"
 WELL_KNOWN_FILE="polis"
 
@@ -322,6 +322,7 @@ cmd_init() {
     mkdir -p ".polis/content/pub.polis.core/comments/drafts"
     mkdir -p ".polis/content/pub.polis.core/comments/pending"
     mkdir -p ".polis/content/pub.polis.core/comments/denied"
+    mkdir -p "content/pub.polis.core/tag"
     mkdir -p ".polis/logs"
 
     dirs_created=("$keys_dir" "$posts_dir" "$comments_dir" "$following_dir" "$snippets_dir" "$themes_dir" "$WELL_KNOWN_DIR")

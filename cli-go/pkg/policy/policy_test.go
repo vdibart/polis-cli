@@ -826,15 +826,18 @@ func TestDefaultPublicPolicyContent(t *testing.T) {
 		}
 	}
 
-	if len(activePolicies) != 3 {
-		t.Fatalf("expected 3 active policies, got %d", len(activePolicies))
+	if len(activePolicies) != 6 {
+		t.Fatalf("expected 6 active policies, got %d", len(activePolicies))
 	}
 
-	// Verify all 3 emit rules parse correctly
+	// Verify all rules parse correctly
 	expectedRules := []string{
+		"allow pub.polis.dm from following",
+		"deny pub.polis.dm from all",
 		"emit pub.polis.comment.blessing from self",
 		"emit pub.polis.comment.blessing from following",
 		"emit pub.polis.comment.blessing from thread-blessed",
+		"deny all from all",
 	}
 	for i, expected := range expectedRules {
 		if activePolicies[i].Rule != expected {
@@ -862,7 +865,7 @@ func TestDefaultPrivatePolicyContent(t *testing.T) {
 		t.Fatalf("failed to load default private policy content: %v", err)
 	}
 
-	// Filter to only active policies with non-empty rules
+	// Private template is empty — no active rules (just the version header)
 	var activePolicies []Policy
 	for _, p := range policies {
 		if p.Active && p.Rule != "" {
@@ -870,28 +873,8 @@ func TestDefaultPrivatePolicyContent(t *testing.T) {
 		}
 	}
 
-	if len(activePolicies) != 9 {
-		t.Fatalf("expected 9 active policies, got %d", len(activePolicies))
-	}
-
-	expectedRules := []string{
-		"allow pub.polis.post from all",
-		"allow pub.polis.comment from all",
-		"allow pub.polis.follow from all",
-		"allow pub.polis.site from all",
-		"allow pub.polis.dm from following",
-		"deny pub.polis.dm from all",
-		"omit pub.polis.notification from self",
-		"omit pub.polis.feed from self",
-		"deny all from all",
-	}
-	for i, expected := range expectedRules {
-		if activePolicies[i].Rule != expected {
-			t.Errorf("policy[%d] = %q, want %q", i, activePolicies[i].Rule, expected)
-		}
-		if _, err := Parse(activePolicies[i].Rule); err != nil {
-			t.Errorf("policy[%d] parse error: %v", i, err)
-		}
+	if len(activePolicies) != 0 {
+		t.Fatalf("expected 0 active policies (empty private template), got %d", len(activePolicies))
 	}
 }
 
@@ -902,15 +885,15 @@ func TestDefaultPolicyContent_BackwardsCompat(t *testing.T) {
 	}
 }
 
-func TestDefaultPrivatePolicy_DenyAllCatchAll(t *testing.T) {
-	// The default private policy ends with "deny all from all" which should
-	// deny unknown content types but allow explicitly listed types above it.
-	content := DefaultPrivatePolicyContent()
+func TestDefaultPublicPolicy_DenyAllCatchAll(t *testing.T) {
+	// The default public policy ends with "deny all from all" which should
+	// deny unknown content types but allow DMs from following and emit blessings.
+	content := DefaultPublicPolicyContent()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "rules.jsonl")
 	os.WriteFile(path, []byte(content), 0644)
 
-	policies, err := LoadPolicies(path, "/nonexistent")
+	policies, err := LoadPolicies("/nonexistent", path)
 	if err != nil {
 		t.Fatalf("failed to load: %v", err)
 	}
@@ -920,74 +903,73 @@ func TestDefaultPrivatePolicy_DenyAllCatchAll(t *testing.T) {
 		FollowingDomains: map[string]bool{"friend.com": true},
 	}
 
-	// Known type (pub.polis.post) from anyone should be allowed
-	evt := Event{Type: "pub.polis.post.published", ActorDomain: "anyone.com"}
-	if got := Evaluate(policies, evt, ctx); got != Allow {
-		t.Errorf("known type should be allowed, got %v", got)
-	}
-
 	// Unknown type should be denied by the catch-all
-	evt = Event{Type: "pub.custom.widget.created", ActorDomain: "anyone.com"}
+	evt := Event{Type: "pub.custom.widget.created", ActorDomain: "anyone.com"}
 	if got := Evaluate(policies, evt, ctx); got != Deny {
 		t.Errorf("unknown type should be denied by catch-all, got %v", got)
 	}
 
-	// DM from following should be allowed (before the deny dm rule)
+	// DM from following should be allowed
 	evt = Event{Type: "pub.polis.dm.delivered", ActorDomain: "friend.com"}
 	if got := Evaluate(policies, evt, ctx); got != Allow {
 		t.Errorf("DM from following should be allowed, got %v", got)
 	}
 
-	// DM from stranger should be denied (by the dm-specific deny, not the catch-all)
+	// DM from stranger should be denied
 	evt = Event{Type: "pub.polis.dm.delivered", ActorDomain: "stranger.com"}
 	if got := Evaluate(policies, evt, ctx); got != Deny {
 		t.Errorf("DM from stranger should be denied, got %v", got)
 	}
 }
 
-func TestDefaultPrivatePolicy_FeedSelfOmit(t *testing.T) {
-	// The default private policy includes "omit pub.polis.feed from self"
-	// which suppresses self-authored events in the feed.
-	content := DefaultPrivatePolicyContent()
+func TestDefaultPolicies_PrivateOverridesPublic(t *testing.T) {
+	// A private deny rule should shadow the public emit rules.
 	dir := t.TempDir()
-	path := filepath.Join(dir, "rules.jsonl")
-	os.WriteFile(path, []byte(content), 0644)
+	privPath := filepath.Join(dir, "private.jsonl")
+	pubPath := filepath.Join(dir, "public.jsonl")
 
-	policies, err := LoadPolicies(path, "/nonexistent")
+	os.WriteFile(privPath, []byte(`{"active":true,"policy":"deny all from all at blocked.com"}`+"\n"), 0644)
+	os.WriteFile(pubPath, []byte(DefaultPublicPolicyContent()), 0644)
+
+	policies, err := LoadPolicies(privPath, pubPath)
 	if err != nil {
 		t.Fatalf("failed to load: %v", err)
 	}
 
-	ctx := EvalContext{MyDomain: "mysite.com"}
-
-	// Feed event from self should be omitted
-	evt := Event{Type: "pub.polis.feed.pub.polis.post.published", ActorDomain: "mysite.com"}
-	if got := Evaluate(policies, evt, ctx); got != Omit {
-		t.Errorf("feed self-event should be omitted, got %v", got)
+	ctx := EvalContext{
+		MyDomain:         "mysite.com",
+		FollowingDomains: map[string]bool{"blocked.com": true},
 	}
 
-	// Feed event from others should be allowed (by explicit allow rules above)
-	evt = Event{Type: "pub.polis.feed.pub.polis.post.published", ActorDomain: "other.com"}
-	// This matches "deny all from all" catch-all since pub.polis.feed isn't explicitly allowed.
-	// Feed events are evaluated with the "pub.polis.feed." prefix, and there's no
-	// explicit allow for pub.polis.feed — but the catch-all denies unknown types.
-	// The FeedHandler should use only relevant policies or the feed events
-	// should be evaluated before the catch-all kicks in.
-	// For now, this tests that the omit rule works for self.
+	// Blessing from blocked.com should be denied by private override
+	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "blocked.com"}
+	if got := Evaluate(policies, evt, ctx); got != Deny {
+		t.Errorf("blessing from blocked domain should be denied, got %v", got)
+	}
+
+	// Blessing from non-blocked following should still emit
+	evt = Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "friend.com"}
+	ctx.FollowingDomains["friend.com"] = true
+	if got := Evaluate(policies, evt, ctx); got != Emit {
+		t.Errorf("blessing from non-blocked following should emit, got %v", got)
+	}
 }
 
 func TestDefaultPolicies_VersionHeader(t *testing.T) {
 	// Both default policy contents should start with a version header
-	for _, content := range []string{DefaultPublicPolicyContent(), DefaultPrivatePolicyContent()} {
+	for name, content := range map[string]string{
+		"public":  DefaultPublicPolicyContent(),
+		"private": DefaultPrivatePolicyContent(),
+	} {
 		lines := strings.Split(strings.TrimSpace(content), "\n")
-		if len(lines) < 2 {
-			t.Fatal("expected at least 2 lines (header + rules)")
+		if len(lines) < 1 {
+			t.Fatalf("%s: expected at least 1 line (header)", name)
 		}
 		if !strings.Contains(lines[0], `"version"`) {
-			t.Errorf("first line should be version header, got: %s", lines[0])
+			t.Errorf("%s: first line should be version header, got: %s", name, lines[0])
 		}
 		if !strings.Contains(lines[0], `"generator"`) {
-			t.Errorf("first line should contain generator, got: %s", lines[0])
+			t.Errorf("%s: first line should contain generator, got: %s", name, lines[0])
 		}
 	}
 }

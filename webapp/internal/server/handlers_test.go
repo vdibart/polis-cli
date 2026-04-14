@@ -4199,11 +4199,12 @@ func TestHandleFeed_SpecialCharacterTitles(t *testing.T) {
 	s := newTestServer(t)
 
 	// Populate cache with titles containing special characters
+	// Use dates well within the 90-day feed retention window to avoid time-sensitive pruning
 	cm := feed.NewCacheManager(s.DataDir, "default")
 	cm.MergeItems([]feed.FeedItem{
-		{Type: "post", Title: "It's Not Beyond Our Reach", URL: "posts/its-not.md", Published: "2026-01-15T12:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-		{Type: "post", Title: `She said "hello" & waved`, URL: "posts/she-said.md", Published: "2026-01-14T12:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-		{Type: "post", Title: "2 < 3 && 5 > 4", URL: "posts/math.md", Published: "2026-01-13T12:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "It's Not Beyond Our Reach", URL: "posts/its-not.md", Published: "2026-04-03T12:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: `She said "hello" & waved`, URL: "posts/she-said.md", Published: "2026-04-02T12:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "2 < 3 && 5 > 4", URL: "posts/math.md", Published: "2026-04-01T12:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/feed", nil)
@@ -4499,7 +4500,7 @@ func TestHandleFeedViewed_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestHandleFeedViewed_SetsViewedAt(t *testing.T) {
+func TestHandleFeedViewed_DoesNotSetViewedAt(t *testing.T) {
 	s := newConfiguredServer(t)
 
 	discoveryDomain := s.GetDiscoveryDomain()
@@ -4514,13 +4515,10 @@ func TestHandleFeedViewed_SetsViewedAt(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
+	// viewed_at should NOT be written (deprecated — GetCursor returns "0" for missing keys)
 	viewedAt, _ := store.GetCursor("pub.polis.feed.viewed_at")
-	if viewedAt == "" {
-		t.Error("expected pub.polis.feed.viewed_at to be set")
-	}
-	// Should be a valid RFC3339 timestamp
-	if _, err := time.Parse(time.RFC3339, viewedAt); err != nil {
-		t.Errorf("expected RFC3339 timestamp, got %q: %v", viewedAt, err)
+	if viewedAt != "0" {
+		t.Errorf("pub.polis.feed.viewed_at should not be set, got %q", viewedAt)
 	}
 }
 
@@ -4530,28 +4528,31 @@ func TestComputeAllCounts_HasNewFeed(t *testing.T) {
 	discoveryDomain := s.GetDiscoveryDomain()
 	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
 
-	// Add a feed item with a CachedAt timestamp
-	cm := s.feedCacheForScope("network")
-	_, _ = cm.MergeItems([]feed.FeedItem{{
-		Type:         "post",
-		Title:        "Test",
-		URL:          "https://alice.pub/posts/test",
-		AuthorDomain: "alice.pub",
-		AuthorURL:    "https://alice.pub",
-		Published:    "2026-04-01T12:00:00Z",
-	}})
-
-	// No viewed_at set yet — should show has_new_feed
+	// No sync cursor — should not show has_new_feed
 	counts := s.computeAllCounts()
-	if !counts.HasNewFeed {
-		t.Error("expected HasNewFeed=true when no viewed_at is set and feed items exist")
+	if counts.HasNewFeed {
+		t.Error("expected HasNewFeed=false when sync cursor is empty")
 	}
 
-	// Set viewed_at to the future — should clear has_new_feed
-	_ = store.SetCursor("pub.polis.feed.viewed_at", "2099-01-01T00:00:00Z")
+	// Set sync cursor but no viewed cursor — should show has_new_feed
+	_ = store.SetCursor("pub.polis.sync", "100")
+	counts = s.computeAllCounts()
+	if !counts.HasNewFeed {
+		t.Error("expected HasNewFeed=true when sync cursor is set but viewed is not")
+	}
+
+	// Set viewed cursor to match sync — should clear has_new_feed
+	_ = store.SetCursor("pub.polis.feed.viewed", "100")
 	counts = s.computeAllCounts()
 	if counts.HasNewFeed {
-		t.Error("expected HasNewFeed=false when viewed_at is after newest item")
+		t.Error("expected HasNewFeed=false when sync and viewed cursors match")
+	}
+
+	// Advance sync past viewed — should show has_new_feed again
+	_ = store.SetCursor("pub.polis.sync", "200")
+	counts = s.computeAllCounts()
+	if !counts.HasNewFeed {
+		t.Error("expected HasNewFeed=true when sync cursor is ahead of viewed")
 	}
 }
 
@@ -6749,30 +6750,6 @@ func TestHandleSSE_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-// ============================================================================
-// cursorLess / cursorGreater Tests (sync utilities)
-// ============================================================================
-
-func TestCursorLess(t *testing.T) {
-	tests := []struct {
-		a, b string
-		want bool
-	}{
-		{"1", "2", true},
-		{"2", "1", false},
-		{"10", "9", false},
-		{"9", "10", true},
-		{"100", "100", false},
-		{"0", "1", true},
-	}
-
-	for _, tt := range tests {
-		got := cursorLess(tt.a, tt.b)
-		if got != tt.want {
-			t.Errorf("cursorLess(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
-		}
-	}
-}
 
 func TestComputeAllCounts_WithFollowing(t *testing.T) {
 	s := newConfiguredServer(t)

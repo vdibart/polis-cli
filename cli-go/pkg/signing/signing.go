@@ -74,11 +74,12 @@ func SignContent(content, privateKeyPEM []byte) (string, error) {
 	// Sign the blob, not the raw content
 	sig := ed25519.Sign(privKey, signingBlob)
 
-	// Zero the private key bytes after signing
+	// Extract public key before zeroing private key material
+	pubKey := privKey.Public().(ed25519.PublicKey)
 	ZeroKey(privKey)
 
 	// Format as SSH signature
-	sshSig, err := formatSSHSignature(privKey.Public().(ed25519.PublicKey), sig)
+	sshSig, err := formatSSHSignature(pubKey, sig)
 	if err != nil {
 		return "", err
 	}
@@ -239,31 +240,63 @@ func parsePrivateKey(pemData []byte) (ed25519.PrivateKey, error) {
 	}
 	data = data[len(magic):]
 
+	var err error
+
 	// Skip cipher, kdf, kdf options
-	_, data, _ = readString(data)
-	_, data, _ = readString(data)
-	_, data, _ = readString(data)
+	_, data, err = readString(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key cipher: %w", err)
+	}
+	_, data, err = readString(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key kdf: %w", err)
+	}
+	_, data, err = readString(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key kdf options: %w", err)
+	}
 
 	// Number of keys
-	_, data, _ = readUint32(data)
+	_, data, err = readUint32(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key num keys: %w", err)
+	}
 
 	// Skip public key blob
-	_, data, _ = readBytes(data)
+	_, data, err = readBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key public key blob: %w", err)
+	}
 
 	// Private key section
-	privSection, _, _ := readBytes(data)
+	privSection, _, err := readBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key private section: %w", err)
+	}
 
 	// Skip check numbers
+	if len(privSection) < 8 {
+		return nil, fmt.Errorf("private key section too short for check numbers")
+	}
 	privSection = privSection[8:]
 
 	// Key type
-	_, privSection, _ = readString(privSection)
+	_, privSection, err = readString(privSection)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key type: %w", err)
+	}
 
 	// Public key
-	_, privSection, _ = readBytes(privSection)
+	_, privSection, err = readBytes(privSection)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key embedded public key: %w", err)
+	}
 
 	// Private key (ed25519 stores 64 bytes: seed + public)
-	privKeyBytes, _, _ := readBytes(privSection)
+	privKeyBytes, _, err := readBytes(privSection)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key bytes: %w", err)
+	}
 
 	if len(privKeyBytes) != ed25519.PrivateKeySize {
 		return nil, fmt.Errorf("invalid private key size")
@@ -292,10 +325,16 @@ func parsePublicKey(sshData []byte) (ed25519.PublicKey, error) {
 	}
 
 	// Skip key type string
-	_, blob, _ = readString(blob)
+	_, blob, err = readString(blob)
+	if err != nil {
+		return nil, fmt.Errorf("parse public key type: %w", err)
+	}
 
 	// Read public key bytes
-	pubBytes, _, _ := readBytes(blob)
+	pubBytes, _, err := readBytes(blob)
+	if err != nil {
+		return nil, fmt.Errorf("parse public key bytes: %w", err)
+	}
 
 	if len(pubBytes) != ed25519.PublicKeySize {
 		return nil, fmt.Errorf("invalid public key size")

@@ -15,8 +15,8 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
-	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
+	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
@@ -46,30 +46,30 @@ func checkWellKnownVersion(ctx *runContext) CheckResult {
 	version, _ := raw["version"].(string)
 	if version == "" {
 		// Missing version — set it
-		raw["version"] = GetGenerator()
+		raw["version"] = ctx.generator
 	} else if !semverPattern.MatchString(version) {
 		// Already in generator format or some other format — pass
 		return pass(name, fmt.Sprintf("Version already in generator format: %q", version))
 	} else {
 		// Bare semver — needs update
-		raw["version"] = GetGenerator()
+		raw["version"] = ctx.generator
 	}
 
-	if version == GetGenerator() {
+	if version == ctx.generator {
 		return pass(name, fmt.Sprintf("Version already in generator format: %q", version))
 	}
 
-	actions := []Action{{Op: "update", Path: ".well-known/polis", Detail: fmt.Sprintf("%q → %q", version, GetGenerator())}}
+	actions := []Action{{Op: "update", Path: ".well-known/polis", Detail: fmt.Sprintf("%q → %q", version, ctx.generator)}}
 
 	if ctx.dryRun {
-		return fail(name, fmt.Sprintf("Version %q → %q", version, GetGenerator()), reason, actions)
+		return fail(name, fmt.Sprintf("Version %q → %q", version, ctx.generator), reason, actions)
 	}
 
 	backupFile(ctx.siteDir, "", ".well-known/polis") // best-effort
 	if err := writeWellKnownRaw(wkPath, raw); err != nil {
 		return fail(name, fmt.Sprintf("Failed to update: %v", err), reason, actions)
 	}
-	return CheckResult{Name: name, Status: StatusFail, Message: fmt.Sprintf("Updated %q → %q", version, GetGenerator()), Reason: reason, Actions: actions}
+	return CheckResult{Name: name, Status: StatusFail, Message: fmt.Sprintf("Updated %q → %q", version, ctx.generator), Reason: reason, Actions: actions}
 }
 
 // checkWellKnownLegacyConfig removes old config.directories/config.files sections.
@@ -369,7 +369,7 @@ func checkLayoutFollowing(ctx *runContext) CheckResult {
 	}
 
 	// Update version string in the file
-	updateJSONVersion(newPath)
+	updateJSONVersion(newPath, ctx.generator)
 
 	return CheckResult{Name: name, Status: StatusFail, Message: "Moved following.json to core bundle", Reason: reason, Actions: actions}
 }
@@ -404,7 +404,7 @@ func checkLayoutBlessed(ctx *runContext) CheckResult {
 	}
 
 	// Update version string in the file
-	updateJSONVersion(newPath)
+	updateJSONVersion(newPath, ctx.generator)
 
 	return CheckResult{Name: name, Status: StatusFail, Message: "Moved blessed-comments.json to core bundle", Reason: reason, Actions: actions}
 }
@@ -929,7 +929,7 @@ func writeWellKnownRaw(path string, raw map[string]interface{}) error {
 }
 
 // updateJSONVersion updates the "version" field in a JSON file to the current generator.
-func updateJSONVersion(path string) {
+func updateJSONVersion(path, generator string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
@@ -939,7 +939,7 @@ func updateJSONVersion(path string) {
 		return
 	}
 	if _, ok := raw["version"]; ok {
-		raw["version"] = GetGenerator()
+		raw["version"] = generator
 		out, err := json.MarshalIndent(raw, "", "  ")
 		if err != nil {
 			return
@@ -1293,6 +1293,7 @@ func checkDMPreviewEncryption(ctx *runContext) CheckResult {
 	if err != nil {
 		return skip(name, "Cannot parse private key for encryption", reason)
 	}
+	defer signing.ZeroKey(privKey)
 
 	store, err := dm.NewStore(ctx.siteDir, privKey.Seed())
 	if err != nil {
@@ -1306,68 +1307,55 @@ func checkDMPreviewEncryption(ctx *runContext) CheckResult {
 	return CheckResult{Name: name, Status: StatusFail, Message: fmt.Sprintf("Encrypted %d plaintext DM preview(s)", plaintextCount), Reason: reason, Actions: actions}
 }
 
-// ── Phase 6 (cont): Policy rules ──────────────────────────────────
+// ── Phase 6 (cont): Policy content convergence ──────────────────────
 
-// checkPolicyFeedSelfOmit ensures the feed self-omit rule exists in private policies.
-func checkPolicyFeedSelfOmit(ctx *runContext) CheckResult {
-	const name = "policy-feed-self-omit"
-	const reason = "Feed content from self must be omitted to prevent self-referencing in the feed view"
+// checkPolicyContentConverge overwrites both policy files with the canonical
+// templates if their content has drifted. Tenants cannot customize policy
+// files, so all existing files should match the defaults.
+func checkPolicyContentConverge(ctx *runContext) CheckResult {
+	const name = "policy-content-converge"
+	const reason = "Policy files must match the canonical templates for consistent behavior"
 
-	policyPath := filepath.Join(ctx.siteDir, ".polis", "policies", "rules.jsonl")
-	if !fileExists(policyPath) {
-		return skip(name, "Private policy file not found", reason)
+	privPath := filepath.Join(ctx.siteDir, ".polis", "policies", "rules.jsonl")
+	pubPath := filepath.Join(ctx.siteDir, "policies", "rules.jsonl")
+
+	var drifted []string
+	var actions []Action
+
+	if privData, err := os.ReadFile(privPath); err == nil {
+		if strings.TrimSpace(string(privData)) != strings.TrimSpace(policy.DefaultPrivatePolicyContent()) {
+			drifted = append(drifted, "private")
+			actions = append(actions, Action{Op: "update", Path: ".polis/policies/rules.jsonl", Detail: "converge to canonical template"})
+		}
 	}
 
-	data, err := os.ReadFile(policyPath)
-	if err != nil {
-		return skip(name, "Cannot read private policies", reason)
+	if pubData, err := os.ReadFile(pubPath); err == nil {
+		if strings.TrimSpace(string(pubData)) != strings.TrimSpace(policy.DefaultPublicPolicyContent()) {
+			drifted = append(drifted, "public")
+			actions = append(actions, Action{Op: "update", Path: "policies/rules.jsonl", Detail: "converge to canonical template"})
+		}
 	}
 
-	if strings.Contains(string(data), "omit pub.polis.feed from self") {
-		return pass(name, "Feed self-omit rule present")
+	if len(drifted) == 0 {
+		return pass(name, "Policy files match canonical templates")
 	}
-
-	actions := []Action{{Op: "update", Path: ".polis/policies/rules.jsonl", Detail: "append feed self-omit rule"}}
 
 	if ctx.dryRun {
-		return fail(name, "Missing feed self-omit rule", reason, actions)
+		return fail(name, "Policy content drift: "+strings.Join(drifted, ", "), reason, actions)
 	}
 
-	if err := appendPolicyRule(policyPath, `{"active":true,"policy":"omit pub.polis.feed from self"}`); err != nil {
-		return fail(name, fmt.Sprintf("Failed to append rule: %v", err), reason, actions)
-	}
-	return CheckResult{Name: name, Status: StatusFail, Message: "Appended feed self-omit rule", Reason: reason, Actions: actions}
-}
-
-// checkPolicyDenyAll ensures the deny-all catch-all rule exists in private policies.
-func checkPolicyDenyAll(ctx *runContext) CheckResult {
-	const name = "policy-deny-all"
-	const reason = "A default-deny catch-all rule provides a security baseline for content acceptance"
-
-	policyPath := filepath.Join(ctx.siteDir, ".polis", "policies", "rules.jsonl")
-	if !fileExists(policyPath) {
-		return skip(name, "Private policy file not found", reason)
+	for _, d := range drifted {
+		switch d {
+		case "private":
+			os.MkdirAll(filepath.Dir(privPath), 0700)
+			os.WriteFile(privPath, []byte(policy.DefaultPrivatePolicyContent()), 0600)
+		case "public":
+			os.MkdirAll(filepath.Dir(pubPath), 0755)
+			os.WriteFile(pubPath, []byte(policy.DefaultPublicPolicyContent()), 0644)
+		}
 	}
 
-	data, err := os.ReadFile(policyPath)
-	if err != nil {
-		return skip(name, "Cannot read private policies", reason)
-	}
-
-	if strings.Contains(string(data), "deny all from all") {
-		return pass(name, "Deny-all catch-all rule present")
-	}
-
-	actions := []Action{{Op: "update", Path: ".polis/policies/rules.jsonl", Detail: "append deny-all catch-all rule"}}
-
-	if ctx.dryRun {
-		return fail(name, "Missing deny-all catch-all rule", reason, actions)
-	}
-
-	if err := appendPolicyRule(policyPath, `{"active":true,"policy":"deny all from all"}`); err != nil {
-		return fail(name, fmt.Sprintf("Failed to append rule: %v", err), reason, actions)
-	}
-	return CheckResult{Name: name, Status: StatusFail, Message: "Appended deny-all catch-all rule", Reason: reason, Actions: actions}
+	return CheckResult{Name: name, Status: StatusFail, Message: "Converged policy files: " + strings.Join(drifted, ", "), Reason: reason, Actions: actions}
 }
 
 // ── Phase 7 (cont): Webapp config cleanup ──────────────────────────
@@ -1540,6 +1528,114 @@ func appendPolicyRule(path, ruleLine string) error {
 	}
 	_, err = f.WriteString(ruleLine + "\n")
 	return err
+}
+
+// checkStaleScopedFeed removes deprecated scoped feed cache files (followers, me).
+// These scopes are now served as runtime filters over the network feed cache.
+func checkStaleScopedFeed(ctx *runContext) CheckResult {
+	name := "stale-scoped-feed"
+	reason := "followers/me feed scopes collapsed to runtime filters; separate cache files are obsolete"
+
+	dsDir := filepath.Join(ctx.siteDir, ".polis", "ds")
+	entries, err := os.ReadDir(dsDir)
+	if err != nil {
+		return CheckResult{Name: name, Status: StatusPass, Message: "no DS directory"}
+	}
+
+	deprecated := []string{"followers", "me"}
+	var actions []Action
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		stateDir := filepath.Join(dsDir, entry.Name(), "pub.polis.core", "state")
+		for _, scope := range deprecated {
+			fname := "pub.polis.feed." + scope + ".jsonl"
+			p := filepath.Join(stateDir, fname)
+			if _, err := os.Stat(p); err == nil {
+				relPath, _ := filepath.Rel(ctx.siteDir, p)
+				if !ctx.dryRun {
+					os.Remove(p)
+				}
+				actions = append(actions, Action{
+					Op:     "remove",
+					Path:   relPath,
+					Detail: "deprecated scoped feed cache",
+				})
+			}
+		}
+	}
+
+	if len(actions) == 0 {
+		return CheckResult{Name: name, Status: StatusPass, Message: "no deprecated scoped feed files"}
+	}
+	return CheckResult{
+		Name:    name,
+		Status:  StatusFail,
+		Reason:  reason,
+		Message: fmt.Sprintf("removed %d deprecated scoped feed file(s)", len(actions)),
+		Actions: actions,
+	}
+}
+
+// checkStaleFeedViewedAt removes the deprecated pub.polis.feed.viewed_at cursor key
+// from cursors.json. This timestamp-based key was replaced by the position-based
+// pub.polis.feed.viewed cursor.
+func checkStaleFeedViewedAt(ctx *runContext) CheckResult {
+	name := "stale-feed-viewed-at"
+	reason := "pub.polis.feed.viewed_at cursor replaced by position-based pub.polis.feed.viewed"
+
+	dsDir := filepath.Join(ctx.siteDir, ".polis", "ds")
+	entries, err := os.ReadDir(dsDir)
+	if err != nil {
+		return CheckResult{Name: name, Status: StatusPass, Message: "no DS directory"}
+	}
+
+	var actions []Action
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		cursorsPath := filepath.Join(dsDir, entry.Name(), "pub.polis.core", "state", "cursors.json")
+		data, err := os.ReadFile(cursorsPath)
+		if err != nil {
+			continue
+		}
+		var raw map[string]interface{}
+		if json.Unmarshal(data, &raw) != nil {
+			continue
+		}
+		cursors, ok := raw["cursors"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if _, has := cursors["pub.polis.feed.viewed_at"]; !has {
+			continue
+		}
+		relPath, _ := filepath.Rel(ctx.siteDir, cursorsPath)
+		if !ctx.dryRun {
+			delete(cursors, "pub.polis.feed.viewed_at")
+			if out, err := json.MarshalIndent(raw, "", "  "); err == nil {
+				os.WriteFile(cursorsPath, append(out, '\n'), 0644)
+			}
+		}
+		actions = append(actions, Action{
+			Op:     "remove_key",
+			Path:   relPath,
+			Detail: "deprecated pub.polis.feed.viewed_at cursor",
+		})
+	}
+
+	if len(actions) == 0 {
+		return CheckResult{Name: name, Status: StatusPass, Message: "no deprecated feed viewed_at cursor"}
+	}
+	return CheckResult{
+		Name:    name,
+		Status:  StatusFail,
+		Reason:  reason,
+		Message: fmt.Sprintf("removed pub.polis.feed.viewed_at from %d cursors file(s)", len(actions)),
+		Actions: actions,
+	}
 }
 
 // canonicalizeContent normalizes content for hashing.

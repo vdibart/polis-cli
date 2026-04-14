@@ -157,7 +157,8 @@ verification. The `payload` is type-specific data.
 |------|-----------|-------|---------|
 | `pub.polis.post.published` | `POST /v1/content` (new post) | Author domain | url, version, title |
 | `pub.polis.post.republished` | `POST /v1/content` (update post) | Author domain | url, version, title |
-| `pub.polis.post.removed` | `POST /v1/content/unregister` | Author domain | url, type |
+| `pub.polis.post.unpublished` | `POST /v1/content/unpublish` (post) | Author domain | url, type |
+| `pub.polis.comment.unpublished` | `POST /v1/content/unpublish` (comment) | Commenter domain | url, type, in_reply_to, root_post |
 | `pub.polis.comment.published` | `POST /v1/content` (new comment) | Commenter domain | url, version, in_reply_to, root_post, target_domain, source_domain |
 | `pub.polis.comment.republished` | `POST /v1/content` (update comment) | Commenter domain | url, version, in_reply_to, root_post, target_domain, source_domain |
 | `pub.polis.comment.blessing.requested` | `POST /v1/content` (beseech) | Commenter domain | comment_url, in_reply_to, root_post, target_domain, source_domain |
@@ -166,7 +167,7 @@ verification. The `payload` is type-specific data.
 | `pub.polis.follow.announced` | `POST /v1/stream` (client) | Follower domain | target_domain |
 | `pub.polis.follow.removed` | `POST /v1/stream` (client) | Unfollower domain | target_domain |
 | `pub.polis.tag.applied` | `POST /v1/content` (tag) | Author domain | tag, target |
-| `pub.polis.tag.removed` | `POST /v1/content/unregister` (tag) | Author domain | tag, target |
+| `pub.polis.tag.removed` | `POST /v1/content/unregister` (tags only) | Author domain | tag, target |
 | `pub.polis.site.registered` | `POST /v1/sites` (new) | Site domain | domain, registry_url |
 | `pub.polis.site.reregistered` | `POST /v1/sites` (existing) | Site domain | domain, registry_url |
 | `pub.polis.site.key_rotated` | `POST /v1/sites/keys/rotate` | Site domain | old_key_id, new_key_id |
@@ -314,8 +315,13 @@ Projection state lives on disk, namespaced by discovery service domain and bundl
             ├── pub.polis.follow.json       # Materialized follower set
             ├── pub.polis.blessing.json     # Blessings state
             ├── pub.polis.notification.jsonl # Notification entries
-            └── pub.polis.feed.jsonl         # Feed items
+            ├── pub.polis.feed.jsonl         # Feed items (network scope)
+            └── pub.polis.feed.global.jsonl  # Feed items (global scope, separate data source)
 ```
+
+Note: `followers` and `me` feed scopes are runtime-filtered over the network cache,
+not materialized as separate files. Only `global` gets its own file because it contains
+data outside the unified sync boundary (posts from unfollowed domains).
 
 ### Why namespaced by discovery service domain?
 

@@ -31,6 +31,7 @@ type DiscoveryConfig struct {
 	BaseURL      string
 	DataDir      string
 	HTTPClient   *http.Client // Optional shared HTTP client for connection pooling
+	Generator    string       // e.g. "polis-cli-go/0.59.0" — used in tag metadata
 }
 
 // resolveDiscoveryConfig returns the effective config: explicit if provided,

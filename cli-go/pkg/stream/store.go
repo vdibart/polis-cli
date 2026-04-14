@@ -124,6 +124,13 @@ var cursorKeyMigrations = map[string]string{
 	"polis.blessing":     "pub.polis.comment.blessing",
 }
 
+// deprecatedCursorKeys are cursor keys that should be removed on load.
+var deprecatedCursorKeys = []string{
+	"pub.polis.feed.followers",  // replaced by runtime filtering over network cache
+	"pub.polis.feed.me",         // replaced by runtime filtering over network cache
+	"pub.polis.feed.viewed_at",  // replaced by position-based pub.polis.feed.viewed
+}
+
 func (s *Store) loadCursors() (*CursorsFile, error) {
 	data, err := os.ReadFile(filepath.Join(s.stateDir, "cursors.json"))
 	if err != nil {
@@ -151,6 +158,14 @@ func (s *Store) loadCursors() (*CursorsFile, error) {
 			migrated = true
 		}
 	}
+	// Remove deprecated scoped feed cursor keys (collapsed to runtime filters)
+	for _, key := range deprecatedCursorKeys {
+		if _, ok := cf.Cursors[key]; ok {
+			delete(cf.Cursors, key)
+			migrated = true
+		}
+	}
+
 	if migrated {
 		_ = s.saveCursorsLocked(&cf)
 	}

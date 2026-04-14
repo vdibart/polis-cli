@@ -379,6 +379,47 @@ func (c *Client) UnregisterContent(contentType, contentURL, signature string) er
 	return nil
 }
 
+// UnpublishContent unpublishes content from the discovery service (clean break retraction).
+// For posts, this cascades blessing changes (blessed→orphaned, pending→denied).
+// For comments, this resets the comment's blessing to 'pending'.
+func (c *Client) UnpublishContent(contentType, contentURL, signature string) error {
+	endpoint := c.BaseURL + "/v1/content/unpublish"
+
+	req := ContentUnregisterRequest{
+		Type:      contentType,
+		URL:       contentURL,
+		Signature: signature,
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	resp, err := c.doWithTiming(httpReq)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
+		return fmt.Errorf("content unpublish failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
 // CheckContent checks if content exists in the discovery service.
 func (c *Client) CheckContent(contentType, contentURL string) (*ContentCheckResponse, error) {
 	params := url.Values{}
@@ -629,6 +670,12 @@ func MakeContentUnregisterCanonicalJSON(contentType, contentURL string) string {
 		URL:  contentURL,
 	})
 	return string(b)
+}
+
+// MakeContentUnpublishCanonicalJSON creates the deterministic canonical JSON for
+// content unpublish signing. Same shape as unregister: {type, url}
+func MakeContentUnpublishCanonicalJSON(contentType, contentURL string) string {
+	return MakeContentUnregisterCanonicalJSON(contentType, contentURL)
 }
 
 // MakeRelationshipCanonicalJSON creates canonical JSON for relationship update signing.

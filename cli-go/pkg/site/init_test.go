@@ -37,6 +37,7 @@ func TestInit_BundleLayout(t *testing.T) {
 		"content/pub.polis.core/comment",
 		"content/pub.polis.core/follow",
 		"content/pub.polis.core/feed",
+		"content/pub.polis.core/tag",
 		"policies",
 		".well-known",
 	}
@@ -430,18 +431,25 @@ func TestInit_PassesAllPatrolChecks(t *testing.T) {
 		t.Errorf("Storage salt permissions = %04o, want 0600", perm)
 	}
 
-	// Private policies must include DM rules
+	// Private policies must exist (empty template — overrides only)
 	privatePolicyData, err := os.ReadFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"))
 	if err != nil {
 		t.Fatalf("Private policies should exist: %v", err)
 	}
-	if !strings.Contains(string(privatePolicyData), "pub.polis.dm") {
-		t.Error("Private policies should contain DM rules")
+	if !strings.Contains(string(privatePolicyData), "version") {
+		t.Error("Private policies should contain version header")
 	}
 
-	// Public policies must exist
-	if _, err := os.Stat(filepath.Join(dir, "policies", "rules.jsonl")); err != nil {
+	// Public policies must exist and include DM rules + catch-all
+	publicPolicyData, err := os.ReadFile(filepath.Join(dir, "policies", "rules.jsonl"))
+	if err != nil {
 		t.Fatalf("Public policies should exist: %v", err)
+	}
+	if !strings.Contains(string(publicPolicyData), "pub.polis.dm") {
+		t.Error("Public policies should contain DM rules")
+	}
+	if !strings.Contains(string(publicPolicyData), "deny all from all") {
+		t.Error("Public policies should contain deny-all catch-all")
 	}
 }
 

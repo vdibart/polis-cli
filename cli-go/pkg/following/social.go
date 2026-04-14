@@ -2,6 +2,7 @@ package following
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
@@ -39,7 +40,14 @@ type UnfollowResult struct {
 // pending/denied comments against the site's policies. With default policies
 // containing "emit pub.polis.comment.blessing from following", this auto-blesses
 // comments from the newly followed author — matching the previous hardcoded behavior.
-func FollowWithBlessing(followingPath string, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy) (*FollowResult, error) {
+// FollowConfig holds optional configuration for follow/unfollow operations.
+// If nil or fields are empty, falls back to package-level globals (deprecated).
+type FollowConfig struct {
+	DataDir      string
+	DiscoveryURL string
+}
+
+func FollowWithBlessing(followingPath string, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy, cfg ...*FollowConfig) (*FollowResult, error) {
 	result := &FollowResult{
 		AuthorURL: authorURL,
 	}
@@ -84,15 +92,30 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 	// DS operations: reads (queries) are always allowed, writes (grants, stream
 	// events) require registration. This lets unregistered sites follow authors
 	// locally and pull their feed, without announcing to the network.
-	registered := discovery.IsRegisteredLocally(DataDir, DiscoveryURL)
+	dd, du := DataDir, DiscoveryURL
+	if len(cfg) > 0 && cfg[0] != nil {
+		if cfg[0].DataDir != "" {
+			dd = cfg[0].DataDir
+		}
+		if cfg[0].DiscoveryURL != "" {
+			du = cfg[0].DiscoveryURL
+		}
+	}
+	registered := discovery.IsRegisteredLocally(dd, du)
 
 	// Fetch pending/denied blessings and re-evaluate against policies (DS read — always allowed)
-	pendingResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
+	pendingResp, err := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 		"status": "pending",
 	})
-	deniedResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[!] Could not check pending blessings: %v\n", err)
+	}
+	deniedResp, err := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 		"status": "denied",
 	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[!] Could not check denied blessings: %v\n", err)
+	}
 
 	var allUnblessed []discovery.RelationshipRecord
 	if pendingResp != nil {
@@ -138,7 +161,7 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 // UnfollowWithDenial removes an author from the following list and re-evaluates
 // granted blessings against policies. Blessings that no longer match an emit/allow
 // rule (because the author is no longer followed) get denied.
-func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy) (*UnfollowResult, error) {
+func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy, cfg ...*FollowConfig) (*UnfollowResult, error) {
 	result := &UnfollowResult{
 		AuthorURL: authorURL,
 	}
@@ -165,12 +188,24 @@ func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient 
 	}
 
 	// DS operations: reads always allowed, writes require registration
-	registered := discovery.IsRegisteredLocally(DataDir, DiscoveryURL)
+	dd, du := DataDir, DiscoveryURL
+	if len(cfg) > 0 && cfg[0] != nil {
+		if cfg[0].DataDir != "" {
+			dd = cfg[0].DataDir
+		}
+		if cfg[0].DiscoveryURL != "" {
+			du = cfg[0].DiscoveryURL
+		}
+	}
+	registered := discovery.IsRegisteredLocally(dd, du)
 
 	// Fetch granted blessings and re-evaluate against policies (DS read — always allowed)
-	grantedResp, _ := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
+	grantedResp, err := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 		"status": "granted",
 	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[!] Could not check granted blessings: %v\n", err)
+	}
 
 	if registered && grantedResp != nil {
 		ctx := policy.EvalContext{

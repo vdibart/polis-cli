@@ -62,12 +62,18 @@ func handleFollow(args []string) {
 	// Fetch unblessed comments from this author on our posts via relationship-query
 	authorDomain := discovery.ExtractDomainFromURL(authorURL)
 
-	pendingResp, _ := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
+	pendingResp, err := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 		"status": "pending",
 	})
-	deniedResp, _ := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[!] Could not check pending blessings: %v\n", err)
+	}
+	deniedResp, err := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
 		"status": "denied",
 	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[!] Could not check denied blessings: %v\n", err)
+	}
 
 	// Filter to relationships where source is from the author's domain
 	var allUnblessed []discovery.RelationshipRecord

@@ -34,6 +34,7 @@ func handleRebuild(args []string) {
 		Comments:      *rebuildComments || *rebuildAll,
 		Notifications: *rebuildNotifications || *rebuildAll,
 		All:           *rebuildAll,
+		Generator:     generator,
 	}
 
 	result, err := index.RebuildIndex(dir, baseURL, opts)

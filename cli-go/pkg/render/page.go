@@ -758,8 +758,14 @@ func (r *PageRenderer) loadBlessedCommentsForPost(postPath string) ([]template.B
 		// Try to load local comment content
 		content := r.loadLocalCommentContent(comment.URL)
 
+		// Convert .md to .html in the URL for browser-facing links
+		commentURL := comment.URL
+		if strings.HasSuffix(commentURL, ".md") {
+			commentURL = strings.TrimSuffix(commentURL, ".md") + ".html"
+		}
+
 		results = append(results, template.BlessedCommentData{
-			URL:            comment.URL,
+			URL:            commentURL,
 			AuthorName:     extractDomain(comment.URL),
 			Published:      comment.BlessedAt,
 			PublishedHuman: template.FormatHumanDate(comment.BlessedAt),

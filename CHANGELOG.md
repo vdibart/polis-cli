@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.62.0] - 2026-04-13
+
+This release adds the `unpublish` command for posts and comments (clean-break retraction), tag directory initialization parity between the Bash and Go CLIs, a comment author link fix, feed system improvements including policy separation and scope consolidation, Studio13 theme favicon support, and updated discovery service API documentation for the unpublish endpoint.
+
+### Added
+
+- **[Bash CLI / Go CLI] Tag directory on init**: `polis init` now creates `content/pub.polis.core/tag/` so the tag system works immediately after site initialization without requiring a separate `polis tag` command first.
+- **[Go CLI] Unpublish command**: `polis unpublish` supports posts and comments. Implements clean-break retraction: strips frontmatter (signature, versions), deletes `.versions/` history, saves title and body as a draft, and notifies the discovery service via the new `/v1/content/unpublish` endpoint. Any future republish is treated as a completely fresh publication. Includes a confirmation prompt with clear warnings.
+- **[Go CLI] `UnpublishContent` discovery client method**: Posts to `/v1/content/unpublish`.
+- **[Docs] Unpublish lifecycle**: New `docs/ds/developer/unpublish-lifecycle.md` documenting the end-to-end lifecycle of a post or comment retraction.
+
+### Changed
+
+- **[Go CLI] Feed scope consolidation**: The `followers` and `me` feed scopes are now runtime filters over the network cache rather than separately materialized files. Only the `global` scope gets its own file because it contains posts from unfollowed domains outside the unified sync boundary. This eliminates redundant file writes and cursor drift.
+- **[Go CLI] Policy system cleanup**: Network engagement rules and feed display rules are now separated in `pkg/policy`. The catch-all deny that was blocking feed sync items has been removed.
+- **[Webapp] Feed cursor management**: Feed cursor is now guarded against pruning losses. Network feed auto-syncs on page load when stale.
+- **[Webapp] Unpublish UI**: Hover unpublish button on published posts and blessed comments in the overview. Confirmation modals explain clean-break semantics.
+- **[Docs] DS API reference**: `POST /v1/content/unregister` now restricted to tags only; posts and comments must use the new `POST /v1/content/unpublish`. Stream architecture doc updated with `pub.polis.post.unpublished` and `pub.polis.comment.unpublished` events and the materialized-vs-runtime-filtered scope distinction.
+- **[Themes] Studio13 favicon support**: `index.html`, `post.html`, and `posts.html` include an adaptive SVG favicon link.
+
+### Fixed
+
+- **[Go CLI] Comment author links**: Fixed links in rendered comment HTML pointing to `.md` instead of `.html`.
+- **[Go CLI] Feed test stability**: Fixed a time-sensitive feed cache test that failed at the 90-day retention boundary.
+
 ## [0.61.0] - 2026-04-11
 
 This release adds security hardening across the DM and discovery service layers, DS attestation storage in registration files, webapp feed improvements, favicon support in themes, and shell completion updates. Hosted-only operational packages (judge, patrol, medic) have been removed from the public distribution, and shared theme utilities have been refactored into `pkg/theme`.

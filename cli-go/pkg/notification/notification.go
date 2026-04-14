@@ -14,14 +14,6 @@ import (
 	"time"
 )
 
-// Version is set at init time by cmd package.
-var Version = "dev"
-
-// GetGenerator returns the generator identifier for metadata files.
-func GetGenerator() string {
-	return "polis-cli-go/" + Version
-}
-
 // StateEntry represents a single notification in state.jsonl.
 type StateEntry struct {
 	ID        string                 `json:"id"`

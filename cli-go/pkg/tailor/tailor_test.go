@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 )
 
 // createOldSite creates a pre-bundle polis site (v0.42.0 era) for testing.
@@ -124,14 +126,11 @@ func createCurrentSite(t *testing.T) string {
 	os.WriteFile(filepath.Join(dir, "content", "pub.polis.core", "comment", "blessed.json"),
 		[]byte(`{"version": "polis-cli-go/0.59.0", "comments": []}`), 0644)
 
-	// Policies (with required rules)
+	// Policies (canonical templates)
 	os.MkdirAll(filepath.Join(dir, "policies"), 0755)
-	os.WriteFile(filepath.Join(dir, "policies", "rules.jsonl"), []byte(`{"version":1}`+"\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "policies", "rules.jsonl"), []byte(policy.DefaultPublicPolicyContent()), 0644)
 	os.MkdirAll(filepath.Join(dir, ".polis", "policies"), 0700)
-	privatePolicies := `{"version":1}` + "\n" +
-		`{"active":true,"policy":"omit pub.polis.feed from self"}` + "\n" +
-		`{"active":true,"policy":"deny all from all"}` + "\n"
-	os.WriteFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"), []byte(privatePolicies), 0600)
+	os.WriteFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"), []byte(policy.DefaultPrivatePolicyContent()), 0600)
 
 	// Storage salt
 	os.WriteFile(filepath.Join(dir, ".polis", "storage-salt"), []byte("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"), 0600)
@@ -803,58 +802,47 @@ func TestDMDomainCase_FixesMixedCase(t *testing.T) {
 	}
 }
 
-// ── Policy feed self-omit tests ────────────────────────────────────
+// ── Policy content convergence tests ─────────────────────────────
 
-func TestPolicyFeedSelfOmit_Diagnose(t *testing.T) {
+func TestPolicyContentConverge_Diagnose(t *testing.T) {
 	dir := createCurrentSite(t)
-	// Overwrite with policies missing the feed self-omit rule
-	os.WriteFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"), []byte(`{"version":1}`+"\n"), 0600)
+	// Overwrite with old/drifted content
+	os.WriteFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"), []byte(`{"version":1}`+"\n"+`{"active":true,"policy":"allow pub.polis.post from all"}`+"\n"), 0600)
 
-	result := checkPolicyFeedSelfOmit(&runContext{siteDir: dir, dryRun: true})
+	result := checkPolicyContentConverge(&runContext{siteDir: dir, dryRun: true})
 	if result.Status != StatusFail {
 		t.Errorf("expected fail, got %s: %s", result.Status, result.Message)
 	}
 }
 
-func TestPolicyFeedSelfOmit_Apply(t *testing.T) {
+func TestPolicyContentConverge_Apply(t *testing.T) {
 	dir := createCurrentSite(t)
-	os.WriteFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"), []byte(`{"version":1}`+"\n"), 0600)
+	// Overwrite both files with old content
+	os.WriteFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"), []byte(`{"version":1}`+"\n"+`{"active":true,"policy":"deny all from all"}`+"\n"), 0600)
+	os.WriteFile(filepath.Join(dir, "policies", "rules.jsonl"), []byte(`{"version":1}`+"\n"), 0644)
 
-	result := checkPolicyFeedSelfOmit(&runContext{siteDir: dir, dryRun: false})
+	result := checkPolicyContentConverge(&runContext{siteDir: dir, dryRun: false})
 	if result.Status != StatusFail {
 		t.Errorf("expected fail (applied), got %s: %s", result.Status, result.Message)
 	}
 
-	data, _ := os.ReadFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"))
-	if !strings.Contains(string(data), "omit pub.polis.feed from self") {
-		t.Error("feed self-omit rule should have been appended")
+	// Verify both files now match canonical templates
+	privData, _ := os.ReadFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"))
+	if strings.TrimSpace(string(privData)) != strings.TrimSpace(policy.DefaultPrivatePolicyContent()) {
+		t.Error("private policy should match canonical template after convergence")
+	}
+	pubData, _ := os.ReadFile(filepath.Join(dir, "policies", "rules.jsonl"))
+	if strings.TrimSpace(string(pubData)) != strings.TrimSpace(policy.DefaultPublicPolicyContent()) {
+		t.Error("public policy should match canonical template after convergence")
 	}
 }
 
-// ── Policy deny-all tests ──────────────────────────────────────────
-
-func TestPolicyDenyAll_Diagnose(t *testing.T) {
+func TestPolicyContentConverge_AlreadyCorrect(t *testing.T) {
 	dir := createCurrentSite(t)
-	os.WriteFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"), []byte(`{"version":1}`+"\n"), 0600)
 
-	result := checkPolicyDenyAll(&runContext{siteDir: dir, dryRun: true})
-	if result.Status != StatusFail {
-		t.Errorf("expected fail, got %s: %s", result.Status, result.Message)
-	}
-}
-
-func TestPolicyDenyAll_Apply(t *testing.T) {
-	dir := createCurrentSite(t)
-	os.WriteFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"), []byte(`{"version":1}`+"\n"), 0600)
-
-	result := checkPolicyDenyAll(&runContext{siteDir: dir, dryRun: false})
-	if result.Status != StatusFail {
-		t.Errorf("expected fail (applied), got %s: %s", result.Status, result.Message)
-	}
-
-	data, _ := os.ReadFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"))
-	if !strings.Contains(string(data), "deny all from all") {
-		t.Error("deny-all rule should have been appended")
+	result := checkPolicyContentConverge(&runContext{siteDir: dir, dryRun: false})
+	if result.Status != StatusPass {
+		t.Errorf("expected pass for correct files, got %s: %s", result.Status, result.Message)
 	}
 }
 
@@ -921,5 +909,120 @@ func TestThemeConsolidation_PassesWhenClean(t *testing.T) {
 	}
 	if cr.Status != StatusPass {
 		t.Errorf("expected pass for clean site, got %s: %s", cr.Status, cr.Message)
+	}
+}
+
+func TestStaleScopedFeed_Diagnose(t *testing.T) {
+	dir := createCurrentSite(t)
+	stateDir := filepath.Join(dir, ".polis", "ds", "ds.polis.pub", "pub.polis.core", "state")
+	os.MkdirAll(stateDir, 0755)
+	os.WriteFile(filepath.Join(stateDir, "pub.polis.feed.followers.jsonl"), []byte(`{}`), 0644)
+	os.WriteFile(filepath.Join(stateDir, "pub.polis.feed.me.jsonl"), []byte(`{}`), 0644)
+
+	result := checkStaleScopedFeed(&runContext{siteDir: dir, dryRun: true})
+	if result.Status != StatusFail {
+		t.Errorf("expected fail, got %s: %s", result.Status, result.Message)
+	}
+	if len(result.Actions) != 2 {
+		t.Errorf("expected 2 actions, got %d", len(result.Actions))
+	}
+
+	// Dry run should NOT remove files
+	if _, err := os.Stat(filepath.Join(stateDir, "pub.polis.feed.followers.jsonl")); os.IsNotExist(err) {
+		t.Error("Diagnose should not remove files")
+	}
+}
+
+func TestStaleScopedFeed_Apply(t *testing.T) {
+	dir := createCurrentSite(t)
+	stateDir := filepath.Join(dir, ".polis", "ds", "ds.polis.pub", "pub.polis.core", "state")
+	os.MkdirAll(stateDir, 0755)
+	os.WriteFile(filepath.Join(stateDir, "pub.polis.feed.followers.jsonl"), []byte(`{}`), 0644)
+	os.WriteFile(filepath.Join(stateDir, "pub.polis.feed.me.jsonl"), []byte(`{}`), 0644)
+	// Global should NOT be removed
+	os.WriteFile(filepath.Join(stateDir, "pub.polis.feed.global.jsonl"), []byte(`{}`), 0644)
+
+	result := checkStaleScopedFeed(&runContext{siteDir: dir, dryRun: false})
+	if result.Status != StatusFail {
+		t.Errorf("expected fail (applied), got %s: %s", result.Status, result.Message)
+	}
+
+	// Deprecated files removed
+	if _, err := os.Stat(filepath.Join(stateDir, "pub.polis.feed.followers.jsonl")); !os.IsNotExist(err) {
+		t.Error("pub.polis.feed.followers.jsonl should be removed")
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "pub.polis.feed.me.jsonl")); !os.IsNotExist(err) {
+		t.Error("pub.polis.feed.me.jsonl should be removed")
+	}
+
+	// Global preserved
+	if _, err := os.Stat(filepath.Join(stateDir, "pub.polis.feed.global.jsonl")); os.IsNotExist(err) {
+		t.Error("pub.polis.feed.global.jsonl should NOT be removed")
+	}
+}
+
+func TestStaleScopedFeed_Clean(t *testing.T) {
+	dir := createCurrentSite(t)
+	// No deprecated files
+	result := checkStaleScopedFeed(&runContext{siteDir: dir, dryRun: true})
+	if result.Status != StatusPass {
+		t.Errorf("expected pass for clean site, got %s: %s", result.Status, result.Message)
+	}
+}
+
+func TestStaleFeedViewedAt_Diagnose(t *testing.T) {
+	dir := createCurrentSite(t)
+	stateDir := filepath.Join(dir, ".polis", "ds", "ds.polis.pub", "pub.polis.core", "state")
+	os.MkdirAll(stateDir, 0755)
+	cursors := `{"cursors":{"pub.polis.sync":{"position":"100"},"pub.polis.feed.viewed_at":{"position":"2026-04-01T12:00:00Z"}}}`
+	os.WriteFile(filepath.Join(stateDir, "cursors.json"), []byte(cursors), 0644)
+
+	result := checkStaleFeedViewedAt(&runContext{siteDir: dir, dryRun: true})
+	if result.Status != StatusFail {
+		t.Errorf("expected fail, got %s: %s", result.Status, result.Message)
+	}
+	if len(result.Actions) != 1 {
+		t.Errorf("expected 1 action, got %d", len(result.Actions))
+	}
+
+	// Dry run should NOT modify file
+	data, _ := os.ReadFile(filepath.Join(stateDir, "cursors.json"))
+	if !strings.Contains(string(data), "pub.polis.feed.viewed_at") {
+		t.Error("Diagnose should not remove key from file")
+	}
+}
+
+func TestStaleFeedViewedAt_Apply(t *testing.T) {
+	dir := createCurrentSite(t)
+	stateDir := filepath.Join(dir, ".polis", "ds", "ds.polis.pub", "pub.polis.core", "state")
+	os.MkdirAll(stateDir, 0755)
+	cursors := `{"cursors":{"pub.polis.sync":{"position":"100"},"pub.polis.feed.viewed_at":{"position":"2026-04-01T12:00:00Z"},"pub.polis.feed.viewed":{"position":"100"}}}`
+	os.WriteFile(filepath.Join(stateDir, "cursors.json"), []byte(cursors), 0644)
+
+	result := checkStaleFeedViewedAt(&runContext{siteDir: dir, dryRun: false})
+	if result.Status != StatusFail {
+		t.Errorf("expected fail (applied), got %s: %s", result.Status, result.Message)
+	}
+
+	// Key should be removed
+	data, _ := os.ReadFile(filepath.Join(stateDir, "cursors.json"))
+	if strings.Contains(string(data), "pub.polis.feed.viewed_at") {
+		t.Error("pub.polis.feed.viewed_at should be removed from cursors.json")
+	}
+	// Other keys preserved
+	if !strings.Contains(string(data), "pub.polis.sync") {
+		t.Error("pub.polis.sync should be preserved")
+	}
+	if !strings.Contains(string(data), "pub.polis.feed.viewed") {
+		t.Error("pub.polis.feed.viewed should be preserved")
+	}
+}
+
+func TestStaleFeedViewedAt_Clean(t *testing.T) {
+	dir := createCurrentSite(t)
+	// No cursors.json at all
+	result := checkStaleFeedViewedAt(&runContext{siteDir: dir, dryRun: true})
+	if result.Status != StatusPass {
+		t.Errorf("expected pass for clean site, got %s: %s", result.Status, result.Message)
 	}
 }

@@ -138,7 +138,8 @@ These limits are per-domain per hour. They restrict how many operations a single
 | `DS_RATE_DOMAIN_SITES_REGISTER` | 5 | `POST /v1/sites` |
 | `DS_RATE_DOMAIN_SITES_UNREGISTER` | 5 | `POST /v1/sites/unregister` |
 | `DS_RATE_DOMAIN_CONTENT_REGISTER` | 50 | `POST /v1/content` |
-| `DS_RATE_DOMAIN_CONTENT_UNREGISTER` | 20 | `POST /v1/content/unregister` |
+| `DS_RATE_DOMAIN_CONTENT_UNREGISTER` | 20 | `POST /v1/content/unregister` (tags only) |
+| `DS_RATE_DOMAIN_CONTENT_UNPUBLISH` | 20 | `POST /v1/content/unpublish` (posts/comments) |
 | `DS_RATE_DOMAIN_RELATIONSHIP_UPDATE` | 50 | `POST /v1/relationships` |
 | `DS_RATE_DOMAIN_STREAM_PUBLISH` | 100 | `POST /v1/stream` |
 

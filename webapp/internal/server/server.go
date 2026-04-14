@@ -38,7 +38,6 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
-	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
@@ -558,6 +557,7 @@ func (s *Server) DiscoveryConfig() *publish.DiscoveryConfig {
 		DiscoveryURL: s.DiscoveryURL,
 		DiscoveryKey: s.DiscoveryKey,
 		BaseURL:      s.BaseURL,
+		Generator:    "polis-cli-go/" + s.CLIVersion,
 	}
 }
 
@@ -959,16 +959,14 @@ func NewServer(dataDir, cliThemesDir string) *Server {
 
 // Initialize validates the site and loads configuration.
 func (s *Server) Initialize() {
-	// Propagate CLI version to packages that embed it in metadata
+	// Propagate CLI version to packages that still use package-level globals
+	// as fallback when no explicit generator parameter is passed.
 	if s.CLIVersion != "" {
 		publish.Version = s.CLIVersion
 		comment.Version = s.CLIVersion
 		metadata.Version = s.CLIVersion
 		following.Version = s.CLIVersion
-		feed.Version = s.CLIVersion
 		site.Version = s.CLIVersion
-		notification.Version = s.CLIVersion
-		theme.Version = s.CLIVersion
 		tag.Version = s.CLIVersion
 	}
 
@@ -1348,16 +1346,12 @@ func (s *Server) computeAllCounts() CountsPayload {
 		counts.Following = f.Count()
 	}
 
-	// Feed unread count + newest cached timestamp
-	newestCachedAt := ""
+	// Feed unread count
 	cm := s.feedCacheForScope("network")
 	if items, err := cm.List(); err == nil {
 		for _, item := range items {
 			if item.ReadAt == "" {
 				counts.FeedUnread++
-			}
-			if item.CachedAt > newestCachedAt {
-				newestCachedAt = item.CachedAt
 			}
 		}
 	}
@@ -1398,9 +1392,10 @@ func (s *Server) computeAllCounts() CountsPayload {
 		}
 	}
 
-	// Feed has-new: compare newest cached item timestamp against last viewed time
-	viewedAt, _ := store.GetCursor("pub.polis.feed.viewed_at")
-	counts.HasNewFeed = newestCachedAt != "" && newestCachedAt > viewedAt
+	// Feed has-new: compare sync position against viewed position
+	syncPos, _ := store.GetCursor("pub.polis.sync")
+	viewedPos, _ := store.GetCursor("pub.polis.feed.viewed")
+	counts.HasNewFeed = syncPos != "" && syncPos != viewedPos
 
 	return counts
 }
@@ -1726,26 +1721,37 @@ func (s *Server) syncFeed() {
 	log.Printf("[feed-sync] processed %d events -> %d feed items", len(result.Events), len(items))
 
 	// Merge into cache
+	cursorSafe := true
 	if len(items) > 0 {
-		newCount, err := cm.MergeItems(items)
+		mr, err := cm.MergeItemsResult(items)
 		if err != nil {
 			log.Printf("[feed-sync] merge failed: %v", err)
+			cursorSafe = false
 		} else {
-			log.Printf("[feed-sync] merged %d new items (total cached: check JSONL)", newCount)
+			log.Printf("[feed-sync] merged %d new items, %d retained after prune", mr.Added, mr.Retained)
+			if mr.Added > 0 && mr.Retained < mr.Added {
+				log.Printf("[feed-sync] WARNING: %d items lost to pruning, holding cursor at %s", mr.Added-mr.Retained, cursor)
+				cursorSafe = false
+			}
 		}
 	}
 
-	// Update cursor (always set to refresh LastUpdated, even if position unchanged)
-	if result.Cursor != "" {
+	// Only advance cursor if all new items were retained (or no items to merge).
+	// If pruning dropped newly added items, holding the cursor back lets the
+	// next sync re-fetch them after older items age out of the cache.
+	if cursorSafe && result.Cursor != "" {
 		_ = cm.SetCursor(result.Cursor)
+	} else if result.Cursor != "" {
+		// Still touch LastUpdated for staleness tracking without advancing position
+		_ = cm.SetCursor(cursor)
 	}
 }
 
-// syncFeedScoped syncs a non-network feed scope ("followers" or "global").
-// For "followers": queries DS with follower domains as actors.
-// For "global": queries DS with no actor filter + created_after=24h ago.
+// syncFeedScoped syncs a non-network feed scope that needs its own DS query.
+// Currently only "global" qualifies — it queries DS with no actor filter + created_after=24h.
+// "followers" and "me" are runtime-filtered over the network cache and don't need separate sync.
 func (s *Server) syncFeedScoped(scope string) {
-	if s.DiscoveryURL == "" || scope == "" || scope == "network" {
+	if s.DiscoveryURL == "" || scope == "" || scope == "network" || runtimeFilteredScopes[scope] {
 		return
 	}
 	baseURL := s.GetBaseURL()
@@ -1768,26 +1774,9 @@ func (s *Server) syncFeedScoped(scope string) {
 	followedDomains := make(map[string]bool)
 
 	switch scope {
-	case "followers":
-		discoveryDomain := s.GetDiscoveryDomain()
-		store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
-		var followerState stream.FollowerState
-		_ = store.LoadState("pub.polis.follow", &followerState)
-		if len(followerState.Followers) == 0 {
-			log.Printf("[feed-sync-%s] skip: no followers", scope)
-			return
-		}
-		actorFilter = discovery.JoinDomains(followerState.Followers)
-		for _, d := range followerState.Followers {
-			followedDomains[d] = true
-		}
-
 	case "global":
 		client.CreatedAfter = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
 		// No actor filter — query all of polis
-
-	case "me":
-		actorFilter = myDomain
 	}
 
 	log.Printf("[feed-sync-%s] querying stream: cursor=%q actors=%q", scope, cursor, actorFilter)
@@ -1807,17 +1796,25 @@ func (s *Server) syncFeedScoped(scope string) {
 	}
 
 	items := handler.Process(result.Events)
+	cursorSafe := true
 	if len(items) > 0 {
-		newCount, err := cm.MergeItems(items)
+		mr, err := cm.MergeItemsResult(items)
 		if err != nil {
 			log.Printf("[feed-sync-%s] merge failed: %v", scope, err)
+			cursorSafe = false
 		} else {
-			log.Printf("[feed-sync-%s] merged %d new items", scope, newCount)
+			log.Printf("[feed-sync-%s] merged %d new items, %d retained", scope, mr.Added, mr.Retained)
+			if mr.Added > 0 && mr.Retained < mr.Added {
+				log.Printf("[feed-sync-%s] WARNING: %d items lost to pruning, holding cursor", scope, mr.Added-mr.Retained)
+				cursorSafe = false
+			}
 		}
 	}
 
-	if result.Cursor != "" {
+	if cursorSafe && result.Cursor != "" {
 		_ = cm.SetCursor(result.Cursor)
+	} else if result.Cursor != "" {
+		_ = cm.SetCursor(cursor)
 	}
 }
 
@@ -2019,13 +2016,26 @@ var validFeedScopes = map[string]bool{
 	"me":        true,
 }
 
+// runtimeFilteredScopes are feed scopes that are served as runtime filters
+// over the network cache rather than materialized as separate JSONL files.
+// Only "global" needs its own file because it contains data outside the
+// unified sync boundary (posts from unfollowed domains).
+var runtimeFilteredScopes = map[string]bool{
+	"followers": true,
+	"me":        true,
+}
+
 // feedCacheForScope returns a shared CacheManager for the given scope.
 // All callers (background sync, manual refresh, counts) share the same
 // instance per scope to avoid file-level TOCTOU races.
+//
+// Runtime-filtered scopes ("followers", "me") return the network cache
+// manager — their data is a subset of the network feed, filtered at read
+// time via FilterOptions.AuthorDomains.
 func (s *Server) feedCacheForScope(scope string) *feed.CacheManager {
 	// Normalize scope key
 	key := scope
-	if key == "" || key == "network" {
+	if key == "" || key == "network" || runtimeFilteredScopes[key] {
 		key = "network"
 	}
 
@@ -2048,6 +2058,30 @@ func (s *Server) feedCacheForScope(scope string) *feed.CacheManager {
 	}
 	s.feedCaches[key] = cm
 	return cm
+}
+
+// feedFilterForScope returns FilterOptions with AuthorDomains set for
+// runtime-filtered scopes (followers, me). For other scopes returns empty opts.
+func (s *Server) feedFilterForScope(scope string) feed.FilterOptions {
+	switch scope {
+	case "followers":
+		discoveryDomain := s.GetDiscoveryDomain()
+		store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+		var state stream.FollowerState
+		_ = store.LoadState("pub.polis.follow", &state)
+		m := make(map[string]bool, len(state.Followers))
+		for _, d := range state.Followers {
+			m[d] = true
+		}
+		return feed.FilterOptions{AuthorDomains: m}
+	case "me":
+		baseURL := s.GetBaseURL()
+		myDomain := extractDomainFromURL(baseURL)
+		if myDomain != "" {
+			return feed.FilterOptions{AuthorDomains: map[string]bool{myDomain: true}}
+		}
+	}
+	return feed.FilterOptions{}
 }
 
 // extractDomainFromURL extracts the hostname from a URL string.

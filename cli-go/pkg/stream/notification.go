@@ -6,12 +6,15 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
-	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 )
 
 // NotificationHandler is a rule-driven projection handler that generates local
 // notifications from stream events. Rules define which event types produce
 // notifications, how to filter them, and what display template to use.
+//
+// Policy evaluation is NOT done here — policies govern network engagement
+// (DM acceptance, blessing auto-decision), while notification display is a
+// separate concern handled by rules and muted-domains filtering.
 type NotificationHandler struct {
 	// MyDomain is the local site's domain.
 	MyDomain string
@@ -24,12 +27,6 @@ type NotificationHandler struct {
 	// pre-filtered by actor in the DS query. If nil, falls back to the legacy
 	// behavior of accepting any non-self actor.
 	FollowedDomains map[string]bool
-	// Policies is the active policy set loaded from rules.jsonl files.
-	// When non-empty, events matching a deny policy are suppressed.
-	Policies []policy.Policy
-	// FollowerDomains is a set of domains that follow us. Used for policy
-	// evaluation when rules reference the "followers" source.
-	FollowerDomains map[string]bool
 }
 
 // NotificationConfig is the user configuration stored in config/notifications.json.
@@ -112,34 +109,9 @@ func (h *NotificationHandler) Process(events []discovery.StreamEvent) []notifica
 			continue
 		}
 
-		// Policy check: deny/omit events that match a deny or omit policy.
-		// This replaces the former hardcoded self-event skip — the default
-		// private policy "omit pub.polis.notification from self" handles it.
-		//
-		// The event type is prefixed with "pub.polis.notification." so that
-		// notification-specific policies (like "omit pub.polis.notification from self")
-		// match via dot-boundary prefix matching without interfering with
-		// policies that target the raw event types in other contexts.
-		if len(h.Policies) > 0 {
-			pEvt := policy.Event{
-				Type:        "pub.polis.notification." + evt.Type,
-				ActorDomain: evt.Actor,
-			}
-			if td, ok := evt.Payload["target_domain"].(string); ok {
-				pEvt.TargetDomain = td
-			}
-			if tp, ok := evt.Payload["target_url"].(string); ok {
-				pEvt.TargetPath = tp
-			}
-			ctx := policy.EvalContext{
-				MyDomain:         h.MyDomain,
-				FollowingDomains: h.FollowedDomains,
-				FollowerDomains:  h.FollowerDomains,
-			}
-			result := policy.EvaluateWithLog(h.Policies, pEvt, ctx)
-			if result.Decision == policy.Deny || result.Decision == policy.Omit {
-				continue
-			}
+		// Skip self-authored events — your own actions are noise in notifications.
+		if evt.Actor == h.MyDomain {
+			continue
 		}
 
 		for _, rule := range rules {

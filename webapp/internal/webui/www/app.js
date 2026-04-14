@@ -69,6 +69,8 @@ const App = {
     _feedScope: 'network',      // 'network', 'followers', 'global'
     _feedPopoverOpen: null,     // currently open popover filter name, or null
     _feedFilterOnly: false,     // true when re-render is from filter change only (skip DS sync)
+    _feedPendingScrollY: 0,     // scroll position to restore after feed render (from sessionStorage)
+    _feedStateRestored: false,  // guard flag to prevent double-restore of feed state
     _feedObserver: null,        // IntersectionObserver for viewport-based read marking
     _markReadQueue: [],         // batched item IDs waiting to be marked read
     _markReadTimer: null,       // debounce timer for batch mark-read
@@ -924,6 +926,10 @@ const App = {
                                 this._observeFeedItems(cl);
                             }
                         }
+                    });
+                    // Save feed filter state on navigation away (for restore on return)
+                    window.addEventListener('beforeunload', () => {
+                        if (this.currentView === 'conversations') this._saveFeedState();
                     });
                     this.checkSetupBanner();
 
@@ -1963,11 +1969,12 @@ const App = {
                     const commentCount = post.comment_count || 0;
                     const commentHtml = `<div class="mc-comments"><svg width="14" height="14" viewBox="0 0 24 24"><path d="M3 2C1.9 2 1 2.9 1 4v12c0 1.1.9 2 2 2h12l4 4V4c0-1.1-.9-2-2-2H3zm0 2h14v13.2L15.2 16H3V4z" fill="currentColor"/></svg> ${commentCount}</div>`;
                     const editedHtml = post.modified ? `<span class="mc-edited">&middot; edited ${this.formatRelativeTime(post.modified)}</span>` : '';
-                    return `<div class="mc-post" onclick="App.openPost('${this.escapeHtml(post.path)}')">
+                    return `<div class="mc-post mc-post-published" onclick="App.openPost('${this.escapeHtml(post.path)}')">
                         <div class="mc-date">${this.formatDate(post.published)} ${editedHtml}</div>
                         <div class="mc-title">${this.escapeHtml(post.title)}</div>
                         ${excerptHtml}
                         ${commentHtml}
+                        <button class="mc-unpublish-btn" onclick="event.stopPropagation(); App.unpublishPost('${this.escapeHtml(post.path)}')" title="Unpublish"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
                     </div>`;
                 }).join('');
             } else {
@@ -2030,9 +2037,13 @@ const App = {
                     .mc-comments svg { flex-shrink: 0; }
                     .mc-draft-badge { font-size: 11px; font-family: var(--font-ui, inherit); background: var(--border); color: var(--text-secondary); padding: 1px 6px; border-radius: 3px; margin-left: 6px; vertical-align: middle; }
                     .mc-post-draft { position: relative; }
+                    .mc-post-published { position: relative; }
                     .mc-delete-draft { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-tertiary); font-size: 18px; line-height: 1; padding: 4px 8px; cursor: pointer; opacity: 0; transition: opacity 0.15s, color 0.15s; border-radius: var(--radius-sm); }
                     .mc-post-draft:hover .mc-delete-draft { opacity: 1; }
                     .mc-delete-draft:hover { color: var(--salmon, #c4604a); background: var(--bg-hover); }
+                    .mc-unpublish-btn { position: absolute; right: 4px; top: 18px; background: none; border: none; color: var(--text-tertiary); padding: 4px 8px; cursor: pointer; opacity: 0; transition: opacity 0.15s, color 0.15s; border-radius: var(--radius-sm); }
+                    .mc-post-published:hover .mc-unpublish-btn { opacity: 1; }
+                    .mc-unpublish-btn:hover { color: var(--salmon, #c4604a); background: var(--bg-hover); }
                     .mc-empty { font-size: 14px; color: var(--text-tertiary); padding: 32px 0; text-align: center; }
                     .mc-empty a { color: var(--accent); }
                 </style>
@@ -2334,6 +2345,7 @@ const App = {
                         </div>
                     </div>
                     <div class="post-status">
+                        ${item._status === 'blessed' ? `<button class="hover-btn" onclick="event.stopPropagation(); App.unpublishComment('${this.escapeHtml(item.id)}')" title="Unpublish">Unpublish</button>` : ''}
                         <span class="post-date">${this.formatRelativeTime(date)}</span>
                     </div>
                 </div>
@@ -2400,7 +2412,7 @@ const App = {
                 if (content) {
                     previewEl.innerHTML = content;
                 } else {
-                    previewEl.innerHTML = `<a href="${this.escapeHtml(comment.comment_url)}" target="_blank">Open comment in new tab &rarr;</a>`;
+                    previewEl.innerHTML = `<a href="${this.escapeHtml(this.mdToHtmlUrl(comment.comment_url))}" target="_blank">Open comment in new tab &rarr;</a>`;
                 }
             }
         } else if (comment.content) {
@@ -2473,7 +2485,7 @@ const App = {
                 if (content) {
                     previewEl.innerHTML = content;
                 } else {
-                    previewEl.innerHTML = `<a href="${this.escapeHtml(request.comment_url)}" target="_blank">Open comment in new tab &rarr;</a>`;
+                    previewEl.innerHTML = `<a href="${this.escapeHtml(this.mdToHtmlUrl(request.comment_url))}" target="_blank">Open comment in new tab &rarr;</a>`;
                 }
             }
         }
@@ -4098,11 +4110,11 @@ echo "File: $POLIS_PATH"</code>
         }
     },
 
-    // Unpublish a post (remove from site and discovery)
+    // Unpublish a post (clean break — removes from site and discovery, deletes version history)
     async unpublishPost(path) {
         const confirmed = await this.showConfirmModal(
             'Unpublish Post',
-            'This will remove the post from your site and from discovery. Comments on other sites will remain. This cannot be undone.',
+            'This will remove the post from your site and from discovery. All version history will be permanently deleted. The content will be saved as a draft, but signatures and versions will be stripped. Any blessed comments will be orphaned. If you republish later, it will be treated as a brand new post.',
             'Unpublish',
             'Cancel',
             'danger',
@@ -4111,7 +4123,27 @@ echo "File: $POLIS_PATH"</code>
 
         try {
             await this.api('POST', '/api/unpublish', { path });
-            this.showToast('Post unpublished', 'success');
+            this.showToast('Post unpublished and saved to drafts', 'success');
+            this.loadViewContent();
+        } catch (err) {
+            this.showToast(err.message || 'Failed to unpublish', 'error');
+        }
+    },
+
+    // Unpublish a comment (clean break — removes from discovery, saves as draft)
+    async unpublishComment(commentId) {
+        const confirmed = await this.showConfirmModal(
+            'Unpublish Comment',
+            'This will remove the comment from discovery. The content will be saved as a draft, but signatures and versions will be stripped. If you republish later, it will need to be re-beseeched for blessing.',
+            'Unpublish',
+            'Cancel',
+            'danger',
+        );
+        if (!confirmed) return;
+
+        try {
+            await this.api('POST', '/api/unpublish', { comment_id: commentId });
+            this.showToast('Comment unpublished and saved to drafts', 'success');
             this.loadViewContent();
         } catch (err) {
             this.showToast(err.message || 'Failed to unpublish', 'error');
@@ -4573,7 +4605,7 @@ echo "File: $POLIS_PATH"</code>
                 const timeMap = {
                     'in the last hour': '1h', 'in the last day': '24h',
                     'in the last 2 days': '2d', 'in the last week': '7d',
-                    'in the last month': '30d'
+                    'in the last month': '30d', 'from all time': 'all'
                 };
                 this._feedTimeFilter = timeMap[value] || '24h';
                 break;
@@ -4584,6 +4616,36 @@ echo "File: $POLIS_PATH"</code>
         this._feedFilterOnly = true;
         const contentList = document.getElementById('content-list');
         if (contentList) this.renderConversationsTabbed(contentList);
+    },
+
+    _saveFeedState() {
+        try {
+            sessionStorage.setItem('polis-feed-state', JSON.stringify({
+                showNew: this._feedShowNew,
+                scope: this._feedScope,
+                timeFilter: this._feedTimeFilter,
+                contentType: this._feedContentType,
+                authorFilter: this._feedAuthorFilter,
+                scrollY: window.scrollY
+            }));
+        } catch (e) {}
+    },
+
+    _restoreFeedState() {
+        if (this._feedStateRestored) return 0;
+        this._feedStateRestored = true;
+        try {
+            const raw = sessionStorage.getItem('polis-feed-state');
+            sessionStorage.removeItem('polis-feed-state');
+            if (!raw) return 0;
+            const s = JSON.parse(raw);
+            if (s.showNew !== undefined) this._feedShowNew = s.showNew;
+            if (s.scope) this._feedScope = s.scope;
+            if (s.timeFilter) this._feedTimeFilter = s.timeFilter;
+            if (s.contentType !== undefined) this._feedContentType = s.contentType;
+            if (s.authorFilter !== undefined) this._feedAuthorFilter = s.authorFilter;
+            return s.scrollY || 0;
+        } catch (e) { return 0; }
     },
 
     openFeedPopover(filterName) {
@@ -4615,13 +4677,13 @@ echo "File: $POLIS_PATH"</code>
         const contentLabel = contentLabels[this._feedContentType] || 'items';
         const scopeLabels = { 'me': 'me', 'network': 'my network', 'followers': 'my followers', 'global': 'all of polis' };
         const scopeLabel = scopeLabels[this._feedScope] || 'my network';
-        const timeLabels = { '1h': 'in the last hour', '24h': 'in the last day', '2d': 'in the last 2 days', '7d': 'in the last week', '30d': 'in the last month' };
+        const timeLabels = { '1h': 'in the last hour', '24h': 'in the last day', '2d': 'in the last 2 days', '7d': 'in the last week', '30d': 'in the last month', 'all': 'from all time' };
         const timeLabel = timeLabels[this._feedTimeFilter] || 'in the last day';
 
         const isGlobal = this._feedScope === 'global';
         const timeOptions = isGlobal
             ? [['in the last hour', '1h'], ['in the last day', '24h']]
-            : [['in the last hour', '1h'], ['in the last day', '24h'], ['in the last 2 days', '2d'], ['in the last week', '7d'], ['in the last month', '30d']];
+            : [['in the last hour', '1h'], ['in the last day', '24h'], ['in the last 2 days', '2d'], ['in the last week', '7d'], ['in the last month', '30d'], ['from all time', 'all']];
 
         const word = (filterName, label, options) => {
             const optHtml = options.map(([lbl]) =>
@@ -4648,6 +4710,8 @@ echo "File: $POLIS_PATH"</code>
     },
 
     async renderConversationsTabbed(container) {
+        // Restore saved feed filter state from session (returning from external nav)
+        this._feedPendingScrollY = this._restoreFeedState();
         // Clear the feed dot immediately and advance the viewed timestamp
         this.counts.hasNewFeed = false;
         this._updateTopbarBadges();
@@ -4910,11 +4974,11 @@ echo "File: $POLIS_PATH"</code>
                 return (tb || 0) - (ta || 0);
             });
 
-            // Auto-sync scoped feeds when stale or never-synced
-            if (groupedResult.stale && this._feedScope && this._feedScope !== 'network' && !this._feedScopeSyncing) {
+            // Auto-sync any feed scope (including network) when stale
+            if (groupedResult.stale && !this._feedScopeSyncing) {
                 this._feedScopeSyncing = true;
                 container.innerHTML = filterHtml + '<div class="feed-list"><div class="empty-state"><p>Syncing...</p></div></div>';
-                await this.api('POST', `/api/feed/refresh?scope=${this._feedScope}`);
+                await this.api('POST', `/api/feed/refresh${scopeParam}`);
                 this._feedScopeSyncing = false;
                 return this._renderAllSubtab(container, filterHtml);
             }
@@ -4948,7 +5012,7 @@ echo "File: $POLIS_PATH"</code>
 
             const cutoffMap = { '1h': 3600000, '24h': 86400000, '2d': 172800000, '7d': 604800000, '30d': 2592000000 };
 
-            // Time filter with auto-widen: if default 24h yields nothing, try 7d then all
+            // Time filter with auto-widen: if default 24h yields nothing, cascade through wider ranges
             let effectiveTimeFilter = this._feedTimeFilter || '24h';
             if (effectiveTimeFilter !== 'all') {
                 const cutoff = Date.now() - (cutoffMap[effectiveTimeFilter] || 86400000);
@@ -4958,14 +5022,20 @@ echo "File: $POLIS_PATH"</code>
                 });
                 // Auto-widen only from the default 24h when no content/author filters are active
                 if (visibleEntries.length === 0 && effectiveTimeFilter === '24h' && !this._feedAuthorFilter && !this._feedShowNew && !this._feedContentType) {
-                    const cutoff7d = Date.now() - cutoffMap['7d'];
-                    visibleEntries = entries.filter(e => {
-                        const ts = e.timestamp ? new Date(e.timestamp).getTime() : 0;
-                        return ts >= cutoff7d;
-                    });
-                    if (visibleEntries.length > 0) {
-                        effectiveTimeFilter = '7d';
-                    } else {
+                    const widenCascade = ['2d', '7d', '30d'];
+                    for (const range of widenCascade) {
+                        const rc = Date.now() - cutoffMap[range];
+                        const candidates = entries.filter(e => {
+                            const ts = e.timestamp ? new Date(e.timestamp).getTime() : 0;
+                            return ts >= rc;
+                        });
+                        if (candidates.length > 0) {
+                            visibleEntries = candidates;
+                            effectiveTimeFilter = range;
+                            break;
+                        }
+                    }
+                    if (visibleEntries.length === 0) {
                         visibleEntries = entries;
                         effectiveTimeFilter = 'all';
                     }
@@ -5058,6 +5128,13 @@ echo "File: $POLIS_PATH"</code>
 
             // Observe unread items for viewport-based auto-marking
             this._observeFeedItems(container);
+
+            // Restore scroll position if returning from external navigation
+            if (this._feedPendingScrollY) {
+                const scrollTarget = this._feedPendingScrollY;
+                this._feedPendingScrollY = 0;
+                requestAnimationFrame(() => window.scrollTo(0, scrollTarget));
+            }
 
             // Restore inline comment editor if it was open
             if (_savedInlineCommentUrl) {
@@ -6331,6 +6408,14 @@ echo "File: $POLIS_PATH"</code>
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    },
+
+    // Utility: convert .md URL to .html for browser-facing links
+    mdToHtmlUrl(url) {
+        if (url && url.endsWith('.md')) {
+            return url.slice(0, -3) + '.html';
+        }
+        return url || '';
     },
 
     // Utility: format date

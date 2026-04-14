@@ -429,14 +429,15 @@ func TestHandleDraftsCreateBadPayload(t *testing.T) {
 }
 
 func TestHandleDraftsGetReachesHandler(t *testing.T) {
-	mux, _, _ := testSetup(t)
+	mux, _, apiKey := testSetup(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/content/post/drafts/abc", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
-	// Should not be blocked by routing/auth (GET is public)
-	if w.Code == http.StatusUnauthorized || w.Code == http.StatusMethodNotAllowed {
+	// Should reach handler with valid auth (drafts require auth)
+	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden || w.Code == http.StatusMethodNotAllowed {
 		t.Errorf("routing failed with %d, should reach handler", w.Code)
 	}
 }
@@ -596,9 +597,10 @@ func TestHandlersLogSecurityNilEngine(t *testing.T) {
 func TestDispatchUsesBackgroundContext(t *testing.T) {
 	// Verify by running through the full stack: a successful dispatch
 	// implies context.Background() was acceptable
-	mux, _, _ := testSetup(t)
+	mux, _, apiKey := testSetup(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/content/follow", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 

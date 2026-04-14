@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -160,40 +159,14 @@ func (s *Server) runUnifiedSync() SyncResult {
 	return result
 }
 
-// getUnifiedCursor returns the polis.sync cursor, migrating from old
-// per-handler cursors on first use (takes the minimum to not miss events).
+// getUnifiedCursor returns the pub.polis.sync cursor position.
+// Returns "0" on first run to replay the full stream.
 func (s *Server) getUnifiedCursor(store *stream.Store) string {
 	cursor, _ := store.GetCursor("pub.polis.sync")
 	if cursor != "" && cursor != "0" {
 		return cursor
 	}
-
-	// First unified sync — use minimum of old cursors to avoid missing events
-	// Check both new (pub.polis.*) and old (polis.*) key names for migration
-	oldKeys := []string{"pub.polis.notification", "pub.polis.follow", "pub.polis.feed", "polis.notification", "polis.follow", "polis.feed", "polis.sync"}
-	minCursor := ""
-	for _, key := range oldKeys {
-		c, _ := store.GetCursor(key)
-		if c != "" && c != "0" {
-			if minCursor == "" || cursorLess(c, minCursor) {
-				minCursor = c
-			}
-		}
-	}
-	if minCursor != "" {
-		return minCursor
-	}
 	return "0"
-}
-
-// cursorLess returns true if cursor a is numerically less than cursor b.
-func cursorLess(a, b string) bool {
-	ai, errA := strconv.Atoi(a)
-	bi, errB := strconv.Atoi(b)
-	if errA != nil || errB != nil {
-		return a < b
-	}
-	return ai < bi
 }
 
 // queryStreamEvents uses the unified DS endpoint to fetch all relevant events
@@ -350,28 +323,11 @@ func (h *notificationSyncHandler) Process(events []discovery.StreamEvent) stream
 		}
 	}
 
-	// Load policies for event filtering
-	privPath, pubPath := policy.DefaultPaths(s.DataDir)
-	policies, _ := policy.LoadPolicies(privPath, pubPath)
-
-	// Load follower state for policy evaluation
-	var followerDomains map[string]bool
-	if len(policies) > 0 {
-		var followerState stream.FollowerState
-		_ = store.LoadState("pub.polis.follow", &followerState)
-		followerDomains = make(map[string]bool, len(followerState.Followers))
-		for _, f := range followerState.Followers {
-			followerDomains[f] = true
-		}
-	}
-
 	handler := &stream.NotificationHandler{
 		MyDomain:        myDomain,
 		Rules:           rules,
 		MutedDomains:    mutedDomains,
 		FollowedDomains: followedDomains,
-		Policies:        policies,
-		FollowerDomains: followerDomains,
 	}
 
 	entries := handler.Process(events)
@@ -448,28 +404,12 @@ func (h *feedSyncHandler) Process(events []discovery.StreamEvent) stream.Handler
 		}
 	}
 
-	// Load policies for event filtering
-	privPath, pubPath := policy.DefaultPaths(s.DataDir)
-	policies, _ := policy.LoadPolicies(privPath, pubPath)
-
-	// Load follower state for policy evaluation
-	discoveryDomain2 := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain2, "pub.polis.core")
-	var followerDomains map[string]bool
-	if len(policies) > 0 {
-		var followerState stream.FollowerState
-		_ = store.LoadState("pub.polis.follow", &followerState)
-		followerDomains = make(map[string]bool, len(followerState.Followers))
-		for _, fl := range followerState.Followers {
-			followerDomains[fl] = true
-		}
-	}
-
+	// Feed is a local projection for display — skip policy evaluation here.
+	// Policy enforcement happens at content acceptance (blessings, follows).
+	// This matches syncFeed() in server.go which also skips policies.
 	handler := &feed.FeedHandler{
 		MyDomain:        myDomain,
 		FollowedDomains: followedDomains,
-		Policies:        policies,
-		FollowerDomains: followerDomains,
 	}
 
 	items := handler.Process(events)

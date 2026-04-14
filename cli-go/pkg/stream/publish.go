@@ -28,6 +28,7 @@ type DiscoveryConfig struct {
 	DiscoveryKey string
 	BaseURL      string
 	DataDir      string
+	Generator    string // e.g. "polis-cli-go/0.59.0"
 }
 
 // PublishEvent publishes an event to the discovery stream.

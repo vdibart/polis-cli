@@ -30,6 +30,7 @@ type DiscoveryConfig struct {
 	DiscoveryURL string
 	DiscoveryKey string
 	BaseURL      string
+	Generator    string // e.g. "polis-cli-go/0.59.0" — used in frontmatter metadata
 }
 
 // resolveDiscoveryConfig returns the effective config: explicit if provided,
@@ -39,6 +40,15 @@ func resolveDiscoveryConfig(cfg *DiscoveryConfig) (dsURL, dsKey, baseURL string)
 		return cfg.DiscoveryURL, cfg.DiscoveryKey, cfg.BaseURL
 	}
 	return DiscoveryURL, DiscoveryKey, BaseURL
+}
+
+// resolveGenerator returns the generator string from an explicit DiscoveryConfig,
+// or falls back to the package-level GetGenerator() for backwards compatibility.
+func resolveGenerator(cfg *DiscoveryConfig) string {
+	if cfg != nil && cfg.Generator != "" {
+		return cfg.Generator
+	}
+	return GetGenerator()
 }
 
 // RegisterPost registers a published post with the discovery service.

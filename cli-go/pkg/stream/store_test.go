@@ -213,3 +213,80 @@ func TestStateAndCursorsIndependent(t *testing.T) {
 		t.Errorf("loaded count = %d, want 1", loaded.Count)
 	}
 }
+
+func TestDeprecatedCursorKeyCleanup(t *testing.T) {
+	dir := t.TempDir()
+	s := NewStore(dir, "ds.polis.pub", "pub.polis.core")
+
+	// Pre-populate cursors.json with deprecated keys alongside valid ones
+	os.MkdirAll(s.StateDir(), 0755)
+	cf := CursorsFile{
+		Cursors: map[string]CursorEntry{
+			"pub.polis.sync":           {Position: "500", LastUpdated: "2026-04-01T00:00:00Z"},
+			"pub.polis.feed":           {Position: "500", LastUpdated: "2026-04-01T00:00:00Z"},
+			"pub.polis.feed.followers":  {Position: "300", LastUpdated: "2026-03-01T00:00:00Z"},
+			"pub.polis.feed.me":         {Position: "400", LastUpdated: "2026-03-15T00:00:00Z"},
+			"pub.polis.feed.viewed_at":  {Position: "2026-04-01T12:00:00Z", LastUpdated: "2026-04-01T00:00:00Z"},
+			"pub.polis.feed.global":     {Position: "450", LastUpdated: "2026-03-20T00:00:00Z"},
+		},
+	}
+	data, _ := json.MarshalIndent(cf, "", "  ")
+	os.WriteFile(filepath.Join(s.StateDir(), "cursors.json"), data, 0644)
+
+	// Reading any cursor triggers loadCursors which cleans up deprecated keys
+	cursor, err := s.GetCursor("pub.polis.sync")
+	if err != nil {
+		t.Fatalf("GetCursor: %v", err)
+	}
+	if cursor != "500" {
+		t.Errorf("sync cursor = %q, want %q", cursor, "500")
+	}
+
+	// Verify deprecated keys are gone
+	_, err = s.GetCursorEntry("pub.polis.feed.followers")
+	if err != nil {
+		t.Fatalf("GetCursorEntry: %v", err)
+	}
+	followersEntry, _ := s.GetCursorEntry("pub.polis.feed.followers")
+	if followersEntry.Position != "" {
+		t.Errorf("deprecated pub.polis.feed.followers should be removed, got position %q", followersEntry.Position)
+	}
+
+	meEntry, _ := s.GetCursorEntry("pub.polis.feed.me")
+	if meEntry.Position != "" {
+		t.Errorf("deprecated pub.polis.feed.me should be removed, got position %q", meEntry.Position)
+	}
+
+	viewedAtEntry, _ := s.GetCursorEntry("pub.polis.feed.viewed_at")
+	if viewedAtEntry.Position != "" {
+		t.Errorf("deprecated pub.polis.feed.viewed_at should be removed, got position %q", viewedAtEntry.Position)
+	}
+
+	// Verify non-deprecated keys are preserved
+	globalEntry, _ := s.GetCursorEntry("pub.polis.feed.global")
+	if globalEntry.Position != "450" {
+		t.Errorf("pub.polis.feed.global should be preserved, got position %q", globalEntry.Position)
+	}
+
+	feedEntry, _ := s.GetCursorEntry("pub.polis.feed")
+	if feedEntry.Position != "500" {
+		t.Errorf("pub.polis.feed should be preserved, got position %q", feedEntry.Position)
+	}
+
+	// Verify the file on disk no longer has deprecated keys
+	rawData, _ := os.ReadFile(filepath.Join(s.StateDir(), "cursors.json"))
+	var persisted CursorsFile
+	json.Unmarshal(rawData, &persisted)
+	if _, ok := persisted.Cursors["pub.polis.feed.followers"]; ok {
+		t.Error("pub.polis.feed.followers should be removed from cursors.json on disk")
+	}
+	if _, ok := persisted.Cursors["pub.polis.feed.me"]; ok {
+		t.Error("pub.polis.feed.me should be removed from cursors.json on disk")
+	}
+	if _, ok := persisted.Cursors["pub.polis.feed.viewed_at"]; ok {
+		t.Error("pub.polis.feed.viewed_at should be removed from cursors.json on disk")
+	}
+	if len(persisted.Cursors) != 3 {
+		t.Errorf("expected 3 cursor entries on disk, got %d", len(persisted.Cursors))
+	}
+}

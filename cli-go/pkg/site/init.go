@@ -29,6 +29,7 @@ type InitOptions struct {
 	Author    string // Optional author name (falls back to git config user.name)
 	Email     string // Optional email address — private by default, only written if explicitly provided
 	Theme     string // Optional initial theme (default: empty, selected randomly on first render)
+	Generator string // e.g. "polis-cli-go/0.59.0" — used in metadata; falls back to package default if empty
 }
 
 // InitResult contains the result of site initialization.
@@ -49,6 +50,11 @@ type InitResult struct {
 // This function has no webapp dependencies and can be used by CLI tools.
 // It will NOT overwrite existing keys or .well-known/polis — safety feature.
 func Init(siteDir string, opts InitOptions) (*InitResult, error) {
+	gen := opts.Generator
+	if gen == "" {
+		gen = GetGenerator()
+	}
+
 	result := &InitResult{
 		Success: false,
 		SiteDir: siteDir,
@@ -96,6 +102,7 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 		filepath.Join(siteDir, "content", "pub.polis.core", "comment"),
 		filepath.Join(siteDir, "content", "pub.polis.core", "follow"),
 		filepath.Join(siteDir, "content", "pub.polis.core", "feed"),
+		filepath.Join(siteDir, "content", "pub.polis.core", "tag"),
 		// Policies
 		filepath.Join(siteDir, "policies"),
 	}
@@ -146,7 +153,7 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 	}
 
 	wk := &WellKnown{
-		Version:     GetGenerator(),
+		Version:     gen,
 		AuthorName:  author,
 		Email:       opts.Email,
 		PublicKey:    strings.TrimSpace(string(pubKey)),
@@ -182,7 +189,7 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 	filesCreated = append(filesCreated, "content/pub.polis.core/bundle.json")
 
 	// Create content files
-	if err := initContentFiles(siteDir, &filesCreated); err != nil {
+	if err := initContentFiles(siteDir, &filesCreated, gen); err != nil {
 		return nil, fmt.Errorf("failed to create content files: %w", err)
 	}
 
@@ -196,7 +203,7 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 		filesCreated = append(filesCreated, "site/snippets/about.md")
 	}
 
-	// Create default public policy file (emit rules for blessing)
+	// Create default public policy file (DM rules + blessing emit rules + catch-all deny)
 	policyPath := filepath.Join(siteDir, "policies", "rules.jsonl")
 	if _, err := os.Stat(policyPath); os.IsNotExist(err) {
 		if err := os.WriteFile(policyPath, []byte(policy.DefaultPublicPolicyContent()), 0644); err != nil {
@@ -205,18 +212,13 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 		filesCreated = append(filesCreated, "policies/rules.jsonl")
 	}
 
-	// Create default private policy file (core type allows + DM + notification)
+	// Create default private policy file (empty — overrides only)
 	privatePolicyPath := filepath.Join(siteDir, ".polis", "policies", "rules.jsonl")
 	if _, err := os.Stat(privatePolicyPath); os.IsNotExist(err) {
 		if err := os.WriteFile(privatePolicyPath, []byte(policy.DefaultPrivatePolicyContent()), 0600); err != nil {
 			return nil, fmt.Errorf("failed to create default private policy file: %w", err)
 		}
 		filesCreated = append(filesCreated, ".polis/policies/rules.jsonl")
-	} else {
-		// Existing private policy file — ensure DM policies are present (backwards compat)
-		if err := EnsureDMPolicies(privatePolicyPath); err != nil {
-			return nil, fmt.Errorf("failed to ensure DM policies: %w", err)
-		}
 	}
 
 	// Create webapp config
@@ -278,7 +280,7 @@ func EnsureDMPolicies(privatePolicyPath string) error {
 }
 
 // initContentFiles creates the initial content files for pub.polis.core.
-func initContentFiles(siteDir string, filesCreated *[]string) error {
+func initContentFiles(siteDir string, filesCreated *[]string, gen string) error {
 	// Create empty content index
 	indexPath := filepath.Join(siteDir, "content", "pub.polis.core", "index.jsonl")
 	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
@@ -292,7 +294,7 @@ func initContentFiles(siteDir string, filesCreated *[]string) error {
 	followingPath := filepath.Join(siteDir, "content", "pub.polis.core", "follow", "following.json")
 	if _, err := os.Stat(followingPath); os.IsNotExist(err) {
 		following := map[string]interface{}{
-			"version":   GetGenerator(),
+			"version":   gen,
 			"following": []interface{}{},
 		}
 		data, _ := json.MarshalIndent(following, "", "  ")
@@ -307,7 +309,7 @@ func initContentFiles(siteDir string, filesCreated *[]string) error {
 	blessedPath := filepath.Join(siteDir, "content", "pub.polis.core", "comment", "blessed.json")
 	if _, err := os.Stat(blessedPath); os.IsNotExist(err) {
 		blessed := map[string]interface{}{
-			"version":  GetGenerator(),
+			"version":  gen,
 			"comments": []interface{}{},
 		}
 		data, _ := json.MarshalIndent(blessed, "", "  ")

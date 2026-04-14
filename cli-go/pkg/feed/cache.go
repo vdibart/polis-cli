@@ -57,13 +57,7 @@ func PublishedBefore(a, b string) bool {
 	return ta.Before(tb)
 }
 
-// Version is set at init time by cmd package.
-var Version = "dev"
 
-// GetGenerator returns the generator identifier for metadata files.
-func GetGenerator() string {
-	return "polis-cli-go/" + Version
-}
 
 // CachedFeedItem represents a single item in the feed cache.
 type CachedFeedItem struct {
@@ -286,8 +280,9 @@ func (cm *CacheManager) ListByType(itemType string) ([]CachedFeedItem, error) {
 
 // FilterOptions configures feed list filtering.
 type FilterOptions struct {
-	Type   string // "post", "comment", or "" (all)
-	Status string // "read", "unread", or "" (all)
+	Type          string          // "post", "comment", or "" (all)
+	Status        string          // "read", "unread", or "" (all)
+	AuthorDomains map[string]bool // restrict to these author domains (nil = all)
 }
 
 // ListFiltered returns cached feed items filtered by type and/or read status.
@@ -297,12 +292,15 @@ func (cm *CacheManager) ListFiltered(opts FilterOptions) ([]CachedFeedItem, erro
 		return nil, err
 	}
 
-	if opts.Type == "" && opts.Status == "" {
+	if opts.Type == "" && opts.Status == "" && opts.AuthorDomains == nil {
 		return all, nil
 	}
 
 	var filtered []CachedFeedItem
 	for _, item := range all {
+		if opts.AuthorDomains != nil && !opts.AuthorDomains[item.AuthorDomain] {
+			continue
+		}
 		if opts.Type != "" && item.Type != opts.Type {
 			continue
 		}
@@ -423,14 +421,26 @@ func (cm *CacheManager) LastUpdated() string {
 	return entry.LastUpdated
 }
 
+// MergeResult holds the outcome of a MergeItems call.
+type MergeResult struct {
+	Added    int // items added before pruning
+	Retained int // items that survived pruning (Added minus any pruned)
+}
+
 // MergeItems integrates new FeedItems into the cache. Returns the number of new items added.
 func (cm *CacheManager) MergeItems(items []FeedItem) (int, error) {
+	r, err := cm.MergeItemsResult(items)
+	return r.Added, err
+}
+
+// MergeItemsResult integrates new FeedItems and reports how many survived pruning.
+func (cm *CacheManager) MergeItemsResult(items []FeedItem) (MergeResult, error) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
 	existing, err := cm.listLocked()
 	if err != nil {
-		return 0, err
+		return MergeResult{}, err
 	}
 
 	// Build ID map of existing items
@@ -439,9 +449,9 @@ func (cm *CacheManager) MergeItems(items []FeedItem) (int, error) {
 		idMap[item.ID] = struct{}{}
 	}
 
-	// Add new items
+	// Add new items, tracking their IDs
 	now := time.Now().UTC().Format(time.RFC3339)
-	newCount := 0
+	var newIDs []string
 	for _, item := range items {
 		id := ComputeItemID(item.AuthorURL, item.URL)
 		if _, exists := idMap[id]; exists {
@@ -467,7 +477,7 @@ func (cm *CacheManager) MergeItems(items []FeedItem) (int, error) {
 			CachedAt:     now,
 		})
 		idMap[id] = struct{}{}
-		newCount++
+		newIDs = append(newIDs, id)
 	}
 
 	// Sort by published descending
@@ -476,13 +486,31 @@ func (cm *CacheManager) MergeItems(items []FeedItem) (int, error) {
 	})
 
 	if err := cm.writeAll(existing); err != nil {
-		return 0, err
+		return MergeResult{}, err
 	}
 
 	// Prune after merge
 	cm.pruneLocked()
 
-	return newCount, nil
+	// Count how many of the newly added items survived pruning
+	retained := len(newIDs)
+	if retained > 0 {
+		afterItems, err := cm.listLocked()
+		if err == nil {
+			afterIDs := make(map[string]struct{}, len(afterItems))
+			for _, item := range afterItems {
+				afterIDs[item.ID] = struct{}{}
+			}
+			retained = 0
+			for _, id := range newIDs {
+				if _, ok := afterIDs[id]; ok {
+					retained++
+				}
+			}
+		}
+	}
+
+	return MergeResult{Added: len(newIDs), Retained: retained}, nil
 }
 
 // MarkRead marks a single item as read.

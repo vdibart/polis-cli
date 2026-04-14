@@ -240,7 +240,11 @@ func DeleteDraft(dataDir, id string) error {
 // Uses CLI-compatible frontmatter format with nested in-reply-to structure.
 // authorIdentity is the domain (e.g. "alice.polis.pub") written to the author frontmatter field.
 // For backward compatibility, email addresses are also accepted.
-func SignComment(dataDir string, draft *CommentDraft, authorIdentity, siteURL string, privateKey []byte) (*SignedComment, error) {
+func SignComment(dataDir string, draft *CommentDraft, authorIdentity, siteURL string, privateKey []byte, generator ...string) (*SignedComment, error) {
+	gen := GetGenerator()
+	if len(generator) > 0 && generator[0] != "" {
+		gen = generator[0]
+	}
 	// Normalize URLs to .md format (defense-in-depth)
 	draft.InReplyTo = polisurl.NormalizeToMD(draft.InReplyTo)
 	draft.RootPost = polisurl.NormalizeToMD(draft.RootPost)
@@ -299,7 +303,7 @@ version-history:
 ---`,
 		escapeYAMLTitle(title),
 		timestampStr,
-		GetGenerator(),
+		gen,
 		draft.InReplyTo,
 		rootPost,
 		hash,
@@ -338,7 +342,7 @@ signature: %s
 		escapeYAMLTitle(title),
 		timestampStr,
 		authorIdentity,
-		GetGenerator(),
+		gen,
 		draft.InReplyTo,
 		rootPost,
 		hash,
@@ -589,8 +593,14 @@ func PublishComment(dataDir, commentID string) error {
 	return nil
 }
 
-// findBlessedComment searches for a blessed comment in the date-based directory structure.
-// Structure: comments/YYYYMMDD/comment-id.md
+// FindBlessedComment searches for a blessed comment in the date-based directory structure.
+// Structure: content/pub.polis.core/comment/YYYYMMDD/comment-id.md
+// Returns (found, absolutePath).
+func FindBlessedComment(dataDir, commentID string) (bool, string) {
+	return findBlessedComment(dataDir, commentID)
+}
+
+// findBlessedComment is the internal implementation.
 func findBlessedComment(dataDir, commentID string) (bool, string) {
 	commentsDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment")
 

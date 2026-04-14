@@ -136,7 +136,7 @@ func handleCommentSign(args []string) {
 	}
 
 	// Sign the comment
-	signed, err := comment.SignComment(dir, draft, authorIdentity, siteURL, privKey)
+	signed, err := comment.SignComment(dir, draft, authorIdentity, siteURL, privKey, generator)
 	if err != nil {
 		exitError("Failed to sign comment: %v", err)
 	}
