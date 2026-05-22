@@ -94,13 +94,14 @@ Curated conversation without censorship.
 curl -fsSL https://raw.githubusercontent.com/vdibart/polis-cli/main/scripts/install.sh | bash
 ```
 
-Three binaries are available on [GitHub Releases](https://github.com/vdibart/polis-cli/releases):
+Four binaries are available on [GitHub Releases](https://github.com/vdibart/polis-cli/releases):
 
 | Binary | What you get | Size |
 |--------|-------------|------|
 | **`polis`** (recommended) | CLI | ~9 MB |
 | `polis-full` | CLI + local web UI | ~12 MB |
 | `polis-server` | Web UI only | ~11 MB |
+| `tailor` | Site migration & health tool for self-hosters | ~10 MB |
 
 ### Build from source
 
