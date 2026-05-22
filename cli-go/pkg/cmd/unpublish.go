@@ -6,10 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
+	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
@@ -130,8 +133,13 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 		return fmt.Errorf("failed to load private key: %v", err)
 	}
 
-	// Build canonical JSON and sign (same shape as unregister: {type, url})
-	canonical := discovery.MakeContentUnpublishCanonicalJSON(dsContentType, contentURL)
+	// Build canonical JSON and sign. R20-C-F1 (2026-05-18): the
+	// canonical now includes a fresh ISO 8601 timestamp. DS rejects
+	// timestamps further than ±5min from server clock — defeats
+	// signature replay (captured unpublish events can't be re-submitted
+	// later to delete URLs a second time).
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+	canonical := discovery.MakeContentUnpublishCanonicalJSON(dsContentType, contentURL, timestamp)
 	sig, err := signing.SignContent([]byte(canonical), privKey)
 	if err != nil {
 		return fmt.Errorf("failed to sign unpublish request: %v", err)
@@ -151,7 +159,7 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 			fmt.Println("[i] Unpublishing from discovery service...")
 		}
 
-		if err := dsClient.UnpublishContent(dsContentType, contentURL, sig); err != nil {
+		if err := dsClient.UnpublishContent(dsContentType, contentURL, timestamp, sig); err != nil {
 			// Non-fatal: DS might be unreachable, still clean up locally
 			if !jsonOutput {
 				fmt.Printf("[!] Warning: DS unpublish failed: %v\n", err)
@@ -188,9 +196,9 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 	baseName := filepath.Base(contentPath)
 	var draftsDir string
 	if isPost {
-		draftsDir = filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+		draftsDir = filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
 	} else {
-		draftsDir = filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "drafts")
+		draftsDir = filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "drafts")
 	}
 
 	// Create drafts directory if it doesn't exist
@@ -247,6 +255,18 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 		}
 	}
 
+	// v4 incremental cascade for unpublished posts. Delete-and-cascade:
+	// neighbors who showed it as a sibling get re-rendered; the index focus
+	// shifts if it was the newest. Only relevant for posts (comments don't
+	// participate in v4's per-post cascade today).
+	if isPost {
+		if shape, err := bundle.GetActiveShapeName(dataDir); err == nil && shape == "v4" {
+			if err := unpublishStreamCascade(dataDir, contentPath); err != nil && !jsonOutput {
+				fmt.Printf("[!] Warning: v4 unpublish cascade failed: %v\n", err)
+			}
+		}
+	}
+
 	if jsonOutput {
 		contentKind := "post"
 		if isComment {
@@ -273,4 +293,33 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 	}
 
 	return nil
+}
+
+// unpublishStreamCascade dispatches the v4-side cascade after a post is removed
+// from a v4 tenant. Mirrors publishStreamCascade in publish.go but routes to
+// UnpublishStream for the delete + pad-back-zone re-render.
+func unpublishStreamCascade(dir, postPath string) error {
+	url := os.Getenv("POLIS_BASE_URL")
+	if url == "" {
+		url = getBaseURLFromSite(dir)
+	}
+	coreBundle := loadOrDefaultBundle(dir)
+	postsSource, _ := coreBundle.ContentDir("pub.polis.post")
+	postsMountDir, _ := coreBundle.MountDir("pub.polis.post")
+	commentsSource, _ := coreBundle.ContentDir("pub.polis.comment")
+	commentsMountDir, _ := coreBundle.MountDir("pub.polis.comment")
+
+	renderer, err := render.NewPageRenderer(render.PageConfig{
+		DataDir:           dir,
+		CLIThemesDir:      findCLIThemesDir(),
+		BaseURL:           url,
+		PostsSourceDir:    postsSource,
+		PostsMountDir:     postsMountDir,
+		CommentsSourceDir: commentsSource,
+		CommentsMountDir:  commentsMountDir,
+	})
+	if err != nil {
+		return fmt.Errorf("create renderer: %w", err)
+	}
+	return renderer.UnpublishStream(postPath)
 }

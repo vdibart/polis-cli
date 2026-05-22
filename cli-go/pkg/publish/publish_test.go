@@ -18,17 +18,6 @@ func TestGetGenerator_UsesVersion(t *testing.T) {
 	}
 }
 
-func TestDefaultVersion_UsesGenerator(t *testing.T) {
-	old := Version
-	defer func() { Version = old }()
-
-	Version = "0.47.0"
-	got := DefaultVersion()
-	if got != "polis-cli-go/0.47.0" {
-		t.Errorf("DefaultVersion() = %q, want %q", got, "polis-cli-go/0.47.0")
-	}
-}
-
 func TestEnsureUniqueFilename_NoCollision(t *testing.T) {
 	dataDir := t.TempDir()
 	dateDir := "20260101"
@@ -143,7 +132,7 @@ func TestEnsureUniqueFilename_DraftCollision(t *testing.T) {
 	dataDir := t.TempDir()
 	dateDir := "20260101"
 	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir), 0755)
-	draftsDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+	draftsDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
 	os.MkdirAll(draftsDir, 0755)
 
 	// Create existing draft

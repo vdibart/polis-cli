@@ -97,38 +97,12 @@ func NewReceiver(privateKeyPEM, publicKeySSH []byte, domain, siteDir string, sto
 	}
 }
 
-// NewReceiverWithHTTP creates a Receiver using a shared HTTP client for connection pooling.
-func NewReceiverWithHTTP(privateKeyPEM, publicKeySSH []byte, domain, siteDir string, store *Store, rl *RateLimiter, hc *http.Client) *Receiver {
-	if hc == nil {
-		return NewReceiver(privateKeyPEM, publicKeySSH, domain, siteDir, store, rl)
-	}
-	return &Receiver{
-		PrivateKeyPEM:  privateKeyPEM,
-		PublicKeySSH:   publicKeySSH,
-		Domain:         strings.ToLower(domain),
-		SiteDir:        siteDir,
-		Store:          store,
-		RateLimiter:    rl,
-		Logger:         nopLogger{},
-		MaxMessageSize: maxDMPayloadSize,
-		keyCache:       make(map[string]*cachedKey),
-		httpClient:     hc,
-	}
-}
-
 // ensureKeys derives the X25519 secret key once.
 func (rcv *Receiver) ensureKeys() error {
 	rcv.initOnce.Do(func() {
 		rcv.myX25519SK, rcv.initErr = signing.Ed25519PrivateKeyToX25519(rcv.PrivateKeyPEM)
 	})
 	return rcv.initErr
-}
-
-// VerifySignedRequest verifies the X-Polis-Domain/Signature/Timestamp headers
-// on an incoming request. Returns the verified sender domain or an error.
-// The optional logger parameter enables structured logging for each verification step.
-func VerifySignedRequest(r *http.Request, fetchPublicKey func(domain string) ([]byte, error)) (string, error) {
-	return VerifySignedRequestWithLogger(r, fetchPublicKey, nil)
 }
 
 // VerifySignedRequestWithLogger is like VerifySignedRequest but accepts a Logger

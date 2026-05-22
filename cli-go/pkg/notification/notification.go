@@ -7,11 +7,14 @@ package notification
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 )
 
 // StateEntry represents a single notification in state.jsonl.
@@ -80,60 +83,6 @@ func (m *Manager) List() ([]StateEntry, error) {
 	}
 
 	return entries, nil
-}
-
-// Append adds new entries to state.jsonl, skipping duplicates by ID.
-// Returns the number of entries actually written.
-func (m *Manager) Append(entries []StateEntry) (int, error) {
-	if len(entries) == 0 {
-		return 0, nil
-	}
-
-	// Load existing IDs for dedup
-	existing, err := m.List()
-	if err != nil {
-		return 0, err
-	}
-	existingIDs := make(map[string]bool, len(existing))
-	for _, e := range existing {
-		existingIDs[e.ID] = true
-	}
-
-	// Filter out duplicates
-	var toWrite []StateEntry
-	for _, e := range entries {
-		if !existingIDs[e.ID] {
-			toWrite = append(toWrite, e)
-			existingIDs[e.ID] = true // Prevent duplicates within the batch
-		}
-	}
-
-	if len(toWrite) == 0 {
-		return 0, nil
-	}
-
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0700); err != nil {
-		return 0, fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	file, err := os.OpenFile(m.stateFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return 0, fmt.Errorf("failed to open state file: %w", err)
-	}
-	defer file.Close()
-
-	for _, e := range toWrite {
-		data, err := json.Marshal(e)
-		if err != nil {
-			continue
-		}
-		if _, err := file.WriteString(string(data) + "\n"); err != nil {
-			return 0, fmt.Errorf("failed to write entry: %w", err)
-		}
-	}
-
-	return len(toWrite), nil
 }
 
 // CountUnread returns the number of unread notifications.
@@ -222,84 +171,24 @@ func (m *Manager) ListPaginated(offset, limit int, includeRead bool) ([]StateEnt
 }
 
 // PruneConfig controls how aggressively to prune old notifications.
-type PruneConfig struct {
-	MaxItems   int // Maximum entries to keep (0 = unlimited)
-	MaxAgeDays int // Maximum age in days (0 = unlimited)
-}
-
-// DefaultPruneConfig returns sensible defaults for notification pruning.
-func DefaultPruneConfig() PruneConfig {
-	return PruneConfig{
-		MaxItems:   500,
-		MaxAgeDays: 90,
-	}
-}
-
-// Prune removes old notifications that exceed the configured limits.
-// Returns the number of entries removed.
-func (m *Manager) Prune(cfg PruneConfig) (int, error) {
-	entries, err := m.List()
-	if err != nil {
-		return 0, err
-	}
-
-	if len(entries) == 0 {
-		return 0, nil
-	}
-
-	original := len(entries)
-
-	// Remove entries older than MaxAgeDays
-	if cfg.MaxAgeDays > 0 {
-		cutoff := time.Now().UTC().AddDate(0, 0, -cfg.MaxAgeDays)
-		var kept []StateEntry
-		for _, e := range entries {
-			t, err := time.Parse("2006-01-02T15:04:05Z", e.CreatedAt)
-			if err != nil {
-				kept = append(kept, e) // Keep entries with unparseable timestamps
-				continue
-			}
-			if !t.Before(cutoff) {
-				kept = append(kept, e)
-			}
-		}
-		entries = kept
-	}
-
-	// Trim to MaxItems (keep newest — JSONL appends chronologically)
-	if cfg.MaxItems > 0 && len(entries) > cfg.MaxItems {
-		entries = entries[len(entries)-cfg.MaxItems:]
-	}
-
-	removed := original - len(entries)
-	if removed > 0 {
-		if err := m.writeAll(entries); err != nil {
-			return 0, err
-		}
-	}
-
-	return removed, nil
-}
-
-// writeAll rewrites the entire state file.
+// writeAll rewrites the entire state file atomically. Marshals all entries
+// in memory first; if any entry fails to marshal we surface the error rather
+// than silently dropping it (the prior implementation discarded write/marshal
+// errors and the deferred Close swallowed close errors too).
 func (m *Manager) writeAll(entries []StateEntry) error {
 	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	file, err := os.Create(m.stateFile)
-	if err != nil {
-		return fmt.Errorf("failed to create state file: %w", err)
-	}
-	defer file.Close()
-
+	var buf bytes.Buffer
 	for _, e := range entries {
 		data, err := json.Marshal(e)
 		if err != nil {
-			continue
+			return fmt.Errorf("marshal entry %s: %w", e.ID, err)
 		}
-		file.WriteString(string(data) + "\n")
+		buf.Write(data)
+		buf.WriteByte('\n')
 	}
 
-	return nil
+	return atomicfile.WriteFile(m.stateFile, buf.Bytes(), 0600)
 }

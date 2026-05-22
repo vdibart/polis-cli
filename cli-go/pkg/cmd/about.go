@@ -23,8 +23,8 @@ func handleAbout(args []string) {
 		exitError("Failed to load .well-known/polis: %v", err)
 	}
 
-	// Active theme from well-known
-	activeTheme := wk.ActiveTheme
+	// Active theme from .polis/bundles/registry.json (with legacy fallback).
+	activeTheme := site.GetActiveTheme(dir)
 
 	// Get environment config
 	baseURL := os.Getenv("POLIS_BASE_URL")

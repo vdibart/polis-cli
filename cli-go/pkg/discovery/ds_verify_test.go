@@ -601,13 +601,21 @@ func TestVerifyAutoblessAttestation_Valid(t *testing.T) {
 	}
 }
 
+// TestVerifyAutoblessAttestation_EmptyAttestation — R20-C-F4 (2026-05-18).
+// Empty attestation must now FAIL verification. Pre-fix this returned
+// nil as a legacy-record concession, but the caller in stream/blessing.go
+// only invokes this function for autoblessed events — where attestation
+// is mandatory. An attacker could emit a fake autobless event with empty
+// ds_attestation and the local cache accepted it.
 func TestVerifyAutoblessAttestation_EmptyAttestation(t *testing.T) {
 	cache := NewDSKeyCache("http://localhost:1", time.Hour)
 
-	// Empty attestation should return nil (legacy record)
 	err := VerifyAutoblessAttestation(cache, "https://a.example/c.md", "https://b.example/p.md", "rule", "source", "key", "")
-	if err != nil {
-		t.Fatalf("expected nil for empty attestation, got: %v", err)
+	if err == nil {
+		t.Fatal("R20-C-F4 regression: expected error for empty attestation, got nil")
+	}
+	if !strings.Contains(err.Error(), "required") && !strings.Contains(err.Error(), "missing") {
+		t.Errorf("expected error to mention 'required' or 'missing'; got %q", err.Error())
 	}
 }
 

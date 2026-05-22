@@ -78,6 +78,7 @@ func allChecks() []checkFunc {
 	return []checkFunc{
 		// Phase 1: Well-known identity
 		checkWellKnownVersion,
+		checkAuthorFieldMigration,
 		checkWellKnownLegacyConfig,
 		checkWellKnownBundles,
 		checkAvatarConfig,
@@ -90,6 +91,18 @@ func allChecks() []checkFunc {
 		checkLayoutBlessed,
 		// Phase 4: Cross-platform fixes
 		checkPathSeparators,
+		// Phase 4.5: step-01 bundle/registry/theme refactor migrations
+		// (must run before Phase 5 — index rebuild + render read the new paths)
+		checkBundleReferencePayload,
+		checkLegacyContentPath,
+		checkRegistryMigration,
+		checkLegacyThemeLocations,
+		checkBundleActiveFields,
+		// Phase 4.7: post-step-01 migrations
+		// (notification relocation, v3→v4 shape cutover, R17-2 archive cleanup)
+		checkNotificationRulesMigration,
+		checkActiveShapeUpgrade,
+		checkV3LegacyArchives,
 		// Phase 5: Derived data rebuild
 		checkIndexRebuild,
 		// Phase 5.5: Re-render site (produces HTML at mount points)
@@ -107,11 +120,26 @@ func allChecks() []checkFunc {
 		// Phase 7: Config migration
 		checkWebappConfig,
 		checkWebappViewMode,
+		// Phase 6.5: Content-aware integrity (F1–F9)
+		checkReferencePayloadIntegrity,
+		checkRegistryIntegrity,
+		checkKeyConsistency,
+		checkBundlePathIntegrity,
+		checkBundleDeclarations,
+		checkIndexEntries,
+		checkBlessedFollowingStructure,
+		// Phase 6.7: Tailor-only self-heal (defense-in-depth + schema-version
+		// plumbing for future bumps)
+		checkActiveThemeUnset,
+		checkRegistrySchemaVersion,
+		checkRegistryFQNSanity,
 		// Phase 8: Cleanup
 		checkManifestObsolete,
 		checkEmptyMetadataDir,
 		checkStaleScopedFeed,
 		checkStaleFeedViewedAt,
+		checkOrphanedThemeDirs,
+		checkStudio13RenameMigration,
 		// Phase 9: CLI binary (network, runs last)
 		checkCLIUpdate,
 	}

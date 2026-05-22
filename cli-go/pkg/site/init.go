@@ -13,6 +13,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 )
 
 // Version is set at startup by the cmd package.
@@ -88,15 +89,14 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 		filepath.Join(siteDir, ".polis", "webapp"),
 		filepath.Join(siteDir, ".polis", "webapp", "hooks"),
 		// Private content state (pub.polis.core)
-		filepath.Join(siteDir, ".polis", "content", "pub.polis.core", "posts", "drafts"),
-		filepath.Join(siteDir, ".polis", "content", "pub.polis.core", "comments", "drafts"),
-		filepath.Join(siteDir, ".polis", "content", "pub.polis.core", "comments", "pending"),
-		filepath.Join(siteDir, ".polis", "content", "pub.polis.core", "comments", "denied"),
+		filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts"),
+		filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "comments", "drafts"),
+		filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "comments", "pending"),
+		filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "comments", "denied"),
 		// DM storage (encrypted conversations)
-		filepath.Join(siteDir, ".polis", "content", "pub.polis.core", "dm", "conv"),
+		filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "dm", "conv"),
 		// Site resources
 		filepath.Join(siteDir, "site", "snippets"),
-		filepath.Join(siteDir, "site", "themes"),
 		// Public content (pub.polis.core)
 		filepath.Join(siteDir, "content", "pub.polis.core", "post"),
 		filepath.Join(siteDir, "content", "pub.polis.core", "comment"),
@@ -152,18 +152,26 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 		author = getGitConfig("user.name")
 	}
 
+	// Default site title to author name when not supplied — avoids
+	// rendered <title></title> + leading-space description artifacts
+	// on fresh tenants where the operator didn't set --site-title.
+	siteTitle := opts.SiteTitle
+	if siteTitle == "" {
+		siteTitle = author
+	}
+
 	wk := &WellKnown{
-		Version:     gen,
-		AuthorName:  author,
-		Email:       opts.Email,
-		PublicKey:    strings.TrimSpace(string(pubKey)),
-		SiteTitle:   opts.SiteTitle,
-		Created:     setupTime.Format(time.RFC3339),
-		ActiveTheme: opts.Theme,
+		Version:    gen,
+		AuthorName: author,
+		Email:      opts.Email,
+		PublicKey:  strings.TrimSpace(string(pubKey)),
+		SiteTitle:  siteTitle,
+		Created:    setupTime.Format(time.RFC3339),
+		// active_theme intentionally not set here — moved to
+		// .polis/bundles/registry.json (step-01/1e).
 		Bundles: map[string]BundleEntry{
 			"pub.polis.core": {
-				Active: true,
-				Path:   "content/pub.polis.core/bundle.json",
+				Path: "content/pub.polis.core/bundle.json",
 			},
 		},
 	}
@@ -188,6 +196,34 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 	}
 	filesCreated = append(filesCreated, "content/pub.polis.core/bundle.json")
 
+	// Install the reference bundle payload (shapes, themes) into .polis/bundles/.
+	// This makes a brand-new site immediately renderable without any background
+	// actors (Patrol/Medic/Tailor). EnsureReferencePayload also writes
+	// registry.json with per-shape/per-theme version stamps that drive
+	// Patrol's NeedsRefresh check.
+	if err := bundle.EnsureReferencePayload(siteDir, "pub.polis.core"); err != nil {
+		return nil, fmt.Errorf("failed to install bundle reference payload: %w", err)
+	}
+	filesCreated = append(filesCreated, ".polis/bundles/pub.polis.core/")
+	filesCreated = append(filesCreated, ".polis/bundles/registry.json")
+
+	// Set active theme on the registry that EnsureReferencePayload just stamped.
+	// Both branches use load+modify+save (via bundle.SetActiveThemeName /
+	// theme.SelectRandomTheme → SetActiveTheme → bundle.SetActiveThemeName)
+	// so the version stamps are preserved.
+	if opts.Theme != "" {
+		if err := bundle.SetActiveThemeName(siteDir, opts.Theme); err != nil {
+			return nil, fmt.Errorf("failed to set active theme: %w", err)
+		}
+	} else {
+		// No theme requested — pick a random one from the installed bundle and
+		// persist it so the registry is fully initialized after init (rather
+		// than half-initialized until first render).
+		if _, err := theme.SelectRandomTheme(siteDir, ""); err != nil {
+			return nil, fmt.Errorf("failed to select default theme: %w", err)
+		}
+	}
+
 	// Create content files
 	if err := initContentFiles(siteDir, &filesCreated, gen); err != nil {
 		return nil, fmt.Errorf("failed to create content files: %w", err)
@@ -196,7 +232,7 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 	// Create default about snippet
 	aboutPath := filepath.Join(siteDir, "site", "snippets", "about.md")
 	if _, err := os.Stat(aboutPath); os.IsNotExist(err) {
-		aboutContent := "Welcome to my polis space. This site runs on *polis*\u2014signed markdown on your own domain. No platform, no middleman, just you and your words.\n"
+		aboutContent := "Hi \u2014 I'm just getting set up here. A real about page is coming soon.\n\nThis site runs on *polis*: signed markdown on my own domain. No platform, no middleman.\n"
 		if err := os.WriteFile(aboutPath, []byte(aboutContent), 0644); err != nil {
 			return nil, fmt.Errorf("failed to create default about snippet: %w", err)
 		}
@@ -330,9 +366,6 @@ func initGitignore(siteDir string) error {
 		content := `# Polis internals and secrets
 .polis/
 .env*
-
-# Installed themes (regeneratable via polis init)
-/site/themes/
 
 # Binaries
 /polis

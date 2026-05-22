@@ -185,6 +185,29 @@ func TestParsePrivateKey(t *testing.T) {
 	}
 }
 
+// TestParsePrivateKey_DoesNotAliasPEMBuffer is a regression test for R16-13.
+// The returned PrivateKey must be a copy of the bytes from the PEM block,
+// not a slice aliasing into it. Otherwise ZeroKey on the returned key (e.g.,
+// SignContent's defer) zeroes bytes inside the caller's PEM buffer, which:
+//   (a) defeats R11-7's separate ZeroKey-of-the-PEM-buffer path, and
+//   (b) breaks idempotent re-sign with the same buffer.
+func TestParsePrivateKey_DoesNotAliasPEMBuffer(t *testing.T) {
+	privKeyPEM, _, _ := GenerateKeypair()
+	pemSnapshot := append([]byte(nil), privKeyPEM...)
+
+	privKey, err := parsePrivateKey(privKeyPEM)
+	if err != nil {
+		t.Fatalf("parsePrivateKey failed: %v", err)
+	}
+
+	// Zero the parsed key — should not affect the caller's PEM buffer.
+	ZeroKey(privKey)
+
+	if !bytes.Equal(privKeyPEM, pemSnapshot) {
+		t.Error("ZeroKey on the parsed key mutated the original PEM buffer — parsePrivateKey must copy, not alias")
+	}
+}
+
 func TestParsePublicKey(t *testing.T) {
 	_, pubKeySSH, _ := GenerateKeypair()
 

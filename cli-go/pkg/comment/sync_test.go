@@ -18,7 +18,7 @@ func TestSyncParsesNestedInReplyTo(t *testing.T) {
 	dataDir := t.TempDir()
 
 	// Create pending directory
-	pendingDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending")
+	pendingDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending")
 	if err := os.MkdirAll(pendingDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestSyncFromEvents_BlessingGranted(t *testing.T) {
 	dataDir := t.TempDir()
 
 	// Create pending directory and a comment file
-	pendingDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending")
+	pendingDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending")
 	if err := os.MkdirAll(pendingDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -158,8 +158,8 @@ Great post!
 func TestSyncFromEvents_BlessingDenied(t *testing.T) {
 	dataDir := t.TempDir()
 
-	pendingDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending")
-	deniedDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "denied")
+	pendingDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending")
+	deniedDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "denied")
 	if err := os.MkdirAll(pendingDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ Hi!
 func TestSyncFromEvents_IgnoresOtherDomains(t *testing.T) {
 	dataDir := t.TempDir()
 
-	pendingDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending")
+	pendingDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending")
 	if err := os.MkdirAll(pendingDir, 0755); err != nil {
 		t.Fatal(err)
 	}

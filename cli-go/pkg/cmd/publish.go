@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
+	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 )
 
 func handlePublish(args []string) {
@@ -56,6 +58,14 @@ func handlePublish(args []string) {
 	result, err := publish.PublishPost(dir, markdown, *filename, privKey, dsCfg)
 	if err != nil {
 		exitError("Failed to publish: %v", err)
+	}
+
+	// v4 incremental render: cascade siblings + index. v3 path unchanged
+	// (CLI publish has never auto-rendered for v3, and continues not to).
+	if shape, err := bundle.GetActiveShapeName(dir); err == nil && shape == "v4" {
+		if err := publishStreamCascade(dir, result.Path, false); err != nil && !jsonOutput {
+			fmt.Fprintf(os.Stderr, "[!] v4 cascade render failed: %v\n", err)
+		}
 	}
 
 	// Remove original file if not already in posts/ (matches bash CLI behavior)
@@ -150,6 +160,14 @@ func handleRepublish(args []string) {
 		exitError("Failed to republish: %v", err)
 	}
 
+	// v4 incremental cascade. RepublishPost preserves the post's path/position;
+	// PublishStream handles republish identically (same lookup, same cascade).
+	if shape, err := bundle.GetActiveShapeName(dir); err == nil && shape == "v4" {
+		if err := publishStreamCascade(dir, result.Path, true); err != nil && !jsonOutput {
+			fmt.Fprintf(os.Stderr, "[!] v4 cascade render failed: %v\n", err)
+		}
+	}
+
 	if jsonOutput {
 		outputJSON(map[string]interface{}{
 			"success":   result.Success,
@@ -168,4 +186,37 @@ func handleRepublish(args []string) {
 func loadPrivateKey(dir string) ([]byte, error) {
 	privKeyPath := filepath.Join(dir, ".polis", "keys", "id_ed25519")
 	return os.ReadFile(privKeyPath)
+}
+
+// publishStreamCascade constructs a PageRenderer and dispatches the v4 incremental
+// render-on-publish (per step-03/3.a). Used by both publish and republish; both
+// flow through PublishStream because the cascade derivation is the same — a
+// republish keeps the post's index position but its sibling neighbors still
+// need re-rendering for any excerpt/title changes. The isRepublish flag is
+// retained for future telemetry / unpublish symmetry.
+func publishStreamCascade(dir, postPath string, isRepublish bool) error {
+	url := os.Getenv("POLIS_BASE_URL")
+	if url == "" {
+		url = getBaseURLFromSite(dir)
+	}
+	coreBundle := loadOrDefaultBundle(dir)
+	postsSource, _ := coreBundle.ContentDir("pub.polis.post")
+	postsMountDir, _ := coreBundle.MountDir("pub.polis.post")
+	commentsSource, _ := coreBundle.ContentDir("pub.polis.comment")
+	commentsMountDir, _ := coreBundle.MountDir("pub.polis.comment")
+
+	renderer, err := render.NewPageRenderer(render.PageConfig{
+		DataDir:           dir,
+		CLIThemesDir:      findCLIThemesDir(),
+		BaseURL:           url,
+		PostsSourceDir:    postsSource,
+		PostsMountDir:     postsMountDir,
+		CommentsSourceDir: commentsSource,
+		CommentsMountDir:  commentsMountDir,
+	})
+	if err != nil {
+		return fmt.Errorf("create renderer: %w", err)
+	}
+	_ = isRepublish // reserved for future use; cascade logic identical today
+	return renderer.PublishStream(postPath)
 }

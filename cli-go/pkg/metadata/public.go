@@ -160,37 +160,6 @@ func splitLines(data []byte) [][]byte {
 	return lines
 }
 
-// UpdateIndexEntry updates an existing entry in public.jsonl by path.
-// Rewrites the entire file with the updated entry.
-func UpdateIndexEntry(siteDir, path, newTitle, newVersion string) error {
-	entries, err := LoadPublicIndex(siteDir)
-	if err != nil {
-		return err
-	}
-
-	// Find and update the entry
-	found := false
-	for i, entry := range entries {
-		if entry.Path == path {
-			if newTitle != "" {
-				entries[i].Title = newTitle
-			}
-			if newVersion != "" {
-				entries[i].CurrentVersion = newVersion
-			}
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		return fmt.Errorf("entry not found: %s", path)
-	}
-
-	// Rewrite the file
-	return writePublicIndex(siteDir, entries)
-}
-
 // RemoveIndexEntry removes an entry from public.jsonl by path.
 func RemoveIndexEntry(siteDir, path string) error {
 	entries, err := LoadPublicIndex(siteDir)
@@ -251,36 +220,3 @@ func writePublicIndex(siteDir string, entries []IndexEntry) error {
 	return nil
 }
 
-// GetCommentEntries returns all comment entries from public.jsonl.
-func GetCommentEntries(siteDir string) ([]IndexEntry, error) {
-	entries, err := LoadPublicIndex(siteDir)
-	if err != nil {
-		return nil, err
-	}
-
-	var comments []IndexEntry
-	for _, entry := range entries {
-		if entry.Type == "comment" {
-			comments = append(comments, entry)
-		}
-	}
-
-	return comments, nil
-}
-
-// GetPostEntries returns all post entries from public.jsonl.
-func GetPostEntries(siteDir string) ([]IndexEntry, error) {
-	entries, err := LoadPublicIndex(siteDir)
-	if err != nil {
-		return nil, err
-	}
-
-	var posts []IndexEntry
-	for _, entry := range entries {
-		if entry.Type == "post" {
-			posts = append(posts, entry)
-		}
-	}
-
-	return posts, nil
-}

@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.63.0] - 2026-05-22
+
+The largest release since the project began publishing: a complete UX pivot from the v3 blog-style shape to the v4 "infinity stream" — a single-screen, sentence-filtered surface that re-aims itself via PQL (Polis Query Language). Both shapes ship together: v4 is the new default, v3 remains for backward compatibility on opt-in sites. Themes and shapes have moved into the bundle system and now ship embedded inside the Go binary, and a new `tailor` standalone binary helps self-hosters migrate sites across versions.
+
+### Added
+
+- **[Webapp] Infinity stream (v4 shape)**: New single-screen UX that replaces the per-tab v3 navigation. The entire surface becomes whatever the URL sentence asks for ("all activity from my network by date", "comments from everyone awaiting blessing", etc.). Built around a topbar icon row of PQL presets and a sentence-filter widget for composition.
+- **[Webapp] PQL — Polis Query Language**: Human-readable URL grammar (`/_/pql/<sentence>`) drives every view. Parser/composer in `webapp/internal/webui/www/pql.js`.
+- **[Webapp] `owner-extras.js`**: Icon-row presets (gateway, paragraph, comment, people, envelope, edit), badge dots for new-since-last-view indicators, search row, owned-content actions. Layered on top of the shape-agnostic stream controller.
+- **[Webapp] `theme-boot.js`**: Externalized theme bootstrap script (CSP-safe replacement for the v3 inline script).
+- **[Webapp] CSP nonce + importmap**: `index.html` injects a per-response nonce; importmap is nonce-pinned for strict-CSP compatibility.
+- **[Go CLI] `pkg/bundle/fixtures/`**: Embedded reference payload now ships with the binary via `//go:embed all:fixtures`. Contains the canonical `pub.polis.core` bundle with shapes/v3, shapes/v4, and all themes. Bundle install/migration logic in new `install.go`, `migration.go`, `config.go`.
+- **[Go CLI] `pkg/atomicfile`**: Durable-write helpers for `.well-known/polis` and other state files.
+- **[Go CLI] `pkg/sitemap`**: sitemaps.org 0.9 generator used by the stream render path.
+- **[Go CLI] `tailor` standalone binary**: A new fourth executable that diagnoses and auto-fixes self-hosted polis sites to bring them up to current spec across historical versions. Run with `--apply` to fix; default is dry-run. Distributed alongside `polis`, `polis-server`, and `polis-full`.
+- **[Go CLI] DS-aggregated comment counts**: Cross-tenant comment counts for posts in your stream are batched and resolved at query time (visible-horizon strategy — first 10 blocking, rest eventual).
+- **[Go CLI / Webapp] Profiles type**: `type=profiles` joins the PQL vocabulary. Bio links ("N followers", "N following", "N posts") route to scoped profile lists.
+- **[Webapp] Cross-visit nav**: When logged in, your icon nav rides along on every polis site you visit (hosted runtime). Autohides to give the host's content visual primacy.
+- **[Webapp] Foreign-site widget**: Embedded comment + follow widget on every public polis page. State machine: unknown / known / connected / owner.
+- **[Docs] `AGENTS.md` at repo root**: Public handbook for humans and LLMs exploring polis. Entry point with threads, recipes, and the doc map.
+- **[Docs] `docs/handbook/`** (new directory): Guided tours — `stream-overview.md` (start here), `url-as-filter.md`, `ds-to-stream.md`, `foreign-site-widget.md`.
+- **[Docs] `docs/general/`** (9 new concept docs): `architecture.md` (four-surface map), `bundles.md`, `content-types.md`, `shapes.md`, `themes.md`, `snap-off-architecture.md`, `policy-grammar.md` — plus the two v4-specific ones, `infinity-stream.md` and `pql.md`.
+- **[Docs] `docs/webapp/designer/`** (new subdirectory): `brand.md`, `components.md`, `decisions.md`, `navigation.md`, `pages.md`, `theme-system.md` — design rationale + brand identity for self-hosters customizing themes.
+
+### Changed
+
+- **[Architecture] Themes and shapes are now bundle-embedded**: The standalone `themes/` directory at the repo root has been retired. All themes now live at `cli-go/pkg/bundle/fixtures/pub.polis.core/themes/` and ship inside the Go binary. Shapes v3 (blog) and v4 (stream) co-exist under `fixtures/pub.polis.core/shapes/`. Self-hosters on earlier versions should run `tailor --apply` to migrate site layout.
+- **[Webapp] SPA hard cutover to v4**: Legacy `/_/posts`, `/_/comments`, `/_/blessings`, `/_/conversations` routes redirect to `/_/pql/<sentence>` equivalents. v3 shape templates remain available for opt-in sites; the SPA itself runs v4.
+- **[Webapp] Feed cursor + sync**: Auto-syncs on page load when stale; cursor guarded against pruning losses (continued from v0.61/v0.62 baseline).
+- **[Webapp] CSP**: Strict per-response nonce; SRI on widget.js + nav.js; frame-ancestors directive; cleaner auth-cookie boundaries.
+- **[Go CLI] DS write gating**: Continues to gate writes on the local registration marker introduced in v0.60.0.
+
+### Fixed
+
+- **[Webapp] Many post-deploy regressions during v3→v4 cutover**: timeline-dot alignment, ghost-compose "+" placement, follow-widget pinning, owner-private paginate auth, tenant-login CSP, bundle-asset CF cache purge.
+- **[Webapp] Cross-tenant CORS**: Bearer-auth + `credentials: 'include'` mismatch resolved for the foreign-site nav widget.
+- **[Go CLI] Metadata RMW race**: `blessed.json` reads serialized to prevent lost-update under concurrent blessing operations.
+- **[Discovery client / signing]**: Timestamp + freshness added to signed unregister/blessing/site payloads; SSRF defense in `wakeDomain`.
+- **[Server]**: Per-IP rate limit on tenant static content; un-spoofable IP source for limiter.
+
+### Removed
+
+- **[Repo] Top-level `themes/` directory**: Themes now ship inside `cli-go/pkg/bundle/fixtures/pub.polis.core/themes/` and are installed into a site on `polis init`. Self-hosters using earlier polis versions can run `tailor --apply` to migrate.
+- **[Go CLI] Orphaned helpers across many packages**: Dead code cleanup pass following the v4 cutover (`dm`, `publish`, `policy`, `comment`, `blessing`, `metadata`, `site`, `discovery`, `theme`, `template`, `ops`, `notifications`, `api/test`). No public API impact.
+
 ## [0.62.0] - 2026-04-13
 
 This release adds the `unpublish` command for posts and comments (clean-break retraction), tag directory initialization parity between the Bash and Go CLIs, a comment author link fix, feed system improvements including policy separation and scope consolidation, Studio13 theme favicon support, and updated discovery service API documentation for the unpublish endpoint.

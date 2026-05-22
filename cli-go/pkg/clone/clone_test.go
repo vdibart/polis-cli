@@ -54,29 +54,6 @@ func TestExtractDomainForDir(t *testing.T) {
 	}
 }
 
-func TestURLToLocalPath(t *testing.T) {
-	tests := []struct {
-		remoteURL string
-		baseURL   string
-		localDir  string
-		expected  string
-	}{
-		{
-			"https://example.com/posts/2025/01/hello.md",
-			"https://example.com",
-			"/local/posts",
-			"/local/posts/posts/2025/01/hello.md",
-		},
-	}
-
-	for _, tt := range tests {
-		result := urlToLocalPath(tt.remoteURL, tt.baseURL, tt.localDir)
-		if result != tt.expected {
-			t.Errorf("urlToLocalPath() = %q, expected %q", result, tt.expected)
-		}
-	}
-}
-
 // newTestServer creates a mock polis site HTTP server. The handler routes
 // requests based on path and uses the provided baseURL in index entries so
 // the clone client fetches from the test server.
@@ -266,17 +243,59 @@ func TestClone_PostContentWritten(t *testing.T) {
 		t.Fatalf("Clone() unexpected error: %v", err)
 	}
 
-	// The post URL relative to baseURL is "content/pub.polis.core/post/2025/03/my-post.md"
-	// urlToLocalPath strips the base URL, so the file goes under postsDir with the remainder
-	// postsDir = targetDir/content/pub.polis.core/post
-	// remainder after stripping baseURL+"/": "content/pub.polis.core/post/2025/03/my-post.md"
-	// final path: postsDir/content/pub.polis.core/post/2025/03/my-post.md
-	// This is a quirk of the current implementation - URL path gets appended to postsDir
-	postPath := filepath.Join(targetDir, "content", "pub.polis.core", "post",
-		"content", "pub.polis.core", "post", "2025", "03", "my-post.md")
+	// Post lands at targetDir + the remote's source-content path. Mirrors
+	// the remote layout 1:1 so subsequent `polis render` finds the markdown
+	// where it expects. (Step-03/3.f audit: this replaces the prior bug
+	// where the URL-stripped suffix was appended to a hardcoded postsDir,
+	// producing a duplicated content/.../post prefix.)
+	postPath := filepath.Join(targetDir, "content", "pub.polis.core", "post", "2025", "03", "my-post.md")
 	data, err := os.ReadFile(postPath)
 	if err != nil {
 		t.Fatalf("failed to read cloned post: %v", err)
+	}
+	if string(data) != postBody {
+		t.Errorf("post content = %q, want %q", string(data), postBody)
+	}
+}
+
+// TestClone_ModernIndexWithEmptyURL covers post-bundle-refactor remotes whose
+// index.jsonl entries ship URL="" and rely on Path for canonical addressing
+// (e.g. discover.polis.pub). Step-03/3.f audit: prior to the fix, the clone
+// loop fed entry.URL="" to FetchContent and produced 100% errors against
+// such remotes.
+func TestClone_ModernIndexWithEmptyURL(t *testing.T) {
+	postBody := "# Modern Post\n\nBody."
+	ts := newTestServer(t, testSiteOpts{
+		indexEntries: []remote.PublicIndexEntry{
+			{
+				Type:      "post",
+				Title:     "Modern Post",
+				Path:      "content/pub.polis.core/post/20260423/modern.md",
+				URL:       "", // intentionally empty — derived from Path
+				Published: "2026-04-23T10:00:00Z",
+			},
+		},
+		postContent: map[string]string{
+			"/content/pub.polis.core/post/20260423/modern.md": postBody,
+		},
+	})
+	defer ts.Close()
+
+	targetDir := t.TempDir()
+	result, err := Clone(ts.URL, targetDir, CloneOptions{FullClone: true})
+	if err != nil {
+		t.Fatalf("Clone(): %v", err)
+	}
+	if result.PostsDownloaded != 1 {
+		t.Fatalf("PostsDownloaded = %d, want 1 (modern URL-empty entries must download)", result.PostsDownloaded)
+	}
+	if result.Errors != 0 {
+		t.Errorf("Errors = %d, want 0", result.Errors)
+	}
+	postPath := filepath.Join(targetDir, "content", "pub.polis.core", "post", "20260423", "modern.md")
+	data, err := os.ReadFile(postPath)
+	if err != nil {
+		t.Fatalf("post not at expected location: %v", err)
 	}
 	if string(data) != postBody {
 		t.Errorf("post content = %q, want %q", string(data), postBody)

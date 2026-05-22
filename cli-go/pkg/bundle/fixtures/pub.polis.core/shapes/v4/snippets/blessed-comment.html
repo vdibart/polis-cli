@@ -1,0 +1,33 @@
+<!--
+    Blessed comment partial for v4 SHAPE.
+
+    Rendered inside `.entry-comments-panel` for the focus entry's
+    pre-loaded blessed-comment list. Iterated server-side via
+    {{#blessed_comments}}{{> snippets/blessed-comment}}{{/blessed_comments}}
+    in stream.html.
+
+    Comment-content trust chain: same as v3 — content is rendered
+    markdown via cli-go/pkg/render's bluemonday-sanitized HTML pipeline
+    at publish time. The {{content}} substitution is raw HTML the
+    template engine emits verbatim.
+
+    Class grammar matches `themes/_shared/base.css`'s `.comment` /
+    `.comment-header` / `.comment-author` / `.comment-date` /
+    `.comment-body` rules — themes inherit those via the concat
+    pipeline, so per-theme CSS overrides apply automatically.
+
+    Template variables:
+    - {{url}}              — author's site URL (linkified)
+    - {{author_name}}      — author handle / display name
+    - {{published_human}}  — human-readable date string
+    - {{content}}          — bluemonday-sanitized HTML body
+-->
+<div class="comment">
+    <div class="comment-header">
+        <a href="{{url}}" class="comment-author">{{author_name}}</a>
+        <span class="comment-date">{{published_human}}</span>
+    </div>
+    <div class="comment-body">
+        {{content}}
+    </div>
+</div>

@@ -263,3 +263,109 @@ func TestFollowHandler_FullCycle(t *testing.T) {
 		t.Errorf("cursor = %q, want %q", cursor, "1")
 	}
 }
+
+func TestFollowHandler_FollowedAtTimestamps(t *testing.T) {
+	h := &FollowHandler{MyDomain: "bob.com"}
+	state := h.NewState()
+
+	events := []discovery.StreamEvent{
+		{
+			ID:        json.Number("1"),
+			Type:      "pub.polis.follow.announced",
+			Actor:     "alice.com",
+			Timestamp: "2026-03-01T10:00:00Z",
+			Payload:   map[string]interface{}{"target_domain": "bob.com"},
+		},
+		{
+			ID:        json.Number("2"),
+			Type:      "pub.polis.follow.announced",
+			Actor:     "charlie.com",
+			Timestamp: "2026-04-15T18:30:00Z",
+			Payload:   map[string]interface{}{"target_domain": "bob.com"},
+		},
+	}
+
+	result, err := h.Process(events, state)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	fs := result.(*FollowerState)
+	if fs.FollowedAt["alice.com"] != "2026-03-01T10:00:00Z" {
+		t.Errorf("alice timestamp = %q, want %q", fs.FollowedAt["alice.com"], "2026-03-01T10:00:00Z")
+	}
+	if fs.FollowedAt["charlie.com"] != "2026-04-15T18:30:00Z" {
+		t.Errorf("charlie timestamp = %q, want %q", fs.FollowedAt["charlie.com"], "2026-04-15T18:30:00Z")
+	}
+}
+
+func TestFollowHandler_RefollowOverwritesTimestamp(t *testing.T) {
+	// "Current relationship started at" semantics: the latest announce
+	// wins. A user who unfollowed and re-follows shows the recent date.
+	h := &FollowHandler{MyDomain: "bob.com"}
+	state := &FollowerState{
+		Followers:  []string{"alice.com"},
+		FollowedAt: map[string]string{"alice.com": "2026-01-01T00:00:00Z"},
+		Count:      1,
+	}
+
+	events := []discovery.StreamEvent{
+		{
+			ID:        json.Number("1"),
+			Type:      "pub.polis.follow.removed",
+			Actor:     "alice.com",
+			Timestamp: "2026-02-01T00:00:00Z",
+			Payload:   map[string]interface{}{"target_domain": "bob.com"},
+		},
+		{
+			ID:        json.Number("2"),
+			Type:      "pub.polis.follow.announced",
+			Actor:     "alice.com",
+			Timestamp: "2026-03-01T00:00:00Z",
+			Payload:   map[string]interface{}{"target_domain": "bob.com"},
+		},
+	}
+
+	result, err := h.Process(events, state)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	fs := result.(*FollowerState)
+	if fs.FollowedAt["alice.com"] != "2026-03-01T00:00:00Z" {
+		t.Errorf("after unfollow+refollow, timestamp = %q, want re-follow time %q",
+			fs.FollowedAt["alice.com"], "2026-03-01T00:00:00Z")
+	}
+}
+
+func TestFollowHandler_LegacyStateNoTimestamps(t *testing.T) {
+	// Legacy on-disk state predates timestamps: Followers is populated
+	// but FollowedAt is nil. Process must accept that and not panic.
+	// A subsequent announce records its timestamp without backfilling
+	// the legacy entries (we don't know when they followed).
+	h := &FollowHandler{MyDomain: "bob.com"}
+	state := &FollowerState{
+		Followers: []string{"alice.com"},
+		Count:     1,
+	}
+
+	events := []discovery.StreamEvent{
+		{
+			ID:        json.Number("1"),
+			Type:      "pub.polis.follow.announced",
+			Actor:     "charlie.com",
+			Timestamp: "2026-04-15T18:30:00Z",
+			Payload:   map[string]interface{}{"target_domain": "bob.com"},
+		},
+	}
+
+	result, err := h.Process(events, state)
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	fs := result.(*FollowerState)
+	if _, hasAlice := fs.FollowedAt["alice.com"]; hasAlice {
+		t.Errorf("legacy alice should have no timestamp; got %q", fs.FollowedAt["alice.com"])
+	}
+	if fs.FollowedAt["charlie.com"] != "2026-04-15T18:30:00Z" {
+		t.Errorf("charlie new entry should record timestamp")
+	}
+}

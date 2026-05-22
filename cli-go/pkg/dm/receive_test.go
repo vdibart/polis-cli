@@ -332,9 +332,9 @@ func TestVerifySignedRequest_ValidSignature(t *testing.T) {
 	req.Header.Set("X-Polis-Signature", compactSig)
 	req.Header.Set("X-Polis-Timestamp", timestamp)
 
-	domain, err := VerifySignedRequest(req, func(d string) ([]byte, error) {
+	domain, err := VerifySignedRequestWithLogger(req, func(d string) ([]byte, error) {
 		return pubSSH, nil
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("verify should succeed: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestVerifySignedRequest_ExpiredTimestamp(t *testing.T) {
 
 func TestVerifySignedRequest_MissingHeaders(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
-	_, err := VerifySignedRequest(req, nil)
+	_, err := VerifySignedRequestWithLogger(req, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for missing headers")
 	}
@@ -622,10 +622,10 @@ func TestVerifySignedRequest_NormalizesDomain(t *testing.T) {
 
 	// fetchPublicKey is called with the lowercased domain
 	var fetchedDomain string
-	domain, err := VerifySignedRequest(req, func(d string) ([]byte, error) {
+	domain, err := VerifySignedRequestWithLogger(req, func(d string) ([]byte, error) {
 		fetchedDomain = d
 		return pubSSH, nil
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("VerifySignedRequest failed: %v", err)
 	}
@@ -634,48 +634,5 @@ func TestVerifySignedRequest_NormalizesDomain(t *testing.T) {
 	}
 	if fetchedDomain != "alice.example.com" {
 		t.Errorf("fetchPublicKey received domain = %q, want lowercase 'alice.example.com'", fetchedDomain)
-	}
-}
-
-func TestNewReceiverWithHTTP_Nil(t *testing.T) {
-	privPEM, pubSSH, _ := signing.GenerateKeypair()
-	privKey, _ := signing.ParsePrivateKey(privPEM)
-	siteDir := t.TempDir()
-	os.MkdirAll(filepath.Join(siteDir, ".polis", "policies"), 0700)
-	store, err := NewStore(siteDir, privKey.Seed())
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-	r := NewReceiverWithHTTP(privPEM, pubSSH, "Test.Local", siteDir, store, NewRateLimiter(10, 100), nil)
-	if r == nil {
-		t.Fatal("returned nil")
-	}
-	if r.httpClient == nil {
-		t.Error("expected fallback httpClient")
-	}
-	if r.Domain != "test.local" {
-		t.Errorf("Domain = %q, want test.local (lowercased)", r.Domain)
-	}
-}
-
-func TestNewReceiverWithHTTP_Shared(t *testing.T) {
-	privPEM, pubSSH, _ := signing.GenerateKeypair()
-	privKey, _ := signing.ParsePrivateKey(privPEM)
-	siteDir := t.TempDir()
-	os.MkdirAll(filepath.Join(siteDir, ".polis", "policies"), 0700)
-	store, err := NewStore(siteDir, privKey.Seed())
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-	shared := &http.Client{}
-	r := NewReceiverWithHTTP(privPEM, pubSSH, "test.local", siteDir, store, NewRateLimiter(10, 100), shared)
-	if r.httpClient != shared {
-		t.Error("expected shared httpClient")
-	}
-	if r.keyCache == nil {
-		t.Error("expected keyCache to be initialized")
-	}
-	if r.MaxMessageSize != maxDMPayloadSize {
-		t.Errorf("MaxMessageSize = %d, want %d", r.MaxMessageSize, maxDMPayloadSize)
 	}
 }

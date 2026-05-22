@@ -2,6 +2,9 @@ package api
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +19,35 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 )
 
+// seedAPIKey writes an APIKeyFile fixture to .polis/api-keys.json and returns
+// the plaintext bearer token. Replaces the older ops.GenerateAPIKey helper which
+// has no production caller.
+func seedAPIKey(t *testing.T, siteDir string) string {
+	t.Helper()
+	var keyBytes [32]byte
+	if _, err := rand.Read(keyBytes[:]); err != nil {
+		t.Fatal(err)
+	}
+	plaintext := "polis_" + hex.EncodeToString(keyBytes[:])
+	sum := sha256.Sum256([]byte(plaintext))
+	keyFile := &ops.APIKeyFile{Keys: []ops.APIKey{{
+		ID:      "test",
+		Name:    "test",
+		KeyHash: hex.EncodeToString(sum[:]),
+	}}}
+	data, err := json.Marshal(keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(siteDir, ".polis"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(siteDir, ".polis", "api-keys.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return plaintext
+}
+
 // testSetup creates a test server with an engine and mux, plus a valid API key.
 func testSetup(t *testing.T) (*http.ServeMux, string, string) {
 	t.Helper()
@@ -28,8 +60,8 @@ func testSetup(t *testing.T) (*http.ServeMux, string, string) {
 		"content/pub.polis.core/post",
 		"content/pub.polis.core/comment",
 		"content/pub.polis.core/follow",
-		".polis/content/pub.polis.core/comments/pending",
-		".polis/content/pub.polis.core/comments/drafts",
+		".polis/bundles/pub.polis.core/comments/pending",
+		".polis/bundles/pub.polis.core/comments/drafts",
 		"posts",
 		"comments",
 		"site/snippets",
@@ -66,11 +98,8 @@ func testSetup(t *testing.T) (*http.ServeMux, string, string) {
 		t.Fatal(err)
 	}
 
-	// Generate API key
-	apiKey, _, err := ops.GenerateAPIKey(siteDir, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Seed API key fixture
+	apiKey := seedAPIKey(t, siteDir)
 
 	// Setup routes
 	mux := http.NewServeMux()
@@ -767,7 +796,7 @@ func TestDispatchErrorNotConfigured(t *testing.T) {
 		// No keys
 	})
 
-	apiKey, _, _ := ops.GenerateAPIKey(siteDir, "test")
+	apiKey := seedAPIKey(t, siteDir)
 	mux := http.NewServeMux()
 	SetupRoutes(mux, engine, siteDir)
 
@@ -807,5 +836,45 @@ func TestErrorFormat(t *testing.T) {
 	}
 	if errObj["message"] == nil || errObj["message"] == "" {
 		t.Error("expected error message")
+	}
+}
+
+// TestIsPrivateContentType_Parity — R18-14 (2026-05-18) CI guard.
+// The webapp's `isPrivateContentType` allowlist (for v1 API read
+// auth) MUST stay in parity with every ContentType in the bundle
+// manifest that ships `Private: true`. Pre-fix the allowlist was a
+// hardcoded `switch` that someone had to remember to update when a
+// new private type was added to a bundle. Now the bundle declares
+// `Private: true` directly on the ContentType struct, and this test
+// fails CI if either side drifts.
+func TestIsPrivateContentType_Parity(t *testing.T) {
+	core := bundle.DefaultCoreBundle()
+
+	// Walk every type in the core bundle. If Private=true, both the
+	// short name (Dir) AND the full FQN must be in isPrivateContentType.
+	for fqn, ct := range core.Types {
+		shortName := ct.Dir
+		gotShort := isPrivateContentType(shortName)
+		gotFQN := isPrivateContentType(fqn)
+
+		if ct.Private {
+			if !gotShort {
+				t.Errorf("bundle declares %s (short %q) Private=true but isPrivateContentType(%q) is false — add to allowlist",
+					fqn, shortName, shortName)
+			}
+			if !gotFQN {
+				t.Errorf("bundle declares %s Private=true but isPrivateContentType(%q) is false — add to allowlist",
+					fqn, fqn)
+			}
+		} else {
+			if gotShort {
+				t.Errorf("isPrivateContentType(%q) is TRUE but bundle declares %s Private=false — fix one side",
+					shortName, fqn)
+			}
+			if gotFQN {
+				t.Errorf("isPrivateContentType(%q) is TRUE but bundle declares %s Private=false — fix one side",
+					fqn, fqn)
+			}
+		}
 	}
 }

@@ -1,0 +1,41 @@
+<!--
+    Per-comment entry partial.
+
+    Renders a comment as a standalone `.entry` in the unified stream
+    grammar. Used by the controller when the filter resolves to comments
+    — comments surface as first-class stream items in the owner's
+    unified view.
+
+    Inline comment rendering (comments shown under their parent post inside
+    `.focus-content` when a reader expands the comment thread) is owned
+    separately by the controller's expand-on-click panel logic; this
+    partial is for the standalone-entry context.
+
+    Template variables:
+    - {{comment_url}}                 — link to the comment's source
+    - {{comment_author_name}}
+    - {{comment_author_domain}}
+    - {{comment_date_human}}
+    - {{comment_body_html}}           — rendered markdown
+    - {{comment_reply_target_url}}    — optional: link to the post being replied to
+    - {{comment_reply_target_title}}  — optional: title of that post
+-->
+<article class="entry entry--comment is-loaded"
+         data-polis-entry-type="comment">
+    <div class="entry-meta">
+        <div class="timeline-dot" aria-hidden="true"></div>
+        <time class="entry-time">{{comment_date_human}}</time>
+    </div>
+    <div class="entry-body">
+        <div class="entry-byline">
+            <a class="byline-author" href="https://{{comment_author_domain}}/">{{comment_author_name}}</a>
+            <span class="byline-domain">{{comment_author_domain}}</span>
+            {{#comment_reply_target_title}}
+            <span class="entry-context">re: <a href="{{comment_reply_target_url}}">{{comment_reply_target_title}}</a></span>
+            {{/comment_reply_target_title}}
+        </div>
+        <div class="comment-body">
+            {{comment_body_html}}
+        </div>
+    </div>
+</article>

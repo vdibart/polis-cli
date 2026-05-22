@@ -1,0 +1,275 @@
+/* vdibart.polis.pub */
+/* Especial theme - inspired by Modelo Especial */
+
+:root {
+    /* Dark foundation (lifted slightly, not pure black) */
+    --color-bg: #121216;
+    --color-bg-light: #1a1a20;
+    --color-surface: #22222a;
+    --color-panel: #2a2a34;
+
+    /* Gold (the crest - rich, warm, prominent) */
+    --color-gold: #c8a014;
+    --color-gold-soft: #d8b028;
+    --color-gold-dim: #a8880e;
+
+    /* Cream (label white, warm and clean) */
+    --color-cream: #e8e0d0;
+    --color-cream-soft: #d8d0c0;
+    --color-cream-dim: #b0a890;
+
+    /* Polis Cyan - consistent branding */
+    --color-cyan: #00d4ff;
+    --color-cyan-glow: rgba(0, 212, 255, 0.3);
+
+    /* Navy accent (the deep blue) */
+    --color-navy: #3a4568;
+    --color-navy-soft: #505c80;
+
+    /* Text - high contrast, clean */
+    --color-text: #f0ece4;
+    --color-text-soft: #c8c4b8;
+    --color-text-muted: #78746c;
+
+    /* Accent colors */
+    --color-copper: #b87848;
+    --color-stone: #98948c;
+
+    /* Borders */
+    --color-border: rgba(212, 168, 24, 0.3);
+    --color-border-light: rgba(212, 168, 24, 0.45);
+
+    /* Accent tokens consumed by the v4 stream chrome (focus-entry
+       timeline-dot, filter-slot underline-hover, sf-option active,
+       comment-author link, focused-comment ring). Map to gold so the
+       accent reads as part of the theme's brand — without this,
+       stream.css falls back to a #d8a060 default that clashes. */
+    --color-accent: var(--color-gold);
+    --color-accent-soft: var(--color-gold-soft);
+    --color-accent-bg: rgba(212, 168, 24, 0.08);
+
+    /* Typography */
+    --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+    --font-display: 'Orbitron', var(--font-mono);
+
+    /* Layout */
+    --max-width: 900px;
+}
+
+/* Focus states for accessibility */
+a:focus-visible,
+button:focus-visible,
+[tabindex]:focus-visible {
+    outline: 2px solid var(--color-cyan);
+    outline-offset: 2px;
+}
+
+.theme-link:hover {
+    color: var(--color-cyan);
+}
+
+.theme-link.active {
+    color: var(--color-cyan);
+}
+
+.nav-home {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--color-cyan);
+    text-decoration: none;
+    transition: color 0.2s ease;
+}
+
+.nav-home:hover {
+    color: var(--color-gold);
+}
+
+.post-meta .meta-value {
+    color: var(--color-gold);
+}
+
+.hero-title {
+    font-family: var(--font-mono);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--color-gold);
+    margin: 0 0 0.25rem 0;
+}
+
+.site-bio em {
+    color: var(--color-gold-soft);
+    font-style: normal;
+}
+
+.site-bio a {
+    color: var(--color-gold);
+    text-decoration: none;
+}
+
+.section-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-gold);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.75rem;
+}
+
+.post-item:hover {
+    border-color: var(--color-gold-dim);
+}
+
+.post-date {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+}
+
+.post-item:hover .post-title {
+    color: var(--color-text);
+}
+
+.post-item:hover .post-comments {
+    color: var(--color-text-soft);
+}
+
+.comment-item:hover {
+    border-color: var(--color-gold-dim);
+}
+
+.comment-item .comment-author {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-gold);
+}
+
+.links-box {
+    display: flex;
+    align-items: center;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-left: 3px solid var(--color-gold);
+}
+
+.link-item:hover .link-icon {
+    color: var(--color-gold);
+}
+
+.link-item:hover .link-label {
+    color: var(--color-gold);
+}
+
+.comment {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-left: 3px solid var(--color-gold);
+    padding: 1rem 1.25rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.comment-author {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--color-gold);
+    text-decoration: none;
+}
+
+.comment-body a {
+    color: var(--color-gold);
+    text-decoration: none;
+}
+
+.content-body h1,
+.content-body h2,
+.content-body h3 {
+    color: var(--color-gold-soft);
+    margin: 1.5rem 0 0.75rem 0;
+}
+
+.content-body strong,
+.content-body b {
+    color: var(--color-gold-soft);
+    font-weight: 600;
+}
+
+.content-body a {
+    color: var(--color-gold);
+    text-decoration: none;
+}
+
+.content-body blockquote {
+    border-left: 3px solid var(--color-gold-dim);
+    margin: 1rem 0;
+    padding-left: 1rem;
+    color: var(--color-text-muted);
+}
+
+.cta-inline summary.cta-link {
+    display: inline;
+    font-size: 0.8rem;
+    color: var(--color-gold);
+    cursor: pointer;
+    list-style: none;
+    text-decoration: none;
+}
+
+.cta-code pre {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    padding: 1rem;
+    overflow-x: auto;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    margin: 0;
+}
+
+.cta-link {
+    font-size: 0.8rem;
+    color: var(--color-gold);
+    text-decoration: none;
+}
+
+.post-footer-nav .section-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--color-gold);
+    margin: 0 0 1rem 0;
+}
+
+.context-link {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--color-gold);
+    text-decoration: none;
+    word-break: break-word;
+    line-height: 1.3;
+}
+
+.context-link:hover, .context-readmore:hover {
+    text-decoration: underline;
+}
+.context-readmore { color: var(--color-gold); }
+
+.view-all:hover {
+    color: var(--color-gold);
+}
+
+/* ── Site header & post list ────────────── */
+.site-avatar-link, .site-identity-text { text-decoration: none; color: inherit; }
+body { font-family: 'Inter', system-ui, sans-serif; }
+.site-name { color: var(--color-text); font-family: 'Newsreader', Georgia, serif; }
+.site-handle { color: var(--color-text-muted); font-family: var(--font-mono); }
+.site-bio { color: var(--color-text-soft); font-family: 'Newsreader', Georgia, serif; }
+.site-stats { color: var(--color-text-muted); border-color: var(--color-border); }
+.site-stats strong { color: var(--color-text); }
+.site-avatar { background: linear-gradient(135deg, var(--color-gold-dim), var(--color-gold)); color: #fff; font-family: 'Newsreader', Georgia, serif; font-style: italic; }
+.sp-date { color: var(--color-text-muted); }
+.sp-title { color: var(--color-text); font-family: 'Newsreader', Georgia, serif; }
+.sp-excerpt { color: var(--color-text-soft); font-family: 'Newsreader', Georgia, serif; }
+.sp-comments { color: var(--color-text-muted); }
+.site-post:hover { background: rgba(200, 160, 20, 0.05); }
+.view-all { color: var(--color-gold); }
+.view-all:hover { color: var(--color-gold-soft); }
+.footer-logo { color: var(--color-text-muted); font-family: 'Newsreader', Georgia, serif; font-style: italic; }
+.footer-tagline { color: var(--color-text-muted); }

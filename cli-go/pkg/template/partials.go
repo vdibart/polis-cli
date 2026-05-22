@@ -62,6 +62,15 @@ func (e *Engine) loadPartial(path string) (string, string, string, error) {
 	// Parse prefix (global: or theme:)
 	prefix, cleanPath := parsePartialPrefix(path)
 
+	// Reject paths that try to escape the lookup directories. Templates can
+	// come from cloned remote sites or hosted-tenant theme uploads, so a
+	// malicious "{{> ../../../etc/passwd}}" must never resolve to a file
+	// outside the lookup dirs. Defense-in-depth: loadFromDir also verifies
+	// the joined path stays under the lookup dir.
+	if err := validatePartialPath(cleanPath); err != nil {
+		return "", "", "", err
+	}
+
 	// Determine lookup order based on prefix.
 	// _base snippets are always the last fallback before giving up.
 	type lookupEntry struct {
@@ -77,6 +86,7 @@ func (e *Engine) loadPartial(path string) (string, string, string, error) {
 		lookupOrder = []lookupEntry{
 			{"theme", e.getThemeSnippetsDir()},
 			{"base", e.getBaseSnippetsDir()},
+			{"base", e.getShapeRootDir()},
 			{"global", e.GetGlobalSnippetsDir()},
 		}
 	default: // "global" or no prefix
@@ -85,6 +95,7 @@ func (e *Engine) loadPartial(path string) (string, string, string, error) {
 			{"global", e.GetGlobalSnippetsDir()},
 			{"theme", e.getThemeSnippetsDir()},
 			{"base", e.getBaseSnippetsDir()},
+			{"base", e.getShapeRootDir()},
 		}
 	}
 
@@ -127,23 +138,38 @@ func (e *Engine) getThemeSnippetsDir() string {
 	return ""
 }
 
-// getBaseSnippetsDir returns the _base theme snippets directory.
-// Tries local _base first, then CLI themes _base directory.
+// getBaseSnippetsDir returns the snippets directory that serves as the
+// last-resort partial source — post-SHAPE refactor this is the installed shape's
+// snippets/ dir, which carries what used to live under themes/_base/snippets/.
+//
+// Defaults to v3 when ActiveShape is unset (pre-step-02 callers that don't
+// thread the shape name through).
 func (e *Engine) getBaseSnippetsDir() string {
-	// Try local _base first
-	localDir := filepath.Join(e.config.DataDir, "site", "themes", "_base", "snippets")
-	if _, err := os.Stat(localDir); err == nil {
-		return localDir
+	shape := e.config.ActiveShape
+	if shape == "" {
+		shape = "v3"
 	}
-
-	// Fall back to CLI themes _base
-	if e.config.CLIThemesDir != "" {
-		cliDir := filepath.Join(e.config.CLIThemesDir, "_base", "snippets")
-		if _, err := os.Stat(cliDir); err == nil {
-			return cliDir
-		}
+	shapeDir := filepath.Join(e.config.DataDir, ".polis", "bundles", "pub.polis.core", "shapes", shape, "snippets")
+	if _, err := os.Stat(shapeDir); err == nil {
+		return shapeDir
 	}
+	return ""
+}
 
+// getShapeRootDir returns the active shape's root directory, used as an
+// additional fallback for partial lookup. stream.html references
+// {{> stream-post}} — stream-post.html lives at the shape root (it's an
+// Entry template), not under snippets/. Without this fallback the partial
+// resolver can't find it.
+func (e *Engine) getShapeRootDir() string {
+	shape := e.config.ActiveShape
+	if shape == "" {
+		shape = "v3"
+	}
+	shapeDir := filepath.Join(e.config.DataDir, ".polis", "bundles", "pub.polis.core", "shapes", shape)
+	if _, err := os.Stat(shapeDir); err == nil {
+		return shapeDir
+	}
 	return ""
 }
 
@@ -156,6 +182,9 @@ func (e *Engine) loadFromDir(dir, path string) (string, string, error) {
 	if hasExplicitExt {
 		// Try exact path only
 		fullPath := filepath.Join(dir, path)
+		if !pathUnder(fullPath, dir) {
+			return "", "", fmt.Errorf("partial path escapes lookup dir: %s", path)
+		}
 		content, err := os.ReadFile(fullPath)
 		if err != nil {
 			return "", "", err
@@ -167,6 +196,9 @@ func (e *Engine) loadFromDir(dir, path string) (string, string, error) {
 	extensions := []string{".md", ".html", ""}
 	for _, ext := range extensions {
 		fullPath := filepath.Join(dir, path+ext)
+		if !pathUnder(fullPath, dir) {
+			return "", "", fmt.Errorf("partial path escapes lookup dir: %s", path)
+		}
 		content, err := os.ReadFile(fullPath)
 		if err == nil {
 			resolvedPath := path + ext
@@ -175,6 +207,58 @@ func (e *Engine) loadFromDir(dir, path string) (string, string, error) {
 	}
 
 	return "", "", fmt.Errorf("file not found: %s", path)
+}
+
+// validatePartialPath rejects partial paths that could escape the lookup
+// dir: empty, absolute, containing `..`, or containing null bytes. Cleaned
+// containment is also verified per-lookup-dir in loadFromDir; this is the
+// fast pre-check before any I/O.
+func validatePartialPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("empty partial path")
+	}
+	if strings.ContainsRune(path, 0) {
+		return fmt.Errorf("partial path contains null byte")
+	}
+	if filepath.IsAbs(path) || strings.HasPrefix(path, "/") || strings.HasPrefix(path, `\`) {
+		return fmt.Errorf("partial path must be relative: %s", path)
+	}
+	// Walk segments: any ".." is rejected outright. Done by string scan rather
+	// than filepath.Clean comparison so we surface the explicit traversal
+	// attempt rather than silently normalizing it.
+	for _, seg := range strings.FieldsFunc(path, func(r rune) bool {
+		return r == '/' || r == '\\'
+	}) {
+		if seg == ".." {
+			return fmt.Errorf("partial path contains '..': %s", path)
+		}
+	}
+	return nil
+}
+
+// pathUnder reports whether the cleaned absolute form of fullPath is the
+// same as or a descendant of dir's cleaned absolute form. Used as a final
+// defense-in-depth check after filepath.Join.
+func pathUnder(fullPath, dir string) bool {
+	absFull, err := filepath.Abs(fullPath)
+	if err != nil {
+		return false
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(absDir, absFull)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	if strings.HasPrefix(rel, "..") {
+		return false
+	}
+	return true
 }
 
 // processPartialContent processes the content of a loaded partial.

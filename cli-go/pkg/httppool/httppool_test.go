@@ -6,16 +6,8 @@ import (
 	"time"
 )
 
-func TestSharedTransportReturnsSameInstance(t *testing.T) {
-	t1 := SharedTransport()
-	t2 := SharedTransport()
-	if t1 != t2 {
-		t.Error("SharedTransport() should return the same pointer on every call")
-	}
-}
-
-func TestSharedTransportPoolConfig(t *testing.T) {
-	tr := SharedTransport()
+func TestDefaultTransportPoolConfig(t *testing.T) {
+	tr := defaultTransport
 	if tr.MaxIdleConns != 200 {
 		t.Errorf("MaxIdleConns = %d, want 200", tr.MaxIdleConns)
 	}

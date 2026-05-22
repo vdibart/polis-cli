@@ -1,0 +1,276 @@
+/* vdibart.polis.pub */
+/* Vice theme - inspired by GTA Vice City / Miami Vice */
+
+:root {
+    /* Warm saturated blue (Miami sky, not cold navy) */
+    --color-bg: #122040;
+    --color-bg-light: #1a2c50;
+    --color-surface: #223860;
+    --color-panel: #2a4070;
+
+    /* Warm coral pink (the Vice script, flamingo, art deco) */
+    --color-pink: #d06888;
+    --color-pink-soft: #e080a0;
+    --color-pink-dim: #a85070;
+
+    /* Sunset peach (Ocean Drive at golden hour) */
+    --color-sunset: #e88050;
+    --color-sunset-soft: #f0a070;
+    --color-sunset-dim: #c06838;
+
+    /* Polis Cyan - consistent branding */
+    --color-cyan: #00d4ff;
+    --color-cyan-glow: rgba(0, 212, 255, 0.3);
+
+    /* Tropical teal (palm trees, Biscayne Bay) */
+    --color-palm: #50c8a0;
+    --color-palm-soft: #70d8b8;
+
+    /* Text - warm creams (pastel art deco facades) */
+    --color-text: #f0e8e0;
+    --color-text-soft: #d0c4b8;
+    --color-text-muted: #8890a0;
+
+    /* Accent colors */
+    --color-cream: #f0d8c0;
+    --color-sky: #70a8d0;
+
+    /* Borders */
+    --color-border: rgba(208, 104, 136, 0.3);
+    --color-border-light: rgba(208, 104, 136, 0.5);
+
+    /* Accent tokens consumed by the v4 stream chrome (focus-entry
+       timeline-dot, filter-slot underline-hover, sf-option active,
+       comment-author link, focused-comment ring). Map to vice's
+       pink so the accent reads as part of the theme's brand —
+       without this, stream.css falls back to a #d8a060 default
+       that doesn't fit. */
+    --color-accent: var(--color-pink);
+    --color-accent-soft: var(--color-pink-soft);
+    --color-accent-bg: rgba(208, 104, 136, 0.08);
+
+    /* Typography */
+    --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+    --font-display: 'Orbitron', var(--font-mono);
+
+    /* Layout */
+    --max-width: 900px;
+}
+
+/* Focus states for accessibility */
+a:focus-visible,
+button:focus-visible,
+[tabindex]:focus-visible {
+    outline: 2px solid var(--color-cyan);
+    outline-offset: 2px;
+}
+
+.theme-link:hover {
+    color: var(--color-cyan);
+}
+
+.theme-link.active {
+    color: var(--color-cyan);
+}
+
+.nav-home {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--color-cyan);
+    text-decoration: none;
+    transition: color 0.2s ease;
+}
+
+.nav-home:hover {
+    color: var(--color-pink);
+}
+
+.post-meta .meta-value {
+    color: var(--color-palm);
+}
+
+.hero-title {
+    font-family: var(--font-mono);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--color-pink);
+    margin: 0 0 0.25rem 0;
+}
+
+.site-bio em {
+    color: var(--color-pink-soft);
+    font-style: normal;
+}
+
+.site-bio a {
+    color: var(--color-palm);
+    text-decoration: none;
+}
+
+.section-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-pink);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.75rem;
+}
+
+.post-item:hover {
+    border-color: var(--color-pink);
+}
+
+.post-date {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+}
+
+.post-item:hover .post-title {
+    color: var(--color-pink-soft);
+}
+
+.post-item:hover .post-comments {
+    color: var(--color-pink-soft);
+}
+
+.comment-item:hover {
+    border-color: var(--color-pink);
+}
+
+.comment-item .comment-author {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-palm);
+}
+
+.links-box {
+    display: flex;
+    align-items: center;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-left: 3px solid var(--color-pink);
+}
+
+.link-item:hover .link-icon {
+    color: var(--color-palm);
+}
+
+.link-item:hover .link-label {
+    color: var(--color-palm);
+}
+
+.comment {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-left: 3px solid var(--color-pink);
+    padding: 1rem 1.25rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.comment-author {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--color-palm);
+    text-decoration: none;
+}
+
+.comment-body a {
+    color: var(--color-palm);
+    text-decoration: none;
+}
+
+.content-body h1,
+.content-body h2,
+.content-body h3 {
+    color: var(--color-text);
+    margin: 1.5rem 0 0.75rem 0;
+}
+
+.content-body strong,
+.content-body b {
+    color: var(--color-text);
+    font-weight: 600;
+}
+
+.content-body a {
+    color: var(--color-palm);
+    text-decoration: none;
+}
+
+.content-body blockquote {
+    border-left: 3px solid var(--color-pink);
+    margin: 1rem 0;
+    padding-left: 1rem;
+    color: var(--color-text-muted);
+}
+
+.cta-inline summary.cta-link {
+    display: inline;
+    font-size: 0.8rem;
+    color: var(--color-palm);
+    cursor: pointer;
+    list-style: none;
+    text-decoration: none;
+}
+
+.cta-code pre {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    padding: 1rem;
+    overflow-x: auto;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    margin: 0;
+}
+
+.cta-link {
+    font-size: 0.8rem;
+    color: var(--color-palm);
+    text-decoration: none;
+}
+
+.post-footer-nav .section-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--color-pink);
+    margin: 0 0 1rem 0;
+}
+
+.context-link {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--color-palm);
+    text-decoration: none;
+    word-break: break-word;
+    line-height: 1.3;
+}
+
+.context-link:hover, .context-readmore:hover {
+    text-decoration: underline;
+}
+.context-readmore { color: var(--color-palm); }
+
+.view-all:hover {
+    color: var(--color-pink-soft);
+}
+
+/* ── Site header & post list (v3 mockup design) ────────────── */
+.site-avatar-link, .site-identity-text { text-decoration: none; color: inherit; }
+body { font-family: 'Inter', system-ui, sans-serif; }
+.site-name { color: var(--color-text); font-family: 'Newsreader', Georgia, serif; }
+.site-handle { color: var(--color-text-muted); font-family: var(--font-mono); }
+.site-bio { color: var(--color-text-soft); font-family: 'Newsreader', Georgia, serif; }
+.site-stats { color: var(--color-text-muted); border-color: var(--color-border); }
+.site-stats strong { color: var(--color-text); }
+.site-avatar { background: linear-gradient(135deg, var(--color-pink), var(--color-sunset)); color: #fff; font-family: 'Newsreader', Georgia, serif; font-style: italic; }
+.sp-date { color: var(--color-text-muted); }
+.sp-title { color: var(--color-text); font-family: 'Newsreader', Georgia, serif; }
+.sp-excerpt { color: var(--color-text-soft); font-family: 'Newsreader', Georgia, serif; }
+.sp-comments { color: var(--color-text-muted); }
+.site-post:hover { background: rgba(255, 255, 255, 0.03); }
+.view-all { color: var(--color-pink); }
+.view-all:hover { color: var(--color-pink-soft); }
+.footer-logo { color: var(--color-text-muted); font-family: 'Newsreader', Georgia, serif; font-style: italic; }
+.footer-tagline { color: var(--color-text-muted); }

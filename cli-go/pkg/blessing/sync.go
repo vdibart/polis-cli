@@ -67,26 +67,3 @@ func SyncBlessedComments(siteDir, domain string, client *discovery.Client) (*Syn
 	return result, nil
 }
 
-// GetBlessedCommentsForDomain fetches all granted blessings for a domain.
-func GetBlessedCommentsForDomain(domain string, client *discovery.Client) ([]discovery.RelationshipRecord, error) {
-	resp, err := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
-		"actor":  domain,
-		"status": "granted",
-	})
-	if err != nil {
-		return nil, err
-	}
-	return resp.Records, nil
-}
-
-// GetCommentsByAuthor fetches comments by author with optional status filter.
-// Uses content-query for the author's comments and relationship-query for status filtering.
-func GetCommentsByAuthor(authorDomain string, client *discovery.Client) ([]discovery.ContentRecord, error) {
-	resp, err := client.QueryContent("pub.polis.comment", map[string]string{
-		"actor": authorDomain,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return resp.Records, nil
-}

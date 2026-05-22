@@ -20,10 +20,15 @@ type Client struct {
 }
 
 // NewClient creates a new remote content client with a private HTTP client.
+// If POLIS_ORIGIN_OVERRIDES is set in the environment, the client's transport
+// is wrapped with origin-override behavior — outbound requests for matching
+// hosts get rewritten to the configured destinations. Test infrastructure
+// only; production code paths are unaffected when the env var is unset.
 func NewClient() *Client {
 	return &Client{
 		HTTPClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Transport: MaybeWrapTransport(http.DefaultTransport),
+			Timeout:   30 * time.Second,
 		},
 	}
 }
@@ -31,11 +36,26 @@ func NewClient() *Client {
 // NewClientWithHTTP creates a remote content client using a shared HTTP client.
 // This enables connection pooling when multiple Client instances share the same
 // underlying http.Client (and its transport).
+//
+// If POLIS_ORIGIN_OVERRIDES is set, the shared client's transport is wrapped
+// in place for the lifetime of the returned Client (the wrapping is reversible
+// — the underlying transport is unchanged). Caller is responsible for not
+// re-using the same hc with conflicting expectations.
 func NewClientWithHTTP(hc *http.Client) *Client {
 	if hc == nil {
 		return NewClient()
 	}
-	return &Client{HTTPClient: hc}
+	// Wrap the shared client's transport (or DefaultTransport if unset). We
+	// return a clone of the http.Client struct so the caller's *http.Client
+	// stays untouched — only the per-Client struct sees the wrapping.
+	wrapped := MaybeWrapTransport(hc.Transport)
+	if wrapped == hc.Transport {
+		// No env override → no-op, return as-is to preserve identity.
+		return &Client{HTTPClient: hc}
+	}
+	clone := *hc
+	clone.Transport = wrapped
+	return &Client{HTTPClient: &clone}
 }
 
 // RemoteAvatarConfig represents custom avatar styling from a remote .well-known/polis.

@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"strconv"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/cmd"
 	"github.com/vdibart/polis-cli/webapp/internal/server"
@@ -28,22 +29,50 @@ func main() {
 }
 
 func runServer(args []string, cliVersion string) {
-	// Parse serve-specific flags
 	dataDir := "."
+	port := 0 // 0 = auto-pick
 
-	// Simple flag parsing for serve command
+	// Two-axis mode flags (step 5.a) — see cmd/server/main.go for the
+	// full description; same parsing rules apply.
+	dataMode := ""
+	surface := ""
+
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--data-dir":
+		case "--data-dir", "-d":
 			if i+1 < len(args) {
 				dataDir = args[i+1]
 				i++
 			}
-		case "-d":
+		case "--port", "-p":
 			if i+1 < len(args) {
-				dataDir = args[i+1]
+				p, err := strconv.Atoi(args[i+1])
+				if err != nil || p <= 0 || p > 65535 {
+					log.Fatalf("invalid --port %q", args[i+1])
+				}
+				port = p
 				i++
 			}
+		case "--owner":
+			if dataMode != "" {
+				log.Fatalf("--owner conflicts with prior --%s", dataMode)
+			}
+			dataMode = server.DataModeOwner
+		case "--mirror":
+			if dataMode != "" {
+				log.Fatalf("--mirror conflicts with prior --%s", dataMode)
+			}
+			dataMode = server.DataModeMirror
+		case "--editor":
+			if surface != "" {
+				log.Fatalf("--editor conflicts with prior --%s", surface)
+			}
+			surface = server.SurfaceEditor
+		case "--reader":
+			if surface != "" {
+				log.Fatalf("--reader conflicts with prior --%s", surface)
+			}
+			surface = server.SurfaceReader
 		}
 	}
 
@@ -54,5 +83,10 @@ func runServer(args []string, cliVersion string) {
 	}
 
 	// Run the server with CLI version for metadata
-	server.Run(webFS, dataDir, server.RunOptions{CLIVersion: cliVersion})
+	server.Run(webFS, dataDir, server.RunOptions{
+		CLIVersion: cliVersion,
+		Port:       port,
+		DataMode:   dataMode,
+		Surface:    surface,
+	})
 }

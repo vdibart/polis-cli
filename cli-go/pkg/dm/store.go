@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 )
 
 const (
@@ -22,7 +24,7 @@ const (
 
 // Store manages DM conversation storage on disk.
 type Store struct {
-	baseDir    string   // .polis/content/pub.polis.core/dm
+	baseDir    string   // .polis/bundles/pub.polis.core/dm
 	siteDir    string   // site root
 	storageKey [32]byte // derived from private key + salt
 }
@@ -30,7 +32,7 @@ type Store struct {
 // NewStore creates a DM store, deriving the storage key from the private key seed
 // and the site-wide salt. Creates the storage directories if needed.
 func NewStore(siteDir string, privateKeySeed []byte) (*Store, error) {
-	baseDir := filepath.Join(siteDir, ".polis", "content", "pub.polis.core", "dm")
+	baseDir := filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "dm")
 	if err := os.MkdirAll(filepath.Join(baseDir, convDir), 0700); err != nil {
 		return nil, fmt.Errorf("create dm dir: %w", err)
 	}
@@ -82,7 +84,7 @@ func loadOrCreateSalt(siteDir string) ([]byte, error) {
 	if err := os.MkdirAll(filepath.Dir(saltPath), 0700); err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(saltPath, []byte(hex.EncodeToString(salt)), 0600); err != nil {
+	if err := atomicfile.WriteFile(saltPath, []byte(hex.EncodeToString(salt)), 0600); err != nil {
 		return nil, fmt.Errorf("write salt: %w", err)
 	}
 
@@ -96,6 +98,14 @@ func EnsureSalt(siteDir string) error {
 }
 
 // LoadIndex reads the conversations index.
+//
+// TODO(volume): cursor pagination. The current consumers
+// (/api/dm/conversations and /api/v1/stream/items?type=dm) read the full
+// index into memory. Tenants with many active conversations (~few
+// hundred+) would benefit from a `LoadIndexPage(cursor, limit)` form
+// that streams pages without realizing the entire index. Defer until a
+// real tenant pushes the volume — typical user has <100 conversations
+// today.
 func (s *Store) LoadIndex() (*ConversationIndex, error) {
 	path := filepath.Join(s.baseDir, conversationsFile)
 	data, err := os.ReadFile(path)
@@ -120,7 +130,7 @@ func (s *Store) SaveIndex(idx *ConversationIndex) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(filepath.Join(s.baseDir, conversationsFile), data, 0600)
+	return atomicfile.WriteFile(filepath.Join(s.baseDir, conversationsFile), data, 0600)
 }
 
 // LoadConversation reads a full conversation from disk.
@@ -148,7 +158,7 @@ func (s *Store) SaveConversation(convID string, conv *Conversation) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(filepath.Join(s.baseDir, convDir, convID+".json"), data, 0600)
+	return atomicfile.WriteFile(filepath.Join(s.baseDir, convDir, convID+".json"), data, 0600)
 }
 
 // DeleteConversation removes a conversation file and its index entry.
@@ -316,23 +326,6 @@ func (s *Store) GetUnsentMessages() ([]UnsentMessage, error) {
 type UnsentMessage struct {
 	ConvID  string
 	Message Message
-}
-
-// UpdateMessageStatus changes the status of a specific message.
-func (s *Store) UpdateMessageStatus(convID, msgID, newStatus string) error {
-	conv, err := s.LoadConversation(convID)
-	if err != nil {
-		return err
-	}
-
-	for i := range conv.Messages {
-		if conv.Messages[i].ID == msgID {
-			conv.Messages[i].Status = newStatus
-			return s.SaveConversation(convID, conv)
-		}
-	}
-
-	return fmt.Errorf("message %s not found in conversation %s", msgID, convID)
 }
 
 // updateIndex updates the conversations index with new message info.

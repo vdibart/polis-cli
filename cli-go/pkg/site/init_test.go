@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 )
 
 func TestInit_BundleLayout(t *testing.T) {
@@ -26,13 +28,12 @@ func TestInit_BundleLayout(t *testing.T) {
 		".polis/policies",
 		".polis/webapp",
 		".polis/webapp/hooks",
-		".polis/content/pub.polis.core/posts/drafts",
-		".polis/content/pub.polis.core/comments/drafts",
-		".polis/content/pub.polis.core/comments/pending",
-		".polis/content/pub.polis.core/comments/denied",
-		".polis/content/pub.polis.core/dm/conv",
+		".polis/bundles/pub.polis.core/posts/drafts",
+		".polis/bundles/pub.polis.core/comments/drafts",
+		".polis/bundles/pub.polis.core/comments/pending",
+		".polis/bundles/pub.polis.core/comments/denied",
+		".polis/bundles/pub.polis.core/dm/conv",
 		"site/snippets",
-		"site/themes",
 		"content/pub.polis.core/post",
 		"content/pub.polis.core/comment",
 		"content/pub.polis.core/follow",
@@ -62,16 +63,19 @@ func TestInit_BundleLayout(t *testing.T) {
 		t.Fatalf("Bundles count = %d, want 1", len(wk.Bundles))
 	}
 	core := wk.Bundles["pub.polis.core"]
-	if !core.Active {
-		t.Error("pub.polis.core should be active")
-	}
+	// Listing-is-activation: presence in Bundles map means the bundle is
+	// active. The pre-cleanup `Active bool` field was removed in C4.
 	if core.Path != "content/pub.polis.core/bundle.json" {
 		t.Errorf("Bundle path = %q, want content/pub.polis.core/bundle.json", core.Path)
 	}
 
-	// Verify default theme is empty (selected randomly on first render)
-	if wk.ActiveTheme != "" {
-		t.Errorf("ActiveTheme = %q, want empty (deferred to first render)", wk.ActiveTheme)
+	// Active theme is picked at init (random selection from declared bundle
+	// themes) and persisted in the registry — no half-initialized state
+	// between init and first render.
+	_ = wk
+	activeTheme := GetActiveTheme(dir)
+	if activeTheme == "" {
+		t.Error("active theme should be set after init (random pick from bundle themes)")
 	}
 
 	// Verify content files exist
@@ -152,8 +156,8 @@ func TestInit_BundleJsonIsValid(t *testing.T) {
 	}
 
 	types, _ := raw["types"].(map[string]interface{})
-	if len(types) != 6 {
-		t.Errorf("types count = %d, want 6", len(types))
+	if len(types) != 7 {
+		t.Errorf("types count = %d, want 7", len(types))
 	}
 }
 
@@ -174,10 +178,13 @@ func TestInit_SiteTitle(t *testing.T) {
 	}
 }
 
-func TestInit_CustomTheme(t *testing.T) {
+// TestInit_DefaultSiteTitleFromAuthor verifies that an empty SiteTitle
+// falls back to the author name. Without this default, fresh-init tenants
+// emit <title></title> + a leading-space artifact on rendered pages.
+func TestInit_DefaultSiteTitleFromAuthor(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Init(dir, InitOptions{Theme: "turbo"})
+	_, err := Init(dir, InitOptions{Author: "Alice"})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -186,8 +193,86 @@ func TestInit_CustomTheme(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to load .well-known/polis: %v", err)
 	}
-	if wk.ActiveTheme != "turbo" {
-		t.Errorf("ActiveTheme = %q, want turbo", wk.ActiveTheme)
+	if wk.SiteTitle != "Alice" {
+		t.Errorf("SiteTitle = %q, want default-from-author Alice", wk.SiteTitle)
+	}
+}
+
+func TestInit_CustomTheme(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := Init(dir, InitOptions{Theme: "turbo"})
+	if err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	if _, err := LoadWellKnown(dir); err != nil {
+		t.Fatalf("Failed to load .well-known/polis: %v", err)
+	}
+	// Active theme now lives in the registry, not well-known.
+	activeTheme := GetActiveTheme(dir)
+	if activeTheme != "turbo" {
+		t.Errorf("active theme = %q, want turbo", activeTheme)
+	}
+}
+
+// TestInit_SelectsRandomThemeByDefault verifies that polis init with no
+// theme specified picks one from the declared bundle themes and persists
+// it into the registry — no half-initialized state between init and first
+// render. See cleanup C2.
+func TestInit_SelectsRandomThemeByDefault(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := Init(dir, InitOptions{}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	activeTheme := GetActiveTheme(dir)
+	if activeTheme == "" {
+		t.Fatal("active theme should be picked at init, got empty")
+	}
+	// Selected theme must be one declared in the bundle.
+	declared := bundle.DefaultCoreBundle().Themes
+	if _, ok := declared[activeTheme]; !ok {
+		t.Errorf("active theme %q is not declared in the bundle", activeTheme)
+	}
+}
+
+// TestInit_PreservesVersionStamps verifies that polis init does not clobber
+// the per-shape/per-theme version stamps that bundle.EnsureReferencePayload
+// records into registry.json. Without these stamps, Patrol's NeedsRefresh
+// check is broken (returns true forever; see cleanup C3 for the bug history).
+func TestInit_PreservesVersionStamps(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := Init(dir, InitOptions{}); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	reg, err := bundle.LoadRegistry(dir)
+	if err != nil {
+		t.Fatalf("LoadRegistry: %v", err)
+	}
+	entry := reg.FindInstalledBundle("pub.polis.core")
+	if entry == nil {
+		t.Fatal("registry should have a pub.polis.core entry after init")
+	}
+
+	defaults := bundle.DefaultCoreBundle()
+	for name, sh := range defaults.Shapes {
+		if got, want := entry.ShapeVersions[name], sh.Version; got != want {
+			t.Errorf("shape %q version stamp = %q, want %q", name, got, want)
+		}
+	}
+	for name, th := range defaults.Themes {
+		if got, want := entry.ThemeVersions[name], th.Version; got != want {
+			t.Errorf("theme %q version stamp = %q, want %q", name, got, want)
+		}
+	}
+
+	// Sanity: NeedsRefresh should be false on a freshly-initialized site.
+	if reg.NeedsRefresh(defaults) {
+		t.Error("NeedsRefresh should be false after init (stamps just recorded)")
 	}
 }
 
@@ -371,7 +456,7 @@ func TestInit_GitignoreContents(t *testing.T) {
 	}
 
 	content := string(data)
-	for _, expected := range []string{".polis/", ".env*", "/site/themes/", "/polis", "/polis-server", "/polis-full"} {
+	for _, expected := range []string{".polis/", ".env*", "/polis", "/polis-server", "/polis-full"} {
 		if !strings.Contains(content, expected) {
 			t.Errorf(".gitignore should contain %q", expected)
 		}
@@ -405,7 +490,7 @@ func TestInit_PassesAllPatrolChecks(t *testing.T) {
 	}
 
 	// DM directories must exist with correct permissions
-	dmConvDir := filepath.Join(dir, ".polis", "content", "pub.polis.core", "dm", "conv")
+	dmConvDir := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "dm", "conv")
 	info, err := os.Stat(dmConvDir)
 	if err != nil {
 		t.Fatalf("DM conv directory should exist: %v", err)

@@ -1,32 +1,38 @@
 package ops
 
 import (
-	"strings"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
-func TestGenerateAndValidateAPIKey(t *testing.T) {
-	siteDir := t.TempDir()
-
-	plaintext, key, err := GenerateAPIKey(siteDir, "test-key")
+// seedAPIKeyFile writes an APIKeyFile fixture directly to .polis/api-keys.json
+// with the given hash entries. Used by ValidateAPIKey tests after the
+// GenerateAPIKey/ListAPIKeys/RevokeAPIKey helpers were retired.
+func seedAPIKeyFile(t *testing.T, siteDir string, entries []APIKey) {
+	t.Helper()
+	keyFile := &APIKeyFile{Keys: entries}
+	data, err := json.Marshal(keyFile)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(siteDir, ".polis"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(apiKeysPath(siteDir), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
 
-	if !strings.HasPrefix(plaintext, "polis_") {
-		t.Errorf("expected key to start with 'polis_', got %q", plaintext[:10])
-	}
-	if key.Name != "test-key" {
-		t.Errorf("expected name 'test-key', got %q", key.Name)
-	}
-	if key.ID == "" {
-		t.Error("expected non-empty ID")
-	}
-	if key.CreatedAt == "" {
-		t.Error("expected non-empty CreatedAt")
-	}
+func TestValidateAPIKey(t *testing.T) {
+	siteDir := t.TempDir()
 
-	// Validate the key
+	plaintext := "polis_test_token_abc123"
+	seedAPIKeyFile(t, siteDir, []APIKey{
+		{ID: "test", Name: "test-key", KeyHash: hashKey(plaintext)},
+	})
+
 	name, ok := ValidateAPIKey(siteDir, plaintext)
 	if !ok {
 		t.Error("expected key to be valid")
@@ -35,89 +41,36 @@ func TestGenerateAndValidateAPIKey(t *testing.T) {
 		t.Errorf("expected name 'test-key', got %q", name)
 	}
 
-	// Invalid key should fail
 	_, ok = ValidateAPIKey(siteDir, "polis_invalid_key")
 	if ok {
 		t.Error("expected invalid key to fail validation")
 	}
 }
 
-func TestListAPIKeys(t *testing.T) {
+func TestValidateAPIKey_NoKeyFile(t *testing.T) {
 	siteDir := t.TempDir()
-
-	// No keys initially
-	keys, err := ListAPIKeys(siteDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if keys != nil {
-		t.Errorf("expected nil for no keys, got %v", keys)
-	}
-
-	// Generate two keys
-	GenerateAPIKey(siteDir, "key-1")
-	GenerateAPIKey(siteDir, "key-2")
-
-	keys, err = ListAPIKeys(siteDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(keys) != 2 {
-		t.Fatalf("expected 2 keys, got %d", len(keys))
-	}
-	// Hashes should be stripped
-	for _, k := range keys {
-		if k.KeyHash != "" {
-			t.Error("key hash should be stripped from listing")
-		}
-	}
-}
-
-func TestRevokeAPIKey(t *testing.T) {
-	siteDir := t.TempDir()
-
-	plaintext, key, err := GenerateAPIKey(siteDir, "to-revoke")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Key should be valid
-	_, ok := ValidateAPIKey(siteDir, plaintext)
-	if !ok {
-		t.Fatal("key should be valid before revocation")
-	}
-
-	// Revoke it
-	if err := RevokeAPIKey(siteDir, key.ID); err != nil {
-		t.Fatal(err)
-	}
-
-	// Key should no longer be valid
-	_, ok = ValidateAPIKey(siteDir, plaintext)
+	// No api-keys.json written.
+	_, ok := ValidateAPIKey(siteDir, "polis_some_key")
 	if ok {
-		t.Error("key should be invalid after revocation")
-	}
-
-	// Revoking non-existent key should error
-	err = RevokeAPIKey(siteDir, "nonexistent")
-	if err == nil {
-		t.Error("expected error for non-existent key")
+		t.Error("expected validation to fail when key file is missing")
 	}
 }
 
-func TestMultipleKeysValidation(t *testing.T) {
+func TestValidateAPIKey_MultipleKeys(t *testing.T) {
 	siteDir := t.TempDir()
 
-	pt1, _, _ := GenerateAPIKey(siteDir, "key-1")
-	pt2, _, _ := GenerateAPIKey(siteDir, "key-2")
+	pt1 := "polis_token_one"
+	pt2 := "polis_token_two"
+	seedAPIKeyFile(t, siteDir, []APIKey{
+		{ID: "k1", Name: "key-1", KeyHash: hashKey(pt1)},
+		{ID: "k2", Name: "key-2", KeyHash: hashKey(pt2)},
+	})
 
-	// Both should be valid
 	name1, ok1 := ValidateAPIKey(siteDir, pt1)
-	name2, ok2 := ValidateAPIKey(siteDir, pt2)
-
 	if !ok1 || name1 != "key-1" {
 		t.Errorf("key-1 validation failed: ok=%v, name=%q", ok1, name1)
 	}
+	name2, ok2 := ValidateAPIKey(siteDir, pt2)
 	if !ok2 || name2 != "key-2" {
 		t.Errorf("key-2 validation failed: ok=%v, name=%q", ok2, name2)
 	}

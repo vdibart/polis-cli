@@ -2,6 +2,7 @@
 package index
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 )
@@ -131,19 +133,20 @@ func rebuildPostsIndex(dataDir, baseURL string) (int, error) {
 		return entries[i].Published > entries[j].Published
 	})
 
-	// Write index file
-	file, err := os.Create(indexPath)
-	if err != nil {
-		return 0, err
-	}
-	defer file.Close()
-
+	// Write index file atomically. Marshal all entries in memory; surface
+	// marshal errors rather than silently skipping (the prior loop discarded
+	// errors and the deferred Close masked them too).
+	var buf bytes.Buffer
 	for _, entry := range entries {
 		data, err := json.Marshal(entry)
 		if err != nil {
-			continue
+			return 0, fmt.Errorf("marshal entry %s: %w", entry.URL, err)
 		}
-		file.WriteString(string(data) + "\n")
+		buf.Write(data)
+		buf.WriteByte('\n')
+	}
+	if err := atomicfile.WriteFile(indexPath, buf.Bytes(), 0600); err != nil {
+		return 0, err
 	}
 
 	return len(entries), nil
@@ -272,7 +275,7 @@ func clearNotifications(dataDir string) (int, error) {
 						count++
 					}
 				}
-				os.WriteFile(statePath, []byte{}, 0644)
+				_ = atomicfile.WriteFile(statePath, []byte{}, 0600)
 			}
 		}
 	}

@@ -84,32 +84,6 @@ func TestPrintUsage(t *testing.T) {
 	}
 }
 
-func TestVersion(t *testing.T) {
-	// Save original version
-	oldVersion := Version
-	defer func() { Version = oldVersion }()
-
-	Version = "test-version-1.2.3"
-
-	// Capture stdout
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	handleVersion([]string{})
-
-	w.Close()
-	os.Stdout = old
-
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
-	output := buf.String()
-
-	if !strings.Contains(output, "test-version-1.2.3") {
-		t.Errorf("Expected version output to contain %q, got %q", "test-version-1.2.3", output)
-	}
-}
-
 func TestGetDataDirDefault(t *testing.T) {
 	// Save original dataDir
 	oldDataDir := dataDir

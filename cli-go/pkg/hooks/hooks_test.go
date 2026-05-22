@@ -203,19 +203,3 @@ func TestRunHook_Timeout(t *testing.T) {
 	}
 }
 
-func TestGetHookPath_BackwardsCompatible(t *testing.T) {
-	config := &HookConfig{
-		PostPublish: "my-hooks/pub.sh",
-	}
-
-	// Original GetHookPath (no siteDir) should still work
-	path := GetHookPath(config, EventPostPublish)
-	if path != "my-hooks/pub.sh" {
-		t.Errorf("Expected explicit path, got %q", path)
-	}
-
-	path = GetHookPath(nil, EventPostPublish)
-	if path != "" {
-		t.Errorf("Expected empty for nil config, got %q", path)
-	}
-}

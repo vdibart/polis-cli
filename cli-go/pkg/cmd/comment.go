@@ -86,7 +86,7 @@ func handleCommentDraft(args []string) {
 	} else {
 		fmt.Printf("Created draft: %s\n", draft.ID)
 		fmt.Printf("In reply to: %s\n", draft.InReplyTo)
-		fmt.Printf("Edit at: .polis/content/pub.polis.core/comments/drafts/%s.md\n", draft.ID)
+		fmt.Printf("Edit at: .polis/bundles/pub.polis.core/comments/drafts/%s.md\n", draft.ID)
 	}
 }
 

@@ -3,6 +3,7 @@ package discovery
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +18,30 @@ import (
 
 // maxDSResponseSize is the maximum response body size for DS API responses (5MB).
 const maxDSResponseSize = 5 * 1024 * 1024
+
+// marshalCanonical produces JSON bytes whose output matches JavaScript's
+// JSON.stringify — specifically, WITHOUT Go's default HTML escaping of
+// <, >, & to \u003c, \u003e, \u0026. The DS side builds canonical JSON
+// with JSON.stringify, so any payload we sign must match byte-for-byte.
+//
+// Use this for EVERY canonical JSON that's signed or verified against a
+// signature — content registrations, relationships, stream events,
+// key rotations, site registrations. Do NOT use for ordinary HTTP
+// request bodies where encoding differences don't matter.
+func marshalCanonical(v interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	// json.Encoder appends a trailing newline; strip it.
+	b := buf.Bytes()
+	if len(b) > 0 && b[len(b)-1] == '\n' {
+		b = b[:len(b)-1]
+	}
+	return b, nil
+}
 
 // maxDSResponseRecords is the maximum number of records/events in a single DS response.
 // Prevents memory exhaustion from responses with millions of tiny objects that fit the
@@ -105,7 +130,7 @@ type queryAuthPayload struct {
 // MakeQueryAuthCanonicalJSON creates the canonical JSON for signed GET auth.
 // Must produce identical output to the TS side's buildQueryAuthCanonicalJSON.
 func MakeQueryAuthCanonicalJSON(domain, timestamp string) ([]byte, error) {
-	return json.Marshal(queryAuthPayload{
+	return marshalCanonical(queryAuthPayload{
 		Action:    "query",
 		Domain:    domain,
 		Timestamp: timestamp,
@@ -189,9 +214,13 @@ type ContentRegisterResponse struct {
 }
 
 // ContentUnregisterRequest is the request to unregister content.
+//
+// R20-C-F1 (2026-05-18): Timestamp added — DS requires it for replay
+// defense; signed canonical includes it; freshness ±5min.
 type ContentUnregisterRequest struct {
 	Type      string `json:"type"`
 	URL       string `json:"url"`
+	Timestamp string `json:"timestamp"`
 	Signature string `json:"signature"`
 }
 
@@ -246,11 +275,15 @@ type ContentQueryResponse struct {
 // ============================================================================
 
 // RelationshipUpdateRequest updates a relationship status.
+//
+// R20-C-F2 (2026-05-18): Timestamp added — DS requires it for replay
+// defense; signed canonical includes it; freshness ±5min.
 type RelationshipUpdateRequest struct {
 	Type      string `json:"type"`
 	SourceURL string `json:"source_url"`
 	TargetURL string `json:"target_url"`
 	Action    string `json:"action"` // "grant" or "deny"
+	Timestamp string `json:"timestamp"`
 	Signature string `json:"signature"`
 }
 
@@ -341,12 +374,17 @@ func (c *Client) RegisterContent(req *ContentRegisterRequest) (*ContentRegisterR
 }
 
 // UnregisterContent removes content from the discovery service.
-func (c *Client) UnregisterContent(contentType, contentURL, signature string) error {
+//
+// R20-C-F1 (2026-05-18): callers must pass the same `timestamp` they
+// used when building the canonical for `signature`. DS rejects
+// timestamps further than ±5min from server clock.
+func (c *Client) UnregisterContent(contentType, contentURL, timestamp, signature string) error {
 	endpoint := c.BaseURL + "/v1/content/unregister"
 
 	req := ContentUnregisterRequest{
 		Type:      contentType,
 		URL:       contentURL,
+		Timestamp: timestamp,
 		Signature: signature,
 	}
 
@@ -382,12 +420,16 @@ func (c *Client) UnregisterContent(contentType, contentURL, signature string) er
 // UnpublishContent unpublishes content from the discovery service (clean break retraction).
 // For posts, this cascades blessing changes (blessed→orphaned, pending→denied).
 // For comments, this resets the comment's blessing to 'pending'.
-func (c *Client) UnpublishContent(contentType, contentURL, signature string) error {
+//
+// R20-C-F1 (2026-05-18): callers must pass the same `timestamp` they
+// used when building the canonical for `signature`.
+func (c *Client) UnpublishContent(contentType, contentURL, timestamp, signature string) error {
 	endpoint := c.BaseURL + "/v1/content/unpublish"
 
 	req := ContentUnregisterRequest{
 		Type:      contentType,
 		URL:       contentURL,
+		Timestamp: timestamp,
 		Signature: signature,
 	}
 
@@ -510,23 +552,131 @@ func (c *Client) QueryContent(contentType string, filters map[string]string) (*C
 	return &result, nil
 }
 
+// CommentCountsRequest is the payload for POST /v1/content/comments/counts.
+type CommentCountsRequest struct {
+	URLs []string `json:"urls"`
+}
+
+// CommentCountsResponse is the response from the comment-counts endpoint.
+// Counts is keyed by the normalized post URL (DS canonical form: .md, forward-slash).
+// URLs with zero comments are omitted from the response.
+type CommentCountsResponse struct {
+	Counts map[string]int `json:"counts"`
+}
+
+// normalizeURLForDS mirrors discovery-service/core/validation.ts normalizeUrl:
+// replaces backslashes with forward slashes (Windows path leak guard) and
+// converts .html extensions to .md (DS stores comment in_reply_to URLs in
+// canonical .md form at register time). Sending .html URLs without this
+// normalization would silently miss every match.
+func normalizeURLForDS(s string) string {
+	s = strings.ReplaceAll(s, "\\", "/")
+	if strings.HasSuffix(s, ".html") {
+		s = s[:len(s)-5] + ".md"
+	}
+	return s
+}
+
+// FetchCommentCountsCtx queries the DS for total comment counts on a batch
+// of post URLs. Returns a map keyed by the URL form the CALLER provided
+// (not the normalized form) so callers don't need to re-map the result.
+//
+// Empty input short-circuits with an empty map — no DS roundtrip.
+//
+// The provided context governs the request lifetime. Stream-handler callers
+// pass a context with a strict timeout (e.g. 500ms for the visible-viewport
+// fetch) so the response never blocks beyond their budget; background
+// callers pass a longer-lived context.Background()-derived context.
+func (c *Client) FetchCommentCountsCtx(ctx context.Context, urls []string) (map[string]int, error) {
+	if len(urls) == 0 {
+		return map[string]int{}, nil
+	}
+
+	// Normalize for the wire, but remember the caller's form so the
+	// returned map keys round-trip exactly. Multiple caller URLs may
+	// normalize to the same DS form (e.g. both .html and .md → .md),
+	// so use a multimap from normalized → list of original.
+	normalized := make([]string, 0, len(urls))
+	callerByNormalized := make(map[string][]string, len(urls))
+	for _, u := range urls {
+		n := normalizeURLForDS(u)
+		if _, seen := callerByNormalized[n]; !seen {
+			normalized = append(normalized, n)
+		}
+		callerByNormalized[n] = append(callerByNormalized[n], u)
+	}
+
+	body, err := json.Marshal(CommentCountsRequest{URLs: normalized})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	endpoint := c.BaseURL + "/v1/content/comments/counts"
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	resp, err := c.doWithTiming(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("comment counts request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("comment counts failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var parsed CommentCountsResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	// Re-key the result by the caller's URL form. Each normalized URL
+	// in the response may map to one or more caller URLs.
+	out := make(map[string]int, len(urls))
+	for normURL, total := range parsed.Counts {
+		for _, originalURL := range callerByNormalized[normURL] {
+			out[originalURL] = total
+		}
+	}
+	return out, nil
+}
+
 // ============================================================================
 // Relationship Methods
 // ============================================================================
 
 // UpdateRelationship updates a relationship status (grant/deny blessing).
 // The privateKey is used to sign the request payload.
+//
+// R20-C-F2 (2026-05-18): a fresh ISO 8601 timestamp is added to the
+// canonical payload at signing time. DS validates within ±5min of
+// server clock to defeat replay; captured grant signatures can no
+// longer be re-submitted later to revert a deny back to granted.
 func (c *Client) UpdateRelationship(relType, sourceURL, targetURL, action string, privateKey []byte) error {
 	endpoint := c.BaseURL + "/v1/relationships"
 
-	// Create canonical payload for signing (must match DS buildRelationshipCanonicalJSON)
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+
+	// Create canonical payload for signing (must match DS buildRelationshipCanonicalJSON).
+	// Uses marshalCanonical to avoid Go's default HTML escaping (<, >, &).
 	canonicalPayload := relationshipCanonicalPayload{
 		Type:      relType,
 		SourceURL: sourceURL,
 		TargetURL: targetURL,
 		Action:    action,
+		Timestamp: timestamp,
 	}
-	canonicalJSON, err := json.Marshal(canonicalPayload)
+	canonicalJSON, err := marshalCanonical(canonicalPayload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal canonical payload: %w", err)
 	}
@@ -542,6 +692,7 @@ func (c *Client) UpdateRelationship(relType, sourceURL, targetURL, action string
 		SourceURL: sourceURL,
 		TargetURL: targetURL,
 		Action:    action,
+		Timestamp: timestamp,
 		Signature: signature,
 	}
 
@@ -640,17 +791,22 @@ type contentCanonicalPayload struct {
 }
 
 // relationshipCanonicalPayload is the canonical payload for relationship update signing.
-// Must match DS buildRelationshipCanonicalJSON: {type, source_url, target_url, action}
+// Must match DS buildRelationshipCanonicalJSON:
+// {type, source_url, target_url, action, timestamp}
+//
+// R20-C-F2 (2026-05-18): timestamp added for replay defense. DS
+// rejects timestamps further than ±5min from server clock.
 type relationshipCanonicalPayload struct {
 	Type      string `json:"type"`
 	SourceURL string `json:"source_url"`
 	TargetURL string `json:"target_url"`
 	Action    string `json:"action"`
+	Timestamp string `json:"timestamp"`
 }
 
 // MakeContentCanonicalJSON creates canonical JSON for content registration signing.
 func MakeContentCanonicalJSON(contentType, contentURL, version, author string, metadata map[string]interface{}) ([]byte, error) {
-	return json.Marshal(contentCanonicalPayload{
+	return marshalCanonical(contentCanonicalPayload{
 		Type:     contentType,
 		URL:      contentURL,
 		Version:  version,
@@ -660,33 +816,27 @@ func MakeContentCanonicalJSON(contentType, contentURL, version, author string, m
 }
 
 // MakeContentUnregisterCanonicalJSON creates the deterministic canonical JSON for
-// content unregistration signing. Must match DS buildContentUnregisterCanonicalJSON: {type, url}
-func MakeContentUnregisterCanonicalJSON(contentType, contentURL string) string {
-	b, _ := json.Marshal(struct {
-		Type string `json:"type"`
-		URL  string `json:"url"`
+// content unregistration signing. Must match DS
+// buildContentUnregisterCanonicalJSON: {type, url, timestamp}.
+//
+// R20-C-F1 (2026-05-18): timestamp added for replay defense.
+func MakeContentUnregisterCanonicalJSON(contentType, contentURL, timestamp string) string {
+	b, _ := marshalCanonical(struct {
+		Type      string `json:"type"`
+		URL       string `json:"url"`
+		Timestamp string `json:"timestamp"`
 	}{
-		Type: contentType,
-		URL:  contentURL,
+		Type:      contentType,
+		URL:       contentURL,
+		Timestamp: timestamp,
 	})
 	return string(b)
 }
 
 // MakeContentUnpublishCanonicalJSON creates the deterministic canonical JSON for
-// content unpublish signing. Same shape as unregister: {type, url}
-func MakeContentUnpublishCanonicalJSON(contentType, contentURL string) string {
-	return MakeContentUnregisterCanonicalJSON(contentType, contentURL)
-}
-
-// MakeRelationshipCanonicalJSON creates canonical JSON for relationship update signing.
-// Must match DS buildRelationshipCanonicalJSON: {type, source_url, target_url, action}
-func MakeRelationshipCanonicalJSON(relType, sourceURL, targetURL, action string) ([]byte, error) {
-	return json.Marshal(relationshipCanonicalPayload{
-		Type:      relType,
-		SourceURL: sourceURL,
-		TargetURL: targetURL,
-		Action:    action,
-	})
+// content unpublish signing. Same shape as unregister: {type, url, timestamp}.
+func MakeContentUnpublishCanonicalJSON(contentType, contentURL, timestamp string) string {
+	return MakeContentUnregisterCanonicalJSON(contentType, contentURL, timestamp)
 }
 
 // ============================================================================
@@ -704,6 +854,51 @@ type SiteCheckResponse struct {
 	AttestationKeyID    string `json:"attestation_key_id,omitempty"`
 	DSSignature         string `json:"ds_signature,omitempty"`
 	DSKeyID             string `json:"ds_key_id,omitempty"`
+}
+
+// 06-profiles Phase 3: site directory listing.
+
+// SiteListOptions configures the ListSites client call. Cursor is
+// opaque (round-trip from a prior response); sort is "name" or
+// "activity"; search is a case-insensitive substring match against
+// domain OR author_name; limit clamps to the server's max (100).
+type SiteListOptions struct {
+	Sort   string // "name" (default) | "activity"
+	Limit  int    // 1–100; server clamps. 0 → server default (50).
+	Cursor string // opaque from prior response; "" for first page
+	Search string // optional case-insensitive substring
+}
+
+// SiteListEntry is one row in the directory response. Mirrors the DS
+// ds_sites_with_activity view; the email column is NOT included by
+// design (server omits at the source).
+//
+// Note: the DS also ships `id` (BIGINT row id) and `post_count` (BIGINT
+// from a subquery) on each row, but we don't decode them. postgres.js
+// serializes BIGINT as a JSON string to preserve precision past 2^53,
+// which doesn't round-trip into Go int64 via the default Unmarshal.
+// Since we don't actually use either field, we let Go ignore them
+// rather than introduce a json.Number / string-tolerant decoder.
+type SiteListEntry struct {
+	Domain                string `json:"domain"`
+	RegistryURL           string `json:"registry_url"`
+	AuthorName            string `json:"author_name,omitempty"`
+	Description           string `json:"description,omitempty"`
+	CreatedAt             string `json:"created_at,omitempty"`
+	UpdatedAt             string `json:"updated_at,omitempty"`
+	LastActiveAt          string `json:"last_active_at,omitempty"`
+	// Actor's most-recent active post; all three are empty when the
+	// actor has no posts yet.
+	RecentPostURL         string `json:"recent_post_url,omitempty"`
+	RecentPostTitle       string `json:"recent_post_title,omitempty"`
+	RecentPostPublishedAt string `json:"recent_post_published_at,omitempty"`
+}
+
+// SiteListResponse is the response shape for GET /v1/sites/list.
+// NextCursor is empty when there are no more pages.
+type SiteListResponse struct {
+	Rows       []SiteListEntry `json:"rows"`
+	NextCursor string          `json:"next_cursor,omitempty"`
 }
 
 // SiteRegisterResponse is the response from the sites-register endpoint.
@@ -726,11 +921,19 @@ type SiteUnregisterResponse struct {
 	Code    string `json:"code,omitempty"`
 }
 
-// siteRegistrationPayload is the canonical payload structure for site registration.
+// siteRegistrationPayload is the canonical payload structure for site
+// registration / unregistration signing.
+//
+// R20-C-F3 (2026-05-18): `Timestamp` is omitempty so the register
+// flow continues to produce the legacy `{version, action, domain}`
+// canonical (register is naturally non-replayable because DS upserts
+// by domain). For `unregister` the caller populates Timestamp; DS
+// validates ±5min freshness and rejects replays.
 type siteRegistrationPayload struct {
-	Version int    `json:"version"`
-	Action  string `json:"action"`
-	Domain  string `json:"domain"`
+	Version   int    `json:"version"`
+	Action    string `json:"action"`
+	Domain    string `json:"domain"`
+	Timestamp string `json:"timestamp,omitempty"`
 }
 
 // siteRegisterRequest is the full request payload for the sites-register endpoint.
@@ -744,10 +947,14 @@ type siteRegisterRequest struct {
 }
 
 // siteUnregisterRequest is the full request payload for the sites-unregister endpoint.
+//
+// R20-C-F3 (2026-05-18): Timestamp added — DS requires it for replay
+// defense; signed canonical includes it; freshness ±5min.
 type siteUnregisterRequest struct {
 	Version   int    `json:"version"`
 	Action    string `json:"action"`
 	Domain    string `json:"domain"`
+	Timestamp string `json:"timestamp"`
 	Signature string `json:"signature"`
 }
 
@@ -792,6 +999,79 @@ func (c *Client) CheckSiteRegistration(domain string) (*SiteCheckResponse, error
 	return &result, nil
 }
 
+// ListSites queries the discovery service's paginated site directory.
+// Returns one page of registered sites + a cursor for the next page
+// (empty when the page is the last one). The underlying endpoint is
+// unauthenticated and unsigned — the response is informational
+// directory data, not security-critical attestation; callers that
+// need a verified site record should follow up with CheckSiteRegistration.
+//
+// Added for 06-profiles Phase 3: the webapp's /api/profiles?scope=all-polis
+// proxies through this method.
+func (c *Client) ListSites(opts SiteListOptions) (*SiteListResponse, error) {
+	q := url.Values{}
+	if opts.Sort != "" {
+		q.Set("sort", opts.Sort)
+	}
+	if opts.Limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", opts.Limit))
+	}
+	if opts.Cursor != "" {
+		q.Set("cursor", opts.Cursor)
+	}
+	if opts.Search != "" {
+		q.Set("search", opts.Search)
+	}
+
+	endpoint := c.BaseURL + "/v1/sites/list"
+	if encoded := q.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+
+	httpReq, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doWithTiming(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode == 404 {
+		// Old DS that hasn't deployed Phase 3 yet. Bubble up a typed
+		// sentinel so callers can render "feature requires DS upgrade"
+		// rather than a generic 500.
+		return nil, ErrListSitesNotDeployed
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("list sites failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result SiteListResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return &result, nil
+}
+
+// ErrListSitesNotDeployed signals that the DS the client is pointing
+// at hasn't shipped /v1/sites/list yet (06-profiles Phase 3). The
+// webapp converts this into a 503 with a human-readable message so
+// the SPA can degrade gracefully under "all of polis" qualifier
+// during DS upgrade windows.
+var ErrListSitesNotDeployed = fmt.Errorf("DS /v1/sites/list endpoint not available")
+
 // RegisterSite registers a domain with the discovery service.
 func (c *Client) RegisterSite(domain string, privateKey []byte, email, authorName string) (*SiteRegisterResponse, error) {
 	endpoint := c.BaseURL + "/v1/sites"
@@ -801,7 +1081,7 @@ func (c *Client) RegisterSite(domain string, privateKey []byte, email, authorNam
 		Action:  "register",
 		Domain:  domain,
 	}
-	canonicalJSON, err := json.Marshal(canonicalPayload)
+	canonicalJSON, err := marshalCanonical(canonicalPayload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal canonical payload: %w", err)
 	}
@@ -863,15 +1143,23 @@ func (c *Client) RegisterSite(domain string, privateKey []byte, email, authorNam
 }
 
 // UnregisterSite unregisters a domain from the discovery service.
+//
+// R20-C-F3 (2026-05-18): a fresh ISO 8601 timestamp is added to the
+// canonical payload at signing time. DS validates within ±5min of
+// server clock to defeat replay; a captured unregister signature can
+// no longer be re-submitted later to delete a re-registered site.
 func (c *Client) UnregisterSite(domain string, privateKey []byte) (*SiteUnregisterResponse, error) {
 	endpoint := c.BaseURL + "/v1/sites/unregister"
 
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+
 	canonicalPayload := siteRegistrationPayload{
-		Version: 1,
-		Action:  "unregister",
-		Domain:  domain,
+		Version:   1,
+		Action:    "unregister",
+		Domain:    domain,
+		Timestamp: timestamp,
 	}
-	canonicalJSON, err := json.Marshal(canonicalPayload)
+	canonicalJSON, err := marshalCanonical(canonicalPayload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal canonical payload: %w", err)
 	}
@@ -885,6 +1173,7 @@ func (c *Client) UnregisterSite(domain string, privateKey []byte) (*SiteUnregist
 		Version:   1,
 		Action:    "unregister",
 		Domain:    domain,
+		Timestamp: timestamp,
 		Signature: signature,
 	}
 
@@ -928,15 +1217,6 @@ func (c *Client) UnregisterSite(domain string, privateKey []byte) (*SiteUnregist
 
 	result.Success = true
 	return &result, nil
-}
-
-// MakeSiteRegistrationCanonicalJSON creates canonical JSON for site registration signing.
-func MakeSiteRegistrationCanonicalJSON(action, domain string) ([]byte, error) {
-	return json.Marshal(siteRegistrationPayload{
-		Version: 1,
-		Action:  action,
-		Domain:  domain,
-	})
 }
 
 // ============================================================================
@@ -1399,7 +1679,7 @@ func MakeStreamCanonicalJSON(eventType string, payload map[string]interface{}) (
 		Type:    eventType,
 		Payload: payload,
 	}
-	return json.Marshal(canonical)
+	return marshalCanonical(canonical)
 }
 
 // ============================================================================
@@ -1428,7 +1708,7 @@ type keyRotationCanonical struct {
 // MakeKeyRotationCanonicalJSON creates the deterministic canonical JSON for
 // key rotation signature verification. Keys are sorted alphabetically.
 func MakeKeyRotationCanonicalJSON(domain, oldKey, newKey, timestamp string) ([]byte, error) {
-	return json.Marshal(keyRotationCanonical{
+	return marshalCanonical(keyRotationCanonical{
 		Action:    "key-rotation",
 		Domain:    domain,
 		NewKey:    newKey,

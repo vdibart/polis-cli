@@ -8,12 +8,20 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 )
 
 // BundleEntry represents a bundle registration in .well-known/polis.
+//
+// Listing-is-activation: presence in bundles[] means the bundle is active.
+// There used to be an `Active bool` field here; it was always true and only
+// read in one place (a no-op skip in site.Validate). Step-01 cleanup C4
+// removed it. A shipped Patrol/Medic migration strips the legacy field
+// from existing tenants' .well-known/polis — see stripBundleActiveFields.
 type BundleEntry struct {
-	Active bool   `json:"active"`
-	Path   string `json:"path"`
+	Path string `json:"path"`
 }
 
 // AvatarConfig represents custom avatar styling for a polis site.
@@ -28,16 +36,18 @@ type AvatarConfig struct {
 
 // WellKnown represents the .well-known/polis v2 file structure.
 // This is the identity document and bundle registry for a polis site.
+//
+// active_theme used to live here but moved to .polis/bundles/registry.json in
+// step-01/1e — read it via bundle.GetActiveThemeName(siteDir).
 type WellKnown struct {
-	Version     string                 `json:"version"`
-	PublicKey   string                 `json:"public_key"`
-	Email       string                 `json:"email,omitempty"`
-	SiteTitle   string                 `json:"site_title,omitempty"`
-	AuthorName  string                 `json:"author_name"`
-	Avatar      *AvatarConfig          `json:"avatar,omitempty"`
-	Created     string                 `json:"created"`
-	ActiveTheme string                 `json:"active_theme,omitempty"`
-	Bundles     map[string]BundleEntry `json:"bundles,omitempty"`
+	Version    string                 `json:"version"`
+	PublicKey  string                 `json:"public_key"`
+	Email      string                 `json:"email,omitempty"`
+	SiteTitle  string                 `json:"site_title,omitempty"`
+	AuthorName string                 `json:"author_name"`
+	Avatar     *AvatarConfig          `json:"avatar,omitempty"`
+	Created    string                 `json:"created"`
+	Bundles    map[string]BundleEntry `json:"bundles,omitempty"`
 }
 
 // LoadWellKnown reads and parses the .well-known/polis file from a site directory.
@@ -56,7 +66,34 @@ func LoadWellKnown(siteDir string) (*WellKnown, error) {
 	return &wk, nil
 }
 
+// LoadWellKnownRaw reads .well-known/polis as a raw map without struct-shape
+// constraints. Distinguishes three cases via return signature:
+//
+//	(nil, nil) — file does not exist (not an error)
+//	(nil, err) — file present but read failure or malformed JSON
+//	(raw, nil) — file present and parsed OK
+//
+// Downstream integrity checks (e.g. patrol F2/F3/F4) consume the error to
+// report malformed-but-present distinctly from absent. Pre-existing helpers
+// that want "assume-absent-on-any-error" semantics discard the error.
+func LoadWellKnownRaw(siteDir string) (map[string]interface{}, error) {
+	path := filepath.Join(siteDir, ".well-known", "polis")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 // SaveWellKnown writes the .well-known/polis file to a site directory.
+// Atomic: a crash mid-write cannot leave the trust anchor truncated.
 func SaveWellKnown(siteDir string, wk *WellKnown) error {
 	dir := filepath.Join(siteDir, ".well-known")
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -69,8 +106,236 @@ func SaveWellKnown(siteDir string, wk *WellKnown) error {
 	}
 	data = append(data, '\n')
 
-	path := filepath.Join(dir, "polis")
-	return os.WriteFile(path, data, 0644)
+	return atomicfile.WriteFile(filepath.Join(dir, "polis"), data, 0644)
+}
+
+// SaveWellKnownRaw writes a raw map back to .well-known/polis with
+// pretty-printing. Use when callers mutate a raw JSON map (to preserve fields
+// not modeled by the WellKnown struct) and need to write it back atomically.
+// Mirrors SaveWellKnown but takes a map; the on-disk format is identical.
+func SaveWellKnownRaw(siteDir string, raw map[string]interface{}) error {
+	dir := filepath.Join(siteDir, ".well-known")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+
+	return atomicfile.WriteFile(filepath.Join(dir, "polis"), data, 0644)
+}
+
+// LegacyPrivateContentExists reports whether the tenant has any private state
+// at the pre-1f location (.polis/content/). Used by Patrol to flag tenants
+// needing the rename remediation in 1g.
+func LegacyPrivateContentExists(siteDir string) bool {
+	root := filepath.Join(siteDir, ".polis", "content")
+	info, err := os.Stat(root)
+	return err == nil && info.IsDir()
+}
+
+// LegacyActiveThemeInWellKnown reports whether .well-known/polis still carries
+// an active_theme field that the registry migration would relocate.
+//
+// Assume-absent-on-error: missing file, read failures, and malformed JSON all
+// return false (the legacy check can't safely assert presence if the file
+// isn't readable). Routed through LoadWellKnownRaw so a single parse path
+// serves both this check and the parse-error-aware patrol checks.
+func LegacyActiveThemeInWellKnown(siteDir string) bool {
+	raw, err := LoadWellKnownRaw(siteDir)
+	if err != nil || raw == nil {
+		return false
+	}
+	v, _ := raw["active_theme"].(string)
+	return v != ""
+}
+
+// LegacyBundleActiveFieldsExist reports whether either .well-known/polis's
+// bundles.<name>.active or .polis/bundles/registry.json's
+// installed_bundles[].active still carries a field. The "active" flags were
+// removed in step-01 cleanup C1+C4 — listing-is-activation now. This is
+// idempotent: returns false once both files have been stripped.
+func LegacyBundleActiveFieldsExist(siteDir string) bool {
+	if wellKnownHasBundleActive(siteDir) {
+		return true
+	}
+	return registryHasInstalledBundleActive(siteDir)
+}
+
+func wellKnownHasBundleActive(siteDir string) bool {
+	raw, err := LoadWellKnownRaw(siteDir)
+	if err != nil || raw == nil {
+		return false
+	}
+	bundles, _ := raw["bundles"].(map[string]interface{})
+	for _, entry := range bundles {
+		em, _ := entry.(map[string]interface{})
+		if _, ok := em["active"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func registryHasInstalledBundleActive(siteDir string) bool {
+	raw, err := bundle.LoadRegistryRaw(siteDir)
+	if err != nil || raw == nil {
+		return false
+	}
+	bundles, _ := raw["installed_bundles"].([]interface{})
+	for _, entry := range bundles {
+		em, _ := entry.(map[string]interface{})
+		if _, ok := em["active"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// StripBundleActiveFields removes the legacy "active" flag from both
+// .well-known/polis (under bundles.<name>.active) and
+// .polis/bundles/registry.json (under installed_bundles[].active). Idempotent:
+// no-op if neither field is present. Uses raw-map mutation to preserve any
+// unknown-to-the-struct fields (per the step-01 avatar-block lesson).
+//
+// One-time migration; pairs with LegacyBundleActiveFieldsExist + the Patrol
+// check checkBundleActiveFields. Will be retired once all tenants are on
+// the cleaned-up format.
+func StripBundleActiveFields(siteDir string) error {
+	if err := stripWellKnownBundleActive(siteDir); err != nil {
+		return fmt.Errorf("strip well-known bundle.active: %w", err)
+	}
+	if err := stripRegistryInstalledBundleActive(siteDir); err != nil {
+		return fmt.Errorf("strip registry installed_bundles.active: %w", err)
+	}
+	return nil
+}
+
+func stripWellKnownBundleActive(siteDir string) error {
+	raw, err := LoadWellKnownRaw(siteDir)
+	if err != nil || raw == nil {
+		return nil // unparseable → don't risk corrupting; missing → nothing to strip
+	}
+	bundles, _ := raw["bundles"].(map[string]interface{})
+	if bundles == nil {
+		return nil
+	}
+	changed := false
+	for _, entry := range bundles {
+		em, _ := entry.(map[string]interface{})
+		if em == nil {
+			continue
+		}
+		if _, ok := em["active"]; ok {
+			delete(em, "active")
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return SaveWellKnownRaw(siteDir, raw)
+}
+
+func stripRegistryInstalledBundleActive(siteDir string) error {
+	regPath := filepath.Join(siteDir, ".polis", "bundles", "registry.json")
+	data, err := os.ReadFile(regPath)
+	if err != nil {
+		return nil // missing → nothing to strip
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	bundles, _ := raw["installed_bundles"].([]interface{})
+	if bundles == nil {
+		return nil
+	}
+	changed := false
+	for _, entry := range bundles {
+		em, _ := entry.(map[string]interface{})
+		if em == nil {
+			continue
+		}
+		if _, ok := em["active"]; ok {
+			delete(em, "active")
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	out, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicfile.WriteFile(regPath, append(out, '\n'), 0600)
+}
+
+// MigratePrivateBundlesPath moves a tenant's per-bundle private state from the
+// legacy .polis/content/ tree into .polis/bundles/. Per-bundle subtrees
+// (posts/, comments/, dm/, etc.) move as units; the destination
+// .polis/bundles/<bundle>/ may already exist (created by EnsureReferencePayload
+// with shapes/ and themes/), and the moved subtrees slot in alongside.
+//
+// Idempotent: returns nil if .polis/content/ doesn't exist or is empty.
+// Returns an error if a destination subdir already exists with conflicting
+// content — won't auto-merge to avoid silent data loss.
+//
+// One-time migration introduced in step-01/1g; will be retired once all
+// tenants are on the new layout.
+func MigratePrivateBundlesPath(siteDir string) error {
+	legacyRoot := filepath.Join(siteDir, ".polis", "content")
+	if _, err := os.Stat(legacyRoot); os.IsNotExist(err) {
+		return nil // already migrated, or never had legacy state
+	}
+
+	bundlesRoot := filepath.Join(siteDir, ".polis", "bundles")
+	if err := os.MkdirAll(bundlesRoot, 0700); err != nil {
+		return fmt.Errorf("ensure .polis/bundles: %w", err)
+	}
+
+	// For each bundle dir under .polis/content/<bundle>/, walk its subtrees
+	// and move each into .polis/bundles/<bundle>/<subtree>.
+	bundleEntries, err := os.ReadDir(legacyRoot)
+	if err != nil {
+		return fmt.Errorf("read legacy root: %w", err)
+	}
+	for _, bundleEntry := range bundleEntries {
+		if !bundleEntry.IsDir() {
+			continue
+		}
+		bundleName := bundleEntry.Name()
+		legacyBundleDir := filepath.Join(legacyRoot, bundleName)
+		newBundleDir := filepath.Join(bundlesRoot, bundleName)
+		if err := os.MkdirAll(newBundleDir, 0700); err != nil {
+			return fmt.Errorf("ensure %s: %w", newBundleDir, err)
+		}
+		subtrees, err := os.ReadDir(legacyBundleDir)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", legacyBundleDir, err)
+		}
+		for _, sub := range subtrees {
+			src := filepath.Join(legacyBundleDir, sub.Name())
+			dst := filepath.Join(newBundleDir, sub.Name())
+			if _, err := os.Stat(dst); err == nil {
+				// Destination already exists — refuse to merge.
+				return fmt.Errorf("migration ambiguous: %s already exists, won't merge from %s", dst, src)
+			}
+			if err := os.Rename(src, dst); err != nil {
+				return fmt.Errorf("rename %s -> %s: %w", src, dst, err)
+			}
+		}
+		// Empty bundle dir — remove.
+		_ = os.Remove(legacyBundleDir)
+	}
+
+	// Remove the legacy root if empty.
+	_ = os.Remove(legacyRoot)
+	return nil
 }
 
 // MigrateAuthorField migrates the deprecated "author" field to "author_name"
@@ -78,15 +343,9 @@ func SaveWellKnown(siteDir string, wk *WellKnown) error {
 // value is copied. The "author" key is then removed. No-op if the file is
 // missing or already migrated.
 func MigrateAuthorField(siteDir string) error {
-	path := filepath.Join(siteDir, ".well-known", "polis")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil // file missing is fine
-	}
-
-	var raw map[string]interface{}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil // corrupt file, skip
+	raw, err := LoadWellKnownRaw(siteDir)
+	if err != nil || raw == nil {
+		return nil // missing or corrupt: skip
 	}
 
 	author, hasAuthor := raw["author"]
@@ -102,49 +361,15 @@ func MigrateAuthorField(siteDir string) error {
 	}
 
 	delete(raw, "author")
-
-	out, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(out, '\n'), 0644)
+	return SaveWellKnownRaw(siteDir, raw)
 }
 
-// GetSiteTitle returns the site title from .well-known/polis.
-func GetSiteTitle(siteDir string) string {
-	wk, err := LoadWellKnown(siteDir)
-	if err != nil {
-		return ""
-	}
-	return wk.SiteTitle
-}
-
-// GetPublicKey returns the public key from .well-known/polis.
-func GetPublicKey(siteDir string) string {
-	wk, err := LoadWellKnown(siteDir)
-	if err != nil {
-		return ""
-	}
-	return wk.PublicKey
-}
-
-// GetActiveTheme returns the active theme from .well-known/polis.
+// GetActiveTheme returns the active theme name. Reads from
+// .polis/bundles/registry.json (post-1e canonical) with a legacy fallback to
+// active_theme in .well-known/polis for pre-migration sites.
 func GetActiveTheme(siteDir string) string {
-	wk, err := LoadWellKnown(siteDir)
-	if err != nil {
-		return ""
-	}
-	return wk.ActiveTheme
-}
-
-// SetActiveTheme updates the active theme in .well-known/polis.
-func SetActiveTheme(siteDir, theme string) error {
-	wk, err := LoadWellKnown(siteDir)
-	if err != nil {
-		return err
-	}
-	wk.ActiveTheme = theme
-	return SaveWellKnown(siteDir, wk)
+	name, _ := bundle.GetActiveThemeName(siteDir)
+	return name
 }
 
 // GenerateDefaultAvatar creates a random avatar config with a contrast-safe
@@ -258,6 +483,14 @@ var faviconPatterns = map[string]func(color string) string{
 // GenerateFaviconSVG produces an SVG favicon string from an avatar config and initial letter.
 // If config is nil, a simple grey circle with the initial is generated.
 // When a pattern is set, the initial is hidden (matching avatar rendering behavior).
+//
+// Shape matches the on-page avatar (border-radius:50% in the shared theme
+// CSS) — modern browsers honor the transparent SVG viewBox area, so the
+// favicon renders as a true circle rather than the rounded square the
+// previous rect-based markup produced. The pattern fill is applied to a
+// circle so the pattern clips to the avatar shape; the border is a
+// stroked circle whose stroke straddles the viewBox edge so the full
+// border width is visible.
 func GenerateFaviconSVG(config *AvatarConfig, initial string) string {
 	bg := "#888888"
 	fg := "#ffffff"
@@ -280,18 +513,27 @@ func GenerateFaviconSVG(config *AvatarConfig, initial string) string {
 			svg := gen(config.PatternColor)
 			b64 := base64.StdEncoding.EncodeToString([]byte(svg))
 			patternDefs = fmt.Sprintf(`<defs><pattern id="p" patternUnits="userSpaceOnUse" width="28" height="28"><image href="data:image/svg+xml;base64,%s" width="28" height="28"/></pattern></defs>`, b64)
-			patternFill = `<rect width="128" height="128" rx="22" fill="url(#p)"/>`
-			displayInitial = "" // hide initial when pattern is set
+			patternFill = `<circle cx="64" cy="64" r="64" fill="url(#p)"/>`
+			displayInitial = "" // hide initial when pattern is set (matches buildAvatarHTML)
 		}
 	}
 
 	if config != nil && config.Border != "" && config.BorderW > 0 {
+		// borderW*2 keeps parity with the previous rect-based scaling
+		// (avatar 48px → favicon 128px). The stroke is centered at
+		// r=64-bw/2, so its outer edge lands exactly on the viewBox
+		// edge (r=64) and inner edge at r=64-bw — full border width
+		// visible against the background fill.
 		bw := config.BorderW * 2
-		borderEl = fmt.Sprintf(`<rect x="%d" y="%d" width="%d" height="%d" rx="%d" fill="none" stroke="%s" stroke-width="%d"/>`,
-			bw/2, bw/2, 128-bw, 128-bw, 22-bw/2, config.Border, bw)
+		borderEl = fmt.Sprintf(`<circle cx="64" cy="64" r="%d" fill="none" stroke="%s" stroke-width="%d"/>`,
+			64-bw/2, config.Border, bw)
 	}
 
-	return fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">%s<rect width="128" height="128" rx="22" fill="%s"/>%s%s<text x="64" y="80" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-weight="600" font-size="%d" fill="%s">%s</text></svg>`,
+	// font-weight=500 matches .site-avatar in themes/_shared/base.css so
+	// the initial in the favicon has the same visual weight as the
+	// initial in the on-page avatar. Text centered at y=64 with
+	// dominant-baseline=central.
+	return fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">%s<circle cx="64" cy="64" r="64" fill="%s"/>%s%s<text x="64" y="64" text-anchor="middle" dominant-baseline="central" font-family="sans-serif" font-weight="500" font-size="%d" fill="%s">%s</text></svg>`,
 		patternDefs, bg, patternFill, borderEl, fontSize, fg, displayInitial)
 }
 

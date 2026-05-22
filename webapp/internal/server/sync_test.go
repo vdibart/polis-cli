@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 )
 
@@ -351,32 +352,6 @@ func TestRunUnifiedSync_InvalidBaseURL(t *testing.T) {
 // Handler Name/EventTypes Tests
 // ============================================================================
 
-func TestNotificationSyncHandler_Name(t *testing.T) {
-	h := &notificationSyncHandler{}
-	if h.Name() != "notifications" {
-		t.Errorf("expected 'notifications', got %q", h.Name())
-	}
-}
-
-func TestNotificationSyncHandler_EventTypes(t *testing.T) {
-	h := &notificationSyncHandler{}
-	types := h.EventTypes()
-	if len(types) == 0 {
-		t.Fatal("expected non-empty event types")
-	}
-	// Should contain at least notification-related events
-	found := false
-	for _, t2 := range types {
-		if strings.Contains(t2, "polis") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("expected polis event types")
-	}
-}
-
 func TestFeedSyncHandler_Name(t *testing.T) {
 	h := &feedSyncHandler{}
 	if h.Name() != "feed" {
@@ -484,35 +459,6 @@ func TestCommentStatusSyncHandler_EventTypes(t *testing.T) {
 // ============================================================================
 // Handler Process - early return paths
 // ============================================================================
-
-func TestNotificationSyncHandler_Process_NoBaseURL(t *testing.T) {
-	s := newTestServer(t)
-	s.BaseURL = ""
-	h := &notificationSyncHandler{server: s}
-
-	events := []discovery.StreamEvent{
-		{Type: "pub.polis.post.published", Actor: "alice.polis.pub"},
-	}
-	result := h.Process(events)
-	if result.NewItems != 0 || result.Error != nil {
-		t.Error("expected empty result when no base URL")
-	}
-}
-
-func TestNotificationSyncHandler_Process_NoPrivateKey(t *testing.T) {
-	s := newTestServer(t)
-	s.BaseURL = "https://test.polis.pub"
-	s.PrivateKey = nil
-	h := &notificationSyncHandler{server: s}
-
-	events := []discovery.StreamEvent{
-		{Type: "pub.polis.post.published", Actor: "alice.polis.pub"},
-	}
-	result := h.Process(events)
-	if result.NewItems != 0 || result.Error != nil {
-		t.Error("expected empty result when no private key")
-	}
-}
 
 func TestFeedSyncHandler_Process_NoBaseURL(t *testing.T) {
 	s := newTestServer(t)
@@ -647,37 +593,6 @@ func TestFollowSyncHandler_Process_FollowRemoved(t *testing.T) {
 	}
 	if !result.FilesChanged {
 		t.Error("expected FilesChanged=true when follower removed")
-	}
-}
-
-// ============================================================================
-// Notification handler: process with notification events
-// ============================================================================
-
-func TestNotificationSyncHandler_Process_CreatesNotification(t *testing.T) {
-	s := newConfiguredServer(t)
-	s.DiscoveryURL = "https://ds.polis.pub"
-
-	myDomain := extractDomainFromURL(s.BaseURL)
-
-	h := &notificationSyncHandler{server: s}
-	events := []discovery.StreamEvent{
-		{
-			Type:      "pub.polis.follow.announced",
-			Actor:     "alice.polis.pub",
-			Timestamp: "2026-03-28T10:00:00Z",
-			Payload: map[string]interface{}{
-				"target_domain": myDomain,
-			},
-		},
-	}
-	result := h.Process(events)
-	if result.Error != nil {
-		t.Errorf("unexpected error: %v", result.Error)
-	}
-	// A follow.announced targeting us should create a notification
-	if result.NewItems == 0 {
-		t.Error("expected at least 1 new notification from follow.announced event")
 	}
 }
 
@@ -877,22 +792,6 @@ func TestFeedSyncHandler_Process_IgnoresSelfEvents(t *testing.T) {
 // Edge cases: empty events
 // ============================================================================
 
-func TestNotificationSyncHandler_Process_EmptyEvents(t *testing.T) {
-	s := newConfiguredServer(t)
-	s.DiscoveryURL = "https://ds.polis.pub"
-	h := &notificationSyncHandler{server: s}
-
-	result := h.Process(nil)
-	if result.NewItems != 0 || result.Error != nil {
-		t.Error("expected clean empty result for nil events")
-	}
-
-	result = h.Process([]discovery.StreamEvent{})
-	if result.NewItems != 0 || result.Error != nil {
-		t.Error("expected clean empty result for empty events slice")
-	}
-}
-
 func TestFeedSyncHandler_Process_EmptyEvents(t *testing.T) {
 	s := newConfiguredServer(t)
 	s.DiscoveryURL = "https://ds.polis.pub"
@@ -1032,9 +931,125 @@ func TestSyncHandlersImplementInterface(t *testing.T) {
 	s := newTestServer(t)
 
 	// Verify each handler satisfies the stream.SyncHandler interface
-	var _ stream.SyncHandler = &notificationSyncHandler{server: s}
 	var _ stream.SyncHandler = &feedSyncHandler{server: s}
 	var _ stream.SyncHandler = &followSyncHandler{server: s}
 	var _ stream.SyncHandler = &blessingSyncHandler{server: s}
 	var _ stream.SyncHandler = &commentStatusSyncHandler{server: s}
+}
+
+// TestFeedSyncHandler_Process_TriggersExcerptKickOff — step-06/6.l.
+// Source-level drift assertion: feedSyncHandler.Process must call
+// kickOffExcerptFetch after a successful merge, so items arrive in
+// the cache with excerpts populated rather than waiting for the
+// dashboard-load fallback to fire. Catches a regression where the
+// post-merge call gets dropped in a future refactor.
+//
+// (An integration test that exercises the actual fetch goroutine
+// would require an HTTPS test server — kickOffExcerptFetch filters
+// out non-https URLs as a security measure, and httptest.NewTLSServer
+// requires SharedHTTPClient cert-trust setup that isn't worth the
+// complexity for one wiring check. The idempotency test below covers
+// the kickOff helper's filtering behavior end-to-end.)
+func TestFeedSyncHandler_Process_TriggersExcerptKickOff(t *testing.T) {
+	// Read the sync.go source and assert the call is wired in.
+	syncSrc, err := os.ReadFile("sync.go")
+	if err != nil {
+		t.Fatalf("read sync.go: %v", err)
+	}
+	src := string(syncSrc)
+
+	// Find the feedSyncHandler.Process function.
+	procStart := strings.Index(src, "func (h *feedSyncHandler) Process(")
+	if procStart == -1 {
+		t.Fatal("feedSyncHandler.Process not found in sync.go")
+	}
+	// Look for kickOffExcerptFetch within the function body — bounded
+	// search to ~80 lines of body content.
+	end := procStart + 4000
+	if end > len(src) {
+		end = len(src)
+	}
+	body := src[procStart:end]
+	if !strings.Contains(body, "kickOffExcerptFetch") {
+		t.Errorf("feedSyncHandler.Process must call s.kickOffExcerptFetch after merge — sync-time excerpt fetch wiring missing")
+	}
+	// And it must be conditional on newCount > 0 — we don't want to
+	// list the entire cache on every sync that produced no new items.
+	if !strings.Contains(body, "newCount > 0") {
+		t.Errorf("kickOffExcerptFetch should be guarded by `if newCount > 0` to avoid wasted cache reads")
+	}
+}
+
+// TestExcerptFetchIndices — step-06/6.l review follow-up. The pure
+// filter underlying kickOffExcerptFetch: returns indices of items
+// that need an excerpt (missing Excerpt + post/comment + https URL).
+// Tested directly without firing a goroutine — replaces the earlier
+// sleep-and-poll idempotency test that depended on timing.
+func TestExcerptFetchIndices(t *testing.T) {
+	cases := []struct {
+		name  string
+		items []feed.CachedFeedItem
+		want  []int
+	}{
+		{
+			name: "needs excerpt — post + https + empty excerpt",
+			items: []feed.CachedFeedItem{
+				{Type: "post", URL: "https://alice.polis.pub/posts/foo.md"},
+			},
+			want: []int{0},
+		},
+		{
+			name: "skips already-excerpted",
+			items: []feed.CachedFeedItem{
+				{Type: "post", URL: "https://alice.polis.pub/posts/foo.md", Excerpt: "already there"},
+			},
+			want: nil,
+		},
+		{
+			name: "skips non-post / non-comment types",
+			items: []feed.CachedFeedItem{
+				{Type: "follow", URL: "https://alice.polis.pub/.well-known/polis"},
+				{Type: "blessing", URL: "https://alice.polis.pub/comments/bar.md"},
+			},
+			want: nil,
+		},
+		{
+			name: "skips http (security: only fetch over TLS)",
+			items: []feed.CachedFeedItem{
+				{Type: "post", URL: "http://insecure.example/posts/foo.md"},
+			},
+			want: nil,
+		},
+		{
+			name: "comments included",
+			items: []feed.CachedFeedItem{
+				{Type: "comment", URL: "https://alice.polis.pub/comments/bar.md"},
+			},
+			want: []int{0},
+		},
+		{
+			name: "mixed — only matching items returned",
+			items: []feed.CachedFeedItem{
+				{Type: "post", URL: "https://a.pub/p.md"},                          // index 0 — match
+				{Type: "post", URL: "https://b.pub/p.md", Excerpt: "has it"},       // index 1 — has excerpt
+				{Type: "follow", URL: "https://c.pub/wk"},                          // index 2 — wrong type
+				{Type: "comment", URL: "https://d.pub/c.md"},                       // index 3 — match
+				{Type: "post", URL: "http://e.pub/p.md"},                           // index 4 — http
+			},
+			want: []int{0, 3},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := excerptFetchIndices(tc.items)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("index %d: got %d, want %d", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
 }

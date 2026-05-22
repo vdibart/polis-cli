@@ -40,7 +40,7 @@ curl -X POST https://mysite.example.com/v1/content/post \
 
 | Document | Audience | Description |
 |----------|----------|-------------|
-| [user/reference.md](user/reference.md) | Users | Routes, request/response examples, error codes, implementation status |
+| [developer/reference.md](developer/reference.md) | Developers | Routes, request/response examples, error codes, implementation status |
 | [developer/dispatch-engine.md](developer/dispatch-engine.md) | Developers | Engine architecture, handler types, adding operations |
 
 ## See Also

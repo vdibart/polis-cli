@@ -1,17 +1,25 @@
 # Policies
 
-Policies are declarative rules that control how your polis site handles incoming events and outgoing side-effects. They replace hardcoded logic with user-configurable statements.
+Policies are declarative rules that control how your polis site handles
+incoming content and (in the future) outgoing event announcements. They
+replace hardcoded logic with user-configurable statements.
+
+**For the authoritative grammar spec — every verb, every layer, every
+edge case — see [`docs/general/policy-grammar.md`](../../general/policy-grammar.md).**
+This page is the user-facing guide. If anything here conflicts with the
+spec, the spec wins.
 
 ## Files
 
 Two policy files, each containing JSONL rules:
 
 | File | Visibility | Priority | Purpose |
-|------|-----------|----------|---------|
-| `.polis/policies/rules.jsonl` | Private | Higher | Instance preferences (never published) |
+|------|------------|----------|---------|
+| `.polis/policies/rules.jsonl` | Private | Higher | Per-instance overrides (never published) |
 | `policies/rules.jsonl` | Public | Lower | Published moderation stance |
 
-Private rules are evaluated first. The first matching rule wins.
+Private rules are evaluated first. The first matching rule wins across
+both files.
 
 ## Grammar
 
@@ -21,205 +29,236 @@ Private rules are evaluated first. The first matching rule wins.
 
 ### Verbs
 
-| Verb | Direction | Meaning |
-|------|-----------|---------|
-| `allow` | Incoming | Accept the event |
-| `deny` | Incoming | Reject the event |
-| `emit` | Outgoing | Trigger a side-effect (e.g., auto-bless a comment) |
-| `omit` | Outgoing | Suppress a side-effect (e.g., skip a notification) |
+Six verbs, organized by **layer** — each layer uses the vocabulary that
+matches the kind of decision it makes:
 
-`allow`/`deny` gate access. `emit`/`omit` control reactions.
+| Verb | Layer | Meaning |
+|------|-------|---------|
+| `allow` | 1 (tenant inbound) | Accept this content into storage |
+| `deny` | 1 (tenant inbound) | Reject this content |
+| `bless` | 1 (tenant inbound, comments) | Auto-display this comment alongside the post |
+| `review` | 1 (tenant inbound, comments) | Queue this comment for human review |
+| `emit` | 2 (tenant outbound, reserved) | Announce this event to the DS |
+| `omit` | 2 (tenant outbound, reserved) | Suppress the DS announcement |
+
+**Layer 2 status.** `emit`/`omit` parse and are retained, but no evaluator
+currently reads them. This is a reserved surface for a future feature
+(suppressing DS announcements for specific events). Do not rely on them
+having any effect today.
 
 ### Types
 
-- `all` -- matches any event type
-- `none` -- matches nothing
-- Dotted prefix -- `pub.polis.comment` matches `pub.polis.comment`, `pub.polis.comment.published`, `pub.polis.comment.blessing.requested`, etc. (dot-boundary prefix matching)
+- `all` — matches any event type
+- `none` — matches nothing (useful for disabled rules)
+- Dotted prefix — `pub.polis.comment` matches `pub.polis.comment`,
+  `pub.polis.comment.published`, `pub.polis.comment.blessing.requested`,
+  etc. (dot-boundary prefix matching)
 
 ### Sources
 
-| Source | Meaning | Resolved by |
-|--------|---------|-------------|
-| `all` | Any actor | Direct match |
-| `none` | No actor | Direct match |
-| `following` | Actor is in your following list | Client or DS |
-| `followers` | Actor follows you | Client or DS |
-| `self` | Actor domain matches your domain | Compare domains |
-| `thread-blessed` | Actor has a prior granted blessing on the thread | DS (storage query) |
+| Source | Meaning |
+|--------|---------|
+| `all` | Any actor |
+| `none` | No actor |
+| `following` | Actors in your following list |
+| `followers` | Actors who follow you |
+| `self` | Your own domain |
+| `thread-blessed` | Actors with a prior blessing on the same thread (DS-resolved) |
 
-### Optional Clauses
+### Optional clauses
 
-- `at <domain>` -- restrict to a specific actor domain
-- `on <target>` -- restrict to a specific target path
+- `at <domain>` — restrict to a specific actor domain
+- `on <target>` — restrict to a specific target path
 
-## Default Policies
+### Verb + type validity (tenant files)
+
+Not every verb is valid with every type. The parser rejects invalid
+combinations. Full matrix in the [grammar spec](../../general/policy-grammar.md#verb-validity-matrix).
+
+| Rule form | Valid? | Why |
+|---|---|---|
+| `allow pub.polis.dm from <scope>` | ✅ | DM inbound acceptance |
+| `deny pub.polis.dm from <scope>` | ✅ | DM inbound rejection |
+| `bless pub.polis.comment from <scope>` | ✅ | Auto-display comment |
+| `review pub.polis.comment from <scope>` | ✅ | Queue comment for review |
+| `deny pub.polis.comment from <scope>` | ✅ | Reject comment |
+| `allow pub.polis.comment from <scope>` | ❌ | Comments have no acceptance layer — use bless/review/deny |
+| `allow pub.polis.post from <scope>` | ❌ | Post stream admission is a DS operator concern |
+| `emit pub.polis.<type> from <scope>` | ✅ | Layer 2 outbound (reserved) |
+
+## Default policies
 
 Created by `polis init`:
 
 ### Public (`policies/rules.jsonl`)
 
 ```jsonl
-{"version":1,"generator":"polis-cli-go/0.57.0"}
-{"active":true,"policy":"emit pub.polis.comment.blessing from self"}
-{"active":true,"policy":"emit pub.polis.comment.blessing from following"}
-{"active":true,"policy":"emit pub.polis.comment.blessing from thread-blessed"}
+{"version":2,"generator":"polis-cli-go/0.63.0"}
+{"active":true,"policy":"allow pub.polis.dm from following"}
+{"active":true,"policy":"deny pub.polis.dm from all"}
+{"active":true,"policy":"bless pub.polis.comment from self"}
+{"active":true,"policy":"bless pub.polis.comment from following"}
+{"active":true,"policy":"bless pub.polis.comment from thread-blessed"}
+{"active":true,"policy":"review pub.polis.comment from all"}
+{"active":true,"policy":"deny all from all"}
 ```
 
-These mean:
-- Your own comments on your posts are auto-blessed
-- Comments from people you follow are auto-blessed
-- Authors who already have a blessed comment on a thread are auto-blessed on subsequent comments
+What these mean:
+
+- DMs accepted only from people you follow; rejected from everyone else.
+- Your own comments on your posts are auto-blessed.
+- Comments from people you follow are auto-blessed.
+- Authors with a prior blessed comment in the same thread are auto-blessed.
+- **All other commenters land in the review queue** — this is the
+  explicit terminal rule that replaces the v1 silent-deny behavior.
+- Default-deny catch-all for unrecognized content types.
 
 ### Private (`.polis/policies/rules.jsonl`)
 
 ```jsonl
-{"version":1,"generator":"polis-cli-go/0.57.0"}
-{"active":true,"policy":"allow pub.polis.post from all"}
-{"active":true,"policy":"allow pub.polis.comment from all"}
-{"active":true,"policy":"allow pub.polis.follow from all"}
-{"active":true,"policy":"allow pub.polis.site from all"}
-{"active":true,"policy":"allow pub.polis.dm from following"}
-{"active":true,"policy":"deny pub.polis.dm from all"}
-{"active":true,"policy":"omit pub.polis.notification from self"}
-{"active":true,"policy":"omit pub.polis.feed from self"}
-{"active":true,"policy":"deny all from all"}
+{"version":2,"generator":"polis-cli-go/0.63.0"}
 ```
 
-These mean:
-- All core content types are accepted from everyone
-- DMs accepted only from people you follow
-- Notifications for your own actions are suppressed
-- Your own posts/comments are excluded from your feed
-- **Default-deny catch-all**: unknown content types are denied (last rule)
-
-The `deny all from all` catch-all ensures that unrecognized content types are
-rejected by default. To allow a new content type, add an `allow` rule for it
-above the catch-all.
-
-**Existing sites:** The catch-all is only added for new sites created with
-`polis init`. Existing sites are not affected. To opt in, add this line to
-the end of `.polis/policies/rules.jsonl`:
-```jsonl
-{"active":true,"policy":"deny all from all"}
-```
+Empty by default. Add overrides here that you don't want advertised
+publicly (e.g. silently blocking a specific domain).
 
 ## Evaluation
 
-Rules are evaluated top-to-bottom, first match wins. If no rule matches, the default is `allow` (permissive).
+Rules are evaluated top-to-bottom (private file first), first match wins.
+If no rule matches, the outcome is `allow` with `matched: false` — which
+consumers interpret as "no explicit decision."
 
-For blessing decisions specifically:
-- `emit` match -> auto-grant
-- `omit`/`deny` match -> auto-deny
-- No match -> pending (manual review)
+For comment blessing specifically, the decision flows through the
+three-valued outcome space:
 
-## System Behaviors
+- `bless` match (or legacy `emit pub.polis.comment.blessing` match) → auto-grant
+- `review` match → queued for human review (explicit pending)
+- `deny` match → auto-deny
+- No match → implicit pending (manual review)
 
-The following behaviors operate alongside the policy engine as system invariants.
-They are intentionally hardcoded and not configurable via policy rules.
+The canonical default ruleset includes an explicit
+`review pub.polis.comment from all` terminal so the pending outcome is
+visible rather than implicit.
+
+## Legacy grammar
+
+Before v2, blessing rules were written as
+`emit pub.polis.comment.blessing from <scope>`. The parser still accepts
+this form (DS-signed historical attestations contain it, and rewriting
+those strings would invalidate signatures). Legacy rules are translated
+at parse time to their v2 equivalent — `bless pub.polis.comment from
+<scope>` — and evaluated accordingly. Writers (new policy files, Medic
+rewrites) never produce the legacy form.
+
+If Patrol detects a v1 file (`version:1` header), Medic silently rewrites
+it with the canonical v2 defaults on the next healing sweep. This is safe
+because per-tenant policy customization does not yet exist; when it lands,
+the rewrite logic will be replaced with a real translator.
+
+## System behaviors
+
+The following operate alongside the policy engine as system invariants.
+They are hardcoded and not configurable via policy rules.
 
 ### Self-visibility
 
-Authors always see their own unblessed comments and all comments on their own
-posts, regardless of policy. This is required for the blessing workflow -- authors
-must see pending comments to act on them. Enforced in the DS comment query handler.
-
-### Blessing state machine
-
-The blessing workflow uses policy evaluation to make automatic decisions:
-- `emit` or `allow` (matched) -> auto-grant blessing
-- `deny` (matched) -> auto-deny blessing
-- No rule matches -> pending (manual review)
-- Previously denied comments stay denied on author re-registration
+Authors always see their own unblessed comments and all comments on their
+own posts, regardless of policy. Required for the blessing workflow.
 
 ### Fail-closed
 
-If the DS cannot load or evaluate policies (e.g., database error), events are
-blocked rather than allowed. This prevents policy bypass during outages.
+If the DS cannot load or evaluate policies (e.g. storage error), events
+are blocked rather than allowed. Prevents policy bypass during outages.
 
 ### Operational limits
 
-Rate limits and size limits exist alongside policies as operational constraints.
-They protect the system from abuse but do not affect content decisions. Policies
-cannot override operational limits.
+Rate limits and size limits protect the system from abuse but do not
+affect content decisions. Policies cannot override operational limits.
 
 ### SSRF protection
 
-Domains matching localhost, IP address literals, reserved TLDs (`.local`,
-`.internal`, `.test`, `.example`, `.invalid`), and cloud metadata endpoints
-are always rejected. This is infrastructure security, not content policy.
+Domains matching localhost, IP literals, reserved TLDs (`.local`,
+`.internal`, `.test`, `.example`, `.invalid`), and cloud metadata
+endpoints are always rejected. Infrastructure security, not content
+policy.
 
-## Common Recipes
+## Common recipes
 
 ### Block a domain
 
 Add to `.polis/policies/rules.jsonl`:
+
 ```jsonl
 {"active":true,"policy":"deny all from all at spammer.example"}
 ```
 
-### Disable comments entirely
+### Deny all comments outright
 
-Remove `allow pub.polis.comment from all` from private policies, or add:
+Add before the `review pub.polis.comment from all` line in the public file:
+
 ```jsonl
 {"active":true,"policy":"deny pub.polis.comment from all"}
 ```
 
 ### Accept DMs from everyone
 
-Replace the DM rules in private policies:
+Replace the DM rules in the public file:
+
 ```jsonl
 {"active":true,"policy":"allow pub.polis.dm from all"}
 ```
 
-### Show your own posts in your feed
+### Bless all thread-reply comments automatically
 
-Remove the feed omit rule from private policies:
-```jsonl
-{"active":false,"policy":"omit pub.polis.feed from self"}
-```
-
-### Opt out of thread-trust
-
-Remove the thread-blessed rule from public policies. Only self and following will auto-bless.
-
-### Custom content-type-only site
-
-Remove all `allow pub.polis.*` rules from private policies. Only your custom content types (registered via bundles) will be processed.
+Already in the defaults as `bless pub.polis.comment from thread-blessed`.
+To opt out, set `active: false` on that line.
 
 ### Disable a rule without deleting it
 
 Set `active` to `false`:
+
 ```jsonl
-{"active":false,"policy":"emit pub.polis.comment.blessing from thread-blessed"}
+{"active":false,"policy":"bless pub.polis.comment from thread-blessed"}
 ```
 
-## Version Header
+## Version header
 
 The first line of each policy file is a version header:
+
 ```jsonl
-{"version":1,"generator":"polis-cli-go/0.57.0"}
+{"version":2,"generator":"polis-cli-go/0.63.0"}
 ```
 
-This enables future upgrades to detect which generation of defaults a site has and apply only new rules without overwriting your customizations.
+Version `2` is the current format (introduced with the decision-verb
+refactor). Version `1` files are automatically upgraded by Patrol + Medic
+on hosted deployments — no action required.
 
-## DS Operator Policies
+## DS operator policies
 
-The discovery service maintains its own operator policies, stored in the database
-and served at `GET /policies/rules.jsonl`. These define which content types the
-DS accepts and what blocking rules are in effect.
+The discovery service maintains its own operator policies, stored in the
+database and served at `GET /policies/rules.jsonl`. These are **Layer 3**
+rules — they gate whether announcements enter the DS event stream and
+provide fallback blessing policy when a tenant's rules.jsonl cannot be
+fetched.
 
-Operators manage policies via the admin API:
+Operators manage these via the admin API:
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/v1/admin/policies` | GET | List all operator policy rules |
-| `/v1/admin/policies` | POST | Add a new rule (validated via `parseRule()`) |
+| `/v1/admin/policies` | POST | Add a new rule (validated via `parseRule(rule, 'operator')`) |
 | `/v1/admin/policies/:id` | DELETE | Remove a rule by ID |
 | `/v1/admin/policies/:id` | PATCH | Enable/disable a rule |
 | `/v1/admin/block/domain` | POST | Convenience: add `deny all from all at <domain>` |
 | `/v1/admin/block/domain` | DELETE | Convenience: remove matching domain deny rule |
-| `/v1/admin/stream/purge` | POST | Purge events (not a policy action) |
 
-When the DS uses its defaults instead of your policies for blessing decisions,
-event metadata includes `policy_source: "ds-default"` and `fallback_reason` so
-you can see exactly which rules were applied.
+**Operator-layer rules differ from tenant-layer rules.** Operator policies
+accept `allow`/`deny` on `pub.polis.{post,comment,follow,site}` — which
+tenant files reject. They also accept `bless`/`review` on
+`pub.polis.comment` as fallback blessing policy. They do not accept
+`emit`/`omit`. See the [grammar spec](../../general/policy-grammar.md#layer-3-ds-operator-ingestion)
+for the full operator matrix.
+
+When the DS uses its defaults instead of your policies for blessing
+decisions, event metadata includes `policy_source: "ds-default"` and a
+`fallback_reason` so you can see exactly which rules were applied.

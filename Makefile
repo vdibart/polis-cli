@@ -4,7 +4,8 @@
 #   make cli               Build polis CLI binary (~8-9 MB)
 #   make webapp            Build polis-server webapp binary (~11 MB)
 #   make bundled           Build polis-full CLI+webapp binary (~11-12 MB)
-#   make all               Build cli + webapp + bundled (default)
+#   make tailor            Build tailor site migration/health binary (~10 MB)
+#   make all               Build cli + webapp + bundled + tailor (default)
 #
 # Test & clean:
 #   make test              Run all Go tests (cli-go + webapp)
@@ -15,8 +16,9 @@
 #   make release-cli       CLI only
 #   make release-webapp    Webapp only
 #   make release-bundled   Bundled only
+#   make release-tailor    Tailor only
 
-.PHONY: all cli webapp bundled clean test
+.PHONY: all cli webapp bundled tailor clean test
 
 # ── Configuration ──────────────────────────────────────────────────
 
@@ -27,7 +29,7 @@ CLI_VERSION := $(shell cat cli-go/version.txt)
 DIST := dist
 
 # Default target: build all local binaries
-all: cli webapp bundled
+all: cli webapp bundled tailor
 
 # ── Build Targets ──────────────────────────────────────────────────
 
@@ -49,6 +51,12 @@ bundled:
 	cd webapp && go build -ldflags "-X main.Version=$(CLI_VERSION)" -o ../$(DIST)/polis-full ./cmd/polis-full
 	@echo "Built $(DIST)/polis-full (version $(CLI_VERSION))"
 
+# Tailor site migration tool: webapp/cmd/tailor -> dist/tailor
+tailor:
+	@mkdir -p $(DIST)
+	cd webapp && go build -ldflags "-X main.Version=$(CLI_VERSION)" -o ../$(DIST)/tailor ./cmd/tailor
+	@echo "Built $(DIST)/tailor (version $(CLI_VERSION))"
+
 # ── Test & Clean ───────────────────────────────────────────────────
 
 # Run all Go tests across both modules.
@@ -66,7 +74,7 @@ clean:
 # ── Release Targets ────────────────────────────────────────────────
 # Cross-compile for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64.
 
-.PHONY: release-cli release-webapp release-bundled release
+.PHONY: release-cli release-webapp release-bundled release-tailor release
 
 release-cli:
 	@mkdir -p $(DIST)
@@ -95,5 +103,14 @@ release-bundled:
 	cd webapp && GOOS=windows GOARCH=amd64 go build -ldflags "-X main.Version=$(CLI_VERSION)" -o ../$(DIST)/polis-full-windows-amd64.exe ./cmd/polis-full
 	@echo "Built bundled release binaries"
 
-# Build all release binaries (CLI + webapp + bundled) for all platforms
-release: release-cli release-webapp release-bundled
+release-tailor:
+	@mkdir -p $(DIST)
+	cd webapp && GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=$(CLI_VERSION)" -o ../$(DIST)/tailor-linux-amd64 ./cmd/tailor
+	cd webapp && GOOS=linux GOARCH=arm64 go build -ldflags "-X main.Version=$(CLI_VERSION)" -o ../$(DIST)/tailor-linux-arm64 ./cmd/tailor
+	cd webapp && GOOS=darwin GOARCH=amd64 go build -ldflags "-X main.Version=$(CLI_VERSION)" -o ../$(DIST)/tailor-darwin-amd64 ./cmd/tailor
+	cd webapp && GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.Version=$(CLI_VERSION)" -o ../$(DIST)/tailor-darwin-arm64 ./cmd/tailor
+	cd webapp && GOOS=windows GOARCH=amd64 go build -ldflags "-X main.Version=$(CLI_VERSION)" -o ../$(DIST)/tailor-windows-amd64.exe ./cmd/tailor
+	@echo "Built tailor release binaries"
+
+# Build all release binaries (CLI + webapp + bundled + tailor) for all platforms
+release: release-cli release-webapp release-bundled release-tailor

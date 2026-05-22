@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
@@ -43,10 +44,10 @@ func newTestServer(t *testing.T) *Server {
 	dirs := []string{
 		filepath.Join(dataDir, ".polis"),
 		filepath.Join(dataDir, ".polis", "keys"),
-		filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "posts", "drafts"),
-		filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "drafts"),
-		filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "pending"),
-		filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "comments", "denied"),
+		filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts"),
+		filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "drafts"),
+		filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending"),
+		filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "denied"),
 		filepath.Join(dataDir, ".well-known"),
 		filepath.Join(dataDir, "content", "pub.polis.core", "post"),
 		filepath.Join(dataDir, "content", "pub.polis.core", "comment"),
@@ -590,7 +591,7 @@ func TestHandleDrafts_ListWithDrafts(t *testing.T) {
 	s := newTestServer(t)
 
 	// Create some drafts
-	draftsDir := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+	draftsDir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
 	os.WriteFile(filepath.Join(draftsDir, "draft1.md"), []byte("# Draft 1"), 0644)
 	os.WriteFile(filepath.Join(draftsDir, "draft2.md"), []byte("# Draft 2"), 0644)
 
@@ -640,7 +641,7 @@ func TestHandleDrafts_SaveNew(t *testing.T) {
 	}
 
 	// Verify file was created
-	draftPath := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts", "my-draft.md")
+	draftPath := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", "my-draft.md")
 	content, err := os.ReadFile(draftPath)
 	if err != nil {
 		t.Fatalf("draft file not created: %v", err)
@@ -701,7 +702,7 @@ func TestHandleDrafts_SaveSanitizesID(t *testing.T) {
 	}
 
 	// Verify file is in drafts directory, not elsewhere
-	draftPath := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts", id+".md")
+	draftPath := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", id+".md")
 	if _, err := os.Stat(draftPath); os.IsNotExist(err) {
 		t.Error("draft should be created in drafts directory")
 	}
@@ -748,7 +749,7 @@ func TestHandleDraft_GetExisting(t *testing.T) {
 	s := newTestServer(t)
 
 	// Create a draft
-	draftPath := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts", "test-draft.md")
+	draftPath := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", "test-draft.md")
 	os.WriteFile(draftPath, []byte("# Test Draft"), 0644)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/drafts/test-draft", nil)
@@ -801,7 +802,7 @@ func TestHandleDraft_Delete(t *testing.T) {
 	s := newTestServer(t)
 
 	// Create a draft
-	draftPath := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts", "to-delete.md")
+	draftPath := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", "to-delete.md")
 	os.WriteFile(draftPath, []byte("# To Delete"), 0644)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/drafts/to-delete", nil)
@@ -1015,7 +1016,7 @@ func TestHandlePublish_DeletesDraftOnPublish(t *testing.T) {
 	s := newConfiguredServer(t)
 
 	// Create a draft file
-	draftsDir := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+	draftsDir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
 	os.MkdirAll(draftsDir, 0755)
 	draftPath := filepath.Join(draftsDir, "my-draft.md")
 	os.WriteFile(draftPath, []byte("# Draft Post\n\nDraft content."), 0644)
@@ -2898,7 +2899,7 @@ func TestDrafts_SavePathTraversalPrevention(t *testing.T) {
 	}
 
 	// Verify file WAS created in proper drafts directory
-	draftsDir := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+	draftsDir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
 	files, _ := os.ReadDir(draftsDir)
 	if len(files) != 1 {
 		t.Errorf("expected 1 file in drafts dir, got %d", len(files))
@@ -3723,7 +3724,7 @@ func TestMigrateDraftsDir_OldToNew(t *testing.T) {
 	}
 
 	// New dir should exist with the file
-	newDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+	newDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
 	if _, err := os.Stat(newDir); os.IsNotExist(err) {
 		t.Fatal("expected new drafts dir to exist")
 	}
@@ -3743,7 +3744,7 @@ func TestMigrateDraftsDir_NoOldDir(t *testing.T) {
 	// No old dir exists - should be a no-op
 	s.migrateDraftsDir()
 
-	newDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+	newDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
 	if _, err := os.Stat(newDir); !os.IsNotExist(err) {
 		t.Error("expected new dir not to be created when no old dir exists")
 	}
@@ -3755,7 +3756,7 @@ func TestMigrateDraftsDir_NewAlreadyExists(t *testing.T) {
 
 	// Create both old and new dirs
 	oldDir := filepath.Join(dataDir, ".polis", "drafts")
-	newDir := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+	newDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
 	os.MkdirAll(oldDir, 0755)
 	os.MkdirAll(newDir, 0755)
 	os.WriteFile(filepath.Join(oldDir, "old-draft.md"), []byte("old"), 0644)
@@ -3955,7 +3956,7 @@ func TestValidateContentPath_Canonicalization(t *testing.T) {
 		{"root html", "index.html", false},
 		{"posts path", "content/pub.polis.core/post/20260101/hello.md", false},
 		{"comments path", "content/pub.polis.core/comment/blessed/comment.md", false},
-		{"drafts path", ".polis/content/pub.polis.core/posts/drafts/my-draft.md", false},
+		{"drafts path", ".polis/bundles/pub.polis.core/posts/drafts/my-draft.md", false},
 		{"posts mount path", "posts/20260101/hello.html", false},
 		{"posts mount md", "posts/20260101/hello.md", false},
 		{"comments mount path", "comments/20260101/reply.html", false},
@@ -3973,6 +3974,80 @@ func TestValidateContentPath_Canonicalization(t *testing.T) {
 				t.Errorf("validateContentPath(%q) error = %v, wantErr %v", tt.path, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidatePath_ErrorKinds(t *testing.T) {
+	// Real traversal/null-byte attempts classify as errPathTraversal (security event).
+	// Prefix mismatches classify as errPathDisallowed (benign 400/404).
+	tests := []struct {
+		name     string
+		fn       func(string) error
+		path     string
+		wantKind error
+	}{
+		{"content traversal", validateContentPath, "../../etc/passwd", errPathTraversal},
+		{"content null byte", validateContentPath, "posts/foo\x00.md", errPathTraversal},
+		{"content bad prefix", validateContentPath, "20260323/slug.html", errPathDisallowed},
+		{"content bad prefix nested", validateContentPath, "secrets/key.pem", errPathDisallowed},
+		{"post traversal", validatePostPath, "content/pub.polis.core/post/..hidden/x.md", errPathTraversal},
+		{"post null byte", validatePostPath, "content/pub.polis.core/post/x\x00.md", errPathTraversal},
+		{"post bad prefix", validatePostPath, "comments/foo.md", errPathDisallowed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.fn(tt.path)
+			if err != tt.wantKind {
+				t.Errorf("got %v, want %v", err, tt.wantKind)
+			}
+		})
+	}
+}
+
+func TestHandleContent_PrefixMismatchDoesNotLogSecurityEvent(t *testing.T) {
+	// Regression: a stale SPA sending /api/content/20260323/slug.html should
+	// produce a plain 404, not a pub.polis.security.path_traversal event.
+	s := newTestServer(t)
+	logsDir := filepath.Join(s.DataDir, "logs")
+	os.MkdirAll(logsDir, 0755)
+	s.Logger = NewLogger(LogLevelBasic, logsDir)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/content/20260323/slug.html", nil)
+	w := httptest.NewRecorder()
+	s.handleContent(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for prefix-mismatch, got %d: %s", w.Code, w.Body.String())
+	}
+
+	logPath := filepath.Join(logsDir, time.Now().Format("2006-01-02")+".log")
+	if data, err := os.ReadFile(logPath); err == nil && strings.Contains(string(data), "pub.polis.security.path_traversal") {
+		t.Errorf("prefix-mismatch should not emit path_traversal event; log contained it:\n%s", data)
+	}
+}
+
+func TestHandleContent_TraversalStillLogsSecurityEvent(t *testing.T) {
+	s := newTestServer(t)
+	logsDir := filepath.Join(s.DataDir, "logs")
+	os.MkdirAll(logsDir, 0755)
+	s.Logger = NewLogger(LogLevelBasic, logsDir)
+
+	// Use a path where ".." survives filepath.Clean (embedded in a filename).
+	req := httptest.NewRequest(http.MethodGet, "/api/content/posts/..hidden/x.html", nil)
+	w := httptest.NewRecorder()
+	s.handleContent(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for real traversal, got %d: %s", w.Code, w.Body.String())
+	}
+
+	logPath := filepath.Join(logsDir, time.Now().Format("2006-01-02")+".log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !strings.Contains(string(data), "pub.polis.security.path_traversal") {
+		t.Errorf("real traversal should emit path_traversal event; log was:\n%s", data)
 	}
 }
 
@@ -4133,10 +4208,11 @@ func TestHandleFeed_MethodNotAllowed(t *testing.T) {
 func TestHandleFeed_WithTypeFilter(t *testing.T) {
 	s := newTestServer(t)
 
+	now := time.Now().UTC()
 	cm := feed.NewCacheManager(s.DataDir, "default")
 	cm.MergeItems([]feed.FeedItem{
-			{Type: "post", Title: "A Post", URL: "posts/a.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-			{Type: "comment", Title: "A Comment", URL: "comments/b.md", Published: "2026-02-02T10:00:00Z", AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
+		{Type: "post", Title: "A Post", URL: "posts/a.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "comment", Title: "A Comment", URL: "comments/b.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/feed?type=post", nil)
@@ -4198,13 +4274,15 @@ func TestHandleFeed_SortOrder(t *testing.T) {
 func TestHandleFeed_SpecialCharacterTitles(t *testing.T) {
 	s := newTestServer(t)
 
-	// Populate cache with titles containing special characters
-	// Use dates well within the 90-day feed retention window to avoid time-sensitive pruning
+	// Populate cache with titles containing special characters.
+	// Dates relative to now so items don't get pruned by the 90-day max age —
+	// hardcoded calendar dates here time-bombed previously.
+	now := time.Now().UTC()
 	cm := feed.NewCacheManager(s.DataDir, "default")
 	cm.MergeItems([]feed.FeedItem{
-		{Type: "post", Title: "It's Not Beyond Our Reach", URL: "posts/its-not.md", Published: "2026-04-03T12:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-		{Type: "post", Title: `She said "hello" & waved`, URL: "posts/she-said.md", Published: "2026-04-02T12:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-		{Type: "post", Title: "2 < 3 && 5 > 4", URL: "posts/math.md", Published: "2026-04-01T12:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "It's Not Beyond Our Reach", URL: "posts/its-not.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: `She said "hello" & waved`, URL: "posts/she-said.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "2 < 3 && 5 > 4", URL: "posts/math.md", Published: now.Add(-72 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/feed", nil)
@@ -4245,11 +4323,12 @@ func TestHandleFeed_SpecialCharacterTitles(t *testing.T) {
 func TestHandleFeed_UnreadCount(t *testing.T) {
 	s := newTestServer(t)
 
+	now := time.Now().UTC()
 	cm := feed.NewCacheManager(s.DataDir, "default")
 	cm.MergeItems([]feed.FeedItem{
-			{Type: "post", Title: "A", URL: "posts/a.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-			{Type: "post", Title: "B", URL: "posts/b.md", Published: "2026-02-02T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-			{Type: "post", Title: "C", URL: "posts/c.md", Published: "2026-02-03T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "A", URL: "posts/a.md", Published: now.Add(-72 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "B", URL: "posts/b.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "C", URL: "posts/c.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 	})
 
 	// Mark one as read
@@ -4387,9 +4466,10 @@ func TestHandleFeedRefresh_InvalidScope(t *testing.T) {
 func TestHandleFeedRead_MarkRead(t *testing.T) {
 	s := newTestServer(t)
 
+	now := time.Now().UTC()
 	cm := feed.NewCacheManager(s.DataDir, "default")
 	cm.MergeItems([]feed.FeedItem{
-			{Type: "post", Title: "Test", URL: "posts/test.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Test", URL: "posts/test.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 	})
 
 	items, _ := cm.List()
@@ -4534,25 +4614,86 @@ func TestComputeAllCounts_HasNewFeed(t *testing.T) {
 		t.Error("expected HasNewFeed=false when sync cursor is empty")
 	}
 
-	// Set sync cursor but no viewed cursor — should show has_new_feed
+	// Sync cursor set, viewed cursor empty — cold-start seeds the viewed
+	// cursor to the current sync position and leaves the flag false. The
+	// previous behavior (flag=true) was over-noisy on first load when the
+	// user has had no opportunity to acknowledge anything yet.
 	_ = store.SetCursor("pub.polis.sync", "100")
 	counts = s.computeAllCounts()
-	if !counts.HasNewFeed {
-		t.Error("expected HasNewFeed=true when sync cursor is set but viewed is not")
+	if counts.HasNewFeed {
+		t.Error("expected HasNewFeed=false on cold start (viewed cursor gets seeded)")
+	}
+	if pos, _ := store.GetCursor("pub.polis.feed.viewed"); pos != "100" {
+		t.Errorf("expected viewed cursor seeded to '100', got %q", pos)
 	}
 
-	// Set viewed cursor to match sync — should clear has_new_feed
-	_ = store.SetCursor("pub.polis.feed.viewed", "100")
+	// Sync and viewed match — no new content.
 	counts = s.computeAllCounts()
 	if counts.HasNewFeed {
 		t.Error("expected HasNewFeed=false when sync and viewed cursors match")
 	}
 
-	// Advance sync past viewed — should show has_new_feed again
+	// Advance sync past viewed — flag fires.
 	_ = store.SetCursor("pub.polis.sync", "200")
 	counts = s.computeAllCounts()
 	if !counts.HasNewFeed {
 		t.Error("expected HasNewFeed=true when sync cursor is ahead of viewed")
+	}
+
+	// Advance viewed to catch up — flag clears.
+	_ = store.SetCursor("pub.polis.feed.viewed", "200")
+	counts = s.computeAllCounts()
+	if counts.HasNewFeed {
+		t.Error("expected HasNewFeed=false after viewed catches up")
+	}
+}
+
+// TestComputeAllCounts_HasNewBlessingInbox mirrors the feed test but layers
+// in the pending-blessing prerequisite: the dot should NOT fire when sync
+// has advanced past the viewed cursor but nothing is actually awaiting
+// blessing.
+func TestComputeAllCounts_HasNewBlessingInbox(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	discoveryDomain := s.GetDiscoveryDomain()
+	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+
+	// Cold start (no cursors) — false.
+	if counts := s.computeAllCounts(); counts.HasNewBlessingInbox {
+		t.Error("expected HasNewBlessingInbox=false on cold start")
+	}
+
+	// Seed sync; cold-start seeds blessing.viewed to match → false.
+	_ = store.SetCursor("pub.polis.sync", "100")
+	counts := s.computeAllCounts()
+	if counts.HasNewBlessingInbox {
+		t.Error("expected HasNewBlessingInbox=false after cold-start seed")
+	}
+	if pos, _ := store.GetCursor("pub.polis.comment.blessing.viewed"); pos != "100" {
+		t.Errorf("expected blessing viewed cursor seeded to '100', got %q", pos)
+	}
+
+	// Advance sync; still no pending blessings — flag stays false.
+	_ = store.SetCursor("pub.polis.sync", "200")
+	if counts := s.computeAllCounts(); counts.HasNewBlessingInbox {
+		t.Error("expected HasNewBlessingInbox=false without pending blessings")
+	}
+
+	// Inject a pending blessing into state, advance sync past viewed — fires.
+	blessingState := stream.BlessingState{
+		Blessings: []stream.BlessingEntry{{Status: "pending"}},
+	}
+	if err := store.SaveState("pub.polis.comment.blessing", &blessingState); err != nil {
+		t.Fatalf("save blessing state: %v", err)
+	}
+	if counts := s.computeAllCounts(); !counts.HasNewBlessingInbox {
+		t.Error("expected HasNewBlessingInbox=true with pending blessing and sync ahead of viewed")
+	}
+
+	// Catch up viewed cursor — clears.
+	_ = store.SetCursor("pub.polis.comment.blessing.viewed", "200")
+	if counts := s.computeAllCounts(); counts.HasNewBlessingInbox {
+		t.Error("expected HasNewBlessingInbox=false after viewed catches up")
 	}
 }
 
@@ -4597,10 +4738,11 @@ func TestHandleFeedCounts_Empty(t *testing.T) {
 func TestHandleFeedCounts_WithItems(t *testing.T) {
 	s := newTestServer(t)
 
+	now := time.Now().UTC()
 	cm := feed.NewCacheManager(s.DataDir, "default")
 	cm.MergeItems([]feed.FeedItem{
-			{Type: "post", Title: "A", URL: "posts/a.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-			{Type: "post", Title: "B", URL: "posts/b.md", Published: "2026-02-02T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "A", URL: "posts/a.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "B", URL: "posts/b.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 	})
 
 	items, _ := cm.List()
@@ -6362,10 +6504,15 @@ func TestHandleThemeSwitch_Success(t *testing.T) {
 		t.Errorf("expected theme=turbo, got %v", resp["theme"])
 	}
 
-	// Verify .well-known/polis was updated with active_theme
-	updatedWK, _ := os.ReadFile(wkPath)
-	if !strings.Contains(string(updatedWK), `"active_theme": "turbo"`) {
-		t.Errorf(".well-known/polis should contain active_theme turbo, got: %s", string(updatedWK))
+	// Active theme now lives in .polis/bundles/registry.json (post-1e). The
+	// handler may write to the registry; the .well-known/polis legacy field
+	// is left untouched here unless the migration helper runs (1.g).
+	regData, err := os.ReadFile(filepath.Join(s.DataDir, ".polis", "bundles", "registry.json"))
+	if err != nil {
+		t.Fatalf("registry.json not created: %v", err)
+	}
+	if !strings.Contains(string(regData), `"pub.polis.themes.turbo"`) {
+		t.Errorf("registry.json should contain pub.polis.themes.turbo, got: %s", string(regData))
 	}
 
 	// Verify CSS was copied to styles.css
@@ -6661,7 +6808,7 @@ func TestHandleCounts_ReturnsJSON(t *testing.T) {
 `
 	os.WriteFile(indexPath, []byte(indexContent), 0644)
 
-	pendingDir := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "comments", "pending")
+	pendingDir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending")
 	os.WriteFile(filepath.Join(pendingDir, "c1.md"), []byte("---\n---\nComment"), 0644)
 
 	// Blessed comments in date-based subdirectory
@@ -6810,12 +6957,13 @@ func TestHandleFeedGrouped_PostOnly(t *testing.T) {
 	discoveryDomain := s.GetDiscoveryDomain()
 	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
 
+	now := time.Now().UTC()
 	cm.MergeItems([]feed.FeedItem{
 		{
 			Type:         "post",
 			Title:        "Hello World",
 			URL:          "https://alice.polis.pub/posts/hello.md",
-			Published:    "2026-02-23T10:00:00Z",
+			Published:    now.Add(-24 * time.Hour).Format(time.RFC3339),
 			AuthorURL:    "https://alice.polis.pub",
 			AuthorDomain: "alice.polis.pub",
 		},
@@ -6854,13 +7002,17 @@ func TestHandleFeedGrouped_CommentsGroupByTarget(t *testing.T) {
 	discoveryDomain := s.GetDiscoveryDomain()
 	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
 
+	now := time.Now().UTC()
+	postTime := now.Add(-26 * time.Hour).Format(time.RFC3339)
+	comment1Time := now.Add(-25 * time.Hour).Format(time.RFC3339)
+	comment2Time := now.Add(-24 * time.Hour).Format(time.RFC3339)
 	postURL := "https://alice.polis.pub/posts/hello.md"
 	cm.MergeItems([]feed.FeedItem{
 		{
 			Type:         "post",
 			Title:        "Hello World",
 			URL:          postURL,
-			Published:    "2026-02-23T10:00:00Z",
+			Published:    postTime,
 			AuthorURL:    "https://alice.polis.pub",
 			AuthorDomain: "alice.polis.pub",
 		},
@@ -6868,7 +7020,7 @@ func TestHandleFeedGrouped_CommentsGroupByTarget(t *testing.T) {
 			Type:         "comment",
 			Title:        "Comment 1",
 			URL:          "https://bob.polis.pub/comments/c1.md",
-			Published:    "2026-02-23T11:00:00Z",
+			Published:    comment1Time,
 			AuthorURL:    "https://bob.polis.pub",
 			AuthorDomain: "bob.polis.pub",
 			TargetURL:    postURL,
@@ -6877,7 +7029,7 @@ func TestHandleFeedGrouped_CommentsGroupByTarget(t *testing.T) {
 			Type:         "comment",
 			Title:        "Comment 2",
 			URL:          "https://carol.polis.pub/comments/c2.md",
-			Published:    "2026-02-23T12:00:00Z",
+			Published:    comment2Time,
 			AuthorURL:    "https://carol.polis.pub",
 			AuthorDomain: "carol.polis.pub",
 			TargetURL:    postURL,
@@ -6903,8 +7055,8 @@ func TestHandleFeedGrouped_CommentsGroupByTarget(t *testing.T) {
 	if g["post_title"] != "Hello World" {
 		t.Errorf("expected post title, got %v", g["post_title"])
 	}
-	if g["last_activity"] != "2026-02-23T12:00:00Z" {
-		t.Errorf("expected last_activity to be latest comment time, got %v", g["last_activity"])
+	if g["last_activity"] != comment2Time {
+		t.Errorf("expected last_activity to be latest comment time (%s), got %v", comment2Time, g["last_activity"])
 	}
 	ids := g["item_ids"].([]interface{})
 	if len(ids) != 3 {
@@ -6927,13 +7079,14 @@ func TestHandleFeedGrouped_NetworkClassification(t *testing.T) {
 	}
 	following.Save(followingPath, f)
 
+	now := time.Now().UTC()
 	postURL := "https://alice.polis.pub/posts/hello.md"
 	cm.MergeItems([]feed.FeedItem{
 		{
 			Type:         "post",
 			Title:        "Hello",
 			URL:          postURL,
-			Published:    "2026-02-23T10:00:00Z",
+			Published:    now.Add(-26 * time.Hour).Format(time.RFC3339),
 			AuthorURL:    "https://alice.polis.pub",
 			AuthorDomain: "alice.polis.pub",
 		},
@@ -6941,7 +7094,7 @@ func TestHandleFeedGrouped_NetworkClassification(t *testing.T) {
 			Type:         "comment",
 			Title:        "Network comment",
 			URL:          "https://bob.polis.pub/comments/c1.md",
-			Published:    "2026-02-23T11:00:00Z",
+			Published:    now.Add(-25 * time.Hour).Format(time.RFC3339),
 			AuthorURL:    "https://bob.polis.pub",
 			AuthorDomain: "bob.polis.pub",
 			TargetURL:    postURL,
@@ -6950,7 +7103,7 @@ func TestHandleFeedGrouped_NetworkClassification(t *testing.T) {
 			Type:         "comment",
 			Title:        "External comment",
 			URL:          "https://stranger.polis.pub/comments/c2.md",
-			Published:    "2026-02-23T12:00:00Z",
+			Published:    now.Add(-24 * time.Hour).Format(time.RFC3339),
 			AuthorURL:    "https://stranger.polis.pub",
 			AuthorDomain: "stranger.polis.pub",
 			TargetURL:    postURL,
@@ -6983,12 +7136,13 @@ func TestHandleFeedGrouped_SortByLastActivity(t *testing.T) {
 	discoveryDomain := s.GetDiscoveryDomain()
 	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
 
+	now := time.Now().UTC()
 	cm.MergeItems([]feed.FeedItem{
 		{
 			Type:         "post",
 			Title:        "Old Post",
 			URL:          "https://alice.polis.pub/posts/old.md",
-			Published:    "2026-02-20T10:00:00Z",
+			Published:    now.Add(-72 * time.Hour).Format(time.RFC3339),
 			AuthorURL:    "https://alice.polis.pub",
 			AuthorDomain: "alice.polis.pub",
 		},
@@ -6996,7 +7150,7 @@ func TestHandleFeedGrouped_SortByLastActivity(t *testing.T) {
 			Type:         "post",
 			Title:        "New Post",
 			URL:          "https://bob.polis.pub/posts/new.md",
-			Published:    "2026-02-22T10:00:00Z",
+			Published:    now.Add(-48 * time.Hour).Format(time.RFC3339),
 			AuthorURL:    "https://bob.polis.pub",
 			AuthorDomain: "bob.polis.pub",
 		},
@@ -7004,7 +7158,7 @@ func TestHandleFeedGrouped_SortByLastActivity(t *testing.T) {
 			Type:         "comment",
 			Title:        "Late comment on old post",
 			URL:          "https://carol.polis.pub/comments/c1.md",
-			Published:    "2026-02-23T10:00:00Z",
+			Published:    now.Add(-24 * time.Hour).Format(time.RFC3339),
 			AuthorURL:    "https://carol.polis.pub",
 			AuthorDomain: "carol.polis.pub",
 			TargetURL:    "https://alice.polis.pub/posts/old.md",
@@ -7035,12 +7189,13 @@ func TestHandleFeedGrouped_OrphanComments(t *testing.T) {
 	discoveryDomain := s.GetDiscoveryDomain()
 	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
 
+	now := time.Now().UTC()
 	cm.MergeItems([]feed.FeedItem{
 		{
 			Type:         "comment",
 			Title:        "Orphan comment",
 			URL:          "https://bob.polis.pub/comments/orphan.md",
-			Published:    "2026-02-23T10:00:00Z",
+			Published:    now.Add(-24 * time.Hour).Format(time.RFC3339),
 			AuthorURL:    "https://bob.polis.pub",
 			AuthorDomain: "bob.polis.pub",
 			// No TargetURL — old cached item
@@ -7075,13 +7230,16 @@ func TestHandleFeedGrouped_BlessedCommentCountsAsReply(t *testing.T) {
 	discoveryDomain := s.GetDiscoveryDomain()
 	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
 
+	now := time.Now().UTC()
+	postTime := now.Add(-48 * time.Hour).Format(time.RFC3339)
+	commentTime := now.Add(-24 * time.Hour).Format(time.RFC3339)
 	postURL := "https://david.polis.pub/posts/20260304/hello-world.html"
 	cm.MergeItems([]feed.FeedItem{
 		{
 			Type:         "post",
 			Title:        "Hello World!",
 			URL:          postURL,
-			Published:    "2026-02-04T08:00:00Z",
+			Published:    postTime,
 			AuthorURL:    "https://david.polis.pub",
 			AuthorDomain: "david.polis.pub",
 		},
@@ -7089,7 +7247,7 @@ func TestHandleFeedGrouped_BlessedCommentCountsAsReply(t *testing.T) {
 		{
 			Type:         "comment",
 			URL:          "https://me.polis.pub/comments/20260304/reply.md",
-			Published:    "2026-02-04T12:00:00Z",
+			Published:    commentTime,
 			AuthorURL:    "https://me.polis.pub",
 			AuthorDomain: "me.polis.pub",
 			TargetURL:    postURL,
@@ -7120,8 +7278,8 @@ func TestHandleFeedGrouped_BlessedCommentCountsAsReply(t *testing.T) {
 	if g["total_comments"].(float64) != 1 {
 		t.Errorf("expected 1 comment (blessed reply), got %v", g["total_comments"])
 	}
-	if g["last_activity"] != "2026-02-04T12:00:00Z" {
-		t.Errorf("expected last_activity from comment, got %v", g["last_activity"])
+	if g["last_activity"] != commentTime {
+		t.Errorf("expected last_activity from comment (%s), got %v", commentTime, g["last_activity"])
 	}
 	ids := g["item_ids"].([]interface{})
 	if len(ids) != 2 {
@@ -8317,6 +8475,230 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 	if v := rr.Header().Get("X-Frame-Options"); v != "SAMEORIGIN" {
 		t.Errorf("expected X-Frame-Options=SAMEORIGIN, got %q", v)
+	}
+}
+
+// R18-21: securityHeadersMiddleware sets a default tenant-content CSP on
+// non-API paths and skips CSP on /api/* (JSON responses don't need it).
+func TestSecurityHeaders_CSP(t *testing.T) {
+	cases := []struct {
+		name     string
+		path     string
+		wantCSP  bool
+		contains string // substring that must appear in the CSP value
+	}{
+		{"non-api path gets tenant-content CSP", "/posts/2026/post.html", true, "script-src 'self' https://polis.pub"},
+		{"root path gets CSP", "/", true, "default-src 'self'"},
+		{"api path skips CSP", "/api/status", false, ""},
+		{"api subpath skips CSP", "/api/v1/content/post", false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			})
+			handler := securityHeadersMiddleware(mux)
+
+			req := httptest.NewRequest(http.MethodGet, c.path, nil)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+
+			got := rr.Header().Get("Content-Security-Policy")
+			if c.wantCSP {
+				if got == "" {
+					t.Errorf("expected CSP header on %s, got none", c.path)
+				}
+				if !strings.Contains(got, c.contains) {
+					t.Errorf("CSP for %s missing %q, got: %s", c.path, c.contains, got)
+				}
+				// Tenant-content CSP must NOT contain a nonce or esm.sh.
+				if strings.Contains(got, "nonce-") {
+					t.Errorf("tenant-content CSP should not contain a nonce, got: %s", got)
+				}
+				if strings.Contains(got, "esm.sh") {
+					t.Errorf("tenant-content CSP should not allow esm.sh, got: %s", got)
+				}
+			} else {
+				if got != "" {
+					t.Errorf("expected no CSP on %s, got: %s", c.path, got)
+				}
+			}
+		})
+	}
+}
+
+// R18-21: GenerateCSPNonce must return distinct values per call and be
+// long enough for the CSP3 minimum (128 bits / ~22 base64 chars).
+func TestGenerateCSPNonce_Distinct(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 50; i++ {
+		n := GenerateCSPNonce()
+		if len(n) < 16 {
+			t.Errorf("nonce too short: %d chars (want >=16)", len(n))
+		}
+		if n == "fallback-nonce-rand-failed" {
+			t.Error("got fallback nonce — crypto/rand failure?")
+		}
+		if seen[n] {
+			t.Errorf("nonce repeated: %s", n)
+		}
+		seen[n] = true
+	}
+}
+
+// R18-21: CSPTenantContent and CSPAdminSPA shape checks.
+func TestCSPTenantContent_Shape(t *testing.T) {
+	csp := CSPTenantContent()
+	mustContain := []string{
+		"default-src 'self'",
+		"script-src 'self' https://polis.pub",
+		"object-src 'none'",
+		"frame-src 'none'",
+		"base-uri 'self'",
+		// nav.js + widget.js fetch sibling tenants' public surfaces
+		// (/api/nav/state, /content/.../following.json). connect-src
+		// must admit *.polis.pub so the cross-visit nav and the
+		// auth-aware widget mount both work.
+		"connect-src 'self' https://polis.pub https://*.polis.pub",
+		// R20-D-S1: defense against clickjacking on tenant pages.
+		// X-Frame-Options is only set for /_/* (admin SPA) in hosted
+		// mode; tenant public pages need frame-ancestors. Allows
+		// embedding from polis.pub + any *.polis.pub (widget pattern).
+		"frame-ancestors 'self' https://polis.pub https://*.polis.pub",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(csp, s) {
+			t.Errorf("CSPTenantContent missing %q. Got: %s", s, csp)
+		}
+	}
+	// The script-src directive specifically must not relax to unsafe-inline,
+	// unsafe-eval, esm.sh, or any nonce. Parse out the script-src directive
+	// and check just its content.
+	scriptSrc := extractCSPDirective(csp, "script-src")
+	if scriptSrc == "" {
+		t.Fatal("CSPTenantContent has no script-src directive")
+	}
+	for _, forbidden := range []string{"'unsafe-inline'", "'unsafe-eval'", "esm.sh", "nonce-"} {
+		if strings.Contains(scriptSrc, forbidden) {
+			t.Errorf("CSPTenantContent's script-src must not contain %q. script-src: %q", forbidden, scriptSrc)
+		}
+	}
+}
+
+// extractCSPDirective returns the contents of `directive` (e.g. "script-src")
+// from a CSP header string, or "" if not present. CSP directives are
+// semicolon-separated; this returns everything between the directive name
+// and the next ';' or end of string.
+func extractCSPDirective(csp, directive string) string {
+	for _, part := range strings.Split(csp, ";") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, directive+" ") || part == directive {
+			return strings.TrimSpace(strings.TrimPrefix(part, directive))
+		}
+	}
+	return ""
+}
+
+func TestCSPAdminSPA_NonceInjection(t *testing.T) {
+	nonce := "abc123=="
+	csp := CSPAdminSPA(nonce)
+	if !strings.Contains(csp, "'nonce-"+nonce+"'") {
+		t.Errorf("CSPAdminSPA(%q) must contain 'nonce-%s', got: %s", nonce, nonce, csp)
+	}
+	if !strings.Contains(csp, "https://esm.sh") {
+		t.Errorf("CSPAdminSPA must allow https://esm.sh, got: %s", csp)
+	}
+	// Different nonce produces different CSP.
+	csp2 := CSPAdminSPA("xyz789==")
+	if csp == csp2 {
+		t.Error("CSPAdminSPA should vary with nonce")
+	}
+}
+
+// R18-21 follow-up: the admin SPA's index.html uses ~40 inline event
+// handlers (onclick="App.foo()" and similar). CSP3's script-src-attr
+// directive controls these independently of script-src-elem (which
+// covers <script> tags). The admin-SPA CSP must:
+//   - allow inline event handlers via script-src-attr 'unsafe-inline'
+//   - keep script-src-elem strict (nonce-only, no 'unsafe-inline')
+// so a future XSS via <script> injection still can't execute, but
+// existing inline-handler UI affordances keep working.
+func TestCSPAdminSPA_AllowsInlineEventHandlers(t *testing.T) {
+	csp := CSPAdminSPA("test-nonce")
+
+	scriptSrcAttr := extractCSPDirective(csp, "script-src-attr")
+	if scriptSrcAttr == "" {
+		t.Fatal("CSPAdminSPA must explicitly set script-src-attr")
+	}
+	if !strings.Contains(scriptSrcAttr, "'unsafe-inline'") {
+		t.Errorf("script-src-attr must allow 'unsafe-inline' so inline event handlers work; got: %q", scriptSrcAttr)
+	}
+
+	scriptSrcElem := extractCSPDirective(csp, "script-src-elem")
+	if scriptSrcElem == "" {
+		t.Fatal("CSPAdminSPA must explicitly set script-src-elem")
+	}
+	if strings.Contains(scriptSrcElem, "'unsafe-inline'") {
+		t.Errorf("script-src-elem must NOT allow 'unsafe-inline' — <script> tags must require the nonce; got: %q", scriptSrcElem)
+	}
+	if !strings.Contains(scriptSrcElem, "'nonce-test-nonce'") {
+		t.Errorf("script-src-elem must require the per-response nonce; got: %q", scriptSrcElem)
+	}
+}
+
+// R18-21: spaHandler must inject a fresh CSP nonce into the importmap
+// script tag's nonce= attribute AND set a matching CSP header. Different
+// requests must get different nonces.
+func TestSpaHandler_CSPNonceInjection(t *testing.T) {
+	// Stub FS with the placeholders the handler substitutes. Includes a
+	// SECOND {{csp_nonce}} occurrence in a comment to mirror the real
+	// index.html shape — a regression net for the bug where
+	// strings.Replace(..., 1) only substitutes the first occurrence
+	// (the comment) and leaves the actual nonce attribute as the literal
+	// placeholder.
+	fsys := fstest.MapFS{
+		"index.html": &fstest.MapFile{
+			Data: []byte(`<html{{theme_attr}}><head>` +
+				`<!-- comment mentioning {{csp_nonce}} -->` +
+				`<script type="importmap" nonce="{{csp_nonce}}">{}</script>` +
+				`</head><body>SPA</body></html>`),
+		},
+	}
+	tmp := t.TempDir()
+	handler := spaHandler(fsys, tmp)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	if strings.Contains(body, "{{csp_nonce}}") {
+		t.Error("{{csp_nonce}} placeholder should be substituted")
+	}
+
+	csp := w.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "'nonce-") {
+		t.Errorf("expected admin-SPA CSP with nonce, got: %s", csp)
+	}
+
+	// Extract the nonce from the CSP header.
+	idx := strings.Index(csp, "'nonce-")
+	rest := csp[idx+len("'nonce-"):]
+	end := strings.Index(rest, "'")
+	nonce := rest[:end]
+
+	want := `<script type="importmap" nonce="` + nonce + `">`
+	if !strings.Contains(body, want) {
+		t.Errorf("importmap script tag should carry CSP nonce %q. Body: %s", nonce, body)
+	}
+
+	// Second request gets a different nonce.
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req)
+	csp2 := w2.Header().Get("Content-Security-Policy")
+	if csp == csp2 {
+		t.Error("two requests should get different nonces")
 	}
 }
 

@@ -140,12 +140,10 @@ func Validate(siteDir string) *ValidationResult {
 		}
 	}
 
-	// Check bundle structure
+	// Check bundle structure. Listing-is-activation: every bundle present
+	// in wellKnown.Bundles is active and must have a valid bundle.json.
 	if wellKnown != nil {
 		for name, entry := range wellKnown.Bundles {
-			if !entry.Active {
-				continue
-			}
 			bundlePath := filepath.Join(siteDir, entry.Path)
 			if _, err := os.Stat(bundlePath); os.IsNotExist(err) {
 				errors = append(errors, ValidationError{
@@ -176,14 +174,52 @@ func Validate(siteDir string) *ValidationResult {
 	} else {
 		result.SiteInfo = &SiteInfo{
 			SiteTitle:   wellKnown.SiteTitle,
-			PublicKey:    wellKnown.PublicKey,
+			PublicKey:   wellKnown.PublicKey,
 			Version:     wellKnown.Version,
 			Created:     wellKnown.Created,
-			ActiveTheme: wellKnown.ActiveTheme,
+			ActiveTheme: GetActiveTheme(siteDir),
 		}
 	}
 
+	// R18-12 (2026-05-18): scrub absolute paths from emitted errors.
+	// Pre-fix, /api/status returned errors containing hosted-disk paths
+	// like /data/tenants/<handle>/.well-known/polis — revealing the
+	// hosted filesystem structure to any owner session (and any future
+	// XSS-style attack against the SPA). Rewrite each Path to be
+	// relative to siteDir. The Code + Message + Suggestion already
+	// carry enough context to identify the file; the absolute path
+	// added nothing the caller needed.
+	//
+	// SITE_DIR_NOT_FOUND / SITE_DIR_ERROR / NOT_A_DIRECTORY pre-empt
+	// this with an early return; their Path is the siteDir itself,
+	// which the caller already knows.
+	scrubAbsolutePaths(result, siteDir)
 	return result
+}
+
+// scrubAbsolutePaths rewrites Path fields in result.Errors to be
+// relative to siteDir, dropping the absolute prefix. Idempotent;
+// safe to call multiple times.
+func scrubAbsolutePaths(result *ValidationResult, siteDir string) {
+	if result == nil || siteDir == "" {
+		return
+	}
+	for i := range result.Errors {
+		p := result.Errors[i].Path
+		if p == "" {
+			continue
+		}
+		// Strip the siteDir prefix when present. If the path IS the
+		// siteDir, leave it as "." so the caller sees that the error
+		// targets the site root rather than an empty string.
+		if p == siteDir {
+			result.Errors[i].Path = "."
+			continue
+		}
+		if rel, err := filepath.Rel(siteDir, p); err == nil && !strings.HasPrefix(rel, "..") {
+			result.Errors[i].Path = rel
+		}
+	}
 }
 
 // validateWellKnown checks the .well-known/polis file.
@@ -227,8 +263,3 @@ func validateWellKnown(path string) (*WellKnown, *ValidationError) {
 	return &wk, nil
 }
 
-// IsValidPolisSite is a convenience function that returns true if the directory is a valid polis site.
-func IsValidPolisSite(siteDir string) bool {
-	result := Validate(siteDir)
-	return result.Status == StatusValid
-}

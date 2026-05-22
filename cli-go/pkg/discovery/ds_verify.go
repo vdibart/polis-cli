@@ -250,9 +250,12 @@ func VerifyDSResponse(cache *DSKeyCache, data map[string]interface{}, sig Signed
 
 // BuildCanonicalJSON produces deterministic JSON with all keys sorted alphabetically.
 // This must match the DS-side buildCanonicalJSON in response_signing.ts.
+// Uses marshalCanonical to avoid Go's default HTML escaping (<, >, &) which
+// JS JSON.stringify does not apply — the DS signs responses without HTML
+// escaping, so we must verify against the same byte sequence.
 func BuildCanonicalJSON(data interface{}) string {
 	sorted := sortValue(data)
-	result, _ := json.Marshal(sorted)
+	result, _ := marshalCanonical(sorted)
 	return string(result)
 }
 
@@ -292,8 +295,10 @@ func (s sortedMap) MarshalJSON() ([]byte, error) {
 		if i > 0 {
 			buf = append(buf, ',')
 		}
-		keyJSON, _ := json.Marshal(entry.key)
-		valJSON, _ := json.Marshal(entry.value)
+		// Must use marshalCanonical (no HTML escape) to match DS's JS
+		// JSON.stringify output byte-for-byte.
+		keyJSON, _ := marshalCanonical(entry.key)
+		valJSON, _ := marshalCanonical(entry.value)
 		buf = append(buf, keyJSON...)
 		buf = append(buf, ':')
 		buf = append(buf, valJSON...)
@@ -302,16 +307,28 @@ func (s sortedMap) MarshalJSON() ([]byte, error) {
 	return buf, nil
 }
 
-// VerifyAutoblessAttestation verifies a DS attestation signature on an autoblessed
-// comment. The attestation proves which DS instance made the autobless decision and
-// which policy rule matched. Returns nil if valid, error if verification fails.
-// If attestation is empty, returns nil (legacy record without attestation).
+// VerifyAutoblessAttestation verifies a DS attestation signature on
+// an autoblessed comment. The attestation proves which DS instance
+// made the autobless decision and which policy rule matched.
+// Returns nil if valid, error if verification fails (or if the
+// attestation is missing).
+//
+// R20-C-F4 (2026-05-18): previously this returned nil on empty
+// attestation as a legacy-record concession. Combined with the
+// caller in `cli-go/pkg/stream/blessing.go` (which logged
+// verification errors but merged the entry into blessingMap
+// anyway), autoblessed events were effectively unverified — an
+// attacker could emit a fake autobless event with empty
+// `ds_attestation` and the local cache would accept it. New
+// posture: require attestation when verification is requested; the
+// caller is responsible for not calling this for legacy/non-
+// autoblessed records.
 func VerifyAutoblessAttestation(
 	cache *DSKeyCache,
 	commentURL, targetURL, policyRule, policySource, dsKeyID, attestation string,
 ) error {
 	if attestation == "" {
-		return nil // Legacy record without attestation — skip verification
+		return fmt.Errorf("autobless attestation is required but missing")
 	}
 
 	canonical := BuildCanonicalJSON(map[string]interface{}{

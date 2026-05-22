@@ -31,7 +31,6 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
-	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
@@ -167,6 +166,14 @@ type Server struct {
 	policyCache   map[string]*policyCacheEntry
 	policyCacheMu sync.Mutex
 
+	// Cross-tenant comment-count cache: post URL → count + expiry.
+	// Populated by populateCrossTenantCommentCounts in handlers_stream.go.
+	// commentCountFlight collapses concurrent stream requests that share
+	// overlapping URL sets into a single DS roundtrip (singleflight).
+	commentCountCache   map[string]*commentCountCacheEntry
+	commentCountCacheMu sync.Mutex
+	commentCountFlight  commentCountSingleflight
+
 	// SSE client registry
 	sseClients map[chan SSEEvent]struct{}
 	sseMu      sync.Mutex
@@ -177,8 +184,27 @@ type Server struct {
 	feedCaches  map[string]*feed.CacheManager
 	feedCacheMu sync.Mutex
 
+	// Mutuals-set memoization. computeMutualsSet runs O(N+M) over
+	// following.json + the FollowerState projection per call; for
+	// scope=my-mutuals requests at high frequency this is wasteful.
+	// Cached value stays valid as long as both source files'
+	// mtimes are unchanged AND the entry is within mutualsCacheTTL.
+	// Capacity-planning Step-6-Scaling-Concerns row.
+	mutualsCacheMu     sync.Mutex
+	mutualsCacheValue  map[string]bool
+	mutualsCacheAt     time.Time
+	mutualsOutboundMt  time.Time // mtime of following.json when cached
+	mutualsInboundMt   time.Time // mtime of pub.polis.follow.json when cached
+
 	syncDone chan struct{} // closed by StopSync() to stop the background goroutine
 }
+
+// mutualsCacheTTL caps how long the cached mutuals set is trusted even
+// when both source mtimes appear unchanged. A backstop against silent
+// corruption / clock skew / external file mutation that mtime might
+// miss. 60s balances request-load amortization against the worst-case
+// staleness window for a single user editing their follows.
+const mutualsCacheTTL = 60 * time.Second
 
 // policyCacheEntry holds a cached policy check result with expiry.
 type policyCacheEntry struct {
@@ -190,6 +216,68 @@ type policyCacheEntry struct {
 
 // policyCheckCacheTTL is how long policy check results are cached.
 const policyCheckCacheTTL = 5 * time.Minute
+
+// commentCountCacheEntry holds a cross-tenant post comment count with expiry.
+// Populated by populateCrossTenantCommentCounts after the DS roundtrip.
+type commentCountCacheEntry struct {
+	Total     int
+	ExpiresAt time.Time
+}
+
+// commentCountCacheTTL is how long an authoritative DS-sourced count is
+// trusted before we re-fetch. "Thoughtfulness not reactivity" framing —
+// a slightly stale count (±1) is fine; what matters is the stream never
+// blocks on the count fetch. 30s amortizes scroll/refresh thrash without
+// the user noticing staleness.
+const commentCountCacheTTL = 30 * time.Second
+
+// commentCountSingleflight collapses concurrent stream-handler calls
+// that fetch overlapping URL sets into a single in-flight DS request.
+// Inline equivalent of golang.org/x/sync/singleflight — kept inline to
+// avoid adding a dependency for one call site (matches the
+// replyFetchGroupT pattern in cli-go/pkg/render/page.go).
+type commentCountFlightCall struct {
+	wg  sync.WaitGroup
+	val map[string]int
+	err error
+}
+
+type commentCountSingleflight struct {
+	mu       sync.Mutex
+	inflight map[string]*commentCountFlightCall
+}
+
+// Do executes fn() exactly once per `key` while one is in flight;
+// concurrent callers with the same key block on wg and receive the
+// same (val, err) pair the in-flight call returned. The key is the
+// caller-built representation of the URL set (typically a sorted,
+// joined string). Returns (nil, nil) if fn is nil (defensive).
+func (g *commentCountSingleflight) Do(key string, fn func() (map[string]int, error)) (map[string]int, error) {
+	g.mu.Lock()
+	if g.inflight == nil {
+		g.inflight = make(map[string]*commentCountFlightCall)
+	}
+	if c, present := g.inflight[key]; present {
+		g.mu.Unlock()
+		c.wg.Wait()
+		return c.val, c.err
+	}
+	c := &commentCountFlightCall{}
+	c.wg.Add(1)
+	g.inflight[key] = c
+	g.mu.Unlock()
+
+	if fn != nil {
+		c.val, c.err = fn()
+	}
+
+	g.mu.Lock()
+	delete(g.inflight, key)
+	g.mu.Unlock()
+	c.wg.Done()
+
+	return c.val, c.err
+}
 
 // Logger handles logging to files organized by date
 type Logger struct {
@@ -276,7 +364,7 @@ func (l *Logger) log(level int, prefix string, format string, args ...interface{
 	if l.jsonOutput && prefix != "DEBUG" {
 		obj := map[string]interface{}{
 			"ts":     now.UTC().Format(time.RFC3339),
-			"source": "localhost",
+			"source": "webapp",
 			"level":  strings.ToLower(prefix),
 			"msg":    message,
 		}
@@ -339,12 +427,20 @@ func (l *Logger) Event(event string, fields map[string]interface{}) {
 		fmt.Fprintf(file, "%s [EVENT:%s] %s\n", timestamp, event, strings.Join(pairs, " "))
 	}
 
-	// Emit JSON to stdout when enabled
+	// Emit JSON to stdout when enabled. Schema is standardized across
+	// the stack as of the v4 cutover:
+	//   - source="webapp" for application events emitted by this Logger
+	//     (hosted.go uses source="landlord" for hosted-service events;
+	//     middleware.go's HTTP request log uses source="http"; DS uses
+	//     source="api"/"admin"/... in its own log line).
+	//   - action=<name> matches the DS schema. Older builds emitted
+	//     "event": <name>; dashboards filtering on `action` now match
+	//     across the entire stack.
 	if l.jsonOutput {
 		obj := map[string]interface{}{
 			"ts":     now.UTC().Format(time.RFC3339),
-			"source": "localhost",
-			"event":  event,
+			"source": "webapp",
+			"action": event,
 		}
 		for k, v := range fields {
 			obj[k] = v
@@ -518,6 +614,34 @@ func (s *Server) NewAuthDSClient(r *http.Request, domain string) *discovery.Clie
 	return client
 }
 
+// NewReadDSClient returns a client for READ-only DS calls. The DS allows
+// anonymous reads on stream/content endpoints, so an unregistered
+// localhost tenant can still sync without dragging in auth verification
+// (which would fail anyway — the DS does a live well-known fetch of the
+// caller's domain on every authenticated request, and a localhost tenant
+// is not publicly reachable).
+//
+// Behavior:
+//   - If the tenant IS registered locally with the configured DS, returns
+//     an authenticated client (auth headers attached). Defense-in-depth:
+//     registered sites attest their domain on reads too.
+//   - If NOT registered, returns an unauthenticated client. The bare
+//     request still leaks "this tenant is interested in X" to the DS,
+//     which is unavoidable when you need data from the DS.
+//
+// For WRITE calls (publish, register, follow/unfollow event emission),
+// use NewAuthDSClient directly — those must always sign, and the DS
+// rejection on an unregistered site is the right failure mode.
+func (s *Server) NewReadDSClient(r *http.Request) *discovery.Client {
+	if s.IsRegisteredWithDS() {
+		myDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
+		if myDomain != "" {
+			return s.NewAuthDSClient(r, myDomain)
+		}
+	}
+	return s.NewDSClient(r)
+}
+
 // setDSLogger configures DS roundtrip timing logging on a discovery client.
 func (s *Server) setDSLogger(client *discovery.Client) {
 	client.Logger = func(method, path string, durationMs int64, requestID string) {
@@ -635,6 +759,53 @@ func (s *Server) RenderSite() error {
 	s.LogEvent("pub.polis.site.render", map[string]interface{}{
 		"posts":    stats.PostsRendered,
 		"comments": stats.CommentsRendered,
+	})
+	return nil
+}
+
+// RenderSiteAfterPublish dispatches the post-publish render. For stream-shape tenants
+// it uses the incremental cascade (renderer.PublishStream) — bounded work per
+// publish instead of the full-corpus RenderAll. For blog-shape tenants it falls back
+// to RenderSite (full corpus) — unchanged from prior behavior.
+//
+// postSourceRelPath is the canonical content path returned by
+// publish.PublishPost / RepublishPost (e.g.
+// "content/pub.polis.core/post/YYYYMMDD/slug.md").
+func (s *Server) RenderSiteAfterPublish(postSourceRelPath string) error {
+	shape, err := bundle.GetActiveShapeName(s.DataDir)
+	if err != nil || shape != "v4" {
+		// v3 or unknown → existing full-corpus path. Preserves byte-identical
+		// output for blog-shape tenants.
+		return s.RenderSite()
+	}
+
+	baseURL := s.GetBaseURL()
+	coreBundle := s.loadOrDefaultBundle()
+	postsSource, _ := coreBundle.ContentDir("pub.polis.post")
+	postsMountDir, _ := coreBundle.MountDir("pub.polis.post")
+	commentsSource, _ := coreBundle.ContentDir("pub.polis.comment")
+	commentsMountDir, _ := coreBundle.MountDir("pub.polis.comment")
+
+	renderer, err := render.NewPageRenderer(render.PageConfig{
+		DataDir:           s.DataDir,
+		CLIThemesDir:      s.CLIThemesDir,
+		BaseURL:           baseURL,
+		PostsSourceDir:    postsSource,
+		PostsMountDir:     postsMountDir,
+		CommentsSourceDir: commentsSource,
+		CommentsMountDir:  commentsMountDir,
+	})
+	if err != nil {
+		s.LogError("v4 incremental renderer init failed: %v", err)
+		return fmt.Errorf("create renderer: %w", err)
+	}
+	if err := renderer.PublishStream(postSourceRelPath); err != nil {
+		s.LogError("v4 PublishStream cascade failed: %v", err)
+		return fmt.Errorf("v4 cascade: %w", err)
+	}
+	s.LogEvent("pub.polis.site.render", map[string]interface{}{
+		"mode": "v4-incremental",
+		"path": postSourceRelPath,
 	})
 	return nil
 }
@@ -970,7 +1141,7 @@ func (s *Server) Initialize() {
 		tag.Version = s.CLIVersion
 	}
 
-	// Migrate .polis/drafts -> .polis/content/pub.polis.core/posts/drafts if needed
+	// Migrate .polis/drafts -> .polis/bundles/pub.polis.core/posts/drafts if needed
 	s.migrateDraftsDir()
 
 	// Validate the site first - only load keys/config if valid
@@ -1055,17 +1226,17 @@ func (s *Server) Initialize() {
 	// s.AuthorKeyCache = discovery.NewAuthorKeyCache(0, 0)
 }
 
-// migrateDraftsDir migrates .polis/drafts to .polis/content/pub.polis.core/posts/drafts if needed.
+// migrateDraftsDir migrates .polis/drafts to .polis/bundles/pub.polis.core/posts/drafts if needed.
 func (s *Server) migrateDraftsDir() {
 	oldPath := filepath.Join(s.DataDir, ".polis", "drafts")
-	newPath := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+	newPath := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
 
 	// Only migrate if old path exists and new path doesn't
 	oldInfo, oldErr := os.Stat(oldPath)
 	_, newErr := os.Stat(newPath)
 
 	if oldErr == nil && oldInfo.IsDir() && os.IsNotExist(newErr) {
-		// Create parent directory (.polis/content — restricted)
+		// Create parent directory (.polis/bundles — restricted)
 		if err := os.MkdirAll(filepath.Dir(newPath), 0700); err != nil {
 			log.Printf("[warning] Failed to create parent directory for drafts migration: %v", err)
 			return
@@ -1073,7 +1244,7 @@ func (s *Server) migrateDraftsDir() {
 		if err := os.Rename(oldPath, newPath); err != nil {
 			log.Printf("[warning] Failed to migrate drafts directory: %v", err)
 		} else {
-			log.Printf("[i] Migrated drafts: .polis/drafts -> .polis/content/pub.polis.core/posts/drafts")
+			log.Printf("[i] Migrated drafts: .polis/drafts -> .polis/bundles/pub.polis.core/posts/drafts")
 		}
 	}
 }
@@ -1124,8 +1295,6 @@ func (s *Server) StartBackgroundSync() {
 
 	// Register handlers
 	s.syncHandlers = nil
-	// Notification sync disabled — UI bell removed; re-enable when notification UI returns
-	// s.RegisterSyncHandler(&notificationSyncHandler{server: s})
 	s.RegisterSyncHandler(&feedSyncHandler{server: s})
 	s.RegisterSyncHandler(&followSyncHandler{server: s})
 	s.RegisterSyncHandler(&commentStatusSyncHandler{server: s})
@@ -1242,6 +1411,12 @@ type CountsPayload struct {
 	IncomingBlessed  int `json:"incoming_blessed"`
 	FeedUnread       int    `json:"feed_unread"`
 	HasNewFeed       bool   `json:"has_new_feed"`
+	// HasNewBlessingInbox / HasNewDM follow the same "new since last view"
+	// pattern as HasNewFeed — each clears when the user activates the
+	// corresponding filter surface (see /api/comment/blessing/viewed and
+	// /api/dm/viewed).
+	HasNewBlessingInbox bool `json:"has_new_blessing_inbox"`
+	HasNewDM            bool `json:"has_new_dm"`
 	Following        int `json:"following"`
 	Followers        int `json:"followers"`
 	NotificationsUnread int `json:"notifications_unread"`
@@ -1270,7 +1445,7 @@ func (s *Server) computeAllCounts() CountsPayload {
 	}
 
 	// Drafts
-	draftsDir := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+	draftsDir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
 	if entries, err := os.ReadDir(draftsDir); err == nil {
 		for _, e := range entries {
 			if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
@@ -1279,7 +1454,7 @@ func (s *Server) computeAllCounts() CountsPayload {
 		}
 	}
 
-	// My comments by status (pending/denied are flat in .polis/content/pub.polis.core/comments/<status>/)
+	// My comments by status (pending/denied are flat in .polis/bundles/pub.polis.core/comments/<status>/)
 	for _, status := range []struct {
 		dir  string
 		dest *int
@@ -1287,7 +1462,7 @@ func (s *Server) computeAllCounts() CountsPayload {
 		{"pending", &counts.MyPending},
 		{"denied", &counts.MyDenied},
 	} {
-		dir := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "comments", status.dir)
+		dir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "comments", status.dir)
 		if entries, err := os.ReadDir(dir); err == nil {
 			for _, e := range entries {
 				if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
@@ -1316,7 +1491,7 @@ func (s *Server) computeAllCounts() CountsPayload {
 	}
 
 	// Comment drafts
-	commentDraftsDir := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "comments", "drafts")
+	commentDraftsDir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "comments", "drafts")
 	if entries, err := os.ReadDir(commentDraftsDir); err == nil {
 		for _, e := range entries {
 			if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
@@ -1364,12 +1539,6 @@ func (s *Server) computeAllCounts() CountsPayload {
 		counts.Followers = followerState.Count
 	}
 
-	// Notification unread count — disabled (UI bell removed)
-	// mgr := notification.NewManager(s.DataDir, discoveryDomain)
-	// if unread, err := mgr.CountUnread(); err == nil {
-	// 	counts.NotificationsUnread = unread
-	// }
-
 	// Incoming pending blessing requests — read from DS-cached blessing state
 	var blessingState stream.BlessingState
 	if store.LoadState("pub.polis.comment.blessing", &blessingState) == nil {
@@ -1392,10 +1561,62 @@ func (s *Server) computeAllCounts() CountsPayload {
 		}
 	}
 
-	// Feed has-new: compare sync position against viewed position
+	// has-new flags: each surface uses a "viewed" cursor that the SPA
+	// advances when the corresponding filter view becomes active. The dot
+	// fires when sync has written something past that cursor.
+	//
+	// Cold-start: when a viewed cursor is empty (fresh tenant, or a tenant
+	// that predates this code), seed it to the current high-water mark and
+	// keep the flag false. Avoids lighting all three dots on first load
+	// when the user has had no opportunity to acknowledge anything.
 	syncPos, _ := store.GetCursor("pub.polis.sync")
-	viewedPos, _ := store.GetCursor("pub.polis.feed.viewed")
-	counts.HasNewFeed = syncPos != "" && syncPos != viewedPos
+
+	feedViewedPos, _ := store.GetCursor("pub.polis.feed.viewed")
+	if feedViewedPos == "" || feedViewedPos == "0" {
+		if syncPos != "" {
+			_ = store.SetCursor("pub.polis.feed.viewed", syncPos)
+		}
+		counts.HasNewFeed = false
+	} else {
+		counts.HasNewFeed = syncPos != "" && syncPos != feedViewedPos
+	}
+
+	// Blessing inbox: dot fires when sync has advanced past the inbox-viewed
+	// cursor AND there's at least one currently-pending blessing request
+	// (no point flagging "new since last view" when nothing's actionable).
+	blessingViewedPos, _ := store.GetCursor("pub.polis.comment.blessing.viewed")
+	if blessingViewedPos == "" || blessingViewedPos == "0" {
+		if syncPos != "" {
+			_ = store.SetCursor("pub.polis.comment.blessing.viewed", syncPos)
+		}
+		counts.HasNewBlessingInbox = false
+	} else {
+		counts.HasNewBlessingInbox = syncPos != "" &&
+			syncPos != blessingViewedPos &&
+			counts.IncomingPending > 0
+	}
+
+	// DM surface: cursor is an RFC3339 timestamp (DMs are local-only).
+	// Fast-path on the conversation summary — per-conversation UnreadCount
+	// already excludes outgoing messages (see dm/store.go updateIndex),
+	// so any conversation with UnreadCount > 0 AND LastMessageAt > viewed
+	// is a "new since last view" hit. No per-message scan needed.
+	dmViewedPos, _ := store.GetCursor("pub.polis.dm.viewed")
+	if dmViewedPos == "" || dmViewedPos == "0" {
+		_ = store.SetCursor("pub.polis.dm.viewed", time.Now().UTC().Format(time.RFC3339Nano))
+		counts.HasNewDM = false
+	} else if s.PrivateKey != nil {
+		if dmStore, err := s.dmStore(); err == nil {
+			if idx, err := dmStore.LoadIndex(); err == nil {
+				for _, c := range idx.Conversations {
+					if c.UnreadCount > 0 && c.LastMessageAt > dmViewedPos {
+						counts.HasNewDM = true
+						break
+					}
+				}
+			}
+		}
+	}
 
 	return counts
 }
@@ -1426,14 +1647,17 @@ func (s *Server) syncCommentStatuses() {
 	}
 
 	// Quick check: any pending comments at all?
-	pendingDir := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "comments", "pending")
+	pendingDir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending")
 	entries, err := os.ReadDir(pendingDir)
 	if err != nil || len(entries) == 0 {
 		return
 	}
 
-	myDomain := discovery.ExtractDomainFromURL(baseURL)
-	client := s.NewAuthDSClient(nil, myDomain)
+	// Read-only: scans for new blessing/denial status on the comments
+	// we've published. NewReadDSClient skips auth when this tenant is
+	// not registered with the DS — the DS allows anonymous reads on
+	// the relationship-query endpoint.
+	client := s.NewReadDSClient(nil)
 	client.RequestID = generateBackgroundRequestID("comment-sync")
 
 	hc := s.getHookConfig()
@@ -1453,186 +1677,6 @@ func (s *Server) syncCommentStatuses() {
 	}
 }
 
-// syncNotifications runs the notification projection: queries the stream
-// with separate queries per relevance group, applies rules, and appends
-// new entries to state.jsonl.
-func (s *Server) syncNotifications() {
-	if s.DiscoveryURL == "" {
-		return
-	}
-	baseURL := s.GetBaseURL()
-	if baseURL == "" || s.PrivateKey == nil {
-		return
-	}
-
-	myDomain := extractDomainFromURL(baseURL)
-	if myDomain == "" {
-		return
-	}
-
-	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
-
-	// Load notification config (rules + muted domains)
-	var config stream.NotificationConfig
-	_ = store.LoadConfig("notifications", &config)
-
-	// Seed rules from defaults if empty, or merge any new default rules
-	rules := config.Rules
-	if len(rules) == 0 {
-		rules = notification.DefaultRules()
-		config.Rules = rules
-		_ = store.SaveConfig("notifications", &config)
-	} else {
-		// Merge new default rules not present in saved config
-		defaults := notification.DefaultRules()
-		existingIDs := make(map[string]bool, len(rules))
-		for _, r := range rules {
-			existingIDs[r.ID] = true
-		}
-		added := false
-		for _, d := range defaults {
-			if !existingIDs[d.ID] {
-				rules = append(rules, d)
-				added = true
-			}
-		}
-		if added {
-			config.Rules = rules
-			_ = store.SaveConfig("notifications", &config)
-			// Reset cursor so newly added rules can process past events
-			_ = store.SetCursor("pub.polis.notification", "0")
-			s.LogInfo("notification sync: added new default rules, cursor reset")
-		}
-	}
-
-	// Build muted domains set
-	mutedDomains := make(map[string]bool, len(config.MutedDomains))
-	for _, d := range config.MutedDomains {
-		mutedDomains[d] = true
-	}
-
-	handler := &stream.NotificationHandler{
-		MyDomain:     myDomain,
-		Rules:        rules,
-		MutedDomains: mutedDomains,
-	}
-
-	// Get shared cursor
-	cursor, _ := store.GetCursor("pub.polis.notification")
-
-	myDomainForAuth := discovery.ExtractDomainFromURL(s.GetBaseURL())
-	client := s.NewAuthDSClient(nil, myDomainForAuth)
-	client.RequestID = generateBackgroundRequestID("notification-sync")
-
-	// Group rules by relevance for targeted server-side filtering
-	groups := handler.RulesByRelevance()
-	var allEntries []notification.StateEntry
-	newCursor := cursor
-
-	// Query 1: target_domain rules
-	if targetRules := groups["target_domain"]; len(targetRules) > 0 {
-		var types []string
-		for _, r := range targetRules {
-			types = append(types, r.EventType)
-		}
-		typeFilter := discovery.JoinDomains(types)
-		result, err := client.StreamQuery(cursor, 1000, typeFilter, "", myDomain)
-		if err != nil {
-			s.LogDebug("notification sync: target_domain query failed: %v", err)
-		} else {
-			entries := handler.Process(result.Events)
-			allEntries = append(allEntries, entries...)
-			if cursorGreater(result.Cursor, newCursor) {
-				newCursor = result.Cursor
-			}
-		}
-	}
-
-	// Query 2: source_domain rules
-	if sourceRules := groups["source_domain"]; len(sourceRules) > 0 {
-		var types []string
-		for _, r := range sourceRules {
-			types = append(types, r.EventType)
-		}
-		typeFilter := discovery.JoinDomains(types)
-		result, err := client.StreamQuery(cursor, 1000, typeFilter, "", "", myDomain)
-		if err != nil {
-			s.LogDebug("notification sync: source_domain query failed: %v", err)
-		} else {
-			entries := handler.Process(result.Events)
-			allEntries = append(allEntries, entries...)
-			if cursorGreater(result.Cursor, newCursor) {
-				newCursor = result.Cursor
-			}
-		}
-	}
-
-	// Query 3: followed_author rules (only if enabled)
-	if authorRules := groups["followed_author"]; len(authorRules) > 0 {
-		// Load following list
-		followingPath := following.DefaultPath(s.DataDir)
-		f, err := following.Load(followingPath)
-		if err == nil {
-			var domains []string
-			for _, entry := range f.All() {
-				d := discovery.ExtractDomainFromURL(entry.URL)
-				if d != "" {
-					domains = append(domains, d)
-				}
-			}
-			if len(domains) > 0 {
-				var types []string
-				for _, r := range authorRules {
-					types = append(types, r.EventType)
-				}
-				typeFilter := discovery.JoinDomains(types)
-				actorFilter := discovery.JoinDomains(domains)
-				result, err := client.StreamQuery(cursor, 1000, typeFilter, actorFilter, "")
-				if err != nil {
-					s.LogDebug("notification sync: followed_author query failed: %v", err)
-				} else {
-					entries := handler.Process(result.Events)
-					allEntries = append(allEntries, entries...)
-					if cursorGreater(result.Cursor, newCursor) {
-						newCursor = result.Cursor
-					}
-				}
-			}
-		}
-	}
-
-	// Append new entries to state.jsonl
-	if len(allEntries) > 0 {
-		mgr := notification.NewManager(s.DataDir, discoveryDomain)
-		added, err := mgr.Append(allEntries)
-		if err != nil {
-			s.LogError("notification sync: failed to append entries: %v", err)
-		} else if added > 0 {
-			s.LogInfo("notification sync: added %d new notifications", added)
-
-			// Prune old notifications to prevent unbounded growth
-			pruneCfg := notification.DefaultPruneConfig()
-			if config.MaxItems > 0 {
-				pruneCfg.MaxItems = config.MaxItems
-			}
-			if config.MaxAgeDays > 0 {
-				pruneCfg.MaxAgeDays = config.MaxAgeDays
-			}
-			if pruned, err := mgr.Prune(pruneCfg); err != nil {
-				s.LogError("notification sync: prune failed: %v", err)
-			} else if pruned > 0 {
-				s.LogInfo("notification sync: pruned %d old notifications", pruned)
-			}
-		}
-	}
-
-	// Update cursor
-	if newCursor != cursor {
-		_ = store.SetCursor("pub.polis.notification", newCursor)
-	}
-}
-
 // cursorGreater compares two cursor position strings numerically.
 // Stream cursors are stringified integers; string comparison fails for
 // multi-digit values (e.g., "30" < "4" lexicographically).
@@ -1647,20 +1691,32 @@ func cursorGreater(a, b string) bool {
 
 // syncFeed queries the discovery stream for post and comment events
 // from followed authors and merges them into the feed cache.
+//
+// Structural early-returns (no DS config, empty following, etc.) bump the
+// cache's LastUpdated via cm.MarkChecked() so IsStale returns false. Without
+// this, the frontend's auto-sync-on-stale loop would call /api/feed/refresh
+// in a tight cycle: refresh skips → cache still stale → frontend retries.
+// Transient errors after the StreamQuery call do NOT mark checked — we want
+// the next cycle to retry.
 func (s *Server) syncFeed() {
+	cm := s.feedCacheForScope("network")
+
 	if s.DiscoveryURL == "" {
 		log.Printf("[feed-sync] skip: no discovery config (url=%q)", s.DiscoveryURL)
+		_ = cm.MarkChecked()
 		return
 	}
 	baseURL := s.GetBaseURL()
 	if baseURL == "" {
 		log.Printf("[feed-sync] skip: empty BaseURL (dataDir=%s)", s.DataDir)
+		_ = cm.MarkChecked()
 		return
 	}
 
 	myDomain := extractDomainFromURL(baseURL)
 	if myDomain == "" {
 		log.Printf("[feed-sync] skip: could not extract domain from %s", baseURL)
+		_ = cm.MarkChecked()
 		return
 	}
 
@@ -1669,10 +1725,13 @@ func (s *Server) syncFeed() {
 	f, err := following.Load(followingPath)
 	if err != nil {
 		log.Printf("[feed-sync] skip: following load error: %v", err)
+		// Load error could be transient (file lock, partial write) —
+		// don't mark checked, let the next cycle retry.
 		return
 	}
 	if f.Count() == 0 {
 		log.Printf("[feed-sync] skip: following list is empty (path=%s)", followingPath)
+		_ = cm.MarkChecked()
 		return
 	}
 
@@ -1685,11 +1744,11 @@ func (s *Server) syncFeed() {
 	}
 	if len(domains) == 0 {
 		log.Printf("[feed-sync] skip: no valid domains extracted from %d following entries", f.Count())
+		_ = cm.MarkChecked()
 		return
 	}
 
-	// Load feed cursor (shared instance to avoid concurrent write races)
-	cm := s.feedCacheForScope("network")
+	// Load feed cursor (cm already obtained at top for early-return MarkChecked).
 	cursor, _ := cm.GetCursor()
 
 	// Query DS stream with actor filter for followed domains
@@ -1720,30 +1779,41 @@ func (s *Server) syncFeed() {
 	items := handler.Process(result.Events)
 	log.Printf("[feed-sync] processed %d events -> %d feed items", len(result.Events), len(items))
 
-	// Merge into cache
-	cursorSafe := true
+	// Merge into cache. R21: cursor advances regardless of how many of
+	// the newly-added items survived pruning. Older intent (hold cursor
+	// when pruning dropped new items, on the theory that older items
+	// would age out and the next re-fetch would succeed) is permanently
+	// broken: items past MaxAgeDays/MaxAnnouncementDays are dropped by
+	// AGE, never admitted no matter how long we wait, so the cursor
+	// freezes forever and no newer events ever load. Pruning is a
+	// normal eviction signal — log how many were dropped so we can
+	// see when a tenant's cap is too tight, but always move the cursor
+	// forward.
+	mergeFailed := false
 	if len(items) > 0 {
 		mr, err := cm.MergeItemsResult(items)
 		if err != nil {
 			log.Printf("[feed-sync] merge failed: %v", err)
-			cursorSafe = false
+			mergeFailed = true
 		} else {
 			log.Printf("[feed-sync] merged %d new items, %d retained after prune", mr.Added, mr.Retained)
 			if mr.Added > 0 && mr.Retained < mr.Added {
-				log.Printf("[feed-sync] WARNING: %d items lost to pruning, holding cursor at %s", mr.Added-mr.Retained, cursor)
-				cursorSafe = false
+				log.Printf("[feed-sync] %d items pruned on insert (advancing cursor anyway; tighten retention if this is unexpected)",
+					mr.Added-mr.Retained)
 			}
 		}
 	}
 
-	// Only advance cursor if all new items were retained (or no items to merge).
-	// If pruning dropped newly added items, holding the cursor back lets the
-	// next sync re-fetch them after older items age out of the cache.
-	if cursorSafe && result.Cursor != "" {
-		_ = cm.SetCursor(result.Cursor)
-	} else if result.Cursor != "" {
-		// Still touch LastUpdated for staleness tracking without advancing position
-		_ = cm.SetCursor(cursor)
+	// Advance the cursor unless the merge itself failed (disk error,
+	// etc.). Pruning losses no longer block advancement.
+	if result.Cursor != "" {
+		if mergeFailed {
+			// Touch LastUpdated for staleness tracking without
+			// advancing position so the next cycle retries.
+			_ = cm.SetCursor(cursor)
+		} else {
+			_ = cm.SetCursor(result.Cursor)
+		}
 	}
 }
 
@@ -1751,19 +1821,32 @@ func (s *Server) syncFeed() {
 // Currently only "global" qualifies — it queries DS with no actor filter + created_after=24h.
 // "followers" and "me" are runtime-filtered over the network cache and don't need separate sync.
 func (s *Server) syncFeedScoped(scope string) {
-	if s.DiscoveryURL == "" || scope == "" || scope == "network" || runtimeFilteredScopes[scope] {
-		return
-	}
-	baseURL := s.GetBaseURL()
-	if baseURL == "" {
-		return
-	}
-	myDomain := extractDomainFromURL(baseURL)
-	if myDomain == "" {
+	// scope=="" / "network" / runtime-filtered are not handled here (see
+	// syncFeed). Other invalid invocations short-circuit without touching
+	// the cache.
+	if scope == "" || scope == "network" || runtimeFilteredScopes[scope] {
 		return
 	}
 
 	cm := s.feedCacheForScope(scope)
+
+	// Structural early-returns mark the cache as checked — see syncFeed
+	// for the rationale.
+	if s.DiscoveryURL == "" {
+		_ = cm.MarkChecked()
+		return
+	}
+	baseURL := s.GetBaseURL()
+	if baseURL == "" {
+		_ = cm.MarkChecked()
+		return
+	}
+	myDomain := extractDomainFromURL(baseURL)
+	if myDomain == "" {
+		_ = cm.MarkChecked()
+		return
+	}
+
 	cursor, _ := cm.GetCursor()
 
 	client := s.NewDSClient(nil)
@@ -1796,25 +1879,28 @@ func (s *Server) syncFeedScoped(scope string) {
 	}
 
 	items := handler.Process(result.Events)
-	cursorSafe := true
+	// R21: same fix as syncFeed (network) — pruning losses no longer
+	// freeze the cursor. See the syncFeed comment for rationale.
+	mergeFailed := false
 	if len(items) > 0 {
 		mr, err := cm.MergeItemsResult(items)
 		if err != nil {
 			log.Printf("[feed-sync-%s] merge failed: %v", scope, err)
-			cursorSafe = false
+			mergeFailed = true
 		} else {
 			log.Printf("[feed-sync-%s] merged %d new items, %d retained", scope, mr.Added, mr.Retained)
 			if mr.Added > 0 && mr.Retained < mr.Added {
-				log.Printf("[feed-sync-%s] WARNING: %d items lost to pruning, holding cursor", scope, mr.Added-mr.Retained)
-				cursorSafe = false
+				log.Printf("[feed-sync-%s] %d items pruned on insert (advancing cursor anyway)", scope, mr.Added-mr.Retained)
 			}
 		}
 	}
 
-	if cursorSafe && result.Cursor != "" {
-		_ = cm.SetCursor(result.Cursor)
-	} else if result.Cursor != "" {
-		_ = cm.SetCursor(cursor)
+	if result.Cursor != "" {
+		if mergeFailed {
+			_ = cm.SetCursor(cursor)
+		} else {
+			_ = cm.SetCursor(result.Cursor)
+		}
 	}
 }
 
@@ -1892,13 +1978,84 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
+// Two-axis flag values for polis-server invocation modes (step 5.a).
+//
+// DataMode selects how the data directory is interpreted:
+//   - DataModeOwner ("owner", default): the operator's own tenant. Keys
+//     present, write paths enabled, DS auto-register on startup.
+//   - DataModeMirror ("mirror"): a clone/snapshot of another tenant. Keys
+//     may be absent; auto-register / DS announce / publish disabled.
+//
+// Surface selects what's served:
+//   - SurfaceEditor ("editor", default for --owner): admin SPA + editor
+//     APIs + deep-link /_/... routes. Today's default behavior.
+//   - SurfaceReader ("reader", default for --mirror): tenant-static at /,
+//     read-only structured-query API at /api/v1/stream/items. No SPA, no
+//     editor APIs, no /_/... routes.
+//
+// Error case: DataModeMirror + SurfaceEditor is invalid (the editor surface
+// requires write paths that mirror data can't support). Run() rejects this
+// combination at startup with a clear message.
+const (
+	DataModeOwner  = "owner"
+	DataModeMirror = "mirror"
+	SurfaceEditor  = "editor"
+	SurfaceReader  = "reader"
+)
+
 // RunOptions contains optional configuration for the server.
 type RunOptions struct {
 	CLIVersion string // CLI version for metadata (empty = use package default)
+	Port       int    // Specific port to bind to (0 = auto-pick an available port)
+	DataMode   string // "owner" (default) or "mirror"; empty == DataModeOwner
+	Surface    string // "editor" or "reader"; empty defaults from DataMode
+}
+
+// resolveModes normalizes RunOptions's flag fields, applying defaults and
+// returning an error for invalid combinations. Empty DataMode → "owner".
+// Empty Surface → "editor" if DataMode is "owner", "reader" if "mirror".
+// Any combination of "mirror" + "editor" is rejected.
+func resolveModes(opts RunOptions) (dataMode, surface string, err error) {
+	dataMode = opts.DataMode
+	if dataMode == "" {
+		dataMode = DataModeOwner
+	}
+	if dataMode != DataModeOwner && dataMode != DataModeMirror {
+		return "", "", fmt.Errorf("invalid --data-mode %q (want %q or %q)", dataMode, DataModeOwner, DataModeMirror)
+	}
+
+	surface = opts.Surface
+	if surface == "" {
+		if dataMode == DataModeMirror {
+			surface = SurfaceReader
+		} else {
+			surface = SurfaceEditor
+		}
+	}
+	if surface != SurfaceEditor && surface != SurfaceReader {
+		return "", "", fmt.Errorf("invalid --surface %q (want %q or %q)", surface, SurfaceEditor, SurfaceReader)
+	}
+
+	if dataMode == DataModeMirror && surface == SurfaceEditor {
+		return "", "", fmt.Errorf("--mirror cannot run with --editor surface (signing keys, DS announce, and publish flows don't apply to mirror data); use --reader (the default for --mirror)")
+	}
+
+	return dataMode, surface, nil
 }
 
 // Run starts the HTTP server with the given embedded filesystem.
 func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
+	// Resolve flag-mode combination first so we fail fast on invalid combos
+	// (e.g., --mirror --editor) before doing any filesystem work.
+	var optsVal RunOptions
+	if len(opts) > 0 {
+		optsVal = opts[0]
+	}
+	dataMode, surface, err := resolveModes(optsVal)
+	if err != nil {
+		log.Fatalf("[error] invalid flag combination: %v", err)
+	}
+
 	// Resolve symlinks - if data/ is a symlink, follow it
 	dataDir = ResolveSymlink(dataDir)
 
@@ -1930,38 +2087,86 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 	server.Initialize()
 	defer server.Close()
 
-	// Start background sync (notifications + feed)
-	server.StartBackgroundSync()
-
-	// Find available port
-	port, err := FindAvailablePort()
-	if err != nil {
-		log.Fatal("Failed to find available port:", err)
+	// Start background sync (notifications + feed). Mirror mode skips —
+	// the data dir is a clone, not the operator's tenant; no DS announce
+	// or auto-register applies.
+	if dataMode != DataModeMirror {
+		server.StartBackgroundSync()
 	}
 
-	// Setup routes
-	mux := http.NewServeMux()
-	SetupRoutes(mux, server)
-
-	// Setup v1 content API routes (alongside existing /api/ routes)
-	if apiEngine, err := server.newContentEngine(); err != nil {
-		log.Printf("[warning] v1 API not available: %v", err)
+	// Resolve port: explicit RunOptions.Port wins; otherwise auto-pick.
+	var port int
+	if len(opts) > 0 && opts[0].Port > 0 {
+		port = opts[0].Port
 	} else {
-		api.SetupRoutes(mux, apiEngine, dataDir, func(event string, fields map[string]interface{}) {
-			server.LogEvent(event, fields)
-		})
-		log.Printf("[info] v1 content API enabled")
+		var err error
+		port, err = FindAvailablePort()
+		if err != nil {
+			log.Fatal("Failed to find available port:", err)
+		}
 	}
 
-	// Static files from embedded filesystem with SPA fallback
-	mux.Handle("/", spaHandler(webFS))
+	// Setup routes — conditional on surface (--editor vs --reader).
+	//
+	// --editor (default for --owner): admin SPA + full editor API surface.
+	// --reader (default for --mirror): read-only public surface — only
+	//   tenant-static content at / + the structured-query stream items
+	//   endpoint at /api/v1/stream/items. No SPA, no editor APIs, no
+	//   /_/... deep-link routes. Used by polis-server-as-discover for
+	//   the local-stack scenario (step 5.e) and by --reader dogfood mode.
+	mux := http.NewServeMux()
+	if surface == SurfaceReader {
+		SetupReaderRoutes(mux, server)
+		mux.Handle("/", tenantStaticHandler(server))
+	} else {
+		SetupRoutes(mux, server)
 
+		// Setup v1 content API routes (alongside existing /api/ routes)
+		if apiEngine, err := server.newContentEngine(); err != nil {
+			log.Printf("[warning] v1 API not available: %v", err)
+		} else {
+			api.SetupRoutes(mux, apiEngine, dataDir, func(event string, fields map[string]interface{}) {
+				server.LogEvent(event, fields)
+			})
+			log.Printf("[info] v1 content API enabled")
+		}
+
+		// Bundle reference assets (step-06/6.a). Serves the v4 stream shape's
+		// stream.js / stream.css / snippet HTML to the SPA homepage so it can
+		// hydrate against the canonical controller without duplicating files
+		// in webapp/internal/webui/www. Path shape:
+		//   /bundle-assets/pub.polis.core/shapes/v4/stream.js
+		//   /bundle-assets/pub.polis.core/shapes/v4/stream.css
+		//   /bundle-assets/pub.polis.core/shapes/v4/snippets/stream-filter.html
+		mux.Handle("/bundle-assets/", http.StripPrefix("/bundle-assets/", http.FileServer(http.FS(bundle.ReferencePayloadFS()))))
+
+		// Static files from embedded filesystem with SPA fallback
+		mux.Handle("/", spaHandler(webFS, dataDir))
+	}
+
+	// R18-18 (2026-05-18): bind is HARDCODED to `localhost` so the
+	// localhost server can't accidentally be exposed on a non-loopback
+	// interface. The "owner-trust by construction" model — under which
+	// /api/content/ (drafts, etc.) and many other endpoints serve
+	// without auth — assumes the only callers reach the loopback
+	// interface, which on a single-user machine means the owner.
+	//
+	// Do NOT add a `--host` / `--bind` RunOptions field without also
+	// gating sensitive endpoints behind auth. The handlers themselves
+	// trust loopback unconditionally. If you need cross-machine access,
+	// run the hosted multi-tenant binary instead (which has session
+	// + magic-link auth) or front this with an SSH tunnel + your own
+	// access controls.
+	//
+	// Regression test: TestRunBindIsLoopbackOnly in server_test.go
+	// asserts this string literal stays "localhost:" prefixed.
 	addr := fmt.Sprintf("localhost:%d", port)
 	url := fmt.Sprintf("http://%s", addr)
 
 	fmt.Printf("[i] Starting polis server...\n")
 	fmt.Printf("[i] Listening on %s\n", url)
 	fmt.Printf("[i] Data directory: %s\n", dataDir)
+	fmt.Printf("[i] Mode: --%s --%s\n", dataMode, surface)
 
 	// Open browser after a short delay
 	go func() {
@@ -1978,13 +2183,52 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 }
 
 // spaHandler serves static files from the embedded filesystem, falling back
-// to index.html for unknown paths (SPA deep-link support).
-func spaHandler(fsys fs.FS) http.Handler {
+// to index.html for unknown paths (SPA deep-link support). For index.html
+// itself (and the SPA fallback path), substitutes a {{theme_attr}}
+// placeholder with the tenant's active theme attribute so first paint
+// lands in the user's selected theme rather than the sols-flavored default
+// (R23 #4 follow-up — the inline-script localStorage path covered repeat
+// visits but not first-load).
+func spaHandler(fsys fs.FS, dataDir string) http.Handler {
 	fileServer := http.FileServer(http.FS(fsys))
+	serveTemplatedIndex := func(w http.ResponseWriter, r *http.Request) {
+		// Sub-rooted at www/ in cmd/server/main.go via fs.Sub, so paths
+		// here are relative to that root (just "index.html", not the
+		// full embed-relative path).
+		raw, err := fs.ReadFile(fsys, "index.html")
+		if err != nil {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		var attr string
+		if name, _ := bundle.GetActiveThemeName(dataDir); name != "" {
+			// Bare attribute injection — the value is constrained by
+			// SetActiveThemeName to ParseFQN-validated tokens (alnum +
+			// `-`/`_`), so direct interpolation is safe.
+			attr = ` data-site-theme="` + name + `"`
+		}
+		out := strings.Replace(string(raw), "{{theme_attr}}", attr, 1)
+		// R18-21: per-response CSP nonce. Substituted into the importmap
+		// script tag's nonce= attribute; matches the admin-SPA CSP set
+		// below. ReplaceAll because the placeholder appears in both an
+		// HTML comment (descriptive text) AND the actual nonce attribute
+		// — only substituting the first occurrence leaves the real
+		// attribute as the literal placeholder string, which doesn't
+		// match the CSP header and gets the importmap blocked.
+		nonce := GenerateCSPNonce()
+		out = strings.ReplaceAll(out, "{{csp_nonce}}", nonce)
+		// R18-21: override the default tenant-content CSP from
+		// securityHeadersMiddleware with the admin-SPA variant that
+		// permits this nonce + the Milkdown esm.sh CDN.
+		w.Header().Set("Content-Security-Policy", CSPAdminSPA(nonce))
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write([]byte(out))
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			fileServer.ServeHTTP(w, r)
+		if path == "" || path == "index.html" {
+			serveTemplatedIndex(w, r)
 			return
 		}
 		// If the file exists in the embedded FS, serve it directly
@@ -1992,9 +2236,8 @@ func spaHandler(fsys fs.FS) http.Handler {
 			fileServer.ServeHTTP(w, r)
 			return
 		}
-		// SPA fallback: serve index.html for deep-link paths
-		r.URL.Path = "/"
-		fileServer.ServeHTTP(w, r)
+		// SPA fallback: serve templated index.html for deep-link paths
+		serveTemplatedIndex(w, r)
 	})
 }
 
@@ -2009,6 +2252,21 @@ func (s *Server) GetDiscoveryDomain() string {
 }
 
 // validFeedScopes lists the accepted scope values for feed queries.
+//
+// step-06/6.f.2 review item #6 — known parallel of the scope=my bug
+// fixed in /api/v1/stream/items at a3de221. The "me" scope here also
+// routes through feedCacheForScope("me") → returns the network cache
+// (per runtimeFilteredScopes) which self-skips own events — so /api/
+// feed?scope=me returns 0 items in production despite local data
+// existing on disk. The fix mirror would be to route through
+// loadOwnContentAsFeedItems for scope=me, but /api/feed has a
+// different response shape than /api/v1/stream/items and the legacy
+// SPA views still using it would need verification.
+//
+// Deferred for now (low priority) since the v4 stream endpoint is the
+// new canonical surface; legacy /api/feed is on the deprecation path
+// (6.l excerpt-fetch + 6.m route cleanup). Revisit if a non-migrated
+// view surfaces a regression.
 var validFeedScopes = map[string]bool{
 	"network":   true,
 	"followers": true,

@@ -14,10 +14,8 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
-	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
-	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 )
 
 // ============================================================================
@@ -567,7 +565,7 @@ func newTestFS() fs.FS {
 }
 
 func TestSPAHandler_RootServesIndex(t *testing.T) {
-	handler := spaHandler(newTestFS())
+	handler := spaHandler(newTestFS(), t.TempDir())
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -581,7 +579,7 @@ func TestSPAHandler_RootServesIndex(t *testing.T) {
 }
 
 func TestSPAHandler_ExistingAsset(t *testing.T) {
-	handler := spaHandler(newTestFS())
+	handler := spaHandler(newTestFS(), t.TempDir())
 
 	for _, path := range []string{"/app.js", "/style.css"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -595,7 +593,7 @@ func TestSPAHandler_ExistingAsset(t *testing.T) {
 }
 
 func TestSPAHandler_DeepLinkFallsBackToIndex(t *testing.T) {
-	handler := spaHandler(newTestFS())
+	handler := spaHandler(newTestFS(), t.TempDir())
 
 	deepPaths := []string{
 		"/_/posts",
@@ -853,53 +851,6 @@ func TestBlessingSyncHandler_NoPolicyManualReview(t *testing.T) {
 	}
 }
 
-func TestNotificationHandler_SelfSkipAndMutedDomains(t *testing.T) {
-	// Verify that self-events are skipped and muted domains are filtered.
-	handler := &stream.NotificationHandler{
-		MyDomain:     "bob.com",
-		Rules:        notification.DefaultRules(),
-		MutedDomains: map[string]bool{"spam.com": true},
-	}
-
-	events := []discovery.StreamEvent{
-		{
-			ID:    json.Number("1"),
-			Type:  "pub.polis.follow.announced",
-			Actor: "bob.com", // self-event — should be skipped
-			Payload: map[string]interface{}{
-				"target_domain": "alice.com",
-			},
-			Timestamp: "2026-02-10T10:00:00Z",
-		},
-		{
-			ID:    json.Number("2"),
-			Type:  "pub.polis.follow.announced",
-			Actor: "spam.com", // muted — should be skipped
-			Payload: map[string]interface{}{
-				"target_domain": "bob.com",
-			},
-			Timestamp: "2026-02-10T10:01:00Z",
-		},
-		{
-			ID:    json.Number("3"),
-			Type:  "pub.polis.follow.announced",
-			Actor: "good.com", // should pass through
-			Payload: map[string]interface{}{
-				"target_domain": "bob.com",
-			},
-			Timestamp: "2026-02-10T10:02:00Z",
-		},
-	}
-
-	entries := handler.Process(events)
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 notification (self + muted skipped), got %d", len(entries))
-	}
-	if entries[0].Actor != "good.com" {
-		t.Errorf("actor = %q, want %q", entries[0].Actor, "good.com")
-	}
-}
-
 // ============================================================================
 // Structured Logging Tests (Phase 7)
 // ============================================================================
@@ -989,11 +940,16 @@ func TestEvent_JSONStdout(t *testing.T) {
 		t.Fatalf("expected valid JSON on stdout, got error %v for output:\n%s", err, output)
 	}
 
-	if obj["source"] != "localhost" {
-		t.Errorf("expected source=localhost, got %v", obj["source"])
+	// Stack-wide schema (v4 cutover): source="webapp", action=<name>.
+	// Older builds emitted source="localhost" + event=<name>.
+	if obj["source"] != "webapp" {
+		t.Errorf("expected source=webapp, got %v", obj["source"])
 	}
-	if obj["event"] != "pub.polis.post.publish" {
-		t.Errorf("expected event=pub.polis.post.publish, got %v", obj["event"])
+	if obj["action"] != "pub.polis.post.publish" {
+		t.Errorf("expected action=pub.polis.post.publish, got %v", obj["action"])
+	}
+	if _, ok := obj["event"]; ok {
+		t.Error("Logger.Event should NOT emit 'event' field (renamed to 'action')")
 	}
 	if obj["path"] != "content/pub.polis.core/post/20260301/hello.md" {
 		t.Errorf("expected path field, got %v", obj["path"])
@@ -1132,8 +1088,9 @@ func TestLog_JSONFormat(t *testing.T) {
 		t.Fatalf("expected valid JSON, got error %v for:\n%s", err, output)
 	}
 
-	if obj["source"] != "localhost" {
-		t.Errorf("expected source=localhost, got %v", obj["source"])
+	// Stack-wide schema (v4 cutover): source="webapp" (was "localhost").
+	if obj["source"] != "webapp" {
+		t.Errorf("expected source=webapp, got %v", obj["source"])
 	}
 	if obj["level"] != "error" {
 		t.Errorf("expected level=error, got %v", obj["level"])
@@ -1481,5 +1438,102 @@ func TestNewDSClient_WithoutSharedHTTP(t *testing.T) {
 	}
 	if dc.HTTPClient == nil {
 		t.Error("expected fallback HTTPClient")
+	}
+}
+
+// TestNewReadDSClient_UnregisteredSkipsAuth — an unregistered self-hosted
+// tenant should be able to sync read-only DS endpoints anonymously. With
+// auth headers attached, the DS does a live well-known fetch to the
+// caller's domain, which fails for any non-publicly-reachable origin.
+func TestNewReadDSClient_UnregisteredSkipsAuth(t *testing.T) {
+	dataDir := t.TempDir()
+	s := &Server{
+		DataDir:      dataDir,
+		DiscoveryURL: "https://ds.example.com",
+		BaseURL:      "https://x.polis.pub",
+		PrivateKey:   []byte("dummy-key"),
+	}
+	// No registration marker on disk → not registered
+	if s.IsRegisteredWithDS() {
+		t.Fatal("test precondition: site should not be registered")
+	}
+	dc := s.NewReadDSClient(nil)
+	if dc == nil {
+		t.Fatal("NewReadDSClient() returned nil")
+	}
+	if dc.Domain != "" || len(dc.PrivateKeyPEM) != 0 {
+		t.Errorf("expected unauthenticated client for unregistered site; got Domain=%q, PrivateKeyPEM len=%d",
+			dc.Domain, len(dc.PrivateKeyPEM))
+	}
+}
+
+// TestNewReadDSClient_RegisteredAddsAuth — a registered tenant should send
+// auth headers on reads as defense-in-depth (domain attestation).
+func TestNewReadDSClient_RegisteredAddsAuth(t *testing.T) {
+	dataDir := t.TempDir()
+	dsURL := "https://ds.example.com"
+	// Write a registration marker so IsRegisteredLocally returns true.
+	if err := discovery.WriteRegistrationMarker(dataDir, dsURL, "x.polis.pub", "test-attestation"); err != nil {
+		t.Fatalf("WriteRegistrationMarker: %v", err)
+	}
+	s := &Server{
+		DataDir:      dataDir,
+		DiscoveryURL: dsURL,
+		BaseURL:      "https://x.polis.pub",
+		PrivateKey:   []byte("dummy-key"),
+	}
+	if !s.IsRegisteredWithDS() {
+		t.Fatal("test precondition: site should be registered (marker written)")
+	}
+	dc := s.NewReadDSClient(nil)
+	if dc == nil {
+		t.Fatal("NewReadDSClient() returned nil")
+	}
+	if dc.Domain != "x.polis.pub" {
+		t.Errorf("expected authenticated client (Domain=x.polis.pub); got Domain=%q", dc.Domain)
+	}
+	if len(dc.PrivateKeyPEM) == 0 {
+		t.Error("expected PrivateKeyPEM to be set on authenticated client")
+	}
+}
+
+// TestRunBindIsLoopbackOnly — R18-18 regression guard (2026-05-18).
+// The non-hosted server's `addr` constant in Run() MUST stay
+// "localhost:" prefixed. Anything else would expose the localhost-
+// trust model (drafts, content, owner-only endpoints served without
+// auth) on the network. The compile-time string-literal check is
+// performed by reading the constant from the package source — the
+// test fails if a future refactor introduces a `--host` flag or
+// otherwise drops the loopback-only invariant.
+//
+// We don't actually start the server here (that would conflict with
+// CI port usage); we just assert the string literal in the source
+// hasn't drifted.
+func TestRunBindIsLoopbackOnly(t *testing.T) {
+	// Read this very file's sibling — server.go — and assert it
+	// contains the literal `localhost:%d` bind expression and does
+	// NOT contain `0.0.0.0`, an empty-host `:%d`, or any other
+	// pattern that would bind beyond loopback.
+	data, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Skipf("cannot read server.go (test runner cwd?): %v", err)
+		return
+	}
+	src := string(data)
+
+	const wantBind = `fmt.Sprintf("localhost:%d", port)`
+	if !strings.Contains(src, wantBind) {
+		t.Errorf("R18-18 regression: server.go must contain the literal %q for the loopback-only bind invariant", wantBind)
+	}
+
+	// Defense in depth — refuse common non-loopback patterns.
+	for _, bad := range []string{
+		`Sprintf("0.0.0.0:%d"`,
+		`Sprintf("[::]:%d"`,
+		`Sprintf(":%d", port)`, // empty host = all interfaces
+	} {
+		if strings.Contains(src, bad) {
+			t.Errorf("R18-18 regression: server.go contains non-loopback bind pattern %q", bad)
+		}
 	}
 }

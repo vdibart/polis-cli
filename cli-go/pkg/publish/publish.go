@@ -170,12 +170,6 @@ func HashContent(content []byte) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// BuildFrontmatter creates the YAML frontmatter for a post.
-// Deprecated: Use buildFrontmatter with explicit generator parameter.
-func BuildFrontmatter(title, hash, timestamp, signature string) string {
-	return buildFrontmatter(title, hash, timestamp, signature, GetGenerator())
-}
-
 // buildFrontmatter creates the YAML frontmatter for a post with an explicit generator string.
 func buildFrontmatter(title, hash, timestamp, signature, generator string) string {
 	// Note: signature is base64-encoded, single line for YAML
@@ -387,7 +381,7 @@ func ensureUniqueFilename(dataDir, dateDir, filename string) string {
 		}
 
 		// Check drafts directory
-		draftPath := filepath.Join(dataDir, ".polis", "content", "pub.polis.core", "posts", "drafts", candidate+".md")
+		draftPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", candidate+".md")
 		if _, err := os.Stat(draftPath); err == nil {
 			candidate = fmt.Sprintf("%s-%d", filename, suffix)
 			suffix++
@@ -521,12 +515,6 @@ FULL_CONTENT_START
 // Delegates to metadata.AppendPostToIndex for deduplication support.
 func AppendToIndex(dataDir string, meta *PostMeta) error {
 	return metadata.AppendPostToIndex(dataDir, meta.Path, meta.Title, meta.Published, meta.CurrentVersion)
-}
-
-// DefaultVersion returns the generator identifier for new manifests.
-// Deprecated: Callers should use the generator string from their DiscoveryConfig.
-func DefaultVersion() string {
-	return GetGenerator()
 }
 
 // UpdateManifest is a no-op — manifest.json has been absorbed into .well-known/polis.

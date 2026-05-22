@@ -1,0 +1,93 @@
+<!--
+    Stream filter (interactive sentence — step-05/5.d, redesigned 2026-04-29).
+
+    The hydratable sentence-filter for the v4 stream's top chrome.
+    Mirrors the after-step-5 build-target mockup
+    (docs/design/v4/mockups/infinity-stream/02-unified-view-after-
+    step-5-pinned-dot.html). Controller toggles dropdowns + reissues
+    structured-query fetches on slot changes.
+
+    Slot grammar (post-2026-04-29 redesign):
+      qualifier  LOCKED to "all". Public visitors have no read-state, so
+                 "new" doesn't apply; step 6 unlocks for the auth'd owner.
+      type       INTERACTIVE — posts / comments / follows. Public default:
+                 posts. Replaces the previous {posts, comments, all items}
+                 set; "all items" was redundant under the unified stream.
+      scope      LOCKED to @<tenant> as identity-stylized text (italic
+                 accent, non-interactive — reads as "this is who you're
+                 viewing", not a control). Step 6 unlocks auth-gated
+                 values (my / my-network / dm).
+      modifier   INTERACTIVE — visible ONLY when type=posts. Options:
+                 "by date" (default — all posts, newest first) and
+                 "with comments" (filters to posts that have ≥1 blessed
+                 comment). Hidden for type=comments / type=follows so
+                 the sentence reads cleanly without a trailing slot.
+                 Replaces the prior "in <timeframe>" slot — timeframes
+                 had cliffs that broke scroll-up under unified-stream.
+
+    Mobile abbreviation: qualifier + scope + "from" connector all hide
+    via data-mobile-hide. When type=posts, sentence collapses to
+    "[type] [modifier]" (e.g. "posts by date"). For other types, just
+    "[type]" — modifier slot is structurally absent.
+
+    Selector convention (per Q-S11 resolution):
+      .sentence-filter [data-filter-slot="qualifier|type|scope|modifier"]
+      .sf-slot--locked / --interactive / --identity
+      data-filter-locked="true" — hint for controller to skip event wiring
+      .sf-dropdown[role="listbox"] / .sf-option[role="option"]
+      aria-expanded on interactive slot toggles open state
+      [hidden] on the modifier slot when type != posts (controller-managed)
+
+    Step-06/6.b extensions (owner SPA + cross-site auth'd visits):
+      - body.is-owner — owner-extras.js sets this; CSS unlocks the
+        qualifier and scope slots (they become interactive).
+      - .sf-site-typeahead — input element shown when scope=site is
+        selected. User types a handle prefix; resolves to scope=@<handle>
+        on selection. Hidden by default; CSS gate: [hidden] until
+        owner-extras.js toggles it.
+      - Modifier slot is type-conditional per FILTER_MODIFIER_OPTIONS_BY_TYPE
+        in stream.js: posts/comments/follows/drafts each surface their own
+        pair of options; activity/dms/mentions hide the slot entirely.
+
+    Template variables:
+    - {{site_domain}}  — the tenant's own domain (e.g. discover.polis.pub)
+-->
+<div class="sentence-filter" role="group" aria-label="Stream filter">
+    <span class="sf-slot sf-slot--locked"
+          data-filter-slot="qualifier"
+          data-filter-locked="true"
+          title="qualifier locked: public visitors have no read-state">all</span>
+
+    <span class="sf-slot sf-slot--interactive"
+          data-filter-slot="type"
+          role="button"
+          tabindex="0"
+          aria-haspopup="listbox"
+          aria-expanded="false">posts</span>
+
+    <span class="sf-connector" data-mobile-hide="true">from</span>
+
+    <span class="sf-slot sf-slot--identity"
+          data-filter-slot="scope"
+          data-filter-locked="true"
+          title="this is the site you're reading">{{site_domain}}</span>
+
+    <span class="sf-slot sf-slot--interactive sf-slot--modifier"
+          data-filter-slot="modifier"
+          role="button"
+          tabindex="0"
+          aria-haspopup="listbox"
+          aria-expanded="false">by date</span>
+
+    <!-- step-06/6.b — site typeahead input. Shown only when scope=site
+         is selected (owner-extras.js toggles [hidden]). User types a
+         handle prefix; suggestions come from following.json + free-text.
+         On selection, controller sets filterScope=@<resolved-handle>
+         and triggers a stream re-fetch. -->
+    <input type="text"
+           class="sf-site-typeahead"
+           data-filter-slot="site-typeahead"
+           placeholder="handle.polis.pub"
+           aria-label="Site handle"
+           hidden>
+</div>

@@ -28,7 +28,7 @@ set -eo pipefail
 #   4. Hardcoded defaults
 
 # Fixed constants (never configurable - required for discovery)
-VERSION="0.62.0"
+VERSION="0.63.0"
 WELL_KNOWN_DIR=".well-known"
 WELL_KNOWN_FILE="polis"
 
@@ -68,14 +68,27 @@ load_env_file() {
 # v2: paths are fixed by bundle convention, no more config.directories/config.files
 load_wellknown_config() {
     local config_file="$WELL_KNOWN_DIR/$WELL_KNOWN_FILE"
-    [ ! -f "$config_file" ] && return 0
 
     # Check if jq is available
     command -v jq > /dev/null 2>&1 || return 0
 
-    # Read active_theme if set
-    local active_theme
-    active_theme=$(jq -r '.active_theme // empty' "$config_file" 2>/dev/null) || return 0
+    # Active theme moved from .well-known/polis to .polis/bundles/registry.json
+    # in the bundle refactor. Read registry first; fall back to well-known
+    # for pre-migration sites.
+    local active_theme=""
+    local registry=".polis/bundles/registry.json"
+    if [ -f "$registry" ]; then
+        local fqn
+        fqn=$(jq -r '.active_theme // empty' "$registry" 2>/dev/null)
+        if [ -n "$fqn" ] && [ "$fqn" != "null" ]; then
+            # Strip the pub.polis.themes. prefix to get the bare name.
+            active_theme="${fqn#pub.polis.themes.}"
+        fi
+    fi
+    if [ -z "$active_theme" ] && [ -f "$config_file" ]; then
+        active_theme=$(jq -r '.active_theme // empty' "$config_file" 2>/dev/null) || true
+        [ "$active_theme" = "null" ] && active_theme=""
+    fi
     if [ -n "$active_theme" ]; then
         ACTIVE_THEME="$active_theme"
     fi
@@ -101,7 +114,13 @@ apply_defaults() {
     : "${POSTS_DIR:=content/pub.polis.core/post}"
     : "${COMMENTS_DIR:=content/pub.polis.core/comment}"
     : "${SNIPPETS_DIR:=site/snippets}"
-    : "${THEMES_DIR:=site/themes}"
+    # Themes + shape live inside the per-tenant installed bundle. The legacy
+    # site/themes/ default is gone; that path is wiped by Patrol/Medic /
+    # Tailor as part of the bundle refactor.
+    : "${BUNDLE_DIR:=.polis/bundles/pub.polis.core}"
+    : "${THEMES_DIR:=$BUNDLE_DIR/themes}"
+    : "${SHAPE_DIR:=$BUNDLE_DIR/shapes/v3}"
+    : "${REGISTRY:=.polis/bundles/registry.json}"
     : "${VERSIONS_DIR_NAME:=.versions}"
 
     # Mount directories (rendered output — source/output separation)
@@ -113,7 +132,9 @@ apply_defaults() {
     : "${BLESSED_COMMENTS:=content/pub.polis.core/comment/blessed.json}"
     : "${FOLLOWING_INDEX:=content/pub.polis.core/follow/following.json}"
 
-    # Manifest is now .well-known/polis (active_theme, version live there)
+    # .well-known/polis is the public site identity (kept here as MANIFEST for
+    # historical reasons). active_theme moved out of well-known into the
+    # bundle registry (.polis/bundles/registry.json) — see read_active_theme.
     : "${MANIFEST:=.well-known/polis}"
 
     # Notification files (private, in .polis/)
@@ -318,10 +339,10 @@ cmd_init() {
     mkdir -p "$snippets_dir"
     mkdir -p "$themes_dir"
     mkdir -p "$WELL_KNOWN_DIR"
-    mkdir -p ".polis/content/pub.polis.core/posts/drafts"
-    mkdir -p ".polis/content/pub.polis.core/comments/drafts"
-    mkdir -p ".polis/content/pub.polis.core/comments/pending"
-    mkdir -p ".polis/content/pub.polis.core/comments/denied"
+    mkdir -p ".polis/bundles/pub.polis.core/posts/drafts"
+    mkdir -p ".polis/bundles/pub.polis.core/comments/drafts"
+    mkdir -p ".polis/bundles/pub.polis.core/comments/pending"
+    mkdir -p ".polis/bundles/pub.polis.core/comments/denied"
     mkdir -p "content/pub.polis.core/tag"
     mkdir -p ".polis/logs"
 
@@ -417,7 +438,9 @@ EOF
     # Create default about snippet
     if [ ! -f "$snippets_dir/about.md" ]; then
         cat > "$snippets_dir/about.md" << 'ABOUT'
-Welcome to my polis space. This site runs on *polis*—signed markdown on your own domain. No platform, no middleman, just you and your words.
+Hi — I'm just getting set up here. A real about page is coming soon.
+
+This site runs on *polis*: signed markdown on my own domain. No platform, no middleman.
 ABOUT
         files_created+=("$snippets_dir/about.md")
         success_human "Created $snippets_dir/about.md"
@@ -429,9 +452,6 @@ ABOUT
 # Polis internals and secrets
 .polis/
 .env*
-
-# Installed themes (regeneratable via polis init)
-/site/themes/
 
 # Binaries
 /polis
@@ -7155,17 +7175,61 @@ ACTIVE_THEME=""
 # Template storage (associative array)
 declare -A TEMPLATES
 
-# Get list of available themes
+# Get list of available themes. A theme is valid if its directory has a
+# <name>.css file. Templates come from the active SHAPE; per-theme template
+# overrides (the studio13 pattern) are optional.
+# System dirs (_shared, _base) are excluded from the selectable list.
 get_available_themes() {
     local themes=()
     if [ -d "$THEMES_DIR" ]; then
         for theme_path in "$THEMES_DIR"/*; do
-            if [ -d "$theme_path" ] && [ -f "$theme_path/index.html" ]; then
-                themes+=("$(basename "$theme_path")")
+            [ -d "$theme_path" ] || continue
+            local name
+            name=$(basename "$theme_path")
+            case "$name" in
+                _*) continue ;; # system dirs (_shared, _base, ...)
+            esac
+            if [ -f "$theme_path/$name.css" ]; then
+                themes+=("$name")
             fi
         done
     fi
     printf '%s\n' "${themes[@]}"
+}
+
+# Read the bare active theme name from the bundle registry, falling back to
+# .well-known/polis active_theme for pre-bundle-refactor sites.
+read_active_theme() {
+    if [ -f "$REGISTRY" ]; then
+        local fqn
+        fqn=$(jq -r '.active_theme // empty' "$REGISTRY" 2>/dev/null)
+        if [ -n "$fqn" ] && [ "$fqn" != "null" ]; then
+            echo "${fqn#pub.polis.themes.}"
+            return 0
+        fi
+    fi
+    if [ -f "$MANIFEST" ]; then
+        jq -r '.active_theme // empty' "$MANIFEST" 2>/dev/null | grep -v '^null$' || true
+    fi
+}
+
+# Write the active theme name into the registry (FQN-qualified).
+write_active_theme() {
+    local theme_name="$1"
+    local fqn="pub.polis.themes.$theme_name"
+    if [ ! -f "$REGISTRY" ]; then
+        # Bootstrap a minimal registry if missing (init usually creates it).
+        mkdir -p "$(dirname "$REGISTRY")"
+        echo '{"active_theme":"","active_shape":"pub.polis.shapes.v3","installed_bundles":[{"name":"pub.polis.core","path":".polis/bundles/pub.polis.core"}]}' > "$REGISTRY"
+    fi
+    local tmp
+    tmp=$(mktemp)
+    if jq --arg theme "$fqn" '.active_theme = $theme' "$REGISTRY" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$REGISTRY"
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
 }
 
 # Select and save active theme (if not already set)
@@ -7177,18 +7241,15 @@ select_theme() {
         json_error "render" "INVALID_STATE" "No themes found in $THEMES_DIR. Run 'polis init' to install default themes."
     fi
 
-    # Check if active_theme is already set in manifest
-    if [ -f "$MANIFEST" ]; then
-        local saved_theme
-        saved_theme=$(jq -r '.active_theme // empty' "$MANIFEST" 2>/dev/null)
-        if [ -n "$saved_theme" ] && [ "$saved_theme" != "null" ]; then
-            # Verify theme exists
-            if [ -d "$THEMES_DIR/$saved_theme" ]; then
-                ACTIVE_THEME="$saved_theme"
-                return 0
-            else
-                json_error "render" "INVALID_STATE" "Active theme '$saved_theme' not found in $THEMES_DIR"
-            fi
+    # Check if active_theme is already set (registry first, then well-known).
+    local saved_theme
+    saved_theme=$(read_active_theme)
+    if [ -n "$saved_theme" ]; then
+        if [ -d "$THEMES_DIR/$saved_theme" ]; then
+            ACTIVE_THEME="$saved_theme"
+            return 0
+        else
+            json_error "render" "INVALID_STATE" "Active theme '$saved_theme' not found in $THEMES_DIR"
         fi
     fi
 
@@ -7196,33 +7257,23 @@ select_theme() {
     local random_index=$((RANDOM % ${#available_themes[@]}))
     ACTIVE_THEME="${available_themes[$random_index]}"
 
-    # Save to manifest
-    if [ -f "$MANIFEST" ]; then
-        local tmp_manifest
-        tmp_manifest=$(mktemp)
-        if jq --arg theme "$ACTIVE_THEME" '. + {active_theme: $theme}' "$MANIFEST" > "$tmp_manifest" 2>/dev/null; then
-            mv "$tmp_manifest" "$MANIFEST"
-            info_human "Selected theme: $ACTIVE_THEME (saved to manifest)"
-        else
-            rm -f "$tmp_manifest"
-            warn "Failed to save theme to manifest"
-            info_human "Selected theme: $ACTIVE_THEME (not saved)"
-        fi
+    if write_active_theme "$ACTIVE_THEME"; then
+        info_human "Selected theme: $ACTIVE_THEME (saved to registry)"
     else
-        warn "No manifest file found at $MANIFEST"
+        warn "Failed to save theme to $REGISTRY"
         info_human "Selected theme: $ACTIVE_THEME (not saved)"
     fi
 }
 
-# Load theme templates from .polis/themes/<name>/
+# Load theme templates from the installed bundle. Per-template lookup:
+#   1. theme dir   ($THEMES_DIR/<name>/<file>.html)        — optional override
+#   2. shape dir   ($SHAPE_DIR/<file>.html)                — canonical fallback
+# Themes are typically CSS-only; the shape provides templates.
 load_theme() {
     local theme_name="$1"
 
     if [ -z "$theme_name" ]; then
-        # Try to get from manifest
-        if [ -f "$MANIFEST" ]; then
-            theme_name=$(jq -r '.active_theme // empty' "$MANIFEST" 2>/dev/null)
-        fi
+        theme_name=$(read_active_theme)
     fi
 
     if [ -z "$theme_name" ] || [ "$theme_name" = "null" ]; then
@@ -7235,38 +7286,29 @@ load_theme() {
         json_error "render" "INVALID_STATE" "Theme '$theme_name' not found in $THEMES_DIR"
     fi
 
-    # Load required templates
-    if [ -f "$theme_dir/post.html" ]; then
-        TEMPLATES[post]=$(cat "$theme_dir/post.html")
-    else
-        json_error "render" "INVALID_STATE" "Theme '$theme_name' missing post.html"
+    if [ ! -d "$SHAPE_DIR" ]; then
+        json_error "render" "INVALID_STATE" "Active SHAPE not installed at $SHAPE_DIR (run 'polis init')"
     fi
 
-    if [ -f "$theme_dir/comment.html" ]; then
-        TEMPLATES[comment]=$(cat "$theme_dir/comment.html")
-    else
-        json_error "render" "INVALID_STATE" "Theme '$theme_name' missing comment.html"
-    fi
+    # _load_template: load $1 from theme dir if present, else shape dir; required.
+    _load_template() {
+        local fname="$1" key="$2" required="$3"
+        if [ -f "$theme_dir/$fname" ]; then
+            TEMPLATES[$key]=$(cat "$theme_dir/$fname")
+        elif [ -f "$SHAPE_DIR/$fname" ]; then
+            TEMPLATES[$key]=$(cat "$SHAPE_DIR/$fname")
+        elif [ "$required" = "yes" ]; then
+            json_error "render" "INVALID_STATE" "Required template $fname not found in theme '$theme_name' or shape"
+        else
+            TEMPLATES[$key]=""
+        fi
+    }
 
-    if [ -f "$theme_dir/comment-inline.html" ]; then
-        TEMPLATES[comment_inline]=$(cat "$theme_dir/comment-inline.html")
-    else
-        # Fall back to blessed-comment snippet if comment-inline doesn't exist
-        TEMPLATES[comment_inline]=""
-    fi
-
-    if [ -f "$theme_dir/index.html" ]; then
-        TEMPLATES[index]=$(cat "$theme_dir/index.html")
-    else
-        json_error "render" "INVALID_STATE" "Theme '$theme_name' missing index.html"
-    fi
-
-    # Load optional archive template
-    if [ -f "$theme_dir/posts.html" ]; then
-        TEMPLATES[archive]=$(cat "$theme_dir/posts.html")
-    else
-        TEMPLATES[archive]=""
-    fi
+    _load_template post.html post yes
+    _load_template comment.html comment yes
+    _load_template comment-inline.html comment_inline no
+    _load_template index.html index yes
+    _load_template posts.html archive no
 
     ACTIVE_THEME="$theme_name"
 

@@ -96,12 +96,6 @@ func convertPolicies(rp []remote.Policy) []policy.Policy {
 	return pp
 }
 
-// CheckDMEligibility checks whether recipientDomain accepts DMs from myDomain.
-// Uses https://<recipientDomain> as the base URL.
-func CheckDMEligibility(client *remote.Client, recipientDomain, myDomain string) Result {
-	return CheckDMEligibilityURL(client, "https://"+recipientDomain, myDomain)
-}
-
 // CheckDMEligibilityURL checks whether the site at baseURL accepts DMs from myDomain.
 //
 // Two-phase evaluation:

@@ -76,6 +76,52 @@ func TestGetBlessedCommentsForPost_SourceContentPath(t *testing.T) {
 	}
 }
 
+func TestAddBlessedComment_EmptyVersionNotDeduplicated(t *testing.T) {
+	siteDir := t.TempDir()
+
+	// Add first comment with empty version (as happens via sync)
+	AddBlessedComment(siteDir, "posts/20260323/hello.md", BlessedComment{
+		URL: "https://alice.polis.pub/comments/20260323/re-hello-20260323.md",
+	})
+
+	// Add second comment for same post, also with empty version
+	AddBlessedComment(siteDir, "posts/20260323/hello.md", BlessedComment{
+		URL: "https://alice.polis.pub/comments/20260415/re-hello-20260415.md",
+	})
+
+	comments, err := GetBlessedCommentsForPost(siteDir, "posts/20260323/hello.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 2 {
+		t.Fatalf("expected 2 comments (empty version should not deduplicate), got %d", len(comments))
+	}
+}
+
+func TestAddBlessedComment_NonEmptyVersionDeduplicated(t *testing.T) {
+	siteDir := t.TempDir()
+
+	// Add comment with a specific version
+	AddBlessedComment(siteDir, "posts/20260323/hello.md", BlessedComment{
+		URL:     "https://alice.polis.pub/comments/20260323/re-hello.md",
+		Version: "sha256:abc123",
+	})
+
+	// Add same version with different URL — should be deduplicated
+	AddBlessedComment(siteDir, "posts/20260323/hello.md", BlessedComment{
+		URL:     "https://alice.polis.pub/comments/20260323/re-hello-v2.md",
+		Version: "sha256:abc123",
+	})
+
+	comments, err := GetBlessedCommentsForPost(siteDir, "posts/20260323/hello.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment (same version should deduplicate), got %d", len(comments))
+	}
+}
+
 func TestMatchesPostPath(t *testing.T) {
 	tests := []struct {
 		stored, query string

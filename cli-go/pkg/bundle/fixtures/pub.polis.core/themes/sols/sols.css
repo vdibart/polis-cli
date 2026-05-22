@@ -1,0 +1,289 @@
+/* vdibart.polis.pub */
+/* Sols theme - inspired by Nine Sols */
+
+:root {
+    /* Deep violet foundation (shadowy purples) */
+    --color-bg: #1a1525;
+    --color-bg-light: #251e30;
+    --color-surface: #302840;
+    --color-panel: #3a3050;
+
+    /* Warm peach/orange (sunset tones) */
+    --color-peach: #e8a060;
+    --color-peach-soft: #f0b880;
+    --color-peach-dim: #c08050;
+
+    /* Soft pink (cherry blossoms) */
+    --color-pink: #d4829a;
+    --color-pink-soft: #e8a0b8;
+    --color-pink-dim: #a06078;
+
+    /* Polis Cyan - consistent branding */
+    --color-cyan: #00d4ff;
+    --color-cyan-glow: rgba(0, 212, 255, 0.3);
+
+    /* Teal accent (butterfly) */
+    --color-teal: #5fbfaf;
+    --color-teal-soft: #80d4c8;
+
+    /* Text - warm creams */
+    --color-text: #f0e8dc;
+    --color-text-soft: #d4c8b8;
+    --color-text-muted: #a09080;
+
+    /* Accent colors */
+    --color-sage: #8a9a6a;
+    --color-cream: #e8dcc8;
+
+    /* Borders */
+    --color-border: rgba(212, 130, 154, 0.4);
+    --color-border-light: rgba(212, 130, 154, 0.55);
+
+    /* Accent tokens consumed by the v4 stream chrome (focus-entry
+       timeline-dot, filter-slot underline-hover, sf-option active,
+       comment-author link, focused-comment ring). Sols's pink IS
+       the source of the v4 stream.css fallback (#d8a060 was a
+       sols-flavored peach default before this token was generalized);
+       formalize the mapping so the accent doesn't drift if
+       stream.css's fallback is later changed. */
+    --color-accent: var(--color-pink);
+    --color-accent-soft: var(--color-pink-soft);
+    --color-accent-bg: rgba(212, 130, 154, 0.08);
+
+    /* Timeline tokens — explicit overrides because --color-accent-soft is
+       set to a solid pink (#e8a0b8) above, and stream.css's default
+       cascade prefers --color-accent-soft over the alpha-mixed fallback.
+       The solid pink reads as a heavy, saturated bar against the deep-
+       violet bg — visually thicker and darker than the muted bar that
+       the alpha-mixed fallback produces on other themes. Re-derive the
+       bar/dot at the same ratios stream.css uses (30% bar / 50% dot) so
+       the timeline reads consistent with the rest of the catalog.
+       2026-05-18 user feedback. */
+    --color-timeline-bar: color-mix(in srgb, var(--color-pink) 25%, transparent);
+    --color-timeline-dot: color-mix(in srgb, var(--color-pink) 50%, transparent);
+
+    /* Typography */
+    --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+    --font-display: 'Orbitron', var(--font-mono);
+
+    /* Layout */
+    --max-width: 900px;
+}
+
+/* Focus states for accessibility */
+a:focus-visible,
+button:focus-visible,
+[tabindex]:focus-visible {
+    outline: 2px solid var(--color-cyan);
+    outline-offset: 2px;
+}
+
+.theme-link:hover {
+    color: var(--color-cyan);
+}
+
+.theme-link.active {
+    color: var(--color-cyan);
+}
+
+.nav-home {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--color-cyan);
+    text-decoration: none;
+    transition: color 0.2s ease;
+}
+
+.nav-home:hover {
+    color: var(--color-peach);
+}
+
+.post-meta .meta-value {
+    color: var(--color-teal);
+}
+
+.hero-title {
+    font-family: var(--font-mono);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--color-peach);
+    margin: 0 0 0.25rem 0;
+}
+
+.site-bio em {
+    color: var(--color-peach-soft);
+    font-style: normal;
+}
+
+.site-bio a {
+    color: var(--color-teal);
+    text-decoration: none;
+}
+
+.section-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-peach);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.75rem;
+}
+
+.post-item:hover {
+    border-color: var(--color-pink);
+}
+
+.post-date {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+}
+
+.post-item:hover .post-title {
+    color: var(--color-pink-soft);
+}
+
+.post-item:hover .post-comments {
+    color: var(--color-pink-soft);
+}
+
+.comment-item:hover {
+    border-color: var(--color-pink);
+}
+
+.comment-item .comment-author {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-sage);
+}
+
+.links-box {
+    display: flex;
+    align-items: center;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-left: 3px solid var(--color-pink);
+}
+
+.link-item:hover .link-icon {
+    color: var(--color-teal);
+}
+
+.link-item:hover .link-label {
+    color: var(--color-teal);
+}
+
+.comment {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-left: 3px solid var(--color-pink);
+    padding: 1rem 1.25rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.comment-author {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--color-sage);
+    text-decoration: none;
+}
+
+.comment-body a {
+    color: var(--color-teal);
+    text-decoration: none;
+}
+
+.content-body h1,
+.content-body h2,
+.content-body h3 {
+    color: var(--color-peach);
+    margin: 1.5rem 0 0.75rem 0;
+}
+
+.content-body strong,
+.content-body b {
+    color: var(--color-peach-dim);
+    font-weight: 600;
+}
+
+.content-body a {
+    color: var(--color-teal);
+    text-decoration: none;
+}
+
+.content-body blockquote {
+    border-left: 3px solid var(--color-pink);
+    margin: 1rem 0;
+    padding-left: 1rem;
+    color: var(--color-text-muted);
+}
+
+.cta-inline summary.cta-link {
+    display: inline;
+    font-size: 0.8rem;
+    color: var(--color-teal);
+    cursor: pointer;
+    list-style: none;
+    text-decoration: none;
+}
+
+.cta-code pre {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    padding: 1rem;
+    overflow-x: auto;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    margin: 0;
+}
+
+.cta-link {
+    font-size: 0.8rem;
+    color: var(--color-teal);
+    text-decoration: none;
+}
+
+.post-footer-nav .section-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--color-peach);
+    margin: 0 0 1rem 0;
+}
+
+.context-link {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--color-teal);
+    text-decoration: none;
+    word-break: break-word;
+    line-height: 1.3;
+}
+
+.context-link:hover, .context-readmore:hover {
+    text-decoration: underline;
+}
+.context-readmore { color: var(--color-teal); }
+
+.view-all:hover {
+    color: var(--color-pink-soft);
+}
+
+/* ── Site header & post list (v3 mockup design) ────────────── */
+.site-avatar-link, .site-identity-text { text-decoration: none; color: inherit; }
+body { font-family: 'Inter', system-ui, sans-serif; }
+.site-name { color: var(--color-text); font-family: 'Newsreader', Georgia, serif; }
+.site-handle { color: var(--color-text-muted); font-family: var(--font-mono); }
+.site-bio { color: var(--color-text-soft); font-family: 'Newsreader', Georgia, serif; }
+.site-stats { color: var(--color-text-muted); border-color: var(--color-border); }
+.site-stats strong { color: var(--color-text); }
+.site-avatar { background: linear-gradient(135deg, var(--color-peach-dim), var(--color-peach)); color: #fff; font-family: 'Newsreader', Georgia, serif; font-style: italic; }
+.sp-date { color: var(--color-text-muted); }
+.sp-title { color: var(--color-text); font-family: 'Newsreader', Georgia, serif; }
+.sp-excerpt { color: var(--color-text-soft); font-family: 'Newsreader', Georgia, serif; }
+.sp-comments { color: var(--color-text-muted); }
+.site-post:hover { background: rgba(232, 160, 96, 0.05); }
+.view-all { color: var(--color-peach); }
+.view-all:hover { color: var(--color-peach-soft); }
+.footer-logo { color: var(--color-text-muted); font-family: 'Newsreader', Georgia, serif; font-style: italic; }
+.footer-tagline { color: var(--color-text-muted); }

@@ -8,6 +8,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
@@ -66,12 +67,16 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 		if baseURL == "" {
 			missing = append(missing, "POLIS_BASE_URL")
 		}
-		fmt.Printf("[i] Discovery registration skipped: %s not set\n", strings.Join(missing, ", "))
+		stream.LogSuppressedEmit("pub.polis.post.published", "config_missing",
+			polisurl.ExtractDomain(baseURL),
+			map[string]interface{}{"missing": strings.Join(missing, ",")})
 		return nil
 	}
 
 	if !discovery.IsRegisteredLocally(dataDir, dsURL) {
-		fmt.Println("[i] DS registration skipped: site not registered with discovery service")
+		stream.LogSuppressedEmit("pub.polis.post.published", "not_registered_locally",
+			polisurl.ExtractDomain(baseURL),
+			map[string]interface{}{"ds_url": dsURL})
 		return nil
 	}
 

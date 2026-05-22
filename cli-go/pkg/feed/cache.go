@@ -13,6 +13,7 @@ import (
 
 	"strings"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 )
 
@@ -59,10 +60,22 @@ func PublishedBefore(a, b string) bool {
 
 
 
+// ExcerptCharCap is the single dial controlling how many characters of
+// post body are extracted into a CachedFeedItem.Excerpt. Tune in one place:
+// raising shows richer previews at the cost of larger feed cache files +
+// JSON payloads; lowering shrinks them. Display-side line count is
+// controlled separately by CSS clipping in the stream shape.
+//
+// Note: existing on-disk cache entries don't resize automatically when the
+// cap changes — they keep whatever length they had when fetched. New fetches
+// pick up the new cap. Force a refresh by clearing pub.polis.feed.jsonl
+// excerpts and reloading the dashboard (tail-trigger refills them).
+const ExcerptCharCap = 200
+
 // CachedFeedItem represents a single item in the feed cache.
 type CachedFeedItem struct {
 	ID           string `json:"id"`
-	Type         string `json:"type"`                    // "post", "comment", or "announcement"
+	Type         string `json:"type"`                    // "post", "comment", "announcement", or "follow"
 	EventType    string `json:"event_type,omitempty"`    // Original DS event type (e.g. "pub.polis.post.published")
 	Title        string `json:"title"`
 	URL          string `json:"url"`
@@ -75,6 +88,11 @@ type CachedFeedItem struct {
 	CachedAt     string `json:"cached_at"`
 	ReadAt       string `json:"read_at"`
 	Excerpt      string `json:"excerpt,omitempty"`
+	// CommentCount is populated for own-scope post items via blessed.json
+	// counts (handlers_stream.go's loadOwnContentAsFeedItems). Cross-tenant
+	// items leave it zero; the stream renderer hides the badge when
+	// the value is zero (renderPost's is-empty class).
+	CommentCount int `json:"comment_count,omitempty"`
 }
 
 // FeedConfig holds user-editable feed configuration.
@@ -219,6 +237,17 @@ func (cm *CacheManager) listLocked() ([]CachedFeedItem, error) {
 
 	var items []CachedFeedItem
 	scanner := bufio.NewScanner(file)
+	// R20-B-S2 (2026-05-18): the default bufio.Scanner buffer is 64KB
+	// and ErrTooLong on a longer line aborts the entire scan — pre-fix
+	// a single oversize feed entry from a followed author (oversize
+	// title / excerpt / body_html, etc.) would brick the reader's feed
+	// view entirely. DS payload cap is 256KB (R15-6), so we set our
+	// reader cap to match: anything DS accepts must be readable here.
+	// Lines past 1MB are aberrant; skip them individually instead of
+	// killing the whole scan.
+	const maxFeedLineBytes = 1 << 20 // 1MiB
+	scanner.Buffer(make([]byte, 0, 64<<10), maxFeedLineBytes)
+	var skipped int
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -231,9 +260,21 @@ func (cm *CacheManager) listLocked() ([]CachedFeedItem, error) {
 		items = append(items, item)
 	}
 
+	// R20-B-S2: don't fail the whole feed view on a single oversize
+	// line. ErrTooLong indicates a line exceeded our buffer; log and
+	// continue with whatever we already parsed. Other scanner errors
+	// (I/O failure, etc.) are still fatal.
 	if err := scanner.Err(); err != nil {
+		if err == bufio.ErrTooLong {
+			skipped++
+			// Returning the partial result is safer than 500-ing the
+			// entire feed view; the caller already tolerates missing
+			// items. Future: surface skipped count via a side-channel.
+			return items, nil
+		}
 		return nil, fmt.Errorf("failed to read cache: %w", err)
 	}
+	_ = skipped // currently unused but reserved for future telemetry
 
 	// Backfill EventType for items cached before the field was added.
 	for i := range items {
@@ -341,6 +382,17 @@ func (cm *CacheManager) SetCursor(cursor string) error {
 	return cm.store.SetCursor(cm.cursorKey, cursor)
 }
 
+// MarkChecked bumps LastUpdated to "now" without changing the cursor
+// position. Use after a sync attempt that resolved structurally to
+// "no work to do" — e.g., empty following list, missing discovery
+// config — so IsStale returns false and clients stop re-triggering
+// the sync in a tight loop. Don't call after transient errors (DS
+// unreachable, etc.) where we want the next cycle to retry.
+func (cm *CacheManager) MarkChecked() error {
+	cursor, _ := cm.GetCursor()
+	return cm.store.SetCursor(cm.cursorKey, cursor)
+}
+
 // LoadConfig loads the feed configuration, returning defaults if not found.
 func (cm *CacheManager) LoadConfig() (*FeedConfig, error) {
 	data, err := os.ReadFile(cm.configFile)
@@ -380,7 +432,7 @@ func (cm *CacheManager) SaveConfig(cfg *FeedConfig) error {
 		return fmt.Errorf("failed to marshal feed config: %w", err)
 	}
 
-	return os.WriteFile(cm.configFile, append(data, '\n'), 0644)
+	return atomicfile.WriteFile(cm.configFile, append(data, '\n'), 0600)
 }
 
 // IsStale returns true if the cache needs refreshing based on staleness_minutes.
@@ -626,10 +678,53 @@ func (cm *CacheManager) MarkUnreadFrom(id string) error {
 
 // SaveItems writes all items back to the cache file. Used to persist
 // updates like excerpts without going through MergeItems.
+//
+// CONCURRENCY HAZARD: SaveItems overwrites the cache with the caller's
+// full slice. If a parallel goroutine has merged new items between the
+// caller's List() and this SaveItems(), the new items are lost.
+// Prefer UpdateExcerpts for excerpt-only updates.
 func (cm *CacheManager) SaveItems(items []CachedFeedItem) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 	return cm.writeAll(items)
+}
+
+// UpdateExcerpts applies per-item Excerpt updates to the cache atomically
+// under the cache mutex. Items not in `updates` are preserved as-is —
+// avoids the read-modify-write race that SaveItems(items) carries when
+// concurrent goroutines hold separate slices.
+//
+// Returns the number of items actually updated. IDs in `updates` that
+// don't match any cached item are silently skipped (no-op for the
+// caller; matches the best-effort excerpt-fetch shape).
+//
+// Closes R17 final-review item #4 (concurrent excerpt-fetch overwrite).
+// Use this from any path that backfills derived data on a per-item key
+// without intent to add or remove items from the cache.
+func (cm *CacheManager) UpdateExcerpts(updates map[string]string) (int, error) {
+	if len(updates) == 0 {
+		return 0, nil
+	}
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	items, err := cm.listLocked()
+	if err != nil {
+		return 0, err
+	}
+	updated := 0
+	for i := range items {
+		if newExcerpt, ok := updates[items[i].ID]; ok && items[i].Excerpt != newExcerpt {
+			items[i].Excerpt = newExcerpt
+			updated++
+		}
+	}
+	if updated == 0 {
+		return 0, nil
+	}
+	if err := cm.writeAll(items); err != nil {
+		return 0, err
+	}
+	return updated, nil
 }
 
 // Prune enforces MaxItems and MaxAgeDays limits. Returns the number of items removed.

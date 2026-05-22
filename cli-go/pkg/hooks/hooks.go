@@ -173,16 +173,9 @@ func GenerateCommitMessage(event HookEvent, title string) string {
 	}
 }
 
-// GetHookPath returns the hook path for a given event.
-// Checks explicit config first, then falls back to the conventional
-// location .polis/hooks/{event}.sh if siteDir is provided.
-// Returns empty string if no hook is found.
-func GetHookPath(config *HookConfig, event HookEvent) string {
-	return GetHookPathWithDiscovery(config, event, "")
-}
-
 // GetHookPathWithDiscovery returns the hook path for a given event,
-// checking explicit config first, then auto-discovering from siteDir.
+// checking explicit config first, then auto-discovering from
+// .polis/hooks/{event}.sh under siteDir. Returns empty string if none.
 func GetHookPathWithDiscovery(config *HookConfig, event HookEvent, siteDir string) string {
 	var hookPath string
 	if config != nil {

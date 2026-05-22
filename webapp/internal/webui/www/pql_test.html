@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<!--
+    pql_test.html — standalone in-browser test runner for pql.js.
+
+    Open `/pql_test.html` in a browser running the SPA (any local
+    polis-server instance will serve this file from the embedded
+    webFS) to verify the parser. No test framework — inline
+    assertions, pass/fail rendered to the page.
+
+    Used for chunk B verification + as a regression catch when the
+    PQL vocabulary changes.
+-->
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>PQL parser tests</title>
+    <script src="/pql.js"></script>
+    <style>
+        body { font-family: sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; }
+        h1 { font-size: 18px; }
+        .pass { color: #2a7; }
+        .fail { color: #c33; }
+        ol { padding-left: 24px; }
+        li { margin: 4px 0; font-family: monospace; font-size: 13px; line-height: 1.5; }
+        .summary { margin-top: 24px; padding: 12px; background: #eef; border-radius: 4px; }
+    </style>
+</head>
+<body>
+<h1>PQL parser tests</h1>
+<ol id="out"></ol>
+<div id="summary" class="summary"></div>
+
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var summary = document.getElementById('summary');
+var passed = 0, failed = 0;
+
+function assert(label, actual, expected) {
+    var match = JSON.stringify(actual) === JSON.stringify(expected);
+    var li = document.createElement('li');
+    li.className = match ? 'pass' : 'fail';
+    li.textContent = (match ? '✓ ' : '✗ ') + label;
+    if (!match) {
+        li.textContent += '\n      got:  ' + JSON.stringify(actual)
+                        + '\n      want: ' + JSON.stringify(expected);
+    }
+    out.appendChild(li);
+    match ? passed++ : failed++;
+}
+
+// ── parse: well-formed sentences round-trip cleanly ──────────────
+
+assert('parse "all activity from my network"',
+    PQL.parse('all activity from my network'),
+    { qualifier: 'all', type: 'activity', scope: 'my-network', modifier: null });
+
+assert('parse "all posts from me by date"',
+    PQL.parse('all posts from me by date'),
+    { qualifier: 'all', type: 'posts', scope: 'me', modifier: 'by-date' });
+
+assert('parse "all comments from all polis to bless"',
+    PQL.parse('all comments from all polis to bless'),
+    { qualifier: 'all', type: 'comments', scope: 'all-polis', modifier: 'to-bless' });
+
+assert('parse "all profiles from my network by name"',
+    PQL.parse('all profiles from my network by name'),
+    { qualifier: 'all', type: 'profiles', scope: 'my-network', modifier: 'by-name' });
+
+assert('parse "all messages from my mutuals by date" (type messages → dms internally)',
+    PQL.parse('all messages from my mutuals by date'),
+    { qualifier: 'all', type: 'dms', scope: 'my-mutuals', modifier: 'by-date' });
+
+assert('parse "all messages from alice.polis.pub by date" (handle scope → @<handle>)',
+    PQL.parse('all messages from alice.polis.pub by date'),
+    { qualifier: 'all', type: 'dms', scope: '@alice.polis.pub', modifier: 'by-date' });
+
+assert('parse "all drafts from me by name"',
+    PQL.parse('all drafts from me by name'),
+    { qualifier: 'all', type: 'drafts', scope: 'me', modifier: 'by-name' });
+
+assert('parse "all posts from me with comments"',
+    PQL.parse('all posts from me with comments'),
+    { qualifier: 'all', type: 'posts', scope: 'me', modifier: 'with-comments' });
+
+assert('parse case-insensitive: "ALL ACTIVITY FROM MY NETWORK"',
+    PQL.parse('ALL ACTIVITY FROM MY NETWORK'),
+    { qualifier: 'all', type: 'activity', scope: 'my-network', modifier: null });
+
+// ── parse: malformed input → null ────────────────────────────────
+
+assert('parse "" → null', PQL.parse(''), null);
+assert('parse null → null', PQL.parse(null), null);
+assert('parse undefined → null', PQL.parse(undefined), null);
+assert('parse "foo bar baz qux" → null (unknown qualifier)',
+    PQL.parse('foo bar baz qux'), null);
+assert('parse "all posts from baz" → null (unknown scope)',
+    PQL.parse('all posts from baz'), null);
+assert('parse "all foo from me" → null (unknown type)',
+    PQL.parse('all foo from me'), null);
+assert('parse "all posts me by date" → null (missing "from")',
+    PQL.parse('all posts me by date'), null);
+assert('parse "all posts from me by something" → null (unknown sort key)',
+    PQL.parse('all posts from me by something'), null);
+assert('parse "all posts from me by date extra" → null (trailing token)',
+    PQL.parse('all posts from me by date extra'), null);
+
+// ── Removed-but-once-supported tokens fall back ──────────────────
+
+assert('parse "all follows from me by name" → null (follows type removed by 06-profiles)',
+    PQL.parse('all follows from me by name'), null);
+
+// ── compose: round-trip property ─────────────────────────────────
+
+var roundtripCases = [
+    'all activity from my network',
+    'all posts from me by date',
+    'all comments from all polis to bless',
+    'all profiles from my network by name',
+    'all messages from my mutuals by date',
+    'all messages from alice.polis.pub by date',
+    'all drafts from me by name',
+    'all posts from me with comments',
+];
+roundtripCases.forEach(function (s) {
+    assert('round-trip: "' + s + '"', PQL.compose(PQL.parse(s)), s);
+});
+
+// ── parseURL: full path → state ──────────────────────────────────
+
+assert('parseURL /_/pql/all+activity+from+my+network',
+    PQL.parseURL({ pathname: '/_/pql/all+activity+from+my+network' }),
+    { pqlState: { qualifier: 'all', type: 'activity', scope: 'my-network', modifier: null } });
+
+assert('parseURL /_/pql/all+messages+from+alice.polis.pub+by+date',
+    PQL.parseURL({ pathname: '/_/pql/all+messages+from+alice.polis.pub+by+date' }),
+    { pqlState: { qualifier: 'all', type: 'dms', scope: '@alice.polis.pub', modifier: 'by-date' } });
+
+assert('parseURL /_/ (not a PQL path) → null',
+    PQL.parseURL({ pathname: '/_/' }),
+    { pqlState: null });
+
+assert('parseURL /_/settings (not a PQL path) → null',
+    PQL.parseURL({ pathname: '/_/settings' }),
+    { pqlState: null });
+
+assert('parseURL with %-encoded space ("%20")',
+    PQL.parseURL({ pathname: '/_/pql/all%20activity%20from%20my%20network' }),
+    { pqlState: { qualifier: 'all', type: 'activity', scope: 'my-network', modifier: null } });
+
+assert('parseURL with trailing slash',
+    PQL.parseURL({ pathname: '/_/pql/all+activity+from+my+network/' }),
+    { pqlState: { qualifier: 'all', type: 'activity', scope: 'my-network', modifier: null } });
+
+// ── composeURL: state → full path ────────────────────────────────
+
+assert('composeURL { activity, my-network }',
+    PQL.composeURL({ qualifier: 'all', type: 'activity', scope: 'my-network', modifier: null }, '/_'),
+    '/_/pql/all+activity+from+my+network');
+
+assert('composeURL { dms, @alice.polis.pub, by-date }',
+    PQL.composeURL({ qualifier: 'all', type: 'dms', scope: '@alice.polis.pub', modifier: 'by-date' }, '/_'),
+    '/_/pql/all+messages+from+alice.polis.pub+by+date');
+
+assert('composeURL invalid state → bare basePath',
+    PQL.composeURL(null, '/_'),
+    '/_/');
+
+assert('composeURL unknown type → bare basePath',
+    PQL.composeURL({ qualifier: 'all', type: 'follows', scope: 'me', modifier: 'by-name' }, '/_'),
+    '/_/');
+
+// ── Summary ──────────────────────────────────────────────────────
+
+summary.textContent = passed + ' passed, ' + failed + ' failed';
+summary.style.background = failed === 0 ? '#cfc' : '#fcc';
+</script>
+</body>
+</html>

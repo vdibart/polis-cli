@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en"{{theme_attr}}>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -10,29 +10,83 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/style.css">
     <link rel="stylesheet" href="/nav-themes.css">
-    <script>
-    // Apply cached themes before first paint to prevent FOUC
-    try {
-        var t = localStorage.getItem('polis-webapp-theme');
-        if (t) document.documentElement.dataset.theme = t;
-        var st = localStorage.getItem('polis-site-theme');
-        if (st) document.documentElement.dataset.siteTheme = st;
-    } catch(e) {}
-    </script>
-    <script type="importmap">
+    <!-- v4 stream shape CSS (step-06/6.a). Served from cli-go/pkg/bundle/fixtures
+         via /bundle-assets/ route so SPA stays in lockstep with the public
+         shape's structural rules (.layout, .stream, .entry, etc.). -->
+    <link rel="stylesheet" href="/bundle-assets/pub.polis.core/shapes/v4/stream.css">
+    <!-- R18-21: FOUC theme-bootstrap moved to external /theme-boot.js so
+         the admin SPA can ship a strict CSP without 'unsafe-inline' on
+         inline scripts. Loaded WITHOUT defer/async so it executes before
+         any subsequent rendering. See webui/www/theme-boot.js. -->
+    <script src="/theme-boot.js"></script>
+    <!-- Importmap with ?bundle on every esm.sh URL — collapses the
+         transitive ProseMirror dependency tree (~40-80 separate module
+         fetches) into ~5 bundled requests. Without ?bundle each tiny
+         dep (prosemirror-model, prosemirror-state, w3c-keyname, etc.)
+         is its own file.
+
+         Combined with the lazy dynamic-import path in App._initMilkdown
+         (no static <script type="module"> tag), Milkdown only loads
+         when the user actually opens an editor — read-only sessions
+         pay zero requests for it. -->
+    <!-- Importmap intentionally uses esm.sh's DEFAULT mode (no ?bundle)
+         for every Milkdown submodule. ?bundle inlines each module's
+         transitive deps, which means each submodule's bundle ends up
+         with its own private @milkdown/core (and @milkdown/ctx,
+         @milkdown/exception, @milkdown/transformer) — 5 separate
+         instances of the context system. commonmark.use() then
+         registers the "nodes" schema on one instance, Editor.create()
+         looks it up on another, and you get "MilkdownError: Context
+         'nodes' not found, do you forget to inject it?".
+         The external= param doesn't help here: it operates on the
+         bundle's internal import paths, but @milkdown/kit/* subpath
+         re-exports rewrite to canonical @milkdown/core paths inside
+         the bundle, so external=@milkdown/kit/core doesn't match.
+         Without ?bundle, esm.sh returns each submodule with absolute
+         URL imports for its deps. The browser HTTP-caches identical
+         URLs, so all submodules end up sharing one cached
+         @milkdown/core module instance. The trade-off is ~40 small
+         requests on first editor open (vs 5 with bundle) — acceptable
+         since the editor is lazy-loaded and after first load
+         everything is cached. -->
+    <!-- R18-21: nonce attribute is injected per-response by the SPA handler
+         so the strict admin-SPA CSP can permit this importmap without
+         'unsafe-inline'. The nonce-placeholder below is replaced with a
+         fresh random per-response value; if the handler doesn't inject
+         (e.g., a future code path), the literal placeholder is harmless
+         (browser ignores unknown nonce values, importmap still parses). -->
+    <script type="importmap" nonce="{{csp_nonce}}">
     {
         "imports": {
             "@milkdown/kit/core": "https://esm.sh/@milkdown/kit@7/core",
             "@milkdown/kit/preset/commonmark": "https://esm.sh/@milkdown/kit@7/preset/commonmark",
             "@milkdown/kit/utils": "https://esm.sh/@milkdown/kit@7/utils",
-            "@milkdown/plugin-listener": "https://esm.sh/@milkdown/plugin-listener@7?external=@milkdown/kit",
+            "@milkdown/plugin-listener": "https://esm.sh/@milkdown/plugin-listener@7",
             "@milkdown/kit/plugin/history": "https://esm.sh/@milkdown/kit@7/plugin/history"
         }
     }
     </script>
-    <script type="module" src="/milkdown-editor.js"></script>
+    <!-- v4 stream controller (step-06/6.a). Loaded from bundle fixtures so
+         the SPA hydrates with the canonical controller code. The owner SPA
+         signals its intent to be hydrated via body[data-polis-stream-direction]
+         (set below). owner-extras.js (6.d) layers on top via the registries
+         (afterRender, registerRenderer) exposed on window.PolisStream. -->
+    <script src="/bundle-assets/pub.polis.core/shapes/v4/stream.js" defer></script>
+    <!-- PQL parser (chunk B). Sentence-filter ↔ URL binding. Owns the
+         /_/pql/<sentence> URL form. owner-extras subscribes to
+         PolisStream.onFilterChange to keep the URL in sync; app.js
+         routes /_/pql/<sentence> paths through PQL.parseURL on init +
+         popstate. Loaded before owner-extras so the parser is available
+         when the URL-push wiring sets up. -->
+    <script src="/pql.js" defer></script>
+    <!-- owner-extras (step-06/6.d). Loaded ONLY by the SPA — public per-post
+         artifacts never reference this file. Skeleton + readiness check
+         today; subsequent step-6 sub-steps (6.e icon presets, 6.f.2
+         activity render mode, 6.h inline editor, 6.i afterRender
+         decorators, 6.j canonical comment-WRITE CTA) compose against it. -->
+    <script src="/owner-extras.js" defer></script>
 </head>
-<body>
+<body data-polis-stream-direction="newest-top">
     <div id="app">
         <!-- Toast Container -->
         <div id="toast-container" class="toast-container"></div>
@@ -158,11 +212,33 @@
             </div>
         </div>
 
-        <!-- Icon Nav Bar (global, shared across screens) -->
-        <nav class="icon-nav" id="icon-nav">
+        <!-- Icon Nav Bar (global, shared across screens).
+             step-06/6.a: nav restructured for v4 owner-stream grammar.
+             Order: avatar | gateway | paragraph | comment | people | envelope | separator | edit.
+             Click handlers stay on legacy navigateTo for now; 6.e rewires
+             them to load filter presets via owner-extras.js.
+             Wordmark removed (v4 SPA logged-in nav has no wordmark).
+             Editor controls retained — they show only when editor is active.
+             step-06/6.c: also tagged .polis-topbar so v4 stream.css's
+             topbar rules apply (filter slot calc-positioning, pinned-dot,
+             height). The filter widget lives inside as a child
+             .polis-topbar-filter element. -->
+        <nav class="icon-nav polis-topbar" id="icon-nav">
+            <!-- Mobile hamburger — hidden on desktop. owner-extras
+                 wires the click handler + populates the drawer header
+                 from /api/status. -->
+            <button class="nav-hamburger" id="nav-hamburger" type="button"
+                    aria-label="Menu" aria-expanded="false">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                    <line x1="4" y1="7" x2="20" y2="7"/>
+                    <line x1="4" y1="12" x2="20" y2="12"/>
+                    <line x1="4" y1="17" x2="20" y2="17"/>
+                </svg>
+            </button>
+
             <!-- Avatar + hover menu -->
             <div class="avatar-wrap">
-                <button id="nav-avatar" class="nav-icon-btn avatar-btn" onclick="App.navigateTo('/feed')"></button>
+                <button id="nav-avatar" class="nav-icon-btn avatar-btn" onclick="App.navigateTo('/')"></button>
                 <div class="avatar-menu" id="avatar-menu">
                     <div class="avatar-menu-header">
                         <div class="avatar-menu-name" id="avatar-menu-name"></div>
@@ -176,157 +252,227 @@
 
             <div class="nav-sep"></div>
 
-            <!-- Nav icons — SYNC: icons must match in all 3 locations:
-                 1. HERE (index.html) — localhost SPA
-                 2. webapp/internal/hosted/nav_inject.go — hosted server-rendered nav
-                 3. webapp/internal/hosted/nav/nav.js ICONS object — hosted client-side widget -->
-            <button id="nav-btn-feed" class="nav-icon-btn" onclick="App.navigateTo('/feed')" data-tip="Feed"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><path d="M2.75 21C2.75-4.93 21.25-4.93 21.25 21"/><circle class="fo" cx="2.75" cy="21" r="2.3"/><circle class="ff" cx="21.25" cy="21" r="2.3"/></svg><span class="nav-dot hidden" id="nav-dot-feed"></span></button>
-            <button id="nav-btn-compose" class="nav-icon-btn" onclick="App.navigateTo('/posts/new')" data-tip="Write"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
-            <button id="nav-btn-posts" class="nav-icon-btn" onclick="App.navigateTo('/posts')" data-tip="Posts"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="14" y2="17"/></svg></button>
-            <button id="nav-btn-comments" class="nav-icon-btn" onclick="App.navigateTo('/blessings')" data-tip="Comments"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><path d="M21 12c0 4.4-4 8-9 8a9.9 9.9 0 0 1-3.8-.7L3 21l1.5-4A7.4 7.4 0 0 1 3 12c0-4.4 4-8 9-8s9 3.6 9 8Z"/></svg><span class="nav-dot hidden" id="nav-dot-comments"></span></button>
-            <button id="nav-btn-people" class="nav-icon-btn" onclick="App.navigateTo('/following')" data-tip="People"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><circle cx="9" cy="7.5" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="8.5" r="2.2"/><path d="M17 14c2.2 0 4 1.8 4 4"/></svg></button>
-            <button id="nav-btn-messages" class="nav-icon-btn" onclick="App.navigateTo('/messages')" data-tip="Messages"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.92 7.94"/></svg><span class="nav-dot hidden" id="nav-dot-messages"></span></button>
+            <!-- v4 owner-stream icon row: gateway | paragraph | comment | people | envelope | sep | edit
+                 Icon SVGs preserved from v3; reordered + relabeled per step-06 plan.
+                 SYNC: this surface (SPA) is on v4 grammar as of step-06/6.a.
+                 The hosted nav surfaces remain on v3 grammar (feed/posts/comments/messages)
+                 and are intentionally deferred to step-06/6.k (auth-aware retheming +
+                 v4-grammar port). When 6.k lands, sync these three:
+                 1. HERE (index.html) — localhost SPA — v4 ✓
+                 2. webapp/internal/hosted/nav_inject.go — hosted SSR — v3 (port at 6.k)
+                 3. webapp/internal/hosted/nav/nav.js ICONS object — hosted widget — v3 (port at 6.k) -->
+            <!-- Icon-row preset buttons. Each button's onclick is a SAFE
+                 FALLBACK that lands the user on /feed (the v4 stream)
+                 if owner-extras.js fails to load — never on a legacy
+                 dashboard route, since those are being phased out.
+                 owner-extras' wireIconPresets() strips these onclicks
+                 at runtime and binds the actual preset behavior
+                 (qualifier/type/scope/modifier filter changes), so
+                 these onclicks only fire during the script-load race
+                 window or when owner-extras itself is broken. -->
+            <button id="nav-btn-gateway" class="nav-icon-btn" onclick="App.navigateTo('/')" data-tip="Activity from my network"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><path d="M3 21 C 3 -5, 21 -5, 21 21" stroke-linecap="round"/><circle class="fo" cx="3" cy="21" r="3"/><circle class="ff" cx="21" cy="21" r="3"/></svg><span class="nav-dot hidden" id="nav-dot-gateway"></span></button>
+            <button id="nav-btn-paragraph" class="nav-icon-btn" onclick="App.navigateTo('/')" data-tip="My posts"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="14" y2="17"/></svg></button>
+            <button id="nav-btn-comment" class="nav-icon-btn" onclick="App.navigateTo('/')" data-tip="Comments to bless"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><path d="M21 12c0 4.4-4 8-9 8a9.9 9.9 0 0 1-3.8-.7L3 21l1.5-4A7.4 7.4 0 0 1 3 12c0-4.4 4-8 9-8s9 3.6 9 8Z"/></svg><span class="nav-dot hidden" id="nav-dot-comment"></span></button>
+            <button id="nav-btn-people" class="nav-icon-btn" onclick="App.navigateTo('/pql/all+profiles+from+my+network+by+name')" data-tip="Profiles"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><circle cx="9" cy="7.5" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="8.5" r="2.2"/><path d="M17 14c2.2 0 4 1.8 4 4"/></svg></button>
+            <!-- Messages icon: literal envelope (rect + flap polyline). The
+                 prior glyph was an "@" (concentric circle + spiral arc); the
+                 "@" is being reserved for the future at-mentions feature, so
+                 the DM nav-button moves to a more semantically distinct
+                 envelope shape. -->
+            <button id="nav-btn-envelope" class="nav-icon-btn" onclick="App.navigateTo('/pql/all+messages+from+my+mutuals+by+date')" data-tip="My messages"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 8l9 6 9-6"/></svg><span class="nav-dot hidden" id="nav-dot-envelope"></span></button>
+            <div class="nav-sep"></div>
+            <!-- Squared + glyph (Variant C from the write-anchor mockup).
+                 Replaces the pencil/edit SVG. Two perpendicular <line>s
+                 dead-centered in the 24-unit viewBox so the glyph reads
+                 as visually anchored (the prior pencil's M16.5,3.5→7,19
+                 path had its visual mass biased upper-right). Click
+                 toggles the post editor open/closed via App.toggleCompose(). -->
+            <button id="nav-btn-edit" class="nav-icon-btn" onclick="App.toggleCompose()" data-tip="New post"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
 
             <div class="nav-spacer"></div>
 
-            <!-- Centered wordmark -->
-            <a class="nav-wordmark" onclick="document.querySelector('.content-shell').scrollTo({top:0,behavior:'smooth'})">polis</a>
+            <!-- Editor controls retired in chunk A — the v3 editor
+                 screen they belonged to is gone; the v4 inline editor
+                 card on the stream-screen owns its own controls. -->
+            <div class="editor-controls hidden" id="editor-controls"></div>
 
-            <div class="nav-spacer"></div>
+            <!-- step-06/6.c — Filter widget. Mirrors the v4 stream snippet
+                 (cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/snippets/
+                 stream-filter.html). Inlined here because the SPA's
+                 index.html isn't bundle-templated; app.js substitutes the
+                 site_domain text at runtime. v4 stream.js (loaded from
+                 /bundle-assets/) wires up dropdown interactivity. -->
+            <div class="polis-topbar-filter" id="polis-topbar-filter">
+                <div class="sentence-filter" role="group" aria-label="Stream filter">
+                    <span class="sf-slot sf-slot--locked" data-filter-slot="qualifier" data-filter-locked="true">all</span>
+                    <span class="sf-slot sf-slot--interactive" data-filter-slot="type" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false">posts</span>
+                    <span class="sf-connector" data-mobile-hide="true">from</span>
+                    <span class="sf-slot sf-slot--interactive" data-filter-slot="scope" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false" id="sf-scope-slot">my network</span>
+                    <span class="sf-slot sf-slot--interactive sf-slot--modifier" data-filter-slot="modifier" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false">by date</span>
+                    <input type="text" class="sf-site-typeahead" data-filter-slot="site-typeahead" placeholder="handle.polis.pub" aria-label="Site handle" hidden>
+                </div>
+            </div>
+            <div class="pinned-dot" aria-hidden="true"></div>
+            <!-- R25 follow-up #4: <handle>.polis.pub label at the
+                 right edge — replaces what the public template uses
+                 for "sign in" since the owner is by definition signed
+                 in. Same JetBrains Mono / muted treatment as the
+                 stream's byline-domain so the handle reads
+                 consistently across surfaces. owner-extras populates
+                 the text from /api/status. -->
+            <a class="polis-handle-label" id="polis-topbar-handle" href="#" target="_blank"></a>
 
-            <!-- Editor controls (shown only when editor is active) -->
-            <div class="editor-controls hidden" id="editor-controls">
-                <span id="editor-save-status" class="editor-save-status"></span>
-                <button id="delete-draft-btn" class="editor-delete-draft-btn hidden">Delete Draft</button>
-                <button id="publish-btn" class="editor-publish-btn">Publish</button>
-                <button id="editor-help-btn" class="editor-menu-btn" title="Keyboard shortcuts">?</button>
+            <!-- Mobile drawer — opened by hamburger. Hidden on desktop.
+                 Header shows avatar + site name (the same info that
+                 lives on the inline avatar + handle-label on desktop);
+                 items mirror the inline icon-row with text labels. -->
+            <div class="nav-mobile-drawer" id="nav-mobile-drawer" aria-hidden="true">
+                <div class="nav-mobile-header">
+                    <div class="nav-mobile-avatar" id="nav-mobile-avatar"></div>
+                    <a class="nav-mobile-site" id="nav-mobile-site" href="#" target="_blank"></a>
+                </div>
+                <div class="nav-mobile-items">
+                    <button class="nav-mobile-item" type="button" data-action="preset" data-preset="gateway">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 21 C 3 -5, 21 -5, 21 21"/><circle cx="3" cy="21" r="3"/><circle cx="21" cy="21" r="3" fill="currentColor"/></svg>
+                        <span>Activity from my network</span>
+                        <span class="nav-dot hidden" id="nav-dot-gateway-mobile"></span>
+                    </button>
+                    <button class="nav-mobile-item" type="button" data-action="preset" data-preset="paragraph">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="14" y2="17"/></svg>
+                        <span>My posts</span>
+                    </button>
+                    <button class="nav-mobile-item" type="button" data-action="preset" data-preset="comment">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 12c0 4.4-4 8-9 8a9.9 9.9 0 0 1-3.8-.7L3 21l1.5-4A7.4 7.4 0 0 1 3 12c0-4.4 4-8 9-8s9 3.6 9 8Z"/></svg>
+                        <span>Comments to bless</span>
+                        <span class="nav-dot hidden" id="nav-dot-comment-mobile"></span>
+                    </button>
+                    <button class="nav-mobile-item" type="button" data-action="preset" data-preset="people">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="9" cy="7.5" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="8.5" r="2.2"/><path d="M17 14c2.2 0 4 1.8 4 4"/></svg>
+                        <span>My follows</span>
+                    </button>
+                    <button class="nav-mobile-item" type="button" data-action="preset" data-preset="envelope">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 8l9 6 9-6"/></svg>
+                        <span>My messages</span>
+                        <span class="nav-dot hidden" id="nav-dot-envelope-mobile"></span>
+                    </button>
+                    <hr>
+                    <button class="nav-mobile-item" type="button" data-action="edit">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+                        <span>New post</span>
+                    </button>
+                    <button class="nav-mobile-item" type="button" data-action="copy-follow-link">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+                        <span>Copy follow link</span>
+                    </button>
+                    <button class="nav-mobile-item" type="button" data-action="settings">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.2V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1.1-1.4 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3.2 15H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.4-1.1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.6 1.6 0 0 0 9 4.6V3a2 2 0 1 1 4 0v.1c0 .7.4 1.3 1.1 1.4a1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9c0 .7.4 1.3 1.1 1.4H21a2 2 0 1 1 0 4h-.1c-.7 0-1.3.4-1.4 1.1Z"/></svg>
+                        <span>Settings</span>
+                    </button>
+                </div>
             </div>
         </nav>
 
-        <!-- Dashboard Screen -->
+        <!-- Stream Screen (v4 layout container; shown when navigating to /feed).
+             step-06/6.c: brings the v4 stream layout into the SPA homepage so
+             the controller (loaded via /bundle-assets/) hydrates a real .stream
+             element. layout-left is hidden via body.is-owner (per 6.a CSS gate);
+             layout-right hosts the stream entries. owner-extras.js (6.d) will
+             register afterRender hooks against this container. -->
+        <main id="stream-screen" class="screen hidden layout">
+            <aside class="layout-left">
+                <!-- R22 #11: scratch-column owner card. Mirrors the
+                     v4 public site-identity layout (avatar + name +
+                     bio + stats), but stats are owner-relevant
+                     (posts / drafts counts as filter shortcuts) and
+                     the bio supports inline editing via Milkdown.
+                     Owner-extras' setupOwnerCard populates the
+                     dynamic content (avatar, bio, counts) at init. -->
+                <div class="site-identity owner-card" id="owner-card">
+                    <!-- R23 #6: avatar dropped from the owner card — the
+                         topbar already renders the avatar in the nav,
+                         so a second blank-fallback placeholder above
+                         the bio just added visual noise. Name + handle
+                         are still useful as a context label. -->
+                    <div class="site-identity-row">
+                        <div class="site-identity-text">
+                            <div class="site-name" id="owner-card-name"></div>
+                            <div class="site-handle" id="owner-card-handle"></div>
+                        </div>
+                    </div>
+                    <!-- Bio view mode: rendered HTML + edit affordance. -->
+                    <div class="site-bio-wrap" id="owner-card-bio-view">
+                        <div class="site-bio" id="owner-card-bio"></div>
+                        <button class="site-bio-toggle" type="button" aria-expanded="false" hidden>show more</button>
+                        <button class="owner-card-edit-link" type="button" id="owner-card-edit-link">edit</button>
+                    </div>
+                    <!-- Bio edit mode: Milkdown editor + Save/Cancel.
+                         Hidden until edit-link click. -->
+                    <div class="owner-card-bio-edit hidden" id="owner-card-bio-edit">
+                        <div class="milkdown-mount hidden" id="milkdown-owner-card-bio"></div>
+                        <textarea id="owner-card-bio-textarea" placeholder="About yourself…"></textarea>
+                        <div class="owner-card-bio-actions">
+                            <button type="button" id="owner-card-bio-cancel">Cancel</button>
+                            <button type="button" class="primary" id="owner-card-bio-save">Save</button>
+                        </div>
+                    </div>
+                    <div class="site-stats">
+                        <span><strong id="owner-card-posts-count">0</strong><button class="site-stat-link" type="button" data-stat-filter-type="posts" data-stat-filter-scope="me" data-stat-filter-modifier="by-date">posts</button></span>
+                        <span><strong id="owner-card-drafts-count">0</strong><button class="site-stat-link" type="button" data-stat-filter-type="drafts" data-stat-filter-scope="me" data-stat-filter-modifier="by-date">drafts</button></span>
+                    </div>
+                </div>
+                <button class="site-bio-hide-floating" type="button" hidden>hide</button>
+            </aside>
+            <section class="layout-right">
+                <!-- R24 #1: top-fade overlay so entries scrolling under
+                     the topbar gradient out instead of cutting hard
+                     against the nav. updateTopFadeVisibility in
+                     stream.js toggles .show-top-fade on .layout-right
+                     based on scroll position. -->
+                <div class="stream-top-fade" aria-hidden="true"></div>
+                <!-- Ghost first entry — the universal write-anchor
+                     (Variant E from the mockup). Lives as a SIBLING of
+                     .stream (not inside it) so stream.js's prependEntry
+                     can't displace it when upward pagination fetches
+                     newer items: prependEntry's insertion target is
+                     `.stream`'s firstElementChild, which by being
+                     outside .stream the ghost is exempt from. Click
+                     toggles the post editor via App.toggleCompose(). -->
+                <article class="entry entry--ghost-compose"
+                         onclick="App.toggleCompose()"
+                         tabindex="0" role="button"
+                         aria-label="Write a new post">
+                    <div class="timeline-dot" aria-hidden="true">+</div>
+                    <p class="ghost-prompt" id="ghost-compose-prompt">yours, truly</p>
+                </article>
+                <div class="stream" data-polis-stream-role="owner-spa-homepage">
+                    <!-- Real entries appended dynamically by stream.js
+                         after the initial /api/v1/stream/items fetch. -->
+                </div>
+            </section>
+            <!-- R23 #5: page-edge bottom fade — mirrors stream.html's
+                 sibling on the public surface so the bottom of the
+                 stream gradients into the page bg instead of cutting
+                 off hard against the viewport edge. CSS in stream.css
+                 already styles .bottom-fade. -->
+            <div class="bottom-fade" aria-hidden="true"></div>
+        </main>
+
+        <!-- Dashboard Screen — refactored to a settings-only host
+             in chunk A. Every other v3 view (posts list, comments,
+             blessings, following, DMs, pulse) is retired; the inline
+             editor card on the v4 stream-screen replaces the editor
+             + comment screens. `renderSettings` is the only function
+             that renders into #content-list now. -->
         <div id="dashboard-screen" class="screen hidden layout-v2">
-
-            <!-- Setup Banner (shown when site not registered) -->
-            <div id="setup-banner" class="setup-banner hidden">
-                <span>Your site isn't registered with the discovery network yet.</span>
-                <a class="setup-banner-link" onclick="App.openSetupWizard()">Complete Setup</a>
-                <button class="setup-banner-dismiss" onclick="App.dismissSetupBanner()">&times;</button>
-            </div>
-
-            <!-- Content Shell (centered column) -->
             <div class="content-shell">
-                <!-- Welcome Panel (lifecycle-aware) -->
-                <div id="welcome-panel" class="welcome-panel hidden"></div>
-
-                <!-- Dynamic content header and body will be rendered by JS -->
-                <div class="content-header">
-                    <h2 id="content-title">Published Posts</h2>
-                    <div id="content-actions" class="content-header-actions">
-                        <button id="new-post-btn" class="primary">New Post</button>
-                    </div>
-                </div>
-                <div class="content-body">
-                    <div id="content-list">
-                    </div>
-                </div>
-            </div>
-
-        </div>
-
-        <!-- Editor Screen -->
-        <div id="editor-screen" class="screen hidden">
-            <input type="text" id="filename-input" class="hidden" placeholder="auto-generated-from-title" />
-            <div class="editor-container">
-                <div class="editor-title-row">
-                    <span class="editor-title-hash">#</span>
-                    <input type="text" id="editor-title-input" class="editor-title-input" placeholder="title">
-                </div>
-                <div id="milkdown-post" class="milkdown-mount"></div>
-                <textarea id="markdown-input" class="hidden"></textarea>
-            </div>
-            <!-- Focus mode hints -->
-            <div id="editor-focus-hint" class="editor-focus-hint hidden"><kbd>Esc</kbd> exit focus mode</div>
-            <div id="editor-focus-discover" class="editor-focus-discover"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> focus mode</div>
-            <!-- Toolbar, slash menu, and link modal moved to body level for cross-editor use -->
-            <!-- Keyboard shortcuts help modal -->
-            <div id="editor-help-modal" class="editor-help-modal hidden">
-                <div class="editor-help-content">
-                    <div class="editor-help-header">
-                        <h3>Keyboard Shortcuts</h3>
-                        <button class="editor-help-close" onclick="document.getElementById('editor-help-modal').classList.add('hidden')">&times;</button>
-                    </div>
-                    <table class="help-table">
-                        <tr><td><kbd>Ctrl+B</kbd></td><td>Bold</td></tr>
-                        <tr><td><kbd>Ctrl+I</kbd></td><td>Italic</td></tr>
-                        <tr><td><kbd>Ctrl+K</kbd></td><td>Insert link</td></tr>
-                        <tr><td><kbd>Ctrl+E</kbd></td><td>Inline code</td></tr>
-                        <tr><td><kbd>Ctrl+Shift+7</kbd></td><td>Ordered list</td></tr>
-                        <tr><td><kbd>Ctrl+Shift+8</kbd></td><td>Bullet list</td></tr>
-                        <tr><td><kbd>Ctrl+Shift+9</kbd></td><td>Blockquote</td></tr>
-                        <tr><td><kbd>Ctrl+S</kbd></td><td>Save draft</td></tr>
-                        <tr><td><kbd>Ctrl+Enter</kbd></td><td>Publish</td></tr>
-                        <tr><td><kbd>Ctrl+Shift+F</kbd></td><td>Focus mode</td></tr>
-                        <tr><td><kbd>/</kbd></td><td>Slash commands (on empty line)</td></tr>
-                    </table>
-                </div>
+                <div id="content-list"></div>
             </div>
         </div>
 
-        <!-- Comment Composer Screen -->
-        <div id="comment-screen" class="screen hidden">
-            <header>
-                <button id="comment-back-btn" class="secondary">&larr; Back</button>
-                <div class="editor-actions">
-                    <button id="save-comment-draft-btn" class="secondary">Save Draft</button>
-                    <button id="sign-send-btn" class="primary">Sign & Send for Blessing</button>
-                </div>
-            </header>
-            <div class="comment-composer">
-                <div class="comment-target-input">
-                    <label for="reply-to-url">Replying to:</label>
-                    <input type="url" id="reply-to-url" placeholder="https://alice.polis.site/posts/20260127/hello-world.md" required>
-                </div>
-                <div class="comment-editor">
-                    <div class="pane-header">Your Comment</div>
-                    <div id="milkdown-comment" class="milkdown-mount"></div>
-                    <textarea id="comment-input" class="hidden" placeholder="Write your comment here...
-
-You can use **markdown** formatting."></textarea>
-                </div>
-            </div>
-        </div>
-
-        <!-- About Editor Screen -->
-        <div id="about-screen" class="screen hidden">
-            <header>
-                <button id="about-back-btn" class="secondary">&larr; Back</button>
-                <div class="about-help-text">Publish the below to update the about section on your homepage.</div>
-                <div class="editor-actions">
-                    <button id="about-publish-btn" class="primary">Publish</button>
-                </div>
-            </header>
-            <div class="editor-container">
-                <div class="editor-pane">
-                    <div class="pane-header">
-                        <span>Editor</span>
-                        <div class="pane-header-spacer"></div>
-                        <button id="about-raw-toggle" class="pane-toggle-btn" title="Toggle raw markdown editing">Raw</button>
-                    </div>
-                    <div id="milkdown-about" class="milkdown-mount"></div>
-                    <textarea id="about-editor-textarea" class="hidden" placeholder="Write your about section in markdown..."></textarea>
-                </div>
-                <div class="preview-pane collapsed">
-                    <div class="pane-header">
-                        <span>Preview</span>
-                        <div class="pane-header-spacer"></div>
-                        <button id="about-preview-toggle" class="pane-toggle-btn" title="Toggle preview pane">Show</button>
-                    </div>
-                    <div id="about-editor-preview" class="preview-content">
-                        <p class="empty-state">Start writing to see a preview.</p>
-                    </div>
-                </div>
-            </div>
-        </div>
+        <!-- About Editor Screen — removed. The about content is now
+             edited inline from the owner-card in the layout-left
+             scratch column (see #owner-card in the stream-screen
+             markup above). -->
 
         <!-- Comment Detail Panel (slide-out from right) -->
         <div id="comment-detail-panel" class="comment-detail-panel hidden">

@@ -1,5 +1,8 @@
 # Content System
 
+> **This is the deep reference.** For the narrative introductions to each concept, start with:
+> [bundles.md](bundles.md) → [content-types.md](content-types.md) → [shapes.md](shapes.md) → [themes.md](themes.md), and place them in the larger picture via [architecture.md](architecture.md). This file documents the full schemas, validation rules, filesystem layout, and event catalog that the narrative docs reference.
+
 The polis content system organizes all site data around **bundles** -- namespaced packages that declare content types, events, storage layout, and handler dispatch. The initial bundle `pub.polis.core` ships with six content types: post, comment, follow, feed, dm, and tag. Third-party bundles extend the system with custom types without modifying the core protocol.
 
 ---
@@ -108,7 +111,9 @@ comments/                            # mount: /comments
 
 **Version storage.** When `storage.versions` is true, previous versions are stored in `.versions/` subdirectories alongside content. Example: `content/pub.polis.core/post/20260301/.versions/hello.md`.
 
-**Private mirroring.** Private state mirrors the public content path under `.polis/content/`. If bundle content is at `content/pub.polis.core/`, the private root is `.polis/content/pub.polis.core/`. The private directory uses plural names for content types that have public mounts: `post` becomes `posts`, `comment` becomes `comments`. Private-only types like `dm` keep their original directory name. Example: `.polis/content/pub.polis.core/posts/drafts/`.
+**Private mirroring.** Private state mirrors the public content path under `.polis/bundles/`. If bundle content is at `content/pub.polis.core/`, the private root is `.polis/bundles/pub.polis.core/`. The private directory uses plural names for content types that have public mounts: `post` becomes `posts`, `comment` becomes `comments`. Private-only types like `dm` keep their original directory name. Example: `.polis/bundles/pub.polis.core/posts/drafts/`. (Pre-bundle-refactor sites used `.polis/content/`; Patrol/Medic migrate this path automatically.)
+
+**Bundle install.** Each tenant has its `.polis/bundles/<bundle>/` populated with the bundle's reference payload — shape templates and per-theme CSS — by `polis init` (new sites) and forcibly resynced by Medic on every cycle (existing tenants). The reference payload ships embedded in the CLI binary at build time. See SHAPE/BUNDLE/THEME below.
 
 **DS state scoping.** Discovery service state is scoped by DS domain and bundle name: `.polis/ds/<domain>/<bundle>/`. Each bundle maintains its own state and config directories. State files are safely deletable (recomputed from the stream). Config files hold user preferences and survive resets. All state filenames match their cursor key in `cursors.json` (e.g., cursor key `pub.polis.feed` corresponds to file `pub.polis.feed.jsonl`).
 
@@ -128,7 +133,6 @@ Bundle declarations live at `content/<bundle-name>/bundle.json`. The `.well-know
   "email": "alice@example.com",
   "site_title": "Alice's Space",
   "created": "2026-01-01T00:00:00Z",
-  "active_theme": "sols",
   "bundles": {
     "pub.polis.core": {
       "active": true,
@@ -137,6 +141,11 @@ Bundle declarations live at `content/<bundle-name>/bundle.json`. The `.well-know
   }
 }
 ```
+
+> **active_theme moved.** Pre-bundle-refactor `.well-known/polis` carried an
+> `active_theme` field. That has moved to a private per-tenant file at
+> `.polis/bundles/registry.json` (see SHAPE/BUNDLE/THEME below). Tenants
+> with the legacy field are migrated transparently by Patrol/Medic.
 
 ### Schema
 
@@ -439,9 +448,145 @@ The following constraints are enforced when loading a bundle:
 
 ---
 
+## SHAPE / BUNDLE / THEME
+
+A bundle ships not only **content types** (post, comment, …) but also
+**shapes** and **themes** that drive rendering.
+
+### Shape
+
+A **shape** declares the rendering approach for a class of polis output —
+the markup templates plus supporting partials. The `pub.polis.core` bundle
+ships two shapes: the **blog** shape (post pages, index, archive, tag pages)
+and the **stream** shape (infinity-stream rendering — focus post inlined +
+adjacent sibling excerpts). Wire names remain `pub.polis.shapes.v3` and
+`pub.polis.shapes.v4` for tenant-data compatibility; `v3`/`v4` are the
+on-disk shorthand the blog/stream shapes were originally introduced under.
+
+Shapes are declared in `bundle.json` under the `shapes` key:
+
+```json
+"shapes": {
+  "v3": {
+    "name": "v3",
+    "version": "1.0.0",
+    "entry": {
+      "post": "post.html",
+      "comment": "comment.html",
+      "comment_inline": "comment-inline.html",
+      "index": "index.html",
+      "archive": "posts.html",
+      "tag": "tag.html",
+      "tag_index": "tag-index.html"
+    },
+    "partials": ["snippets/about.html", "snippets/post-item.html", ...],
+    "default_css": "themes/_shared/base.css"
+  }
+}
+```
+
+### Theme
+
+A **theme** is a CSS-only presentation compatible with one or more shapes.
+Themes do not ship markup. Per-template markup overrides (the `studio13`
+pattern) live in the *theme directory* at install time and beat the shape's
+templates via the loader's local-then-shape lookup.
+
+Themes are declared in `bundle.json` under the `themes` key:
+
+```json
+"themes": {
+  "_shared": {
+    "name": "_shared",
+    "version": "1.0.0",
+    "css": "base.css",
+    "compatible_shapes": ["pub.polis.shapes.v3"]
+  },
+  "vice": {
+    "name": "vice",
+    "version": "1.0.0",
+    "css": "vice.css",
+    "compatible_shapes": ["pub.polis.shapes.v3"]
+  }
+}
+```
+
+`_shared` (leading underscore) is a system directory — base CSS used by
+themes that don't ship their own — not a selectable theme.
+
+### Per-tenant install
+
+Each tenant has the bundle's reference payload installed at
+`.polis/bundles/<bundle>/`. For `pub.polis.core` this means:
+
+```
+.polis/bundles/pub.polis.core/
+├── shapes/v3/                     # templates + snippets
+│   ├── index.html  post.html  comment.html  ...
+│   └── snippets/about.html  ...
+└── themes/                        # CSS-only
+    ├── _shared/base.css
+    ├── especial-light/especial-light.css
+    └── vice/vice.css
+```
+
+`polis init` writes this on new sites. Patrol/Medic forcibly resync it on
+every cycle for hosted tenants — the binary's embedded reference payload is
+always the source of truth, so a binary upgrade ships new shape templates
+or theme CSS instantly. Self-hosters get the same migrations via
+`polis tailor apply` (see `plans/infinity-stream-tailor-updates.md`).
+
+### Active selections
+
+The site's active theme and shape live in a private per-tenant file:
+
+```
+.polis/bundles/registry.json
+{
+  "active_theme": "pub.polis.themes.vice",
+  "active_shape": "pub.polis.shapes.v3",
+  "installed_bundles": [
+    { "name": "pub.polis.core", "path": ".polis/bundles/pub.polis.core", "active": true }
+  ]
+}
+```
+
+Theme/shape names are **fully qualified**: `<namespace>.<kind>.<name>`.
+Reserved substrings `.themes.` and `.shapes.` cannot appear in bundle
+names — the parser uses them as pivots.
+
+Pre-refactor sites carried `active_theme` in `.well-known/polis`;
+`bundle.MigrateActiveThemeToRegistry` relocates it (Patrol/Medic invoke
+this automatically).
+
+### Where the reference payload lives in the repo
+
+Source-of-truth payload ships embedded in the CLI binary at
+`cli-go/pkg/bundle/fixtures/<bundle>/`. For `pub.polis.core`:
+
+```
+cli-go/pkg/bundle/fixtures/pub.polis.core/
+├── shapes/v3/...
+└── themes/{_shared,especial-light,vice}/...
+```
+
+All shipped themes (`especial`, `especial-light`, `sols`, `studio13`,
+`studio13-nk`, `turbo`, `vice`, `zane` — plus `_shared` for base CSS)
+now live in the bundle fixture at
+`cli-go/pkg/bundle/fixtures/pub.polis.core/themes/`. The repo-root
+`themes/` directory is retained for `catalog.html` (a development-only
+gallery) and no longer ships site CSS. `sols` is shipped but reserved as
+the logged-out landing theme — the webapp filters it out of the
+user-selectable dropdown.
+
+---
+
 ## Content Types
 
-The `pub.polis.core` bundle declares six content types. Each has distinct storage patterns, actions, and lifecycle behavior.
+The `pub.polis.core` bundle declares **seven** content types. Each has
+distinct storage patterns, actions, and lifecycle behavior. The seventh —
+`pub.polis.theme` — declares themes as content (see SHAPE/BUNDLE/THEME
+above); other types behave as documented below.
 
 ### `pub.polis.post`
 
@@ -449,7 +594,7 @@ Posts are the primary content unit in polis -- markdown files with signed frontm
 
 **Source path:** `content/pub.polis.core/post/YYYYMMDD/slug.md`
 **Mount path:** `posts/YYYYMMDD/slug.html` (rendered), `posts/YYYYMMDD/slug.md` (copied)
-**Private path:** `.polis/content/pub.polis.core/posts/drafts/`
+**Private path:** `.polis/bundles/pub.polis.core/posts/drafts/`
 **Renderer:** `html`
 **Storage:** Dated directories (`YYYYMMDD`), with version history in `.versions/`
 
@@ -465,7 +610,7 @@ Posts are the primary content unit in polis -- markdown files with signed frontm
 | `render` | Render markdown to HTML using the active theme. |
 | `draft.list` | List saved drafts. |
 | `draft.get` | Retrieve a single draft. |
-| `draft.save` | Save a draft to `.polis/content/pub.polis.core/posts/drafts/`. |
+| `draft.save` | Save a draft to `.polis/bundles/pub.polis.core/posts/drafts/`. |
 | `draft.delete` | Delete a draft. |
 
 **Events emitted:** `pub.polis.post.published`, `pub.polis.post.republished`, `pub.polis.post.removed`
@@ -479,9 +624,9 @@ Comments are replies to posts or other comments, published on the commenter's ow
 **Source path:** `content/pub.polis.core/comment/YYYYMMDD/slug.md`
 **Mount path:** `comments/YYYYMMDD/slug.html` (rendered), `comments/YYYYMMDD/slug.md` (copied)
 **Private paths:**
-- `.polis/content/pub.polis.core/comments/drafts/` -- comment drafts
-- `.polis/content/pub.polis.core/comments/pending/` -- comments awaiting blessing
-- `.polis/content/pub.polis.core/comments/denied/` -- denied comments
+- `.polis/bundles/pub.polis.core/comments/drafts/` -- comment drafts
+- `.polis/bundles/pub.polis.core/comments/pending/` -- comments awaiting blessing
+- `.polis/bundles/pub.polis.core/comments/denied/` -- denied comments
 **Renderer:** `html`
 **Storage:** Dated directories (`YYYYMMDD`), no version history
 **Public artifacts:** `content/pub.polis.core/comment/blessed.json` -- index of blessed comments
@@ -547,7 +692,7 @@ Feed is an aggregated view of content from followed authors. It combines stream 
 
 Direct messages are private, end-to-end encrypted messages between polis instances. This is the first content type with **no mount point, no renderer, and no DS events** -- it validates that the bundle system handles private content types gracefully.
 
-**Source path:** `.polis/content/pub.polis.core/dm/`
+**Source path:** `.polis/bundles/pub.polis.core/dm/`
 **Mount path:** None (private content, never rendered to public HTML)
 **Renderer:** None
 **Storage:** Flat (conversations stored as JSON files, not dated directories)

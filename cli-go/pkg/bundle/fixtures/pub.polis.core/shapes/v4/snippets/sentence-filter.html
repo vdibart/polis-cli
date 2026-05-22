@@ -1,0 +1,28 @@
+<!--
+    Sentence filter (static, non-interactive default).
+
+    Renders the reader-facing filter sentence as part of the top chrome in
+    stream.html. Interactivity is layered on by the stream controller +
+    structured-query API — those code paths hydrate over this markup,
+    replacing the static underlines with clickable dropdowns.
+
+    Default state:
+        "all posts from {{site_domain}} in the last day"
+
+    Underlines on `all`, `posts`, `day` — the three filter slots that
+    become clickable when the controller hydrates (qualifier /
+    content-type / time-range). `{{site_domain}}` is NOT underlined; it's
+    the reader's entry-posture scope (filter defaults to "this site's
+    content") and becomes the fourth (scope) slot when interactive.
+
+    Template variables:
+    - {{site_domain}}     — the tenant's own domain (e.g. alice.polis.pub)
+-->
+<div class="sentence-filter sentence-filter--static">
+    <span class="sf-word sf-word--static">all</span>
+    <span class="sf-word sf-word--static">posts</span>
+    from
+    <span class="sf-site">{{site_domain}}</span>
+    in the last
+    <span class="sf-word sf-word--static">day</span>
+</div>

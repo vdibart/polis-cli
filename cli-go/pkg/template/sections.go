@@ -9,6 +9,31 @@ import (
 // sectionOpenPattern matches {{#name}} opening tags.
 var sectionOpenPattern = regexp.MustCompile(`\{\{#(\w+)\}\}`)
 
+// loopVarPattern matches {{name}} variable references inside loop bodies.
+// Hoisted to package scope so substituteLoopVariables doesn't recompile it
+// once per call (the function runs in the per-template-substitution hot path).
+var loopVarPattern = regexp.MustCompile(`\{\{(\w+)\}\}`)
+
+// commentCountClass returns "is-empty" when count <= 0 and "" otherwise.
+// Used by sibling-iteration rendering and stream.html top-level focus
+// substitution (engine.go) so the badge-hide grammar is identical for
+// SSR'd siblings + the SSR'd focus + JS-rendered entries.
+func commentCountClass(count int) string {
+	if count > 0 {
+		return ""
+	}
+	return "is-empty"
+}
+
+// commentCountDisplay returns "" for count <= 0 (no "0" badge) and the
+// stringified count otherwise. Pairs with commentCountClass.
+func commentCountDisplay(count int) string {
+	if count > 0 {
+		return fmt.Sprintf("%d", count)
+	}
+	return ""
+}
+
 // processSections expands all {{#section}}...{{/section}} loops in the template.
 // Supported sections:
 // - {{#posts}}...{{/posts}} - Loop over posts
@@ -60,6 +85,10 @@ func (e *Engine) processSections(template string, ctx *RenderContext, depth int)
 			output, err = e.renderRecentPostsSection(sectionContent, ctx, depth)
 		case "recent_comments":
 			output, err = e.renderRecentCommentsSection(sectionContent, ctx, depth)
+		case "siblings":
+			output, err = e.renderSiblingsSection(sectionContent, ctx, depth)
+		case "siblings_above":
+			output, err = e.renderSiblingsAboveSection(sectionContent, ctx, depth)
 		case "following":
 			output, err = e.renderFollowingSection(sectionContent, ctx, depth)
 		case "targets":
@@ -80,7 +109,7 @@ func (e *Engine) processSections(template string, ctx *RenderContext, depth int)
 		result = result[:match[0]] + output + result[closeTagStart+len(closeTag):]
 
 		// Avoid checking unsupported section names again
-		if sectionName != "posts" && sectionName != "comments" && sectionName != "blessed_comments" && sectionName != "recent_posts" && sectionName != "recent_comments" && sectionName != "following" && sectionName != "targets" && sectionName != "tags" {
+		if sectionName != "posts" && sectionName != "comments" && sectionName != "blessed_comments" && sectionName != "recent_posts" && sectionName != "recent_comments" && sectionName != "siblings" && sectionName != "siblings_above" && sectionName != "following" && sectionName != "targets" && sectionName != "tags" {
 			// Skip to after this section to avoid infinite loop on unknown sections
 			result = result[:match[0]] + openTag + sectionContent + closeTag + result[match[0]:]
 			break
@@ -117,10 +146,6 @@ func (e *Engine) renderPostsSection(content string, ctx *RenderContext, depth in
 		}
 
 		// Substitute loop-specific variables
-		commentCountDisplay := ""
-		if post.CommentCount > 0 {
-			commentCountDisplay = fmt.Sprintf("%d", post.CommentCount)
-		}
 		rendered := e.substituteLoopVariables(processed, map[string]string{
 			"url":                   post.URL,
 			"title":                 post.Title,
@@ -128,7 +153,7 @@ func (e *Engine) renderPostsSection(content string, ctx *RenderContext, depth in
 			"published":             post.Published,
 			"published_human":       post.PublishedHuman,
 			"comment_count":         fmt.Sprintf("%d", post.CommentCount),
-			"comment_count_display": commentCountDisplay,
+			"comment_count_display": commentCountDisplay(post.CommentCount),
 		})
 
 		builder.WriteString(rendered)
@@ -254,10 +279,6 @@ func (e *Engine) renderRecentPostsSection(content string, ctx *RenderContext, de
 		}
 
 		// Substitute loop-specific variables
-		commentCountDisplay := ""
-		if post.CommentCount > 0 {
-			commentCountDisplay = fmt.Sprintf("%d", post.CommentCount)
-		}
 		rendered := e.substituteLoopVariables(processed, map[string]string{
 			"url":                   post.URL,
 			"title":                 post.Title,
@@ -265,7 +286,7 @@ func (e *Engine) renderRecentPostsSection(content string, ctx *RenderContext, de
 			"published":             post.Published,
 			"published_human":       post.PublishedHuman,
 			"comment_count":         fmt.Sprintf("%d", post.CommentCount),
-			"comment_count_display": commentCountDisplay,
+			"comment_count_display": commentCountDisplay(post.CommentCount),
 		})
 
 		builder.WriteString(rendered)
@@ -317,6 +338,85 @@ func (e *Engine) renderRecentCommentsSection(content string, ctx *RenderContext,
 			"published":       comment.Published,
 			"published_human": comment.PublishedHuman,
 			"preview":         comment.Preview,
+		})
+
+		builder.WriteString(rendered)
+	}
+
+	return builder.String(), nil
+}
+
+// renderSiblingsSection renders the {{#siblings}} section for stream pages.
+// Iterates adjacent posts displayed BELOW the focus (older-direction rail).
+func (e *Engine) renderSiblingsSection(content string, ctx *RenderContext, depth int) (string, error) {
+	return e.renderSiblingsList(content, ctx, depth, ctx.Siblings)
+}
+
+// renderSiblingsAboveSection renders the {{#siblings_above}} section, which
+// iterates posts displayed ABOVE the focus (newer-direction rail). Shares
+// the per-iteration variable substitution with renderSiblingsSection but
+// drives is_above_focus → "is-above-focus" class output via the loop-var
+// map so stream-post.html can apply the fade-into-topbar class.
+func (e *Engine) renderSiblingsAboveSection(content string, ctx *RenderContext, depth int) (string, error) {
+	return e.renderSiblingsList(content, ctx, depth, ctx.SiblingsAbove)
+}
+
+// renderSiblingsList is the shared implementation behind both siblings
+// sections. The PostData slice's IsAboveFocus field drives the
+// is_above_focus loop variable that stream-post.html consumes.
+func (e *Engine) renderSiblingsList(content string, ctx *RenderContext, depth int, posts []PostData) (string, error) {
+	var builder strings.Builder
+
+	for _, post := range posts {
+		iterCtx := &RenderContext{
+			URL:            post.URL,
+			Title:          post.Title,
+			Published:      post.Published,
+			PublishedHuman: post.PublishedHuman,
+			CommentCount:   post.CommentCount,
+			// TitleLinkState must thread through here too: processPartials
+			// calls renderWithDepth on the loaded partial body, which
+			// reaches substituteVariables(template, iterCtx) — and that
+			// pass substitutes {{title_link_state}} from iterCtx.
+			// Without this, the placeholder gets replaced with "" BEFORE
+			// substituteLoopVariables (below) ever runs, so the loop-var
+			// "title_link_state": post.TitleLinkState entry has nothing
+			// left to substitute.
+			TitleLinkState: post.TitleLinkState,
+
+			SiteURL:   ctx.SiteURL,
+			SiteTitle: ctx.SiteTitle,
+			Year:      ctx.Year,
+		}
+
+		processed, err := e.processPartials(content, iterCtx, depth+1)
+		if err != nil {
+			return "", err
+		}
+
+		// is_above_focus drives the optional .is-above-focus class on
+		// the rendered <article>. Empty string when false so the class
+		// list reads cleanly; "is-above-focus" when true.
+		aboveClass := ""
+		if post.IsAboveFocus {
+			aboveClass = "is-above-focus"
+		}
+		rendered := e.substituteLoopVariables(processed, map[string]string{
+			"url":                   post.URL,
+			"title":                 post.Title,
+			"excerpt":               post.Excerpt,
+			"body_html":             post.BodyHTML,
+			"published":             post.Published,
+			"published_human":       post.PublishedHuman,
+			"comment_count":         fmt.Sprintf("%d", post.CommentCount),
+			"comment_count_display": commentCountDisplay(post.CommentCount),
+			// SG-3 (step-05/5.h): "is-empty" when count is 0, "" otherwise.
+			// Stream-post.html threads this onto the comment-badge anchor;
+			// stream.css hides .entry-comments-badge.is-empty so no-comment
+			// posts don't render a "0" badge.
+			"comment_count_class":   commentCountClass(post.CommentCount),
+			"is_above_focus":        aboveClass,
+			"title_link_state":      post.TitleLinkState,
 		})
 
 		builder.WriteString(rendered)
@@ -427,8 +527,7 @@ const escapedOpenBrace = "\x00\x00"
 // This is used for loop-specific variables within section content.
 // Any "{{" in substituted values is escaped to prevent template injection.
 func (e *Engine) substituteLoopVariables(template string, vars map[string]string) string {
-	re := regexp.MustCompile(`\{\{(\w+)\}\}`)
-	return re.ReplaceAllStringFunc(template, func(match string) string {
+	return loopVarPattern.ReplaceAllStringFunc(template, func(match string) string {
 		name := match[2 : len(match)-2]
 		if val, ok := vars[name]; ok {
 			return strings.ReplaceAll(val, "{{", escapedOpenBrace)

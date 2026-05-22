@@ -39,11 +39,12 @@
  *   zane            — dark, warm editor
  *   especial        — dark, premium gold
  *   especial-light  — light, warm fog (ONLY light theme)
- *   studio13        — dark, bold minimal
+ *   studio13        — dark, bold minimal (v4-era; same selector includes studio13-nk for v3-era tenants)
  *
  * NOTE: sols is the system/app theme and is NOT a user-selectable site theme.
  *       It does not appear here — but the default rule below ensures nav
  *       variables are always defined (prevents FOUC on first load).
+ *       (Exception: discover.polis.pub is a system handle and can use sols.)
  */
 
 /* Default — derived from webapp base vars so nav is styled before JS sets data-site-theme */
@@ -168,12 +169,13 @@ html[data-site-theme="zane"] {
   --border: rgba(95,175,175,0.12); --border-strong: rgba(95,175,175,0.2);
   --shadow-card: 0 1px 3px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.04);
   --shadow-hover: 0 3px 10px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.06);
-  --unread-bar: #d97054; --network-color: #5fafaf; --network-soft: rgba(95,175,175,0.1);
+  --unread-bar: #d97054; --network-color: #8aa858; --network-soft: rgba(138,168,88,0.1);
   --red: #d97054; --amber: #d7af5f;
   --success-color: #8aa858; --warning-color: #d7af5f; --error-color: #d97054;
   --bg-light: #3a3a3a; --surface-color: #303030; --surface-hover: #3a3a3a;
   --accent-color: #d97054; --text-color: #f0f0f0; --text-soft: #d0d0d0; --text-muted: #9a9a9a;
   --border-color: rgba(95,175,175,0.12); --border-light: rgba(95,175,175,0.2);
+  --color-comment-accent: #6888a0;
 }
 
 /* especial — dark, premium */
@@ -249,8 +251,14 @@ html[data-site-theme="especial-light"] {
   --text-inv: #f0ece4;
 }
 
-/* studio13 — dark, bold minimal */
-html[data-site-theme="studio13"] {
+/* studio13 + studio13-nk — dark, bold minimal.
+   studio13-nk is the preserved pre-rename theme (v3-only, HTML overrides).
+   studio13 is the future v4-era CSS-only relaunch. Both share the same
+   palette; the aliased selector below applies identical chrome styling to
+   either, so the picker can label both as "studio13" without visual drift
+   when the tenant's active_theme uses either internal name. */
+html[data-site-theme="studio13"],
+html[data-site-theme="studio13-nk"] {
   --nav-bg: #0a0a0a;
   --nav-bg-hover: #1a1a1a;
   --nav-bg-active: #2a2a2a;

@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
+	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
 // Discovery service configuration. Set by the calling application
@@ -65,7 +68,10 @@ func TagTargetMetadata(tagName, targetURI string) map[string]string {
 func SyncTag(dataDir string, tf *TagFile, privateKey []byte, dsCfg *DiscoveryConfig) error {
 	dsURL, dsKey, baseURL := resolveDiscoveryConfig(dsCfg)
 	if dsURL == "" || baseURL == "" {
-		return nil // discovery not configured
+		stream.LogSuppressedEmit("pub.polis.tag.applied", "config_missing",
+			discovery.ExtractDomainFromURL(baseURL),
+			map[string]interface{}{"tag": tf.Tag})
+		return nil
 	}
 
 	checkDir := dataDir
@@ -73,19 +79,30 @@ func SyncTag(dataDir string, tf *TagFile, privateKey []byte, dsCfg *DiscoveryCon
 		checkDir = dsCfg.DataDir
 	}
 	if !discovery.IsRegisteredLocally(checkDir, dsURL) {
-		return nil // silently skip — site not registered
+		stream.LogSuppressedEmit("pub.polis.tag.applied", "not_registered_locally",
+			discovery.ExtractDomainFromURL(baseURL),
+			map[string]interface{}{"tag": tf.Tag, "ds_url": dsURL})
+		return nil
 	}
 
-	// Register each current target
+	// Author is the tenant's domain — matches DS extractActor() which extracts
+	// from the tag URL. Could be overridden by email in future.
+	author := polisurl.ExtractDomain(baseURL)
+
+	// Register each current target. The DS normalizes metadata URLs
+	// (backslash→slash, .html→.md) BEFORE building canonical JSON for
+	// signature verification. We must normalize here too so the bytes
+	// Chaplain signs match the bytes the DS verifies against.
 	for _, target := range tf.Targets {
-		url := TagTargetURL(baseURL, tf.Tag, target.URI)
-		meta := TagTargetMetadata(tf.Tag, target.URI)
+		normalizedTargetURI := polisurl.NormalizeToMD(target.URI)
+		url := TagTargetURL(baseURL, tf.Tag, normalizedTargetURI)
+		meta := TagTargetMetadata(tf.Tag, normalizedTargetURI)
 
 		var hc *http.Client
 		if dsCfg != nil {
 			hc = dsCfg.HTTPClient
 		}
-		if err := registerTagRow(dsURL, dsKey, url, tf.Version, meta, privateKey, hc); err != nil {
+		if err := registerTagRow(dsURL, dsKey, url, tf.Version, author, meta, privateKey, hc); err != nil {
 			return fmt.Errorf("register tag target %q: %w", target.URI, err)
 		}
 	}
@@ -97,6 +114,9 @@ func SyncTag(dataDir string, tf *TagFile, privateKey []byte, dsCfg *DiscoveryCon
 func UnregisterTarget(tagName, targetURI string, privateKey []byte, dsCfg *DiscoveryConfig) error {
 	dsURL, dsKey, baseURL := resolveDiscoveryConfig(dsCfg)
 	if dsURL == "" || baseURL == "" {
+		stream.LogSuppressedEmit("pub.polis.tag.removed", "config_missing",
+			discovery.ExtractDomainFromURL(baseURL),
+			map[string]interface{}{"tag": tagName, "target": targetURI})
 		return nil
 	}
 
@@ -105,10 +125,16 @@ func UnregisterTarget(tagName, targetURI string, privateKey []byte, dsCfg *Disco
 		checkDir = dsCfg.DataDir
 	}
 	if !discovery.IsRegisteredLocally(checkDir, dsURL) {
+		stream.LogSuppressedEmit("pub.polis.tag.removed", "not_registered_locally",
+			discovery.ExtractDomainFromURL(baseURL),
+			map[string]interface{}{"tag": tagName, "target": targetURI, "ds_url": dsURL})
 		return nil
 	}
 
-	url := TagTargetURL(baseURL, tagName, targetURI)
+	// Normalize the target URI the same way SyncTag does so the hashed URL
+	// matches what was registered (DS also normalizes on ingestion).
+	normalizedTargetURI := polisurl.NormalizeToMD(targetURI)
+	url := TagTargetURL(baseURL, tagName, normalizedTargetURI)
 	var hc *http.Client
 	if dsCfg != nil {
 		hc = dsCfg.HTTPClient
@@ -116,13 +142,38 @@ func UnregisterTarget(tagName, targetURI string, privateKey []byte, dsCfg *Disco
 	return softDeleteRow(dsURL, dsKey, url, privateKey, hc)
 }
 
-// registerTagRow registers a single tag+target row with the DS.
-func registerTagRow(dsURL, dsKey, contentURL, version string, meta map[string]string, privateKey []byte, hc *http.Client) error {
+// registerTagRow registers a single tag+target row with the DS. The payload
+// is signed with the tenant's private key and the signature is included so
+// the DS can verify against the tenant's well-known public key.
+func registerTagRow(dsURL, dsKey, contentURL, version, author string, meta map[string]string, privateKey []byte, hc *http.Client) error {
+	// Metadata must be map[string]interface{} so it matches the canonical
+	// payload structure the DS builds (DS uses generic object shape).
+	metaIface := make(map[string]interface{}, len(meta))
+	for k, v := range meta {
+		metaIface[k] = v
+	}
+
+	// Build canonical JSON matching DS buildContentCanonicalJSON: {type, url,
+	// version, author, metadata}. Same byte-sequence on both sides.
+	canonical, err := discovery.MakeContentCanonicalJSON(
+		"pub.polis.tag", contentURL, version, author, metaIface,
+	)
+	if err != nil {
+		return fmt.Errorf("canonical JSON: %w", err)
+	}
+
+	sig, err := signing.SignContent(canonical, privateKey)
+	if err != nil {
+		return fmt.Errorf("sign: %w", err)
+	}
+
 	payload := map[string]interface{}{
-		"type":     "pub.polis.tag",
-		"url":      contentURL,
-		"version":  version,
-		"metadata": meta,
+		"type":      "pub.polis.tag",
+		"url":       contentURL,
+		"version":   version,
+		"author":    author,
+		"metadata":  metaIface,
+		"signature": sig,
 	}
 
 	body, err := json.Marshal(payload)

@@ -9,7 +9,7 @@ Polis has two CLI implementations sharing the same feature set and data formats:
 | Implementation | Language | Status | Version |
 |---------------|----------|--------|---------|
 | **Go CLI** (`cli-go/`) | Go | Active development | `cli-go/version.txt` |
-| **Bash CLI** (`cli-bash/`) | Bash | Feature-frozen at v0.45.0 | Inline in `bin/polis` |
+| **Bash CLI** (`cli-bash/`) | Bash | Feature-frozen (release version tracks Go CLI) | Inline `VERSION=` in `bin/polis` |
 
 The Go CLI owns all core packages in `cli-go/pkg/`. The webapp imports from these packages — the CLI is the source of truth for business logic.
 

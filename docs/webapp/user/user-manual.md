@@ -102,36 +102,27 @@ The UI adapts to where you are in the setup process:
 
 ## Layout & Navigation
 
-The webapp uses a centered-column layout with a thin top navigation bar:
+The webapp uses a centered-column layout with a thin top navigation bar. The logged-in view is a **single stream-screen** rendered by the v4 infinity-stream shape — there is no Feed/Posts mode toggle. Filtering is driven by PQL (polis query language) sentences: clicking an icon loads a preset sentence; the sentence-filter widget in the topbar lets you compose your own.
 
 ### Top Nav Bar
 
-The top bar contains (left to right within a centered 640px column):
+The top bar contains (left to right):
 
-- **Logo**: "Polis" with your domain shown on hover (links to your public site)
-- **Mode Toggle**: Segmented control with "Feed" and "Posts" buttons
-- **Icon Buttons** (right-aligned):
-  - **Sun/Moon** — Toggle between light and dark theme
-  - **Bell** — Notifications (red dot when unread)
-  - **Heart** — Blessing requests (amber dot when pending)
-  - **People** — Following/followers network
-  - **Gear** — Settings
+- **Avatar button** — 28px circle with your initial on a gradient. Click opens a dropdown with your name/handle, follower/following/post stats, Dashboard link, Settings link, and Log out. Carries a notification dot when *any* unread item exists across the system.
+- **Icon row** (each loads a PQL preset; carries its own notification dot where noted):
+  - **Gateway** (arc + dots) — "Activity from my network." Dot = unread activity items.
+  - **Paragraph** (three lines) — "My posts."
+  - **Comment** (speech bubble) — "Comments to bless." Dot = pending blessing requests.
+  - **People** (silhouette + circle) — "Profiles."
+  - **Envelope** — "My messages." Dot = unread DMs.
+  - **Edit** (cross) — "New post."
+- **Sentence-filter widget** (centered) — composable PQL: qualifier slot, type slot, scope slot, modifier slot, plus a site-typeahead input. Builds sentences like `all activity from my network by date` and routes to `/_/pql/<sentence>`.
 
-### Mode Toggle
-
-The Feed/Posts segmented control switches between two primary views:
-
-**Feed** — Social content from authors you follow:
-- Conversations (posts + comments from your network)
-- Pulse (community activity stream)
-- Activity events
-
-**Posts** — Your own site content, with sub-tabs:
-- Published, Drafts, Comments, Blessings, Snippets
+The bell and heart icons that used to sit in the topbar are gone — their indicators are now the badge dots on the gateway and comment buttons described above.
 
 ### Centered Content Column
 
-All content is rendered in a 640px centered column below the top bar. This includes feed cards, post lists, settings, and all other views.
+All content is rendered in a 640px centered column below the top bar. The same column hosts the stream, settings, the editor, post detail, message threads — every view in the SPA.
 
 **Toasts** appear in the bottom-right corner for success, error, warning, and info messages. They auto-dismiss after a few seconds. Some toasts include action buttons — for example, after blessing a comment you may see a suggestion to follow the commenter back.
 
@@ -189,7 +180,7 @@ Unpublishing removes the post from the public index. The source file is deleted.
 
 ### Drafts
 
-Click **Save Draft** at any time while writing. Drafts are stored in `.polis/content/pub.polis.core/posts/drafts/` with auto-numbered IDs. Open a draft from the Drafts sidebar view to continue editing, then publish when ready.
+Click **Save Draft** at any time while writing. Drafts are stored in `.polis/bundles/pub.polis.core/posts/drafts/` with auto-numbered IDs. Open a draft from the Drafts sidebar view to continue editing, then publish when ready.
 
 ### Commenting on Other Authors' Posts
 
@@ -389,21 +380,20 @@ This controls only the webapp's color scheme — it does not affect your public 
 
 ### Site Theme
 
-The Site Theme section has a dropdown selector showing all available themes:
+The Site Theme section has a dropdown selector showing all user-selectable themes:
 
 | Theme | Description |
 |-------|-------------|
 | `especial` | Dark gold and navy, inspired by Modelo Especial |
 | `especial-light` | Light variant of especial with warm fog tones |
-| `sols` | Violet and peach, inspired by Nine Sols |
 | `studio13` | Stark black and burnt orange, late-night studio energy |
 | `turbo` | Deep blue with bright cyan, retro computing aesthetic |
 | `vice` | Warm coral and sunset hues, Miami Vice vibes |
 | `zane` | Neutral dark with teal and salmon, based on a classic editor theme |
 
-Select a theme from the dropdown to switch immediately — this updates the manifest, copies the theme CSS, and re-renders your entire site.
+> `sols` ships with the core bundle but is *reserved* as the logged-out landing theme on polis.pub. It is filtered out of the user-selectable dropdown so that selecting a personal theme always produces a visible shift from the system chrome.
 
-Theme data is stored in your site's manifest (`active_theme` field) and the theme CSS is copied to `styles.css` at the site root.
+Select a theme from the dropdown to switch immediately — this updates `active_theme` in `.polis/bundles/registry.json`, applies the new theme CSS, and re-renders your site. (Active theme is private per-tenant configuration; it does not live in `.well-known/polis`.)
 
 ### Discovery Service Section
 
@@ -566,13 +556,13 @@ Notifications tell you when something happens on the discovery network that's re
 1. The webapp syncs with the discovery service every **30 seconds** when at least one browser tab is connected via SSE
 2. Events are matched against your **notification rules** to decide what's relevant
 3. Matching events are written to a local state file as notification entries
-4. The notification bell shows a red dot when you have unread notifications
+4. The **gateway** icon in the topbar shows a dot when you have unread activity (the old "bell" icon was retired in v4 — see `Top Nav Bar` above)
 
 An immediate sync runs when you first open a browser tab, then repeats every 30 seconds as long as a tab remains open. Sync pauses when all tabs are closed.
 
-### The Notification Bell & Panel
+### The Notifications View
 
-Click the bell icon in the top nav bar to open the notification panel. The panel shows your notifications newest-first, with unread items highlighted.
+Click the **gateway** icon (the arc+dots icon, leftmost in the icon row) to load the activity stream — it filters the main stream-screen to your unread/recent network activity. The view shows notifications newest-first, with unread items highlighted.
 
 Each notification shows an icon, a message, and a relative timestamp (e.g., "2 days ago").
 

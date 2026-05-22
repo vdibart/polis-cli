@@ -100,18 +100,20 @@ Every operational constant in the Discovery Service — rate limits, size limits
 
 ### All Configurable Settings
 
-All 24 settings at a glance:
+All 28 settings at a glance:
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
 | `DS_RATE_DOMAIN_SITES_REGISTER` | 5 | Per-domain site registrations per hour |
 | `DS_RATE_DOMAIN_SITES_UNREGISTER` | 5 | Per-domain site unregistrations per hour |
 | `DS_RATE_DOMAIN_CONTENT_REGISTER` | 50 | Per-domain content registrations per hour |
-| `DS_RATE_DOMAIN_CONTENT_UNREGISTER` | 20 | Per-domain content unregistrations per hour |
+| `DS_RATE_DOMAIN_CONTENT_UNREGISTER` | 20 | Per-domain content unregistrations per hour (tags) |
+| `DS_RATE_DOMAIN_CONTENT_UNPUBLISH` | 20 | Per-domain post/comment unpublishes per hour |
 | `DS_RATE_DOMAIN_RELATIONSHIP_UPDATE` | 50 | Per-domain relationship updates per hour |
 | `DS_RATE_DOMAIN_STREAM_PUBLISH` | 100 | Per-domain stream publishes per hour |
 | `DS_RATE_IP_WRITE_PREAUTH` | 120 | Per-IP write requests per hour (pre-auth) |
 | `DS_RATE_IP_SITES_CHECK` | 300 | Per-IP site check queries per hour |
+| `DS_RATE_IP_SITES_LIST` | 300 | Per-IP `/v1/sites/list` queries per hour |
 | `DS_RATE_IP_CONTENT_CHECK` | 300 | Per-IP content check queries per hour |
 | `DS_RATE_IP_CONTENT_QUERY` | 600 | Per-IP content queries per hour |
 | `DS_RATE_IP_RELATIONSHIP_QUERY` | 600 | Per-IP relationship queries per hour |
@@ -128,6 +130,7 @@ All 24 settings at a glance:
 | `DS_QUERY_CONTENT_MAX_LIMIT` | 100 | Max `limit` for content/relationship queries |
 | `DS_QUERY_STREAM_MAX_LIMIT` | 1000 | Max `limit` for stream queries |
 | `DS_QUERY_MAX_OFFSET` | 10000 | Max pagination offset for queries |
+| `DS_WAKE_ENABLED` | `true` | Outbound wake callbacks to domains after relevant events |
 
 ### Domain Rate Limits
 
@@ -153,6 +156,7 @@ These limits are per-IP per hour. They apply before any payload parsing or authe
 |---------|---------|-----------|
 | `DS_RATE_IP_WRITE_PREAUTH` | 120 | All `POST` endpoints |
 | `DS_RATE_IP_SITES_CHECK` | 300 | `GET /v1/sites/check` |
+| `DS_RATE_IP_SITES_LIST` | 300 | `GET /v1/sites/list` |
 | `DS_RATE_IP_CONTENT_CHECK` | 300 | `GET /v1/content/check` |
 | `DS_RATE_IP_CONTENT_QUERY` | 600 | `GET /v1/content` |
 | `DS_RATE_IP_RELATIONSHIP_QUERY` | 600 | `GET /v1/relationships` |

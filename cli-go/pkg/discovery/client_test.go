@@ -101,7 +101,7 @@ func TestCanonicalPayloadFormat_Register(t *testing.T) {
 	// The bash CLI uses: {"version":1,"action":"register","domain":"alice.com"}
 	// Field order must be: version, action, domain
 
-	payload, err := MakeSiteRegistrationCanonicalJSON("register", "alice.com")
+	payload, err := marshalCanonical(siteRegistrationPayload{Version: 1, Action: "register", Domain: "alice.com"})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestCanonicalPayloadFormat_Unregister(t *testing.T) {
 	// The bash CLI uses: {"version":1,"action":"unregister","domain":"alice.com"}
 	// Field order must be: version, action, domain
 
-	payload, err := MakeSiteRegistrationCanonicalJSON("unregister", "alice.com")
+	payload, err := marshalCanonical(siteRegistrationPayload{Version: 1, Action: "unregister", Domain: "alice.com"})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -885,10 +885,16 @@ func TestMakeKeyRotationCanonicalJSON_KeyOrder(t *testing.T) {
 	}
 }
 
+// TestMakeContentUnregisterCanonicalJSON — R20-C-F1 (2026-05-18):
+// canonical now includes `timestamp` for replay defense.
 func TestMakeContentUnregisterCanonicalJSON(t *testing.T) {
-	result := MakeContentUnregisterCanonicalJSON("pub.polis.post", "https://example.com/posts/test.md")
+	result := MakeContentUnregisterCanonicalJSON(
+		"pub.polis.post",
+		"https://example.com/posts/test.md",
+		"2026-05-18T12:00:00Z",
+	)
 
-	expected := `{"type":"pub.polis.post","url":"https://example.com/posts/test.md"}`
+	expected := `{"type":"pub.polis.post","url":"https://example.com/posts/test.md","timestamp":"2026-05-18T12:00:00Z"}`
 	if result != expected {
 		t.Errorf("Canonical payload mismatch.\nExpected: %s\nGot:      %s", expected, result)
 	}

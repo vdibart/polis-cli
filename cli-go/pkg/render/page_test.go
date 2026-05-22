@@ -1,12 +1,18 @@
 package render
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 )
 
 func TestNewPageRenderer(t *testing.T) {
@@ -25,6 +31,162 @@ func TestNewPageRenderer(t *testing.T) {
 
 	if renderer == nil {
 		t.Fatal("NewPageRenderer returned nil")
+	}
+}
+
+// --- step-02/2.b.4: shape-selection wiring tests ---
+
+func TestNewPageRenderer_DefaultsToStreamWhenRegistryEmpty(t *testing.T) {
+	// Post-cutover: no active_shape set → bundle.GetActiveShapeName
+	// returns "v4" default. Tenant should render v4 stream fixtures
+	// without error. v4 regression sentinel — was previously v3-default.
+	//
+	// Note: setupTestSite pins to v3 explicitly for the v3 test scaffold.
+	// This test deliberately bypasses that by installing the reference
+	// payload directly without setupTestSite's v3-pinning step.
+	tempDir := t.TempDir()
+	if err := bundle.EnsureReferencePayload(tempDir, "pub.polis.core"); err != nil {
+		t.Fatalf("install reference payload: %v", err)
+	}
+	// Create minimal .well-known/polis so the renderer can boot.
+	wellKnownDir := filepath.Join(tempDir, ".well-known")
+	os.MkdirAll(wellKnownDir, 0755)
+	os.WriteFile(filepath.Join(wellKnownDir, "polis"), []byte(`{
+		"base_url": "https://example.com",
+		"site_title": "Test Site"
+	}`), 0644)
+	// Empty content index.
+	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
+	os.MkdirAll(contentDir, 0755)
+	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(""), 0644)
+
+	renderer, err := NewPageRenderer(PageConfig{
+		DataDir: tempDir,
+		BaseURL: "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer with empty active_shape: %v", err)
+	}
+	// v4 Stream template must be populated (default post-cutover).
+	if renderer.templates.Stream == "" {
+		t.Error("default-shape tenant: Stream template must be populated (v4)")
+	}
+}
+
+func TestNewPageRenderer_PicksStreamFromRegistry(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+	// Flip to v4 via the canonical setter.
+	if err := bundle.SetActiveShapeName(tempDir, "v4"); err != nil {
+		t.Fatalf("SetActiveShapeName(v4): %v", err)
+	}
+
+	renderer, err := NewPageRenderer(PageConfig{
+		DataDir: tempDir,
+		BaseURL: "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer(v4): %v", err)
+	}
+	// v4 Stream template must be populated from the embedded v4 fixture.
+	if renderer.templates.Stream == "" {
+		t.Error("v4 tenant: Stream template must be populated")
+	}
+	// v4 artifact convention — stream.html ships with <main class="focus-content" data-polis-focus="true">.
+	if !strings.Contains(renderer.templates.Stream, `class="focus-content"`) ||
+		!strings.Contains(renderer.templates.Stream, `data-polis-focus="true"`) {
+		t.Errorf("stream.html missing focus-content / data-polis-focus demarcation")
+	}
+}
+
+func TestNewPageRenderer_UnknownShapeErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+	// Write an invalid active_shape directly to registry.
+	if err := bundle.SetActiveShapeName(tempDir, "v99"); err != nil {
+		t.Fatalf("SetActiveShapeName(v99): %v", err)
+	}
+
+	if _, err := NewPageRenderer(PageConfig{
+		DataDir: tempDir,
+		BaseURL: "https://example.com",
+	}); err == nil {
+		t.Error("NewPageRenderer should error for active_shape=v99 (shape dir absent)")
+	}
+}
+
+// --- step-05/5.b: theme-resolution chain verification (Q-S12 deferred path) ---
+
+// TestNewPageRenderer_RegistryThemeWins covers the canonical theme-resolution
+// chain: when registry.json::active_theme is set, NewPageRenderer's chain
+// (theme.GetActiveTheme → theme.SelectRandomTheme fallback) picks the
+// registry value. Verifies that `registry.json` stays the canonical source
+// of truth for active_theme — per the Q-S12 hard constraint settled at
+// manager review (2026-04-26) + reinforced by user direction post-handback
+// (no projection of active_theme out of registry.json into bundle.json or
+// any other file).
+func TestNewPageRenderer_RegistryThemeWins(t *testing.T) {
+	tempDir := t.TempDir()
+	setupTestSite(t, tempDir)
+	// setupTestSite writes "active_theme: testtheme" into .well-known/polis
+	// (legacy fallback location). Set a different theme in the canonical
+	// location (registry) — registry should win over the legacy fallback.
+	if err := bundle.SetActiveThemeName(tempDir, "vice"); err != nil {
+		t.Fatalf("SetActiveThemeName(vice): %v", err)
+	}
+
+	renderer, err := NewPageRenderer(PageConfig{
+		DataDir: tempDir,
+		BaseURL: "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer: %v", err)
+	}
+	if renderer.themeName != "vice" {
+		t.Errorf("renderer.themeName = %q, want %q (registry should win over legacy .well-known fallback)", renderer.themeName, "vice")
+	}
+}
+
+// TestNewPageRenderer_RandomFallbackWhenEmpty covers the fallback path:
+// when neither registry.json::active_theme nor .well-known/polis::active_theme
+// is set, NewPageRenderer falls back to theme.SelectRandomTheme. This is
+// the path that EXERCISES on harness clones today — random-theme on clones
+// is intentional v5 behavior (Q-S12 deferred at manager review 2026-04-26).
+// SelectRandomTheme persists its choice to registry, so the next render
+// is deterministic.
+func TestNewPageRenderer_RandomFallbackWhenEmpty(t *testing.T) {
+	tempDir := t.TempDir()
+	// Install bundle reference payload — gives us themes for SelectRandomTheme
+	// to pick from, and the blog shape templates needed by NewPageRenderer.
+	if err := bundle.EnsureReferencePayload(tempDir, "pub.polis.core"); err != nil {
+		t.Fatalf("install reference payload: %v", err)
+	}
+	// Write a minimal .well-known/polis WITHOUT active_theme — no legacy
+	// fallback to find. Registry (created by EnsureReferencePayload) also
+	// has no active_theme set yet.
+	wkDir := filepath.Join(tempDir, ".well-known")
+	os.MkdirAll(wkDir, 0755)
+	os.WriteFile(filepath.Join(wkDir, "polis"), []byte(`{"base_url":"https://example.com","site_title":"Test","author_name":"Test"}`), 0644)
+
+	renderer, err := NewPageRenderer(PageConfig{
+		DataDir: tempDir,
+		BaseURL: "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer (empty registry, empty well-known): %v", err)
+	}
+	// Random fallback should have picked SOME theme.
+	if renderer.themeName == "" {
+		t.Fatal("themeName empty after random fallback; expected SelectRandomTheme to pick a bundled theme")
+	}
+	// SelectRandomTheme persists its choice — verify it's now in the registry
+	// so subsequent renders are deterministic.
+	saved, err := bundle.GetActiveThemeName(tempDir)
+	if err != nil {
+		t.Fatalf("GetActiveThemeName after random fallback: %v", err)
+	}
+	if saved != renderer.themeName {
+		t.Errorf("registry not updated after random fallback: GetActiveThemeName=%q, renderer.themeName=%q", saved, renderer.themeName)
 	}
 }
 
@@ -341,27 +503,34 @@ func TestRenderArchive(t *testing.T) {
 	}
 }
 
-func TestRenderArchive_NoTemplate(t *testing.T) {
+// TestRenderArchive_FromShape verifies that when a theme omits posts.html,
+// RenderArchive falls through to the shape's template. Post-SHAPE refactor the
+// shape always provides posts.html, so the old "no template anywhere" scenario
+// no longer arises.
+func TestRenderArchive_FromShape(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Create a minimal test site WITHOUT posts.html
+	if err := bundle.EnsureReferencePayload(tempDir, "pub.polis.core"); err != nil {
+		t.Fatalf("install reference payload: %v", err)
+	}
+
 	wellKnownDir := filepath.Join(tempDir, ".well-known")
 	os.MkdirAll(wellKnownDir, 0755)
 	os.WriteFile(filepath.Join(wellKnownDir, "polis"), []byte(`{
 		"base_url": "https://example.com",
 		"site_title": "Test Site",
 		"author_name": "Test Author",
-		"active_theme": "turbo"
+		"active_theme": "testtheme"
 	}`), 0644)
 
-	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "testtheme")
 	os.MkdirAll(themesDir, 0755)
+	// Turbo theme intentionally omits posts.html — should fall through to shape.
 	os.WriteFile(filepath.Join(themesDir, "post.html"), []byte("<html>{{title}}</html>"), 0644)
 	os.WriteFile(filepath.Join(themesDir, "comment.html"), []byte("<html>{{title}}</html>"), 0644)
 	os.WriteFile(filepath.Join(themesDir, "comment-inline.html"), []byte("<div>{{content}}</div>"), 0644)
 	os.WriteFile(filepath.Join(themesDir, "index.html"), []byte("<html>{{site_title}}</html>"), 0644)
-	os.WriteFile(filepath.Join(themesDir, "turbo.css"), []byte("/* test css */"), 0644)
-	// NO posts.html
+	os.WriteFile(filepath.Join(themesDir, "testtheme.css"), []byte("/* test css */"), 0644)
 
 	contentDir := filepath.Join(tempDir, "content", "pub.polis.core")
 	os.MkdirAll(contentDir, 0755)
@@ -374,15 +543,9 @@ func TestRenderArchive_NoTemplate(t *testing.T) {
 		t.Fatalf("NewPageRenderer failed: %v", err)
 	}
 
-	// RenderArchive should not error when posts.html doesn't exist
-	err = renderer.RenderArchive()
-	if err != nil {
-		t.Fatalf("RenderArchive should not error when template missing: %v", err)
-	}
-
-	// content/pub.polis.core/post/index.html should NOT be created
-	if _, err := os.Stat(filepath.Join(tempDir, "content", "pub.polis.core", "post", "index.html")); !os.IsNotExist(err) {
-		t.Error("content/pub.polis.core/post/index.html should not exist when theme lacks posts.html")
+	// RenderArchive should succeed using the shape's posts.html as fallback.
+	if err := renderer.RenderArchive(); err != nil {
+		t.Fatalf("RenderArchive failed: %v", err)
 	}
 }
 
@@ -391,7 +554,7 @@ func TestRenderFile_AuthorDomainAndPageType(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Update post template to include widget variables
-	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "testtheme")
 	postTmpl := `<!DOCTYPE html>
 <html>
 <head><title>{{title}}</title></head>
@@ -435,7 +598,7 @@ func TestRenderFile_WidgetVersionPopulated(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Template that uses widget_version
-	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "testtheme")
 	postTmpl := `<script src="https://polis.pub/widget-{{widget_version}}.js"></script><h1>{{title}}</h1>`
 	os.WriteFile(filepath.Join(themesDir, "post.html"), []byte(postTmpl), 0644)
 
@@ -461,7 +624,7 @@ func TestRenderFile_AuthorDomainFromBaseURLConfig(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Template that exposes author_domain
-	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "testtheme")
 	postTmpl := `<div data-author="{{author_domain}}">{{title}}</div>`
 	os.WriteFile(filepath.Join(themesDir, "post.html"), []byte(postTmpl), 0644)
 
@@ -487,7 +650,7 @@ func TestRenderFile_AuthorDomainEmptyWithoutBaseURL(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Template that exposes author_domain
-	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "testtheme")
 	postTmpl := `<div data-author="{{author_domain}}">{{title}}</div>`
 	os.WriteFile(filepath.Join(themesDir, "post.html"), []byte(postTmpl), 0644)
 
@@ -513,7 +676,7 @@ func TestRenderIndex_ExcerptPopulated(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Update index template to show excerpt
-	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "testtheme")
 	idxTmpl := `<!DOCTYPE html>
 <html>
 <head><title>{{site_title}}</title></head>
@@ -568,7 +731,7 @@ func TestRenderIndex_CommentCountWithSourceContentPath(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Use an index template that shows comment_count
-	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "testtheme")
 	idxTmpl := `<!DOCTYPE html>
 <html>
 <head><title>{{site_title}}</title></head>
@@ -632,7 +795,7 @@ func TestRenderIndex_PageTypeIsIndex(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Update index template to include page_type
-	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "testtheme")
 	idxTmpl := `<!DOCTYPE html>
 <html>
 <head><title>{{site_title}}</title></head>
@@ -787,7 +950,7 @@ func TestRenderFile_MountDir_CSSHomePaths(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	// Template that exposes css_path and home_path
-	themesDir := filepath.Join(tempDir, "site", "themes", "turbo")
+	themesDir := filepath.Join(tempDir, "site", "themes", "testtheme")
 	postTmpl := `<link rel="stylesheet" href="{{css_path}}"><a href="{{home_path}}">Home</a><h1>{{title}}</h1>`
 	os.WriteFile(filepath.Join(themesDir, "post.html"), []byte(postTmpl), 0644)
 
@@ -1196,6 +1359,20 @@ func TestBuildAvatarHTML_FallbackToDomain(t *testing.T) {
 func setupTestSite(t *testing.T, dir string) {
 	t.Helper()
 
+	// Install the reference bundle payload — gives us a working blog shape at
+	// .polis/bundles/pub.polis.core/shapes/v3/, which render now requires.
+	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+		t.Fatalf("install reference payload: %v", err)
+	}
+
+	// Pin to v3 — this scaffold writes v3-style per-post templates into
+	// site/themes/testtheme/, so we need active_shape=v3 to dispatch the
+	// v3 render path. Post-cutover the default is v4; tests that exercise
+	// v3 behavior must opt in explicitly.
+	if err := bundle.SetActiveShapeName(dir, "v3"); err != nil {
+		t.Fatalf("SetActiveShapeName(v3): %v", err)
+	}
+
 	// Create .well-known/polis
 	wellKnownDir := filepath.Join(dir, ".well-known")
 	os.MkdirAll(wellKnownDir, 0755)
@@ -1203,11 +1380,11 @@ func setupTestSite(t *testing.T, dir string) {
 		"base_url": "https://example.com",
 		"site_title": "Test Site",
 		"author_name": "Test Author",
-		"active_theme": "turbo"
+		"active_theme": "testtheme"
 	}`), 0644)
 
-	// Create site/themes/turbo with minimal templates
-	themesDir := filepath.Join(dir, "site", "themes", "turbo")
+	// Create site/themes/testtheme with minimal templates
+	themesDir := filepath.Join(dir, "site", "themes", "testtheme")
 	os.MkdirAll(themesDir, 0755)
 
 	postTemplate := `<!DOCTYPE html>
@@ -1245,10 +1422,285 @@ func setupTestSite(t *testing.T, dir string) {
 	os.WriteFile(filepath.Join(themesDir, "posts.html"), []byte(archiveTemplate), 0644)
 
 	// Create CSS file (required by RenderAll)
-	os.WriteFile(filepath.Join(themesDir, "turbo.css"), []byte("/* test css */"), 0644)
+	os.WriteFile(filepath.Join(themesDir, "testtheme.css"), []byte("/* test css */"), 0644)
 
 	// Create empty content/pub.polis.core/index.jsonl
 	contentDir := filepath.Join(dir, "content", "pub.polis.core")
 	os.MkdirAll(contentDir, 0755)
 	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(""), 0644)
+}
+
+// ── R16-12 SSRF on in_reply_to URL ──────────────────────────────────
+
+func TestReplyURLAllowed_RejectsInternalAndUnsafe(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		want bool // true = should be allowed
+	}{
+		// Allowed
+		{"https public", "https://alice.example.com/posts/foo.html", true},
+		{"http public", "http://alice.example.com/posts/foo.html", true},
+		{"https with port", "https://alice.example.com:8443/posts/foo.html", true},
+
+		// Rejected — internal/loopback/sentinel
+		{"localhost", "http://localhost/", false},
+		{"127.0.0.1", "http://127.0.0.1/", false},
+		{"ipv6 loopback", "http://[::1]/", false},
+		{"cloud metadata", "http://169.254.169.254/latest/meta-data/", false},
+		{"single label host", "http://redis/", false},
+		{"dotinternal", "http://polis-ds.internal/health", false},
+		{"dotlocal mDNS", "http://printer.local/", false},
+
+		// Rejected — bad scheme / malformed
+		{"file scheme", "file:///etc/passwd", false},
+		{"javascript scheme", "javascript:alert(1)", false},
+		{"empty", "", false},
+		{"garbage", "::not a url::", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := replyURLAllowed(c.url)
+			if got != c.want {
+				t.Errorf("replyURLAllowed(%q) = %v, want %v", c.url, got, c.want)
+			}
+		})
+	}
+}
+
+func TestFetchReplyContextFull_BlocksSSRFTargets(t *testing.T) {
+	// All of these would otherwise reach internal/sensitive endpoints.
+	for _, url := range []string{
+		"http://localhost:6379/",
+		"http://127.0.0.1/",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://redis/",
+		"http://polis-ds.internal/health",
+	} {
+		entry, ok := FetchReplyContextFull(url)
+		if ok {
+			t.Errorf("FetchReplyContextFull(%q) should have been blocked, got entry=%+v", url, entry)
+		}
+	}
+}
+
+// ── R19-1, R19-2 reply-context cache hardening ──────────────────────
+
+// errAllRoundTripper makes any HTTP call fail. Use it to assert that
+// a cache-hit path does NOT touch the network.
+type errAllRoundTripper struct{}
+
+func (errAllRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("test stub: HTTP fetch should not have happened on a cache-hit path")
+}
+
+// TestLoadOrFetchReplyContext_PartialEntryHits — R19-2 regression
+// guard. A cached entry with Title + Excerpt but empty BodyMD must
+// count as a cache hit; pre-fix the BodyMD!="" predicate forced a
+// re-fetch on every call, defeating the cache's purpose for the
+// remaining caller (buildCommentThreadEnrichments, which only
+// consumes Title + Excerpt).
+func TestLoadOrFetchReplyContext_PartialEntryHits(t *testing.T) {
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, replyContextCachePath)
+	os.MkdirAll(filepath.Dir(cachePath), 0755)
+
+	// Seed a partial entry (Title + Excerpt + Domain, no BodyMD).
+	partial := replyContextCache{
+		"https://alice.example.com/posts/foo.html": ReplyContextEntry{
+			Title:   "Foo",
+			Excerpt: "An excerpt about foo.",
+			Domain:  "alice.example.com",
+		},
+	}
+	data, _ := json.MarshalIndent(partial, "", "  ")
+	os.WriteFile(cachePath, data, 0644)
+
+	// Swap in an error-everywhere HTTP client so any fetch attempt
+	// fails. If the predicate forces a re-fetch we'd get ok=false.
+	origClient := DefaultHTTPClient
+	DefaultHTTPClient = &http.Client{Transport: errAllRoundTripper{}}
+	defer func() { DefaultHTTPClient = origClient }()
+
+	entry, ok := LoadOrFetchReplyContext(dir, "https://alice.example.com/posts/foo.html", 0)
+	if !ok {
+		t.Fatal("expected cache hit on partial entry; got ok=false (predicate forced re-fetch)")
+	}
+	if entry.Title != "Foo" || entry.Excerpt != "An excerpt about foo." {
+		t.Errorf("returned entry doesn't match seed: %+v", entry)
+	}
+}
+
+// stubRoundTripper returns a deterministic .md body for any GET so
+// FetchReplyContextFull can succeed in the R19-1 race test without
+// real network I/O.
+type stubRoundTripper struct{}
+
+func (stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Synthesize a minimal markdown body with frontmatter that
+	// FetchReplyContextFull's parser will accept. Path-derived title
+	// lets the test verify entries are keyed correctly.
+	path := req.URL.Path
+	body := "---\ntitle: " + path + "\n---\n\nBody for " + path + ".\n"
+	return &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+// countingRoundTripper wraps stubRoundTripper to count requests per
+// URL — used by the singleflight test to assert exactly one
+// underlying fetch fires for N concurrent same-URL callers.
+type countingRoundTripper struct {
+	mu     sync.Mutex
+	counts map[string]int
+	gate   chan struct{} // optional: block fetches until close()
+}
+
+func (c *countingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.mu.Lock()
+	c.counts[req.URL.String()]++
+	c.mu.Unlock()
+	if c.gate != nil {
+		<-c.gate // wait for test to release
+	}
+	return stubRoundTripper{}.RoundTrip(req)
+}
+
+// TestLoadOrFetchReplyContext_SingleflightDeduplicates — R19-3
+// regression guard. N concurrent callers for the SAME URL must
+// trigger exactly one underlying HTTP fetch via the singleflight
+// group. Pre-R19-3, each caller would fetch independently, wasting
+// origin bandwidth.
+func TestLoadOrFetchReplyContext_SingleflightDeduplicates(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "comments"), 0755)
+
+	// Reset the package-level negative cache + singleflight inflight
+	// map so prior tests don't pollute state.
+	replyNegativeCacheMu.Lock()
+	replyNegativeCache = make(map[string]time.Time)
+	replyNegativeCacheMu.Unlock()
+
+	// gate keeps fetches in flight until we open it — guarantees all
+	// N callers reach the singleflight Do before the first fetch
+	// completes, so they all share the in-flight call.
+	gate := make(chan struct{})
+	counter := &countingRoundTripper{counts: make(map[string]int), gate: gate}
+
+	origClient := DefaultHTTPClient
+	DefaultHTTPClient = &http.Client{Transport: counter}
+	defer func() { DefaultHTTPClient = origClient }()
+
+	const url = "https://alice.example.com/posts/shared.html"
+	const n = 10
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			LoadOrFetchReplyContext(dir, url, 0)
+		}()
+	}
+
+	// Give goroutines time to all enter singleflight, then release.
+	time.Sleep(50 * time.Millisecond)
+	close(gate)
+	wg.Wait()
+
+	counter.mu.Lock()
+	got := counter.counts[strings.TrimSuffix(url, ".html")+".md"]
+	counter.mu.Unlock()
+	if got != 1 {
+		t.Errorf("expected exactly 1 underlying fetch for %d concurrent same-URL callers; got %d", n, got)
+	}
+}
+
+// TestLoadOrFetchReplyContext_NegativeCacheBlocksRefetch — R19-4
+// regression guard. After a failed fetch, the next call for the
+// same URL must short-circuit (not re-fetch) until the negative
+// entry expires.
+func TestLoadOrFetchReplyContext_NegativeCacheBlocksRefetch(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "comments"), 0755)
+
+	// Reset state.
+	replyNegativeCacheMu.Lock()
+	replyNegativeCache = make(map[string]time.Time)
+	replyNegativeCacheMu.Unlock()
+
+	counter := &countingRoundTripper{counts: make(map[string]int)}
+	origClient := DefaultHTTPClient
+	DefaultHTTPClient = &http.Client{Transport: errAllRoundTripper{}}
+	defer func() { DefaultHTTPClient = origClient }()
+
+	const url = "https://alice.example.com/posts/dead.html"
+
+	// First call: fetch attempt fails → negative cache populated.
+	_, ok := LoadOrFetchReplyContext(dir, url, 0)
+	if ok {
+		t.Fatal("first call: expected ok=false on fetch failure")
+	}
+
+	// Swap to the counting transport that WOULD succeed if hit.
+	DefaultHTTPClient = &http.Client{Transport: counter}
+
+	// Second call: must short-circuit via negative cache; no fetch.
+	_, ok = LoadOrFetchReplyContext(dir, url, 0)
+	if ok {
+		t.Error("second call: negative cache hit should keep ok=false")
+	}
+
+	counter.mu.Lock()
+	got := counter.counts[strings.TrimSuffix(url, ".html")+".md"]
+	counter.mu.Unlock()
+	if got != 0 {
+		t.Errorf("second call should have hit negative cache (0 fetches); got %d", got)
+	}
+}
+
+// TestLoadOrFetchReplyContext_ConcurrentWritesAllPersist — R19-1
+// regression guard. N concurrent callers each fetch a distinct URL;
+// every entry must survive the cache write. Pre-fix the load+save
+// sequence dropped 4 out of every 5 entries because each caller's
+// snapshot overwrote the others.
+func TestLoadOrFetchReplyContext_ConcurrentWritesAllPersist(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "comments"), 0755)
+
+	origClient := DefaultHTTPClient
+	DefaultHTTPClient = &http.Client{Transport: stubRoundTripper{}}
+	defer func() { DefaultHTTPClient = origClient }()
+
+	const n = 20
+	urls := make([]string, n)
+	for i := 0; i < n; i++ {
+		urls[i] = fmt.Sprintf("https://alice.example.com/posts/p%02d.html", i)
+	}
+
+	var wg sync.WaitGroup
+	for _, u := range urls {
+		wg.Add(1)
+		go func(u string) {
+			defer wg.Done()
+			_, ok := LoadOrFetchReplyContext(dir, u, 0)
+			if !ok {
+				t.Errorf("fetch failed for %s", u)
+			}
+		}(u)
+	}
+	wg.Wait()
+
+	// Every URL we wrote must be present in the persisted cache.
+	final := loadReplyContextCache(dir)
+	if len(final) != n {
+		t.Errorf("expected %d entries in persisted cache; got %d", n, len(final))
+	}
+	for _, u := range urls {
+		if _, present := final[u]; !present {
+			t.Errorf("entry for %s missing from persisted cache", u)
+		}
+	}
 }

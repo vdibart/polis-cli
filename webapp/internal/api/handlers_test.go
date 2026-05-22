@@ -110,12 +110,22 @@ func TestWriteErrorVariousStatuses(t *testing.T) {
 
 // ── handleDispatchError ────────────────────────────────────────────────
 
+// TestHandleDispatchErrorMapping — R18-15 (2026-05-18): every branch
+// of handleDispatchError now returns a generic, category-keyed
+// message. Pre-fix, the matched sub-cases (not-configured, invalid,
+// not-found, unsupported-action) echoed err.Error() verbatim;
+// downstream packages frequently wrap errors with absolute fs paths
+// or DS URLs, so echoing leaked server layout to API callers. New
+// posture: status + code preserved, message is fixed per-category,
+// full err logged server-side via pub.polis.api.dispatch_error.
 func TestHandleDispatchErrorMapping(t *testing.T) {
 	tests := []struct {
 		errMsg       string
 		expectedCode int
 		expectedErr  string
 	}{
+		// All branches return a category code with status mapping.
+		// The original err text MUST NOT appear in the response body.
 		{"not configured", http.StatusServiceUnavailable, "not_configured"},
 		{"no private key found", http.StatusServiceUnavailable, "not_configured"},
 		{"field required", http.StatusBadRequest, "invalid_request"},
@@ -123,13 +133,22 @@ func TestHandleDispatchErrorMapping(t *testing.T) {
 		{"unknown content type foo", http.StatusNotFound, "not_found"},
 		{"resource not found", http.StatusNotFound, "not_found"},
 		{"unsupported action delete", http.StatusBadRequest, "unsupported_action"},
+		// Wrapped errors that previously slipped through with absolute
+		// paths — must be scrubbed.
+		{"validate: /data/tenants/alice/.polis/keys/id_ed25519: required", http.StatusBadRequest, "invalid_request"},
+		{"open /data/tenants/bob/.polis/content/post/foo.md: not found", http.StatusNotFound, "not_found"},
+		// Default arm.
+		{"open /data/tenants/foo/.polis/keys/id_ed25519: permission denied", http.StatusInternalServerError, "internal_error"},
 		{"something completely unexpected", http.StatusInternalServerError, "internal_error"},
 	}
+
+	h := &handlers{}
 
 	for _, tt := range tests {
 		t.Run(tt.errMsg, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			handleDispatchError(w, errors.New(tt.errMsg))
+			r := httptest.NewRequest(http.MethodGet, "/v1/content/test", nil)
+			h.handleDispatchError(w, r, errors.New(tt.errMsg))
 
 			if w.Code != tt.expectedCode {
 				t.Errorf("error %q: expected %d, got %d", tt.errMsg, tt.expectedCode, w.Code)
@@ -140,6 +159,17 @@ func TestHandleDispatchErrorMapping(t *testing.T) {
 			errObj := resp["error"].(map[string]any)
 			if errObj["code"] != tt.expectedErr {
 				t.Errorf("error %q: expected code %q, got %q", tt.errMsg, tt.expectedErr, errObj["code"])
+			}
+
+			// R18-15: response body must NOT contain the raw error
+			// text — that's the whole point of the scrub.
+			respMsg, _ := errObj["message"].(string)
+			if strings.Contains(respMsg, tt.errMsg) {
+				t.Errorf("R18-15 regression: error %q echoed in response message %q", tt.errMsg, respMsg)
+			}
+			// And specifically no absolute paths leaked.
+			if strings.Contains(respMsg, "/data/") {
+				t.Errorf("R18-15 regression: response message contains absolute /data/ path: %q", respMsg)
 			}
 		})
 	}

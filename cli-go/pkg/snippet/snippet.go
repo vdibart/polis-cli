@@ -6,12 +6,13 @@
 package snippet
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 )
 
 // SnippetInfo represents metadata about a single snippet file or directory.
@@ -59,26 +60,21 @@ func validatePath(path string) error {
 	return nil
 }
 
-// GetActiveTheme reads the active_theme from .well-known/polis.
-func GetActiveTheme(dataDir string) (string, error) {
-	wkPath := filepath.Join(dataDir, ".well-known", "polis")
-	data, err := os.ReadFile(wkPath)
-	if err != nil {
-		// Default to "zane" if well-known doesn't exist or can't be read
+// activeThemeOrDefault returns the active theme name for snippet lookup,
+// falling back to "zane" when no theme is configured. This is the snippet
+// package's compatibility shim — it differs from theme.GetActiveTheme /
+// bundle.GetActiveThemeName in that it always produces a non-empty string,
+// which the snippet rendering path requires (it needs *some* theme dir to
+// resolve theme: snippets against, even on a freshly-initialized site).
+//
+// Keep this distinct from the canonical accessors so a reader scanning
+// snippet code sees the "always returns a usable name" semantic explicitly.
+func activeThemeOrDefault(dataDir string) (string, error) {
+	name, err := bundle.GetActiveThemeName(dataDir)
+	if err != nil || name == "" {
 		return "zane", nil
 	}
-
-	var wk struct {
-		ActiveTheme string `json:"active_theme"`
-	}
-	if err := json.Unmarshal(data, &wk); err != nil {
-		return "zane", nil
-	}
-
-	if wk.ActiveTheme == "" {
-		return "zane", nil
-	}
-	return wk.ActiveTheme, nil
+	return name, nil
 }
 
 // ListSnippets returns a merged list of snippets from global and theme directories.
@@ -99,7 +95,7 @@ func ListSnippets(dataDir, cliThemesDir, activeTheme, relativePath, filter strin
 	// If activeTheme is empty, try to get it from manifest
 	if activeTheme == "" {
 		var err error
-		activeTheme, err = GetActiveTheme(dataDir)
+		activeTheme, err = activeThemeOrDefault(dataDir)
 		if err != nil {
 			activeTheme = "zane"
 		}
@@ -291,7 +287,7 @@ func ReadSnippet(dataDir, cliThemesDir, activeTheme, snippetPath, source string)
 	// If activeTheme is empty, try to get it from manifest
 	if activeTheme == "" {
 		var err error
-		activeTheme, err = GetActiveTheme(dataDir)
+		activeTheme, err = activeThemeOrDefault(dataDir)
 		if err != nil {
 			activeTheme = "zane"
 		}
@@ -350,7 +346,7 @@ func WriteSnippet(dataDir, cliThemesDir, activeTheme, snippetPath, content, sour
 	// If activeTheme is empty, try to get it from manifest
 	if activeTheme == "" {
 		var err error
-		activeTheme, err = GetActiveTheme(dataDir)
+		activeTheme, err = activeThemeOrDefault(dataDir)
 		if err != nil {
 			activeTheme = "zane"
 		}

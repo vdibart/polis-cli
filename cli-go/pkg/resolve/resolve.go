@@ -149,8 +149,8 @@ func (r *Resolver) MountPath(typeName string) (string, error) {
 
 // PrivatePath returns the absolute private state directory for a content type,
 // optionally with a subdirectory appended.
-// Example: PrivatePath("pub.polis.post", "drafts") → <siteDir>/.polis/content/pub.polis.core/posts/drafts
-// Example: PrivatePath("pub.polis.comment", "pending") → <siteDir>/.polis/content/pub.polis.core/comments/pending
+// Example: PrivatePath("pub.polis.post", "drafts") → <siteDir>/.polis/bundles/pub.polis.core/posts/drafts
+// Example: PrivatePath("pub.polis.comment", "pending") → <siteDir>/.polis/bundles/pub.polis.core/comments/pending
 func (r *Resolver) PrivatePath(typeName string, subdirs ...string) (string, error) {
 	b, err := r.findBundle(typeName)
 	if err != nil {

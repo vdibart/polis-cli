@@ -68,6 +68,26 @@ builds:
     ldflags:
       - -s -w -X main.Version={{.Version}}
 
+  # Tailor: site migration & health tool for self-hosters (~10 MB)
+  - id: tailor
+    dir: webapp
+    main: ./cmd/tailor
+    binary: tailor
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.Version={{.Version}}
+
 archives:
   # CLI-only archives
   - id: polis-archives
@@ -111,6 +131,20 @@ archives:
     files:
       - none*
 
+  # Tailor archives
+  - id: tailor-archives
+    builds:
+      - tailor
+    formats:
+      - tar.gz
+    name_template: "tailor-{{ .Os }}-{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - none*
+
 checksum:
   name_template: 'checksums.txt'
   algorithm: sha256
@@ -125,13 +159,14 @@ release:
   header: |
     ## Polis v{{ .Tag }}
 
-    ### Three Distribution Targets
+    ### Four Distribution Targets
 
     | Binary | Description | Size |
     |--------|-------------|------|
     | `polis` | CLI-only (recommended) | ~9 MB |
     | `polis-server` | Web UI only | ~11 MB |
     | `polis-full` | CLI + `serve` command | ~12 MB |
+    | `tailor` | Site migration & health tool for self-hosters | ~10 MB |
 
     ### Installation
 

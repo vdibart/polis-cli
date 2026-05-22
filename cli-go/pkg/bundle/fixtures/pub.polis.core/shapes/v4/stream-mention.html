@@ -1,0 +1,37 @@
+<!--
+    Per-mention entry partial.
+
+    Renders a mention as a standalone `.entry` in the unified stream
+    grammar. Used by the controller when the filter resolves to mentions
+    — mentions surface as first-class stream items in the owner's
+    unified view.
+
+    A mention is a reference to the reader by another author inside a
+    post. The entry links to the mentioning post, surfaces the author
+    byline + the mention context excerpt, and uses the `entry-byline`
+    + `mention-headline` + `mention-excerpt` shape inside the standard
+    entry-body slot.
+
+    Template variables:
+    - {{mention_source_url}}        — the post containing the mention
+    - {{mention_source_title}}
+    - {{mention_source_author_name}}
+    - {{mention_source_author_domain}}
+    - {{mention_date_human}}
+    - {{mention_excerpt}}           — context snippet around the mention
+-->
+<article class="entry entry--mention is-loaded"
+         data-polis-entry-type="mention">
+    <div class="entry-meta">
+        <div class="timeline-dot" aria-hidden="true"></div>
+        <time class="entry-time">{{mention_date_human}}</time>
+    </div>
+    <a class="entry-body" href="{{mention_source_url}}">
+        <div class="entry-byline">
+            <span class="byline-author">{{mention_source_author_name}}</span>
+            <span class="byline-domain">{{mention_source_author_domain}}</span>
+        </div>
+        <div class="mention-headline">mentioned you in <strong>{{mention_source_title}}</strong></div>
+        <p class="mention-excerpt">{{mention_excerpt}}</p>
+    </a>
+</article>

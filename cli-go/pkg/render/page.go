@@ -7,16 +7,162 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/template"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 )
+
+// replyCacheMu serializes read-modify-write access to the on-disk
+// reply-context cache (.polis/bundles/pub.polis.core/comments/
+// reply-context-cache.json). Without serialization, concurrent
+// LoadOrFetchReplyContext callers each load the same snapshot, add
+// one entry, and write back — last writer wins, and the others'
+// fresh entries are lost.
+//
+// Closes R19-1 (operational-hardening.md). The mutex is NOT held
+// across the outbound HTTP fetch — only the cache load + write
+// halves. The fetch itself is lock-free; R19-3 (singleflight, below)
+// closes the duplicate-fetch race for same-URL callers separately.
+// R19-1's invariant: every entry that gets written stays in the
+// cache.
+var replyCacheMu sync.Mutex
+
+// ── R19-3: singleflight ─────────────────────────────────────────────
+//
+// replyFetchGroup de-duplicates concurrent calls to FetchReplyContextFull
+// for the same URL. Without this, 5 parallel comment-thread renderers
+// pointing at the same parent post each fire an independent HTTP
+// request — wasting origin bandwidth and amplifying R19-1's
+// write-write race (more concurrent writers = more lost entries
+// pre-R19-1 fix; after R19-1 the entries survive but the duplicate
+// fetches are still pure waste).
+//
+// In-place equivalent of golang.org/x/sync/singleflight — kept inline
+// to avoid adding a dependency for one call site. The first caller
+// for a key invokes fn(); subsequent callers wait on the wg and
+// receive the same return values.
+
+type replyFetchCall struct {
+	wg  sync.WaitGroup
+	val ReplyContextEntry
+	ok  bool
+}
+
+type replyFetchGroupT struct {
+	mu       sync.Mutex
+	inflight map[string]*replyFetchCall
+}
+
+var replyFetchGroup = &replyFetchGroupT{inflight: make(map[string]*replyFetchCall)}
+
+// Do executes fn() exactly once per `key` while one is in flight;
+// concurrent callers with the same key receive the same result.
+func (g *replyFetchGroupT) Do(key string, fn func() (ReplyContextEntry, bool)) (ReplyContextEntry, bool) {
+	g.mu.Lock()
+	if c, present := g.inflight[key]; present {
+		g.mu.Unlock()
+		c.wg.Wait()
+		return c.val, c.ok
+	}
+	c := &replyFetchCall{}
+	c.wg.Add(1)
+	g.inflight[key] = c
+	g.mu.Unlock()
+
+	c.val, c.ok = fn()
+
+	g.mu.Lock()
+	delete(g.inflight, key)
+	g.mu.Unlock()
+	c.wg.Done()
+
+	return c.val, c.ok
+}
+
+// ── R19-4: negative cache for failed fetches ────────────────────────
+//
+// In-memory map of URL → expiry-time for recent fetch failures. A
+// comment-thread parent post whose origin is permanently down
+// (deleted post, dead tenant, intermittent network) burns the full
+// 3-second HTTP timeout on every render without this. The negative
+// cache short-circuits subsequent fetches for the same URL until the
+// entry expires.
+//
+// TTL is uniform at replyNegativeCacheTTL (15 min). The original
+// design called for differentiated TTLs by error class (404 long,
+// 5xx short, network shortest) but the FetchReplyContextFull
+// signature returns only (entry, ok) — no error classification. A
+// uniform 15min TTL accepts some retry overhead on flaky DNS while
+// still avoiding the "every render re-fetches every dead URL" case.
+// Differentiated TTLs can come later if observed retry waste justifies
+// the API change.
+//
+// In-memory only — survives process restarts NOT. Survives long
+// enough for one tenant's render bursts, which is all R19-4 was
+// scoped to address.
+
+const replyNegativeCacheTTL = 15 * time.Minute
+
+var (
+	replyNegativeCacheMu sync.Mutex
+	replyNegativeCache   = make(map[string]time.Time) // URL → expiresAt
+)
+
+// replyNegativeCacheCheck reports whether the URL has a live negative
+// entry. Stale entries are lazily evicted on access.
+func replyNegativeCacheCheck(url string) bool {
+	replyNegativeCacheMu.Lock()
+	defer replyNegativeCacheMu.Unlock()
+	if expiresAt, ok := replyNegativeCache[url]; ok {
+		if time.Now().Before(expiresAt) {
+			return true
+		}
+		delete(replyNegativeCache, url)
+	}
+	return false
+}
+
+// replyNegativeCachePut records the URL as recently-failed.
+func replyNegativeCachePut(url string) {
+	replyNegativeCacheMu.Lock()
+	defer replyNegativeCacheMu.Unlock()
+	replyNegativeCache[url] = time.Now().Add(replyNegativeCacheTTL)
+}
+
+// htmlCommentRE matches HTML comments across newlines. Used by
+// StripHTMLComments to drop developer-doc comments embedded in the shape
+// templates (DOM contract notes, protocol-marker explanations, design
+// rationales) before the rendered page hits disk. These comments are
+// useful when reading source but pure waste at runtime — on a typical
+// rendered per-post page they account for ~70% of the uncompressed
+// payload.
+//
+// Safety: this regex strips ALL HTML comments. Markdown-rendered code
+// blocks emit `&lt;!-- ... --&gt;` (HTML-escaped), so user-authored
+// `<!-- ... -->` in post bodies isn't matched. Bluemonday's UGC policy
+// strips raw HTML comments before this stage anyway.
+var htmlCommentRE = regexp.MustCompile(`(?s)<!--.*?-->`)
+
+// StripHTMLComments removes all HTML comments from rendered output. Idempotent.
+// Safe to call on any string; non-HTML content with no `<!--` substring is
+// returned unchanged after the regex's fast path.
+func StripHTMLComments(s string) string {
+	if !strings.Contains(s, "<!--") {
+		return s
+	}
+	return htmlCommentRE.ReplaceAllString(s, "")
+}
 
 // DefaultHTTPClient is an optional shared HTTP client for outbound requests
 // (e.g., fetching reply context during rendering). Set by the calling application
@@ -26,6 +172,15 @@ var DefaultHTTPClient *http.Client
 // WidgetVersion is the single source of truth for the current polis widget version.
 // Update this constant when widget.js changes. Theme snippets reference it via
 // the {{widget_version}} template variable, so they never need manual version bumps.
+//
+// ── HANDBOOK TRAIL MARKER ─ foreign-site widget thread ─────────────────
+// This constant is what every rendered tenant page references in its
+// <script src="https://{{base_domain}}/widget-{{widget_version}}.js"> tag.
+// Bump this when widget/widget.js changes; the hosted server's serveWidgetJS
+// 301-redirects old version URLs to the current one for old HTML.
+// Tour: github.com/vdibart/polis-cli/blob/main/docs/handbook/foreign-site-widget.md
+// Map:  github.com/vdibart/polis-cli/blob/main/AGENTS.md
+// ───────────────────────────────────────────────────────────────────────
 const WidgetVersion = "1.4.4"
 
 // PageConfig holds configuration for page rendering.
@@ -49,6 +204,7 @@ type PageRenderer struct {
 	engine     *template.Engine
 	templates  *theme.Templates
 	themeName  string
+	shapeName  string            // "v3" (page) or "v4" (stream); drives RenderAll dispatch
 	replyCache replyContextCache // lazily loaded cache for reply context
 }
 
@@ -74,8 +230,19 @@ func NewPageRenderer(cfg PageConfig) (*PageRenderer, error) {
 		}
 	}
 
+	// Load active shape from registry. Defaults to v4 post-cutover —
+	// bundle.GetActiveShapeName returns "v4" on missing/empty registry
+	// field, and Medic's upgradeActiveShape remediation flips any
+	// remaining v3 stamps. This fallback covers the edge case of a
+	// renderer constructed before Medic has touched a tenant (cold-
+	// boot races, test fixtures without a registry).
+	shapeName, err := bundle.GetActiveShapeName(cfg.DataDir)
+	if err != nil || shapeName == "" {
+		shapeName = "v4"
+	}
+
 	// Load templates
-	templates, err := theme.Load(cfg.DataDir, cfg.CLIThemesDir, themeName)
+	templates, err := theme.LoadShape(cfg.DataDir, cfg.CLIThemesDir, shapeName, themeName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load theme: %w", err)
 	}
@@ -85,6 +252,7 @@ func NewPageRenderer(cfg PageConfig) (*PageRenderer, error) {
 		DataDir:          cfg.DataDir,
 		CLIThemesDir:     cfg.CLIThemesDir,
 		ActiveTheme:      themeName,
+		ActiveShape:      shapeName,
 		RenderMarkers:    cfg.RenderMarkers,
 		BaseURL:          cfg.BaseURL,
 		MarkdownRenderer: MarkdownToHTML,
@@ -95,6 +263,7 @@ func NewPageRenderer(cfg PageConfig) (*PageRenderer, error) {
 		engine:    engine,
 		templates: templates,
 		themeName: themeName,
+		shapeName: shapeName,
 	}, nil
 }
 
@@ -199,6 +368,17 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 
 	// Widget variables
 	ctx.AuthorDomain = r.getAuthorDomain()
+	// 2026-05-18: if author_name in .well-known/polis is set to the same
+	// string as the domain (common for tenants that haven't set a
+	// distinct display name — e.g. discover.polis.pub publishes
+	// author_name="discover.polis.pub"), suppress the name field so the
+	// rendered layout-left shows the handle once, not twice. CSS hides
+	// .site-name:empty so the wrapper collapses cleanly. EqualFold + trim
+	// guards against incidental whitespace and casing differences in the
+	// stored author_name.
+	if strings.EqualFold(strings.TrimSpace(ctx.AuthorName), strings.TrimSpace(ctx.AuthorDomain)) {
+		ctx.AuthorName = ""
+	}
 	ctx.PageType = fileType // "post" or "comment"
 
 	// Avatar for site header
@@ -265,6 +445,7 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 	if err != nil {
 		return "", false, fmt.Errorf("failed to render template: %w", err)
 	}
+	rendered = StripHTMLComments(rendered)
 
 	// Write HTML output to mount dir
 	if err := os.MkdirAll(filepath.Dir(htmlPath), 0755); err != nil {
@@ -305,6 +486,11 @@ func (r *PageRenderer) RenderIndex() error {
 	ctx.Posts = posts
 	ctx.Comments = comments
 	ctx.AuthorDomain = r.getAuthorDomain()
+	// Suppress duplicate name when author_name == domain (see comment on
+	// the per-post render path above for the rationale).
+	if strings.EqualFold(strings.TrimSpace(ctx.AuthorName), strings.TrimSpace(ctx.AuthorDomain)) {
+		ctx.AuthorName = ""
+	}
 	ctx.PageType = "index"
 
 	// Load following data (non-fatal if missing)
@@ -348,6 +534,7 @@ func (r *PageRenderer) RenderIndex() error {
 	if err != nil {
 		return fmt.Errorf("failed to render index template: %w", err)
 	}
+	rendered = StripHTMLComments(rendered)
 
 	// Write output
 	indexPath := filepath.Join(r.config.DataDir, "index.html")
@@ -388,6 +575,10 @@ func (r *PageRenderer) RenderArchive() error {
 	ctx.PostCount = len(posts)
 	ctx.Posts = posts
 	ctx.AuthorDomain = r.getAuthorDomain()
+	// Suppress duplicate name when author_name == domain.
+	if strings.EqualFold(strings.TrimSpace(ctx.AuthorName), strings.TrimSpace(ctx.AuthorDomain)) {
+		ctx.AuthorName = ""
+	}
 	ctx.PageType = "index"
 	ctx.AvatarHTML = r.buildAvatarHTML()
 
@@ -402,6 +593,7 @@ func (r *PageRenderer) RenderArchive() error {
 	if err != nil {
 		return fmt.Errorf("failed to render archive template: %w", err)
 	}
+	rendered = StripHTMLComments(rendered)
 
 	// Write output to mount dir (posts/index.html) or legacy content dir
 	archiveDir := filepath.Join(r.config.DataDir, r.config.PostsMountDir)
@@ -496,6 +688,7 @@ func (r *PageRenderer) RenderTags() (int, error) {
 		if err != nil {
 			return count, fmt.Errorf("failed to render tag page for %q: %w", tf.Tag, err)
 		}
+		rendered = StripHTMLComments(rendered)
 
 		outPath := filepath.Join(r.config.DataDir, tagPagePath)
 		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
@@ -537,6 +730,7 @@ func (r *PageRenderer) RenderTags() (int, error) {
 	if err != nil {
 		return count, fmt.Errorf("failed to render tag index: %w", err)
 	}
+	rendered = StripHTMLComments(rendered)
 
 	indexPath := filepath.Join(r.config.DataDir, "tags", "index.html")
 	if err := os.MkdirAll(filepath.Dir(indexPath), 0755); err != nil {
@@ -551,6 +745,13 @@ func (r *PageRenderer) RenderTags() (int, error) {
 
 // RenderAll renders all posts and comments, and generates the index.
 func (r *PageRenderer) RenderAll(force bool) (*RenderStats, error) {
+	// stream-shape tenants render through the stream shell: a per-post page with a
+	// focus article + 2-4 sibling excerpts, plus an index.html that focuses
+	// the most-recent post. v3 keeps the legacy per-post/archive/tag pipeline.
+	if r.shapeName == "v4" {
+		return r.renderStreamAll(force)
+	}
+
 	stats := &RenderStats{}
 
 	// Copy CSS first
@@ -780,6 +981,21 @@ func (r *PageRenderer) loadBlessedCommentsForPost(postPath string) ([]template.B
 // Returns rendered HTML content if found, empty string otherwise.
 // Checks both mount path (comments/) and source path (content/pub.polis.core/comment/).
 func (r *PageRenderer) loadLocalCommentContent(commentURL string) string {
+	return LoadLocalCommentContent(r.config.DataDir, r.config.CommentsSourceDir, commentURL)
+}
+
+// LoadLocalCommentContent resolves a blessed comment's URL to local markdown
+// and renders it through the same goldmark + bluemonday pipeline used by
+// per-post page rendering. Used by the stream items handler to enrich posts
+// with their inline blessed comments without re-fetching from the comment
+// author's site (blessed comments are already mirrored locally on the
+// post owner's tenant). Returns empty string on any failure (missing file,
+// unrecognized URL shape, render error) — callers must treat empty as
+// "no inline content available" and degrade gracefully.
+//
+// commentsSourceDir may be empty; if so only the mount path (comments/) is
+// checked.
+func LoadLocalCommentContent(dataDir, commentsSourceDir, commentURL string) string {
 	// Try to extract relative path from URL (e.g., comments/20260101/id.md)
 	suffix := ""
 	if idx := strings.Index(commentURL, "/comments/"); idx >= 0 {
@@ -799,10 +1015,10 @@ func (r *PageRenderer) loadLocalCommentContent(commentURL string) string {
 
 	// Try multiple candidate paths: mount path first, then source content path
 	candidates := []string{
-		filepath.Join(r.config.DataDir, "comments", suffix),
+		filepath.Join(dataDir, "comments", suffix),
 	}
-	if r.config.CommentsSourceDir != "" {
-		candidates = append(candidates, filepath.Join(r.config.DataDir, r.config.CommentsSourceDir, suffix))
+	if commentsSourceDir != "" {
+		candidates = append(candidates, filepath.Join(dataDir, commentsSourceDir, suffix))
 	}
 
 	for _, fullPath := range candidates {
@@ -993,12 +1209,38 @@ func parseFrontmatter(content string) map[string]string {
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) == 2 {
 			key := strings.TrimSpace(parts[0])
-			value := strings.TrimSpace(parts[1])
+			value := yamlUnquote(strings.TrimSpace(parts[1]))
 			result[key] = value
 		}
 	}
 
 	return result
+}
+
+// yamlUnquote strips outer YAML quote characters (double or single) and
+// unescapes the inner content per YAML quoting rules. Handles the
+// double-quoted form (`"\"foo\""` → `"foo"`) and single-quoted form
+// (`'it''s'` → `it's`); plain (unquoted) values pass through unchanged.
+//
+// This is a deliberately small subset of the full YAML escape grammar —
+// polis frontmatter only uses titles and a few other simple string
+// fields, and the auto-derived title path commonly produces
+// `title: "\"X\" Y..."` when the post's first sentence opens with a
+// quoted phrase. Without unescaping, the in-memory title carries the
+// literal backslashes, which then mismatch the rendered body's
+// straight quotes during the title-dedup prefix check.
+func yamlUnquote(v string) string {
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		inner := v[1 : len(v)-1]
+		// Replace `\\` first so a literal backslash before a quote
+		// (e.g. `\\"`) doesn't get its backslash consumed by the
+		// `\"` rule below.
+		return strings.NewReplacer(`\\`, `\`, `\"`, `"`).Replace(inner)
+	}
+	if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
+		return strings.ReplaceAll(v[1:len(v)-1], "''", "'")
+	}
+	return v
 }
 
 // stripFrontmatter removes frontmatter from content.
@@ -1095,17 +1337,29 @@ func truncateText(text string, maxLen int) string {
 	return text[:maxLen-3] + "..."
 }
 
-// replyContextEntry holds cached metadata about a remote post referenced by a comment.
-type replyContextEntry struct {
-	Title   string `json:"title"`
-	Excerpt string `json:"excerpt"`
-	Domain  string `json:"domain"`
+// ReplyContextEntry holds cached metadata about a remote post referenced
+// by a comment. Lower-case fields (Title/Excerpt/Domain) have always been
+// part of the on-disk cache; BodyMD/Published/FetchedAt were added with
+// the stream's `type=comments` thread-entry shape (2026-04-29) and
+// stay omitempty so old cache files keep loading without migration.
+type ReplyContextEntry struct {
+	Title     string `json:"title"`
+	Excerpt   string `json:"excerpt"`
+	Domain    string `json:"domain"`
+	BodyMD    string `json:"body_md,omitempty"`
+	Published string `json:"published,omitempty"`
+	FetchedAt string `json:"fetched_at,omitempty"` // RFC3339; empty on legacy entries
 }
+
+// replyContextEntry kept as a private alias for the existing in-package
+// callers (post-render reply-context injection). New external callers
+// use ReplyContextEntry directly.
+type replyContextEntry = ReplyContextEntry
 
 // replyContextCache is the on-disk cache mapping in_reply_to URLs to metadata.
 type replyContextCache map[string]replyContextEntry
 
-const replyContextCachePath = ".polis/content/pub.polis.core/comments/reply-context-cache.json"
+const replyContextCachePath = ".polis/bundles/pub.polis.core/comments/reply-context-cache.json"
 
 // loadReplyContextCache loads the cache from disk.
 func loadReplyContextCache(dataDir string) replyContextCache {
@@ -1130,9 +1384,56 @@ func saveReplyContextCache(dataDir string, cache replyContextCache) {
 }
 
 // fetchReplyContext fetches a remote post's .md source and extracts title + excerpt.
-// Uses a short timeout so render doesn't hang if the source is unreachable.
+// Wrapper for back-compat — the v3 reply-context-injection callers don't
+// need body/published. New callers should use FetchReplyContextFull.
 func fetchReplyContext(htmlURL string) (title, excerpt string, ok bool) {
-	// Try fetching the .md source (has frontmatter with title)
+	r, ok := FetchReplyContextFull(htmlURL)
+	return r.Title, r.Excerpt, ok
+}
+
+// replyURLAllowed validates that an `in_reply_to` URL is safe to fetch.
+// Defends FetchReplyContextFull against SSRF: the URL originates in
+// remote comment frontmatter, and the render path runs server-side on
+// hosted polis. Without this gate, an attacker-published comment with
+// in_reply_to=`http://localhost:6379/` (Redis), `http://[::1]/`, or
+// `http://169.254.169.254/...` (cloud metadata) would coerce the server
+// into making the request and caching the reply.
+//
+// Allowed: https URLs whose host passes dm.ValidateDomain (rejects bare
+// IPs, localhost, .local/.internal, single-label hostnames, port suffix,
+// brackets). http is allowed only because some self-hosted dev sites
+// don't have TLS — the host validator still rejects all IP literals and
+// internal-network sentinel suffixes.
+func replyURLAllowed(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return false
+	}
+	host := u.Hostname() // strips port + IPv6 brackets
+	return dm.ValidateDomain(host) == nil
+}
+
+// FetchReplyContextFull fetches a remote post's .md source and extracts
+// title, excerpt, body markdown, and published timestamp from the
+// frontmatter. Same fetch semantics as fetchReplyContext (3s timeout via
+// DefaultHTTPClient, 32KB body cap, fallback to /content/ source path).
+// Failed fetches return ok=false and a zero entry; callers should
+// degrade gracefully (e.g. render comment without inline post body).
+//
+// SSRF defense: the URL host is validated through dm.ValidateDomain so
+// attacker-supplied `in_reply_to` values can't be used to reach internal
+// services (Redis, Postgres, cloud metadata at 169.254.169.254, Fly's
+// internal DNS, etc.). The render path runs server-side on hosted polis
+// where one poisoned remote comment would otherwise persist in the reply
+// cache.
+func FetchReplyContextFull(htmlURL string) (entry ReplyContextEntry, ok bool) {
+	if !replyURLAllowed(htmlURL) {
+		return ReplyContextEntry{}, false
+	}
+
 	mdURL := htmlURL
 	if strings.HasSuffix(mdURL, ".html") {
 		mdURL = strings.TrimSuffix(mdURL, ".html") + ".md"
@@ -1155,43 +1456,56 @@ func fetchReplyContext(htmlURL string) (title, excerpt string, ok bool) {
 				if resp != nil {
 					resp.Body.Close()
 				}
-				return "", "", false
+				return ReplyContextEntry{}, false
 			}
 		} else {
-			return "", "", false
+			return ReplyContextEntry{}, false
 		}
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024)) // 32KB max
 	if err != nil {
-		return "", "", false
+		return ReplyContextEntry{}, false
 	}
 
 	content := string(body)
 
-	// Extract title from frontmatter
+	// Find frontmatter bounds. Frontmatter is the markdown bracketed by
+	// `---` on its own line at top-of-file and a closing `---`. Anything
+	// before/after that is body.
+	var fmStart, fmEnd int = -1, -1
 	if idx := strings.Index(content, "---"); idx >= 0 {
 		if end := strings.Index(content[idx+3:], "---"); end >= 0 {
-			fm := content[idx+3 : idx+3+end]
-			for _, line := range strings.Split(fm, "\n") {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "title:") {
-					title = strings.TrimSpace(strings.TrimPrefix(line, "title:"))
-					title = strings.Trim(title, "\"'")
-					break
-				}
+			fmStart = idx
+			fmEnd = idx + 3 + end
+		}
+	}
+
+	// Extract title + published from frontmatter
+	if fmStart >= 0 {
+		fm := content[fmStart+3 : fmEnd]
+		for _, line := range strings.Split(fm, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "title:") {
+				v := strings.TrimSpace(strings.TrimPrefix(line, "title:"))
+				entry.Title = yamlUnquote(v)
+			} else if strings.HasPrefix(line, "published:") {
+				v := strings.TrimSpace(strings.TrimPrefix(line, "published:"))
+				entry.Published = yamlUnquote(v)
 			}
 		}
 	}
 
-	// Extract excerpt: first non-empty paragraph after frontmatter
+	// Body markdown is everything after the frontmatter close.
 	bodyStart := content
-	if idx := strings.Index(content, "---"); idx >= 0 {
-		if end := strings.Index(content[idx+3:], "---"); end >= 0 {
-			bodyStart = content[idx+3+end+3:]
-		}
+	if fmEnd >= 0 {
+		bodyStart = content[fmEnd+3:]
 	}
+	bodyStart = strings.TrimLeft(bodyStart, "\n")
+	entry.BodyMD = bodyStart
+
+	// Extract excerpt: first non-empty paragraph after frontmatter
 	var excerptParts []string
 	excerptLen := 0
 	for _, line := range strings.Split(bodyStart, "\n") {
@@ -1212,10 +1526,106 @@ func fetchReplyContext(htmlURL string) (title, excerpt string, ok bool) {
 		}
 	}
 	if len(excerptParts) > 0 {
-		excerpt = truncateText(strings.Join(excerptParts, " "), 400)
+		entry.Excerpt = truncateText(strings.Join(excerptParts, " "), 400)
 	}
 
-	return title, excerpt, title != "" || excerpt != ""
+	entry.Domain = extractDomain(htmlURL)
+	entry.FetchedAt = time.Now().UTC().Format(time.RFC3339)
+
+	ok = entry.Title != "" || entry.Excerpt != "" || entry.BodyMD != ""
+	return entry, ok
+}
+
+// LoadOrFetchReplyContext returns a cached ReplyContextEntry for the
+// given target URL, fetching + persisting on cache miss or expiry.
+// `ttl` controls how long body data stays valid; pass 0 for "never
+// expire" (only refetch on missing entries). Cache lives at
+// .polis/bundles/pub.polis.core/comments/reply-context-cache.json.
+//
+// Used by the stream's `type=comments` enrichment path. Failed
+// fetches return ok=false; the cache is NOT written for failures so
+// retries get a fresh attempt next call.
+//
+// Concurrency: load + save halves are serialized via replyCacheMu
+// (R19-1). The outbound HTTP fetch is NOT held under the mutex —
+// concurrent same-URL fetches still race to write (last write wins
+// on the duplicate), but R19-3 (singleflight) will close that gap.
+// The invariant this mutex preserves: every entry that gets written
+// stays in the cache.
+//
+// Cache-hit predicate (R19-2): any present entry counts as a hit,
+// regardless of whether BodyMD is populated. The remaining live
+// caller (buildCommentThreadEnrichments in handlers_stream.go) only
+// consumes Title + Excerpt, which partial entries already have. The
+// old `present && entry.BodyMD != ""` predicate was a vestige of
+// buildPostBodies (deleted in commit 174bab8e), which needed full
+// bodies; it now just forces re-fetches that don't help anyone.
+func LoadOrFetchReplyContext(dataDir, htmlURL string, ttl time.Duration) (ReplyContextEntry, bool) {
+	// Read-side: lock long enough to read the cache and snapshot the
+	// hit entry. We deliberately copy the value out so we don't hold
+	// the mutex during the TTL parse + fetch.
+	replyCacheMu.Lock()
+	cache := loadReplyContextCache(dataDir)
+	entry, present := cache[htmlURL]
+	replyCacheMu.Unlock()
+
+	if present {
+		// Hit — check TTL. R19-2: dropped the BodyMD!="" gate. Any
+		// present entry is good enough for the remaining caller's
+		// Title + Excerpt consumption.
+		if ttl <= 0 {
+			return entry, true
+		}
+		if entry.FetchedAt != "" {
+			if t, err := time.Parse(time.RFC3339, entry.FetchedAt); err == nil {
+				if time.Since(t) < ttl {
+					return entry, true
+				}
+			}
+		}
+	}
+
+	// R19-4: short-circuit if a recent fetch for this URL failed.
+	// Avoids burning 3s per render on every dead origin (deleted post,
+	// dead tenant, intermittent network). Returns whatever cached
+	// entry we have (possibly partial) along with ok=false to signal
+	// the negative-cache short-circuit.
+	if replyNegativeCacheCheck(htmlURL) {
+		return entry, false
+	}
+
+	// R19-3: singleflight — concurrent same-URL callers share one
+	// outbound HTTP request. The first caller fetches and writes the
+	// result; subsequent callers receive the same return values from
+	// replyFetchGroup.Do.
+	fetched, ok := replyFetchGroup.Do(htmlURL, func() (ReplyContextEntry, bool) {
+		got, fetchOK := FetchReplyContextFull(htmlURL)
+		if !fetchOK {
+			// R19-4: record the failure so subsequent calls short-
+			// circuit. Uniform 15min TTL — see replyNegativeCacheTTL
+			// for the rationale on not differentiating by error class.
+			replyNegativeCachePut(htmlURL)
+			return got, false
+		}
+		// Write-side: re-load fresh under the lock so concurrent
+		// fetches' writes don't clobber each other (R19-1). Without
+		// this re-load, an old cache snapshot from another call site
+		// could overwrite entries written by parallel callers between
+		// our read and write.
+		replyCacheMu.Lock()
+		fresh := loadReplyContextCache(dataDir)
+		fresh[htmlURL] = got
+		saveReplyContextCache(dataDir, fresh)
+		replyCacheMu.Unlock()
+		return got, true
+	})
+	if !ok {
+		// Return whatever cached entry we had (possibly partial / legacy)
+		// along with ok=false to signal the fetch miss to callers that
+		// want to fall back to URL-derived defaults.
+		return entry, false
+	}
+	return fetched, true
 }
 
 // mountToSourceURL converts a mount-path URL to a content source path URL.

@@ -28,6 +28,7 @@ func createTestTheme(t *testing.T, themeDir, themeName string) {
 }
 
 // createBaseTheme creates a _base theme directory with all templates.
+// Pre-SHAPE-refactor tests used this; still useful for cliThemesDir-based tests.
 func createBaseTheme(t *testing.T, themeDir string) {
 	t.Helper()
 	dir := filepath.Join(themeDir, "_base")
@@ -48,6 +49,27 @@ func createBaseTheme(t *testing.T, themeDir string) {
 	}
 }
 
+// installShapeFixture writes a minimal blog shape fixture into dataDir at
+// .polis/bundles/pub.polis.core/shapes/v3/. Required by Load/LoadShape which
+// now expect the shape dir to exist (post-SHAPE refactor).
+func installShapeFixture(t *testing.T, dataDir string) {
+	t.Helper()
+	dir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "shapes", "v3")
+	os.MkdirAll(dir, 0755)
+	templates := map[string]string{
+		"post.html":           "<html>SHAPE POST</html>",
+		"comment.html":        "<html>SHAPE COMMENT</html>",
+		"comment-inline.html": "<div>SHAPE INLINE</div>",
+		"index.html":          "<html>SHAPE INDEX</html>",
+		"posts.html":          "<html>SHAPE ARCHIVE</html>",
+		"tag.html":            "<html>SHAPE TAG</html>",
+		"tag-index.html":      "<html>SHAPE TAG INDEX</html>",
+	}
+	for name, content := range templates {
+		os.WriteFile(filepath.Join(dir, name), []byte(content), 0644)
+	}
+}
+
 // createCSSOnlyTheme creates a theme with just a CSS file (no HTML templates).
 func createCSSOnlyTheme(t *testing.T, themeDir, themeName string) {
 	t.Helper()
@@ -58,10 +80,11 @@ func createCSSOnlyTheme(t *testing.T, themeDir, themeName string) {
 
 func TestLoad(t *testing.T) {
 	tempDir := t.TempDir()
+	installShapeFixture(t, tempDir)
 	themesDir := filepath.Join(tempDir, "site", "themes")
 	createTestTheme(t, themesDir, "turbo")
 
-	templates, err := Load(tempDir, "", "turbo")
+	templates, err := LoadShape(tempDir, "", "v3", "turbo")
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -77,12 +100,13 @@ func TestLoad(t *testing.T) {
 
 func TestLoadFallbackToCLI(t *testing.T) {
 	dataDir := t.TempDir()
+	installShapeFixture(t, dataDir)
 	cliThemesDir := t.TempDir()
 
 	// Only create theme in CLI dir (not local)
 	createTestTheme(t, cliThemesDir, "sols")
 
-	templates, err := Load(dataDir, cliThemesDir, "sols")
+	templates, err := LoadShape(dataDir, cliThemesDir, "v3", "sols")
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -95,27 +119,9 @@ func TestLoadFallbackToCLI(t *testing.T) {
 func TestLoadMissingTheme(t *testing.T) {
 	tempDir := t.TempDir()
 
-	_, err := Load(tempDir, "", "nonexistent")
+	_, err := LoadShape(tempDir, "", "v3", "nonexistent")
 	if err == nil {
 		t.Error("Expected error for missing theme")
-	}
-}
-
-func TestManifest(t *testing.T) {
-	tempDir := t.TempDir()
-
-	// Create .well-known directory and write polis config
-	os.MkdirAll(filepath.Join(tempDir, ".well-known"), 0755)
-	os.WriteFile(filepath.Join(tempDir, ".well-known", "polis"), []byte(`{"active_theme":"turbo","public_key":"test"}`), 0644)
-
-	// Load manifest
-	loaded, err := LoadManifest(tempDir)
-	if err != nil {
-		t.Fatalf("LoadManifest failed: %v", err)
-	}
-
-	if loaded.ActiveTheme != "turbo" {
-		t.Errorf("Expected active_theme 'turbo', got '%s'", loaded.ActiveTheme)
 	}
 }
 
@@ -239,13 +245,14 @@ func TestSelectRandomTheme_SingleTheme(t *testing.T) {
 
 func TestLoad_OptionalArchiveTemplate(t *testing.T) {
 	tempDir := t.TempDir()
+	installShapeFixture(t, tempDir)
 	themesDir := filepath.Join(tempDir, "site", "themes")
 	createTestTheme(t, themesDir, "turbo")
 
-	// Add posts.html to the theme
+	// Add posts.html to the theme (overrides shape)
 	os.WriteFile(filepath.Join(themesDir, "turbo", "posts.html"), []byte("<html>{{#posts}}{{title}}{{/posts}}</html>"), 0644)
 
-	templates, err := Load(tempDir, "", "turbo")
+	templates, err := LoadShape(tempDir, "", "v3", "turbo")
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -261,125 +268,102 @@ func TestLoad_OptionalArchiveTemplate(t *testing.T) {
 
 func TestLoad_MissingArchiveTemplate(t *testing.T) {
 	tempDir := t.TempDir()
+	installShapeFixture(t, tempDir)
 	themesDir := filepath.Join(tempDir, "site", "themes")
 	createTestTheme(t, themesDir, "turbo")
 
-	// Do NOT add posts.html
-
-	templates, err := Load(tempDir, "", "turbo")
+	// Do NOT add posts.html — should fall through to shape's posts.html.
+	templates, err := LoadShape(tempDir, "", "v3", "turbo")
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
 
-	if templates.Archive != "" {
-		t.Errorf("Expected empty archive template, got: %s", templates.Archive)
+	if templates.Archive != "<html>SHAPE ARCHIVE</html>" {
+		t.Errorf("Expected shape archive template fallback, got: %s", templates.Archive)
 	}
 }
 
-func TestLoad_CSSOnlyThemeWithBase(t *testing.T) {
+// TestLoad_CSSOnlyThemeUsesShape verifies that a CSS-only theme (no HTML)
+// loads all templates from the installed shape. Post-SHAPE refactor the shape
+// replaces the old _base concept as the fallback source.
+func TestLoad_CSSOnlyThemeUsesShape(t *testing.T) {
 	dataDir := t.TempDir()
+	installShapeFixture(t, dataDir)
 	themesDir := filepath.Join(dataDir, "site", "themes")
 
-	// Create _base with all templates
-	createBaseTheme(t, themesDir)
-	// Create CSS-only theme (no HTML)
+	// CSS-only theme (no HTML templates).
 	createCSSOnlyTheme(t, themesDir, "minimal")
 
-	templates, err := Load(dataDir, "", "minimal")
+	templates, err := LoadShape(dataDir, "", "v3", "minimal")
 	if err != nil {
 		t.Fatalf("Load failed for CSS-only theme: %v", err)
 	}
 
-	// All templates should come from _base
-	if templates.Post != "<html>BASE POST</html>" {
-		t.Errorf("Expected base post template, got: %s", templates.Post)
+	// All templates should come from the shape fixture.
+	if templates.Post != "<html>SHAPE POST</html>" {
+		t.Errorf("Expected shape post template, got: %s", templates.Post)
 	}
-	if templates.Index != "<html>BASE INDEX</html>" {
-		t.Errorf("Expected base index template, got: %s", templates.Index)
+	if templates.Index != "<html>SHAPE INDEX</html>" {
+		t.Errorf("Expected shape index template, got: %s", templates.Index)
 	}
-	if templates.Archive != "<html>BASE ARCHIVE</html>" {
-		t.Errorf("Expected base archive template, got: %s", templates.Archive)
+	if templates.Archive != "<html>SHAPE ARCHIVE</html>" {
+		t.Errorf("Expected shape archive template, got: %s", templates.Archive)
 	}
-	if templates.Tag != "<html>BASE TAG</html>" {
-		t.Errorf("Expected base tag template, got: %s", templates.Tag)
+	if templates.Tag != "<html>SHAPE TAG</html>" {
+		t.Errorf("Expected shape tag template, got: %s", templates.Tag)
 	}
 }
 
-func TestLoad_ThemeOverridesBase(t *testing.T) {
+// TestLoad_ThemeOverridesShape verifies that a theme's per-template overrides
+// beat the shape fallback (the studio13 pattern).
+func TestLoad_ThemeOverridesShape(t *testing.T) {
 	dataDir := t.TempDir()
+	installShapeFixture(t, dataDir)
 	themesDir := filepath.Join(dataDir, "site", "themes")
 
-	// Create _base
-	createBaseTheme(t, themesDir)
-	// Create theme with only post.html override
+	// Theme with only post.html override.
 	themeDir := filepath.Join(themesDir, "custom")
 	os.MkdirAll(themeDir, 0755)
 	os.WriteFile(filepath.Join(themeDir, "custom.css"), []byte("body {}"), 0644)
 	os.WriteFile(filepath.Join(themeDir, "post.html"), []byte("<html>CUSTOM POST</html>"), 0644)
 
-	templates, err := Load(dataDir, "", "custom")
+	templates, err := LoadShape(dataDir, "", "v3", "custom")
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
 
-	// post.html should come from theme override
+	// post.html should come from theme override.
 	if templates.Post != "<html>CUSTOM POST</html>" {
 		t.Errorf("Expected custom post template, got: %s", templates.Post)
 	}
-	// index.html should come from _base fallback
-	if templates.Index != "<html>BASE INDEX</html>" {
-		t.Errorf("Expected base index template, got: %s", templates.Index)
+	// index.html should come from shape fallback.
+	if templates.Index != "<html>SHAPE INDEX</html>" {
+		t.Errorf("Expected shape index template, got: %s", templates.Index)
 	}
 }
 
-func TestLoad_NoBaseGracefulDegradation(t *testing.T) {
+func TestLoad_NoShapeInstalledFails(t *testing.T) {
 	dataDir := t.TempDir()
 	themesDir := filepath.Join(dataDir, "site", "themes")
 
-	// Create full theme (no _base needed)
+	// Full theme, but no shape installed at .polis/bundles/...
 	createTestTheme(t, themesDir, "turbo")
 
-	templates, err := Load(dataDir, "", "turbo")
-	if err != nil {
-		t.Fatalf("Load should work without _base for full themes: %v", err)
-	}
-
-	if templates.Post == "" {
-		t.Error("Expected post template to be loaded")
-	}
-}
-
-func TestLoad_CSSOnlyThemeWithoutBaseFails(t *testing.T) {
-	dataDir := t.TempDir()
-	themesDir := filepath.Join(dataDir, "site", "themes")
-
-	// Create CSS-only theme but NO _base
-	createCSSOnlyTheme(t, themesDir, "minimal")
-
-	_, err := Load(dataDir, "", "minimal")
+	_, err := LoadShape(dataDir, "", "v3", "turbo")
 	if err == nil {
-		t.Error("Expected error for CSS-only theme without _base")
+		t.Fatal("expected Load to fail when shape is not installed")
 	}
 }
 
-func TestLoad_CLIBaseThemeFallback(t *testing.T) {
+func TestLoadShape_UnknownShapeFails(t *testing.T) {
 	dataDir := t.TempDir()
-	cliThemesDir := t.TempDir()
+	installShapeFixture(t, dataDir) // installs v3 only
+	themesDir := filepath.Join(dataDir, "site", "themes")
+	createTestTheme(t, themesDir, "turbo")
 
-	// Create CSS-only theme locally
-	localThemesDir := filepath.Join(dataDir, "site", "themes")
-	createCSSOnlyTheme(t, localThemesDir, "minimal")
-
-	// Create _base in CLI themes dir (not local)
-	createBaseTheme(t, cliThemesDir)
-
-	templates, err := Load(dataDir, cliThemesDir, "minimal")
-	if err != nil {
-		t.Fatalf("Load failed with CLI _base fallback: %v", err)
-	}
-
-	if templates.Post != "<html>BASE POST</html>" {
-		t.Errorf("Expected base post from CLI themes, got: %s", templates.Post)
+	_, err := LoadShape(dataDir, "", "v4", "turbo")
+	if err == nil {
+		t.Fatal("expected LoadShape to fail for undeclared shape v4")
 	}
 }
 
@@ -468,4 +452,218 @@ func TestCalculateHomePath(t *testing.T) {
 			t.Errorf("CalculateHomePath(%q) = %q, want %q", tc.filePath, result, tc.expected)
 		}
 	}
+}
+
+// --- hotfix-studio13-cleanup: picker shape-filtering + DisplayName tests ---
+
+// installBundleThemes writes minimal valid theme dirs (just a CSS file each)
+// for the named themes into the bundle-installed location. Mirrors what
+// EnsureReferencePayload would have done on a real tenant.
+func installBundleThemes(t *testing.T, dataDir string, names ...string) {
+	t.Helper()
+	base := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "themes")
+	for _, name := range names {
+		dir := filepath.Join(base, name)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name+".css"), []byte(":root { --color-bg: #000; }"), 0644); err != nil {
+			t.Fatalf("write css: %v", err)
+		}
+	}
+}
+
+func TestListUserSelectableThemes_FiltersByShape_Blog(t *testing.T) {
+	dir := t.TempDir()
+	// Install a cross-section of bundle-declared themes.
+	installBundleThemes(t, dir, "vice", "studio13-nk")
+
+	// V3 picker should include vice (v3+v4) and studio13-nk (blog-only).
+	themes, err := ListUserSelectableThemes(dir, "", "v3")
+	if err != nil {
+		t.Fatalf("ListUserSelectableThemes(v3): %v", err)
+	}
+	names := map[string]bool{}
+	for _, p := range themes {
+		names[p.Name] = true
+	}
+	if !names["vice"] {
+		t.Error("v3 picker should include vice")
+	}
+	if !names["studio13-nk"] {
+		t.Error("v3 picker should include studio13-nk (blog-only theme)")
+	}
+}
+
+func TestListUserSelectableThemes_EmptyShapeDefaultsToBlog(t *testing.T) {
+	dir := t.TempDir()
+	installBundleThemes(t, dir, "vice", "studio13-nk")
+
+	// Empty active_shape → treated as v3 per bundle.GetActiveShapeName default.
+	themes, err := ListUserSelectableThemes(dir, "", "")
+	if err != nil {
+		t.Fatalf("ListUserSelectableThemes(empty): %v", err)
+	}
+	if len(themes) == 0 {
+		t.Error("expected v3 themes when active_shape empty; got none")
+	}
+}
+
+func TestListUserSelectableThemes_ExcludesOrphansNotDeclared(t *testing.T) {
+	dir := t.TempDir()
+	// "junk" is installed on disk but NOT declared in DefaultCoreBundle.
+	// Picker must not surface it — disk drift is handled by the orphan-dir
+	// Patrol check, not by the picker.
+	installBundleThemes(t, dir, "vice", "junk")
+
+	themes, err := ListUserSelectableThemes(dir, "", "v3")
+	if err != nil {
+		t.Fatalf("ListUserSelectableThemes: %v", err)
+	}
+	for _, p := range themes {
+		if p.Name == "junk" {
+			t.Error("picker must not include undeclared theme 'junk'")
+		}
+	}
+}
+
+func TestListThemesWithPalettes_PopulatesDisplayName(t *testing.T) {
+	dir := t.TempDir()
+	// studio13-nk carries DisplayName "studio13" in DefaultCoreBundle.
+	installBundleThemes(t, dir, "studio13-nk")
+
+	themes, err := ListThemesWithPalettes(dir, "")
+	if err != nil {
+		t.Fatalf("ListThemesWithPalettes: %v", err)
+	}
+	found := false
+	for _, p := range themes {
+		if p.Name == "studio13-nk" {
+			found = true
+			if p.DisplayName != "studio13" {
+				t.Errorf("studio13-nk DisplayName = %q, want %q", p.DisplayName, "studio13")
+			}
+		}
+	}
+	if !found {
+		t.Error("studio13-nk not returned from ListThemesWithPalettes")
+	}
+}
+
+func TestGetThemeDir_ChecksBundleLocation(t *testing.T) {
+	dir := t.TempDir()
+	installBundleThemes(t, dir, "vice")
+	got := GetThemeDir(dir, "", "vice")
+	want := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "themes", "vice")
+	if got != want {
+		t.Errorf("GetThemeDir = %q, want %q (bundle-installed path)", got, want)
+	}
+}
+
+// --- step-02/2.b: stream shape loading tests ---
+
+// installStreamShapeFixture writes a minimal stream shape fixture into dataDir at
+// .polis/bundles/pub.polis.core/shapes/v4/. Mirrors installShapeFixture's
+// pattern for v3. Only stream.html is required — partials are optional and
+// individual tests write them as needed.
+func installStreamShapeFixture(t *testing.T, dataDir string) {
+	t.Helper()
+	dir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "shapes", "v4")
+	os.MkdirAll(filepath.Join(dir, "snippets"), 0755)
+	os.WriteFile(filepath.Join(dir, "stream.html"), []byte("<html>V4 STREAM</html>"), 0644)
+	os.WriteFile(filepath.Join(dir, "stream-post.html"), []byte("<a>V4 POST</a>"), 0644)
+	os.WriteFile(filepath.Join(dir, "stream-comment.html"), []byte("<div>V4 COMMENT</div>"), 0644)
+	os.WriteFile(filepath.Join(dir, "stream-profile.html"), []byte("<a>V4 PROFILE</a>"), 0644)
+	os.WriteFile(filepath.Join(dir, "stream-mention.html"), []byte("<a>V4 MENTION</a>"), 0644)
+}
+
+func TestLoadShape_StreamLoadsTemplates(t *testing.T) {
+	tempDir := t.TempDir()
+	installStreamShapeFixture(t, tempDir)
+
+	templates, err := LoadShape(tempDir, "", "v4", "vice")
+	if err != nil {
+		t.Fatalf("LoadShape(v4): %v", err)
+	}
+	if templates.Stream != "<html>V4 STREAM</html>" {
+		t.Errorf("Stream = %q, want shape-dir content", templates.Stream)
+	}
+	if templates.StreamPost != "<a>V4 POST</a>" {
+		t.Errorf("StreamPost = %q, want shape-dir content", templates.StreamPost)
+	}
+	if templates.StreamComment != "<div>V4 COMMENT</div>" {
+		t.Errorf("StreamComment = %q, want shape-dir content", templates.StreamComment)
+	}
+	if templates.StreamProfile != "<a>V4 PROFILE</a>" {
+		t.Errorf("StreamProfile = %q, want shape-dir content", templates.StreamProfile)
+	}
+	if templates.StreamMention != "<a>V4 MENTION</a>" {
+		t.Errorf("StreamMention = %q, want shape-dir content", templates.StreamMention)
+	}
+	// v3 fields must NOT be populated when shape is v4.
+	if templates.Post != "" || templates.Comment != "" || templates.Index != "" {
+		t.Errorf("v4 LoadShape populated v3 fields (Post/Comment/Index) — want empty")
+	}
+}
+
+func TestLoadShape_BlogDoesNotLoadStreamFields(t *testing.T) {
+	tempDir := t.TempDir()
+	installShapeFixture(t, tempDir)
+
+	templates, err := LoadShape(tempDir, "", "v3", "vice")
+	if err != nil {
+		t.Fatalf("LoadShape(v3): %v", err)
+	}
+	// stream fields must stay empty on blog shape.
+	if templates.Stream != "" || templates.StreamPost != "" || templates.StreamComment != "" ||
+		templates.StreamProfile != "" || templates.StreamMention != "" {
+		t.Errorf("v3 LoadShape populated stream fields — want empty; got Stream=%q", templates.Stream)
+	}
+	// v3 required fields populated.
+	if templates.Post == "" || templates.Index == "" {
+		t.Error("v3 LoadShape did not populate v3 required fields")
+	}
+}
+
+func TestLoadShape_StreamMissingTemplatesErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	// Install v4 dir but NO stream.html.
+	dir := filepath.Join(tempDir, ".polis", "bundles", "pub.polis.core", "shapes", "v4")
+	os.MkdirAll(dir, 0755)
+	os.WriteFile(filepath.Join(dir, "stream-post.html"), []byte("<a></a>"), 0644)
+
+	_, err := LoadShape(tempDir, "", "v4", "vice")
+	if err == nil {
+		t.Error("LoadShape(v4) without stream.html should error")
+	}
+}
+
+func TestLoadShape_UnknownShapeErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	// Install shape dir but under an unknown name; dispatcher should reject.
+	dir := filepath.Join(tempDir, ".polis", "bundles", "pub.polis.core", "shapes", "v99")
+	os.MkdirAll(dir, 0755)
+	os.WriteFile(filepath.Join(dir, "anything.html"), []byte(""), 0644)
+
+	_, err := LoadShape(tempDir, "", "v99", "vice")
+	if err == nil {
+		t.Error("LoadShape(v99) should error — unsupported shape")
+	}
+}
+
+func TestLoadShape_StreamPartialsAreOptional(t *testing.T) {
+	tempDir := t.TempDir()
+	dir := filepath.Join(tempDir, ".polis", "bundles", "pub.polis.core", "shapes", "v4")
+	os.MkdirAll(dir, 0755)
+	// Only stream.html present — partials absent.
+	os.WriteFile(filepath.Join(dir, "stream.html"), []byte("<html></html>"), 0644)
+
+	templates, err := LoadShape(tempDir, "", "v4", "vice")
+	if err != nil {
+		t.Fatalf("LoadShape(v4) with only stream.html: %v", err)
+	}
+	if templates.Stream == "" {
+		t.Error("Stream should be populated")
+	}
+	// Partials may be empty — no error expected.
 }

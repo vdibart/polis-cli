@@ -2,6 +2,7 @@ package feed
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
@@ -308,6 +309,50 @@ func TestFeedHandler_FollowAnnounced(t *testing.T) {
 	}
 	if items[0].TargetDomain != "alice.polis.pub" {
 		t.Errorf("expected target alice.polis.pub, got %s", items[0].TargetDomain)
+	}
+}
+
+// TestFeedHandler_FollowRemoved covers the mapping for
+// pub.polis.follow.removed events (06-profiles: surfaces unfollow
+// activity in the ACTIVITY stream alongside follow.announced).
+func TestFeedHandler_FollowRemoved(t *testing.T) {
+	h := &FeedHandler{
+		MyDomain: "me.polis.pub",
+	}
+
+	events := []discovery.StreamEvent{
+		{
+			ID:        json.Number("1"),
+			Type:      "pub.polis.follow.removed",
+			Timestamp: "2026-02-01T10:00:00Z",
+			Actor:     "bob.polis.pub",
+			Payload: map[string]interface{}{
+				"target_domain": "alice.polis.pub",
+			},
+		},
+	}
+
+	items := h.Process(events)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Type != "announcement" {
+		t.Errorf("expected type announcement, got %s", items[0].Type)
+	}
+	if items[0].EventType != "pub.polis.follow.removed" {
+		t.Errorf("expected event_type pub.polis.follow.removed, got %s", items[0].EventType)
+	}
+	if items[0].AuthorDomain != "bob.polis.pub" {
+		t.Errorf("expected author bob.polis.pub, got %s", items[0].AuthorDomain)
+	}
+	if items[0].TargetDomain != "alice.polis.pub" {
+		t.Errorf("expected target alice.polis.pub, got %s", items[0].TargetDomain)
+	}
+	// URL prefix must differ from follow.announced so the same
+	// (actor, target) pair can produce two separate timeline entries.
+	wantPrefix := "unfollow:"
+	if !strings.HasPrefix(items[0].URL, wantPrefix) {
+		t.Errorf("expected URL to start with %q, got %q", wantPrefix, items[0].URL)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
@@ -39,6 +40,8 @@ func (h *BuiltinCoreHandler) Handle(ctx context.Context, req ActionRequest, env 
 		return h.handleDM(ctx, req, env)
 	case "pub.polis.tag":
 		return h.handleTag(ctx, req, env)
+	case "pub.polis.theme":
+		return h.handleTheme(ctx, req, env)
 	default:
 		return nil, fmt.Errorf("unsupported content type: %s", req.ContentType)
 	}
@@ -59,6 +62,8 @@ func (h *BuiltinCoreHandler) Actions(contentType string) []string {
 		return []string{"list", "get", "send", "deliver", "mark_read", "delete", "retry"}
 	case "pub.polis.tag":
 		return []string{"list", "apply", "remove", "delete"}
+	case "pub.polis.theme":
+		return []string{"list", "get"}
 	default:
 		return nil
 	}
@@ -752,6 +757,89 @@ func (h *BuiltinCoreHandler) deleteTag(req ActionRequest, env HandlerEnv) (*Acti
 			"deleted": true,
 		},
 	}, nil
+}
+
+// ── Theme operations ────────────────────────────────────────────────
+
+func (h *BuiltinCoreHandler) handleTheme(ctx context.Context, req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	switch req.Action {
+	case "list":
+		return h.listThemes(env)
+	case "get":
+		return h.getTheme(req, env)
+	default:
+		return nil, fmt.Errorf("unsupported action %q for pub.polis.theme", req.Action)
+	}
+}
+
+// listThemes returns theme declarations from the bundle manifest.
+func (h *BuiltinCoreHandler) listThemes(env HandlerEnv) (*ActionResult, error) {
+	if env.Bundle == nil {
+		return &ActionResult{
+			Status: "success",
+			Data:   map[string]any{"themes": []any{}, "count": 0},
+		}, nil
+	}
+
+	// Sort for stable output
+	names := make([]string, 0, len(env.Bundle.Themes))
+	for name := range env.Bundle.Themes {
+		names = append(names, name)
+	}
+	for i := 0; i < len(names); i++ {
+		for j := i + 1; j < len(names); j++ {
+			if names[j] < names[i] {
+				names[i], names[j] = names[j], names[i]
+			}
+		}
+	}
+
+	themes := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		themes = append(themes, themeToMap(name, env.Bundle.Themes[name]))
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data: map[string]any{
+			"themes": themes,
+			"count":  len(themes),
+		},
+	}, nil
+}
+
+// getTheme returns a single theme's declared metadata.
+func (h *BuiltinCoreHandler) getTheme(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	name, _ := req.Payload["name"].(string)
+	if name == "" {
+		return nil, fmt.Errorf("theme name required")
+	}
+	if env.Bundle == nil {
+		return nil, fmt.Errorf("bundle not loaded")
+	}
+	th, err := env.Bundle.GetTheme(name)
+	if err != nil {
+		return nil, err
+	}
+	return &ActionResult{
+		Status: "success",
+		Data:   themeToMap(name, th),
+	}, nil
+}
+
+// themeToMap converts a Theme declaration to a JSON-friendly map.
+// Name comes from the caller so callers can use the map key (avoids reliance on
+// the embedded Name field in case of skew).
+func themeToMap(name string, th *bundle.Theme) map[string]any {
+	m := map[string]any{
+		"name":    name,
+		"version": th.Version,
+		"css":     th.CSS,
+	}
+	if len(th.CompatibleShapes) > 0 {
+		m["compatible_shapes"] = th.CompatibleShapes
+	}
+	return m
 }
 
 // envInt reads an integer from an environment variable, returning defaultVal if unset or invalid.

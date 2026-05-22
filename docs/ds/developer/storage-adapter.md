@@ -6,7 +6,7 @@
 
 ## Why It Exists
 
-- **Portability** -- The same business logic runs on Supabase (using their JS client) and Fly.io (using postgres.js) without changes to core handlers
+- **Portability** -- The same business logic runs against any compatible store without changes to core handlers
 - **Testability** -- Tests can use an in-memory adapter or mock without a real database
 - **Future-proofing** -- Adding support for a new database (SQLite, CockroachDB, etc.) requires only a new adapter implementation
 
@@ -14,51 +14,71 @@
 
 | File | Database | Used By |
 |------|----------|---------|
-| `supabase/functions/supabase-storage.ts` | Supabase Postgres (via `@supabase/supabase-js`) | Supabase Edge Functions |
-| `server/postgres-storage.ts` | Any Postgres (via `postgres.js`) | Fly.io / standalone Deno server |
+| `server/postgres-storage.ts` | Any Postgres (via `postgres.js`) | Fly.io / standalone Deno server (production) |
+| `_archived/supabase/supabase-storage.ts` | Supabase Postgres | Supabase Edge Functions (retired) |
+
+> The Supabase adapter is no longer maintained — it lives under `_archived/` as a reference for anyone writing a new adapter. `server/postgres-storage.ts` is the only adapter exercised in production today.
 
 ## Interface Reference
 
+The interface in `core/storage.ts` is the source of truth and currently exposes ~50 methods. The snapshot below groups them by purpose. Open `core/storage.ts` for exact signatures, return types, and JSDoc.
+
 ```typescript
 interface StorageAdapter {
-  // --- Sites ---
-  registerSite(domain: string, publicKey: string, email: string, attestation: string): Promise<RegisteredSite>
+  // --- Lifecycle ---
+  close(): Promise<void>                 // graceful shutdown
+
+  // --- Sites + key management ---
+  registerSite(...): Promise<RegisteredSite>
+  registerSiteAtomic(...): Promise<RegisteredSite>   // upsert site + key history + attestation key id in one tx
   unregisterSite(domain: string): Promise<void>
   checkSite(domain: string): Promise<{ registered: boolean }>
   getSitePublicKey(domain: string): Promise<string | null>
+  listSites(filters: SitesListFilters): Promise<{ count: number; items: SiteRecord[] }>
+
+  // --- Keys (rotation + history) ---
+  getCurrentKey(domain: string): Promise<KeyRecord | null>
+  getKeyHistory(domain: string): Promise<KeyRecord[]>
+  closeKey(domain: string, keyId: string): Promise<void>
+  rotateKey(domain: string, newKey: KeyRecord): Promise<void>
+  insertKeyHistory(domain: string, key: KeyRecord): Promise<void>
 
   // --- Content ---
-  registerContent(type: string, url: string, version: string, metadata: ContentMetadata): Promise<ContentRecord>
+  registerContent(...): Promise<ContentRecord>
   unregisterContent(type: string, url: string): Promise<void>
+  unpublishContent(type: string, url: string): Promise<void>      // post/comment unpublish (clean break)
   checkContent(type: string, url: string): Promise<ContentRecord | null>
   queryContent(type: string, filters: ContentFilters): Promise<{ count: number; items: ContentRecord[] }>
+  getCommentCounts(urls: string[]): Promise<Record<string, { total: number; blessed: number }>>
 
-  // --- Relationships ---
-  updateRelationship(type: string, sourceUrl: string, targetUrl: string, status: string, metadata?: any): Promise<RelationshipRecord>
+  // --- Relationships (blessings, follows) ---
+  updateRelationship(...): Promise<RelationshipRecord>
   queryRelationships(type: string, filters: RelationshipFilters): Promise<{ count: number; items: RelationshipRecord[] }>
+  orphanBlessingsForPost(postUrl: string): Promise<number>        // unpublish cascade: blessed → orphaned
+  resetCommentBlessing(commentUrl: string): Promise<void>         // unpublish: comment’s blessing → pending
 
   // --- Stream ---
   publishEvent(type: string, data: any, namespace: string): Promise<EventRecord>
   queryEvents(filters: StreamQueryFilters): Promise<StreamEvent[]>
   queryEventsUnified(filters: StreamUnifiedFilters): Promise<StreamEvent[]>
   getStreamHealth(): Promise<{ mode: string; event_count: number }>
+  purgeEvents(filter: PurgeFilter): Promise<number>
 
-  // --- Admin ---
-  getBlocks(): Promise<{ domains: string[]; types: string[] }>
-  blockDomain(domain: string): Promise<void>
-  unblockDomain(domain: string): Promise<void>
-  blockType(type: string): Promise<void>
-  unblockType(type: string): Promise<void>
-  isDomainBlocked(domain: string): Promise<boolean>
-  isTypeBlocked(type: string): Promise<boolean>
-  setStreamMode(mode: string): Promise<void>
-  purgeEvents(before: string): Promise<number>
+  // --- Admin / operator policies ---
+  getOperatorPolicies(): Promise<PolicyRecord[]>                  // policies in evaluation order
+  listOperatorPolicies(filters?: PolicyListFilters): Promise<PolicyRecord[]>
+  addOperatorPolicy(rule: string, reason: string): Promise<PolicyRecord>
+  removeOperatorPolicy(id: number): Promise<void>
+  removeOperatorPoliciesByRule(rule: string): Promise<number>     // used by the block/domain convenience endpoints
+  updateOperatorPolicy(id: number, patch: { active?: boolean }): Promise<PolicyRecord>
 
   // --- Migrations ---
   registerMigration(oldDomain: string, newDomain: string): Promise<MigrationRecord>
   queryMigrations(domain: string): Promise<MigrationRecord[]>
 }
 ```
+
+The legacy block-table API (`getBlocks`, `blockDomain`, `blockType`, `setStreamMode`, etc.) has been removed — all blocking is now policy-based. See `getOperatorPolicies` / `addOperatorPolicy` above.
 
 ## Writing a Custom Adapter
 

@@ -1,6 +1,6 @@
 # Polis CLI - Complete Usage Guide
 
-> **Note:** This is the Bash CLI command reference. The Bash CLI is feature-frozen at v0.56.0. The **Go CLI** has identical commands, ships as a single binary with no external dependencies, and is the recommended choice for new users. For the webapp (local web interface), see [WEBAPP-USER-MANUAL.md](WEBAPP-USER-MANUAL.md).
+> **Note:** This is the Bash CLI command reference. The Bash CLI is feature-frozen (release version tracks the Go CLI in `cli-go/version.txt`). The **Go CLI** has identical commands, ships as a single binary with no external dependencies, and is the recommended choice for new users. For the webapp (local web interface), see [../../webapp/user/user-manual.md](../../webapp/user/user-manual.md).
 
 Command-line tool for managing decentralized social content with cryptographic signing and version control.
 
@@ -381,7 +381,7 @@ polis --json preview https://alice.com/posts/hello.md
 - Preview content before responding to it
 - Verify content integrity and authenticity
 
-**JSON mode:** See [JSON-MODE.md](JSON-MODE.md) for response format.
+**JSON mode:** See [json-mode.md](json-mode.md) for response format.
 
 ### `polis rebuild`
 
@@ -507,7 +507,7 @@ polis migrate newdomain.com
     Posts: 3, Comments: 5, Database rows: 5
 ```
 
-**JSON mode:** See [JSON-MODE.md](JSON-MODE.md) for response format.
+**JSON mode:** See [json-mode.md](json-mode.md) for response format.
 
 **Important notes:**
 - Domain should not include protocol (use `example.com`, not `https://example.com`)
@@ -555,7 +555,7 @@ Displays site details, versions, configuration paths, key status, and discovery 
 - **discovery not configured** - `DISCOVERY_SERVICE_URL` or `DISCOVERY_SERVICE_KEY` not set
 - **check failed** - Could not reach the discovery service
 
-**JSON mode:** Returns structured data with all sections. See [JSON-MODE.md](JSON-MODE.md) for the full JSON response format.
+**JSON mode:** Returns structured data with all sections. See [json-mode.md](json-mode.md) for the full JSON response format.
 
 ### `polis register`
 
@@ -757,7 +757,7 @@ This is useful for:
 - Debugging template output without extra HTML
 - Compatibility with strict HTML validators
 
-**JSON mode:** See [JSON-MODE.md](JSON-MODE.md) for response format.
+**JSON mode:** See [json-mode.md](json-mode.md) for response format.
 
 ### `polis blessing`
 
@@ -1082,6 +1082,94 @@ polis tag delete old-topic
 
 All subcommands support `--json` for machine-readable output.
 
+### `polis clone <url> [target-dir]`
+
+Clone a remote polis site to a local directory. Useful for archiving someone's content, reading offline, or operating on a snapshot of a site you don't own.
+
+**Usage:**
+```bash
+polis clone https://alice.polis.pub               # target dir derived from domain
+polis clone https://alice.polis.pub ./alice       # explicit target dir
+polis clone https://alice.polis.pub --full        # re-download all content
+polis clone https://alice.polis.pub --diff        # only download changes (default after first clone)
+```
+
+**Flags:**
+- `--full` — re-download all content, ignore cached state
+- `--diff` — only fetch new/changed content (default if the target was previously cloned)
+
+If neither flag is given the clone package decides based on whether a clone-state file exists in the target.
+
+### `polis rotate-key`
+
+Rotate your site's Ed25519 signing key. Generates a fresh keypair, publishes the new public key, records the rotation in your key history at the DS, and updates `.well-known/polis`. Existing signed content remains verifiable via the key history.
+
+**Usage:**
+```bash
+polis rotate-key                       # rotate; keep old private key archived
+polis rotate-key --delete-old-key      # rotate and securely delete the old private key
+```
+
+**Flags:**
+- `--delete-old-key` — securely delete the old private key after rotation (irreversible)
+
+Must be run from a polis site directory.
+
+### `polis validate`
+
+Run the local validation suite over your site: signed content integrity, index consistency, policy file parseability, key/handle alignment, and bundle registry health. Mirrors the checks Patrol/Medic run server-side for hosted sites.
+
+**Usage:**
+```bash
+polis validate
+polis validate --json
+```
+
+### `polis discover`
+
+Interact with the discovery service to find new content or sync state for the people you follow.
+
+**Usage:**
+```bash
+polis discover                                       # check all followed authors for new activity
+polis discover --author https://alice.polis.pub      # check just one author
+polis discover --json
+```
+
+**Flags:**
+- `--author <url>` — limit discovery to one specific author
+
+Requires `DISCOVERY_SERVICE_URL` to be configured. Reads `following.json` to determine who to query.
+
+### `polis unpublish <path>`
+
+Unpublish a post or comment — a *clean break* operation that severs all ties between the published identity and the content. Differs from `unregister` (which removes the whole site) and from deleting the file (which leaves DS state behind).
+
+**Usage:**
+```bash
+polis unpublish content/pub.polis.core/post/20260201/my-post.md
+polis unpublish content/pub.polis.core/comment/20260201/comment-id.md
+polis unpublish <path> -y                            # skip confirmation
+```
+
+**Flags:**
+- `-y` — skip the confirmation prompt
+
+**Semantics:** Post unpublish cascades blessing state in the DS (blessed → orphaned, pending → denied). Comment unpublish resets the comment's blessing to `pending`. Republishing later is treated as a brand-new publication — orphaned blessings are NOT restored. See [Unpublish Lifecycle](../../ds/developer/unpublish-lifecycle.md) for full state transition rules.
+
+### `polis serve [options]`
+
+Start the polis HTTP server (the webapp). Only available in the bundled binary (`polis-full`) — the CLI-only binary (`polis`) prints a pointer to the bundled binary if you try.
+
+**Usage:**
+```bash
+polis serve                            # bind to default port
+polis serve --port 8080                # custom port
+polis serve --data-dir /path/to/site   # serve a site outside cwd
+```
+
+See the [Webapp User Manual](../../webapp/user/user-manual.md) for full usage. Webapp-only and bundled-binary build instructions are in [docs/cli/README.md](../README.md).
+
 ## File Frontmatter
 
 Published files include YAML frontmatter with metadata:
@@ -1236,7 +1324,7 @@ All commands support `--json` for machine-readable output:
 polis --json post my-post.md | jq -r '.data.content_hash'
 ```
 
-See [JSON-MODE.md](JSON-MODE.md) for response schemas, error codes, and scripting examples.
+See [json-mode.md](json-mode.md) for response schemas, error codes, and scripting examples.
 
 ## Publishing Workflow
 
@@ -1514,9 +1602,9 @@ Run `polis rebuild` to regenerate `public.jsonl` from published files.
 ## Next Steps
 
 - Deploy your content to GitHub Pages, Netlify, or any static host
-- Read [SECURITY-MODEL.md](SECURITY-MODEL.md) for the full cryptographic model and threat analysis
-- Customize your site with [TEMPLATING.md](TEMPLATING.md)
-- Try the [webapp](WEBAPP-USER-MANUAL.md) for a visual interface
+- Read [security-model.md](../../general/security-model.md) for the full cryptographic model and threat analysis
+- Customize your site with [templating.md](templating.md)
+- Try the [webapp](../../webapp/user/user-manual.md) for a visual interface
 
 ## Support
 

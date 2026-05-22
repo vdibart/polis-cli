@@ -63,52 +63,52 @@ func TestValidatePath(t *testing.T) {
 	}
 }
 
-// --- GetActiveTheme ---
+// --- activeThemeOrDefault ---
 
-func TestGetActiveTheme_ReadsFromManifest(t *testing.T) {
+func TestActiveThemeOrDefault_ReadsFromManifest(t *testing.T) {
 	dir := setupDataDir(t, "turbo")
-	theme, err := GetActiveTheme(dir)
+	theme, err := activeThemeOrDefault(dir)
 	if err != nil {
-		t.Fatalf("GetActiveTheme: %v", err)
+		t.Fatalf("activeThemeOrDefault: %v", err)
 	}
 	if theme != "turbo" {
 		t.Errorf("got %q, want %q", theme, "turbo")
 	}
 }
 
-func TestGetActiveTheme_DefaultsToZane_MissingFile(t *testing.T) {
+func TestActiveThemeOrDefault_DefaultsToZane_MissingFile(t *testing.T) {
 	dir := t.TempDir() // no .well-known
-	theme, err := GetActiveTheme(dir)
+	theme, err := activeThemeOrDefault(dir)
 	if err != nil {
-		t.Fatalf("GetActiveTheme: %v", err)
+		t.Fatalf("activeThemeOrDefault: %v", err)
 	}
 	if theme != "zane" {
 		t.Errorf("got %q, want %q", theme, "zane")
 	}
 }
 
-func TestGetActiveTheme_DefaultsToZane_InvalidJSON(t *testing.T) {
+func TestActiveThemeOrDefault_DefaultsToZane_InvalidJSON(t *testing.T) {
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
 	os.WriteFile(filepath.Join(dir, ".well-known", "polis"), []byte("not json"), 0644)
 
-	theme, err := GetActiveTheme(dir)
+	theme, err := activeThemeOrDefault(dir)
 	if err != nil {
-		t.Fatalf("GetActiveTheme: %v", err)
+		t.Fatalf("activeThemeOrDefault: %v", err)
 	}
 	if theme != "zane" {
 		t.Errorf("got %q, want %q", theme, "zane")
 	}
 }
 
-func TestGetActiveTheme_DefaultsToZane_EmptyTheme(t *testing.T) {
+func TestActiveThemeOrDefault_DefaultsToZane_EmptyTheme(t *testing.T) {
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
 	os.WriteFile(filepath.Join(dir, ".well-known", "polis"), []byte(`{"active_theme":""}`), 0644)
 
-	theme, err := GetActiveTheme(dir)
+	theme, err := activeThemeOrDefault(dir)
 	if err != nil {
-		t.Fatalf("GetActiveTheme: %v", err)
+		t.Fatalf("activeThemeOrDefault: %v", err)
 	}
 	if theme != "zane" {
 		t.Errorf("got %q, want %q", theme, "zane")

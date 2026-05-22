@@ -226,25 +226,6 @@ func TestStore_GetUnsentMessages(t *testing.T) {
 	}
 }
 
-func TestStore_UpdateMessageStatus(t *testing.T) {
-	store := testStore(t)
-
-	var nonce [24]byte
-	copy(nonce[:], []byte("nonce-1-24bytes-testing!"))
-
-	msg, _ := store.AppendMessage("conv1", "bob.example.com", "https://bob.example.com",
-		"alice.example.com", "bob.example.com", "Retrying", "", "unsent", nonce)
-
-	if err := store.UpdateMessageStatus("conv1", msg.ID, "sent"); err != nil {
-		t.Fatalf("UpdateMessageStatus: %v", err)
-	}
-
-	conv, _ := store.LoadConversation("conv1")
-	if conv.Messages[0].Status != "sent" {
-		t.Errorf("expected sent, got %s", conv.Messages[0].Status)
-	}
-}
-
 func TestEncryptPreview_RoundTrip(t *testing.T) {
 	store := testStore(t)
 

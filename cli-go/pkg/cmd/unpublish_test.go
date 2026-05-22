@@ -160,7 +160,7 @@ func TestRunUnpublish_PostSuccess(t *testing.T) {
 	}
 
 	// Assert draft was created with stripped frontmatter
-	draftPath := filepath.Join(dir, ".polis", "content", "pub.polis.core", "posts", "drafts", "my-post.md")
+	draftPath := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", "my-post.md")
 	draftContent, err := os.ReadFile(draftPath)
 	if err != nil {
 		t.Fatalf("expected draft to be created: %v", err)
@@ -229,7 +229,7 @@ func TestRunUnpublish_CommentSuccess(t *testing.T) {
 	}
 
 	// Assert draft was created
-	draftPath := filepath.Join(dir, ".polis", "content", "pub.polis.core", "comments", "drafts", "comment-a.md")
+	draftPath := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "comments", "drafts", "comment-a.md")
 	draftContent, err := os.ReadFile(draftPath)
 	if err != nil {
 		t.Fatalf("expected comment draft to be created: %v", err)
@@ -338,7 +338,7 @@ func TestRunUnpublish_PreservesOtherPosts(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, postA)); !os.IsNotExist(err) {
 		t.Error("expected post-a .md file to be deleted")
 	}
-	draftA := filepath.Join(dir, ".polis", "content", "pub.polis.core", "posts", "drafts", "post-a.md")
+	draftA := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", "post-a.md")
 	if _, err := os.Stat(draftA); err != nil {
 		t.Errorf("expected post-a draft to exist: %v", err)
 	}

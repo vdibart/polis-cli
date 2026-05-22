@@ -1,3 +1,23 @@
+// =============================================================================
+// HANDBOOK TRAIL MARKER — DS-to-stream thread (event-to-FeedItem transformer)
+// =============================================================================
+// FeedHandler is the transformer in the middle of the continuous sync path —
+// it consumes typed events the DS emitted, filters self-authored ones (unless
+// IncludeSelf), and produces FeedItems that get persisted to the local cache
+// (pub.polis.feed.jsonl) by stream.Store.
+//
+// Trail across files (DS-to-stream, continuous sync):
+//   producer       — webapp/internal/server/sync.go: runUnifiedSync()
+//   DS endpoint    — discovery-service/core/handlers/stream.ts
+//   transformer    — this file (FeedHandler.Process)
+//   cursor + cache — cli-go/pkg/stream/store.go (Store)
+//
+// Pull the thread:
+//   github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md  (tour)
+//   github.com/vdibart/polis-cli/blob/main/docs/general/content-types.md
+//   github.com/vdibart/polis-cli/blob/main/AGENTS.md                      (map)
+// =============================================================================
+
 package feed
 
 import (
@@ -61,6 +81,8 @@ func (h *FeedHandler) eventToItems(evt discovery.StreamEvent) []FeedItem {
 		return []FeedItem{h.blessingRequestedToItem(evt)}
 	case "pub.polis.follow.announced":
 		return []FeedItem{h.followEventToItem(evt)}
+	case "pub.polis.follow.removed":
+		return []FeedItem{h.followRemoveEventToItem(evt)}
 	case "pub.polis.site.registered":
 		return []FeedItem{h.siteRegisteredToItem(evt)}
 	default:
@@ -235,6 +257,26 @@ func (h *FeedHandler) followEventToItem(evt discovery.StreamEvent) FeedItem {
 		Type:         "announcement",
 		EventType:    evt.Type,
 		URL:          "follow:" + evt.Actor + ":" + targetDomain,
+		Published:    evt.Timestamp,
+		AuthorURL:    "https://" + evt.Actor,
+		AuthorDomain: evt.Actor,
+		TargetURL:    "https://" + targetDomain,
+		TargetDomain: targetDomain,
+	}
+}
+
+// followRemoveEventToItem extracts a FeedItem from a follow.removed event.
+// Mirrors followEventToItem but uses an "unfollow:" URL prefix so dedup
+// keys can distinguish announce-then-remove for the same (actor, target)
+// pair. The activity-stream renderer (owner-extras.js appendFollowSignal)
+// reads EventType to choose between "followed" and "unfollowed" verbs.
+func (h *FeedHandler) followRemoveEventToItem(evt discovery.StreamEvent) FeedItem {
+	targetDomain, _ := evt.Payload["target_domain"].(string)
+
+	return FeedItem{
+		Type:         "announcement",
+		EventType:    evt.Type,
+		URL:          "unfollow:" + evt.Actor + ":" + targetDomain,
 		Published:    evt.Timestamp,
 		AuthorURL:    "https://" + evt.Actor,
 		AuthorDomain: evt.Actor,

@@ -1,0 +1,5115 @@
+// =============================================================================
+// HANDBOOK TRAIL MARKER
+// =============================================================================
+// This file is the *consumer* of the URL-as-filter thread. It hydrates the
+// stream DOM, applies whatever filter the URL parser handed in, and tracks
+// scroll-driven focus changes that update the URL bar (closing the loop:
+// scroll → focused entry → URL → bookmarkable).
+//
+// Trail across files (URL-as-filter):
+//   producer  — webapp/internal/webui/www/app.js: intercepts /_/pql/<sentence>
+//   grammar   — webapp/internal/webui/www/pql.js: PQL.parse / .compose
+//   consumer  — this file (stream.js): hydration + scroll-as-URL-mutation
+//
+// Pull the thread:
+//   github.com/vdibart/polis-cli/blob/main/docs/general/infinity-stream.md (why)
+//   github.com/vdibart/polis-cli/blob/main/docs/general/pql.md              (spec)
+//   github.com/vdibart/polis-cli/blob/main/docs/general/shapes.md           (v3 vs v4)
+//   github.com/vdibart/polis-cli/blob/main/docs/handbook/url-as-filter.md   (tour)
+//   github.com/vdibart/polis-cli/blob/main/AGENTS.md                        (map)
+// =============================================================================
+
+// Polis stream controller.
+//
+// Hydrates the SSR'd stream DOM, tracks scroll-driven focus changes via
+// IntersectionObserver, updates the URL bar via history.replaceState, and
+// exposes polymorphic item renderers + entry-insertion plumbing as the
+// PolisStream namespace for downstream consumers (lazy body fetch, filter
+// integration, owner-SPA compose flow).
+//
+// Same script source is loaded by:
+//   - Public per-post artifacts (via stream.html's <script src="/stream.js">)
+//   - Owner SPA's index.html (loaded alongside its own /app.js for now;
+//     the SPA's existing screens migrate into this controller progressively)
+//
+// Detection: any page with <body data-polis-stream-direction="..."> is a
+// stream-shape page. Pages without that attribute (legacy v3 templates,
+// non-polis content) are inert — the controller's init() returns early.
+//
+// Public surface (window.PolisStream):
+//   .renderEntry(meta)              — dispatch on meta.type, return DOM element
+//   .renderers.{post,comment,profile,mention,dm}(meta) — type-specific
+//   .appendEntry(domEl)             — insert into .stream + observe + track
+//   .clearDynamicEntries()          — remove non-SSR entries (filter reset)
+//   .getEntries()                   — current entries array (read-only snapshot)
+//   .getFocusedEntry()              — currently-focused entry (for prefetch
+//                                      horizon in 4.c, etc.)
+//   .announce(text)                 — write to ARIA live region (screen readers)
+//   .focusNext() / .focusPrev()     — j/k keyboard nav targets, also callable
+//   .onEscape(fn)                   — register Esc-key handler (popover close,
+//                                      dialog dismiss, etc.)
+//   .afterRender(type, fn)          — Layer-3 extension hook (step-06/6.a).
+//                                      Listener fires after a renderer produces
+//                                      its DOM. owner-extras.js subscribes for
+//                                      auth-only chrome (edit/bless rollovers,
+//                                      activity-mode metadata signal). Public
+//                                      bundle never subscribes; layered cleanly.
+//   .registerRenderer(type, fn)     — Layer-4 extension override (step-06/6.a).
+//                                      Replace a base renderer entirely. Used
+//                                      when owner-side rendering of a type
+//                                      diverges fundamentally (e.g., DM owner
+//                                      view with decryption indicator).
+//   .registerFilterOption(slot,opt) — filter-slot extension (step-06/6.b).
+//                                      Adds an option to the type / qualifier
+//                                      / scope dropdowns. owner-extras.js calls
+//                                      this at init to expose owner-only
+//                                      values (activity, dms, my-mutuals, …).
+//   .setFilterScope(value, opts)    — programmatic scope setter (step-06/6.c).
+//                                      Updates filterScope + slot label, then
+//                                      triggers applyFilter (clear + re-fetch).
+//                                      opts.label overrides the displayed text.
+//   .setFilterType(value, opts)     — programmatic type setter (step-06/6.c).
+//                                      Same shape as setFilterScope; resets
+//                                      filterModifier to 'by-date' alongside.
+//   .setFilterQualifier(value)      — programmatic qualifier setter.
+//   .setFilterModifier(value, opts) — programmatic modifier setter.
+//   .refresh()                      — re-trigger applyFilter without
+//                                      mutating state. Used by
+//                                      owner-extras to pull a freshly-
+//                                      published post into the stream
+//                                      after the editor's Publish
+//                                      button fires (step-06/6.h
+//                                      follow-up).
+//
+// DIRECTION-HOOK markers tag every line whose semantic flips under stream-
+// direction reversal. `grep "DIRECTION-HOOK"` is the audit tool.
+
+(function () {
+    'use strict';
+
+    /* ------------------------------------------------------------------
+       Constants + detection
+       ------------------------------------------------------------------ */
+
+    var STREAM_DIRECTION_ATTR = 'data-polis-stream-direction';
+    var FOCUS_DEBOUNCE_MS = 150;
+    // scrollY ≤ this counts as "at the top of the page" — restores the
+    // landing URL (e.g. /index.html) instead of stamping the current
+    // focus's canonical URL. 4px slack absorbs anti-aliasing/momentum
+    // jitter without missing a deliberate "back to top" gesture.
+    var TOP_RESTORE_THRESHOLD = 4;
+
+    function isStreamPage() {
+        return !!(document.body && document.body.hasAttribute(STREAM_DIRECTION_ATTR));
+    }
+
+    /* ------------------------------------------------------------------
+       State
+       ------------------------------------------------------------------ */
+
+    var entries = [];           // .entry DOM elements in document order
+    var focusedEntry = null;    // currently focused entry (per scroll position)
+    var observer = null;
+    var intersectingMap = new Map();  // entry -> intersectionRatio
+    var focusUpdateTimer = null;
+    var userHasScrolled = false;      // gate URL updates on user-initiated scroll
+    var userHasScrolledUp = false;    // gate upward pagination on user scroll-UP (separate from any-scroll)
+    var hasPushedFirstUpdate = false; // first focus-change uses pushState (preserves landing URL)
+    var landingURL = '';              // path+search at hydrate time
+    // landingURLNeedsRestore: only the index-page case (where /index.html
+    // is distinct from the focus's own canonical URL) needs scroll-to-top
+    // to restore the landing URL. On per-post pages the focus's canonical
+    // URL IS the landing URL, AND scrollY=0 can mean "user scrolled UP
+    // through the above-focus rail and pagination prepended newer posts"
+    // — restoring landingURL there would clobber the correct
+    // bestEntry-tracked URL with the original post's URL.
+    var landingURLNeedsRestore = false;
+
+    // Lazy body fetch state
+    var sessionCache = new Map();      // url -> { body, cachedAt }
+    var inFlight = new Map();           // url -> Promise<string|null>
+    var prefetchObserver = null;
+    var BODY_TTL_MS = 60 * 60 * 1000;   // 1 hour, per plan §4.c task 2
+    var PREFETCH_ROOT_MARGIN = '500px 0px 500px 0px';  // ±500px around viewport
+
+    // Lazy-fetch rate limiting (step-05/5.h). Prevents thundering-herd
+    // against followed origins on a fast scroll: cap concurrent fetches
+    // both globally (~8) and per-origin (~4). Excess requests get
+    // deferred via re-observing the entry — the prefetch observer fires
+    // again when the entry's intersection changes (or a fast scroll
+    // brings it back into the prefetch horizon). Sliding-window quotas
+    // (e.g., "60 fetches per minute") are intentionally NOT implemented
+    // for alpha — the in-flight caps already serve the thundering-herd
+    // purpose; sliding-window adds complexity without clear value at
+    // the user's expected scale.
+    var LAZY_FETCH_MAX_TOTAL = 8;
+    var LAZY_FETCH_MAX_PER_ORIGIN = 4;
+    var lazyFetchInFlightTotal = 0;
+    var lazyFetchInFlightByOrigin = new Map();   // host -> count
+    // Origin "kill list" — once a host returns a CORS-misconfig error
+    // (TypeError with no response object — fetch's standard CORS-failure
+    // signature), skip every subsequent fetch to that host for the rest
+    // of the page session. Without this gate, a single misconfigured
+    // followed origin would drain retry budget on every entry from that
+    // origin scrolled into view. CORS misconfigs require server-side
+    // remediation; client retries can't help.
+    var lazyFetchCORSDisabled = new Set();
+    // Per-URL retry state. Each URL tracks attempt count + a pending
+    // retry timer ID so applyFilter / page navigation can cancel them.
+    var lazyFetchRetries = new Map();          // url -> { attempts, timerId }
+    var LAZY_FETCH_MAX_ATTEMPTS = 3;
+    var LAZY_FETCH_BACKOFF_BASE_MS = 750;        // 750ms / 1.5s / 3s
+
+    // Pagination state (step-05/5.c). The public per-post artifact ships
+    // focus + 4 SSR'd siblings; once the user scrolls past those, the
+    // controller pages older posts in via /api/v1/stream/items.
+    var paginationTenant = '';            // canonical hostname (the tenant scope)
+    var paginationCursor = '';            // server-returned cursor for next page
+    // 06-profiles Phase 3: debounced search string. Only meaningful
+    // under filterType=profiles && filterScope=all-polis. fetchNextPage
+    // appends &search=<encoded> when set; the .entry--search input
+    // updates this via setSearchQuery() with a 250ms debounce.
+    var currentSearch = '';
+    var paginationDone = false;           // true after server returns no next_cursor
+    var paginationInFlight = false;       // single-flight gate
+    var paginationObserver = null;        // last-entry IntersectionObserver
+    var paginationLastEntry = null;       // entry currently being observed
+    var paginationFirstFetch = true;      // first call uses before_url=<oldest sibling>
+    var PAGINATION_LOOKAHEAD = '200px 0px 200px 0px'; // start fetch when last entry ±200px from viewport
+    // Pagination retry/backoff (step-05/5.h, SC-2 close). The previous
+    // implementation relied on the IntersectionObserver re-firing on a
+    // subsequent scroll to retry transient failures — but the observer
+    // only fires on intersection-state CHANGE, so a user already past
+    // the last-entry boundary at fail-time wouldn't get a retry until
+    // they scrolled out + back. Schedule a delayed retry via setTimeout
+    // instead, with exponential backoff (750ms / 1.5s / 3s) up to 3
+    // attempts. Honors `Retry-After` for 429/503 responses.
+    var paginationRetryAttempts = 0;
+    var paginationRetryTimer = null;
+    var PAGINATION_MAX_ATTEMPTS = 3;
+    var PAGINATION_BACKOFF_BASE_MS = 750;
+
+    // Upward pagination state (scroll-up on per-post pages). Symmetric to
+    // the down-pagination block above: scroll-up past the SSR'd focus
+    // entry fetches NEWER posts via /api/v1/stream/items?after_url=
+    // <focus URL> and prepends them above the focus. Skipped on the
+    // homepage (focus is already the newest post — nothing to fetch).
+    // Independent state from the down direction so concurrent fetches
+    // (user scrolls fast in both directions) don't clobber each other.
+    var paginationCursorTop = '';
+    var paginationDoneTop = false;
+    var paginationInFlightTop = false;
+    var paginationTopObserver = null;
+    var paginationFirstEntry = null;
+    var paginationFirstFetchTop = true;       // first call uses after_url=<focus URL>
+    var paginationRetryAttemptsTop = 0;
+    var paginationRetryTimerTop = null;
+
+    // Filter state (step-05/5.d, redesigned 2026-04-29). Mirrors the slot
+    // grammar from snippets/stream-filter.html. Public-view defaults
+    // match the SSR'd sentence shape; user changes via the interactive
+    // slots reissue /api/v1/stream/items with new params.
+    var filterType = 'posts';             // posts | comments | profiles | activity | dms | drafts | mentions
+    var filterModifier = 'by-date';       // by-date | with-comments | to-bless | by-name (type-conditional)
+    var filterQualifier = 'all';          // all | new (owner unlocks new; public locked to all)
+    // step-06/6.c: scope is now a first-class controller variable. Empty
+    // string means "let pagination derive from paginationTenant" — the
+    // public-surface default ('@<canonical-tenant>'). owner-extras.js
+    // sets filterScope='my-network' (or whatever preset) at SPA init so
+    // pagination requests use the right grammar value. selectOption(scope)
+    // updates this and triggers applyFilter.
+    var filterScope = '';                 // '' | 'me' | 'my-network' | 'my-mutuals' | 'all-polis' | '@<handle>'
+    var filterOpenDropdown = null;        // currently-open dropdown DOM (or null)
+    // Dropdown option sets — display text + API value pairs. Display
+    // text matches the slot's natural-language convention from the
+    // build-target mockup; API values match the server's accepted enums.
+    //
+    // step-06/6.b: option lists are extensible. Public bundle ships the
+    // public-only set (posts/comments/follows). owner-extras.js (6.d)
+    // calls PolisStream.registerFilterOption(slot, opt) to add owner-
+    // only values (activity/dms/drafts) without forking the controller.
+    var FILTER_TYPE_OPTIONS = [
+        // Public surface type ladder. Each type pairs with a per-type
+        // default modifier (FILTER_MODIFIER_OPTIONS_BY_TYPE below) and,
+        // on public pages, a host-anchored scope: posts/comments use
+        // bare @<host>; profiles forces @<host>:network since the bare
+        // form isn't a valid profiles data path on the public surface.
+        // owner-extras.js replaces this list entirely on the SPA with
+        // the owner-set [activity, posts, comments, profiles, messages,
+        // drafts] via replaceFilterOptions — adding profiles here
+        // doesn't double-register.
+        { label: 'posts',    value: 'posts'    },
+        { label: 'comments', value: 'comments' },
+        { label: 'profiles', value: 'profiles' }
+    ];
+    // step-06/6.b: modifier options are type-conditional. Each entry maps
+    // a type to its allowed [(default), (alt)] pair. Types absent from this
+    // map have no modifier slot — the controller hides the slot in
+    // updateFilterSlotVisibility (driven from grammar).
+    var FILTER_MODIFIER_OPTIONS_BY_TYPE = {
+        posts: [
+            { label: 'by date', value: 'by-date' },
+            { label: 'with comments', value: 'with-comments' }
+        ],
+        comments: [
+            { label: 'by date', value: 'by-date' },
+            { label: 'to bless', value: 'to-bless' }
+        ],
+        // 06-profiles: third-clause grammar for profiles is
+        // "by name" (default) / "by activity". Default position
+        // matches FILTER_MODIFIER_OPTIONS_BY_TYPE convention: first
+        // entry is the default.
+        profiles: [
+            { label: 'by name', value: 'by-name' },
+            { label: 'by activity', value: 'by-activity' }
+        ],
+        drafts: [
+            { label: 'by date', value: 'by-date' },
+            { label: 'by name', value: 'by-name' }
+        ],
+        dms: [
+            { label: 'by date', value: 'by-date' },
+            { label: 'by name', value: 'by-name' }
+        ]
+        // activity / mentions: no modifier slot (entry absent).
+    };
+    // Backwards-compat alias for callers that still index the legacy flat
+    // array name. Resolves to the posts-only set (the only type the
+    // public surface ships interactivity for).
+    var FILTER_MODIFIER_OPTIONS = FILTER_MODIFIER_OPTIONS_BY_TYPE.posts;
+    // step-06/6.b: qualifier options. Public surface keeps qualifier
+    // locked to "all" via the SSR'd template; owner-extras.js sets
+    // body.is-owner and unlocks the slot interactively. The option list
+    // is owner-only; FILTER_QUALIFIER_OPTIONS remains here as the
+    // canonical reference for the dropdown when unlocked.
+    var FILTER_QUALIFIER_OPTIONS = [
+        { label: 'all', value: 'all' },
+        { label: 'new', value: 'new' }
+    ];
+    // step-06/6.b: scope options. Public surface keeps scope locked to
+    // the tenant's @<domain> identity text; owner-extras.js unlocks for
+    // me / my-network / my-mutuals / all-polis / site (handle typeahead).
+    var FILTER_SCOPE_OPTIONS = [
+        { label: 'me', value: 'me' },
+        { label: 'my network', value: 'my-network' },
+        { label: 'my mutuals', value: 'my-mutuals' }, // (indent removed — read as odd in dropdown)
+        { label: 'all polis', value: 'all-polis' },
+        { label: 'site', value: 'site' } // sentinel; opens typeahead input
+    ];
+
+    // Map slot kind → option array, used by toggleSlotDropdown +
+    // registerFilterOption. Modifier is special-cased (type-conditional),
+    // and scope is type-conditional too for profiles.
+    function getFilterOptions(slotKind) {
+        if (slotKind === 'type') return FILTER_TYPE_OPTIONS;
+        if (slotKind === 'qualifier') return FILTER_QUALIFIER_OPTIONS;
+        if (slotKind === 'scope') return scopeOptionsForCurrentType(FILTER_SCOPE_OPTIONS);
+        if (slotKind === 'modifier') {
+            var raw = FILTER_MODIFIER_OPTIONS_BY_TYPE[filterType] || [];
+            return modifierOptionsForCurrentScope(raw);
+        }
+        return [];
+    }
+
+    // R23 #11: filter modifier options based on the current scope.
+    // "to bless" only makes sense when querying network comments —
+    // own comments don't need blessing. Drop the to-bless entry when
+    // scope=me for type=comments.
+    function modifierOptionsForCurrentScope(raw) {
+        if (filterType !== 'comments' || filterScope !== 'me') return raw;
+        var out = [];
+        for (var i = 0; i < raw.length; i++) {
+            if (raw[i].value !== 'to-bless') out.push(raw[i]);
+        }
+        return out;
+    }
+
+    // 06-profiles: restrict scope choices when type=profiles. The
+    // profile surface only makes sense at network scopes — "me" /
+    // "my mutuals" / a single "site" handle don't carry meaningful
+    // profile-list semantics. Keep "my network" and "all polis" only.
+    //
+    // DM extension: when type=dms, the dropdown is owner-side-only and
+    // becomes a fast-switcher — pinned "↩ my mutuals" (returns to inbox)
+    // followed by the 10 most-recently-active conversations (populated
+    // by owner-extras via setDMScopeOptions). Public surface never sees
+    // type=dms so this branch is owner-only by construction.
+    function scopeOptionsForCurrentType(raw) {
+        if (filterType === 'dms') {
+            // Pinned return-to-inbox entry + the dynamic recent-conv list.
+            // Empty recent list (no active conversations yet, or fetch
+            // hasn't populated yet) still surfaces the pinned entry so
+            // the user can always navigate back to "my mutuals".
+            var pinned = [{ label: '↩ my mutuals', value: 'my-mutuals', pinned: true }];
+            return pinned.concat(dmScopeOptions);
+        }
+        // Drop the "site" typeahead sentinel everywhere except DMs.
+        // The typeahead isn't wired to a server-side handle filter for
+        // posts/comments/activity yet — surfacing it dead in the dropdown
+        // is worse than hiding it until that work lands.
+        var withoutSite = [];
+        for (var j = 0; j < raw.length; j++) {
+            if (raw[j].value !== 'site') withoutSite.push(raw[j]);
+        }
+        if (filterType !== 'profiles') return withoutSite;
+        var allowed = { 'my-network': true, 'all-polis': true };
+        var out = [];
+        for (var i = 0; i < withoutSite.length; i++) {
+            if (allowed[withoutSite[i].value]) out.push(withoutSite[i]);
+        }
+        return out;
+    }
+
+    // DM-specific recent-conversation list for the scope dropdown.
+    // Populated by owner-extras via PolisStream.setDMScopeOptions whenever
+    // it learns the current inbox state. Each entry: { label, value }
+    // where label is the peer's handle (e.g. "alice.polis.pub") and
+    // value is the internal scope form ("@alice.polis.pub").
+    var dmScopeOptions = [];
+    function setDMScopeOptions(opts) {
+        if (!Array.isArray(opts)) { dmScopeOptions = []; return; }
+        dmScopeOptions = opts.filter(function (o) {
+            return o && typeof o.label === 'string' && typeof o.value === 'string';
+        }).slice(0, 10);
+    }
+
+    // Look up the display label for a slot value by walking the
+    // relevant option array. Used by the setter functions below as a
+    // fallback when the caller didn't pass an explicit label — without
+    // this, internal values like 'my-network' / 'by-name' / 'dms' would
+    // surface verbatim in the sentence (e.g. when re-hydrating filter
+    // state from a PQL URL through setFilter(state)).
+    //
+    // Special cases:
+    //   - scope @<handle>  → render the bare handle (drop the '@').
+    //   - scope (unknown handle) → keep as-is (defensive).
+    //   - modifier         → walk per-type table (scoped to filterType).
+    //   - any miss         → fall back to the value itself.
+    function labelForSlot(slotKind, value) {
+        if (typeof value !== 'string' || !value) return value || '';
+        if (slotKind === 'scope') {
+            if (value.charAt(0) === '@') {
+                // Possessive-network form: `@<handle>:network` →
+                // `<handle>.polis.pub's network`. Used by the bio
+                // "N followers" / "N following" stat-links on public
+                // visitor pages — keeps the sentence reading as
+                // English ("from discover.polis.pub's network") rather
+                // than exposing the internal `:network` suffix.
+                var rest = value.substring(1);
+                if (rest.slice(-8) === ':network') {
+                    return rest.slice(0, -8) + "'s network";
+                }
+                return rest;
+            }
+            var sArr = FILTER_SCOPE_OPTIONS;
+            for (var i = 0; i < sArr.length; i++) {
+                if (sArr[i].value === value) return sArr[i].label;
+            }
+            return value;
+        }
+        if (slotKind === 'modifier') {
+            var mArr = FILTER_MODIFIER_OPTIONS_BY_TYPE[filterType] || [];
+            for (var j = 0; j < mArr.length; j++) {
+                if (mArr[j].value === value) return mArr[j].label;
+            }
+            // Fall through: replace dashes with spaces so 'by-name'
+            // reads as 'by name' even on type/modifier mismatches.
+            return value.replace(/-/g, ' ');
+        }
+        var arr;
+        if (slotKind === 'type') arr = FILTER_TYPE_OPTIONS;
+        else if (slotKind === 'qualifier') arr = FILTER_QUALIFIER_OPTIONS;
+        else return value;
+        for (var k = 0; k < arr.length; k++) {
+            if (arr[k].value === value) return arr[k].label;
+        }
+        return value;
+    }
+
+    // Public extension point. owner-extras.js calls
+    // PolisStream.registerFilterOption('type', { label: 'activity',
+    // value: 'activity' }) at init to add owner-only options without
+    // editing the controller.
+    function registerFilterOption(slotKind, opt) {
+        if (!opt || typeof opt.value !== 'string') return;
+        var arr = getFilterOptions(slotKind);
+        // De-dupe by value.
+        for (var i = 0; i < arr.length; i++) {
+            if (arr[i].value === opt.value) return;
+        }
+        // opts.prepend places the new option at index 0 (used by
+        // owner-extras to put 'activity' atop the type dropdown).
+        if (opt.prepend) {
+            arr.unshift(opt);
+        } else {
+            arr.push(opt);
+        }
+    }
+
+    // Replace the entire option list for a slot. Used by owner-extras
+    // to override the public default ([posts, comments, follows]) with
+    // the owner-only set ([activity, drafts, dms]) — registerFilterOption
+    // can only add, never remove. Mutates the array in place so existing
+    // references via getFilterOptions stay live.
+    function replaceFilterOptions(slotKind, opts) {
+        if (!Array.isArray(opts)) return;
+        var arr = getFilterOptions(slotKind);
+        arr.length = 0;
+        for (var i = 0; i < opts.length; i++) {
+            if (opts[i] && typeof opts[i].value === 'string') {
+                arr.push(opts[i]);
+            }
+        }
+    }
+
+    // Unlock a slot that was SSR'd as `sf-slot--locked` (public default
+    // for qualifier + scope) so it becomes interactive. owner-extras.js
+    // calls this for `qualifier` and `scope` at init so the owner can
+    // toggle between all/new and switch scopes via the sentence filter.
+    // Idempotent — safe to call multiple times.
+    function unlockSlot(slotKind) {
+        var slot = document.querySelector('.sentence-filter [data-filter-slot="' + slotKind + '"]');
+        if (!slot) return;
+        // Idempotent: bail if already interactive.
+        if (slot.classList.contains('sf-slot--interactive')) return;
+        // Public surface SSRs scope as sf-slot--identity (italic accent,
+        // no underline) and qualifier as sf-slot--locked. Both need
+        // converting to sf-slot--interactive so owner sees the same
+        // always-underlined affordance the public type/modifier slots
+        // already get (R20-1).
+        slot.classList.remove('sf-slot--locked');
+        slot.classList.remove('sf-slot--identity');
+        slot.classList.add('sf-slot--interactive');
+        slot.removeAttribute('data-filter-locked');
+        slot.setAttribute('role', 'button');
+        slot.setAttribute('tabindex', '0');
+        slot.setAttribute('aria-haspopup', 'listbox');
+        slot.setAttribute('aria-expanded', 'false');
+        attachSlotHandlers(slot);
+    }
+
+    /* ------------------------------------------------------------------
+       Init
+       ------------------------------------------------------------------ */
+
+    function init() {
+        if (!isStreamPage()) {
+            return;
+        }
+
+        // Manual scroll restoration so the browser doesn't fight the
+        // controller's history.replaceState updates during scroll.
+        if ('scrollRestoration' in history) {
+            history.scrollRestoration = 'manual';
+        }
+
+        hydrate();
+        setupFocusTracking();
+        setupPrefetch();
+        setupPagination();
+        setupPaginationTop();
+        setupFilter();
+        setupCommentsPanel();
+        setupCardClicks();
+        setupAboutToggle();
+        setupPostBodyToggles();
+        setupStatLinks();
+        installLiveRegion();
+        setupKeyboardNav();
+        setupFocusModeClickOutside();
+        setupPinnedDotRefresh();
+
+        // Auto-engage focus mode on canonical permalink pages
+        // (rapid-fire #17). When a visitor lands on /posts/.../*.html
+        // or /comments/.../*.html, the SSR template puts the target
+        // entry as `.entry.is-focused` — the page IS the focus content,
+        // so engaging focus mode immediately matches the permalink
+        // intent instead of showing siblings as competing context.
+        // Click-outside / scroll-to-exit handlers stay active so the
+        // visitor can step out of focus to browse siblings if they
+        // want. The pre-existing #comments hash branch is now
+        // subsumed; opens the comments panel via the same path.
+        //
+        // 2026-05-18 (post-deploy bug): the SSR template ALSO marks
+        // the most-recent post as `.entry.is-focused` on `/` and
+        // `/index.html` (the subdomain root is the same shell with
+        // the most-recent post in focus per D-DEEPLINK). Pre-fix,
+        // typing `vdibart.polis.pub` opened the latest post in
+        // read-focus immediately — surprising behavior on the root
+        // landing. Gate: only auto-engage when the URL path is an
+        // explicit permalink (anything OTHER than `/` or
+        // `/index.html`). Root visitors see the stream with the
+        // focus entry visually anchored but NOT mode-locked, so they
+        // can scroll the feed normally.
+        var path = window.location.pathname || '/';
+        var isPermalink = path !== '/' && path !== '/index.html';
+        if (isPermalink) {
+            var focusEntry = document.querySelector('.entry.is-focused');
+            if (focusEntry && isFocusModeEligible(focusEntry)) {
+                var focusOpts = window.location.hash === '#comments'
+                    ? { scrollTo: 'comments' }
+                    : undefined;
+                enterFocusMode(focusEntry, focusOpts);
+            }
+        }
+
+        // Auto-scroll to focus + above-focus peek on per-post pages.
+        // Runs BEFORE setupUserScrollGate so the synthetic scroll event
+        // fired by window.scrollTo doesn't flip userHasScrolled. The
+        // user's first MANUAL scroll after the gate attaches will flip
+        // the flag correctly. Pre-conditions ("careful" gates) are
+        // checked inside autoScrollToFocusPeek — see its docstring.
+        autoScrollToFocusPeek();
+        // After auto-scroll settles, recompute top-fade visibility from
+        // current geometry. Per-post page after auto-scroll: topmost
+        // (above-focus) entry is partially behind the fade → show.
+        // /index.html: topmost (focus) is below the fade → hide.
+        updateTopFadeVisibility();
+        // Tall-monitor / short-corpus fallback: if the SSR'd content
+        // doesn't fill the viewport, the user has no scroll-trigger
+        // affordance and the IO-based pagination machinery sits idle.
+        // Proactively kick off fetchNextPage to extend the stream until
+        // it overflows the viewport (or until paginationDone). The
+        // success handler's observeLastEntry call will then re-fire
+        // the IO observer if the new last entry is still inside the
+        // 200px lookahead — natural loop terminating on either
+        // viewport-fill or end-of-history.
+        fillViewportIfShort();
+        setupUserScrollGate();
+
+        // Claim keyboard focus for the page so j/k work without first
+        // requiring a click. After `document.body.focus()`, keydown
+        // events flow through the document-level listener installed by
+        // setupKeyboardNav. Body needs tabindex="-1" (set in stream.html)
+        // to be a focusable element. Wrapped in try/catch as a defense
+        // against environments where body.focus() throws (some embedded
+        // contexts).
+        try {
+            if (document.body && typeof document.body.focus === 'function') {
+                document.body.focus({ preventScroll: true });
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    // Gate URL updates AND lazy prefetch on a real user-initiated scroll.
+    // Layout-shift events (font swap, image lazy-load, hosted nav-widget
+    // mounting at #polis-nav-root, theme-toggle hydration, lazy-fetched
+    // bodies expanding entries) all fire the IntersectionObserver and
+    // would otherwise poison the URL bar by replacing it to whatever
+    // entry is closest to viewport center after the shift. Listening for
+    // `scroll` (one-shot, passive, capture) catches all forms of user-
+    // initiated scroll: mouse wheel, trackpad, scrollbar drag, touch,
+    // arrow keys, spacebar, pgup/pgdown, home/end. scrollIntoView()
+    // called by j/k also triggers a scroll event — that's fine, it means
+    // a user-initiated keypress produced a scroll.
+    //
+    // First scroll also kicks off prefetching for the same reason: we
+    // don't want to spend bandwidth fetching bodies for a user who
+    // navigated to the page and immediately left without engaging.
+    // autoScrollToFocusPeek scrolls the page so the focus entry's top
+    // edge sits just below the topbar + a peek-amount (~140px). Above-
+    // focus siblings extend up under the topbar with the
+    // .stream-top-fade overlay smoothly fading their upper portion
+    // into the topbar bg. The bottom of the topmost above-focus entry
+    // is barely visible, communicating "scroll up for more" — and the
+    // user's reflexive scroll-up triggers the top-pagination observer
+    // (userHasScrolledUp gate flips on first scrollY decrease).
+    //
+    // "Careful version" gates — skip auto-scroll when:
+    //   - .layout-right doesn't carry .show-top-fade at SSR time (no
+    //     above-focus siblings rendered → nothing to peek at).
+    //   - URL has a fragment (e.g. #comments) — let the browser's own
+    //     scroll-to-fragment behavior take over.
+    //   - Navigation is a reload or back/forward — preserve any
+    //     browser-restored scroll position.
+    //   - User has prefers-reduced-motion: reduce — auto-scroll is a
+    //     non-essential motion the user has opted out of.
+    function autoScrollToFocusPeek() {
+        var layoutRight = document.querySelector('.layout-right');
+        if (!layoutRight || !layoutRight.classList.contains('show-top-fade')) {
+            return;
+        }
+        if (window.location.hash !== '') {
+            return;
+        }
+        // Reduced-motion gate. matchMedia is supported everywhere we
+        // care about; fail-open if it's missing.
+        if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            return;
+        }
+        // Navigation-type gate. PerformanceNavigationTiming exposes
+        // 'navigate' / 'reload' / 'back_forward' / 'prerender'. Only
+        // 'navigate' (a fresh URL load) gets the auto-scroll. Reloads
+        // and back/forward keep their browser-saved scroll position.
+        if (window.performance && typeof performance.getEntriesByType === 'function') {
+            var navEntries = performance.getEntriesByType('navigation');
+            if (navEntries && navEntries.length > 0 && navEntries[0].type !== 'navigate') {
+                return;
+            }
+        }
+        var focusEl = document.querySelector('.entry.is-focused');
+        if (!focusEl) return;
+        var topbar = document.querySelector('.polis-topbar');
+        var topbarHeight = topbar ? topbar.getBoundingClientRect().height : 50;
+        // PEEK_AMOUNT is how far below the topbar the focus's top sits.
+        // The above-focus entry's bottom 140px peeks under the topbar
+        // (and through the fade). Smaller on narrow viewports so the
+        // focus stays the dominant element on mobile.
+        var peekAmount = window.innerWidth <= 600 ? 90 : 140;
+        var rect = focusEl.getBoundingClientRect();
+        var targetScrollY = rect.top + window.scrollY - topbarHeight - peekAmount;
+        if (targetScrollY <= 0) return; // nothing to scroll up to
+        try {
+            // 'instant' so the page doesn't visibly animate from 0 to
+            // target — the scroll happens before the user perceives a
+            // page-top render.
+            window.scrollTo({ top: targetScrollY, behavior: 'instant' });
+        } catch (e) {
+            // Older browsers don't accept the options object form.
+            window.scrollTo(0, targetScrollY);
+        }
+    }
+
+    // fillViewportIfShort proactively kicks off fetchNextPage when the
+    // SSR'd content doesn't fill the viewport — the tall-monitor /
+    // short-corpus case where pagination's IO observer would otherwise
+    // sit idle (no scroll → userHasScrolled never flips → no fetch).
+    //
+    // The check is geometry-only: if document.scrollHeight <=
+    // window.innerHeight + buffer, content is shorter than the
+    // viewport. The +50 buffer absorbs sub-pixel rendering noise.
+    //
+    // Safe to call once at init: fetchNextPage's success handler
+    // calls observeLastEntry on the new last entry, and the IO
+    // observer's initial-state callback fires when that entry is
+    // still inside the 200px lookahead. So the recursion happens via
+    // the natural pagination loop (not via re-calling
+    // fillViewportIfShort) and terminates when either content
+    // overflows the viewport OR the server returns no next_cursor
+    // (paginationDone=true → fetchNextPage early-returns).
+    //
+    // Skipped when:
+    //   - paginationDone (already at end-of-history; nothing more to fetch).
+    //   - paginationInFlight (a fetch is already underway).
+    //   - !paginationTenant (no canonical link → setupPagination bailed).
+    function fillViewportIfShort() {
+        if (paginationDone || paginationInFlight) return;
+        if (!paginationTenant) return;
+        var docHeight = document.documentElement.scrollHeight;
+        if (docHeight > window.innerHeight + 50) return;
+        fetchNextPage();
+    }
+
+    // updateTopFadeVisibility decides whether .show-top-fade should be
+    // on the .layout-right element. Called from init(), every scroll,
+    // and after upward-fetch state changes. Three cases:
+    //
+    //   (A) scrollY === 0 AND paginationDoneTop → HIDE.
+    //       The user is at the top of the rendered stream and there's
+    //       no more content to fetch above. Showing the fade here
+    //       would obscure the topmost entry's title with no way for
+    //       the user to scroll up to "uncover" it. Closes the
+    //       2026-04-29 edge case where the topmost loaded entry was
+    //       stuck partially-faded at scroll-top.
+    //
+    //   (B) topmostEntry.rect.top >= topbarHeight + fadeHeight → HIDE.
+    //       The topmost entry is fully below the fade overlay — no
+    //       content under the topbar to fade. Common case on
+    //       /index.html before any scroll: focus = newest is the
+    //       topmost entry, sits below topbar with the fade-area
+    //       above empty. Hiding keeps the focus's top edge crisp.
+    //
+    //   (C) otherwise → SHOW.
+    //       Topmost entry is partially behind the topbar/fade-area;
+    //       the fade does its job (smooth transition into topbar bg)
+    //       and the scroll-bar position communicates "more above".
+    //
+    // Same logic governs both /index.html (fade only after user has
+    // scrolled past the focus) and per-post pages (fade always shows
+    // until upward pagination is done AND user is at scroll-top).
+    function updateTopFadeVisibility() {
+        var layoutRight = document.querySelector('.layout-right');
+        if (!layoutRight) return;
+        // R24 follow-up #1: fade shows on every scrollable view, not
+        // just type=posts. Earlier shape gated this on filterType to
+        // avoid showing fade on per-post-page filter changes (where
+        // the focus-post structure was a posts-only affordance), but
+        // on the owner SPA every type benefits from the same gradient
+        // under the topbar. The Case (A)/(B)/(C) checks below already
+        // handle "no overflow" / "scrolled to top" / "partial overlap"
+        // correctly regardless of type.
+        // Pick the first VISIBLE entry — defensive in case future
+        // filters hide entries without removing them from entries[].
+        var topmostEntry = null;
+        for (var i = 0; i < entries.length; i++) {
+            if (!entries[i].classList.contains('is-hidden-by-filter')) {
+                topmostEntry = entries[i];
+                break;
+            }
+        }
+        if (!topmostEntry) {
+            topmostEntry = layoutRight.querySelector('.entry:not(.is-hidden-by-filter)');
+        }
+        if (!topmostEntry) {
+            layoutRight.classList.remove('show-top-fade');
+            return;
+        }
+        // Case (A): at scroll-top with no more upward pagination.
+        if (window.scrollY === 0 && paginationDoneTop) {
+            layoutRight.classList.remove('show-top-fade');
+            return;
+        }
+        var topbar = document.querySelector('.polis-topbar');
+        var topbarH = topbar ? topbar.getBoundingClientRect().height : 50;
+        var fadeH = 120; // matches .stream-top-fade's CSS height
+        var rect = topmostEntry.getBoundingClientRect();
+        // Case (B): topmost fully below the fade-bottom. Hide.
+        if (rect.top >= topbarH + fadeH) {
+            layoutRight.classList.remove('show-top-fade');
+            return;
+        }
+        // Case (C): topmost partially behind the fade. Show.
+        layoutRight.classList.add('show-top-fade');
+    }
+
+    function setupUserScrollGate() {
+        // Two-stage gate. The first scroll (any direction) flips
+        // userHasScrolled and kicks off down-pagination + prefetch.
+        // Up-pagination is deferred to the first scroll-UP event so the
+        // common case (user lands on per-post page, scrolls down to read
+        // older posts) doesn't fire both directions concurrently — the
+        // simultaneous prepend + append produces a visible scrollbar
+        // jump and pushes the year-marker off-screen as the prepend's
+        // scroll-position adjustment fights the user's downward motion.
+        // Tracking scroll direction is cheap and lets each direction's
+        // observer attach lazily only when the user signals interest.
+        var lastY = window.scrollY;
+        var onScroll = function () {
+            if (!userHasScrolled) {
+                userHasScrolled = true;
+                startPrefetching();
+                startPagination();
+            }
+            var currentY = window.scrollY;
+            if (!userHasScrolledUp && currentY < lastY) {
+                userHasScrolledUp = true;
+                startPaginationTop();
+            }
+            lastY = currentY;
+            // Top-fade visibility tracks scroll geometry — recompute on
+            // every scroll. Cheap (one rect read + one classList op).
+            // Drives the /index.html "fade only after scroll-down" path
+            // and the per-post "fade releases at scroll-top" edge case.
+            updateTopFadeVisibility();
+            // URL-restoration on scroll-back-to-top depends on a focus
+            // update firing when the scroll position crosses
+            // TOP_RESTORE_THRESHOLD. IntersectionObserver only fires when
+            // ratios cross thresholds — fine for "moved to a different
+            // entry" but it can miss a "same entry, scrolled within it"
+            // transition. Cheap to schedule (debounced) and idempotent if
+            // the observer already pending'd one.
+            scheduleFocusUpdate();
+        };
+        window.addEventListener('scroll', onScroll, { passive: true, capture: true });
+    }
+
+    /* ------------------------------------------------------------------
+       Hydration — adopt the SSR'd DOM, no re-render
+       ------------------------------------------------------------------ */
+
+    function hydrate() {
+        entries = Array.prototype.slice.call(document.querySelectorAll('.entry'));
+        focusedEntry = document.querySelector('.entry.is-focused') || entries[0] || null;
+
+        // Stamp each entry with its canonical URL so the focus tracker has a
+        // uniform lookup regardless of entry sub-type or rendering shape.
+        // Two SSR shapes carry the URL in different elements:
+        //   - Expanded form (.entry-body--expanded, post-shape default since
+        //     the bake-bodies refactor): URL is on .entry-title-link inside.
+        //   - Excerpt form (.entry-body--excerpt, used by the JS renderer
+        //     for dynamic entries from filter results before lazy-fetch
+        //     expands them): the .entry-body element IS the <a>.
+        // The focus entry uses the same .entry-title-link wrapper (added
+        // 2026-04-29 so clicking the focus title navigates to the
+        // canonical URL — same as siblings), so a single querySelector
+        // covers focus + siblings + dynamic entries. Falls back to the
+        // current document URL if no anchor is found, which preserves the
+        // pre-2026-04-29 behavior on any future shape that ships a focus
+        // without an inner anchor.
+        landingURL = window.location.pathname + window.location.search;
+        for (var i = 0; i < entries.length; i++) {
+            var entry = entries[i];
+            var url = null;
+            var a = entry.querySelector('a.entry-title-link, a.entry-body, a.entry-body--excerpt');
+            if (a) {
+                url = a.getAttribute('href');
+            } else if (entry === focusedEntry) {
+                url = landingURL;
+            }
+            if (url) {
+                entry.dataset.polisCanonicalUrl = url;
+            }
+        }
+        // Decide whether scrollY-at-top should restore landingURL. On
+        // /index.html the landing URL (/index.html) is distinct from the
+        // focus's canonical URL (/posts/.../newest.html) — the user's
+        // mental model is "at the top, I'm on the homepage; once I
+        // start scrolling, I'm reading a post." On per-post pages the
+        // two are identical, so bestEntry tracking handles every case
+        // including scroll-up into a dynamically-prepended above-focus
+        // rail (where scrollY → 0 means "viewing prepended newer post",
+        // NOT "back at landing").
+        if (focusedEntry && focusedEntry.dataset.polisCanonicalUrl) {
+            landingURLNeedsRestore = (focusedEntry.dataset.polisCanonicalUrl !== landingURL);
+        }
+
+        // Initial pageview analytics fire once at load time (analytics infra
+        // hook lives upstream). Subsequent replaceState updates on scroll do
+        // NOT fire pageview events — that distinction is the whole point of
+        // replaceState vs pushState here.
+    }
+
+    /* ------------------------------------------------------------------
+       Scroll + focus tracking
+       ------------------------------------------------------------------ */
+
+    function setupFocusTracking() {
+        if (!('IntersectionObserver' in window)) {
+            // Old browser: don't crash, but don't track focus either. The
+            // page still renders + scrolls fine without the URL updating.
+            return;
+        }
+
+        var opts = {
+            // Multiple thresholds let us pick a center-of-mass focus rather
+            // than a binary visible/not. Tuned for "the entry the reader is
+            // most centrally looking at" without flapping.
+            threshold: [0, 0.25, 0.5, 0.75, 1.0],
+        };
+
+        observer = new IntersectionObserver(onIntersect, opts);
+        for (var i = 0; i < entries.length; i++) {
+            observer.observe(entries[i]);
+        }
+    }
+
+    function onIntersect(observerEntries) {
+        for (var i = 0; i < observerEntries.length; i++) {
+            var oe = observerEntries[i];
+            if (oe.intersectionRatio > 0) {
+                intersectingMap.set(oe.target, oe.intersectionRatio);
+            } else {
+                intersectingMap.delete(oe.target);
+            }
+        }
+        scheduleFocusUpdate();
+    }
+
+    function scheduleFocusUpdate() {
+        if (focusUpdateTimer !== null) {
+            return; // already pending
+        }
+        focusUpdateTimer = setTimeout(function () {
+            focusUpdateTimer = null;
+            updateFocus();
+        }, FOCUS_DEBOUNCE_MS);
+    }
+
+    function updateFocus() {
+        if (intersectingMap.size === 0) {
+            return;
+        }
+
+        // Honor SSR's focus until the user actually scrolls. The
+        // IntersectionObserver fires not just on user scroll but on any
+        // layout shift — font swap, image lazy-load, hosted nav-widget
+        // mount at #polis-nav-root, theme-toggle hydration, lazy-fetched
+        // bodies replacing skeletons (4.c), etc. None of those are user
+        // intent to change the focused entry; running updateFocus then
+        // would poison the URL bar with a sibling URL and break browser
+        // back + relative link resolution. Gate on userHasScrolled (set
+        // by the one-shot scroll listener installed in setupUserScrollGate).
+        if (!userHasScrolled) {
+            return;
+        }
+
+        // Pick the intersecting entry whose vertical center is closest to
+        // the reader's eye-line — ~25% down the post-topbar viewport, not
+        // the geometric center. Center-based picking lagged: by the time
+        // a post crossed the 50% line the reader was already well into it,
+        // so the URL bar updated long after they'd started reading. 25%
+        // matches the natural reading anchor and makes the URL track the
+        // post the user is actually engaged with.
+        //
+        // DIRECTION-HOOK: a fixed fraction of the viewport is a direction-
+        // agnostic reference; reversing stream direction doesn't change
+        // which entry is closest to it, so this works for both newest-top
+        // and newest-bottom configs.
+        var topbar = document.querySelector('.polis-topbar');
+        var topbarHeight = topbar ? topbar.getBoundingClientRect().height : 0;
+        var readAnchor = topbarHeight + (window.innerHeight - topbarHeight) * 0.25;
+
+        var bestEntry = null;
+        var bestDistance = Infinity;
+        for (var i = 0; i < entries.length; i++) {
+            var entry = entries[i];
+            if (!intersectingMap.has(entry)) continue;
+            var rect = entry.getBoundingClientRect();
+            var entryCenter = rect.top + rect.height / 2;
+            var distance = Math.abs(entryCenter - readAnchor);
+            if (distance < bestDistance) {
+                bestEntry = entry;
+                bestDistance = distance;
+            }
+        }
+
+        if (!bestEntry) {
+            return;
+        }
+
+        // Update DOM state classes only when the focused entry actually
+        // changes; URL update below handles "scroll within the same
+        // focused entry" + "scroll back to top" cases that don't move
+        // the focused entry.
+        if (bestEntry !== focusedEntry) {
+            if (focusedEntry) {
+                focusedEntry.classList.remove('is-focused');
+            }
+            bestEntry.classList.add('is-focused');
+            focusedEntry = bestEntry;
+        }
+
+        // Clear has-unread on entries the user has scrolled past
+        // (R20-3 / R22 #4). Two failure modes the prior walk had:
+        //   1. previousElementSibling stopped at non-.entry siblings
+        //      (year-markers, fade nodes, the sticky editor card),
+        //      leaving entries above them flagged.
+        //   2. The walk only ran once per focus change; on fast scroll
+        //      the focus could skip past entries between debounces.
+        // Iterate ALL .entry siblings of the focused entry's parent —
+        // anything whose DOM position precedes the focus and is still
+        // marked unread gets cleared. One-way: scrolling back up
+        // doesn't re-flag earlier entries.
+        if (focusedEntry && focusedEntry.parentNode) {
+            var siblings = focusedEntry.parentNode.querySelectorAll(':scope > .entry.has-unread');
+            for (var si = 0; si < siblings.length; si++) {
+                var s = siblings[si];
+                if (s === focusedEntry) break; // querySelectorAll preserves DOM order
+                s.classList.remove('has-unread');
+                fireEntryReadEvent(s);
+            }
+        }
+
+        // Pick target URL based on scroll position. The "at the top
+        // restore landing URL" rule fires ONLY when landingURL is
+        // distinct from the focus's canonical URL — i.e. the
+        // /index.html case (landingURLNeedsRestore set in hydrate()).
+        // On per-post pages bestEntry tracking alone is correct,
+        // including the case where scroll-up triggers paginationTop
+        // and prepends newer posts above the original focus: scrollY
+        // can drop to 0 there but the user is reading the topmost
+        // prepended entry, not "back at the landing URL".
+        //
+        // The canonical URL was stamped onto each entry's dataset at
+        // hydrate time (see hydrate() above), so the lookup is uniform
+        // across focus + siblings + dynamically-added entries.
+        //
+        // First URL change uses pushState — preserves the user's
+        // landing URL in history so the browser back button returns
+        // to it. Subsequent changes use replaceState to avoid polluting
+        // history with one entry per intermediate scroll position.
+        // R23 follow-up: scroll-driven URL syncing only makes sense on
+        // the public per-post page (data-polis-stream-role=
+        // "static-focus-and-siblings"), where the focused entry IS the
+        // page's identity. On the owner SPA homepage
+        // (data-polis-stream-role="owner-spa-homepage") the URL stays
+        // /_/feed regardless of which entry is in focus — the entries
+        // are heterogenous (cross-tenant) and pushState'ing their
+        // canonical URLs would (a) be cross-origin and SecurityError
+        // out, and (b) be semantically wrong even if it worked. Skip
+        // the URL-mirror logic entirely outside the public surface.
+        if (!isPublicFocusSurface()) return;
+
+        var targetURL;
+        if (landingURLNeedsRestore && window.scrollY <= TOP_RESTORE_THRESHOLD) {
+            targetURL = landingURL;
+        } else {
+            targetURL = bestEntry.dataset.polisCanonicalUrl || landingURL;
+        }
+        var currentPath = window.location.pathname + window.location.search;
+        if (targetURL && targetURL !== currentPath) {
+            if (!hasPushedFirstUpdate) {
+                history.pushState(null, '', targetURL);
+                hasPushedFirstUpdate = true;
+            } else {
+                history.replaceState(null, '', targetURL);
+            }
+        }
+    }
+
+    // Returns true only for the public per-post page where the focused
+    // entry's canonical URL is a meaningful URL-bar target.
+    function isPublicFocusSurface() {
+        var stream = document.querySelector('.stream');
+        if (!stream) return false;
+        return stream.getAttribute('data-polis-stream-role') === 'static-focus-and-siblings';
+    }
+
+    /* ------------------------------------------------------------------
+       ARIA live region — accessibility surface for "loaded N more posts",
+       "filter changed", "no more results", etc. Visually hidden but
+       announced by screen readers. polite (not assertive) so it doesn't
+       interrupt active reading.
+       ------------------------------------------------------------------ */
+
+    var liveRegion = null;
+
+    function installLiveRegion() {
+        liveRegion = document.createElement('div');
+        liveRegion.id = 'polis-stream-live';
+        liveRegion.setAttribute('role', 'status');
+        liveRegion.setAttribute('aria-live', 'polite');
+        liveRegion.setAttribute('aria-atomic', 'true');
+        // Visually hidden via inline style so it works even if stream.css
+        // isn't loaded (degraded path). Standard sr-only pattern.
+        liveRegion.style.cssText = (
+            'position:absolute;width:1px;height:1px;padding:0;margin:-1px;' +
+            'overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;'
+        );
+        document.body.appendChild(liveRegion);
+    }
+
+    // Emit a CustomEvent when an entry transitions from unread → read so
+    // SPA-side listeners (owner-extras) can persist the local read state.
+    // Bubbles so a single document-level listener can collect events
+    // from any entry. Bundle-shape stays generic — public surfaces have
+    // no listener so the event is a no-op there.
+    function fireEntryReadEvent(entry) {
+        if (!entry || !entry.dataset || !entry.dataset.polisEntryId) return;
+        entry.dispatchEvent(new CustomEvent('polis:entry-read', {
+            bubbles: true,
+            detail: {
+                id: entry.dataset.polisEntryId,
+                type: entry.dataset.polisEntryType || '',
+            },
+        }));
+    }
+
+    function announce(text) {
+        if (!liveRegion || !text) return;
+        // Setting textContent twice (clear + set) ensures screen readers
+        // re-announce even when the new text equals the previous text.
+        liveRegion.textContent = '';
+        // Defer to next microtask so the clear is observed before the set.
+        Promise.resolve().then(function () {
+            if (liveRegion) liveRegion.textContent = String(text);
+        });
+    }
+
+    /* ------------------------------------------------------------------
+       Keyboard navigation — j (next entry), k (previous entry),
+       Esc (close popovers; no-op until consumers register handlers).
+
+       j/k are conventional "feed reader" bindings (Gmail / Twitter /
+       Reddit / HN). They scroll the target entry into view; the
+       IntersectionObserver naturally picks it up as the new focus, which
+       updates the URL bar via the existing replaceState path.
+
+       DIRECTION-HOOK: in newest-top mode, j (next) targets the OLDER
+       entry below the current focus and k (prev) targets the NEWER entry
+       above. Reversal would flip these mappings.
+
+       Skip when focus is in an editable element (input/textarea/
+       contenteditable) so typing doesn't get hijacked.
+       ------------------------------------------------------------------ */
+
+    var popoverHandlers = [];  // close handlers registered by consumers
+
+    function setupKeyboardNav() {
+        document.addEventListener('keydown', onKeyDown);
+    }
+
+    function isEditableTarget(target) {
+        if (!target) return false;
+        var tag = target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+        if (target.isContentEditable) return true;
+        return false;
+    }
+
+    function onKeyDown(ev) {
+        if (ev.defaultPrevented) return;
+        if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+        if (isEditableTarget(ev.target)) return;
+
+        // Context-aware navigation (step-05/5.i Phase B Q-PB1).
+        // The open panel IS a visible mode marker — when it's open,
+        // j/k + arrow keys advance through comments inside the panel
+        // instead of advancing entries. The user knows which mode
+        // they're in by what's on screen.
+        var openEntry = getEntryWithOpenPanel();
+
+        switch (ev.key) {
+            case 'j':
+            case 'ArrowDown':
+                if (openEntry) {
+                    focusNextComment(openEntry);
+                } else if (ev.key === 'j') {
+                    focusNext();
+                } else {
+                    return; // ArrowDown with no open panel: let browser scroll
+                }
+                ev.preventDefault();
+                break;
+            case 'k':
+            case 'ArrowUp':
+                if (openEntry) {
+                    focusPrevComment(openEntry);
+                } else if (ev.key === 'k') {
+                    focusPrev();
+                } else {
+                    return; // ArrowUp with no open panel: let browser scroll
+                }
+                ev.preventDefault();
+                break;
+            case 'c':
+                // Toggle focus mode on the j/k focused entry.
+                if (focusedEntry && isFocusModeEligible(focusedEntry)) {
+                    toggleFocusMode(focusedEntry);
+                    ev.preventDefault();
+                }
+                break;
+            case 'Enter':
+                // Don't hijack Enter when focus is on a real interactive
+                // element — let native activation run. Body-level Enter
+                // toggles focus mode on the j/k focused entry, mirroring
+                // the click gesture.
+                if (isInteractiveActiveElement()) return;
+                if (focusedEntry && isFocusModeEligible(focusedEntry)) {
+                    toggleFocusMode(focusedEntry);
+                    ev.preventDefault();
+                }
+                break;
+            case 'Escape':
+                if (popoverHandlers.length > 0) {
+                    for (var i = 0; i < popoverHandlers.length; i++) {
+                        try { popoverHandlers[i](); } catch (e) { /* ignore */ }
+                    }
+                    ev.preventDefault();
+                }
+                break;
+        }
+    }
+
+    function isInteractiveActiveElement() {
+        var ae = document.activeElement;
+        if (!ae || ae === document.body) return false;
+        var tag = ae.tagName;
+        if (tag === 'A' || tag === 'BUTTON') return true;
+        if (tag === 'INPUT') {
+            var type = (ae.getAttribute('type') || '').toLowerCase();
+            // Submit-style inputs activate on Enter; text inputs are caught
+            // earlier by isEditableTarget.
+            return type === 'submit' || type === 'button' || type === 'reset';
+        }
+        if (ae.getAttribute && ae.getAttribute('role') === 'button') return true;
+        return false;
+    }
+
+    function focusNext() {
+        if (entries.length === 0) return;
+        var idx = focusedEntry ? entries.indexOf(focusedEntry) : -1;
+        if (idx === entries.length - 1) {
+            // At boundary — keystroke registers as received-but-no-further.
+            // Don't scroll (target is already current), just flash.
+            flashHighlight(focusedEntry);
+            return;
+        }
+        var next = idx >= 0 ? entries[idx + 1] : entries[0];
+        if (next) next.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function focusPrev() {
+        if (entries.length === 0) return;
+        var idx = focusedEntry ? entries.indexOf(focusedEntry) : 0;
+        if (idx <= 0) {
+            // At boundary — see focusNext for rationale.
+            flashHighlight(focusedEntry || entries[0]);
+            return;
+        }
+        var prev = entries[idx - 1];
+        if (prev) prev.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    // Brief visual feedback at j/k boundaries so the keystroke registers as
+    // received-but-no-further. The .highlight class is defined in stream.css
+    // with a transition; we add it, schedule a removal, and let CSS animate.
+    // Single-tracked timer/entry so mashing the boundary key cancels the
+    // previous removal cleanly — without the cancel, two flashes within
+    // 1.8s would briefly remove the class between calls and animate jumpily.
+    var flashTimer = null;
+    var flashEntry = null;
+
+    function flashHighlight(entry) {
+        if (!entry) return;
+        if (flashTimer) {
+            clearTimeout(flashTimer);
+            if (flashEntry) flashEntry.classList.remove('highlight');
+        }
+        entry.classList.add('highlight');
+        flashEntry = entry;
+        flashTimer = setTimeout(function () {
+            entry.classList.remove('highlight');
+            flashTimer = null;
+            flashEntry = null;
+        }, 1800);
+    }
+
+    function registerPopoverCloseHandler(fn) {
+        if (typeof fn === 'function') popoverHandlers.push(fn);
+    }
+
+    /* ------------------------------------------------------------------
+       COMMENTS — focus-mode open / close (step-05/5.i Phase B)
+
+       Click the focus-entry body or the focus's comment-badge → the
+       blessed-comment panel slides open beneath the body. Click again
+       (or scroll out, or press Escape, or press `c`) → it closes.
+
+       Smoothness improvements over the prototype's setTimeout-based
+       sequencing (per Q-PB2 manager review 2026-04-28):
+         1. transitionend (with propertyName === 'max-height') replaces
+            the magic FOCUS_DURATION_MS + 150 buffer.
+         2. Cancel-in-flight transitions on rapid toggle: snapshot the
+            current rendered height + apply as start state, animate to
+            target. Avoids the "snap to 0 then back up" jank when the
+            user clicks-clicks-clicks.
+         3. IntersectionObserver on UP/DOWN sentinels replaces the
+            scroll-event listener. Only fires on threshold cross,
+            zero per-scroll cost.
+         4. CSS handles `prefers-reduced-motion` (transition: none).
+
+       Boundary on j-past-last-comment: close panel + advance to next
+       entry ("I've read these, what's next?" auto-progression). User
+       can always re-open with `c`. Choice (b) per the impl-time
+       deferral noted in alignment.
+
+       Scope: focus entry only (Q-PB4). Sibling entries don't get
+       panels in Phase B — their badges keep `href="{url}#comments"`
+       to navigate to the canonical post page; the controller's
+       fragment-auto-open at init() handles the landing.
+       ------------------------------------------------------------------ */
+
+    var COMMENTS_PANEL_DURATION_MS = 320;  // matches stream.css transition
+    var COMMENTS_TOPBAR_OFFSET = 80;        // smooth-scroll target offset
+    var commentsTransitionEnd = null;       // active transitionend handler
+
+    function setupCommentsPanel() {
+        // Comments-panel scaffolding for the SSR'd focus entry. The
+        // badge click is handled via the entry-level focus-mode
+        // delegation in bindCardClick — entering focus mode on the
+        // focus entry calls openCommentsPanel, which animates the
+        // panel from max-height:0 to scrollHeight. This function
+        // exists as a kept-around hook for future panel-init work
+        // (lazy-fetched comment threads, etc.) and is intentionally
+        // a no-op today. Esc still closes via the popoverHandlers
+        // registered by enterFocusMode.
+    }
+
+    // setupCardClicks wires the entry-level click handler that opens
+    // focus mode for eligible entries (long body or has comments).
+    // Both SSR'd siblings (.entry-body--expanded) and the focus entry
+    // (.focus-content) get the handler. Dynamic excerpt-form entries
+    // (renderPost's <a class="entry-body--excerpt">, used pre-lazy-
+    // fetch for filter results) are skipped — their native link nav
+    // takes the user to the canonical URL until the body lazy-fetches
+    // in and the .entry-body--expanded form takes over.
+    function setupCardClicks() {
+        var entries = document.querySelectorAll('.entry--post, .entry--comment-thread');
+        for (var i = 0; i < entries.length; i++) {
+            bindCardClick(entries[i]);
+        }
+    }
+
+    // bindCardClick wires click-to-enter-focus-mode for one entry.
+    // Idempotent via data-card-click-bound. Called at init for SSR'd
+    // entries AND from appendEntry (every dynamically-rendered entry,
+    // including excerpt-form posts pre-lazy-fetch) AND from injectBody
+    // (post-swap re-bind on already-expanded entries — no-op since
+    // cardClickBound is already '1').
+    //
+    // Click semantics:
+    //   - Eligible entry (has show-more OR has comments OR is a post/
+    //     comment-thread): every click inside enters focus mode. Title-
+    //     link, body, post-body-toggle, comments-badge, AND the excerpt-
+    //     form body anchor all funnel into the same gesture so the user
+    //     doesn't have to aim. Modifier-clicks (cmd/ctrl/shift) fall
+    //     through to native handling so cmd-click still opens the
+    //     canonical URL in a new tab.
+    //   - Excerpt-form entries trigger lazy-fetch on click (instead of
+    //     waiting for the prefetch observer to scroll-into-view), then
+    //     enter focus mode. Without this, clicking before scrolling
+    //     would navigate to the per-post page — inconsistent with the
+    //     post-scroll click-to-focus behavior the rest of the stream has.
+    //   - Inline body anchors that aren't title-link / comments-badge /
+    //     excerpt-body fall through to native navigation — links inside
+    //     the post body work as written.
+    function bindCardClick(entry) {
+        if (!entry || entry.dataset.cardClickBound === '1') return;
+
+        // Bind on the entry article so every click target — title
+        // link, body content, post-body-toggle button, comments badge
+        // (which sits in .entry-meta-line outside the body) — funnels
+        // through the same handler.
+        entry.addEventListener('click', function (ev) {
+            // Modifier-clicks always pass through to native handling
+            // so power-users can cmd-click links to open new tabs.
+            if (ev.metaKey || ev.ctrlKey || ev.shiftKey) return;
+
+            var anchor = ev.target.closest('a');
+            var button = ev.target.closest('button');
+
+            // Identify the focus-trigger surfaces. Three anchors mean
+            // "enter focus mode": the title wrapper (.entry-title-link,
+            // expanded form), the comments-count icon (.entry-comments-
+            // badge), and the excerpt-form body wrapper
+            // (.entry-body--excerpt, the whole card before lazy-fetch
+            // swaps it for a div). One button does: .post-body-toggle.
+            // Anything else inside the entry (in-body hyperlinks, etc.)
+            // falls through to native handling.
+            var isFocusTriggerAnchor = anchor && (
+                anchor.classList.contains('entry-title-link') ||
+                anchor.classList.contains('entry-comments-badge') ||
+                anchor.classList.contains('entry-body--excerpt')
+            );
+            var isFocusTriggerButton = button && button.classList.contains('post-body-toggle');
+            if (anchor && !isFocusTriggerAnchor) return;
+            if (button && !isFocusTriggerButton) return;
+
+            // Eligibility gate. For ineligible entries (short body, no
+            // comments) we leave native navigation alone so the user can
+            // still click through to the canonical URL — preventDefault
+            // followed by no focus-mode entry would silently swallow the
+            // click. Only when an entry IS eligible do we cancel native
+            // nav and route to focus mode.
+            if (!isFocusModeEligible(entry)) return;
+
+            if (anchor) ev.preventDefault();
+
+            // While in focus mode, the same gesture that opened it
+            // closes it. The chrome-outside-click exit
+            // (setupFocusModeClickOutside) handles clicks on the dimmed
+            // surroundings; this branch is what makes the focused entry
+            // itself feel toggleable.
+            if (entry.classList.contains('is-focus-mode')) {
+                exitFocusMode();
+                return;
+            }
+
+            // Excerpt-form entry: kick off the lazy-fetch immediately
+            // (don't wait for the prefetch observer to scroll it into
+            // view) so the body lands while the user reads the focus.
+            // fetchAndExpand handles cache hits, in-flight dedup, rate-
+            // limiting, and re-observation. injectBody runs eventually
+            // and the new .entry-body--expanded slots in under the
+            // already-active focus mode — focus state lives on the
+            // entry article, not the body, so the swap doesn't drop it.
+            if (!entry.classList.contains('is-expanded') &&
+                !entry.classList.contains('is-loading') &&
+                !entry.classList.contains('is-404') &&
+                entry.dataset.polisCanonicalUrl) {
+                fetchAndExpand(entry, entry.dataset.polisCanonicalUrl);
+            }
+            // Click intent: the comments badge sends the user to the
+            // post's comments section ("see/add comments"); every other
+            // focus-trigger surface (title-link, body, post-body-toggle,
+            // excerpt body) lands them at the post top. The intent is
+            // threaded through enterFocusMode → installs a follow-up
+            // scroll once the comments panel finishes its open animation.
+            var focusOpts = {};
+            if (anchor && anchor.classList.contains('entry-comments-badge')) {
+                focusOpts.scrollTo = 'comments';
+            }
+            enterFocusMode(entry, focusOpts);
+        });
+        entry.dataset.cardClickBound = '1';
+    }
+
+    // setupAboutToggle wires the layout-left bio's "show more" / "hide"
+    // control. Bio is rendered inside .site-bio-wrap with a [hidden]
+    // <button class="site-bio-toggle">; CSS caps the bio at ~1/3 viewport
+    // height by default. We measure scrollHeight vs clientHeight here —
+    // bios that fit don't overflow, so we leave the button [hidden] and
+    // remove the max-height cap by adding .is-expanded (which also
+    // clears the bottom-fade mask). Re-measure after fonts load so the
+    // first paint's pre-font-load height (which can underestimate) doesn't
+    // accidentally hide the button on a borderline bio.
+    function setupAboutToggle() {
+        var bio = document.querySelector('.layout-left .site-bio');
+        var btn = document.querySelector('.layout-left .site-bio-toggle');
+        var floating = document.querySelector('.layout-left .site-bio-hide-floating');
+        var col = document.querySelector('.layout-left');
+        if (!bio || !btn) return;
+
+        function setExpanded(expanded) {
+            bio.classList.toggle('is-expanded', expanded);
+            btn.textContent = expanded ? 'hide' : 'show more';
+            btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+            updateFloating();
+        }
+
+        // Floating hide is only useful when the bio is expanded AND the
+        // column actually overflows — otherwise the in-flow toggle is
+        // already reachable. Re-evaluate on every state change + on
+        // resize so a viewport resize that flips overflow state updates
+        // the floating control.
+        function updateFloating() {
+            if (!floating || !col) return;
+            var expanded = bio.classList.contains('is-expanded');
+            var overflows = col.scrollHeight > col.clientHeight + 2;
+            floating.hidden = !(expanded && overflows);
+        }
+
+        function measure() {
+            // 2px slack so anti-aliasing doesn't flap the visibility on
+            // a bio that's exactly the cap height.
+            var overflows = bio.scrollHeight > bio.clientHeight + 2;
+            if (overflows) {
+                btn.hidden = false;
+                // 2026-05-18: symmetric reset. Earlier shape only added
+                // is-expanded in the no-overflow branch and never cleared
+                // it — so once a prior call had wrongly expanded the bio
+                // (e.g. because the owner-card was still display:none at
+                // first paint, scrollHeight read 0), a subsequent measure
+                // wouldn't roll it back. Bio stayed expanded even after
+                // the card became visible and the cap clearly applied.
+                bio.classList.remove('is-expanded');
+                btn.textContent = 'show more';
+                btn.setAttribute('aria-expanded', 'false');
+            } else {
+                btn.hidden = true;
+                // No overflow — drop the cap so an in-fonts paint that
+                // doesn't quite reach the cap doesn't keep a mask edge.
+                bio.classList.add('is-expanded');
+                btn.setAttribute('aria-expanded', 'true');
+            }
+            updateFloating();
+        }
+
+        btn.addEventListener('click', function () {
+            setExpanded(!bio.classList.contains('is-expanded'));
+        });
+
+        // Click anywhere on the bio to toggle. Skip clicks on inner
+        // anchors so links inside the bio still navigate. Only do
+        // anything when the toggle button is unhidden (i.e. the bio
+        // actually overflows — short bios stay non-interactive).
+        bio.addEventListener('click', function (ev) {
+            if (btn.hidden) return;
+            if (ev.target.closest('a')) return;
+            setExpanded(!bio.classList.contains('is-expanded'));
+        });
+
+        if (floating) {
+            floating.addEventListener('click', function () {
+                setExpanded(false);
+                // Scroll the column back to the top so the user lands
+                // at the now-collapsed bio rather than mid-stats.
+                if (col) col.scrollTop = 0;
+            });
+        }
+
+        // Layout shifts (column overflow can change as the follow widget
+        // hydrates, fonts swap, etc.) flip floating visibility.
+        window.addEventListener('resize', updateFloating);
+
+        measure();
+        // Web fonts often load after first paint; re-measure so a bio
+        // that crosses the cap only after fonts swap gets its toggle.
+        if (document.fonts && document.fonts.ready) {
+            document.fonts.ready.then(measure);
+        }
+    }
+
+    // setupPostBodyToggles wires the per-post "show more" / "hide" control
+    // for SSR'd entries (focus + siblings). Body element (.content-body
+    // for focus, .entry-content for siblings) is capped at ~1/2 viewport
+    // height by CSS; we measure scrollHeight vs clientHeight here and
+    // only unhide each entry's [hidden] .post-body-toggle button when
+    // its body actually exceeds the cap. Re-measure after fonts load —
+    // typography swap can push a borderline body across the threshold.
+    //
+    // Idempotent via data-body-toggle-bound. Dynamically-added entries
+    // (filter results / lazy-fetch'd) hit a different render path
+    // (renderPost in stream.js) that produces an .entry-body--excerpt
+    // wrapper without these elements; this function silently skips them.
+    function setupPostBodyToggles() {
+        var entries = document.querySelectorAll('.entry--post');
+        for (var i = 0; i < entries.length; i++) {
+            bindPostBodyToggle(entries[i]);
+        }
+    }
+
+    function bindPostBodyToggle(entry) {
+        if (!entry || entry.dataset.bodyToggleBound === '1') return;
+        var btn = entry.querySelector('.post-body-toggle');
+        if (!btn) return;
+        // Focus uses .focus-content > .content-body; siblings use
+        // .entry-content. Pick whichever this entry has.
+        var body = entry.querySelector('.focus-content .content-body, .entry-content');
+        if (!body) return;
+
+        // measure() decides whether the body actually overflows the
+        // 50vh cap. It's the single source of truth for "is this post
+        // long enough to be focus-mode-eligible" (isFocusModeEligible
+        // reads btn.hidden). For sub-cap bodies, drop the cap so the
+        // mask-image doesn't leave a stale fade edge — and these
+        // bodies stay focus-mode-ineligible unless they have comments.
+        function measure() {
+            var overflows = body.scrollHeight > body.clientHeight + 2;
+            if (overflows) {
+                btn.hidden = false;
+            } else {
+                btn.hidden = true;
+                body.classList.add('is-expanded');
+                btn.setAttribute('aria-expanded', 'true');
+            }
+        }
+
+        // No click handler here — the entry-level delegation in
+        // bindCardClick catches button clicks and routes them to
+        // enterFocusMode (or no-op if already in focus mode). Direct
+        // body toggling is gone; the body uncap is now a side effect
+        // of entering focus mode.
+
+        measure();
+        if (document.fonts && document.fonts.ready) {
+            document.fonts.ready.then(measure);
+        }
+        entry.dataset.bodyToggleBound = '1';
+    }
+
+    // setupStatLinks wires the layout-left site-stats labels (posts /
+    // followers / following) as filter shortcuts. Each click rewrites
+    // the sentence filter at the top of the page to the corresponding
+    // view state and re-fetches the stream:
+    //   "posts"     → type=posts, modifier=by-date
+    //   "followers" → type=follows
+    //   "following" → type=follows
+    // (The DS doesn't currently differentiate inbound vs outbound
+    // follow direction in the stream filter; both labels collapse to
+    // the same view, which is fine for the "shortcut to <handle>'s
+    // follow activity" intent.)
+    function setupStatLinks() {
+        var links = document.querySelectorAll('.layout-left .site-stat-link[data-stat-filter-type]');
+        for (var i = 0; i < links.length; i++) {
+            (function (link) {
+                link.addEventListener('click', function (ev) {
+                    ev.preventDefault();
+                    var type = link.getAttribute('data-stat-filter-type');
+                    var modifier = link.getAttribute('data-stat-filter-modifier') || '';
+                    var scope = link.getAttribute('data-stat-filter-scope') || '';
+                    applyStatFilter(type, modifier, scope);
+                });
+            })(links[i]);
+        }
+    }
+
+    // applyStatFilter mirrors selectOption's effect for both type and
+    // modifier slots in a single pass — sets controller state, updates
+    // both slot DOM labels from the canonical FILTER_*_OPTIONS lists,
+    // ensures the modifier slot's hidden state matches the new type,
+    // and fires applyFilter once. (Calling selectOption twice would
+    // also work but produces two fetches for one user action.)
+    function applyStatFilter(type, modifier, scope) {
+        filterType = type;
+        if (modifier) filterModifier = modifier;
+        // Personal-lock side-effects for drafts/dms — keeps the
+        // sentence + slot states truthful when a stat-link jumps the
+        // user into a private view. Called BEFORE setting scope from
+        // the stat-link so that applyTypePersonalLock's transition-
+        // out-of-personal branch (unlockScopeSlot(true) → filterScope
+        // = 'my-network') doesn't clobber the stat-link's explicit
+        // scope. Example: from drafts (__wasPersonalType=true) →
+        // clicking the bio "N posts" link (scope=me): without the
+        // reorder, posts would land on my-network instead of me.
+        applyTypePersonalLock(type);
+        if (scope) {
+            filterScope = scope;
+            var scSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="scope"]');
+            // Route through labelForSlot so possessive-network values
+            // (`@<handle>:network`) render as "<handle>'s network"
+            // instead of the raw internal form. Bare `@<handle>` and
+            // named atoms (me / my-network / ...) also normalize
+            // through the same helper.
+            if (scSlot) scSlot.textContent = labelForSlot('scope', scope);
+        }
+
+        var typeOpt = null;
+        for (var i = 0; i < FILTER_TYPE_OPTIONS.length; i++) {
+            if (FILTER_TYPE_OPTIONS[i].value === type) {
+                typeOpt = FILTER_TYPE_OPTIONS[i];
+                break;
+            }
+        }
+        var typeSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="type"]');
+        // Fall back to the bare type value when the public type table
+        // doesn't carry an entry for it (e.g., 'profiles' isn't in the
+        // public FILTER_TYPE_OPTIONS — it's stat-link-only). Without
+        // this fallback the slot label silently stayed on the prior
+        // type after a stat-link click.
+        if (typeSlot) typeSlot.textContent = typeOpt ? typeOpt.label : type;
+
+        if (modifier) {
+            var modOpt = null;
+            for (var j = 0; j < FILTER_MODIFIER_OPTIONS.length; j++) {
+                if (FILTER_MODIFIER_OPTIONS[j].value === modifier) {
+                    modOpt = FILTER_MODIFIER_OPTIONS[j];
+                    break;
+                }
+            }
+            var modSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="modifier"]');
+            if (modSlot && modOpt) modSlot.textContent = modOpt.label;
+        }
+
+        updateModifierSlotVisibility();
+        applyFilter();
+    }
+
+    function getEntryWithOpenPanel() {
+        // Single panel open at a time (focus-only scope in Phase B).
+        return document.querySelector('.entry.comments-open');
+    }
+
+    function toggleCommentsPanel(entry) {
+        if (!entry) return;
+        if (entry.classList.contains('comments-open')) {
+            closeCommentsPanel(entry);
+        } else {
+            openCommentsPanel(entry);
+        }
+    }
+
+    function openCommentsPanel(entry) {
+        if (!entry || entry.classList.contains('comments-open')) return;
+
+        var panel = entry.querySelector('.entry-comments-panel');
+        if (!panel) return;
+
+        // Cancel any in-flight transition by snapshotting the current
+        // rendered height as the start state — avoids "snap to 0 then
+        // back up" when toggle fires mid-close.
+        clearPanelTransitionEnd();
+        var current = panel.getBoundingClientRect().height;
+        if (current > 0 && current < panel.scrollHeight) {
+            panel.style.maxHeight = current + 'px';
+            // Force reflow before next style change so the browser
+            // commits this start state instead of collapsing the two
+            // assignments into one frame.
+            void panel.offsetHeight;
+        } else {
+            panel.style.maxHeight = '0px';
+            void panel.offsetHeight;
+        }
+
+        entry.classList.add('comments-open');
+
+        // Compute target and start the transition. After max-height
+        // settles, release to 'none' so any future content (lazy-loaded
+        // replies, hypothetical) doesn't clip. Page-level focus-mode
+        // state, smooth-scroll, Esc registration, and scroll-out auto-
+        // close all live in enterFocusMode now — this function is
+        // narrowly responsible for the panel's max-height transition.
+        var targetHeight = panel.scrollHeight;
+        requestAnimationFrame(function () {
+            panel.style.maxHeight = targetHeight + 'px';
+        });
+
+        commentsTransitionEnd = function (ev) {
+            if (ev.propertyName !== 'max-height') return;
+            panel.removeEventListener('transitionend', commentsTransitionEnd);
+            commentsTransitionEnd = null;
+            if (entry.classList.contains('comments-open')) {
+                panel.style.maxHeight = 'none';
+            }
+        };
+        panel.addEventListener('transitionend', commentsTransitionEnd);
+
+        // Mark unread comments read on open. Class flips inform any theme
+        // CSS that wants to differentiate unread comments visually.
+        if (entry.classList.contains('has-unread')) {
+            entry.classList.remove('has-unread');
+            entry.querySelectorAll('.comment.unread').forEach(function (c) {
+                c.classList.remove('unread');
+            });
+            fireEntryReadEvent(entry);
+        }
+
+        announce('Comments panel opened');
+    }
+
+    function closeCommentsPanel(entry) {
+        if (!entry || !entry.classList.contains('comments-open')) return;
+        var panel = entry.querySelector('.entry-comments-panel');
+        if (!panel) return;
+
+        clearPanelTransitionEnd();
+
+        // Snapshot current rendered height (max-height was 'none' after
+        // the open transition settled) so the close animation has a
+        // concrete start value.
+        var current = panel.scrollHeight;
+        panel.style.maxHeight = current + 'px';
+        void panel.offsetHeight;  // commit start state
+
+        entry.classList.remove('comments-open');
+
+        // Clear any focused-comment cursor inside the panel.
+        var focusedComment = panel.querySelector('.comment.is-focused');
+        if (focusedComment) focusedComment.classList.remove('is-focused');
+
+        requestAnimationFrame(function () {
+            panel.style.maxHeight = '0px';
+        });
+
+        commentsTransitionEnd = function (ev) {
+            if (ev.propertyName !== 'max-height') return;
+            panel.removeEventListener('transitionend', commentsTransitionEnd);
+            commentsTransitionEnd = null;
+            // Reset inline max-height so the next open computes scrollHeight
+            // fresh (the CSS rule's 0px default takes over).
+            if (!entry.classList.contains('comments-open')) {
+                panel.style.maxHeight = '';
+            }
+        };
+        panel.addEventListener('transitionend', commentsTransitionEnd);
+
+        announce('Comments panel closed');
+    }
+
+    function clearPanelTransitionEnd() {
+        if (commentsTransitionEnd) {
+            // Find the panel the handler is attached to via the active
+            // open entry; on rapid toggle the panel is one — guarded by
+            // the .removeEventListener call inside the handler being
+            // idempotent if it already fired.
+            var open = document.querySelector('.entry.comments-open .entry-comments-panel');
+            if (open) open.removeEventListener('transitionend', commentsTransitionEnd);
+            commentsTransitionEnd = null;
+        }
+    }
+
+    /* ------------------------------------------------------------------
+       Focus mode
+
+       The user-facing "click into a post" primitive. A post is
+       focus-mode-eligible when it has a long body (.post-body-toggle
+       unhidden by the overflow check) or has comments (.entry-comments-
+       badge not .is-empty). Clicking anywhere in an eligible entry —
+       title, body, post-body-toggle, comments-badge — enters focus
+       mode. Non-eligible entries are inert: no navigation, no card
+       click. Modifier-clicks (cmd/ctrl/shift) on inner anchors fall
+       through to native browser behavior so power-users can still
+       open the canonical URL in a new tab.
+
+       Effects on entry:
+         - body.focus-mode + entry.is-focus-mode classes
+         - long body uncaps with an animated max-height transition
+         - existing comments panel opens (openCommentsPanel)
+         - chrome (topbar, layout-left, sibling entries, fades) dims
+           and blurs via CSS keyed off body.focus-mode
+         - smooth-scroll the entry under the topbar
+
+       Class taxonomy — three distinct concerns:
+         .entry.is-focused      — SSR-anchored or scroll-tracker
+                                  centered entry; URL-bar source-of-
+                                  truth for which post the user is
+                                  reading. Independent of focus mode.
+         .entry.is-focus-mode   — entry currently in the focus-mode
+                                  interaction (one at a time globally).
+         body.focus-mode        — page-level chrome-dim flag. Set
+                                  whenever any entry is in focus mode.
+
+       Exit triggers (all → exitFocusMode):
+         - Esc (registered via popoverHandlers, same channel as the
+           comments panel's Esc handler)
+         - Click outside the focus entry (document-level handler)
+         - Scroll-out: IntersectionObserver sentinels above + below
+           the focus entry, installed AFTER transitions settle so the
+           entry's own smooth-scroll-into-view doesn't trip them.
+       ------------------------------------------------------------------ */
+
+    var BODY_TRANSITION_MS = 360;             // matches stream.css max-height transition
+    var FOCUS_AUTO_CLOSE_INSTALL_DELAY_MS = 480;  // body expand + smooth-scroll settle
+    // Auto-close fires when the focus entry no longer overlaps the
+    // central ~40% of the viewport. Negative rootMargin shrinks the
+    // IntersectionObserver root by 30% top + 30% bottom, so once the
+    // entry's bounding box exits that middle band the user has clearly
+    // moved on — exit immediately without waiting for the entry to
+    // fully clear the chrome bands at the edges.
+    //
+    // The chrome (topbar 50px + stream-top-fade 120px at the top, and
+    // bottom-fade 240px at the bottom) already obscures the outer
+    // strips of the viewport. A pixel-perfect match against the chrome
+    // (-130px / -200px in the previous revision) still left scrolling
+    // feeling sluggish — the user reads "I'm done with this post" well
+    // before the entry's bbox actually slides into the fade. Inset to
+    // 30% on each side keeps the trigger inside the obviously-visible
+    // reading band rather than at its edges.
+    //
+    // Top inset is fixed at ~90px (matches COMMENTS_TOPBAR_OFFSET so the
+    // entry's smooth-scrolled top lands JUST inside the trigger zone) —
+    // a percent inset broke short entries on tall viewports: a 150px
+    // entry whose top scrolls to 80px sits entirely ABOVE a -30% top
+    // margin's trigger zone (240px on an 800px viewport), so the
+    // observer fired isIntersecting=false on install and exited focus
+    // mode immediately. Bottom stays at -30% so "I've scrolled past
+    // this post" still feels right for tall posts.
+    var FOCUS_AUTO_CLOSE_MARGIN = '-90px 0px -30% 0px';
+    var focusModeAutoCloseObserver = null;
+
+    // isFocusModeEligible — eligibility gate for READ-FOCUS MODE (see the
+    // section header in stream.css search "READ-FOCUS MODE" for the full
+    // spec). An entry is eligible when it has body content to read against
+    // the dimmed/blurred chrome:
+    //
+    //   - .is-expanded → injectBody has run (own/cross-tenant body_html
+    //     shipped server-side, or lazy-fetch completed). SSR'd siblings on
+    //     per-post pages also ship with .is-expanded.
+    //   - .entry--comment-thread → always renders with target-post body
+    //     inline + the handle's comment attached underneath.
+    //   - non-empty .entry-comments-badge → entry has comments worth
+    //     entering focus to read, even if body content failed to ship.
+    //     (Safety net for rendering failures + entry types that don't
+    //     carry body_html.)
+    //
+    // Pre-2026-05-15: also gated on .post-body-toggle visibility — that's
+    // now redundant (toggle visibility implies injectBody ran which sets
+    // .is-expanded), so it was dropped.
+    //
+    // Excluded entry types:
+    //   - .is-draft → drafts are conceptually WRITE-FOCUS entries (clicking
+    //     opens the embedded editor via decoratePost's draft click handler,
+    //     which is the write-focus surface). Without this opt-out, drafts
+    //     ship body_html → get .is-expanded → would also trigger
+    //     read-focus, overlaying both modes on the same click.
+    function isFocusModeEligible(entry) {
+        if (!entry) return false;
+        if (entry.classList.contains('is-draft')) return false;
+        if (entry.classList.contains('is-expanded')) return true;
+        if (entry.classList.contains('entry--comment-thread')) return true;
+        var badge = entry.querySelector('.entry-comments-badge');
+        if (badge && !badge.classList.contains('is-empty')) return true;
+        return false;
+    }
+
+    function enterFocusMode(entry, opts) {
+        if (!entry || !isFocusModeEligible(entry)) return;
+        if (entry.classList.contains('is-focus-mode')) return;
+        opts = opts || {};
+
+        // If a different entry is already in focus mode, exit it first.
+        // Click-on-different-eligible-entry path: entry handler runs
+        // first, so we exit the previous before entering the new.
+        var current = document.querySelector('.entry.is-focus-mode');
+        if (current && current !== entry) {
+            exitFocusMode();
+        }
+
+        document.body.classList.add('focus-mode');
+        entry.classList.add('is-focus-mode');
+
+        // Auto-expand the long body if it has an unhidden post-body-toggle.
+        // measure() in bindPostBodyToggle already added .is-expanded for
+        // sub-cap bodies (mask-edge cleanup), so we only animate when the
+        // body is genuinely capped.
+        var btn = entry.querySelector('.post-body-toggle');
+        var body = entry.querySelector('.focus-content .content-body, .entry-content');
+        if (btn && !btn.hidden && body && !body.classList.contains('is-expanded')) {
+            animateBodyExpand(body);
+            btn.setAttribute('aria-expanded', 'true');
+            btn.textContent = 'hide';
+            entry.dataset.bodyAutoExpanded = '1';
+        }
+
+        // Open the comments panel if present and the entry has comments.
+        // Both the SSR'd focus entry on a per-post page AND the JS-rendered
+        // stream-list entries (renderPost's inline panel) carry the panel
+        // when blessed_comments are non-empty.
+        var panel = entry.querySelector('.entry-comments-panel');
+        var badge = entry.querySelector('.entry-comments-badge');
+        var hasComments = badge && !badge.classList.contains('is-empty');
+        if (panel && hasComments) {
+            openCommentsPanel(entry);
+        }
+
+        // Scroll target depends on click intent:
+        //   - 'comments' (badge click): scroll the comments panel to the
+        //     top of the reading band — the user clicked specifically to
+        //     see/add comments. Defer until the panel's open animation
+        //     settles so the rect we measure is the final post-animation
+        //     geometry, not an intermediate frame.
+        //   - default (title / body / toggle click): scroll the entry top
+        //     under the topbar — the user wants to read the post.
+        if (opts.scrollTo === 'comments') {
+            // The panel's max-height transition runs ~250ms; wait a hair
+            // longer so getBoundingClientRect lands on the settled height.
+            setTimeout(function () {
+                if (!entry.classList.contains('is-focus-mode')) return;
+                var p = entry.querySelector('.entry-comments-panel');
+                var target = p || entry;       // fall back to entry top if no panel
+                var r = target.getBoundingClientRect();
+                var ty = window.scrollY + r.top - COMMENTS_TOPBAR_OFFSET;
+                try {
+                    window.scrollTo({ top: ty, behavior: 'smooth' });
+                } catch (e) {
+                    window.scrollTo(0, ty);
+                }
+            }, 320);
+        } else {
+            // Smooth-scroll the entry under the topbar so the body and any
+            // opening comments panel both have viewport room.
+            var rect = entry.getBoundingClientRect();
+            var targetY = window.scrollY + rect.top - COMMENTS_TOPBAR_OFFSET;
+            if (Math.abs(targetY - window.scrollY) > 4) {
+                try {
+                    window.scrollTo({ top: targetY, behavior: 'smooth' });
+                } catch (e) {
+                    window.scrollTo(0, targetY);
+                }
+            }
+        }
+
+        // Esc handler — same registry as the comments-panel Esc.
+        registerPopoverCloseHandler(function () {
+            if (entry.classList.contains('is-focus-mode')) {
+                exitFocusMode();
+            }
+        });
+
+        // Defer scroll-out auto-close install until transitions + smooth-
+        // scroll settle. Installing too early lets the entering scroll
+        // itself trip the sentinels.
+        setTimeout(function () {
+            if (entry.classList.contains('is-focus-mode')) {
+                installFocusModeAutoClose(entry);
+            }
+        }, FOCUS_AUTO_CLOSE_INSTALL_DELAY_MS);
+
+        announce('Post opened in focus mode');
+    }
+
+    function exitFocusMode() {
+        var entry = document.querySelector('.entry.is-focus-mode');
+        if (!entry) return;
+
+        teardownFocusModeAutoClose();
+
+        // Close comments panel if it was opened by enterFocusMode.
+        if (entry.classList.contains('comments-open')) {
+            closeCommentsPanel(entry);
+        }
+
+        // Re-cap the body if we auto-expanded it on enter. The user's
+        // explicit show-more clicks now also flow through enterFocusMode,
+        // so the auto-expanded flag is the single source of truth here.
+        if (entry.dataset.bodyAutoExpanded === '1') {
+            var btn = entry.querySelector('.post-body-toggle');
+            var body = entry.querySelector('.focus-content .content-body, .entry-content');
+            if (body && body.classList.contains('is-expanded')) {
+                animateBodyCollapse(body);
+            }
+            if (btn) {
+                btn.setAttribute('aria-expanded', 'false');
+                btn.textContent = 'show more';
+            }
+            delete entry.dataset.bodyAutoExpanded;
+        }
+
+        entry.classList.remove('is-focus-mode');
+        document.body.classList.remove('focus-mode');
+
+        announce('Focus mode closed');
+    }
+
+    function toggleFocusMode(entry) {
+        if (!entry) return;
+        if (entry.classList.contains('is-focus-mode')) {
+            exitFocusMode();
+        } else {
+            enterFocusMode(entry);
+        }
+    }
+
+    // animateBodyExpand uncaps a capped body with a smooth max-height
+    // transition. Adds .is-expanded (drops the mask-image edge), sets
+    // explicit pixel max-height (so the transition has a concrete
+    // target — animating to 'none' doesn't tween), then releases to
+    // 'none' on transitionend so future content additions don't clip.
+    function animateBodyExpand(body) {
+        if (!body) return;
+        var endHeight = body.scrollHeight;
+        body.classList.add('is-expanded');
+        // Inline style overrides .is-expanded's max-height: none from CSS,
+        // giving the transition a concrete target.
+        body.style.maxHeight = endHeight + 'px';
+
+        var done = function (ev) {
+            if (ev.propertyName !== 'max-height') return;
+            body.removeEventListener('transitionend', done);
+            if (body.classList.contains('is-expanded')) {
+                body.style.maxHeight = 'none';
+            }
+        };
+        body.addEventListener('transitionend', done);
+    }
+
+    // animateBodyCollapse re-caps an expanded body. Snapshots the current
+    // rendered height as the start state, removes .is-expanded (which
+    // re-applies the mask) and clears the inline style so the CSS 50vh
+    // cap takes back over — the transition runs on the resulting
+    // max-height delta.
+    function animateBodyCollapse(body) {
+        if (!body) return;
+        var current = body.scrollHeight;
+        body.style.maxHeight = current + 'px';
+        // Force a reflow so the start state is committed before we
+        // change the target. Without this the two assignments collapse
+        // into one frame and the transition is skipped.
+        void body.offsetHeight;
+
+        body.classList.remove('is-expanded');
+        body.style.maxHeight = '';
+    }
+
+    // installFocusModeAutoClose observes the focus entry against the
+    // viewport-minus-chrome zone defined by FOCUS_AUTO_CLOSE_MARGIN.
+    // While the entry intersects the visible content band, focus mode
+    // stays open. As soon as the entry slides into a fade or under the
+    // topbar, exit fires.
+    //
+    // Two failure modes the current shape of the rule avoids:
+    //
+    //   1. The first prototype used absolutely-positioned sentinel divs
+    //      at entry-top - 30vh and entry-bottom + 30vh. Problem: the UP
+    //      sentinel sits above the viewport at install time (the entry
+    //      has just been scrolled to viewport top + 80px offset, putting
+    //      "entry top - 30vh" already off-screen above), so the
+    //      observer's initial-state callback fired with !isIntersecting
+    //      && rect.top < 0 — closing focus mode immediately on open.
+    //      That's the "rough" feel reported on the prototype. Observing
+    //      the entry itself sidesteps that geometry: at install the
+    //      entry is in view, isIntersecting:true, no false trigger.
+    //
+    //   2. The first revision used a +30%/+30% rootMargin (extending
+    //      the viewport). On a 900px viewport that meant the entry had
+    //      to scroll ~270px past the viewport edge in either direction
+    //      before exit fired — a full screen of dimmed siblings before
+    //      the chrome restored. The fade overlays at top (120px sticky)
+    //      and bottom (240px fixed) made it worse — the entry was
+    //      visually invisible long before its bounding box exited the
+    //      raw viewport. Inverting the margin (negative inset matching
+    //      the fade heights) makes "visually obscured by chrome" the
+    //      trigger, which is what the user reads as "I'm done with
+    //      this post."
+    function installFocusModeAutoClose(entry) {
+        teardownFocusModeAutoClose();
+        if (typeof IntersectionObserver !== 'function') return;
+
+        focusModeAutoCloseObserver = new IntersectionObserver(function (records) {
+            var openEntry = document.querySelector('.entry.is-focus-mode');
+            if (!openEntry) {
+                teardownFocusModeAutoClose();
+                return;
+            }
+            for (var i = 0; i < records.length; i++) {
+                if (!records[i].isIntersecting) {
+                    exitFocusMode();
+                    return;
+                }
+            }
+        }, {
+            rootMargin: FOCUS_AUTO_CLOSE_MARGIN,
+            threshold: 0,
+        });
+
+        focusModeAutoCloseObserver.observe(entry);
+    }
+
+    function teardownFocusModeAutoClose() {
+        if (focusModeAutoCloseObserver) {
+            focusModeAutoCloseObserver.disconnect();
+            focusModeAutoCloseObserver = null;
+        }
+    }
+
+    // setupFocusModeClickOutside installs a document-level click handler
+    // that exits focus mode whenever the click lands outside the
+    // currently-focused entry. The click itself is NOT preventDefault'd
+    // — chrome links/buttons stay active, just with a side effect of
+    // dismissing focus mode. Bound once at init.
+    function setupFocusModeClickOutside() {
+        document.addEventListener('click', function (ev) {
+            var entry = document.querySelector('.entry.is-focus-mode');
+            if (!entry) return;
+            if (entry.contains(ev.target)) return;
+            exitFocusMode();
+        });
+    }
+
+    // Rapid-fire #16: the pinned-dot becomes a refresh affordance on
+    // hover (CSS expands it + swaps in a refresh-arrow icon). Click
+    // re-fires the current filter via applyFilter so the user sees a
+    // fresh server response without a full page reload.
+    function setupPinnedDotRefresh() {
+        var dot = document.querySelector('.pinned-dot');
+        if (!dot) return;
+        dot.addEventListener('click', function (ev) {
+            ev.preventDefault();
+            applyFilter();
+        });
+    }
+
+    /* Comment-internal keyboard navigation (j/k or arrow keys when a
+       panel is open). focusNextComment / focusPrevComment cycle the
+       .is-focused class across the panel's .comment children, scrolling
+       each into view and adding a subtle accent border via CSS.
+       At j-past-last: close panel + advance to next entry ("auto-
+       progression" — the user has read these, hand them the next post).
+       At k-past-first: stay on first comment (no analogous "back up
+       past the entry" affordance — the user can press Escape or click
+       outside to close). */
+    function focusNextComment(entry) {
+        var panel = entry.querySelector('.entry-comments-panel');
+        if (!panel) return;
+        var comments = panel.querySelectorAll('.comment');
+        if (comments.length === 0) {
+            // No comments to advance through — fall through to entry nav.
+            exitFocusMode();
+            focusNext();
+            return;
+        }
+        var current = panel.querySelector('.comment.is-focused');
+        var idx = current ? Array.prototype.indexOf.call(comments, current) : -1;
+        if (idx === comments.length - 1) {
+            // Past last comment — auto-progress (exit focus mode + advance).
+            exitFocusMode();
+            focusNext();
+            return;
+        }
+        if (current) current.classList.remove('is-focused');
+        var next = comments[idx + 1];
+        next.classList.add('is-focused');
+        next.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function focusPrevComment(entry) {
+        var panel = entry.querySelector('.entry-comments-panel');
+        if (!panel) return;
+        var comments = panel.querySelectorAll('.comment');
+        if (comments.length === 0) return;
+        var current = panel.querySelector('.comment.is-focused');
+        var idx = current ? Array.prototype.indexOf.call(comments, current) : 0;
+        if (idx <= 0) {
+            // At first — flash and stay.
+            if (comments[0]) flashCommentBoundary(comments[0]);
+            return;
+        }
+        if (current) current.classList.remove('is-focused');
+        var prev = comments[idx - 1];
+        prev.classList.add('is-focused');
+        prev.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function flashCommentBoundary(comment) {
+        // Re-use the entry-level highlight pattern but applied to a
+        // single comment element. CSS handles the transition; we add
+        // and schedule removal.
+        comment.classList.add('highlight');
+        setTimeout(function () {
+            comment.classList.remove('highlight');
+        }, 800);
+    }
+
+    /* ------------------------------------------------------------------
+       Lazy body fetch + session cache + prefetch
+
+       When sibling entries (or dynamically-added entries from filter
+       results in 4.e) approach the viewport, fetch their canonical
+       URL, extract the focus body, and inject it inline so the user
+       can read full content without leaving the page.
+
+       Per BL-4 Option A: lazy-fetched bodies render at compact (excerpt-
+       like) styling, NOT prose styling. Only the SSR'd focus entry's
+       .focus-content marker triggers prose font-size; lazy-fetched
+       bodies land in .entry-content which inherits compact styling.
+       The stream stays visually uniform as the user scrolls through
+       expanded entries.
+
+       DMs explicitly bypass this path (per Q4 alignment): DM bodies
+       live encrypted on disk locally and are decrypted in the owner's
+       browser session — no cross-origin fetch is involved.
+       observeEntryForPrefetch skips entries with
+       data-polis-entry-type="dm".
+
+       Error handling + token-bucket rate limiting + retry with backoff
+       land in the next commit; this commit ships the happy-path skeleton
+       with simple 404-skip + console-warn-on-network-error.
+
+       Trust chain for injected body HTML: same chain as renderComment's
+       innerHTML — search "TRUST CHAIN" for the four assumptions.
+       ------------------------------------------------------------------ */
+
+    function setupPrefetch() {
+        if (!('IntersectionObserver' in window)) return;
+        prefetchObserver = new IntersectionObserver(onPrefetchIntersect, {
+            rootMargin: PREFETCH_ROOT_MARGIN,
+            threshold: 0,
+        });
+        // Don't observe entries until the user actually scrolls. Matches
+        // the BL-1 "honor SSR until user engages" principle: a user who
+        // landed on the page but immediately navigated away shouldn't
+        // have triggered a wave of prefetches against followed origins.
+    }
+
+    function startPrefetching() {
+        if (!prefetchObserver) return;
+        for (var i = 0; i < entries.length; i++) {
+            observeEntryForPrefetch(entries[i]);
+        }
+    }
+
+    function observeEntryForPrefetch(entry) {
+        if (!prefetchObserver || !entry) return;
+        // Skip if already expanded (already fetched).
+        if (entry.classList.contains('is-expanded')) return;
+        // Only post entries have the excerpt → fetch → expand flow.
+        // Comment-thread / profile / mention / follow / DM are rendered
+        // in their final shape by their respective render*() functions
+        // (already carry author, date, body HTML inline from the API
+        // response). Observing them would trigger fetchBody on their
+        // canonical URL — which for comments is a v3 per-comment page
+        // that lacks the <main class="focus-content"> protocol marker
+        // fetchBody looks for, so the call returns null, fetchAndExpand
+        // tags the entry with .is-404, and CSS hides it. Entries appear
+        // briefly on render, then disappear when scrolled into the
+        // prefetch root margin. (Pre-2026-05-02 bug; only the
+        // entry.dataset.polisEntryType === 'dm' bypass existed.)
+        var entryType = entry.dataset.polisEntryType;
+        if (entryType && entryType !== 'post') return;
+        // SSR'd focus entry already has its body inlined.
+        if (entry.querySelector('main.focus-content[data-polis-focus="true"]')) return;
+        // Need a canonical URL to fetch from.
+        if (!entry.dataset.polisCanonicalUrl) return;
+        // R25 follow-up: entries that ship their body_html
+        // synchronously (currently drafts via handleStreamItemsDrafts)
+        // set data-polis-no-prefetch="1" — skip them. Their URL is an
+        // SPA deep-link (/_/posts/drafts/<id>) which would otherwise
+        // resolve to spaHandler's index.html fallback, fetchBody
+        // returns null since there's no focus-content marker, and
+        // the entry gets tagged .is-404 and hidden.
+        if (entry.dataset.polisNoPrefetch === '1') return;
+        prefetchObserver.observe(entry);
+    }
+
+    function onPrefetchIntersect(observerEntries) {
+        for (var i = 0; i < observerEntries.length; i++) {
+            var oe = observerEntries[i];
+            if (!oe.isIntersecting) continue;
+            // Defensive: if is-expanded was set after observation began
+            // (e.g., the deferred injectBody from renderPost's body_html
+            // path fired between observation and intersection), the entry
+            // already has its body content. Skip the lazy-fetch entirely;
+            // firing fetchAndExpand against an already-injected entry
+            // wastes a network round-trip and can flip the entry to
+            // is-404 on URLs that resolve to the SPA shell.
+            if (oe.target.classList.contains('is-expanded')) {
+                prefetchObserver.unobserve(oe.target);
+                continue;
+            }
+            var url = oe.target.dataset.polisCanonicalUrl;
+            if (!url) continue;
+            // One-shot: don't re-fire for the same entry.
+            prefetchObserver.unobserve(oe.target);
+            fetchAndExpand(oe.target, url);
+        }
+    }
+
+    function fetchAndExpand(entry, url) {
+        // Cache hit (within TTL): inject immediately without a network
+        // round-trip. Plan §4.c task 7 "staleness on scroll" — entries
+        // past TTL fall through to a fresh fetch on next prefetch trigger.
+        var cached = sessionCache.get(url);
+        if (cached && (Date.now() - cached.cachedAt) < BODY_TTL_MS) {
+            injectBody(entry, cached.body);
+            return;
+        }
+
+        // R23 follow-up: cross-origin lazy-fetch always fails (polis
+        // tenants don't ship Access-Control-Allow-Origin) — skip the
+        // attempt entirely instead of letting it through, hitting CORS,
+        // and logging once-per-origin. The owner SPA's stream is full
+        // of cross-tenant URLs; on the first burst, dozens of entries
+        // would race to the broken-CORS branch before the disabled-set
+        // catches up. The public per-post page only ever has same-
+        // tenant siblings, so this gate is a no-op there.
+        if (!isSameOrigin(url)) {
+            entry.classList.remove('is-loading');
+            return;
+        }
+
+        // Already in flight from a previous prefetch attempt: piggyback.
+        if (inFlight.has(url)) {
+            inFlight.get(url).then(function (body) {
+                if (body) injectBody(entry, body);
+            }).catch(function () { /* already logged */ });
+            return;
+        }
+
+        // CORS-misconfigured origins: skip without trying. Repeated
+        // entries from the same broken origin would otherwise drain the
+        // retry budget on every scroll-into-view. Server-side fix
+        // required to recover; client retries can't help.
+        var origin = lazyFetchOriginOf(url);
+        if (origin && lazyFetchCORSDisabled.has(origin)) {
+            entry.classList.remove('is-loading');
+            return;
+        }
+
+        // Rate-limit gate: re-observe the entry if we're at capacity.
+        // Either cap (total or per-origin) being saturated defers the
+        // fetch; the prefetch observer fires again on intersection-state
+        // change, which gives natural backpressure on a fast scroll.
+        if (!lazyFetchCanProceed(origin)) {
+            // Re-observe so a later intersection (or scroll change) can
+            // retry. Pure "queue + drain" was considered + rejected as
+            // alpha-overkill — re-observe is observer-native and falls
+            // out for free on filter change (clearStreamForFilterChange
+            // unobserves all entries).
+            if (prefetchObserver) prefetchObserver.observe(entry);
+            return;
+        }
+
+        entry.classList.add('is-loading');
+        lazyFetchAcquire(origin);
+        var promise = fetchBody(url);
+        inFlight.set(url, promise);
+        promise.then(function (body) {
+            inFlight.delete(url);
+            lazyFetchRelease(origin);
+            // Success path — drop any retry record for this URL so a
+            // future TTL-stale refetch starts fresh.
+            lazyFetchRetries.delete(url);
+            if (body == null) {
+                // 404 — silent skip per D-PROXY's "unpublish propagates
+                // silently." Mark the entry so CSS .is-404 hides it.
+                entry.classList.remove('is-loading');
+                entry.classList.add('is-404');
+                return;
+            }
+            sessionCache.set(url, { body: body, cachedAt: Date.now() });
+            injectBody(entry, body);
+        }).catch(function (err) {
+            inFlight.delete(url);
+            lazyFetchRelease(origin);
+            // Classify the error. CORS misconfigs surface as plain
+            // TypeError with no `response` — disable that origin for the
+            // rest of the session and don't retry. Network / 5xx errors
+            // get exponential backoff up to 3 attempts; 4xx (other than
+            // 429) is a permanent "bad request" — don't retry.
+            if (isCORSMisconfig(err)) {
+                // First time we see this origin fail: log once, mark
+                // disabled. Concurrent in-flight fetches that lose the
+                // race still hit this branch but skip the log so the
+                // console doesn't repeat the same warning N times.
+                var firstTime = !!origin && !lazyFetchCORSDisabled.has(origin);
+                if (origin) lazyFetchCORSDisabled.add(origin);
+                entry.classList.remove('is-loading');
+                if (firstTime) {
+                    console.warn('[polis-stream] CORS-disabled for origin', origin || '(unknown)');
+                }
+                return;
+            }
+            if (!isLazyFetchTransient(err)) {
+                entry.classList.remove('is-loading');
+                console.warn('[polis-stream] fetch failed (no retry) for', url, err);
+                return;
+            }
+            scheduleLazyFetchRetry(entry, url, err);
+        });
+    }
+
+    // Lazy-fetch helpers — origin extraction, capacity gate, CORS
+    // classification, retry scheduling. Kept inline (not in a separate
+    // module) because the controller is a single shipped JS asset.
+
+    function lazyFetchOriginOf(url) {
+        try { return new URL(url, window.location.href).host; }
+        catch (e) { return ''; }
+    }
+
+    // Same-origin check used by fetchAndExpand to skip cross-origin
+    // lazy-fetch attempts that would always fail with CORS. Path-only
+    // URLs (no scheme/host) are always same-origin.
+    function isSameOrigin(url) {
+        if (!url || url.charAt(0) === '/') return true;
+        try {
+            return new URL(url, window.location.href).origin === window.location.origin;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function lazyFetchCanProceed(origin) {
+        if (lazyFetchInFlightTotal >= LAZY_FETCH_MAX_TOTAL) return false;
+        if (origin) {
+            var perOrigin = lazyFetchInFlightByOrigin.get(origin) || 0;
+            if (perOrigin >= LAZY_FETCH_MAX_PER_ORIGIN) return false;
+        }
+        return true;
+    }
+
+    function lazyFetchAcquire(origin) {
+        lazyFetchInFlightTotal++;
+        if (origin) {
+            lazyFetchInFlightByOrigin.set(origin, (lazyFetchInFlightByOrigin.get(origin) || 0) + 1);
+        }
+    }
+
+    function lazyFetchRelease(origin) {
+        if (lazyFetchInFlightTotal > 0) lazyFetchInFlightTotal--;
+        if (origin) {
+            var n = (lazyFetchInFlightByOrigin.get(origin) || 0) - 1;
+            if (n > 0) lazyFetchInFlightByOrigin.set(origin, n);
+            else lazyFetchInFlightByOrigin.delete(origin);
+        }
+    }
+
+    // CORS misconfig signature: fetch() rejects with a TypeError + no
+    // `status` field (because the response object never reached us).
+    // Same signature as a DNS failure or a fully offline origin —
+    // alpha-acceptable false positive: disabling a transiently-offline
+    // origin for the session is cheaper than driving retry storms.
+    function isCORSMisconfig(err) {
+        return !!(err && err.name === 'TypeError' && err.status == null);
+    }
+
+    function isLazyFetchTransient(err) {
+        // Transient: network errors (handled above as TypeError when not
+        // CORS), 429 / 5xx HTTP. Permanent: 4xx other than 429.
+        if (!err) return false;
+        if (err.transient) return true;
+        var msg = err.message || '';
+        var m = msg.match(/^fetch failed: (\d+)$/);
+        if (m) {
+            var status = parseInt(m[1], 10);
+            return status === 429 || (status >= 500 && status < 600);
+        }
+        return false;
+    }
+
+    function scheduleLazyFetchRetry(entry, url, err) {
+        var record = lazyFetchRetries.get(url) || { attempts: 0, timerId: null };
+        record.attempts++;
+        if (record.attempts > LAZY_FETCH_MAX_ATTEMPTS) {
+            entry.classList.remove('is-loading');
+            console.warn('[polis-stream] fetch failed after retries for', url, err);
+            lazyFetchRetries.delete(url);
+            return;
+        }
+        var delay = (err && err.retryAfterMs)
+            ? err.retryAfterMs
+            : LAZY_FETCH_BACKOFF_BASE_MS * Math.pow(2, record.attempts - 1);
+        if (record.timerId) clearTimeout(record.timerId);
+        record.timerId = setTimeout(function () {
+            record.timerId = null;
+            // Skip retry if the entry was removed (filter change) or
+            // already resolved by another path (cache hit). The DOM
+            // check is cheap and avoids stale-entry retries.
+            if (!entry.isConnected || entry.classList.contains('is-expanded') || entry.classList.contains('is-404')) {
+                lazyFetchRetries.delete(url);
+                return;
+            }
+            fetchAndExpand(entry, url);
+        }, delay);
+        lazyFetchRetries.set(url, record);
+    }
+
+    // Origin overrides (test infrastructure only). When window.POLIS_ORIGIN_OVERRIDES
+    // is an object mapping hostname -> URL prefix, outbound fetches for matching
+    // hosts get rewritten to the configured destination. In production the global
+    // is undefined and applyOriginOverride is a no-op.
+    function applyOriginOverride(rawUrl) {
+        var ovr = (typeof window !== 'undefined') && window.POLIS_ORIGIN_OVERRIDES;
+        if (!ovr) return rawUrl;
+        try {
+            var u = new URL(rawUrl, window.location.href);
+            var dst = ovr[u.host];
+            if (!dst) return rawUrl;
+            // dst is a URL-prefix string (e.g. http://localhost:9000/origin/discover.polis.pub).
+            // Append the original path + query.
+            var trimmed = dst.replace(/\/+$/, '');
+            return trimmed + u.pathname + u.search;
+        } catch (e) {
+            return rawUrl;
+        }
+    }
+
+    function fetchBody(url) {
+        return fetch(applyOriginOverride(url), { credentials: 'omit' }).then(function (resp) {
+            if (resp.status === 404) return null;
+            // Throttle / backpressure markers: 429 (rate limit) + 503
+            // (service unavailable). Honor Retry-After for the retry
+            // delay; surface as a transient error so isLazyFetchTransient
+            // schedules a retry rather than dropping permanently.
+            if (resp.status === 429 || resp.status === 503) {
+                var err = new Error('fetch failed: ' + resp.status);
+                err.status = resp.status;
+                err.retryAfterMs = parseRetryAfter(resp.headers.get('Retry-After'));
+                err.transient = true;
+                throw err;
+            }
+            if (!resp.ok) {
+                var permErr = new Error('fetch failed: ' + resp.status);
+                permErr.status = resp.status;
+                throw permErr;
+            }
+            return resp.text();
+        }).then(function (html) {
+            if (html == null) return null;
+            var doc = new DOMParser().parseFromString(html, 'text/html');
+            // The cross-tenant body extraction protocol marker (per the
+            // architecture doc + step-3 artifact convention).
+            var focus = doc.querySelector('main.focus-content[data-polis-focus="true"]');
+            return focus ? focus.innerHTML : null;
+        });
+    }
+
+    function injectBody(entry, bodyHtml) {
+        var oldBody = entry.querySelector('.entry-body');
+        if (!oldBody) return;
+
+        // Restructure: replace the excerpt-link wrapper (<a>) with an
+        // expanded body container (<div>). The title becomes its own
+        // link — clicking it still navigates to the canonical post URL.
+        // The body content sits below as non-link, so intra-body links
+        // (e.g., the post linking to other articles) work normally.
+        // Nested <a> would be invalid HTML; the parser would close the
+        // outer <a> when it encounters an inner one, producing weird
+        // DOM. Restructuring sidesteps that.
+        var titleEl = oldBody.querySelector('.entry-title');
+        var url = oldBody.getAttribute('href') || entry.dataset.polisCanonicalUrl;
+
+        var newBody = document.createElement('div');
+        newBody.className = 'entry-body entry-body--expanded';
+
+        if (titleEl) {
+            var titleLink = document.createElement('a');
+            titleLink.className = 'entry-title-link';
+            // Carry forward the title-redundant flag stamped by renderPost.
+            // Without this, the body-swap from excerpt → expanded loses
+            // the dedup signal: the new .entry-title-link gets default
+            // styling (visible h3) even though the body's first sentence
+            // begins with the title.
+            if (entry.dataset.polisTitleRedundant === '1') {
+                titleLink.className += ' is-redundant';
+            }
+            titleLink.setAttribute('href', url);
+            // Clone the title element WITHOUT the .is-redundant class
+            // that the excerpt form may carry — the redundancy treatment
+            // now lives on the title-link wrapper (matches SSR shape).
+            var titleClone = titleEl.cloneNode(true);
+            titleClone.classList.remove('is-redundant');
+            titleLink.appendChild(titleClone);
+            newBody.appendChild(titleLink);
+        }
+
+        var content = document.createElement('div');
+        content.className = 'entry-content';
+        // ── TRUST CHAIN — see the named comment block at the first
+        // innerHTML site in renderComment for the four assumptions
+        // every innerHTML call site in this file depends on. Lazy-
+        // fetched body HTML originates from the same publish-time
+        // sanitization + sign-verify chain as comment body_html.
+        content.innerHTML = bodyHtml;
+        newBody.appendChild(content);
+
+        // Long-post collapse toggle — matches the SSR'd siblings'
+        // markup in stream-post.html. Hidden by default; the
+        // bindPostBodyToggle call below measures overflow against the
+        // 50vh cap and unhides only if the body actually exceeds it.
+        // Without this, dynamic post entries (filter results,
+        // scroll-paginated, etc.) never get the toggle even when their
+        // bodies clearly overflow — only SSR'd entries got toggles
+        // since setupPostBodyToggles runs once at init.
+        var toggle = document.createElement('button');
+        toggle.className = 'post-body-toggle';
+        toggle.type = 'button';
+        toggle.setAttribute('aria-expanded', 'false');
+        toggle.hidden = true;
+        toggle.textContent = 'show more';
+        newBody.appendChild(toggle);
+
+        oldBody.parentNode.replaceChild(newBody, oldBody);
+        entry.classList.remove('is-loading');
+        entry.classList.add('is-expanded');
+        entry.classList.add('is-loaded');
+        // The new .entry-body--expanded is now the click target. Wire
+        // the navigate-on-click handler so the body is clickable, not
+        // just the title-link inside.
+        bindCardClick(entry);
+        bindPostBodyToggle(entry);
+    }
+
+    /* ------------------------------------------------------------------
+       Polymorphic item renderers — match the SSR partial shape from
+       shapes/v4/stream-{post,comment,profile,mention,dm}.html exactly
+       so the .entry DOM is uniform regardless of who created it
+       (server-rendered for static siblings, controller-rendered for
+       lazy-fetched bodies + filter results + DMs).
+
+       Renderers use document.createElement / textContent for plain-text
+       fields (title, author name, date, excerpt, etc.) so author-
+       controlled metadata can never produce executable markup. Five
+       call sites (body_html, bio_html, avatar_html, sender_avatar_html)
+       use innerHTML — see the TRUST CHAIN comment at the first such
+       site (renderComment, search "TRUST CHAIN") for the safety
+       argument those calls depend on. If any link in that chain
+       changes, audit every innerHTML site.
+       ------------------------------------------------------------------ */
+
+    function el(tag, opts) {
+        var node = document.createElement(tag);
+        if (opts) {
+            if (opts.cls) node.className = opts.cls;
+            if (opts.text !== undefined && opts.text !== null) node.textContent = String(opts.text);
+            if (opts.href) node.setAttribute('href', opts.href);
+            if (opts.ariaHidden) node.setAttribute('aria-hidden', 'true');
+            if (opts.attrs) {
+                for (var k in opts.attrs) {
+                    if (Object.prototype.hasOwnProperty.call(opts.attrs, k)) {
+                        node.setAttribute(k, opts.attrs[k]);
+                    }
+                }
+            }
+            if (opts.children) {
+                for (var i = 0; i < opts.children.length; i++) {
+                    if (opts.children[i]) node.appendChild(opts.children[i]);
+                }
+            }
+        }
+        return node;
+    }
+
+    function timelineDot() {
+        return el('div', { cls: 'timeline-dot', ariaHidden: true });
+    }
+
+    function entryShell(typeClass, meta, extraClasses) {
+        // Common shell shared by all entry sub-types: <article> with the
+        // unified entry classes + state classes + data attrs. Sub-types
+        // append their own children.
+        var classes = 'entry ' + typeClass + ' is-loaded';
+        // Unread state — drives the timeline-dot's accent halo treatment
+        // (stream.css .entry.has-unread .timeline-dot). Honors an
+        // explicit meta.unread flag (DMs use this) and falls back to
+        // "no read_at timestamp" for posts/comments/follows. Skip the
+        // default-unread inference for entry types that don't carry
+        // read-state today (focus/profile/mention) — those should stay
+        // visually neutral.
+        var unread = false;
+        if (typeof meta.unread === 'boolean') {
+            unread = meta.unread;
+        } else if (meta.read_at !== undefined && meta.read_at === '') {
+            unread = true;
+        }
+        if (unread) classes += ' has-unread';
+        if (extraClasses) classes += ' ' + extraClasses;
+        var article = el('article', {
+            cls: classes,
+            attrs: { 'data-polis-entry-type': meta.type || typeClass.replace('entry--', '') },
+        });
+        if (meta.url) article.dataset.polisCanonicalUrl = meta.url;
+        if (meta.id) article.dataset.polisEntryId = meta.id;
+        return article;
+    }
+
+    function renderPost(meta) {
+        // body.is-owner gates SPA-side behavior — owner-extras.js's
+        // decoratePost is what runs for each entry on the dashboard
+        // and conditionally adds entry--commentable for CROSS-author
+        // posts (own posts skip the class so the timeline-dot doesn't
+        // pose as a comment-add affordance on your own content).
+        // On public pages decoratePost never runs, so we add the
+        // class here for parity with the SSR'd stream-post.html (all
+        // entries on a single-tenant public list are commentable by
+        // a logged-in cross-visitor).
+        var ownerMode = document.body.classList.contains('is-owner');
+        var article = entryShell('entry--post', meta, ownerMode ? '' : 'entry--commentable');
+        // Title-redundancy flag — server-side enrichment runs the same
+        // StripLeadingTitleHeading + TitleStartsFirstSentence the SSR
+        // path uses, so dynamically-rendered posts get the same title-
+        // chrome suppression as static siblings. Stash on the dataset
+        // so injectBody (called after lazy-fetch swaps excerpt → expanded)
+        // can re-apply .is-redundant to the new title-link wrapper.
+        var titleRedundant = !!meta.title_redundant;
+        if (titleRedundant) {
+            article.dataset.polisTitleRedundant = '1';
+        }
+        // entry-meta-line: date+time on left, byline · comment-indicator
+        // grouped on right. Both byline-domain-link and entry-comments-
+        // badge are siblings inside an .entry-meta-right wrapper with a
+        // .entry-meta-sep ("·") between them — flex-distributed by the
+        // meta-line's justify-content:space-between. The svg icon is
+        // built via setAttribute (no innerHTML) so it stays out of the
+        // TRUST CHAIN audit boundary.
+        //
+        // Comment count is always rendered (even at 0) so the indicator
+        // reads as "this post has N comments" at a glance from anywhere
+        // in the stream. Pre-2026-05-16 the badge was hidden via
+        // .is-empty visibility:hidden on zero-count posts; that behavior
+        // is removed — empty count just shows "0".
+        //
+        // R26 #3: drafts skip both the comment badge and the byline.
+        // You can't comment on your own unpublished draft (badge would
+        // mislead), and the byline is always "me" (redundant).
+        // 2026-05-15: the right-aligned DRAFT pill was dropped — its
+        // role is now covered by the entry-rollover-cta pattern.
+        var dateTime = el('time', { cls: 'entry-date-time', text: meta.published_human });
+        var metaLine = el('div', { cls: 'entry-meta-line', children: [timelineDot(), dateTime] });
+        // entry-meta-right hosts the comment-count badge (always) and,
+        // on the owner SPA only, the byline-domain link. Public single-
+        // tenant pages skip the byline (author is implicit from the
+        // page) but keep the badge so readers can see at a glance
+        // which posts have conversation. Count is rendered even at 0
+        // so the indicator reads as "this post has N comments" rather
+        // than appearing only on hot posts.
+        if (!meta.draft) {
+            var rightGroup = el('span', { cls: 'entry-meta-right' });
+            if (ownerMode && meta.author_domain) {
+                rightGroup.appendChild(el('a', {
+                    cls: 'byline-domain-link',
+                    href: 'https://' + meta.author_domain + '/',
+                    children: [el('span', {
+                        cls: 'byline-domain',
+                        text: meta.author_domain,
+                    })],
+                }));
+                // Separator — same character convention used in the date
+                // ("May 16 · 11pm"). CSS handles spacing + muted color.
+                rightGroup.appendChild(el('span', {
+                    cls: 'entry-meta-sep',
+                    text: '·',
+                    attrs: { 'aria-hidden': 'true' },
+                }));
+            }
+            // Comment indicator: count is always rendered (0 if none).
+            // .add-plus is still in the DOM so hover behaviors (badge-+
+            // swap on .entry--post:hover for surfaces that want the
+            // comment-add CTA — see the entry-rollover-cta section in
+            // stream.css for SPA exclusions on .entry--mine and
+            // .entry--commentable) keep working unchanged.
+            var commentCount = (meta.comment_count != null) ? meta.comment_count : 0;
+            rightGroup.appendChild(el('a', {
+                cls: 'entry-comments-badge',
+                href: (meta.url || '#') + '#comments',
+                children: [
+                    buildCommentSVG(),
+                    el('span', { cls: 'count', text: formatCommentCount(commentCount) }),
+                    el('span', { cls: 'add-plus', text: '+', attrs: { 'aria-hidden': 'true' } }),
+                ],
+            }));
+            metaLine.appendChild(rightGroup);
+        }
+        // Drafts: nothing appended to the meta-line beyond the date.
+        // The Discard rollover CTA (owner-extras.js decoratePost
+        // draft branch) fills the upper-right slot on hover.
+        // Excerpt-form title: .is-redundant hides the h3 via CSS when the
+        // server flagged the body as starting with the title text. The
+        // excerpt below is a 200-char truncation of that same body, so
+        // hiding the h3 doesn't lose content — the user reads it once
+        // in the natural prose flow instead of twice.
+        var titleH3 = el('h3', {
+            cls: titleRedundant ? 'entry-title is-redundant' : 'entry-title',
+            text: meta.title,
+        });
+        var body = el('a', {
+            cls: 'entry-body entry-body--excerpt',
+            href: meta.url || '#',
+            children: [
+                titleH3,
+                el('p', { cls: 'entry-excerpt', text: meta.excerpt }),
+            ],
+        });
+        article.appendChild(metaLine);
+        article.appendChild(body);
+        // Inline blessed-comments panel — server-side enrichment populates
+        // meta.blessed_comments for type=posts on own-handle scope (mirror
+        // of the comment-thread enrichment for the inverse view). Mount the
+        // panel as a sibling of .entry-body so injectBody's body-swap on
+        // lazy-fetch leaves it intact. Same DOM shape as the SSR'd focus
+        // entry's panel in stream.html, so enterFocusMode + openCommentsPanel
+        // animate it identically.
+        if (Array.isArray(meta.blessed_comments) && meta.blessed_comments.length > 0) {
+            article.appendChild(buildCommentsPanel(meta.blessed_comments));
+        }
+        // R23 #9: server-rendered body HTML available (drafts ship it
+        // synchronously; future enrichment may ship it for cross-tenant
+        // posts too). Skip the lazy-fetch path and inject directly so
+        // the entry shows formatted markdown instead of a plain-text
+        // excerpt. Defer to next tick so the entry is in the DOM and
+        // bindPostBodyToggle can measure overflow.
+        // R28 follow-up: drafts now render the rendered HTML as the
+        // preview (matches user expectation — markdown syntax in the
+        // excerpt read as raw `# Header` strings, which was noise).
+        // CSS line-clamps .entry.is-draft .entry-content so the height
+        // stays excerpt-shaped, and owner-extras attaches the click-
+        // to-edit handler at the article level so it survives the
+        // excerpt → expanded body swap.
+        if (meta.body_html) {
+            // 2026-05-16: claim is-expanded + skip prefetch IMMEDIATELY,
+            // before the deferred injectBody fires. Without these two
+            // markers the prefetch observer (started in appendEntry →
+            // observeEntryForPrefetch) saw a freshly-rendered article
+            // without is-expanded yet and added it to the observation
+            // set. Later, when the entry crossed the prefetch root-
+            // margin (i.e., once the user had scrolled at some point in
+            // the session), fetchAndExpand fired against /posts/.../html
+            // — which the localhost server's spaHandler resolves to the
+            // SPA shell, NOT the rendered post HTML (the post file lives
+            // on disk under dataDir, not in the embedded FS the
+            // spaHandler checks). fetchBody parsed the shell, found no
+            // focus-content marker, returned null, and fetchAndExpand
+            // tagged the entry with is-404. Symptom: post flashes
+            // briefly then disappears. Setting these markers up front
+            // matches the draft path's intent for the same reason.
+            article.classList.add('is-expanded');
+            article.dataset.polisNoPrefetch = '1';
+            setTimeout(function () { injectBody(article, meta.body_html); }, 0);
+        }
+        // Drafts ship body_html too (handleStreamItemsDrafts) so they
+        // already pick up the no-prefetch + is-expanded markers above.
+        // The marker is left on the entry regardless of whether body_html
+        // landed, since draft URLs are SPA deep-links (/_/posts/drafts/
+        // <id>) that would resolve to the SPA shell anyway.
+        if (meta.draft) {
+            article.dataset.polisNoPrefetch = '1';
+        }
+        return article;
+    }
+
+    // buildCommentsPanel constructs the inline .entry-comments-panel DOM
+    // for a list of blessed-comment records. Mirrors the SSR template
+    // shapes/v4/snippets/blessed-comment.html: a .comment row per entry
+    // with header (author + date) + body (rendered HTML). content_html
+    // ── TRUST CHAIN — see the named comment block at the first innerHTML
+    // site in renderComment for the four assumptions every innerHTML site
+    // depends on. Blessed-comment HTML originates from the publish-time
+    // sanitization on the COMMENT AUTHOR's site + the local blessing
+    // signature verify chain — same trust assumption the SSR per-post
+    // page already relies on for its inline blessed-comment panel.
+    function buildCommentsPanel(comments) {
+        // The --cards modifier scopes the bordered-card visual treatment
+        // (mirrors .entry--comment-thread .comment-attached) to the
+        // stream-list context. The per-post focus page's inline panel
+        // uses the plain .entry-comments-panel class and keeps its
+        // simpler border-top separator look.
+        var panel = el('div', { cls: 'entry-comments-panel entry-comments-panel--cards' });
+        for (var i = 0; i < comments.length; i++) {
+            var c = comments[i];
+            var row = el('div', { cls: 'comment' });
+            var header = el('div', { cls: 'comment-header' });
+            header.appendChild(el('a', {
+                cls: 'comment-author',
+                href: c.url || '#',
+                text: c.author_name || '',
+            }));
+            header.appendChild(el('span', {
+                cls: 'comment-date',
+                text: c.published_human || '',
+            }));
+            row.appendChild(header);
+            var bodyDiv = el('div', { cls: 'comment-body' });
+            // ── TRUST CHAIN ── content_html is server-rendered through
+            // render.LoadLocalCommentContent (goldmark + bluemonday).
+            // ── END TRUST CHAIN ──
+            bodyDiv.innerHTML = c.content_html || '';
+            row.appendChild(bodyDiv);
+            panel.appendChild(row);
+        }
+        return panel;
+    }
+
+    // Comment-badge svg, built via DOM APIs (no innerHTML). Single path
+    // matches the SSR'd markup in stream-post.html.
+    // formatCommentCount — keeps the meta-line badge slot compact even
+    // on posts with hundreds of comments. 0-999 render as literal
+    // numbers; >=1000 collapses to "1k+", "2k+", … (no more than 3
+    // chars including the "+"). The 999 threshold is the sweet spot
+    // for matching the meta-line typography — 3-digit numbers fit
+    // cleanly in the badge's min-width slot.
+    function formatCommentCount(n) {
+        n = Number(n) || 0;
+        if (n < 1000) return String(n);
+        var k = Math.floor(n / 1000);
+        return k + 'k+';
+    }
+
+    function buildCommentSVG() {
+        var SVG_NS = 'http://www.w3.org/2000/svg';
+        var svg = document.createElementNS(SVG_NS, 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('aria-hidden', 'true');
+        var path = document.createElementNS(SVG_NS, 'path');
+        path.setAttribute('d', 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z');
+        svg.appendChild(path);
+        return svg;
+    }
+
+    // Speech-bubble glyph for the comment-meta-line in entry--comment-thread
+    // entries. Same path as buildCommentSVG; differentiated by class so CSS
+    // can size + tint independently of the entry-comments-badge SVG.
+    function commentMetaIcon() {
+        var svg = buildCommentSVG();
+        svg.setAttribute('class', 'comment-meta-icon');
+        return svg;
+    }
+
+    // Title-dedup runs server-side in handlers_stream.go: the enrichment
+    // builder applies render.StripLeadingTitleHeading (drops a leading
+    // ATX heading matching the title) and render.TitleStartsFirstSentence
+    // (flags posts whose first prose sentence begins with the title) on
+    // the raw post markdown before rendering to HTML. Doing it on raw
+    // markdown matters because emphasis markers (**bold**) survive in
+    // the title but get stripped from rendered HTML — comparing against
+    // markdown keeps both sides aligned. The flag rides the API response
+    // as `target_post_title_redundant` and renderCommentThread honors it
+    // by adding .is-redundant to the title-link wrapper.
+
+    // type=comments thread-entry: the post that handle commented on
+    // (full body inline) followed by the latest comment by handle on
+    // that post. Two timeline dots on the SAME main bar — the post's
+    // standard 8px dot at its meta-line + a smaller 5px dot at the
+    // comment's italic metadata row. No inner vertical bar.
+    //
+    // Server enriches each comment item with target_post_* fields and
+    // comment_body_html. Missing fields (failed remote fetch) degrade
+    // gracefully — we render with whatever's present and a placeholder
+    // for the post body.
+    //
+    // ── TRUST CHAIN — same chain as renderComment's body_html (search
+    // for "TRUST CHAIN" in this file). The HTML strings injected via
+    // innerHTML here are produced by the Go render.MarkdownToHTML
+    // pipeline (goldmark + UGC sanitizer) on the server, then carried
+    // verbatim. Same four assumptions apply. ── END TRUST CHAIN ──
+    function renderCommentThread(meta) {
+        var article = entryShell('entry--comment-thread', meta);
+
+        // Post region: meta-line (post date + author domain) + title
+        // link + full body HTML.
+        var postMetaLine = el('div', { cls: 'entry-meta-line' });
+        postMetaLine.appendChild(timelineDot());
+        // Date+time wrapped in the same target_url link as the title, so a
+        // post whose title is hidden via .is-redundant still has a clickable
+        // affordance pointing at the original post (and so users have a
+        // second target if they aim at the date out of habit).
+        var timeEl = el('time', {
+            cls: 'entry-date-time',
+            text: meta.target_post_published_human || '',
+        });
+        if (meta.target_url) {
+            postMetaLine.appendChild(el('a', {
+                cls: 'entry-date-time-link',
+                href: meta.target_url,
+                children: [timeEl],
+            }));
+        } else {
+            postMetaLine.appendChild(timeEl);
+        }
+        // Author handle in the upper-right of the entry. Linked to the
+        // author's polis site so visitors can navigate to the source. The
+        // byline-domain is the only stable handle-attribution surface when
+        // the post body is capped+faded by the 50vh rule, so it stays
+        // visible on every entry regardless of title-link state.
+        if (meta.target_post_author_domain) {
+            postMetaLine.appendChild(el('a', {
+                cls: 'byline-domain-link',
+                href: 'https://' + meta.target_post_author_domain + '/',
+                children: [el('span', {
+                    cls: 'byline-domain',
+                    text: meta.target_post_author_domain,
+                })],
+            }));
+        }
+
+        var postBody = el('div', { cls: 'entry-body entry-body--expanded' });
+        if (meta.target_url || meta.target_post_title) {
+            var titleLink = el('a', {
+                cls: 'entry-title-link',
+                href: meta.target_url || '#',
+                children: [el('h3', {
+                    cls: 'entry-title',
+                    text: meta.target_post_title || '(untitled)',
+                })],
+            });
+            postBody.appendChild(titleLink);
+        }
+        var postContent = el('div', { cls: 'entry-content' });
+        if (meta.target_post_body_html) {
+            postContent.innerHTML = meta.target_post_body_html;
+            // Server-supplied flag: hide title chrome when body's first
+            // sentence absorbs the title (see comment block above).
+            if (meta.target_post_title_redundant && titleLink && titleLink.classList) {
+                titleLink.classList.add('is-redundant');
+            }
+        } else {
+            postContent.appendChild(el('p', {
+                cls: 'entry-content--unavailable',
+                text: '(post body unavailable)',
+            }));
+        }
+        postBody.appendChild(postContent);
+        // Long-post collapse toggle for the post region. Same markup as
+        // .entry--post (see stream-post.html); bindPostBodyToggle measures
+        // overflow against the 50vh cap and only unhides the button when
+        // the cap is actually exceeded — short bodies stay non-interactive.
+        // Without this, posts taller than 50vh in this view had no way to
+        // expand other than navigating away.
+        postBody.appendChild(el('button', {
+            cls: 'post-body-toggle',
+            text: 'show more',
+            attrs: { type: 'button', 'aria-expanded': 'false', hidden: '' },
+        }));
+
+        // Comment region — framed inside the right column with a left
+        // accent rule + tint background so post (context) and comment
+        // (focus of the filtered view) are distinguishable at a glance.
+        // Smaller dot in the gutter marks the comment's position on the
+        // timeline bar; speech-bubble icon prefixes the byline so the
+        // eye finds the attribution line.
+        var commentBlock = el('div', { cls: 'comment-attached' });
+        commentBlock.appendChild(el('div', {
+            cls: 'timeline-dot timeline-dot--small',
+            attrs: { 'aria-hidden': 'true' },
+        }));
+        var commentMeta = el('div', { cls: 'comment-meta-line' });
+        commentMeta.appendChild(commentMetaIcon());
+        commentMeta.appendChild(el('span', {
+            cls: 'comment-author',
+            text: meta.author_domain || '',
+        }));
+        commentMeta.appendChild(el('time', {
+            cls: 'comment-date-time',
+            text: meta.published_human || '',
+        }));
+        commentBlock.appendChild(commentMeta);
+        var commentBody = el('div', { cls: 'comment-body' });
+        if (meta.comment_body_html) {
+            commentBody.innerHTML = meta.comment_body_html;
+        } else if (meta.excerpt) {
+            commentBody.textContent = meta.excerpt;
+        }
+        commentBlock.appendChild(commentBody);
+
+        article.appendChild(postMetaLine);
+        article.appendChild(postBody);
+        article.appendChild(commentBlock);
+        return article;
+    }
+
+    function renderComment(meta) {
+        var article = entryShell('entry--comment', meta);
+        var entryMeta = el('div', {
+            cls: 'entry-meta',
+            children: [
+                timelineDot(),
+                el('time', { cls: 'entry-time', text: meta.date_human }),
+            ],
+        });
+        var byline = el('div', { cls: 'entry-byline' });
+        var authorLink = el('a', {
+            cls: 'byline-author',
+            href: meta.author_domain ? 'https://' + meta.author_domain + '/' : '#',
+            text: meta.author_name,
+        });
+        byline.appendChild(authorLink);
+        byline.appendChild(el('span', { cls: 'byline-domain', text: meta.author_domain }));
+        if (meta.reply_target_title) {
+            var ctx = el('span', { cls: 'entry-context', text: 're: ' });
+            ctx.appendChild(el('a', { href: meta.reply_target_url || '#', text: meta.reply_target_title }));
+            byline.appendChild(ctx);
+        }
+        var commentBody = el('div', { cls: 'comment-body' });
+        // ── TRUST CHAIN — applies to every innerHTML site in this file ──
+        // The HTML strings injected here (body_html / bio_html / avatar_html
+        // / sender_avatar_html) are author-controlled but safe to assign
+        // via innerHTML because of four assumptions:
+        //   1. Sanitization at publish time. cli-go/pkg/render runs author
+        //      markdown through bluemonday (UGC policy) before the bytes
+        //      ever leave the publishing tenant. Script tags, on-* event
+        //      attrs, and javascript: hrefs are stripped at the source.
+        //   2. Tamper-evident in transit. The bytes are part of the post
+        //      body that the author signed at publish time. The DS verifies
+        //      signatures on ingestion; readers re-verifying via R13-1
+        //      (deferred hardening) would catch any modification.
+        //   3. No further sanitization on the read side, by design. Once
+        //      the body is verified, the reader trusts it verbatim.
+        //   4. DM bodies (the dm/ renderer's body_html) are decrypted
+        //      locally from owner-encrypted disk storage. The decryption
+        //      authority IS the trust boundary; the plaintext is what
+        //      the owner originally composed and (per the DM protocol)
+        //      passed through the same sanitizer chain.
+        // If ANY of these assumptions changes (sanitizer bypass, sign-
+        // verify bypass, alternate render path that skips bluemonday,
+        // DM plaintext sourced from an untrusted layer), audit every
+        // innerHTML call site in this file before shipping.
+        // ── END TRUST CHAIN ──
+        if (meta.body_html) {
+            commentBody.innerHTML = meta.body_html;
+        } else if (meta.body_text) {
+            commentBody.textContent = meta.body_text;
+        }
+        var body = el('div', { cls: 'entry-body', children: [byline, commentBody] });
+        article.appendChild(entryMeta);
+        article.appendChild(body);
+        return article;
+    }
+
+    // Profile entry renderer (06-profiles Phase 2).
+    //
+    // Shape matches docs/design/v4/mockups/06-profiles-and-activity.html
+    // panel 2: standard entry-meta-line (last-active + handle byline),
+    // entry-title with display_name, profile-state-line with a passive
+    // follow-state + relationship summary, an optional .recent-post-
+    // attached block showing the author's most-recent post, and an
+    // entry-actions container that the rollover-CTA layer (in
+    // owner-extras.js / stream.css §entry-rollover-cta) populates with
+    // Follow / Unfollow buttons on hover.
+    //
+    // Expected meta fields (emitted by buildProfilesList in
+    // webapp/internal/server/handlers_profiles.go):
+    //   id, type ("profile"), author_domain, author_url,
+    //   display_name, following (bool), relationship (enum:
+    //   mutual | follows-you | you-follow | none), last_active,
+    //   published_human ("2h ago"), recent_post { title, url,
+    //   excerpt, published_human }
+    function renderProfile(meta) {
+        var article = entryShell('entry--profile', meta);
+        // Preserve key fields on the article element for the CTA layer
+        // (owner-extras' rollover handler reads these to drive
+        // POST/DELETE /api/following). Stored on dataset rather than
+        // a hidden field so the values survive re-renders cleanly.
+        if (meta.author_domain) article.dataset.polisProfileDomain = meta.author_domain;
+        if (meta.author_url) article.dataset.polisProfileUrl = meta.author_url;
+        if (typeof meta.following === 'boolean') {
+            article.dataset.polisProfileFollowing = meta.following ? '1' : '0';
+        }
+
+        // Meta-line: "last active <relative>" on the left, follow-state
+        // indicator on the right (where other entry types show a handle
+        // byline). Profile entries don't need a handle byline since the
+        // handle is the entry title — surfacing the follow-state in
+        // that slot avoids duplication and surfaces the more useful
+        // signal. The combined label captures both the binary follow
+        // direction AND the bilateral signal: mutual / follows you /
+        // following / not following.
+        var dateText = meta.published_human ? ('last active ' + meta.published_human) : '';
+        var isFollowing = !!meta.following;
+        var statusLabel;
+        switch (meta.relationship) {
+            case 'mutual':       statusLabel = 'mutual'; break;
+            case 'follows-you':  statusLabel = 'follows you'; break;
+            case 'you-follow':   statusLabel = 'following'; break;
+            default:             statusLabel = isFollowing ? 'following' : 'not following';
+        }
+        var entryMeta = el('div', {
+            cls: 'entry-meta-line',
+            children: [
+                timelineDot(),
+                el('span', { cls: 'entry-date-time', text: dateText }),
+                el('span', {
+                    cls: 'entry-byline follow-state ' +
+                         (isFollowing ? 'is-following' : 'is-not-following'),
+                    text: statusLabel,
+                }),
+            ],
+        });
+        article.appendChild(entryMeta);
+
+        // Title: display name when available, otherwise fall back to
+        // the handle (matches the by-name sort key fallback).
+        var titleText = meta.display_name || meta.author_domain || '';
+        article.appendChild(el('h3', { cls: 'entry-title', text: titleText }));
+
+        // Recent-post-attached: sunset-tinted preview of the author's
+        // most-recent post, mirroring the .comment-attached chrome but
+        // with --color-follow-accent. Click-to-expand wiring lives in
+        // owner-extras.js (Phase 2 task 16).
+        if (meta.recent_post && (meta.recent_post.title || meta.recent_post.url)) {
+            var rp = meta.recent_post;
+            var attached = el('div', { cls: 'recent-post-attached' });
+            if (rp.url) attached.dataset.polisRecentPostUrl = rp.url;
+
+            var metaLine = el('div', { cls: 'recent-post-meta-line' });
+            metaLine.appendChild(el('span', { cls: 'recent-post-label', text: 'Most recent post' }));
+            if (rp.published_human) {
+                metaLine.appendChild(el('span', { cls: 'recent-post-date', text: rp.published_human }));
+            }
+            attached.appendChild(metaLine);
+
+            if (rp.title) {
+                var titleRow = el('div', { cls: 'recent-post-title' });
+                titleRow.appendChild(document.createTextNode(rp.title));
+                titleRow.appendChild(el('span', { cls: 'expand-chevron', text: '›' })); // ›
+                attached.appendChild(titleRow);
+            }
+            if (rp.excerpt) {
+                attached.appendChild(el('p', { cls: 'recent-post-excerpt', text: rp.excerpt }));
+            }
+            article.appendChild(attached);
+        }
+
+        // Rollover-CTA slot. Hidden at rest; revealed on .entry:hover
+        // via the existing .entry-actions CSS. owner-extras.js populates
+        // the button (Follow / Unfollow with the right variant) and
+        // wires the click handler in Phase 2 task 15.
+        article.appendChild(el('div', { cls: 'entry-actions' }));
+
+        return article;
+    }
+
+    function renderMention(meta) {
+        var article = entryShell('entry--mention', meta);
+        var entryMeta = el('div', {
+            cls: 'entry-meta',
+            children: [
+                timelineDot(),
+                el('time', { cls: 'entry-time', text: meta.date_human }),
+            ],
+        });
+        var byline = el('div', {
+            cls: 'entry-byline',
+            children: [
+                el('span', { cls: 'byline-author', text: meta.source_author_name }),
+                el('span', { cls: 'byline-domain', text: meta.source_author_domain }),
+            ],
+        });
+        var headline = el('div', { cls: 'mention-headline' });
+        headline.appendChild(document.createTextNode('mentioned you in '));
+        headline.appendChild(el('strong', { text: meta.source_title }));
+        var excerpt = el('p', { cls: 'mention-excerpt', text: meta.excerpt });
+        var body = el('a', {
+            cls: 'entry-body',
+            href: meta.source_url || '#',
+            children: [byline, headline, excerpt],
+        });
+        article.appendChild(entryMeta);
+        article.appendChild(body);
+        return article;
+    }
+
+    function renderDM(meta) {
+        // Inbox row — one entry per conversation. Layout mirrors
+        // renderPost: entry-meta-line with timeline-dot + date on the
+        // left and a byline-domain-link on the right. Earlier versions
+        // tucked the byline under the date and rendered both sender_name
+        // and sender_domain — which on accounts without a display name
+        // produced a doubled handle ("alice.polis.pub alice.polis.pub").
+        // Sticking to sender_domain matches the post entry's
+        // author_domain convention.
+        var extraClasses = meta.unread ? 'has-unread' : '';
+        var article = entryShell('entry--dm', meta, extraClasses);
+        if (meta.conversation_id) article.dataset.polisConversationId = meta.conversation_id;
+        var dateTime = el('time', {
+            cls: 'entry-date-time',
+            text: meta.published_human || meta.date_human || '',
+        });
+        var metaLine = el('div', { cls: 'entry-meta-line', children: [timelineDot(), dateTime] });
+        if (meta.sender_domain) {
+            var rightGroup = el('span', { cls: 'entry-meta-right' });
+            rightGroup.appendChild(el('a', {
+                cls: 'byline-domain-link',
+                href: 'https://' + meta.sender_domain + '/',
+                children: [el('span', {
+                    cls: 'byline-domain',
+                    text: meta.sender_domain,
+                })],
+            }));
+            metaLine.appendChild(rightGroup);
+        }
+        var dmBody = el('div', { cls: 'dm-body' });
+        if (meta.body_html) {
+            dmBody.innerHTML = meta.body_html;
+        } else if (meta.body_text) {
+            dmBody.textContent = meta.body_text;
+        }
+        var body = el('div', { cls: 'entry-body', children: [dmBody] });
+        article.appendChild(metaLine);
+        article.appendChild(body);
+        return article;
+    }
+
+    // renderDMMessage — thread-mode DM renderer. One entry per message in
+    // a single conversation. is_mine flag from the server drives the
+    // indent + mint-tint styling (CSS rules in stream.css under
+    // .entry--message.is-mine). meta.sender_name is "you" for own
+    // messages, the peer's domain for theirs.
+    //
+    // Differs from renderDM (inbox mode):
+    //   - one entry per MESSAGE, not per conversation
+    //   - no preview-truncation — full body shown
+    //   - has-unread + unread-count chrome irrelevant (per-message read
+    //     state isn't tracked)
+    //   - title is absent (the byline + date are the message's identity)
+    //
+    // The conversation_id is preserved on the article's dataset so any
+    // future per-message action wiring (mark read, copy, reply-quote)
+    // can route through it.
+    function renderDMMessage(meta) {
+        var extraClasses = meta.is_mine ? 'is-mine' : '';
+        var article = entryShell('entry--message', meta, extraClasses);
+        if (meta.conversation_id) article.dataset.polisConversationId = meta.conversation_id;
+        if (meta.id) article.dataset.polisMessageId = meta.id;
+
+        var entryMeta = el('div', {
+            cls: 'entry-meta-line',
+            children: [
+                timelineDot(),
+                el('span', { cls: 'entry-date-time', text: meta.published_human || '' }),
+                el('span', {
+                    cls: 'entry-byline',
+                    children: [
+                        meta.is_mine
+                            ? el('span', { cls: 'you-label', text: 'you' })
+                            : document.createTextNode(meta.sender_domain || meta.sender_name || ''),
+                    ],
+                }),
+            ],
+        });
+
+        var bodyEl = el('div', { cls: 'entry-body' });
+        if (meta.body_text) {
+            bodyEl.textContent = meta.body_text;
+        }
+
+        article.appendChild(entryMeta);
+        article.appendChild(bodyEl);
+        return article;
+    }
+
+    // Local tenant display name for follow entries: the site_title from
+    // .well-known/polis (SSR'd into <body data-polis-site-title="...">),
+    // falling back to the subdomain part of paginationTenant when the
+    // title isn't set or is just the domain. Public-view phrasing avoids
+    // "you" / "your"; the local tenant gets named in third person.
+    function localTenantDisplayName() {
+        var title = (document.body && document.body.dataset && document.body.dataset.polisSiteTitle) || '';
+        title = title.trim();
+        // Use site_title only when it's a real human label, not just the
+        // bare domain echoed back as the title.
+        if (title && title !== paginationTenant) return title;
+        // Fall back to the subdomain — drop everything from the first dot
+        // onward (e.g. "discover.polis.pub" → "discover").
+        if (paginationTenant) {
+            var dot = paginationTenant.indexOf('.');
+            return dot > 0 ? paginationTenant.substring(0, dot) : paginationTenant;
+        }
+        return '';
+    }
+
+    // Follow feed item (renders within ACTIVITY — 06-profiles removed
+    // the dedicated type=follows surface, but follow events still flow
+    // through the activity feed via feed/handler.go's followEventToItem
+    // path and use this renderer). Server emits:
+    //   meta.author_domain — the actor (who followed/unfollowed)
+    //   meta.target_domain — the other party
+    //   meta.event_type    — pub.polis.follow.announced | .removed
+    //
+    // Visual structure mirrors the post/comment entry pattern: standard
+    // entry-meta-line (date on the left, actor handle as byline on the
+    // right) followed by a single italic body line "followed <target>"
+    // or "unfollowed <target>". No glyph in the timeline gutter — the
+    // timeline-dot is the only marker, matching the rest of the stream.
+    function renderFollow(meta) {
+        var article = entryShell('entry--follow', meta);
+        var actorDomain = meta.author_domain || '';
+        var targetDomain = meta.target_domain || '';
+        var verbWord = (meta.event_type === 'pub.polis.follow.removed')
+            ? 'unfollowed'
+            : 'followed';
+        var entryMeta = el('div', {
+            cls: 'entry-meta-line',
+            children: [
+                timelineDot(),
+                el('time', { cls: 'entry-date-time', text: meta.published_human || '' }),
+                el('span', { cls: 'entry-byline', text: actorDomain }),
+            ],
+        });
+        var body = el('p', { cls: 'follow-event-body' });
+        body.appendChild(el('span', { cls: 'verb', text: verbWord }));
+        body.appendChild(el('a', {
+            cls: 'target',
+            href: 'https://' + targetDomain,
+            text: targetDomain,
+        }));
+        article.appendChild(entryMeta);
+        article.appendChild(body);
+        return article;
+    }
+
+    // Default 'comment' renderer is the new thread-entry shape introduced
+    // 2026-04-29 with the type=comments rescope: each entry shows the full
+    // post handle commented on + the latest comment underneath. The older
+    // renderComment is kept for code paths that surface a bare comment
+    // without thread context (currently none in the public stream; reserved
+    // for the panel-expansion comment list and future owner-side flows).
+    var renderers = {
+        post: renderPost,
+        comment: renderCommentThread,
+        profile: renderProfile,
+        mention: renderMention,
+        dm: renderDM,
+        'dm-message': renderDMMessage,
+        follow: renderFollow,
+    };
+
+    // Extension registry (step-06/6.a). Layer 3: afterRender listeners decorate
+    // a base entry post-render. Layer 4: registerRenderer overrides the base
+    // renderer entirely. owner-extras.js composes against these; public bundle
+    // never subscribes — registry stays empty for non-auth visitors.
+    var afterRenderListeners = {};
+
+    // step-06/6.f.2 review concern #1: filter-change subscribers. Fired
+    // by every code path that mutates filter state (selectOption from
+    // dropdown picks, setFilter / setFilterType / setFilterScope /
+    // setFilterQualifier / setFilterModifier from owner-extras).
+    // Listener receives a snapshot of the post-change filter state so
+    // a single hook can react uniformly to any source. owner-extras
+    // uses this to keep body.is-activity-mode in sync with filterType
+    // — without it, dropdown-picked type changes left the body class
+    // stale, breaking the Layer-2 CSS gate.
+    var filterChangeListeners = [];
+
+    function fireFilterChange() {
+        var snapshot = {
+            qualifier: filterQualifier,
+            type: filterType,
+            scope: filterScope,
+            modifier: filterModifier,
+        };
+        for (var i = 0; i < filterChangeListeners.length; i++) {
+            try {
+                filterChangeListeners[i](snapshot);
+            } catch (e) {
+                console.error('[polis-stream] filterChange listener error:', e);
+            }
+        }
+    }
+
+    function addFilterChangeListener(fn) {
+        if (typeof fn !== 'function') return;
+        filterChangeListeners.push(fn);
+    }
+
+    function fireAfterRender(type, entry, meta) {
+        var listeners = afterRenderListeners[type];
+        if (!listeners) return;
+        for (var i = 0; i < listeners.length; i++) {
+            try {
+                listeners[i](entry, meta);
+            } catch (e) {
+                console.error('[polis-stream] afterRender listener error:', e);
+            }
+        }
+    }
+
+    function addAfterRenderListener(type, fn) {
+        if (typeof fn !== 'function') return;
+        if (!afterRenderListeners[type]) afterRenderListeners[type] = [];
+        afterRenderListeners[type].push(fn);
+    }
+
+    function registerRenderer(type, fn) {
+        if (typeof fn !== 'function') return;
+        renderers[type] = fn;
+    }
+
+    function renderEntry(meta) {
+        var fn = renderers[meta && meta.type];
+        if (!fn) {
+            console.warn('[polis-stream] unknown entry type:', meta && meta.type);
+            return null;
+        }
+        var entry = fn(meta);
+        if (entry) fireAfterRender(meta.type, entry, meta);
+        return entry;
+    }
+
+    /* ------------------------------------------------------------------
+       Entry insertion — append to .stream, observe, track in entries[]
+       ------------------------------------------------------------------ */
+
+    function getStreamContainer() {
+        return document.querySelector('.stream');
+    }
+
+    function appendEntry(domEl) {
+        if (!domEl) return null;
+        var container = getStreamContainer();
+        if (!container) return null;
+        // Insert before .stream-fade-out if present, else append at end.
+        var fade = container.querySelector(':scope > .stream-fade-out');
+        if (fade) {
+            container.insertBefore(domEl, fade);
+        } else {
+            container.appendChild(domEl);
+        }
+        entries.push(domEl);
+        if (observer) observer.observe(domEl);
+        // Also subscribe the new entry for lazy-fetch prefetch (skipped
+        // for DMs + SSR'd focus + already-expanded entries inside the
+        // helper). Only kicks in if the user has already scrolled —
+        // until then, prefetchObserver isn't observing anything.
+        if (userHasScrolled) observeEntryForPrefetch(domEl);
+        // Wire focus-mode click handler on entries that ship in expanded
+        // form (post excerpt-form entries get bound only after lazy-
+        // fetch restructures them; renderCommentThread output ships
+        // expanded, so it needs to be bound here). bindCardClick is a
+        // no-op for entries without .focus-content / .entry-body--expanded.
+        bindCardClick(domEl);
+        // Wire the post-body toggle (show more / hide) — same plumbing
+        // used by SSR'd .entry--post cards and lazy-fetched bodies.
+        // Idempotent via data-body-toggle-bound; no-op for entries
+        // without a .post-body-toggle button. Comment-thread entries
+        // ship the toggle inline via renderCommentThread.
+        bindPostBodyToggle(domEl);
+        return domEl;
+    }
+
+    function clearDynamicEntries() {
+        // Remove any .entry that wasn't part of the SSR hydration. Detected
+        // via a marker class set by appendEntry, since the original entries[]
+        // snapshot is mutated. We add the marker class lazily there.
+        var container = getStreamContainer();
+        if (!container) return;
+        var dynamics = container.querySelectorAll('.entry.is-dynamic');
+        for (var i = 0; i < dynamics.length; i++) {
+            if (observer) observer.unobserve(dynamics[i]);
+            if (prefetchObserver) prefetchObserver.unobserve(dynamics[i]);
+            dynamics[i].parentNode.removeChild(dynamics[i]);
+        }
+        // Rebuild entries array from what's left in DOM order.
+        entries = Array.prototype.slice.call(container.querySelectorAll('.entry'));
+        // Re-anchor focus to whatever's left (typically the SSR'd focus). If
+        // the previously-focused entry was a dynamic one we just removed,
+        // it's now a detached DOM node and would silently poison
+        // focusNext/focusPrev (entries.indexOf returns -1, falling back to
+        // entries[0]) and updateFocus comparisons. Reset and let the next
+        // observer fire repopulate.
+        focusedEntry = container.querySelector('.entry.is-focused') || entries[0] || null;
+        intersectingMap.clear();
+    }
+
+    /* ------------------------------------------------------------------
+       Pagination — scroll-past-end fetches older entries via
+       /api/v1/stream/items?scope=@<canonical-tenant>. (step-05/5.c)
+
+       First request uses before_url=<oldest SSR'd sibling URL> so the
+       server can synthesize the cursor; subsequent requests pass the
+       server-returned `next_cursor`. On end-of-history (no next_cursor),
+       the observer disconnects.
+
+       Gated on userHasScrolled like setupPrefetch — layout-shift events
+       (font load, nav-widget hydration, lazy-fetch expansions) intersect
+       the last entry but shouldn't trigger a network call until the user
+       has actually scrolled.
+       ------------------------------------------------------------------ */
+
+    function readCanonicalTenant() {
+        var link = document.querySelector('link[rel="canonical"]');
+        if (!link) return '';
+        var href = link.getAttribute('href');
+        if (!href) return '';
+        try {
+            return new URL(href, window.location.href).hostname;
+        } catch (e) {
+            return '';
+        }
+    }
+
+    // step-06/6.c: returns the scope value to encode into pagination
+    // requests. filterScope wins when set (owner SPA assigns it at init
+    // and selectOption updates it on user pick); falls back to
+    // '@<canonicalTenant>' for the public per-post page where the
+    // tenant identity is the implicit scope.
+    function currentScopeParam() {
+        if (filterScope) return filterScope;
+        if (paginationTenant) return '@' + paginationTenant;
+        return '';
+    }
+
+    function setupPagination() {
+        if (!('IntersectionObserver' in window)) return;
+        if (!('fetch' in window)) return;
+        paginationTenant = readCanonicalTenant();
+        if (!paginationTenant) {
+            // No canonical link → can't determine tenant scope. Quietly
+            // bail; rest of the controller still works (focus tracking,
+            // keyboard nav, lazy-fetch on whatever's already on the page).
+            return;
+        }
+        paginationObserver = new IntersectionObserver(onPaginationIntersect, {
+            rootMargin: PAGINATION_LOOKAHEAD,
+        });
+        // Don't observe yet — wait for first scroll, mirroring setupPrefetch's
+        // pattern. Observing immediately at hydrate-time was flaky:
+        // IntersectionObserver fires its initial-state callback synchronously
+        // on registration, and that initial fire gets gated out by the
+        // userHasScrolled check in onPaginationIntersect. Once the observer
+        // has registered "intersecting" once (because the last SSR'd entry is
+        // already inside the 200px lookahead — common on tall viewports with
+        // only ~5 SSR'd entries), it only fires again on intersection-state
+        // CHANGE — and a user scrolling past an already-intersecting entry
+        // produces no state change. Result: pagination silently fails to
+        // trigger ~20% of the time, depending on viewport height vs entry
+        // count. Deferring observation until startPagination() (called from
+        // setupUserScrollGate's first-scroll handler) ensures the initial
+        // callback fires AFTER userHasScrolled flips true, so the gate lets
+        // it through.
+    }
+
+    // Called from setupUserScrollGate's onFirstScroll alongside
+    // startPrefetching(). See setupPagination's comment for why observation
+    // is deferred to first scroll.
+    function startPagination() {
+        if (!paginationObserver || paginationDone) return;
+        observeLastEntry();
+    }
+
+    function observeLastEntry() {
+        if (!paginationObserver || paginationDone) return;
+        if (paginationLastEntry) {
+            paginationObserver.unobserve(paginationLastEntry);
+        }
+        var last = entries[entries.length - 1];
+        if (!last) {
+            paginationLastEntry = null;
+            return;
+        }
+        paginationLastEntry = last;
+        paginationObserver.observe(last);
+    }
+
+    function onPaginationIntersect(observerEntries) {
+        // No userHasScrolled gate here. The observer is only attached to a
+        // last-entry via startPagination (first scroll) or fetchNextPage's
+        // success handler (post-engagement) — both of which require user
+        // action. Gating at the callback was redundant with deferred
+        // observation AND broke the no-scroll-then-filter path: a user who
+        // clicks a filter from the topbar before scrolling would get one
+        // fetchNextPage from applyFilter, but the success handler's
+        // observeLastEntry would then synthesize an initial-state callback
+        // that the gate would drop, leaving pagination silently stuck.
+        for (var i = 0; i < observerEntries.length; i++) {
+            if (observerEntries[i].isIntersecting) {
+                fetchNextPage();
+                break;
+            }
+        }
+    }
+
+    function fetchNextPage() {
+        if (paginationInFlight || paginationDone) return;
+        // SD-3 close (step-05/5.h): gate fetches when no scope can be
+        // determined. step-06/6.c generalizes from "no canonical tenant"
+        // to "no scope param at all" — the owner SPA assigns filterScope
+        // before the controller starts paginating, so the gate stays
+        // effective for both surfaces.
+        if (!currentScopeParam()) return;
+        paginationInFlight = true;
+
+        // Build URL from current filter state. Public default is
+        // qualifier=all, type=posts, modifier=by-date, scope=@<canonicalTenant>.
+        // User-driven filter changes update filterType + filterModifier;
+        // applyFilter resets pagination state + retriggers fetch. The
+        // public-stream filter has no timeframe option (removed in the
+        // 2026-04-29 grammar redesign), so we send an explicit time window
+        // to bypass the server's 24h default — otherwise scrolling older
+        // than 24h, or filtering to "with comments" against an older
+        // corpus, would silently return empty. We send 30d (the server's
+        // maxStreamWindowDays cap) rather than 'all' so the intent stays
+        // visible in URLs/logs and matches the server-enforced ceiling.
+        // step-06/6.c: scope comes from currentScopeParam() so owner SPA
+        // can drive my-network / my-mutuals / etc.; public surface
+        // continues to use '@<canonical-tenant>' (paginationTenant).
+        var scopeParam = currentScopeParam();
+        var url = '/api/v1/stream/items?scope=' + encodeURIComponent(scopeParam)
+            + '&qualifier=' + encodeURIComponent(filterQualifier)
+            + '&time=30d';
+        if (filterType !== '') {
+            url += '&type=' + encodeURIComponent(filterType);
+        }
+        // step-06/6.c: with= modifier covers two type-conditional values.
+        // posts + with-comments → with=comments (existing). comments +
+        // to-bless → with=pending-blessing (new in 6.b grammar).
+        if (filterType === 'posts' && filterModifier === 'with-comments') {
+            url += '&with=comments';
+        } else if (filterType === 'comments' && filterModifier === 'to-bless') {
+            url += '&with=pending-blessing';
+        }
+        // sort= modifier:
+        //   - drafts:   by-name (alphabetic by title; default for the
+        //     type is by-date — backend default is preserved when this
+        //     branch doesn't fire)
+        //   - profiles: by-name (default) or by-activity. Default
+        //     transmitted explicitly so the backend doesn't need to
+        //     know the type-conditional default.
+        if (filterType === 'drafts' && filterModifier === 'by-name') {
+            url += '&sort=by-name';
+        } else if (filterType === 'profiles') {
+            if (filterModifier === 'by-activity') {
+                url += '&sort=by-activity';
+            } else {
+                url += '&sort=by-name';
+            }
+        }
+        // Search modifier — supported on both profiles scopes.
+        // all-polis hits the DS site directory; my-network filters the
+        // local follow list server-side.
+        if (filterType === 'profiles' &&
+            (filterScope === 'all-polis' || filterScope === 'my-network') &&
+            currentSearch) {
+            url += '&search=' + encodeURIComponent(currentSearch);
+        }
+        var wasFirstFetch = paginationFirstFetch;
+        if (paginationCursor) {
+            url += '&cursor=' + encodeURIComponent(paginationCursor);
+        } else if (paginationFirstFetch) {
+            // First call (or first after a filter change): anchor on the
+            // oldest entry currently on the page so the server returns
+            // items strictly older than that. before_url is converted to
+            // a cursor server-side (step-05/5.c — handlers_stream.go's
+            // beforeURL handling). Avoids client-side cursor-format
+            // coupling. After applyFilter clears siblings, this anchors
+            // on the focus URL — server returns items older than the
+            // focus, in the new filter type/time.
+            var anchorURL = oldestSSREntryURL();
+            if (anchorURL) {
+                url += '&before_url=' + encodeURIComponent(anchorURL);
+            }
+        }
+
+        // 2026-05-18: credentials: 'same-origin' so the polis_session
+        // cookie travels with the request. Pre-fix this was 'omit',
+        // which made sense when /api/v1/stream/items was fully public
+        // — but R20-B-H1 (sec-scan fix) made owner-private scopes
+        // (scope=my-network / me / my / @<self>) require auth. The
+        // admin SPA sends those scopes; without credentials, the
+        // hosted gate 401s every paginate. Same-origin (not 'include')
+        // because the stream endpoint is always on the SPA's own
+        // origin; cross-tenant body fetches go through fetchBody
+        // which stays 'omit'.
+        fetch(url, { credentials: 'same-origin' })
+            .then(function (resp) {
+                // Throttle / backpressure: 429 (rate limit) + 503 (service
+                // unavailable) carry a Retry-After hint per RFC 9110. Parse
+                // it to drive the retry delay; falls back to exponential
+                // backoff if the header is absent or unparseable.
+                if (resp.status === 429 || resp.status === 503) {
+                    var err = new Error('HTTP ' + resp.status);
+                    err.retryAfterMs = parseRetryAfter(resp.headers.get('Retry-After'));
+                    err.transient = true;
+                    throw err;
+                }
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                return resp.json();
+            })
+            .then(function (data) {
+                // Success path — reset the retry budget. A subsequent
+                // failure starts attempt counting fresh.
+                paginationRetryAttempts = 0;
+                var items = (data && data.items) || [];
+                for (var i = 0; i < items.length; i++) {
+                    appendItemIfNew(items[i]);
+                }
+                paginationCursor = (data && data.next_cursor) || '';
+                paginationFirstFetch = false;
+                if (!paginationCursor) {
+                    // End of history — no more pages to fetch. Stop
+                    // observing the last entry but keep the observer
+                    // instance around so a later filter change (5.d)
+                    // can reuse it without re-creating.
+                    paginationDone = true;
+                    if (paginationObserver && paginationLastEntry) {
+                        paginationObserver.unobserve(paginationLastEntry);
+                    }
+                    paginationLastEntry = null;
+                    // Empty-state per Q-S10: if a filter change just
+                    // landed AND the result set is empty AND the only
+                    // remaining entry is the focus, render an honest
+                    // "no results" message + reset link. Don't show
+                    // the empty state on natural end-of-history during
+                    // scroll (siblings + appended entries already in
+                    // place — user just hit the bottom of the corpus).
+                    if (wasFirstFetch && items.length === 0 && entries.length <= 1) {
+                        renderEmptyState();
+                    }
+                } else {
+                    // New entries appended — re-anchor observer on the
+                    // new last entry.
+                    observeLastEntry();
+                }
+            })
+            .catch(function (err) {
+                // SC-2 close (step-05/5.h): schedule a delayed retry via
+                // setTimeout instead of relying on the IntersectionObserver
+                // to re-fire. The observer only fires on intersection-state
+                // CHANGE, so a user already past the last-entry boundary
+                // at fail-time wouldn't get a retry until they scrolled
+                // out and back. Honors `Retry-After` for 429/503; falls
+                // back to exponential backoff (750ms / 1.5s / 3s) up to
+                // PAGINATION_MAX_ATTEMPTS. After exhaustion: log + give
+                // up. Filter change (applyFilter) clears any pending timer.
+                paginationRetryAttempts++;
+                if (paginationRetryAttempts <= PAGINATION_MAX_ATTEMPTS) {
+                    var delay = (err && err.retryAfterMs)
+                        ? err.retryAfterMs
+                        : PAGINATION_BACKOFF_BASE_MS * Math.pow(2, paginationRetryAttempts - 1);
+                    if (paginationRetryTimer) clearTimeout(paginationRetryTimer);
+                    paginationRetryTimer = setTimeout(function () {
+                        paginationRetryTimer = null;
+                        fetchNextPage();
+                    }, delay);
+                } else {
+                    if (window.console && console.warn) {
+                        console.warn('[polis-stream] pagination fetch failed after retries:', err);
+                    }
+                    // Reset the attempts counter so a later filter change
+                    // gets a fresh retry budget; leave paginationDone false
+                    // so a subsequent scroll-trigger can still try.
+                    paginationRetryAttempts = 0;
+                }
+            })
+            .then(function () {
+                paginationInFlight = false;
+            });
+    }
+
+    // parseRetryAfter accepts both the integer-seconds form ("30") and
+    // the HTTP-date form ("Wed, 21 Oct 2026 07:28:00 GMT") per RFC 9110.
+    // Returns milliseconds, or null when unparseable. The numeric form is
+    // overwhelmingly the common case for application-level rate limiting.
+    function parseRetryAfter(raw) {
+        if (!raw) return null;
+        var n = parseInt(raw, 10);
+        if (!isNaN(n) && n >= 0) return n * 1000;
+        var ts = Date.parse(raw);
+        if (isNaN(ts)) return null;
+        var ms = ts - Date.now();
+        return ms > 0 ? ms : 0;
+    }
+
+    // oldestSSREntryURL returns the URL of the oldest SSR'd sibling —
+    // used as the before_url anchor on the first pagination fetch.
+    // The hydration step stamped data-polis-canonical-url on every entry;
+    // the LAST entry in document order is the oldest in newest-top mode
+    // (DIRECTION-HOOK).
+    function oldestSSREntryURL() {
+        var last = entries[entries.length - 1];
+        if (!last) return '';
+        return (last.dataset && last.dataset.polisCanonicalUrl) || '';
+    }
+
+    // newestSSREntryURL returns the URL of the newest currently-loaded
+    // entry — used as the after_url anchor on the first upward
+    // pagination fetch. On a per-post page with above-focus siblings,
+    // entries[0] is the topmost above-focus sibling, NOT the focus —
+    // so anchoring on entries[0] avoids re-fetching SSR'd above-focus
+    // entries (the dedup at prependItemIfNew would catch them, but
+    // anchoring correctly saves the round-trip). On a per-post page
+    // with NO above-focus siblings (e.g., focus = newest in corpus
+    // but viewed via per-post URL), entries[0] is the focus itself,
+    // which is also the right anchor.
+    function newestSSREntryURL() {
+        var first = entries[0];
+        if (!first) return '';
+        return (first.dataset && first.dataset.polisCanonicalUrl) || '';
+    }
+
+    function appendItemIfNew(item) {
+        if (!item) return;
+        // Dedup key: posts/comments carry url (canonical document URL);
+        // profile/dm/other entity items have no document URL and fall
+        // back to id ("profile:<domain>", "dm:<conv-id>", etc.). Either
+        // way the key is stamped on dataset.polisCanonicalUrl below so
+        // re-fetch dedup and focus-tracking work uniformly.
+        var key = item.url || item.id;
+        if (!key) return;
+        for (var i = 0; i < entries.length; i++) {
+            var existing = entries[i];
+            if (existing.dataset && existing.dataset.polisCanonicalUrl === key) {
+                return;
+            }
+        }
+        // published_human is supplied by the server (handlers_stream.go's
+        // streamItemResponse wrapper) — single source of truth for stream
+        // date formatting. SSR'd entries (focus + siblings) and JS-appended
+        // entries share the same formatter (template.FormatHumanDateTime),
+        // so the meta-line never drifts between the SSR window and the
+        // pagination window. SC-3 close (step-05/5.g).
+        var dom = renderEntry(item);
+        if (!dom) return;
+        dom.classList.add('is-dynamic');
+        if (dom.dataset) dom.dataset.polisCanonicalUrl = key;
+        appendEntry(dom);
+    }
+
+    /* ------------------------------------------------------------------
+       Upward pagination — scroll past the FIRST entry fetches NEWER
+       entries via /api/v1/stream/items?after_url=<focus URL>&order=oldest.
+       Symmetric to the down direction (fetchNextPage / observeLastEntry
+       / appendItemIfNew). The focus is the SSR'd anchor on first fetch;
+       subsequent fetches use the server-returned next_cursor.
+
+       Skipped on the homepage: the focus there IS the newest post, so
+       there's nothing newer to fetch. Detected via window.location.pathname.
+
+       Scroll-position preservation: prepending DOM nodes pushes existing
+       content down, which would visually shift the user's anchor entry.
+       fetchPreviousPage's success handler captures the anchor's
+       getBoundingClientRect().top before insertion and adjusts
+       window.scrollY by the height-delta after insertion so the user's
+       view stays anchored to the same content. Architecture doc lines
+       314-322 documents this contract.
+       ------------------------------------------------------------------ */
+
+    function setupPaginationTop() {
+        if (!('IntersectionObserver' in window)) return;
+        if (!('fetch' in window)) return;
+        // Homepage skip: focus is already the newest post, nothing to
+        // fetch upward. Per-post URLs land under /posts/.../*.html.
+        var p = window.location.pathname;
+        if (p === '/' || p === '' || p === '/index.html' || (/\/index\.html$/).test(p)) {
+            paginationDoneTop = true;
+            return;
+        }
+        // Reuse paginationTenant resolved by setupPagination — both
+        // directions hit the same /api/v1/stream/items endpoint with
+        // the same scope. setupPagination runs first in init() (see
+        // init's call order), so paginationTenant is set by the time
+        // we reach here. If it's empty (no canonical link), the down
+        // direction also bails — nothing to do here either.
+        if (!paginationTenant) {
+            paginationDoneTop = true;
+            return;
+        }
+        paginationTopObserver = new IntersectionObserver(onPaginationTopIntersect, {
+            rootMargin: PAGINATION_LOOKAHEAD,
+        });
+        // Defer observation to first scroll, mirroring setupPagination's
+        // post-1.7.20 pattern: an IntersectionObserver registered before
+        // the user has scrolled fires its initial-state callback once
+        // (synchronously, with whatever the current intersection state
+        // is) and then never again unless the state CHANGES — which
+        // breaks pagination silently when the focus is already inside
+        // the lookahead at hydrate time.
+    }
+
+    function startPaginationTop() {
+        if (!paginationTopObserver || paginationDoneTop) return;
+        observeFirstEntry();
+    }
+
+    function observeFirstEntry() {
+        if (!paginationTopObserver || paginationDoneTop) return;
+        if (paginationFirstEntry) {
+            paginationTopObserver.unobserve(paginationFirstEntry);
+        }
+        var first = entries[0];
+        if (!first) {
+            paginationFirstEntry = null;
+            return;
+        }
+        paginationFirstEntry = first;
+        paginationTopObserver.observe(first);
+    }
+
+    function onPaginationTopIntersect(observerEntries) {
+        for (var i = 0; i < observerEntries.length; i++) {
+            if (observerEntries[i].isIntersecting) {
+                fetchPreviousPage();
+                break;
+            }
+        }
+    }
+
+    function fetchPreviousPage() {
+        if (paginationInFlightTop || paginationDoneTop) return;
+        // step-06/6.c: scope-presence gate (matches fetchNextPage).
+        if (!currentScopeParam()) return;
+        paginationInFlightTop = true;
+
+        // order=oldest so the response items come back from oldest-newer
+        // to newest-of-batch. We then prepend them in-order: each item
+        // lands directly above the previous topmost entry, leaving the
+        // newest-of-batch at the very top — chronologically correct.
+        // step-06/6.c: same scope/with/sort propagation as down direction.
+        var scopeParamUp = currentScopeParam();
+        var url = '/api/v1/stream/items?scope=' + encodeURIComponent(scopeParamUp)
+            + '&qualifier=' + encodeURIComponent(filterQualifier)
+            + '&order=oldest';
+        if (filterType !== '') {
+            url += '&type=' + encodeURIComponent(filterType);
+        }
+        if (filterType === 'posts' && filterModifier === 'with-comments') {
+            url += '&with=comments';
+        } else if (filterType === 'comments' && filterModifier === 'to-bless') {
+            url += '&with=pending-blessing';
+        }
+        // sort= modifier (mirror of fetchNextPage — keep in sync).
+        if (filterType === 'drafts' && filterModifier === 'by-name') {
+            url += '&sort=by-name';
+        } else if (filterType === 'profiles') {
+            if (filterModifier === 'by-activity') {
+                url += '&sort=by-activity';
+            } else {
+                url += '&sort=by-name';
+            }
+        }
+        // Search modifier (mirror of fetchNextPage). Supported on both
+        // profiles scopes.
+        if (filterType === 'profiles' &&
+            (filterScope === 'all-polis' || filterScope === 'my-network') &&
+            currentSearch) {
+            url += '&search=' + encodeURIComponent(currentSearch);
+        }
+        if (paginationCursorTop) {
+            url += '&cursor=' + encodeURIComponent(paginationCursorTop);
+        } else if (paginationFirstFetchTop) {
+            // Anchor on the topmost SSR'd entry — that's entries[0],
+            // which is the topmost above-focus sibling when the page
+            // SSR'd any, or the focus itself when there are none.
+            // Using the focus URL when an above-focus sibling exists
+            // would have the server return the SSR'd above-focus
+            // siblings again (dedup catches them, but it's a wasted
+            // round-trip).
+            var anchorURL = newestSSREntryURL();
+            if (anchorURL) {
+                url += '&after_url=' + encodeURIComponent(anchorURL);
+            }
+        }
+
+        // Capture the anchor's viewport-relative position BEFORE
+        // prepending, so we can restore the user's view after DOM
+        // mutation (which would otherwise shift everything down by the
+        // height of the prepended content).
+        var anchorEl = paginationFirstEntry || document.querySelector('.entry.is-focused');
+        var anchorTopBefore = anchorEl ? anchorEl.getBoundingClientRect().top : 0;
+
+        // 2026-05-18: same-origin credentials — see comment above the
+        // sibling fetch in the downward-pagination block. Same fix:
+        // owner-private scopes need the polis_session cookie.
+        fetch(url, { credentials: 'same-origin' })
+            .then(function (resp) {
+                if (resp.status === 429 || resp.status === 503) {
+                    var err = new Error('HTTP ' + resp.status);
+                    err.retryAfterMs = parseRetryAfter(resp.headers.get('Retry-After'));
+                    err.transient = true;
+                    throw err;
+                }
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                return resp.json();
+            })
+            .then(function (data) {
+                paginationRetryAttemptsTop = 0;
+                var items = (data && data.items) || [];
+                for (var i = 0; i < items.length; i++) {
+                    prependItemIfNew(items[i]);
+                }
+                paginationCursorTop = (data && data.next_cursor) || '';
+                paginationFirstFetchTop = false;
+                if (!paginationCursorTop) {
+                    paginationDoneTop = true;
+                    if (paginationTopObserver && paginationFirstEntry) {
+                        paginationTopObserver.unobserve(paginationFirstEntry);
+                    }
+                    paginationFirstEntry = null;
+                    // paginationDoneTop just flipped — top-fade may now
+                    // need to hide once user reaches scroll-top. Recompute
+                    // immediately so the rule (A) check (scrollY===0 AND
+                    // paginationDoneTop) sees the up-to-date state.
+                    updateTopFadeVisibility();
+                } else {
+                    // New entries prepended — re-anchor observer on the new
+                    // first entry.
+                    observeFirstEntry();
+                }
+                // Scroll-position preservation: figure out where the
+                // anchor element ended up after the DOM mutation and
+                // shift the viewport so it's at the same position as
+                // before the prepend.
+                if (anchorEl && items.length > 0) {
+                    var anchorTopAfter = anchorEl.getBoundingClientRect().top;
+                    var delta = anchorTopAfter - anchorTopBefore;
+                    if (delta !== 0) {
+                        window.scrollBy(0, delta);
+                    }
+                }
+            })
+            .catch(function (err) {
+                paginationRetryAttemptsTop++;
+                if (paginationRetryAttemptsTop <= PAGINATION_MAX_ATTEMPTS) {
+                    var delay = (err && err.retryAfterMs)
+                        ? err.retryAfterMs
+                        : PAGINATION_BACKOFF_BASE_MS * Math.pow(2, paginationRetryAttemptsTop - 1);
+                    if (paginationRetryTimerTop) clearTimeout(paginationRetryTimerTop);
+                    paginationRetryTimerTop = setTimeout(function () {
+                        paginationRetryTimerTop = null;
+                        fetchPreviousPage();
+                    }, delay);
+                } else {
+                    if (window.console && console.warn) {
+                        console.warn('[polis-stream] upward pagination fetch failed after retries:', err);
+                    }
+                    paginationRetryAttemptsTop = 0;
+                }
+            })
+            .then(function () {
+                paginationInFlightTop = false;
+            });
+    }
+
+    function prependItemIfNew(item) {
+        if (!item || !item.url) return;
+        // Dedup against existing entries (SSR'd + already-paginated in
+        // either direction).
+        for (var i = 0; i < entries.length; i++) {
+            var existing = entries[i];
+            if (existing.dataset && existing.dataset.polisCanonicalUrl === item.url) {
+                return;
+            }
+        }
+        var dom = renderEntry(item);
+        if (!dom) return;
+        dom.classList.add('is-dynamic');
+        if (dom.dataset) dom.dataset.polisCanonicalUrl = item.url;
+        prependEntry(dom);
+    }
+
+    function prependEntry(domEl) {
+        if (!domEl) return null;
+        var container = getStreamContainer();
+        if (!container) return null;
+        // Insert at the TOP of the stream — before whatever's currently
+        // first (focus, or a previously-prepended dynamic entry). The
+        // year-marker sits OUTSIDE .stream (in .layout-right) so it
+        // doesn't interfere with this insertion point.
+        var firstChild = container.firstElementChild;
+        if (firstChild) {
+            container.insertBefore(domEl, firstChild);
+        } else {
+            container.appendChild(domEl);
+        }
+        // Track in entries[] at the FRONT so observer-anchor logic
+        // (paginationFirstEntry vs. paginationLastEntry) reflects DOM
+        // order. Focus tracking (setupFocusTracking's observer) doesn't
+        // care about array order — it scans IntersectionObserver
+        // results — but observeFirstEntry / observeLastEntry index off
+        // entries[0] / entries[n-1] respectively.
+        entries.unshift(domEl);
+        if (observer) observer.observe(domEl);
+        if (userHasScrolled) observeEntryForPrefetch(domEl);
+        return domEl;
+    }
+
+    /* ------------------------------------------------------------------
+       Filter widget (step-05/5.d) — slot-change → reset stream + refetch
+
+       Click on an interactive slot toggles its dropdown; click on an
+       option updates the slot label + reissues /api/v1/stream/items
+       with the new type/time params. On filter change: clear ALL non-
+       focus entries (SSR'd siblings + dynamics), reset pagination
+       state, refetch from the top. Empty-state per Q-S10 resolution:
+       honest message + "Show all posts" reset link (resets to canonical
+       default: type=posts, modifier=by-date).
+
+       Selectors per snippets/stream-filter.html / Q-S11 resolution.
+       Click-outside / Escape close all dropdowns via existing onEscape API.
+       ------------------------------------------------------------------ */
+
+    function setupFilter() {
+        var slots = document.querySelectorAll('.sentence-filter .sf-slot--interactive');
+        if (!slots.length) return;
+        for (var i = 0; i < slots.length; i++) {
+            attachSlotHandlers(slots[i]);
+        }
+        // Close any open dropdown on click outside the filter container.
+        document.addEventListener('click', function (ev) {
+            if (!filterOpenDropdown) return;
+            var filterEl = document.querySelector('.sentence-filter');
+            if (filterEl && !filterEl.contains(ev.target)) {
+                closeOpenDropdown();
+            }
+        });
+        // Wire ESC into the controller's existing popover-close registry
+        // so any open dropdown closes alongside other popovers (compose
+        // surface, etc. that step 6 layers in).
+        registerPopoverCloseHandler(closeOpenDropdown);
+    }
+
+    function attachSlotHandlers(slotEl) {
+        // R24 follow-up: dedupe so repeated lock/unlock cycles on the
+        // scope slot don't accumulate click listeners.
+        if (slotEl.__polisSlotWired) return;
+        slotEl.__polisSlotWired = true;
+        var slotKind = slotEl.getAttribute('data-filter-slot'); // 'type' or 'time'
+        slotEl.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            toggleSlotDropdown(slotEl, slotKind);
+        });
+        slotEl.addEventListener('keydown', function (ev) {
+            if (ev.key === 'Enter' || ev.key === ' ') {
+                ev.preventDefault();
+                toggleSlotDropdown(slotEl, slotKind);
+            }
+        });
+    }
+
+    function toggleSlotDropdown(slotEl, slotKind) {
+        // R25 follow-up #1: respect the slot's locked state at toggle
+        // time. attachSlotHandlers wires the click listener once, so a
+        // slot that gets locked after first wire (e.g. the scope slot
+        // when applyTypePersonalLock fires for dms/drafts) still has
+        // a live click handler. Bail early if the slot has been
+        // marked locked — same outcome the user gets if the click
+        // listener had been removed entirely.
+        if (slotEl.getAttribute('data-filter-locked') === 'true' ||
+            slotEl.classList.contains('sf-slot--locked')) {
+            return;
+        }
+        var alreadyOpen = filterOpenDropdown && filterOpenDropdown.parentNode === slotEl;
+        closeOpenDropdown();
+        if (alreadyOpen) return;
+        // step-06/6.b: dispatch through getFilterOptions so all slots
+        // (including the type-conditional modifier set) flow through
+        // one extension point. owner-extras.js registers additional
+        // options via PolisStream.registerFilterOption.
+        var options = getFilterOptions(slotKind);
+        if (!options.length) return;
+        var current;
+        if (slotKind === 'type') current = filterType;
+        else if (slotKind === 'modifier') current = filterModifier;
+        else if (slotKind === 'qualifier') current = filterQualifier;
+        else if (slotKind === 'scope') current = filterScope;
+        else return;
+        var dropdown = buildDropdown(slotKind, options, current);
+        // Position relative to the slot — the slot itself doesn't have
+        // position: relative by default, so set it inline; .sf-dropdown
+        // is position:absolute relative to the slot.
+        slotEl.style.position = 'relative';
+        slotEl.appendChild(dropdown);
+        slotEl.setAttribute('aria-expanded', 'true');
+        filterOpenDropdown = dropdown;
+    }
+
+    function closeOpenDropdown() {
+        if (!filterOpenDropdown) return;
+        var slotEl = filterOpenDropdown.parentNode;
+        if (slotEl) {
+            slotEl.removeChild(filterOpenDropdown);
+            slotEl.setAttribute('aria-expanded', 'false');
+        }
+        filterOpenDropdown = null;
+    }
+
+    function buildDropdown(slotKind, options, currentValue) {
+        var ariaLabel = 'Filter';
+        if (slotKind === 'type') ariaLabel = 'Item type';
+        else if (slotKind === 'modifier') ariaLabel = 'Item modifier';
+        var dropdown = el('div', {
+            cls: 'sf-dropdown',
+            attrs: {
+                role: 'listbox',
+                'aria-label': ariaLabel,
+            },
+        });
+        for (var i = 0; i < options.length; i++) {
+            (function (opt) {
+                var selected = opt.value === currentValue;
+                // R24 #2: opt.indent visually nests the option under
+                // the prior parent — used to show posts/comments/follows
+                // as children of "activity" in the type dropdown.
+                var classes = 'sf-option';
+                if (opt.indent) classes += ' sf-option--indent';
+                var optionEl = el('div', {
+                    cls: classes,
+                    attrs: { role: 'option', 'aria-selected': selected ? 'true' : 'false' },
+                    children: [
+                        el('span', { text: opt.label }),
+                        selected ? el('span', { cls: 'sf-check', text: '✓' }) : null,
+                    ],
+                });
+                optionEl.addEventListener('click', function (ev) {
+                    ev.stopPropagation();
+                    selectOption(slotKind, opt);
+                });
+                dropdown.appendChild(optionEl);
+            })(options[i]);
+        }
+        return dropdown;
+    }
+
+    function selectOption(slotKind, opt) {
+        // Update controller state.
+        if (slotKind === 'type') {
+            filterType = opt.value;
+            // When type changes, reset modifier to the type's canonical
+            // default — the first entry of FILTER_MODIFIER_OPTIONS_BY_
+            // TYPE[type]. Previously this was always 'by-date', which
+            // was wrong for profiles ('by-name'/'by-activity') and
+            // produced an invalid sentence after picking profiles.
+            // Types without a modifier table (activity, mentions) fall
+            // back to 'by-date' as a safe default; updateModifierSlot-
+            // Visibility hides the slot for those.
+            var typeModOpts = FILTER_MODIFIER_OPTIONS_BY_TYPE[opt.value];
+            var modDefault = (typeModOpts && typeModOpts.length > 0)
+                ? typeModOpts[0]
+                : { value: 'by-date', label: 'by date' };
+            filterModifier = modDefault.value;
+            var modSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="modifier"]');
+            if (modSlot) modSlot.textContent = modDefault.label;
+            updateModifierSlotVisibility();
+            // Public-visitor scope coupling. On the SPA the owner picks
+            // scope independently (applyTypePersonalLock just unlocks
+            // the slot for non-personal types); on public pages the
+            // scope is host-anchored — bare @<host> for posts/comments,
+            // and @<host>:network for profiles (the only valid profiles
+            // data path on the public surface). Without this coupling,
+            // clicking "profiles" left the scope at @<host>, the server
+            // rejected the request, and the stream went blank.
+            if (!document.body.classList.contains('is-owner')) {
+                var hostDom = document.body.dataset.polisSiteDomain || paginationTenant;
+                if (hostDom) {
+                    filterScope = (opt.value === 'profiles')
+                        ? '@' + hostDom + ':network'
+                        : '@' + hostDom;
+                    var sSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="scope"]');
+                    if (sSlot) sSlot.textContent = labelForSlot('scope', filterScope);
+                }
+            }
+            // Rapid-fire #11: drafts and dms are inherently personal —
+            // they only exist in the owner's local store. Force the
+            // sentence to "all <type> from me by date" the moment the
+            // user picks one, so the sentence reads truthfully even if
+            // the prior qualifier/scope didn't match.
+            applyTypePersonalLock(opt.value);
+        } else if (slotKind === 'modifier') {
+            filterModifier = opt.value;
+        } else if (slotKind === 'qualifier') {
+            // step-06/6.c: owner SPA unlocks qualifier (all | new).
+            filterQualifier = opt.value;
+        } else if (slotKind === 'scope') {
+            // step-06/6.c: owner SPA scope selection. The 'site' value is
+            // a typeahead sentinel — owner-extras.js intercepts to show
+            // the input; on resolution it calls setFilterScope('@<handle>').
+            // For non-site values we set filterScope directly.
+            if (opt.value === 'site') {
+                // Don't update filterScope yet; defer to typeahead resolution.
+                // owner-extras.js opens the input here.
+                closeOpenDropdown();
+                return;
+            }
+            filterScope = opt.value;
+            applyScopeModifierGuard();
+        }
+        // Update slot label in DOM. Pinned dropdown entries carry
+        // navigational decoration in their label (e.g. '↩ my mutuals'
+        // for the DM-scope return-to-inbox shortcut). That arrow is a
+        // dropdown affordance — it shouldn't persist in the slot's
+        // resting text. Re-derive a clean label from the canonical
+        // option table when the picked entry is pinned.
+        var slotEl = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="' + slotKind + '"]');
+        if (slotEl) {
+            slotEl.textContent = opt.pinned ? labelForSlot(slotKind, opt.value) : opt.label;
+        }
+        closeOpenDropdown();
+        fireFilterChange();
+        applyFilter();
+    }
+
+    // step-06/6.c: programmatic scope setter for owner-extras.js / SPA
+    // init / typeahead resolution. Updates the slot label in the DOM and
+    // triggers a re-fetch via applyFilter. opts.label overrides the
+    // displayed text (for @<handle>.polis.pub typeahead resolutions where
+    // the URL value is "@alice.polis.pub" but the slot reads "@alice").
+    function setFilterScope(value, opts) {
+        filterScope = value || '';
+        var slotEl = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="scope"]');
+        if (slotEl) {
+            var label = (opts && opts.label) || labelForSlot('scope', value);
+            slotEl.textContent = label;
+        }
+        applyScopeModifierGuard();
+        fireFilterChange();
+        applyFilter();
+    }
+
+    // step-06/6.c: programmatic type setter — symmetric with setFilterScope.
+    // owner-extras.js icon presets call this to load a preset sentence
+    // (gateway → setFilterType('activity')) without going through the
+    // dropdown UX.
+    function setFilterType(value, opts) {
+        filterType = value || '';
+        // Reset modifier alongside (matches selectOption logic).
+        filterModifier = 'by-date';
+        var slotEl = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="type"]');
+        if (slotEl) {
+            slotEl.textContent = (opts && opts.label) || labelForSlot('type', value);
+        }
+        var modSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="modifier"]');
+        if (modSlot) modSlot.textContent = 'by date';
+        updateModifierSlotVisibility();
+        applyTypePersonalLock(filterType);
+        fireFilterChange();
+        applyFilter();
+    }
+
+    // Rapid-fire #11: drafts and dms are private/personal — they only
+    // exist in the owner's local store. Forcing qualifier=all + scope=me
+    // when the user picks one keeps the sentence truthful regardless of
+    // the prior slot values. R22 #1: also visually LOCK the scope slot
+    // (sf-slot--locked = no underline, no click handler) so the user
+    // can't try to change it after the fact and end up with a 400 from
+    // the server. The lock is reverted when the user switches back to
+    // a non-personal type.
+    // R23 #11: when scope changes to 'me' on comments, "to bless"
+    // becomes nonsensical (own comments don't need blessing). Reset
+    // modifier to 'by-date' so the sentence stays valid.
+    function applyScopeModifierGuard() {
+        if (filterType === 'comments' && filterScope === 'me' && filterModifier === 'to-bless') {
+            filterModifier = 'by-date';
+            var modSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="modifier"]');
+            if (modSlot) modSlot.textContent = 'by date';
+        }
+    }
+
+    // R24 follow-up: type-change side effects on scope.
+    //   drafts → lock scope to me (private store, no other scope makes sense)
+    //   dms    → lock scope to my-mutuals (DMs are between mutuals)
+    //   any other type → unlock the slot
+    //
+    // R25 follow-up #2: do NOT reset scope when switching between
+    // non-personal types. Earlier shape forced scope back to
+    // my-network on every non-personal type-change, which clobbered
+    // the user's selected scope ("all comments from all-polis" →
+    // switch type → unwanted "from my network"). Now the unlock path
+    // only restores the slot's interactive state without touching
+    // filterScope; the existing scope value carries through. The
+    // scope IS still updated when transitioning OUT of a personal
+    // type (drafts/dms) since the prior scope was a forced lock —
+    // we can't keep "me" / "my-mutuals" if those don't make sense
+    // for the new type, so we still reset to my-network in that case.
+    var __wasPersonalType = false;
+    function applyTypePersonalLock(type) {
+        // body.is-owner is set only on the owner SPA (app.js init).
+        // Public / cross-visit views must keep the scope slot in its
+        // initial sf-slot--identity state (locked to the host's
+        // @<domain>). The unlock paths below assume an owner who can
+        // legitimately switch between me / my-network / my-mutuals /
+        // all-polis — none of which apply when the viewer is a
+        // visitor reading the host's content. Bail early on public
+        // pages so e.g. clicking the bio "N posts" link doesn't
+        // suddenly make the scope slot interactive and expose owner-
+        // context options on what should be a fixed-scope view.
+        if (!document.body.classList.contains('is-owner')) return;
+        var sSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="scope"]');
+        if (!sSlot) return;
+        var qSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="qualifier"]');
+
+        function lockScope(value, label) {
+            filterScope = value;
+            filterQualifier = 'all';
+            if (qSlot) qSlot.textContent = 'all';
+            sSlot.textContent = label;
+            sSlot.classList.remove('sf-slot--interactive');
+            sSlot.classList.remove('sf-slot--identity');
+            sSlot.classList.add('sf-slot--locked');
+            sSlot.setAttribute('data-filter-locked', 'true');
+            sSlot.removeAttribute('role');
+            sSlot.removeAttribute('tabindex');
+            sSlot.removeAttribute('aria-haspopup');
+            sSlot.removeAttribute('aria-expanded');
+        }
+        function unlockScopeSlot(resetScope) {
+            if (resetScope) {
+                filterScope = 'my-network';
+                sSlot.textContent = 'my network';
+            }
+            // Always re-apply the interactive classes + handlers — the
+            // slot may have been sf-slot--locked from a prior personal-
+            // type pick OR sf-slot--identity from the SSR public default,
+            // OR already interactive. attachSlotHandlers is dedup'd via
+            // __polisSlotWired so double-binding doesn't accumulate.
+            sSlot.classList.remove('sf-slot--locked');
+            sSlot.classList.remove('sf-slot--identity');
+            sSlot.classList.add('sf-slot--interactive');
+            sSlot.removeAttribute('data-filter-locked');
+            sSlot.setAttribute('role', 'button');
+            sSlot.setAttribute('tabindex', '0');
+            sSlot.setAttribute('aria-haspopup', 'listbox');
+            sSlot.setAttribute('aria-expanded', 'false');
+            attachSlotHandlers(sSlot);
+        }
+
+        var personal = (type === 'drafts' || type === 'dms');
+        if (type === 'drafts') {
+            lockScope('me', 'me');
+        } else if (type === 'dms') {
+            // 2026-05-18: DM scope stays INTERACTIVE. Drafts truly lock
+            // (the on-disk store has only one author — locking the slot
+            // to "me" is honest), but DMs have multiple legitimate
+            // scopes — "my mutuals" (the inbox) and "@<peer>" for each
+            // active conversation. Locking the slot prevented the user
+            // from switching peers via the dropdown (which was already
+            // being populated by owner-extras' refreshDMScopeOptions).
+            // Mockup `docs/design/v4/mockups/07-messages.html` shows the
+            // peer handle as an interactive slot — this matches.
+            // Default to my-mutuals (the inbox) when first arriving on
+            // dms via the icon preset; the user picks a peer from the
+            // dropdown to drill in.
+            filterScope = 'my-mutuals';
+            filterQualifier = 'all';
+            if (qSlot) qSlot.textContent = 'all';
+            sSlot.textContent = 'my mutuals';
+            unlockScopeSlot(false);
+        } else {
+            // Non-personal type. Reset scope to my-network ONLY when
+            // we're transitioning out of a personal type (where the
+            // scope was a forced lock that doesn't carry forward
+            // meaningfully). Switching between non-personal types
+            // preserves the user's selected scope.
+            unlockScopeSlot(__wasPersonalType);
+            // 06-profiles: profiles narrows the legal scope set to
+            // {my-network, all-polis}. If the carried-over scope is
+            // outside that set (e.g. user was on posts/me, then
+            // switched to profiles), coerce to my-network so the
+            // sentence stays valid and the dropdown stays consistent
+            // with scopeOptionsForCurrentType.
+            if (type === 'profiles' &&
+                filterScope !== 'my-network' &&
+                filterScope !== 'all-polis') {
+                filterScope = 'my-network';
+                sSlot.textContent = 'my network';
+            }
+        }
+        __wasPersonalType = personal;
+    }
+
+    function setFilterQualifier(value) {
+        filterQualifier = value || 'all';
+        var slotEl = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="qualifier"]');
+        if (slotEl) slotEl.textContent = filterQualifier;
+        fireFilterChange();
+        applyFilter();
+    }
+
+    function setFilterModifier(value, opts) {
+        filterModifier = value || 'by-date';
+        var slotEl = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="modifier"]');
+        if (slotEl) slotEl.textContent = (opts && opts.label) || labelForSlot('modifier', filterModifier);
+        fireFilterChange();
+        applyFilter();
+    }
+
+    // step-06/6.e: batch preset loader. owner-extras.js icon-row clicks
+    // call this with all four slot values at once — single applyFilter
+    // (one server fetch) instead of four cascaded fetches from calling
+    // setFilterScope/Type/Qualifier/Modifier sequentially.
+    //
+    // preset shape: { qualifier, type, scope, modifier } — any subset.
+    // opts shape: { qualifierLabel, typeLabel, scopeLabel, modifierLabel }
+    //   — optional display-text overrides (e.g. scope value
+    //   "@alice.polis.pub" rendered as "alice").
+    //
+    // Type changes implicitly reset the modifier to 'by-date' — same
+    // behavior as selectOption('type', ...). If the preset specifies
+    // an explicit modifier, it wins after the implicit reset.
+    function setFilter(preset, opts) {
+        // step-06/6.f.2 review nit #8: warn on null/empty preset rather
+        // than silently no-op; helps debugging when a caller forgot to
+        // populate ICON_PRESETS or passed null by accident.
+        if (!preset || typeof preset !== 'object') {
+            console.warn('[polis-stream] setFilter called with empty/invalid preset:', preset);
+            return;
+        }
+        opts = opts || {};
+
+        // Defensive validation: caller-supplied type/qualifier values
+        // must match a registered option. Catches typos like type='post'
+        // (singular) before they propagate into the slot label and a
+        // doomed server request. Scope is intentionally NOT validated
+        // here — '@<handle>' values are dynamic.
+        if (preset.type !== undefined) {
+            var typeKnown = FILTER_TYPE_OPTIONS.some(function (o) { return o.value === preset.type; });
+            if (!typeKnown) {
+                console.warn('[polis-stream] setFilter rejected unknown type:', preset.type);
+                return;
+            }
+        }
+        if (preset.qualifier !== undefined && preset.qualifier !== 'all' && preset.qualifier !== 'new') {
+            console.warn('[polis-stream] setFilter rejected unknown qualifier:', preset.qualifier);
+            return;
+        }
+
+        if (preset.qualifier !== undefined) {
+            filterQualifier = preset.qualifier;
+            var qSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="qualifier"]');
+            if (qSlot) qSlot.textContent = opts.qualifierLabel || labelForSlot('qualifier', filterQualifier);
+        }
+        if (preset.type !== undefined) {
+            filterType = preset.type;
+            var tSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="type"]');
+            if (tSlot) tSlot.textContent = opts.typeLabel || labelForSlot('type', filterType);
+            // Type-change resets modifier (matches selectOption).
+            filterModifier = 'by-date';
+            var modSlotReset = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="modifier"]');
+            if (modSlotReset) modSlotReset.textContent = 'by date';
+            updateModifierSlotVisibility();
+            // R23 #2/#3: same personal-lock side-effects selectOption +
+            // setFilterType run. Without this, switching from a personal
+            // type (drafts/dms) into a non-personal preset via setFilter
+            // left the scope slot stuck locked from the prior state —
+            // user couldn't change "from me" on "all comments from me".
+            applyTypePersonalLock(filterType);
+        }
+        if (preset.scope !== undefined) {
+            filterScope = preset.scope;
+            var sSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="scope"]');
+            if (sSlot) sSlot.textContent = opts.scopeLabel || labelForSlot('scope', filterScope);
+        }
+        // Modifier comes last so it wins over the type-change reset above.
+        if (preset.modifier !== undefined) {
+            filterModifier = preset.modifier;
+            var mSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="modifier"]');
+            if (mSlot) mSlot.textContent = opts.modifierLabel || labelForSlot('modifier', filterModifier);
+        }
+        // Final guard — if the resolved combo is type=comments scope=me
+        // modifier=to-bless, drop the modifier back to by-date.
+        applyScopeModifierGuard();
+        fireFilterChange();
+        applyFilter();
+    }
+
+    // step-06/6.b: modifier slot is visible only when the current type
+    // has at least one modifier option in FILTER_MODIFIER_OPTIONS_BY_TYPE
+    // (posts/comments/follows/drafts). For types with no modifier slot
+    // (activity/dms/mentions) the slot stays [hidden] and the sentence
+    // reads cleanly without a trailing slot.
+    function updateModifierSlotVisibility() {
+        var modSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="modifier"]');
+        if (!modSlot) return;
+        var hasModifier = FILTER_MODIFIER_OPTIONS_BY_TYPE[filterType] && FILTER_MODIFIER_OPTIONS_BY_TYPE[filterType].length > 0;
+        if (hasModifier) {
+            modSlot.removeAttribute('hidden');
+        } else {
+            modSlot.setAttribute('hidden', '');
+        }
+    }
+
+    function applyFilter() {
+        // Clear all entries except the focus (SSR'd siblings + dynamics).
+        // The focus stays — it's the page's main content; the filter
+        // changes the surrounding stream. (Public per-post view only;
+        // step 6 owner stream may handle this differently.)
+        clearStreamForFilterChange();
+        // Reset pagination state so the next fetch starts fresh.
+        paginationCursor = '';
+        paginationDone = false;
+        paginationFirstFetch = true;
+        // Cancel any pending retry from a prior failed fetch — the new
+        // filter params would invalidate it anyway. SC-2 close cleanup.
+        paginationRetryAttempts = 0;
+        if (paginationRetryTimer) {
+            clearTimeout(paginationRetryTimer);
+            paginationRetryTimer = null;
+        }
+        if (paginationLastEntry && paginationObserver) {
+            paginationObserver.unobserve(paginationLastEntry);
+            paginationLastEntry = null;
+        }
+        // Reset upward direction symmetrically — same filter applies to
+        // both directions, so any in-flight upward fetch's results
+        // would no longer match the new filter params.
+        paginationCursorTop = '';
+        paginationDoneTop = false;
+        paginationFirstFetchTop = true;
+        paginationRetryAttemptsTop = 0;
+        if (paginationRetryTimerTop) {
+            clearTimeout(paginationRetryTimerTop);
+            paginationRetryTimerTop = null;
+        }
+        if (paginationFirstEntry && paginationTopObserver) {
+            paginationTopObserver.unobserve(paginationFirstEntry);
+            paginationFirstEntry = null;
+        }
+        // If the observer was never set up (no canonical link),
+        // setupPagination's earlier bail-out left it null. Try once
+        // more — if the bail still applies (fetch unsupported, etc.),
+        // fetchNextPage's checks below will short-circuit cleanly.
+        if (paginationObserver === null) {
+            setupPagination();
+        }
+        if (paginationTopObserver === null && !paginationDoneTop) {
+            setupPaginationTop();
+        }
+        // Trigger a fetch with the new filter params. fetchNextPage
+        // builds the URL from filterType / filterModifier / paginationTenant.
+        // Upward direction does NOT auto-fetch on filter change — the
+        // focus is the only entry left after clearStreamForFilterChange,
+        // and the user has to scroll up past it to trigger fetchPrevious
+        // Page.
+        fetchNextPage();
+        // Re-anchor the upward observer ONLY if the user has previously
+        // engaged scroll-up. If they haven't, leave the observer
+        // detached — the scroll-direction gate in setupUserScrollGate
+        // will attach it on first scroll-up. This preserves the design
+        // intent that filter-change is a fresh stream and upward
+        // pagination is opt-in via scroll direction.
+        if (userHasScrolledUp && paginationTopObserver) {
+            observeFirstEntry();
+        }
+    }
+
+    function clearStreamForFilterChange() {
+        var container = getStreamContainer();
+        if (!container) return;
+        // Preserve the SSR'd focus — identified by the cross-tenant
+        // body-extraction protocol marker, NOT by the .is-focused class.
+        // Scroll-driven focus tracking may have migrated .is-focused to
+        // a sibling or dynamic entry by the time filter changes; in
+        // that case the previous-filter's dynamic entry would survive
+        // clearing and pollute the new filter's stream (e.g. a follow
+        // entry sticking around after switching to type=posts).
+        var ssrMarker = container.querySelector('.entry .focus-content[data-polis-focus="true"]');
+        var ssrFocus = ssrMarker ? ssrMarker.closest('.entry') : null;
+        var allEntries = container.querySelectorAll('.entry');
+        for (var i = 0; i < allEntries.length; i++) {
+            var entry = allEntries[i];
+            if (entry === ssrFocus) continue;
+            // step-06/6.h: pinned entries (data-polis-pinned) survive
+            // filter changes. The owner-side inline editor card
+            // (data-polis-pinned="editor") needs to stay put while
+            // the user changes filter context around it — resolved
+            // decision #17 says sticky-across-filter-changes only,
+            // and this is where that stickiness lives. Other pinned
+            // markers reserved for future surfaces (compose drafts in
+            // a different shape, etc.).
+            if (entry.hasAttribute('data-polis-pinned')) continue;
+            if (observer) observer.unobserve(entry);
+            if (prefetchObserver) prefetchObserver.unobserve(entry);
+            entry.parentNode.removeChild(entry);
+        }
+        // Restore .is-focused on the SSR focus — if it had migrated to
+        // a removed entry above, the class is gone now. Idempotent
+        // when the SSR focus already had it.
+        if (ssrFocus) ssrFocus.classList.add('is-focused');
+        // Rebuild entries[] from what's left (typically just the focus).
+        entries = Array.prototype.slice.call(container.querySelectorAll('.entry'));
+        focusedEntry = ssrFocus || entries[0] || null;
+        // Focus visibility tracks filterType: focus is always a post, so
+        // when type=comments / type=follows the focus doesn't belong in
+        // the result set and would otherwise show as ghost content above
+        // the new entries. Hide it via CSS class (kept in DOM so
+        // switching back to type=posts brings it right back without a
+        // page reload).
+        applyFocusVisibilityForFilter();
+        intersectingMap.clear();
+        // Remove any leftover empty-state element from a prior filter change.
+        var emptyState = container.querySelector(':scope > .stream-empty-state');
+        if (emptyState) emptyState.parentNode.removeChild(emptyState);
+        // Clear the empty-state mode flag so the focus entry + year-marker
+        // come back into view on the next render cycle (renderEmptyState
+        // re-applies it if the new fetch also yields zero items).
+        setEmptyStateMode(false);
+    }
+
+    // Toggle focus-entry visibility based on the current filterType.
+    // The focus is always a post on per-post pages; for type=comments
+    // and type=follows it doesn't belong in the rendered list. Hidden
+    // via CSS class so switching back to type=posts restores it
+    // without a page reload.
+    function applyFocusVisibilityForFilter() {
+        var focus = document.querySelector('.entry.is-focused');
+        if (!focus) return;
+        if (filterType === 'posts') {
+            focus.classList.remove('is-hidden-by-filter');
+        } else {
+            focus.classList.add('is-hidden-by-filter');
+        }
+        // Top-fade was anchored on the (now-hidden) focus or above-focus
+        // sibling SSR'd into the page. Recompute against the new
+        // first-visible entry so the fade isn't stranded over the top
+        // of the rendered list.
+        updateTopFadeVisibility();
+    }
+
+    function renderEmptyState() {
+        var container = getStreamContainer();
+        if (!container) return;
+
+        // One-line explanation. Composed against the current slot
+        // values so the message reads truthfully ("no comments from
+        // my-network yet"). R22 #6: ASCII art removed; the headline
+        // + a contextual CTA carry the empty surface.
+        var typeLabel = filterType || 'items';
+        // R23 #10: paginationTenant is empty in the owner SPA homepage
+        // (no canonical post on the page to derive it from). Compose
+        // the "from <X>" clause from the current scope slot instead so
+        // the message reads correctly across all filter combinations.
+        var scopeSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="scope"]');
+        var scopeText = scopeSlot ? (scopeSlot.textContent || '').trim() : '';
+        var fromLabel = scopeText
+            ? 'from ' + scopeText
+            : (paginationTenant ? 'from ' + paginationTenant : '');
+        var detail;
+        if (filterType === 'posts' && filterModifier === 'with-comments') {
+            detail = ('no posts ' + fromLabel + ' with blessed comments yet.').replace(/\s+/g, ' ');
+        } else if (filterType === 'comments' && filterModifier === 'to-bless') {
+            // R24 #7: bless-pending message reads simpler without the
+            // "from <scope>" tail — the user is asking "what needs my
+            // attention?" not "what does scope X have?".
+            detail = 'no comments to bless yet.';
+        } else if (filterType === 'dms') {
+            // R24 follow-up #5: drop the "from <scope>" tail on DMs and
+            // surface the UI label "messages" rather than the dms wire
+            // token.
+            detail = 'no messages yet.';
+        } else {
+            detail = ('no ' + typeLabel + ' ' + fromLabel + ' yet.').replace(/\s+/g, ' ');
+        }
+
+        var wrap = el('div', { cls: 'stream-empty-state', attrs: { 'aria-live': 'polite' } });
+
+        // Timeline-dot retained on the bar in empty-state mode so the
+        // bar visually terminates here rather than against blank space.
+        var dot = el('div', { cls: 'timeline-dot', ariaHidden: true });
+        wrap.appendChild(dot);
+
+        // One-line explanation.
+        wrap.appendChild(el('p', { cls: 'stream-empty-state-headline', text: detail }));
+
+        // CTA — context-aware (R22 #7). Each filter type gets a CTA
+        // that either invokes the most useful local action or links
+        // to a place where the user can do something productive.
+        var ownerMode = document.body.classList.contains('is-owner') &&
+            window.PolisOwnerExtras &&
+            typeof window.PolisOwnerExtras.openEditor === 'function';
+        var ctaLabel = 'show all posts';
+        var ctaAction = function () {
+            filterModifier = 'by-date';
+            var modSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="modifier"]');
+            if (modSlot) modSlot.textContent = 'by date';
+            selectOption('type', { label: 'posts', value: 'posts' });
+        };
+        if (ownerMode) {
+            switch (filterType) {
+                case 'posts':
+                case 'drafts':
+                case 'activity':
+                    ctaLabel = 'create post';
+                    ctaAction = function () {
+                        if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
+                        setEmptyStateMode(false);
+                        window.PolisOwnerExtras.openEditor();
+                    };
+                    break;
+                case 'comments':
+                    // R24 #7: when on "all comments to bless" with no
+                    // pending requests, drop into the broader comments
+                    // view via applyFilter(scope=all-polis,
+                    // modifier=by-date) so the user can browse what's
+                    // out there. The scope-modifier guard at
+                    // applyTypePersonalLock keeps the sentence valid.
+                    if (filterModifier === 'to-bless') {
+                        ctaLabel = 'browse all comments';
+                        ctaAction = function () {
+                            if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
+                            setEmptyStateMode(false);
+                            filterModifier = 'by-date';
+                            var modSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="modifier"]');
+                            if (modSlot) modSlot.textContent = 'by date';
+                            applyFilter();
+                        };
+                        break;
+                    }
+                    ctaLabel = 'discover sites to follow';
+                    ctaAction = function () {
+                        window.location.href = 'https://discover.polis.pub/';
+                    };
+                    break;
+                case 'profiles':
+                    ctaLabel = 'discover sites to follow';
+                    ctaAction = function () {
+                        window.location.href = 'https://discover.polis.pub/';
+                    };
+                    break;
+                case 'dms':
+                    ctaLabel = 'send a message';
+                    ctaAction = function () {
+                        if (window.App && typeof window.App.navigateTo === 'function') {
+                            window.App.navigateTo('/messages/new');
+                        }
+                    };
+                    break;
+                default:
+                    ctaLabel = 'show all posts';
+            }
+        }
+        var cta = el('a', {
+            cls: 'stream-empty-state-cta',
+            href: '#',
+            attrs: { role: 'button' },
+            text: ctaLabel,
+        });
+        cta.addEventListener('click', function (ev) {
+            ev.preventDefault();
+            ctaAction();
+        });
+        wrap.appendChild(cta);
+
+        var fade = container.querySelector(':scope > .stream-fade-out');
+        if (fade) container.insertBefore(wrap, fade);
+        else container.appendChild(wrap);
+
+        // Hide the SSR'd focus entry + year-marker while the empty state
+        // is showing. The focus is a single post that doesn't satisfy the
+        // current filter (otherwise we wouldn't be here), so showing it
+        // alongside an "all is quiet" message reads as contradictory. The
+        // class flips off in clearStreamForFilterChange (next filter
+        // change) which restores the focus + marker.
+        setEmptyStateMode(true);
+    }
+
+    function setEmptyStateMode(active) {
+        var layoutRight = document.querySelector('.layout-right');
+        if (!layoutRight) return;
+        if (active) {
+            layoutRight.classList.add('is-empty-state');
+        } else {
+            layoutRight.classList.remove('is-empty-state');
+        }
+    }
+
+    /* ------------------------------------------------------------------
+       Boot + public API
+       ------------------------------------------------------------------ */
+
+    // Public per-post artifacts use <script defer>, so DOM is parsed by
+    // script-execution time. Owner SPA's index.html may load this without
+    // defer — guard against early script execution by checking readyState.
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+    // Public surface for downstream consumers (lazy fetch, filter integration,
+    // owner-SPA compose flow). Read-only by convention; mutating these is
+    // undefined behavior.
+    window.PolisStream = {
+        renderEntry: renderEntry,
+        renderers: renderers,
+        appendEntry: function (domEl) {
+            // Mark as dynamic so clearDynamicEntries can find it later.
+            if (domEl) domEl.classList.add('is-dynamic');
+            return appendEntry(domEl);
+        },
+        clearDynamicEntries: clearDynamicEntries,
+        getEntries: function () { return entries.slice(); },
+        getFocusedEntry: function () { return focusedEntry; },
+        announce: announce,
+        focusNext: focusNext,
+        focusPrev: focusPrev,
+        // Comment-panel API (step-05/5.i Phase B). Programmatic open/close
+        // of the focus entry's blessed-comment panel; click handlers in
+        // setupCommentsPanel call into the same functions.
+        openComments: openCommentsPanel,
+        closeComments: closeCommentsPanel,
+        toggleComments: toggleCommentsPanel,
+        // Read-focus exit hook. Owner SPA wires this into the write-focus
+        // openers (post editor, comment editor) so read-focus exits
+        // cleanly when the user pivots from "I'm reading this" to "I'm
+        // editing this" — otherwise both modes overlay (the bug fixed
+        // for drafts at 3d56ff9, generalized here to all editor entry
+        // points). Safe to call when no entry is in focus — no-ops.
+        exitFocusMode: exitFocusMode,
+        // onEscape is the canonical name. registerPopoverCloseHandler kept
+        // as an alias for any consumer that already wires against it; safe
+        // to remove once internal callers are migrated.
+        onEscape: registerPopoverCloseHandler,
+        registerPopoverCloseHandler: registerPopoverCloseHandler,
+        // Extension registries (step-06/6.a). Layer 3 + Layer 4 of the
+        // layered extension model. owner-extras.js wires against these;
+        // public bundle never subscribes.
+        afterRender: addAfterRenderListener,
+        registerRenderer: registerRenderer,
+        // step-06/6.b: filter-option extension point. owner-extras.js
+        // registers owner-only values (e.g., type=activity, scope=
+        // my-mutuals) via PolisStream.registerFilterOption(slot, opt).
+        registerFilterOption: registerFilterOption,
+        replaceFilterOptions: replaceFilterOptions,
+        // DM scope dropdown: owner-extras feeds the recent-conversations
+        // list (top 10, sorted by recency) so the scope dropdown for
+        // type=dms can serve as a fast-switcher across active threads.
+        // The pinned "↩ my mutuals" entry is added automatically by the
+        // controller; this setter only receives the dynamic per-thread
+        // entries.
+        setDMScopeOptions: setDMScopeOptions,
+        // step-06 follow-up: owner-extras unlocks qualifier + scope at
+        // init so the owner can toggle "all"/"new" and switch scopes
+        // via the sentence filter. Public surface stays SSR-locked.
+        unlockSlot: unlockSlot,
+        // step-06/6.c: programmatic filter setters. Owner SPA assigns
+        // initial scope at init; icon-row presets call these to load
+        // preset sentences without going through dropdown UX. All four
+        // trigger applyFilter() which clears + refetches.
+        setFilterScope: setFilterScope,
+        setFilterType: setFilterType,
+        setFilterQualifier: setFilterQualifier,
+        setFilterModifier: setFilterModifier,
+        // step-06/6.e: batch preset loader. Sets qualifier / type /
+        // scope / modifier in one pass and triggers a single
+        // applyFilter (one server fetch) — avoids the cascaded
+        // re-fetches you'd get from calling the individual setters
+        // sequentially.
+        setFilter: setFilter,
+        // R22 #11: re-run the bio-toggle measurement after owner-extras
+        // populates the bio HTML. Idempotent — calling it again just
+        // re-attaches handlers and re-measures overflow.
+        setupAboutToggle: setupAboutToggle,
+        // step-06/6.f.2 review concern #1: filter-change subscription.
+        // Listener is invoked AFTER any of the setFilter* / setFilter
+        // / selectOption mutations, with a snapshot
+        // {qualifier,type,scope,modifier}. owner-extras uses this to
+        // sync body.is-activity-mode against filterType regardless of
+        // which code path mutated the state.
+        onFilterChange: addFilterChangeListener,
+        // step-06/6.h follow-up: re-trigger applyFilter without
+        // mutating state. owner-extras calls this after a successful
+        // publish to pull the just-published post into the stream.
+        // Equivalent to "press refresh on the current filter."
+        refresh: function () { applyFilter(); },
+        // 06-profiles Phase 3: search wiring for "all profiles from
+        // all of polis". setSearchQuery mutates the module-local
+        // search string and re-runs the filter (clears the stream +
+        // re-fetches with &search=). Called from the .entry--search
+        // input keyup handler in owner-extras.js, debounced 250ms.
+        setSearchQuery: function (q) {
+            var next = (typeof q === 'string') ? q : '';
+            if (next === currentSearch) return;
+            currentSearch = next;
+            applyFilter();
+        },
+        getSearchQuery: function () { return currentSearch; },
+    };
+})();

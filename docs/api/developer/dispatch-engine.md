@@ -2,6 +2,8 @@
 
 The content type API is built on a two-layer architecture: a **dispatch engine** that routes operations to handlers, and a **REST API layer** that translates HTTP into engine calls.
 
+> **Currently wired content types** (handled end-to-end by `BuiltinCoreHandler` for the `pub.polis.core` bundle): `pub.polis.post` (list, create), `pub.polis.comment` (create), `pub.polis.follow` (list), `pub.polis.dm` (full CRUD: list/get/send/deliver/mark_read/delete/retry), `pub.polis.tag` (full CRUD: list/apply/remove/delete), `pub.polis.theme` (list, get). Other actions declared in `Actions()` have REST routes but the handler returns "unsupported action" until they are wired. See [reference.md § Current Implementation Status](reference.md#current-implementation-status) for the full matrix.
+
 ## Dispatch Engine (`cli-go/pkg/ops/`)
 
 The engine routes `ActionRequest` objects to the appropriate handler based on content type:
@@ -70,10 +72,13 @@ Handles all `pub.polis.core` content types by calling into `cli-go/pkg/` package
 - `pub.polis.post/list` → reads `index.jsonl`
 - `pub.polis.comment/create` → `blessing.Beseech()`
 - `pub.polis.follow/list` → `following.Load()`
+- `pub.polis.dm/{list,get,send,deliver,mark_read,delete,retry}` → `dm.*`
 - `pub.polis.tag/list` → lists tags with optional filters
 - `pub.polis.tag/apply` → applies a tag to a target URL
 - `pub.polis.tag/remove` → removes a tag from a target URL
 - `pub.polis.tag/delete` → deletes a tag and all associations
+- `pub.polis.theme/list` → returns themes declared by the active bundle (with `active` field)
+- `pub.polis.theme/get` → returns a single theme's manifest entry
 
 Each operation is a method on `BuiltinCoreHandler`. New operations are wired by adding a case to the action dispatch switch.
 

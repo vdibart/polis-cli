@@ -66,10 +66,6 @@ func BeseechComment(dataDir, commentID string, privateKey []byte, dsCfg ...*Disc
 		return nil, fmt.Errorf("POLIS_BASE_URL not configured")
 	}
 
-	if !discovery.IsRegisteredLocally(dataDir, dsURL) {
-		return nil, fmt.Errorf("site not registered with discovery service (run 'polis register' first)")
-	}
-
 	// Get the pending comment
 	signed, err := GetComment(dataDir, commentID, StatusPending)
 	if err != nil {
@@ -78,9 +74,30 @@ func BeseechComment(dataDir, commentID string, privateKey []byte, dsCfg ...*Disc
 
 	// Publish the comment to the public comments/ directory before DS registration.
 	// This makes the comment accessible via HTTPS so the post owner can fetch it
-	// when reviewing the blessing request (matches bash CLI behavior).
+	// when reviewing the blessing request (matches bash CLI behavior). Runs
+	// regardless of DS-registration status — when the site isn't registered we
+	// still want the comment to land on the local public mount so the user can
+	// share its URL / register later and resync.
 	if err := PublishComment(dataDir, commentID); err != nil {
 		return nil, fmt.Errorf("publish comment: %w", err)
+	}
+
+	// Registration check is now AFTER the local publish step. When the site
+	// hasn't registered with the DS, we don't have a relationship to invoke
+	// for blessing — short-circuit with a "deferred" result instead of an
+	// error. The comment is already signed (sign step) and on the public
+	// mount (PublishComment above); only the DS registration is deferred
+	// until the user runs 'polis register' and re-beseeches. Returning an
+	// error here would force callers to treat a known + expected state
+	// (unregistered site = no DS contact) as a runtime failure, which
+	// produced confusing HTTP 500s on the v4 SPA's first comment.
+	if !discovery.IsRegisteredLocally(dataDir, dsURL) {
+		return &BeseechResult{
+			Success: true,
+			Status:  "deferred",
+			Message: "Site not registered with discovery — comment saved locally. Register and re-beseech to send for blessing.",
+			Comment: signed.Meta,
+		}, nil
 	}
 
 	// Compute comment URL from base URL + date directory + comment ID

@@ -1,3 +1,23 @@
+// =============================================================================
+// HANDBOOK TRAIL MARKER — DS-to-stream thread (cursor + state storage)
+// =============================================================================
+// Store is the on-disk persistence layer for the continuous sync path. It
+// holds the per-projection cursors (cursors.json), the materialized state
+// (followers, blessings, notifications, feed cache as JSONL), and the
+// per-DS user config (notification rules, feed settings). state/ is safely
+// deletable — re-syncing from the DS rebuilds it from cursor=0.
+//
+// Trail across files (DS-to-stream, continuous sync):
+//   producer       — webapp/internal/server/sync.go: runUnifiedSync()
+//   DS endpoint    — discovery-service/core/handlers/stream.ts
+//   transformer    — cli-go/pkg/feed/handler.go (FeedHandler)
+//   cursor + cache — this file (Store)
+//
+// Pull the thread:
+//   github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md  (tour)
+//   github.com/vdibart/polis-cli/blob/main/AGENTS.md                      (map)
+// =============================================================================
+
 // Package stream manages per-projection cursors, state, and config on disk.
 //
 // Root: .polis/ds/<discovery-service-domain>/<bundle-name>/
@@ -14,6 +34,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 )
 
 // Store manages per-projection cursors, state, and config on disk.
@@ -181,7 +203,7 @@ func (s *Store) saveCursors(cf *CursorsFile) error {
 	if err != nil {
 		return fmt.Errorf("marshal cursors: %w", err)
 	}
-	return os.WriteFile(filepath.Join(s.stateDir, "cursors.json"), data, 0644)
+	return atomicfile.WriteFile(filepath.Join(s.stateDir, "cursors.json"), data, 0600)
 }
 
 // saveCursorsLocked writes cursors without acquiring the mutex (for use within already-locked methods).
@@ -193,7 +215,7 @@ func (s *Store) saveCursorsLocked(cf *CursorsFile) error {
 	if err != nil {
 		return fmt.Errorf("marshal cursors: %w", err)
 	}
-	return os.WriteFile(filepath.Join(s.stateDir, "cursors.json"), data, 0644)
+	return atomicfile.WriteFile(filepath.Join(s.stateDir, "cursors.json"), data, 0600)
 }
 
 // --- State operations (state/<name>.json) ---
@@ -202,6 +224,13 @@ func (s *Store) saveCursorsLocked(cf *CursorsFile) error {
 var stateFileMigrations = map[string]string{
 	"polis.follow":   "pub.polis.follow",
 	"polis.blessing": "pub.polis.comment.blessing",
+}
+
+// StatePath returns the absolute path of the state file for the given
+// name (without extension). Used by callers that need to stat the file
+// for mtime-based invalidation without reading its contents.
+func (s *Store) StatePath(name string) string {
+	return filepath.Join(s.stateDir, name+".json")
 }
 
 // LoadState loads state from state/<name>.json directly into target.
@@ -252,7 +281,7 @@ func (s *Store) SaveState(name string, state interface{}) error {
 	if err != nil {
 		return fmt.Errorf("marshal state %s: %w", name, err)
 	}
-	return os.WriteFile(filepath.Join(s.stateDir, name+".json"), data, 0644)
+	return atomicfile.WriteFile(filepath.Join(s.stateDir, name+".json"), data, 0600)
 }
 
 // --- Config operations (config/<name>.json) ---
@@ -285,5 +314,5 @@ func (s *Store) SaveConfig(name string, config interface{}) error {
 	if err != nil {
 		return fmt.Errorf("marshal config %s: %w", name, err)
 	}
-	return os.WriteFile(filepath.Join(s.configDir, name+".json"), data, 0644)
+	return atomicfile.WriteFile(filepath.Join(s.configDir, name+".json"), data, 0600)
 }

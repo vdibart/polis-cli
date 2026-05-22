@@ -11,6 +11,12 @@
     --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     --font-content: 'Newsreader', Georgia, 'Times New Roman', serif;
 
+    /* --stream-body-font-size is defined in
+       cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.css
+       (the v4 shape bundle's :root). One declaration, both surfaces.
+       Used here by .item-excerpt, .comment-detail-text, .mc-excerpt,
+       .conv-preview, .msg-bubble — all SPA stream-body rules. */
+
     /* Layout — shared across themes */
     --sidebar-width: 220px;
     --header-height: 50px;
@@ -197,6 +203,17 @@
     --preview-quote-border: #c0b8aa;
 }
 
+/* Paint the viewport background on <html> as well as <body> so the
+   page edge renders the theme color immediately on first paint. The
+   body's bg propagates to the viewport in most cases, but during
+   early paint (before body is laid out, during repaints from CSS
+   transitions, etc.) browsers can briefly show the html bg. Without
+   this rule, html falls back to canvas white and a flash of light
+   color appears even when the theme is dark. */
+html {
+    background: var(--bg);
+}
+
 body {
     font-family: var(--font-ui);
     font-size: 15px;
@@ -266,16 +283,33 @@ body {
     stroke-linecap: round;
     stroke-linejoin: round;
 }
-#nav-btn-feed svg path{stroke-width:1.4;}
-#nav-btn-feed svg circle.fo{fill:var(--nav-bg, var(--bar-bg));stroke-width:0.9;}
-#nav-btn-feed svg circle.ff{fill:var(--nav-icon, #a0a0a0);stroke:none !important;}
-#nav-btn-feed:hover svg circle.ff{fill:var(--nav-icon-hover, #e0e0e0);}
-#nav-btn-feed.active svg circle.ff{fill:var(--nav-icon-active, #fff);}
+#nav-btn-gateway svg path{stroke-width:1.7;}
+#nav-btn-gateway svg circle.fo{fill:var(--nav-bg, var(--bar-bg));stroke-width:1.1;}
+#nav-btn-gateway svg circle.ff{fill:var(--nav-icon, #a0a0a0);stroke:none !important;}
+#nav-btn-gateway:hover svg circle.ff{fill:var(--nav-icon-hover, #e0e0e0);}
+#nav-btn-gateway.active svg circle.ff{fill:var(--nav-icon-active, #fff);}
 .nav-icon-btn:hover svg line,
 .nav-icon-btn:hover svg path,
 .nav-icon-btn:hover svg circle,
 .nav-icon-btn:hover svg rect {
     stroke: var(--nav-icon-hover, #e0e0e0);
+}
+/* Write-anchor (+) hover pulls --network-color (the theme's
+   complementary token) instead of the generic nav-icon-hover, so the
+   "new thing" action is the only nav icon that swaps color on hover
+   in a distinct hue — visually paired with the ghost-compose row in
+   the stream which uses the same token. Falls back to nav-icon-hover
+   for any theme that doesn't define --network-color. Stroke bumped
+   from 1.6 → 2.0 on hover so the + reads at similar saturation to
+   the ghost glyph; thinner strokes were perceptibly more muted on
+   the lighter hover-bg rectangle even though the hex was identical. */
+#nav-btn-edit:hover {
+    color: var(--network-color, var(--nav-icon-hover, var(--text-primary, #e0e0e0)));
+}
+#nav-btn-edit:hover svg line,
+#nav-btn-edit:hover svg path {
+    stroke: var(--network-color, var(--nav-icon-hover, #e0e0e0));
+    stroke-width: 2;
 }
 .nav-icon-btn.active svg line,
 .nav-icon-btn.active svg path,
@@ -318,6 +352,130 @@ body {
     text-decoration: none; z-index: 1;
 }
 .nav-wordmark:hover { color: var(--bar-text-active); }
+@media (max-width: 600px) { .nav-wordmark { display: none; } }
+
+/* Mobile hamburger + drawer (R27 follow-up).
+   At/below 900px the owner SPA topbar collapses: hide the inline
+   avatar + icon-row + handle-label and replace them with a hamburger
+   button. 900px matches stream.css's mobile breakpoint (where
+   .polis-topbar { flex-direction: column } would otherwise fire) —
+   the column stack works for the public template's 3 items but the
+   owner SPA's 6 icon-buttons + avatar + handle is too many. */
+.nav-hamburger {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    background: none;
+    border: none;
+    color: var(--nav-icon, var(--text-secondary, #a0a0a0));
+    cursor: pointer;
+    padding: 0;
+    border-radius: 8px;
+    flex-shrink: 0;
+}
+.nav-hamburger:hover {
+    background: var(--nav-bg-hover, rgba(255,255,255,0.07));
+    color: var(--nav-icon-hover, var(--text-primary, #e0e0e0));
+}
+.nav-mobile-drawer { display: none; }
+
+@media (max-width: 900px) {
+    /* Override the stream.css mobile rule (.polis-topbar {flex-direction:column})
+       for the owner SPA — there are too many items to stack vertically,
+       so we collapse them into a hamburger instead. Matches the
+       stream.css @media (max-width: 900px) breakpoint exactly. */
+    body.is-owner .polis-topbar {
+        flex-direction: row !important;
+        align-items: center !important;
+        min-height: var(--topbar-height, 50px) !important;
+        padding: 0 12px !important;
+        gap: 6px;
+    }
+    body.is-owner .polis-topbar .avatar-wrap,
+    body.is-owner .polis-topbar > .nav-sep,
+    body.is-owner .polis-topbar .nav-icon-btn:not(.nav-hamburger),
+    body.is-owner .polis-handle-label {
+        display: none !important;
+    }
+    /* Keep .nav-spacer (flex:1) — pushes the filter to the right of
+       the hamburger so the topbar reads as "menu | filter". */
+    .nav-hamburger { display: flex; }
+
+    body.nav-menu-open .nav-mobile-drawer {
+        display: block;
+        position: absolute;
+        top: var(--topbar-height, 50px);
+        left: 0;
+        right: 0;
+        background: var(--nav-bg, var(--bar-bg, #1a1525));
+        border-bottom: 1px solid var(--nav-border, var(--border, rgba(255,255,255,0.08)));
+        padding: 14px 16px;
+        box-shadow: 0 6px 16px rgba(0,0,0,0.35);
+        z-index: 90;
+    }
+}
+.nav-mobile-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-bottom: 12px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--nav-border, var(--border, rgba(255,255,255,0.08)));
+}
+.nav-mobile-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: var(--nav-accent, var(--accent, #c8a878));
+    flex-shrink: 0;
+}
+.nav-mobile-site {
+    color: var(--text-primary, #e8e0f0);
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 14px;
+    text-decoration: none;
+    word-break: break-all;
+}
+.nav-mobile-site:hover { text-decoration: underline; }
+.nav-mobile-items {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.nav-mobile-item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 10px;
+    background: transparent;
+    border: none;
+    color: var(--text-primary, #e8e0f0);
+    font-size: 15px;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 6px;
+    font-family: inherit;
+    position: relative;
+}
+.nav-mobile-item:hover {
+    background: var(--nav-bg-hover, rgba(255,255,255,0.07));
+}
+.nav-mobile-item svg {
+    flex-shrink: 0;
+    color: var(--nav-icon, var(--text-secondary, #a0a0a0));
+}
+.nav-mobile-item .nav-dot {
+    position: static;
+    margin-left: auto;
+    border: none;
+}
+.nav-mobile-items hr {
+    border: none;
+    border-top: 1px solid var(--nav-border, var(--border, rgba(255,255,255,0.08)));
+    margin: 8px 0;
+}
 
 /* Nav separator */
 .nav-sep {
@@ -843,40 +1001,6 @@ button.success:hover {
 .domain-display a:hover {
     color: var(--accent-hover);
     text-decoration: underline;
-}
-
-.notification-bell {
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    padding: 4px;
-    position: relative;
-    display: flex;
-    align-items: center;
-    transition: color 0.2s;
-}
-
-.notification-bell:hover {
-    color: var(--accent-color);
-}
-
-.notification-bell.active {
-    color: var(--accent-color);
-}
-
-.notification-dot {
-    position: absolute;
-    top: 2px;
-    right: 0;
-    width: 8px;
-    height: 8px;
-    background: #e74c3c;
-    border-radius: 50%;
-}
-
-.notification-dot.hidden {
-    display: none;
 }
 
 /* Main Container */
@@ -1941,7 +2065,11 @@ button.success:hover {
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 100;
+    /* Above the editor card's focus-mode z-index (100, set in
+       stream.css body.is-editor-focus .entry--editor). Without
+       this, modals/dialogs are hidden behind the fullscreen editor
+       when Ctrl+Shift+F is active. */
+    z-index: 200;
 }
 .editor-help-modal.hidden { display: none; }
 .editor-help-content {
@@ -4703,137 +4831,6 @@ a.activity-event:hover {
     padding: 12px;
 }
 
-/* ==================== Community Pulse ==================== */
-
-.pulse-dashboard {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    padding: 16px;
-}
-
-.pulse-card {
-    background: var(--surface-color);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 16px;
-}
-
-.pulse-card-title {
-    font-size: 0.8rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-muted);
-    margin-bottom: 12px;
-}
-
-.pulse-stats-row {
-    display: flex;
-    gap: 24px;
-}
-
-.pulse-stat {
-    text-align: center;
-    min-width: 60px;
-}
-
-.pulse-stat-value {
-    font-size: 1.5rem;
-    font-weight: 700;
-    color: var(--accent-color);
-    line-height: 1.2;
-}
-
-.pulse-stat-value.pulse-stat-warning {
-    color: var(--salmon);
-}
-
-.pulse-stat-label {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    margin-top: 2px;
-}
-
-.pulse-highlight {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-    flex-wrap: wrap;
-}
-
-.pulse-highlight:last-child {
-    border-bottom: none;
-}
-
-.pulse-type-badge {
-    display: inline-block;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-size: 0.65rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    background: rgba(95, 175, 175, 0.15);
-    color: var(--accent-color);
-    flex-shrink: 0;
-}
-
-.pulse-highlight-title {
-    font-size: 0.85rem;
-    color: var(--text-color);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    flex: 1;
-    min-width: 0;
-}
-
-.pulse-unread-dot {
-    display: inline-block;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent-color);
-    flex-shrink: 0;
-}
-
-.pulse-highlight-meta {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    white-space: nowrap;
-    flex-shrink: 0;
-}
-
-.pulse-author {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 6px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-}
-
-.pulse-author:last-child {
-    border-bottom: none;
-}
-
-.pulse-author-domain {
-    font-size: 0.85rem;
-    color: var(--accent-color);
-    font-weight: 600;
-}
-
-.pulse-author-stats {
-    font-size: 0.8rem;
-    color: var(--text-muted);
-}
-
-.pulse-empty {
-    font-size: 0.85rem;
-    color: var(--text-muted);
-    padding: 8px 0;
-}
 
 /* ==================== Followers ==================== */
 
@@ -6004,7 +6001,8 @@ a.activity-event:hover {
 
 .item-excerpt {
     font-family: var(--font-content);
-    font-size: 1rem; line-height: 1.55;
+    font-size: var(--stream-body-font-size);
+    line-height: 1.55;
     color: var(--text-secondary);
     display: -webkit-box; -webkit-line-clamp: 2;
     -webkit-box-orient: vertical; overflow: hidden;
@@ -6073,7 +6071,8 @@ a.activity-event:hover {
 .comment-detail-time { font-size: 0.68rem; color: var(--text-faint); margin-left: auto; }
 .comment-detail-text {
     font-family: var(--font-content);
-    font-size: 0.88rem; line-height: 1.45;
+    font-size: var(--stream-body-font-size);
+    line-height: 1.45;
     color: var(--text-secondary);
     padding: 0 0.85rem 0.55rem;
     display: -webkit-box; -webkit-line-clamp: 2;
@@ -6322,7 +6321,8 @@ a.activity-event:hover {
     display: flex; align-items: center; gap: 8px;
 }
 .mc-excerpt {
-    font-family: var(--font-content); font-size: 14.5px;
+    font-family: var(--font-content);
+    font-size: var(--stream-body-font-size);
     color: var(--text-secondary); line-height: 1.55;
 }
 .mc-draft-badge {
@@ -6547,7 +6547,7 @@ a.activity-event:hover {
 
 .conv-preview {
     font-family: var(--font-content);
-    font-size: 0.88rem;
+    font-size: var(--stream-body-font-size);
     color: var(--text-secondary);
     line-height: 1.45;
     white-space: nowrap;
@@ -6709,7 +6709,7 @@ a.activity-event:hover {
     padding: 0.6rem 0.85rem;
     border-radius: 14px;
     font-family: var(--font-content);
-    font-size: 0.9rem;
+    font-size: var(--stream-body-font-size);
     line-height: 1.5;
     position: relative;
 }
@@ -7292,7 +7292,10 @@ a.activity-event:hover {
 /* ── Floating Selection Toolbar ── */
 .editor-toolbar {
     position: fixed;
-    z-index: 50;
+    /* Above the editor card's focus-mode z-index (100, set in
+       stream.css body.is-editor-focus .entry--editor). Hidden
+       behind the fullscreen editor at z:50. */
+    z-index: 200;
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -7328,7 +7331,12 @@ a.activity-event:hover {
 /* ── Slash Command Menu ── */
 .editor-slash-menu {
     position: fixed;
-    z-index: 50;
+    /* Above the editor card's focus-mode z-index (100, set in
+       stream.css body.is-editor-focus .entry--editor). Hidden
+       behind the fullscreen editor at z:50 — was the root cause
+       of "/" appearing to do nothing in focus mode (the menu was
+       opening, just not visible). */
+    z-index: 200;
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -7363,4 +7371,109 @@ a.activity-event:hover {
     font-weight: 600;
     color: var(--accent);
     flex-shrink: 0;
+}
+
+/* ── R22 #11 — Scratch-column owner card ────────────────────────────────
+   Owner-only chrome in the layout-left scratch column. The structural
+   pieces (.site-identity / .site-bio / .site-stats) inherit their
+   layout from the v4 stream.css; these rules add owner-specific
+   affordances: the inline edit-link, the bio-edit form, and the
+   save/cancel button row. */
+.owner-card-edit-link {
+    background: none;
+    border: none;
+    padding: 0;
+    margin-top: 4px;
+    color: var(--accent);
+    font-family: 'Inter', sans-serif;
+    font-size: 12px;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+.owner-card-edit-link:hover { color: var(--text-primary); }
+.owner-card-bio-edit {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+/* R26 #4: about editor uses the same typography as the rendered bio
+   in .layout-left (Inter 14px, line-height 1.55, soft color, no
+   visible border/padding chrome) so the transition between view ↔
+   edit is visually seamless. The wrapper background is transparent
+   too — we let the focus state (a subtle ring on focus-within)
+   stand in for an explicit input frame. */
+.owner-card-bio-edit textarea {
+    width: 100%;
+    min-height: 6em;
+    background: transparent;
+    color: var(--text-soft, var(--text-primary));
+    border: none;
+    padding: 0;
+    font-family: 'Inter', sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
+    resize: vertical;
+    outline: none;
+}
+.owner-card-bio-edit .milkdown-mount {
+    background: transparent;
+    border: none;
+    min-height: 6em;
+}
+.owner-card-bio-edit .milkdown-mount .ProseMirror {
+    /* Scoped override of the post-editor's Newsreader serif so the
+       about edit surface matches the rendered .site-bio (Inter,
+       14px). Keep the ProseMirror min-height + padding behavior. */
+    font-family: 'Inter', sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--text-soft, var(--text-primary));
+    padding: 0;
+}
+.owner-card-bio-edit .milkdown-mount .ProseMirror p {
+    /* Match .layout-left .site-bio p (zero default margin + small
+       inter-paragraph gap) so the edit form's paragraph spacing
+       matches what the rendered bio shows. */
+    margin: 0;
+}
+.owner-card-bio-edit .milkdown-mount .ProseMirror p + p {
+    margin-top: 0.9em;
+}
+.owner-card-bio-edit:focus-within {
+    /* Subtle outline-ring on focus stands in for the explicit border
+       chrome we dropped. */
+    box-shadow: inset 0 0 0 1px var(--accent, currentColor);
+    border-radius: 4px;
+    padding: 4px 6px;
+    margin: -4px -6px;
+}
+.owner-card-bio-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+}
+.owner-card-bio-actions button {
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+.owner-card-bio-actions button.primary {
+    background: var(--accent);
+    color: var(--bar-text-active, #fff);
+    border-color: var(--accent);
+}
+.owner-card-bio-actions button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+/* Empty-state hides the bio block entirely so the column doesn't
+   show a hollow placeholder before the fetch lands. */
+#owner-card-bio:empty + .site-bio-toggle {
+    display: none;
 }

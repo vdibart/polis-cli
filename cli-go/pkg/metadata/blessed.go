@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,6 +24,19 @@ const (
 	// BlessedCommentsFilename is the name of the blessed comments index file.
 	BlessedCommentsFilename = "blessed.json"
 )
+
+// blessedMu serializes load + modify + save of blessed.json across all
+// entry points in this package. Without it, AddBlessedComment,
+// RemoveBlessedComment, and SaveBlessedComments callers race on the
+// shared on-disk file: each reads the same snapshot, modifies its
+// copy, and writes back — last writer wins, dropping the other's
+// entries. Same shape as R19-1's reply-context cache race; see
+// `plans/operational-hardening.md` R22 for the full diagnosis.
+//
+// All public mutators (Add, Remove, Save) take this lock. Internal
+// helpers that already hold it use the saveLocked variant to avoid
+// re-entrancy.
+var blessedMu sync.Mutex
 
 // BlessedComments represents the blessed-comments.json file structure.
 // This file is the public index of comments that the site owner has blessed,
@@ -47,7 +61,20 @@ type BlessedComment struct {
 
 // LoadBlessedComments reads the blessed-comments.json file from the metadata directory.
 // Returns an error if the file doesn't exist.
+//
+// Reads are not synchronized against concurrent writers — the file is
+// updated atomically via rename in saveBlessedCommentsLocked, so a
+// reader observes either the pre-write or post-write contents but
+// never a partial write. For load+modify+save callers, use
+// AddBlessedComment / RemoveBlessedComment to get the right
+// serialization; direct LoadBlessedComments is for read-only paths.
 func LoadBlessedComments(siteDir string) (*BlessedComments, error) {
+	return loadBlessedCommentsRaw(siteDir)
+}
+
+// loadBlessedCommentsRaw is the unsynchronized read path; reused from
+// inside the locked Add/Remove flows.
+func loadBlessedCommentsRaw(siteDir string) (*BlessedComments, error) {
 	filePath := filepath.Join(siteDir, BundleContentDir, "comment", BlessedCommentsFilename)
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -64,7 +91,20 @@ func LoadBlessedComments(siteDir string) (*BlessedComments, error) {
 
 // SaveBlessedComments writes the blessed-comments.json file atomically.
 // It writes to a temporary file first, then renames to ensure atomic update.
+//
+// Takes blessedMu so callers doing their own load+modify+save sequence
+// (e.g. index rebuild) are serialized against AddBlessedComment /
+// RemoveBlessedComment. Internal callers that already hold the lock
+// use saveBlessedCommentsLocked.
 func SaveBlessedComments(siteDir string, bc *BlessedComments) error {
+	blessedMu.Lock()
+	defer blessedMu.Unlock()
+	return saveBlessedCommentsLocked(siteDir, bc)
+}
+
+// saveBlessedCommentsLocked is the unsynchronized write path. Caller
+// must hold blessedMu.
+func saveBlessedCommentsLocked(siteDir string, bc *BlessedComments) error {
 	metadataDir := filepath.Join(siteDir, BundleContentDir, "comment")
 	if err := os.MkdirAll(metadataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create metadata directory: %w", err)
@@ -75,7 +115,8 @@ func SaveBlessedComments(siteDir string, bc *BlessedComments) error {
 		return fmt.Errorf("failed to marshal blessed comments: %w", err)
 	}
 
-	// Write atomically via temp file
+	// Write atomically via temp file. The shared `.tmp` filename is
+	// safe under blessedMu — only one goroutine holds it at a time.
 	filePath := filepath.Join(metadataDir, BlessedCommentsFilename)
 	tmpPath := filePath + ".tmp"
 
@@ -91,41 +132,22 @@ func SaveBlessedComments(siteDir string, bc *BlessedComments) error {
 	return nil
 }
 
-// InitBlessedComments creates an empty blessed-comments.json if it doesn't exist.
-// Returns nil if the file already exists (does not overwrite).
-func InitBlessedComments(siteDir string, version string) error {
-	filePath := filepath.Join(siteDir, BundleContentDir, "comment", BlessedCommentsFilename)
-
-	// Check if file already exists
-	if _, err := os.Stat(filePath); err == nil {
-		return nil // Already exists, don't overwrite
-	}
-
-	// Create metadata directory if needed
-	metadataDir := filepath.Join(siteDir, BundleContentDir, "comment")
-	if err := os.MkdirAll(metadataDir, 0755); err != nil {
-		return fmt.Errorf("failed to create metadata directory: %w", err)
-	}
-
-	// Create empty structure
-	bc := &BlessedComments{
-		Version:  version,
-		Comments: []PostComments{},
-	}
-
-	return SaveBlessedComments(siteDir, bc)
-}
-
 // AddBlessedComment adds a comment to the blessed comments index.
 // Creates the post entry if it doesn't exist.
-// This is an atomic read-modify-write operation.
+//
+// Holds blessedMu for the full load+modify+save cycle to prevent
+// concurrent callers from losing each other's entries.
 func AddBlessedComment(siteDir string, postPath string, comment BlessedComment, generator ...string) error {
+	blessedMu.Lock()
+	defer blessedMu.Unlock()
+
 	gen := GetGenerator()
 	if len(generator) > 0 && generator[0] != "" {
 		gen = generator[0]
 	}
-	// Load current state
-	bc, err := LoadBlessedComments(siteDir)
+	// Load current state. loadBlessedCommentsRaw bypasses the mutex
+	// since we already hold it.
+	bc, err := loadBlessedCommentsRaw(siteDir)
 	if err != nil {
 		// If file doesn't exist, create new structure
 		if errors.Is(err, os.ErrNotExist) {
@@ -149,7 +171,7 @@ func AddBlessedComment(siteDir string, postPath string, comment BlessedComment, 
 		if pc.Post == postPath {
 			// Check if comment already exists (by URL or version)
 			for _, existing := range pc.Blessed {
-				if existing.URL == comment.URL || existing.Version == comment.Version {
+				if existing.URL == comment.URL || (comment.Version != "" && existing.Version == comment.Version) {
 					// Already blessed, nothing to do
 					return nil
 				}
@@ -169,13 +191,18 @@ func AddBlessedComment(siteDir string, postPath string, comment BlessedComment, 
 		})
 	}
 
-	return SaveBlessedComments(siteDir, bc)
+	return saveBlessedCommentsLocked(siteDir, bc)
 }
 
 // RemoveBlessedComment removes a comment from the blessed comments index.
 // Matches by URL.
+//
+// Holds blessedMu for the full load+modify+save cycle.
 func RemoveBlessedComment(siteDir string, commentURL string) error {
-	bc, err := LoadBlessedComments(siteDir)
+	blessedMu.Lock()
+	defer blessedMu.Unlock()
+
+	bc, err := loadBlessedCommentsRaw(siteDir)
 	if err != nil {
 		return err
 	}
@@ -192,7 +219,7 @@ func RemoveBlessedComment(siteDir string, commentURL string) error {
 					bc.Comments = append(bc.Comments[:i], bc.Comments[i+1:]...)
 				}
 
-				return SaveBlessedComments(siteDir, bc)
+				return saveBlessedCommentsLocked(siteDir, bc)
 			}
 		}
 	}
@@ -261,23 +288,3 @@ func MatchesPostPath(stored, query string) bool {
 	return storedRelBase == queryRelBase
 }
 
-// IsBlessedComment checks if a comment URL is in the blessed index.
-func IsBlessedComment(siteDir string, commentURL string) (bool, error) {
-	bc, err := LoadBlessedComments(siteDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, err
-	}
-
-	for _, pc := range bc.Comments {
-		for _, c := range pc.Blessed {
-			if c.URL == commentURL {
-				return true, nil
-			}
-		}
-	}
-
-	return false, nil
-}

@@ -621,12 +621,12 @@ Private policies are loaded first and take precedence over public policies due t
 Policy files start with a version/generator header line, followed by one JSON object per rule:
 
 ```json
-{"version":1,"generator":"polis-cli-go/0.57.0"}
-{"active": true, "policy": "allow pub.polis.comment from following"}
+{"version":2,"generator":"polis-cli-go/0.63.0"}
+{"active": true, "policy": "bless pub.polis.comment from following"}
 {"active": false, "policy": "deny all from all at spam.com"}
 ```
 
-The header line is not a rule — it records the file format version and the CLI version that created it. Parsers skip any line containing a `"version"` key.
+The header line is not a rule — it records the file format version and the CLI version that created it. Parsers skip any line containing a `"version"` key. **The current file format version is `2`**, introduced with the decision-verb grammar refactor; v1 files are detected by Patrol and silently rewritten by Medic to v2.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -643,21 +643,27 @@ Inactive rules (`"active": false`) are skipped during evaluation. This allows di
 
 | Component | Values | Description |
 |-----------|--------|-------------|
-| `action` | `allow`, `deny`, `emit`, `omit` | What to do when the rule matches |
+| `action` | `allow`, `deny`, `bless`, `review`, `emit`, `omit` | What to do when the rule matches |
 | `type-match` | `all`, `none`, dotted type prefix | Event type to match |
 | `from` | literal keyword | Required separator |
 | `source-match` | `all`, `none`, `following`, `followers`, `self`, `thread-blessed` | Who the event is from |
 | `at <domain>` | optional | Restrict match to a specific actor domain |
 | `on <target>` | optional | Restrict match to a specific target path |
 
-**Verb semantics:**
+**Verbs are layered.** The six verbs are not interchangeable — each belongs to a specific *policy layer*, and the parser rejects combinations that don't fit the target layer. The authoritative spec of which verb + type combinations are valid in which layer lives in [`docs/general/policy-grammar.md`](./policy-grammar.md). The short form:
 
-| Verb pair | Category | Purpose | Example |
-|-----------|----------|---------|---------|
-| `allow` / `deny` | Access control | Gate **incoming** events — determine whether content from a given source is accepted or rejected | `allow pub.polis.comment from following` accepts comments from followed authors |
-| `emit` / `omit` | Side-effect control | Trigger or suppress **outgoing** side-effects in response to events | `emit pub.polis.comment.blessing from following` auto-blesses comments from followed authors; `omit pub.polis.notification from self` suppresses self-notifications |
+| Layer | Purpose | Verbs |
+|---|---|---|
+| **1. Tenant inbound** | Decisions about content that concerns me | `allow`, `deny`, `bless`, `review` |
+| **2. Tenant outbound** | Whether to announce my events to the DS | `emit`, `omit` (reserved — no evaluator yet) |
+| **3. DS operator ingestion** | Whether to admit an announcement to the DS stream | `allow`, `deny` |
 
-Access control verbs (`allow`/`deny`) answer "should this event be accepted?" Side-effect verbs (`emit`/`omit`) answer "should this event trigger an automatic action?" Both use the same grammar and evaluation model. See `docs/cli/user/policies.md` for full usage guide.
+- **Layer 1 / `allow`, `deny`** (DMs only): accept or reject inbound DMs.
+- **Layer 1 / `bless`, `review`, `deny`** (comments only): auto-display the comment on your post, queue it for human review, or reject it. `allow pub.polis.comment` is not valid — comments don't have a tenant-side acceptance step; they live on the commenter's site.
+- **Layer 2 / `emit`, `omit`**: parse and persist but have no evaluator today. Reserved for a future outbound-announcement-filter feature.
+- **Layer 3 / `allow`, `deny`**: lives in the DS `ds_operator_policies` table, not in tenant files. Gates whether announcements (`pub.polis.post`, `pub.polis.follow`, etc.) enter the DS stream.
+
+See [`docs/cli/user/policies.md`](../cli/user/policies.md) for the user-facing guide and [`docs/general/policy-grammar.md`](./policy-grammar.md) for the full verb-by-layer matrix and legacy-grammar notes.
 
 ### Type Matching
 
@@ -687,28 +693,30 @@ Type matching uses **prefix matching with dot boundary**: `pub.polis.comment` ma
 2. **First match wins**: The first active rule that matches the event determines the outcome
 3. **Default allow**: If no rule matches, the event is allowed (permissive by default)
 
-This evaluation model is critical for the blessing workflow. `EvaluateExplicit` returns an `EvalResult` that distinguishes between all four decisions:
+This evaluation model is critical for the blessing workflow. `EvaluateExplicit` returns an `EvalResult` that distinguishes between six decisions plus the no-match case:
 
 | Outcome | Decision | Matched | Meaning |
 |---------|----------|---------|---------|
-| Explicit allow | `Allow` | `true` | A rule explicitly permits this; auto-grant blessing |
-| Explicit deny | `Deny` | `true` | A rule explicitly forbids this; auto-deny blessing |
-| Explicit emit | `Emit` | `true` | A rule triggers an outgoing side-effect (e.g., auto-bless) |
-| Explicit omit | `Omit` | `true` | A rule suppresses an outgoing side-effect (e.g., skip notification) |
-| No match | `Allow` | `false` | No rule matched; requires manual review |
+| Explicit bless | `Bless` | `true` | Auto-grant blessing (v2 grammar, Layer 1 comment decision) |
+| Explicit review | `Review` | `true` | Queue for human review (v2 grammar, Layer 1 comment decision) |
+| Explicit deny | `Deny` | `true` | Auto-deny — the rule explicitly forbids this |
+| Explicit allow | `Allow` | `true` | Grant access — used for DM acceptance (Layer 1) or stream ingestion (Layer 3) |
+| Explicit emit | `Emit` | `true` | Layer 2 outbound announcement (reserved); also retained for legacy-translated blessing rules |
+| Explicit omit | `Omit` | `true` | Layer 2 outbound suppression (reserved) |
+| No match | `Allow` | `false` | No rule matched; pending / requires manual review |
 
-The `EvalResult` also includes `Rule` (the raw policy string that matched) and `RuleIdx` (index in the policy list, -1 if no match), useful for logging and debugging.
+The `EvalResult` also includes `Rule` (the **raw** policy string that matched, preserved byte-exact for signature verification — critical for legacy `emit pub.polis.comment.blessing` strings that the parser translates at read time) and `RuleIdx` (index in the policy list, -1 if no match).
 
 ### Examples
 
-**Follow-only comments** (only people you follow can comment):
+**Follow-only auto-blessing** (v2 default for comments):
 
 ```jsonl
-{"active":true,"policy":"allow pub.polis.comment from following"}
-{"active":true,"policy":"deny pub.polis.comment from all"}
+{"active":true,"policy":"bless pub.polis.comment from following"}
+{"active":true,"policy":"review pub.polis.comment from all"}
 ```
 
-Non-comment events (follows, etc.) fall through both rules and are allowed by default.
+Comments from followed domains are auto-blessed; everyone else lands in the review queue.
 
 **Domain block** (block all events from a specific domain):
 
@@ -716,21 +724,13 @@ Non-comment events (follows, etc.) fall through both rules and are allowed by de
 {"active":true,"policy":"deny all from all at evil.corp"}
 ```
 
-**Auto-bless comments from followed authors**:
-
-```jsonl
-{"active":true,"policy":"emit pub.polis.comment.blessing from following"}
-```
-
-When a blessing request arrives from a followed domain, `EvaluateExplicit` returns `(Emit, true)`, triggering automatic granting.
-
 **Post-specific deny** (disable comments on a specific post):
 
 ```jsonl
 {"active":true,"policy":"deny pub.polis.comment from all on posts/2026/01/draft.md"}
 ```
 
-**Private blocklist + public allowlist** (combined private and public policies):
+**Private blocklist + public ruleset**:
 
 Private `.polis/policies/rules.jsonl`:
 ```jsonl
@@ -738,43 +738,42 @@ Private `.polis/policies/rules.jsonl`:
 {"active":true,"policy":"deny all from all at troll.net"}
 ```
 
-Public `policies/rules.jsonl`:
-```jsonl
-{"active":true,"policy":"allow pub.polis.comment from following"}
-{"active":true,"policy":"deny pub.polis.comment from all"}
-```
+Public `policies/rules.jsonl`: canonical v2 defaults.
 
-Private blocklist rules fire first (blocking spam.com and troll.net for all event types), then public rules control comment access.
+Private blocklist rules fire first (blocking both domains for all event types); public rules then govern the default flow.
 
 ### Default Policies
 
-New sites are initialized with two policy files containing 10 rules total.
+New sites are initialized with the canonical v2 files. The public file contains 7 active rules (DM inbound + comment blessing/review + catch-all deny); the private file is empty by default.
 
-**Public** (`policies/rules.jsonl`) — visible to visitors, controls side-effects:
-
-```jsonl
-{"version":1,"generator":"polis-cli-go/0.57.0"}
-{"active":true,"policy":"emit pub.polis.comment.blessing from self"}
-{"active":true,"policy":"emit pub.polis.comment.blessing from following"}
-{"active":true,"policy":"emit pub.polis.comment.blessing from thread-blessed"}
-```
-
-These auto-bless comments from yourself, followed authors, and anyone already blessed in the thread.
-
-**Private** (`.polis/policies/rules.jsonl`) — not published, controls access and notifications:
+**Public** (`policies/rules.jsonl`):
 
 ```jsonl
-{"version":1,"generator":"polis-cli-go/0.57.0"}
-{"active":true,"policy":"allow pub.polis.post from all"}
-{"active":true,"policy":"allow pub.polis.comment from all"}
-{"active":true,"policy":"allow pub.polis.follow from all"}
-{"active":true,"policy":"allow pub.polis.site from all"}
+{"version":2,"generator":"polis-cli-go/0.63.0"}
 {"active":true,"policy":"allow pub.polis.dm from following"}
 {"active":true,"policy":"deny pub.polis.dm from all"}
-{"active":true,"policy":"omit pub.polis.notification from self"}
+{"active":true,"policy":"bless pub.polis.comment from self"}
+{"active":true,"policy":"bless pub.polis.comment from following"}
+{"active":true,"policy":"bless pub.polis.comment from thread-blessed"}
+{"active":true,"policy":"review pub.polis.comment from all"}
+{"active":true,"policy":"deny all from all"}
 ```
 
-The private defaults allow all standard content types from everyone, restrict DMs to followed domains (allow-then-deny ordering), and suppress self-notifications.
+**Private** (`.polis/policies/rules.jsonl`):
+
+```jsonl
+{"version":2,"generator":"polis-cli-go/0.63.0"}
+```
+
+Empty by default. Add per-instance overrides (e.g. silent domain blocks) here.
+
+### Legacy grammar (v1)
+
+Before v2, blessing rules were written as `emit pub.polis.comment.blessing from <scope>`. The parser still accepts this form because DS-signed historical attestations embed the matched `policy_rule` string verbatim. Rewriting those strings would invalidate their signatures.
+
+The parser translates legacy strings at read time to the v2 equivalent (`bless pub.polis.comment from <scope>`) for evaluation purposes. The **raw** string is preserved in `EvalResult.Rule` so signature verification continues to succeed byte-exact. Writers (new policy files, Medic rewrites, seeded operator policies) never emit the legacy form.
+
+Patrol detects v1 files by their `version:1` header and Medic silently rewrites them with the canonical v2 defaults on the next healing sweep. Because per-tenant policy customization does not yet exist, overwrite is safe; when customization lands, the rewrite logic will be replaced with a real translator.
 
 ### DM Acceptance Policy
 
@@ -989,7 +988,7 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 
 | Aspect | Detail |
 |--------|--------|
-| **Attack** | Attacker gains filesystem access to `.polis/content/pub.polis.core/dm/` |
+| **Attack** | Attacker gains filesystem access to `.polis/bundles/pub.polis.core/dm/` |
 | **Mitigation** | Message content encrypted with secretbox using HKDF-derived key; file permissions 0600; metadata (from, to, timestamp) remains cleartext |
 | **Residual risk** | Attacker with private key access can derive storage key and decrypt all stored DMs. Metadata (who you message, when, how often) is visible without decryption. |
 
@@ -1135,15 +1134,15 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 
 | Aspect | Security Property |
 |--------|-------------------|
-| **Schedule** | Hourly background job on hosted service (`judgeTick = 1 * time.Hour`) |
+| **Schedule** | Hourly background job on the hosted runtime |
 | **HTTP content verification** | Fetches posts via loopback HTTP and verifies Ed25519 signatures + SHA-256 content hashes, testing the full serving pipeline end-to-end |
 | **DS attestation audit** | Verifies structural integrity of blessed comments index; full DS attestation signature verification against DS public key planned for future iteration |
-| **Key continuity monitoring** | Tracks each tenant's public key fingerprint over time; alerts on unexpected key changes (proto-TOFU). Baselines stored at `/data/judge/{handle}/key_baseline.json` |
-| **Policy snapshot verification** | Snapshots policy file hashes; detects retroactive policy changes after blessings were granted. Snapshots stored at `/data/judge/{handle}/policy_snapshot.json` |
+| **Key continuity monitoring** | Tracks each tenant's public key fingerprint over time; alerts on unexpected key changes (proto-TOFU) |
+| **Policy snapshot verification** | Snapshots policy file hashes; detects retroactive policy changes after blessings were granted |
 | **Index consistency** | Verifies `index.jsonl` entries match real signed files on disk; detects orphaned entries (indexed but missing), phantom files (on disk but not indexed), and hash mismatches |
 | **Cross-site comment verification** | Verifies blessed comment signatures against the claimed author's current public key (fetched from the author's `.well-known/polis` via HTTPS) |
-| **State persistence** | Judge state survives restarts via `/data/judge/` directory on the Fly.io persistent volume |
-| **Observability** | All findings emitted as structured JSON events (`judge.sweep`, `judge.fail.*`, `judge.alert.*`, `judge.info.*`) to Axiom for monitoring and alerting |
+| **State persistence** | Baselines, snapshots, and monitoring state persist across restarts via the hosted runtime's storage layer |
+| **Observability** | All findings emitted as structured JSON events (`judge.sweep`, `judge.fail.*`, `judge.alert.*`, `judge.info.*`) to the hosted runtime's observability backend |
 | **Graceful degradation** | External HTTP failures (item 6) are skipped gracefully with 5-second timeouts; unreachable domains are cached to avoid retry storms |
 
 ---

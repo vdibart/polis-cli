@@ -21,7 +21,7 @@ type SyncResult struct {
 // SyncPendingComments checks all pending comments with the discovery service
 // and moves them to blessed/denied based on their status.
 // It also runs the post-comment hook when a comment is blessed.
-// Pending/denied comments are in .polis/content/pub.polis.core/comments/, blessed go to content/pub.polis.core/comment/YYYYMMDD/.
+// Pending/denied comments are in .polis/bundles/pub.polis.core/comments/, blessed go to content/pub.polis.core/comment/YYYYMMDD/.
 // baseURL is this site's base URL (e.g. "https://follower1.polis.pub"), used to
 // reconstruct comment URLs from frontmatter when the flat comment_url field is absent.
 func SyncPendingComments(dataDir, baseURL string, discoveryClient *discovery.Client, hookConfig *hooks.HookConfig) (*SyncResult, error) {
@@ -284,94 +284,3 @@ func SyncFromEvents(dataDir, baseURL string, events []discovery.StreamEvent, hoo
 	return result, nil
 }
 
-// SyncSingleComment syncs a single comment by ID.
-// baseURL is this site's base URL, used to reconstruct comment URLs when missing.
-func SyncSingleComment(dataDir, baseURL, commentID string, discoveryClient *discovery.Client, hookConfig *hooks.HookConfig) (string, error) {
-	// Read comment to get URL
-	commentPath := filepath.Join(getCommentDir(dataDir, StatusPending), commentID+".md")
-	data, err := os.ReadFile(commentPath)
-	if err != nil {
-		return "", err
-	}
-
-	content := string(data)
-	fm := ParseFrontmatter(content)
-
-	// Reconstruct commentURL: prefer flat field, fall back to baseURL + date + ID
-	commentURL := fm["comment_url"]
-	if commentURL == "" && baseURL != "" {
-		timestamp := time.Now().UTC()
-		if ts := fm["published"]; ts != "" {
-			if parsed, err := time.Parse("2006-01-02T15:04:05Z", ts); err == nil {
-				timestamp = parsed
-			}
-		}
-		dateDir := timestamp.Format("20060102")
-		commentURL = strings.TrimSuffix(baseURL, "/") + "/comments/" + dateDir + "/" + commentID + ".md"
-	}
-
-	// Parse in_reply_to: prefer nested format, fall back to flat field
-	inReplyTo, _ := ParseNestedInReplyTo(content)
-	if inReplyTo == "" {
-		inReplyTo = fm["in_reply_to"]
-	}
-
-	if commentURL == "" || inReplyTo == "" {
-		return "", nil
-	}
-
-	// Check status via relationship-query
-	resp, err := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
-		"source_url": commentURL,
-		"target_url": inReplyTo,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	status := "pending"
-	if resp != nil && len(resp.Records) > 0 {
-		status = resp.Records[0].Status
-	}
-
-	switch status {
-	case "granted":
-		if err := MoveComment(dataDir, commentID, StatusPending, StatusBlessed); err != nil {
-			return "", err
-		}
-
-		// Run hook
-		if hookConfig != nil {
-			// Determine the blessed comment path based on timestamp
-			timestamp := time.Now().UTC()
-			if ts := fm["timestamp"]; ts != "" {
-				if parsed, err := time.Parse("2006-01-02T15:04:05Z", ts); err == nil {
-					timestamp = parsed
-				}
-			}
-			dateDir := timestamp.Format("20060102")
-			blessedPath := filepath.Join("comments", dateDir, commentID+".md")
-
-			payload := &hooks.HookPayload{
-				Event:         hooks.EventPostComment,
-				Path:          blessedPath,
-				Title:         fm["in_reply_to"],
-				Version:       fm["comment_version"],
-				Timestamp:     time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-				CommitMessage: hooks.GenerateCommitMessage(hooks.EventPostComment, fm["in_reply_to"]),
-			}
-			hooks.RunHook(dataDir, hookConfig, payload)
-		}
-
-		return "granted", nil
-
-	case "denied":
-		if err := MoveComment(dataDir, commentID, StatusPending, StatusDenied); err != nil {
-			return "", err
-		}
-		return "denied", nil
-
-	default:
-		return "pending", nil
-	}
-}

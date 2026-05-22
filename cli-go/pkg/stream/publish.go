@@ -64,7 +64,10 @@ func PublishEvent(eventType string, payload map[string]interface{}, privateKey [
 		dataDir = dsCfg[0].DataDir
 	}
 	if !discovery.IsRegisteredLocally(dataDir, dsURL) {
-		return nil // silently skip — stream events are fire-and-forget
+		LogSuppressedEmit(eventType, "not_registered_locally",
+			discovery.ExtractDomainFromURL(baseURL),
+			map[string]interface{}{"ds_url": dsURL})
+		return nil
 	}
 	if privateKey == nil {
 		fmt.Println("[i] Stream event skipped: no private key")

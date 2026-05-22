@@ -265,16 +265,27 @@ func TestPartialResolutionOrder(t *testing.T) {
 	}
 }
 
+// installShapeSnippets writes partial files at the installed-shape snippets
+// location used by the engine's base-snippet lookup post-SHAPE refactor.
+func installShapeSnippets(t *testing.T, dataDir string, files map[string]string) {
+	t.Helper()
+	dir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "shapes", "v3", "snippets")
+	os.MkdirAll(dir, 0755)
+	for name, content := range files {
+		os.WriteFile(filepath.Join(dir, name), []byte(content), 0644)
+	}
+}
+
 func TestBaseSnippetFallback(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Create _base snippets
-	baseDir := filepath.Join(tempDir, "site", "themes", "_base", "snippets")
-	os.MkdirAll(baseDir, 0755)
-	os.WriteFile(filepath.Join(baseDir, "post-item.html"), []byte("BASE POST ITEM"), 0644)
-	os.WriteFile(filepath.Join(baseDir, "about.html"), []byte("BASE ABOUT"), 0644)
+	// Installed shape snippets act as the last-resort fallback.
+	installShapeSnippets(t, tempDir, map[string]string{
+		"post-item.html": "BASE POST ITEM",
+		"about.html":     "BASE ABOUT",
+	})
 
-	// Create theme with NO snippets (CSS-only)
+	// Theme with NO snippets (CSS-only).
 	themeDir := filepath.Join(tempDir, "site", "themes", "minimal")
 	os.MkdirAll(themeDir, 0755)
 
@@ -284,28 +295,86 @@ func TestBaseSnippetFallback(t *testing.T) {
 	})
 	ctx := NewRenderContext()
 
-	// theme: prefix with no theme snippets should fall back to _base
+	// theme: prefix with no theme snippets should fall back to the shape
 	result, _ := engine.Render(`{{> theme:post-item}}`, ctx)
 	if !strings.Contains(result, "BASE POST ITEM") {
-		t.Errorf("Expected base snippet fallback for theme: prefix, got: %s", result)
+		t.Errorf("Expected shape snippet fallback for theme: prefix, got: %s", result)
 	}
 
-	// default prefix (global-first) should also fall back to _base when no global/theme exists
+	// default prefix (global-first) should also fall back to shape
 	result, _ = engine.Render(`{{> about}}`, ctx)
 	if !strings.Contains(result, "BASE ABOUT") {
-		t.Errorf("Expected base snippet fallback for default prefix, got: %s", result)
+		t.Errorf("Expected shape snippet fallback for default prefix, got: %s", result)
+	}
+}
+
+// TestShapeRootResolutionForEntryPartials verifies the shape-root fallback
+// in the partial-resolver lookup chain. v4's `{{> stream-post}}` resolves
+// stream-post.html from the shape root (it's an Entry template, not a
+// snippet). If a future contributor adds shapes/<v>/snippets/stream-post.html
+// it would silently shadow the root version — this test acts as a tripwire:
+// when only the shape-root file exists, resolution must succeed.
+//
+// Pair this with TestShapeRootShadowedByShapeSnippets below to catch a
+// flipped lookup order at review time (snippets/ should win when both
+// exist; shape-root should win when only the root file exists).
+func TestShapeRootResolutionForEntryPartials(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Active shape's root carries the Entry template. snippets/ is empty —
+	// no stream-post.html collision. We use ActiveShape "v4" + the same
+	// path layout the bundle install lays down.
+	shapeRoot := filepath.Join(tempDir, ".polis", "bundles", "pub.polis.core", "shapes", "v4")
+	os.MkdirAll(shapeRoot, 0755)
+	os.WriteFile(filepath.Join(shapeRoot, "stream-post.html"), []byte("ROOT STREAM POST"), 0644)
+
+	// Empty snippets/ dir — confirms shape-root wins when snippets/ has no
+	// shadowing file.
+	os.MkdirAll(filepath.Join(shapeRoot, "snippets"), 0755)
+
+	engine := New(Config{DataDir: tempDir, ActiveShape: "v4"})
+	result, err := engine.Render(`{{> stream-post}}`, NewRenderContext())
+	if err != nil {
+		t.Fatalf("Render failed: %v", err)
+	}
+	if !strings.Contains(result, "ROOT STREAM POST") {
+		t.Errorf("Expected shape-root resolution, got: %s", result)
+	}
+}
+
+// TestShapeRootShadowedByShapeSnippets is the tripwire's other half: when
+// snippets/<file> AND <file> at the shape root both exist, snippets/ wins.
+// If a future refactor flips the order, this test catches it before the
+// silent shadow lands in production.
+func TestShapeRootShadowedByShapeSnippets(t *testing.T) {
+	tempDir := t.TempDir()
+
+	shapeRoot := filepath.Join(tempDir, ".polis", "bundles", "pub.polis.core", "shapes", "v4")
+	os.MkdirAll(shapeRoot, 0755)
+	os.WriteFile(filepath.Join(shapeRoot, "stream-post.html"), []byte("ROOT STREAM POST"), 0644)
+
+	snippetsDir := filepath.Join(shapeRoot, "snippets")
+	os.MkdirAll(snippetsDir, 0755)
+	os.WriteFile(filepath.Join(snippetsDir, "stream-post.html"), []byte("SNIPPETS STREAM POST"), 0644)
+
+	engine := New(Config{DataDir: tempDir, ActiveShape: "v4"})
+	result, err := engine.Render(`{{> stream-post}}`, NewRenderContext())
+	if err != nil {
+		t.Fatalf("Render failed: %v", err)
+	}
+	if !strings.Contains(result, "SNIPPETS STREAM POST") {
+		t.Errorf("Expected snippets/ to shadow shape-root, got: %s", result)
 	}
 }
 
 func TestBaseSnippetOverriddenByTheme(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Create _base snippets
-	baseDir := filepath.Join(tempDir, "site", "themes", "_base", "snippets")
-	os.MkdirAll(baseDir, 0755)
-	os.WriteFile(filepath.Join(baseDir, "post-item.html"), []byte("BASE POST ITEM"), 0644)
+	installShapeSnippets(t, tempDir, map[string]string{
+		"post-item.html": "BASE POST ITEM",
+	})
 
-	// Create theme with override snippet
+	// Theme override snippet.
 	themeDir := filepath.Join(tempDir, "site", "themes", "studio13", "snippets")
 	os.MkdirAll(themeDir, 0755)
 	os.WriteFile(filepath.Join(themeDir, "post-item.html"), []byte("STUDIO13 POST ITEM"), 0644)
@@ -316,10 +385,10 @@ func TestBaseSnippetOverriddenByTheme(t *testing.T) {
 	})
 	ctx := NewRenderContext()
 
-	// theme: prefix should use theme override, not _base
+	// theme: prefix should use theme override, not the shape fallback.
 	result, _ := engine.Render(`{{> theme:post-item}}`, ctx)
 	if !strings.Contains(result, "STUDIO13 POST ITEM") {
-		t.Errorf("Expected theme override over base, got: %s", result)
+		t.Errorf("Expected theme override over shape, got: %s", result)
 	}
 }
 
@@ -336,23 +405,6 @@ func TestMarkers(t *testing.T) {
 
 	if !strings.Contains(content, "POLIS-SNIPPET-END: global:about.html") {
 		t.Errorf("Expected end marker, got: %s", content)
-	}
-}
-
-func TestStripMarkers(t *testing.T) {
-	marked := `<!-- POLIS-SNIPPET-START: global:about.html path=about.html -->
-<span class="polis-snippet-boundary" data-snippet="global:about.html" data-path="about.html" data-source="global" hidden></span>
-<p>Hello</p>
-<!-- POLIS-SNIPPET-END: global:about.html -->`
-
-	stripped := StripMarkers(marked)
-
-	if strings.Contains(stripped, "POLIS-SNIPPET") {
-		t.Errorf("Expected markers to be stripped, got: %s", stripped)
-	}
-
-	if !strings.Contains(stripped, "<p>Hello</p>") {
-		t.Errorf("Expected content to remain, got: %s", stripped)
 	}
 }
 
@@ -671,6 +723,56 @@ func TestFormatHumanDate(t *testing.T) {
 	}
 }
 
+// TestFormatHumanDateTime locks in the stream meta-line format
+// ("April 23, 2026 · 4:12pm") used by both SSR (page.go / v4.go) and
+// the structured-query API (handlers_stream.go). SC-3 close — drift
+// regression guard.
+func TestFormatHumanDateTime(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"2026-04-23T16:12:00Z", "April 23, 2026 · 4:12pm"},
+		{"2026-01-08T08:30:00Z", "January 8, 2026 · 8:30am"},
+		{"2026-04-23T00:00:00Z", "April 23, 2026 · 12:00am"},
+		{"2026-04-23T12:00:00Z", "April 23, 2026 · 12:00pm"},
+		// RFC3339Nano tolerated.
+		{"2026-04-23T16:12:00.123456789Z", "April 23, 2026 · 4:12pm"},
+		// Date-only fallback — keeps the date even when there's no time
+		// component to render, so the meta-line doesn't go blank.
+		{"2026-12-25", "December 25, 2026 · 12:00am"},
+		// Unparseable — return as-is so callers can flag bad data without
+		// us silently fabricating a date.
+		{"not-a-date", "not-a-date"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		result := FormatHumanDateTime(tc.input)
+		if result != tc.expected {
+			t.Errorf("FormatHumanDateTime(%q) = %q, want %q", tc.input, result, tc.expected)
+		}
+	}
+}
+
+func TestFormatYear(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"2026-04-23T16:12:00Z", "2026"},
+		{"2025-12-31T23:59:59Z", "2025"},
+		{"2026-12-25", "2026"},
+		{"not-a-date", ""},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		result := FormatYear(tc.input)
+		if result != tc.expected {
+			t.Errorf("FormatYear(%q) = %q, want %q", tc.input, result, tc.expected)
+		}
+	}
+}
+
 func TestTruncateSignature(t *testing.T) {
 	sig := "AAAAC3NzaC1lZDI1NTE5AAAAIKs8y..."
 	result := TruncateSignature(sig, 16)
@@ -813,5 +915,66 @@ func TestCommentCountDisplayInRecentPosts(t *testing.T) {
 
 	if !strings.Contains(result, "<span>5</span>") {
 		t.Errorf("Expected comment_count_display=5 in recent_posts, got: %s", result)
+	}
+}
+
+// ── R16-10 partial path traversal regression ────────────────────────
+
+func TestValidatePartialPath_RejectsTraversal(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want bool // true = should error
+	}{
+		{"empty", "", true},
+		{"single dotdot", "..", true},
+		{"trailing dotdot", "../etc/passwd", true},
+		{"middle dotdot", "shared/../../etc/passwd", true},
+		{"absolute unix", "/etc/passwd", true},
+		{"absolute backslash", `\etc\passwd`, true},
+		{"null byte", "abc\x00def", true},
+		{"plain name", "about", false},
+		{"with extension", "about.md", false},
+		{"subdir", "shared/header.html", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validatePartialPath(c.path)
+			gotErr := err != nil
+			if gotErr != c.want {
+				t.Errorf("validatePartialPath(%q): got err=%v, want err=%v", c.path, err, c.want)
+			}
+		})
+	}
+}
+
+func TestProcessPartials_BlocksTraversalToOutsideFile(t *testing.T) {
+	// Sibling dirs under <DataDir>/site/: snippets (lookup root) and secrets.
+	// A traversal partial like "{{> ../secrets/key}}" would otherwise resolve
+	// to the secrets dir via filepath.Join's `..` handling.
+	tmpDir := t.TempDir()
+	siteDir := filepath.Join(tmpDir, "site")
+	snippetsDir := filepath.Join(siteDir, "snippets")
+	secretsDir := filepath.Join(siteDir, "secrets")
+	if err := os.MkdirAll(snippetsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(secretsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secretsDir, "key.html"), []byte("LEAKED"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	engine := New(Config{DataDir: tmpDir})
+	ctx := NewRenderContext()
+
+	tmpl := `{{> ../secrets/key}}`
+	result, err := engine.Render(tmpl, ctx)
+	if err == nil {
+		t.Logf("Render returned no error; result=%q", result)
+	}
+	if strings.Contains(result, "LEAKED") {
+		t.Errorf("partial traversal succeeded — result contains secret content: %q", result)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/blessing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
@@ -42,38 +43,44 @@ import (
 // draftIDSanitizer strips all characters except alphanumeric, hyphens, and underscores.
 var draftIDSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 
+// errPathTraversal indicates the path contains a traversal sequence (`..`) or
+// a null byte — a real security concern worth logging as a security event.
+var errPathTraversal = fmt.Errorf("invalid path: traversal not allowed")
+
+// errPathDisallowed indicates the path is well-formed but outside the allowed
+// roots. Benign causes include stale clients or bad URLs; not a security event.
+var errPathDisallowed = fmt.Errorf("invalid path: outside allowed roots")
+
+// isTraversal reports whether err came from a traversal/null-byte rejection
+// (as opposed to a prefix-mismatch). Call sites use this to decide whether to
+// emit a security event.
+func isTraversal(err error) bool { return err == errPathTraversal }
+
 // validatePostPath ensures the path is safe and within the posts content directory.
-// This prevents path traversal attacks that could read/write arbitrary files.
+// Returns errPathTraversal for `..`/null-byte attempts and errPathDisallowed for
+// everything else.
 func validatePostPath(path string) error {
 	// Canonicalize first to normalize encoded traversals (e.g., ./, //)
 	path = filepath.Clean(path)
-	// Must start with "content/pub.polis.core/post/"
+	// Check for traversal/null bytes first so they classify as security events
+	// even when combined with a missing prefix.
+	if strings.Contains(path, "..") || strings.Contains(path, "\x00") {
+		return errPathTraversal
+	}
 	if !strings.HasPrefix(path, "content/pub.polis.core/post/") {
-		return fmt.Errorf("invalid path: must be under content/pub.polis.core/post/")
-	}
-	// No path traversal sequences
-	if strings.Contains(path, "..") {
-		return fmt.Errorf("invalid path: traversal not allowed")
-	}
-	// No null bytes (could bypass checks in some systems)
-	if strings.Contains(path, "\x00") {
-		return fmt.Errorf("invalid path: null bytes not allowed")
+		return errPathDisallowed
 	}
 	return nil
 }
 
 // validateContentPath ensures the path is safe and within allowed directories.
-// This prevents path traversal attacks.
+// Returns errPathTraversal for `..`/null-byte attempts and errPathDisallowed for
+// prefix-mismatches.
 func validateContentPath(path string) error {
 	// Canonicalize first to normalize encoded traversals (e.g., ./, //)
 	path = filepath.Clean(path)
-	// No path traversal sequences
-	if strings.Contains(path, "..") {
-		return fmt.Errorf("invalid path: traversal not allowed")
-	}
-	// No null bytes
-	if strings.Contains(path, "\x00") {
-		return fmt.Errorf("invalid path: null bytes not allowed")
+	if strings.Contains(path, "..") || strings.Contains(path, "\x00") {
+		return errPathTraversal
 	}
 
 	// Allow root-level markdown and html files (e.g., index.md, index.html, about.md)
@@ -85,7 +92,7 @@ func validateContentPath(path string) error {
 	allowedPrefixes := []string{
 		"content/pub.polis.core/post/",
 		"content/pub.polis.core/comment/",
-		".polis/content/pub.polis.core/posts/drafts/",
+		".polis/bundles/pub.polis.core/posts/drafts/",
 		"posts/",    // Mount point (rendered output)
 		"comments/", // Mount point (rendered output)
 	}
@@ -94,7 +101,7 @@ func validateContentPath(path string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("invalid path: must be a root .md/.html file or under content/pub.polis.core/post/, content/pub.polis.core/comment/, .polis/content/pub.polis.core/posts/drafts/, posts/, or comments/")
+	return errPathDisallowed
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -456,7 +463,7 @@ func (s *Server) handleRender(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDrafts(w http.ResponseWriter, r *http.Request) {
-	draftsDir := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+	draftsDir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
 
 	switch r.Method {
 	case http.MethodGet:
@@ -601,7 +608,7 @@ func (s *Server) handleDraft(w http.ResponseWriter, r *http.Request) {
 	// Sanitize ID - whitelist only safe characters
 	id = draftIDSanitizer.ReplaceAllString(id, "-")
 
-	draftPath := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts", id+".md")
+	draftPath := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", id+".md")
 
 	switch r.Method {
 	case http.MethodGet:
@@ -686,8 +693,10 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		"title": result.Title,
 	})
 
-	// Render site to generate HTML files
-	if err := s.RenderSite(); err != nil {
+	// Render site to generate HTML files. stream-shape tenants get the incremental
+	// cascade (bounded work per publish per step-03/3.a); v3 falls through
+	// to the full RenderSite path for byte-identical legacy behavior.
+	if err := s.RenderSiteAfterPublish(result.Path); err != nil {
 		// Log but don't fail - the post was published successfully
 		log.Printf("[warning] post-publish render failed: %v", err)
 	}
@@ -695,7 +704,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	// Delete the draft if this was published from a draft
 	if req.DraftID != "" {
 		cleanID := draftIDSanitizer.ReplaceAllString(req.DraftID, "-")
-		draftPath := filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts", cleanID+".md")
+		draftPath := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", cleanID+".md")
 		if err := os.Remove(draftPath); err != nil && !os.IsNotExist(err) {
 			s.LogWarn("Failed to remove draft after publish: %v", err)
 		}
@@ -778,7 +787,7 @@ func (s *Server) handlePosts(w http.ResponseWriter, r *http.Request) {
 			srcPath := filepath.Join(s.DataDir, path)
 			if raw, err := os.ReadFile(srcPath); err == nil {
 				body := stripFrontmatter(string(raw))
-				entry["excerpt"] = makeExcerpt(body, 140)
+				entry["excerpt"] = makeExcerpt(body, feed.ExcerptCharCap)
 			}
 			if info, err := os.Stat(srcPath); err == nil {
 				entry["modified"] = info.ModTime().Format(time.RFC3339)
@@ -826,9 +835,11 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request) {
 
 	// Validate path to prevent directory traversal
 	if err := validatePostPath(postPath); err != nil {
-		s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
-			"path": postPath, "request_id": RequestIDFromContext(r.Context()),
-		})
+		if isTraversal(err) {
+			s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
+				"path": postPath, "request_id": RequestIDFromContext(r.Context()),
+			})
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -895,9 +906,11 @@ func (s *Server) handleRepublish(w http.ResponseWriter, r *http.Request) {
 
 	// Validate path to prevent directory traversal
 	if err := validatePostPath(req.Path); err != nil {
-		s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
-			"path": req.Path, "request_id": RequestIDFromContext(r.Context()),
-		})
+		if isTraversal(err) {
+			s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
+				"path": req.Path, "request_id": RequestIDFromContext(r.Context()),
+			})
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -925,8 +938,10 @@ func (s *Server) handleRepublish(w http.ResponseWriter, r *http.Request) {
 		"title": result.Title,
 	})
 
-	// Render site to generate HTML files
-	if err := s.RenderSite(); err != nil {
+	// Render site to generate HTML files. stream-shape tenants get the incremental
+	// cascade (PublishStream handles republish identically); v3 stays on full
+	// RenderSite.
+	if err := s.RenderSiteAfterPublish(result.Path); err != nil {
 		// Log but don't fail - the post was republished successfully
 		log.Printf("[warning] post-republish render failed: %v", err)
 	}
@@ -1051,8 +1066,11 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 		dsContentType = "pub.polis.comment"
 	}
 
-	// Sign unpublish request
-	canonical := discovery.MakeContentUnpublishCanonicalJSON(dsContentType, contentURL)
+	// Sign unpublish request. R20-C-F1 (2026-05-18): canonical now
+	// includes a fresh ISO 8601 timestamp; DS rejects timestamps
+	// further than ±5min from server clock — defeats signature replay.
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+	canonical := discovery.MakeContentUnpublishCanonicalJSON(dsContentType, contentURL, timestamp)
 	sig, err := signing.SignContent([]byte(canonical), s.PrivateKey)
 	if err != nil {
 		s.LogError("Failed to sign unpublish request for %s: %v", req.Path, err)
@@ -1063,14 +1081,28 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 	// Call DS to unpublish — skip if not registered
 	if s.IsRegisteredWithDS() {
 		dsClient := s.NewDSClient(r)
-		if err := dsClient.UnpublishContent(dsContentType, contentURL, sig); err != nil {
+		if err := dsClient.UnpublishContent(dsContentType, contentURL, timestamp, sig); err != nil {
 			s.LogError("DS unpublish failed for %s: %v", req.Path, err)
 			// Non-fatal: still clean up locally
 		}
 	}
 
-	// Strip frontmatter, preserve only title + body
+	// Strip frontmatter, then strip any leading title heading from the
+	// body — published posts store the body markdown WITH the leading
+	// "# Title" heading still in place (see publish.PublishPost which
+	// writes canonicalBody = markdown as-is, with whatever heading the
+	// user typed). Pre-2026-05-16 this branch unconditionally prepended
+	// "# title\n\n" to the body, so a publish → unpublish → republish
+	// cycle accumulated heading copies: the first publish wrote
+	// `# Title\n\nbody`, unpublish made it `# Title\n\n# Title\n\nbody`
+	// in drafts, the next publish wrote that back to disk, and so on.
+	// Symptom: rendered post showed the title 3+ times.
+	//
+	// Strip first, then prepend, so the draft body is always
+	// exactly `# title\n\n<body-without-leading-title>`, regardless
+	// of how many cycles the user has run.
 	body := publish.StripFrontmatter(contentStr)
+	body = render.StripLeadingTitleHeading(body, title)
 
 	// Build draft content
 	var draftContent string
@@ -1090,9 +1122,9 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 	baseName := filepath.Base(req.Path)
 	var draftsDir string
 	if isPost {
-		draftsDir = filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "posts", "drafts")
+		draftsDir = filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
 	} else {
-		draftsDir = filepath.Join(s.DataDir, ".polis", "content", "pub.polis.core", "comments", "drafts")
+		draftsDir = filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "comments", "drafts")
 	}
 
 	// Create drafts directory and write draft
@@ -1671,9 +1703,11 @@ func (s *Server) handleCommentsSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create authenticated discovery client (needed for pending/denied queries)
+	// DS read: pending/denied queries. Auth-conditional (see
+	// NewReadDSClient docstring) — DS post-filtering is client-side,
+	// so anonymous read is sufficient for unregistered tenants.
 	myDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
-	client := s.NewAuthDSClient(r, myDomain)
+	client := s.NewReadDSClient(r)
 
 	// Sync pending comments (pass nil hookConfig when hooks disabled to prevent execution)
 	hc := s.getHookConfig()
@@ -1718,9 +1752,11 @@ func (s *Server) handleBlessingRequests(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Create authenticated discovery client (needed for status=pending queries)
+	// DS read: status=pending blessing requests. Auth-conditional via
+	// NewReadDSClient — see docstring. The DS returns matching records
+	// regardless of auth; FetchPendingRequests filters client-side.
 	myDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
-	client := s.NewAuthDSClient(r, myDomain)
+	client := s.NewReadDSClient(r)
 
 	// Fetch pending blessing requests (actor must be full domain, not subdomain)
 	requests, err := blessing.FetchPendingRequests(client, myDomain)
@@ -1972,7 +2008,7 @@ func (s *Server) handleBlessedComments(w http.ResponseWriter, r *http.Request) {
 				localPath := filepath.Join(s.DataDir, relPath)
 				if raw, err := os.ReadFile(localPath); err == nil {
 					body := stripFrontmatter(string(raw))
-					ec.Excerpt = makeExcerpt(body, 140)
+					ec.Excerpt = makeExcerpt(body, feed.ExcerptCharCap)
 				}
 			}
 			epc.Blessed = append(epc.Blessed, ec)
@@ -2095,8 +2131,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		editorPanelMode = s.Config.EditorPanelMode
 	}
 
-	// Load theme data
-	themes, _ := theme.ListThemesWithPalettes(s.DataDir, s.CLIThemesDir)
+	// Load theme data, filtered by tenant's active shape. Themes incompatible
+	// with the current shape (e.g. studio13-nk on v4, future v4-era studio13
+	// on v3) are excluded from the picker. Undeclared-on-disk orphans are
+	// also excluded (disk drift is covered separately by the orphan-dir
+	// Patrol check).
+	activeShape, _ := bundle.GetActiveShapeName(s.DataDir)
+	themes, _ := theme.ListUserSelectableThemes(s.DataDir, s.CLIThemesDir, activeShape)
 	activeTheme, _ := theme.GetActiveTheme(s.DataDir)
 
 	// Load avatar and author_name from .well-known/polis
@@ -2906,10 +2947,16 @@ func (s *Server) handleContent(w http.ResponseWriter, r *http.Request) {
 
 	// Validate path to prevent directory traversal
 	if err := validateContentPath(contentPath); err != nil {
-		s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
-			"path": contentPath, "request_id": RequestIDFromContext(r.Context()),
-		})
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		if isTraversal(err) {
+			s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
+				"path": contentPath, "request_id": RequestIDFromContext(r.Context()),
+			})
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Benign prefix-mismatch (e.g. stale client): return 404 without the
+		// security event.
+		http.NotFound(w, r)
 		return
 	}
 
@@ -2941,7 +2988,7 @@ func (s *Server) handleContent(w http.ResponseWriter, r *http.Request) {
 	} else if strings.HasPrefix(contentPath, "content/pub.polis.core/comment/") {
 		contentType = "blessed_comment"
 		editable = false // Blessed comments from others are not editable
-	} else if strings.HasPrefix(contentPath, ".polis/content/pub.polis.core/posts/drafts/") {
+	} else if strings.HasPrefix(contentPath, ".polis/bundles/pub.polis.core/posts/drafts/") {
 		contentType = "draft"
 		editable = true // Own drafts are editable
 	} else if strings.HasSuffix(contentPath, ".md") && !strings.Contains(contentPath, "/") {
@@ -3317,7 +3364,7 @@ func (s *Server) handleSetupWizardDismiss(w http.ResponseWriter, r *http.Request
 // About page handler
 
 // defaultAboutContent is the fallback text for sites without snippets/about.md.
-const defaultAboutContent = "Welcome to my polis space. This site runs on *polis*\u2014signed markdown on your own domain. No platform, no middleman, just you and your words.\n"
+const defaultAboutContent = "Hi \u2014 I'm just getting set up here. A real about page is coming soon.\n\nThis site runs on *polis*: signed markdown on my own domain. No platform, no middleman.\n"
 
 // handleAbout handles GET/POST /api/about for the about page editor.
 func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
@@ -3847,6 +3894,48 @@ func (s *Server) handleFeedViewed(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
+// handleBlessingInboxViewed advances the blessing-inbox viewed cursor to the
+// current sync position. Mirrors handleFeedViewed; called when the user
+// activates the "all comments from all polis to bless" filter view so the
+// comment nav-dot reflects "new blessing requests since I last looked."
+// POST /api/comment/blessing/viewed
+func (s *Server) handleBlessingInboxViewed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	discoveryDomain := s.GetDiscoveryDomain()
+	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+
+	syncCursor, _ := store.GetCursor("pub.polis.sync")
+	if syncCursor != "" {
+		_ = store.SetCursor("pub.polis.comment.blessing.viewed", syncCursor)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+}
+
+// handleDMSurfaceViewed advances the DM-surface viewed timestamp to now.
+// DMs are local-only (not synced from DS) so there's no monotone sync
+// position to copy; the cursor stores an RFC3339Nano timestamp that the
+// counts computation compares against each conversation's LastMessageAt.
+// POST /api/dm/viewed
+func (s *Server) handleDMSurfaceViewed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	discoveryDomain := s.GetDiscoveryDomain()
+	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	_ = store.SetCursor("pub.polis.dm.viewed", time.Now().UTC().Format(time.RFC3339Nano))
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+}
+
 // handleFeedRefresh triggers a stream-based feed sync and returns the updated cache.
 // POST /api/feed/refresh
 func (s *Server) handleFeedRefresh(w http.ResponseWriter, r *http.Request) {
@@ -4023,29 +4112,40 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Group items by post URL
+	//
+	// title-redundancy contract (see render.TitleStartsFirstSentence): when
+	// the title is a prefix of the body's first sentence (common with
+	// auto-derived titles that truncate the first line), the renderer is
+	// expected to suppress the title chrome so the excerpt absorbs it
+	// naturally. PostTitleRedundant + (per-comment) TitleRedundant are
+	// computed below by passing title + excerpt to the detector. The legacy
+	// renderConversationsTabbed in app.js honors these flags to skip
+	// rendering the title element when set.
 	type commentDetail struct {
-		URL          string `json:"url"`
-		AuthorDomain string `json:"author_domain"`
-		Title        string `json:"title,omitempty"`
-		Excerpt      string `json:"excerpt,omitempty"`
-		Published    string `json:"published"`
-		Unread       bool   `json:"unread"`
+		URL            string `json:"url"`
+		AuthorDomain   string `json:"author_domain"`
+		Title          string `json:"title,omitempty"`
+		Excerpt        string `json:"excerpt,omitempty"`
+		TitleRedundant bool   `json:"title_redundant,omitempty"`
+		Published      string `json:"published"`
+		Unread         bool   `json:"unread"`
 	}
 	type feedGroup struct {
-		PostURL          string           `json:"post_url"`
-		PostTitle        string           `json:"post_title"`
-		PostDomain       string           `json:"post_domain"`
-		PostPublished    string           `json:"post_published"`
-		PostExcerpt      string           `json:"post_excerpt,omitempty"`
-		HasPost          bool             `json:"has_post"`
-		TotalComments    int              `json:"total_comments"`
-		NetworkComments  int              `json:"network_comments"`
-		ExternalComments int              `json:"external_comments"`
-		UnreadComments   int              `json:"unread_comments"`
-		LastActivity     string           `json:"last_activity"`
-		PostUnread       bool             `json:"post_unread"`
-		ItemIDs          []string         `json:"item_ids"`
-		Comments         []*commentDetail `json:"comments,omitempty"`
+		PostURL            string           `json:"post_url"`
+		PostTitle          string           `json:"post_title"`
+		PostDomain         string           `json:"post_domain"`
+		PostPublished      string           `json:"post_published"`
+		PostExcerpt        string           `json:"post_excerpt,omitempty"`
+		PostTitleRedundant bool             `json:"post_title_redundant,omitempty"`
+		HasPost            bool             `json:"has_post"`
+		TotalComments      int              `json:"total_comments"`
+		NetworkComments    int              `json:"network_comments"`
+		ExternalComments   int              `json:"external_comments"`
+		UnreadComments     int              `json:"unread_comments"`
+		LastActivity       string           `json:"last_activity"`
+		PostUnread         bool             `json:"post_unread"`
+		ItemIDs            []string         `json:"item_ids"`
+		Comments           []*commentDetail `json:"comments,omitempty"`
 	}
 
 	type announcementItem struct {
@@ -4142,12 +4242,13 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 				g.UnreadComments++
 			}
 			g.Comments = append(g.Comments, &commentDetail{
-				URL:          item.URL,
-				AuthorDomain: item.AuthorDomain,
-				Title:        item.Title,
-				Excerpt:      item.Excerpt,
-				Published:    item.Published,
-				Unread:       isUnread,
+				URL:            item.URL,
+				AuthorDomain:   item.AuthorDomain,
+				Title:          item.Title,
+				Excerpt:        item.Excerpt,
+				TitleRedundant: render.TitleStartsFirstSentence(item.Title, item.Excerpt),
+				Published:      item.Published,
+				Unread:         isUnread,
 			})
 			g.ItemIDs = append(g.ItemIDs, item.ID)
 			if feed.PublishedBefore(g.LastActivity, item.Published) {
@@ -4160,6 +4261,16 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 	result := make([]*feedGroup, 0, len(groups))
 	for _, key := range groupOrder {
 		result = append(result, groups[key])
+	}
+
+	// Title-redundancy pass: now that each group has its final post title +
+	// excerpt, run the detector. (Computed here rather than during the loop
+	// because both fields can be updated across iterations as items are
+	// merged into the group.)
+	for _, g := range result {
+		if g.HasPost && g.PostTitle != "" && g.PostExcerpt != "" {
+			g.PostTitleRedundant = render.TitleStartsFirstSentence(g.PostTitle, g.PostExcerpt)
+		}
 	}
 
 	// Sort by last_activity descending (parse timestamps to handle JS Date format)
@@ -4178,61 +4289,132 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 		"stale":         stale,
 	})
 
-	// Background: fetch excerpts for items that don't have one yet
-	var needExcerpts []int
+	// Background: fetch excerpts for items that don't have one yet.
+	// step-06/6.l: this is now the FALLBACK path. The primary trigger
+	// for excerpt fetching moved to feedSyncHandler.Process so the
+	// dashboard renders with excerpts already populated on first load.
+	// This call stays as a safety net — idempotent (only fetches what's
+	// still missing), so a sync that didn't reach the network still
+	// gets a second chance when the user opens the dashboard.
+	s.kickOffExcerptFetch(cm, items)
+}
+
+// excerptFetchIndices returns the indices of items that need an
+// excerpt fetched: missing Excerpt + post/comment type + https URL.
+// Pure function — no side effects. Extracted so tests can verify the
+// filter logic without firing a goroutine (which would race against
+// network or require sleep-and-poll patterns to assert behavior).
+func excerptFetchIndices(items []feed.CachedFeedItem) []int {
+	var out []int
 	for i, item := range items {
 		if item.Excerpt == "" && (item.Type == "post" || item.Type == "comment") && strings.HasPrefix(item.URL, "https://") {
-			needExcerpts = append(needExcerpts, i)
+			out = append(out, i)
 		}
 	}
-	if len(needExcerpts) > 0 {
-		go s.fetchFeedExcerpts(cm, items, needExcerpts)
+	return out
+}
+
+// kickOffExcerptFetch scans `items` for entries missing an excerpt and,
+// if any are found, launches a background fetch. Shared by:
+//   - handleFeedGrouped (fallback — fires on dashboard load)
+//   - feedSyncHandler.Process (primary — fires on sync, step-06/6.l)
+// Idempotent: items that already have an Excerpt or non-https URLs
+// are skipped, so calling repeatedly costs only the index scan when
+// the cache is fully hydrated.
+func (s *Server) kickOffExcerptFetch(cm *feed.CacheManager, items []feed.CachedFeedItem) {
+	indices := excerptFetchIndices(items)
+	if len(indices) > 0 {
+		go s.fetchFeedExcerpts(cm, items, indices)
 	}
 }
 
 // fetchFeedExcerpts fetches remote post content and caches excerpts.
 // Runs in background goroutine; errors are logged, never fatal.
+//
+// step-06/6.l: parallelized with a 5-worker concurrency cap. Without
+// the cap, a sync that brings in N new items would fire N concurrent
+// remote-fetch goroutines, stampeding the origin servers. The cap
+// keeps fan-out bounded while still parallelizing enough to be useful
+// (serial was ~2-3 sec/item; 5-way parallel is closer to N/5 sec).
+//
+// step-06 final-review item #4: excerpts collected into a per-item
+// map, persisted via cm.UpdateExcerpts (per-item, race-free) instead
+// of cm.SaveItems (full-slice overwrite, races with parallel
+// MergeItems). Items slice still owns the read snapshot, but
+// persistence reads-modifies-writes under the cache mutex so
+// concurrent merges aren't lost.
+//
+// Concurrency safety:
+//   - Each worker writes to a unique key in `excerpts` map (with mu).
+//   - sync.Mutex guards map writes.
+//   - cm.UpdateExcerpts atomically applies updates under cm.mu.
 func (s *Server) fetchFeedExcerpts(cm *feed.CacheManager, items []feed.CachedFeedItem, indices []int) {
+	const maxWorkers = 5
+	sem := make(chan struct{}, maxWorkers)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	excerpts := make(map[string]string, len(indices))
+
 	client := s.NewRemoteClient()
-	updated := false
 
 	for _, idx := range indices {
-		item := &items[idx]
-		content, err := client.FetchContent(item.URL)
-		if err != nil {
-			// Comment URLs use /comments/ for rendered HTML but the markdown
-			// source lives at /content/pub.polis.core/comment/. Try that path.
-			if strings.Contains(item.URL, "/comments/") {
-				altURL := strings.Replace(item.URL, "/comments/", "/content/pub.polis.core/comment/", 1)
-				content, err = client.FetchContent(altURL)
-			}
-			if err != nil {
-				s.LogDebug("excerpt fetch failed for %s: %v", item.URL, err)
-				continue
-			}
-		}
-		// If HTML, try markdown source
-		if looksLikeHTML(content) {
-			altContent, _, altErr := client.TryAlternateExtension(item.URL)
-			if altErr == nil && !looksLikeHTML(altContent) {
-				content = altContent
-			} else {
-				continue // Can't extract excerpt from HTML
-			}
-		}
-		body := stripFrontmatter(content)
-		excerpt := makeExcerpt(body, 140)
-		if excerpt != "" {
-			item.Excerpt = excerpt
-			updated = true
-		}
-	}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int) {
+			defer func() {
+				// Recover from panics in fetch / parse / excerpt code so
+				// one bad item doesn't crash the process. Five concurrent
+				// workers means five concurrent panic-attractors; without
+				// this, a single panic in any one tears down everything
+				// (the dashboard, the SPA, hosted-mode siblings). LogError
+				// surfaces the panic via the standard structured-event
+				// pipeline.
+				if r := recover(); r != nil {
+					s.LogError("excerpt fetch worker panic for index %d: %v", i, r)
+				}
+				<-sem
+				wg.Done()
+			}()
 
-	if updated {
-		if err := cm.SaveItems(items); err != nil {
+			item := &items[i]
+			content, err := client.FetchContent(item.URL)
+			if err != nil {
+				// Comment URLs use /comments/ for rendered HTML but the markdown
+				// source lives at /content/pub.polis.core/comment/. Try that path.
+				if strings.Contains(item.URL, "/comments/") {
+					altURL := strings.Replace(item.URL, "/comments/", "/content/pub.polis.core/comment/", 1)
+					content, err = client.FetchContent(altURL)
+				}
+				if err != nil {
+					s.LogDebug("excerpt fetch failed for %s: %v", item.URL, err)
+					return
+				}
+			}
+			// If HTML, try markdown source
+			if looksLikeHTML(content) {
+				altContent, _, altErr := client.TryAlternateExtension(item.URL)
+				if altErr == nil && !looksLikeHTML(altContent) {
+					content = altContent
+				} else {
+					return // Can't extract excerpt from HTML
+				}
+			}
+			body := stripFrontmatter(content)
+			excerpt := makeExcerpt(body, feed.ExcerptCharCap)
+			if excerpt != "" {
+				mu.Lock()
+				excerpts[item.ID] = excerpt
+				mu.Unlock()
+			}
+		}(idx)
+	}
+	wg.Wait()
+
+	if len(excerpts) > 0 {
+		if applied, err := cm.UpdateExcerpts(excerpts); err != nil {
 			s.LogError("failed to save feed excerpts: %v", err)
 		} else {
-			s.LogDebug("cached %d feed excerpts", len(indices))
+			s.LogDebug("cached %d feed excerpts (of %d fetched)", applied, len(excerpts))
 		}
 	}
 }
@@ -4846,11 +5028,19 @@ func (s *Server) handleFollowerCount(w http.ResponseWriter, r *http.Request) {
 	for i, f := range followers {
 		followers[i] = strings.ToLower(f)
 	}
+	// FollowedAt may be nil on legacy state files written before
+	// 2026-05-02 (when timestamps were added). Default to empty so the
+	// JSON encodes as {} rather than null — easier for the SPA to use.
+	followedAt := state.FollowedAt
+	if followedAt == nil {
+		followedAt = map[string]string{}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"count":     state.Count,
-		"followers": followers,
+		"count":       state.Count,
+		"followers":   followers,
+		"followed_at": followedAt,
 	})
 }
 
@@ -5887,6 +6077,44 @@ func (s *Server) setPolicyCacheEntry(key, status, reason string, followsUs bool)
 		Reason:    reason,
 		FollowsUs: followsUs,
 		ExpiresAt: time.Now().Add(policyCheckCacheTTL),
+	}
+}
+
+// getCommentCountCacheEntry returns the cached count for a post URL, or
+// (0, false) if expired or missing. Lazy expiry on read.
+func (s *Server) getCommentCountCacheEntry(url string) (int, bool) {
+	s.commentCountCacheMu.Lock()
+	defer s.commentCountCacheMu.Unlock()
+	if s.commentCountCache == nil {
+		return 0, false
+	}
+	entry, ok := s.commentCountCache[url]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		if ok {
+			delete(s.commentCountCache, url)
+		}
+		return 0, false
+	}
+	return entry.Total, true
+}
+
+// setCommentCountCacheEntries stores a batch of post-URL → count mappings.
+// Single-mutex acquisition for a batch is cheaper than locking per entry.
+func (s *Server) setCommentCountCacheEntries(counts map[string]int) {
+	if len(counts) == 0 {
+		return
+	}
+	s.commentCountCacheMu.Lock()
+	defer s.commentCountCacheMu.Unlock()
+	if s.commentCountCache == nil {
+		s.commentCountCache = make(map[string]*commentCountCacheEntry, len(counts))
+	}
+	expiresAt := time.Now().Add(commentCountCacheTTL)
+	for url, total := range counts {
+		s.commentCountCache[url] = &commentCountCacheEntry{
+			Total:     total,
+			ExpiresAt: expiresAt,
+		}
 	}
 }
 

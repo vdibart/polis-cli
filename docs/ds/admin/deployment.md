@@ -174,8 +174,8 @@ curl "$DS_URL/v1/stream/health"
 # → {"status":"ok","latest_cursor":"0","oldest_cursor":"0","event_count":0}
 
 # Admin endpoint (requires OPERATOR_API_KEY)
-curl -H "Authorization: Bearer $OPERATOR_API_KEY" "$DS_URL/v1/admin/blocks"
-# → {"blocked_domains":[],"blocked_types":[],"stream_config":{"mode":"blocklist"}}
+curl -H "Authorization: Bearer $OPERATOR_API_KEY" "$DS_URL/v1/admin/policies"
+# → {"policies":[]}
 ```
 
 If any check returns an error, check the server logs (`fly logs` on Fly.io, `docker logs` for Docker).

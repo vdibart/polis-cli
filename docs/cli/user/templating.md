@@ -121,10 +121,14 @@ Snippets are reusable template fragments included with `{{> name}}` syntax.
 When resolving `{{> path}}`:
 
 1. **Global snippets** - `./snippets/{path}.md` or `.html` (author overrides)
-2. **Theme snippets** - `.polis/themes/{active_theme}/snippets/{path}.html` or `.md`
-3. **Base snippets** - `.polis/themes/_base/snippets/{path}.html` or `.md`
+2. **Theme snippets** - `.polis/bundles/pub.polis.core/themes/{active_theme}/snippets/{path}.html` or `.md`
+3. **Shape snippets** - `.polis/bundles/pub.polis.core/shapes/{active_shape}/snippets/{path}.html` or `.md`
 
 This allows you to override theme defaults by creating snippets in `./snippets/`.
+
+> **Migration note:** Pre-bundle-refactor sites used `.polis/themes/<name>/snippets/`
+> and `.polis/themes/_base/snippets/`. Patrol/Medic (hosted) and Tailor
+> (self-hosted) migrate these locations into the bundle layout above.
 
 ### Explicit Tier Selection
 
@@ -387,17 +391,17 @@ Your theme automatically inherits all HTML templates from `_base/`. Only customi
 If you need different HTML structure for specific pages, override individual templates:
 
 ```bash
-# Create CSS-only theme first
-mkdir -p .polis/themes/mytheme
-vim .polis/themes/mytheme/mytheme.css
+# Create a CSS-only theme directory under your installed bundle.
+mkdir -p .polis/bundles/pub.polis.core/themes/mytheme
+vim .polis/bundles/pub.polis.core/themes/mytheme/mytheme.css
 
-# Override just the homepage (other pages use _base)
-cp .polis/themes/_base/index.html .polis/themes/mytheme/index.html
-vim .polis/themes/mytheme/index.html
+# Override just the homepage (other pages fall through to the shape).
+cp .polis/bundles/pub.polis.core/shapes/v3/index.html .polis/bundles/pub.polis.core/themes/mytheme/index.html
+vim .polis/bundles/pub.polis.core/themes/mytheme/index.html
 
 # Override a snippet
-mkdir -p .polis/themes/mytheme/snippets
-cp .polis/themes/_base/snippets/post-item.html .polis/themes/mytheme/snippets/post-item.html
+mkdir -p .polis/bundles/pub.polis.core/themes/mytheme/snippets
+cp .polis/bundles/pub.polis.core/shapes/v3/snippets/post-item.html .polis/bundles/pub.polis.core/themes/mytheme/snippets/post-item.html
 vim .polis/themes/mytheme/snippets/post-item.html
 ```
 

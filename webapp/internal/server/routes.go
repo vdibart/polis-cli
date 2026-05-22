@@ -1,6 +1,10 @@
 package server
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/vdibart/polis-cli/webapp/internal/serve"
+)
 
 // SetupRoutes registers all API routes on the given ServeMux.
 func SetupRoutes(mux *http.ServeMux, s *Server) {
@@ -76,12 +80,35 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 
 	// Social API routes (following, feed, remote content)
 	mux.HandleFunc("/api/following", limitBody(s.handleFollowing, MaxDefaultBodySize))
+	// 06-profiles Phase 2: enriched directory of profiles in the user's
+	// network (display name, relationship, recent post, last activity).
+	// /api/following stays as the mutation endpoint (POST/DELETE) — this
+	// new endpoint is GET-only and pairs with the new /profiles SPA route.
+	mux.HandleFunc("/api/profiles", limitBody(s.handleProfiles, MaxDefaultBodySize))
 	mux.HandleFunc("/api/feed", s.handleFeed)
 	mux.HandleFunc("/api/feed/refresh", limitBody(s.handleFeedRefresh, MaxDefaultBodySize))
 	mux.HandleFunc("/api/feed/read", limitBody(s.handleFeedRead, MaxDefaultBodySize))
 	mux.HandleFunc("/api/feed/viewed", limitBody(s.handleFeedViewed, MaxDefaultBodySize))
+	mux.HandleFunc("/api/comment/blessing/viewed", limitBody(s.handleBlessingInboxViewed, MaxDefaultBodySize))
+	mux.HandleFunc("/api/dm/viewed", limitBody(s.handleDMSurfaceViewed, MaxDefaultBodySize))
 	mux.HandleFunc("/api/feed/counts", s.handleFeedCounts)
 	mux.HandleFunc("/api/feed/grouped", s.handleFeedGrouped)
+
+	// v1 stream filter endpoint (plan §4.d). Structured-query API consumed
+	// by the stream's filter widget (4.e). GET-only. Wrapped in
+	// publicContentMiddleware (CORS * + per-IP rate limit per plan §4.d
+	// task 3 — the same limiter used for /posts/, /comments/, /content/
+	// when those land in routes).
+	mux.HandleFunc("/api/v1/stream/items", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamItems))
+	// step-06/6.e: client-emitted structured event endpoint. Owner SPA
+	// posts {event, fields} on icon-preset clicks (pub.polis.stream.
+	// preset_loaded) for usage telemetry. Allowlist-restricted.
+	mux.HandleFunc("/api/v1/event", limitBody(s.handleClientEvent, MaxDefaultBodySize))
+	// step-06/6.f.2: notification rule declarations from registry.json,
+	// surfaced to the SPA so owner-extras.js's activity-mode renderer
+	// has rule.template + rule.icon to fill per-entry metadata signal.
+	// Read-only; cached one-shot at SPA init.
+	mux.HandleFunc("/api/v1/bundle/notification-rules", s.handleNotificationRules)
 	mux.HandleFunc("/api/remote/avatar", s.handleRemoteAvatar)
 	mux.HandleFunc("/api/remote/post", s.handleRemotePost)
 
@@ -125,4 +152,46 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/widget/comment", limitBody(s.handleWidgetComment, MaxCommentBodySize+4096))
 	mux.HandleFunc("/api/widget/follow", limitBody(s.handleWidgetFollow, MaxDefaultBodySize))
 	mux.HandleFunc("/api/widget/connect", limitBody(s.handleWidgetConnect, MaxDefaultBodySize))
+}
+
+// SetupReaderRoutes registers the read-only public surface used by
+// polis-server's --reader mode (step 5.a). The route boundary:
+//
+// EXISTS under --reader:
+//   - / and any tenant-static path (/posts/, /comments/, /styles.css,
+//     /sitemap.xml, /stream.js, /.well-known/polis, etc.) → served by
+//     tenantStaticHandler via the shared webapp/internal/serve package
+//   - /api/v1/stream/items — structured-query API for the stream
+//   - /content/ — source-path 301 redirect to mount paths
+//   - /favicon.svg — generated favicon (avatar-derived)
+//
+// 404 under --reader: admin SPA at /, /_/... deep-link routes,
+// /api/feed, /api/blessings, /api/comments, /api/dm, /api/init,
+// auth-related routes, /widget-X.Y.Z.js (hosted-only). All editor-
+// surface routes registered by SetupRoutes are simply not registered
+// in --reader mode — the mux 404s any request that doesn't match a
+// route in this set.
+func SetupReaderRoutes(mux *http.ServeMux, s *Server) {
+	// v1 stream filter endpoint (plan §4.d) — same wrapper as in
+	// SetupRoutes (publicContentMiddleware + per-IP rate limiter).
+	mux.HandleFunc("/api/v1/stream/items", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamItems))
+
+	// Content source path redirect (content/ .html → mount path)
+	mux.HandleFunc("/content/", s.handleContentRedirect)
+
+	// Generated favicon (avatar-based; fallback handled by tenant-static)
+	mux.HandleFunc("/favicon.svg", s.handleFavicon)
+}
+
+// tenantStaticHandler returns an http.HandlerFunc that serves rendered
+// tenant content from the configured data directory using the shared
+// webapp/internal/serve package. Used as the catch-all "/" handler
+// under --reader mode. No post-process hook (the hosted nav-widget
+// injection is hosted-specific; non-hosted polis-server doesn't have
+// a "visitor" concept).
+func tenantStaticHandler(s *Server) http.HandlerFunc {
+	storage := NewDataDirStorage(s.DataDir)
+	return func(w http.ResponseWriter, r *http.Request) {
+		serve.ServeTenantPublic(w, r, storage, "", nil)
+	}
 }

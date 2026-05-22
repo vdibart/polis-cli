@@ -259,9 +259,16 @@ func TestBlessingHandler_FullLifecycle(t *testing.T) {
 	}
 }
 
-func TestBlessingHandler_AutoblessNoAttestation_Processes(t *testing.T) {
-	// Legacy autobless events without ds_attestation should be processed without warning
-	h := &BlessingHandler{MyDomain: "bob.com"}
+// TestBlessingHandler_AutoblessNoAttestation_Dropped — R20-C-F4
+// (2026-05-18). Pre-fix, autobless events without ds_attestation
+// were "processed without warning" as a legacy concession. An
+// attacker could emit a fake autobless event with no attestation
+// and the local cache would accept it. New posture: drop the event.
+func TestBlessingHandler_AutoblessNoAttestation_Dropped(t *testing.T) {
+	// DSKeyCache wired so the handler's "no cache configured" path
+	// doesn't fire — this test is specifically about empty attestation.
+	cache := discovery.NewDSKeyCache("http://localhost:1", time.Hour)
+	h := &BlessingHandler{MyDomain: "bob.com", DSKeyCache: cache}
 	state := h.NewState()
 
 	events := []discovery.StreamEvent{
@@ -276,7 +283,7 @@ func TestBlessingHandler_AutoblessNoAttestation_Processes(t *testing.T) {
 				"auto_blessed":  true,
 				"policy_rule":   "emit pub.polis.comment.blessing from following",
 				"policy_source": "user-published",
-				// No ds_attestation — legacy
+				// No ds_attestation — must be dropped.
 			},
 			Timestamp: "2026-03-23T10:00:00Z",
 		},
@@ -288,18 +295,53 @@ func TestBlessingHandler_AutoblessNoAttestation_Processes(t *testing.T) {
 	}
 
 	bs := result.(*BlessingState)
-	if len(bs.Blessings) != 1 {
-		t.Fatalf("expected 1 blessing, got %d", len(bs.Blessings))
-	}
-	if bs.Blessings[0].Status != "granted" {
-		t.Errorf("status = %q, want %q", bs.Blessings[0].Status, "granted")
+	if len(bs.Blessings) != 0 {
+		t.Errorf("R20-C-F4 regression: autobless event without attestation produced %d blessings; expected 0", len(bs.Blessings))
 	}
 }
 
+// TestBlessingHandler_AutoblessCommentURLFields — DS auto-blessing
+// events use comment_url/in_reply_to instead of source_url/target_url.
+// Regression test: these events must not be silently skipped.
+//
+// Post-R20-C-F4 (2026-05-18): the event now requires a valid
+// ds_attestation. Stand up a fake DS that signs the canonical with a
+// known key; the handler verifies and processes the entry.
 func TestBlessingHandler_AutoblessCommentURLFields(t *testing.T) {
-	// DS auto-blessing events use comment_url/in_reply_to instead of source_url/target_url.
-	// Regression test: these events must not be silently skipped.
-	h := &BlessingHandler{MyDomain: "david.polis.pub"}
+	privPEM, pubSSH, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"public_key": string(pubSSH),
+			"key_id":     "ds-primary",
+		})
+	}))
+	defer server.Close()
+	cache := discovery.NewDSKeyCache(server.URL, time.Hour)
+
+	commentURL := "https://vdibart.polis.pub/comments/20260323/ongoing-list-20260323.md"
+	inReplyTo := "https://david.polis.pub/posts/20260323/ongoing-list-of-ideas.md"
+	policyRule := "emit pub.polis.comment.blessing from following"
+	policySource := "user-published"
+	dsKeyID := "ds-primary"
+	canonical := discovery.BuildCanonicalJSON(map[string]interface{}{
+		"type":          "pub.polis.comment.blessing",
+		"action":        "autobless",
+		"comment_url":   commentURL,
+		"target_url":    inReplyTo,
+		"policy_rule":   policyRule,
+		"policy_source": policySource,
+		"ds_key_id":     dsKeyID,
+	})
+	attestation, err := signing.SignContent([]byte(canonical), privPEM)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+
+	h := &BlessingHandler{MyDomain: "david.polis.pub", DSKeyCache: cache}
 	state := h.NewState()
 
 	events := []discovery.StreamEvent{
@@ -308,14 +350,16 @@ func TestBlessingHandler_AutoblessCommentURLFields(t *testing.T) {
 			Type:  "pub.polis.comment.blessing.granted",
 			Actor: "david.polis.pub",
 			Payload: map[string]interface{}{
-				"comment_url":   "https://vdibart.polis.pub/comments/20260323/ongoing-list-20260323.md",
-				"in_reply_to":   "https://david.polis.pub/posts/20260323/ongoing-list-of-ideas.md",
-				"target_domain": "david.polis.pub",
-				"source_domain": "vdibart.polis.pub",
-				"auto_blessed":  true,
-				"bless_reason":  "policy-match",
-				"policy_rule":   "emit pub.polis.comment.blessing from following",
-				"policy_source": "user-published",
+				"comment_url":    commentURL,
+				"in_reply_to":    inReplyTo,
+				"target_domain":  "david.polis.pub",
+				"source_domain":  "vdibart.polis.pub",
+				"auto_blessed":   true,
+				"bless_reason":   "policy-match",
+				"policy_rule":    policyRule,
+				"policy_source":  policySource,
+				"ds_attestation": attestation,
+				"ds_key_id":      dsKeyID,
 			},
 			Timestamp: "2026-03-23T10:00:00Z",
 		},
@@ -333,10 +377,10 @@ func TestBlessingHandler_AutoblessCommentURLFields(t *testing.T) {
 	if bs.Blessings[0].Status != "granted" {
 		t.Errorf("status = %q, want %q", bs.Blessings[0].Status, "granted")
 	}
-	if bs.Blessings[0].SourceURL != "https://vdibart.polis.pub/comments/20260323/ongoing-list-20260323.md" {
+	if bs.Blessings[0].SourceURL != commentURL {
 		t.Errorf("source_url = %q, want comment_url value", bs.Blessings[0].SourceURL)
 	}
-	if bs.Blessings[0].TargetURL != "https://david.polis.pub/posts/20260323/ongoing-list-of-ideas.md" {
+	if bs.Blessings[0].TargetURL != inReplyTo {
 		t.Errorf("target_url = %q, want in_reply_to value", bs.Blessings[0].TargetURL)
 	}
 	if bs.Granted != 1 {
@@ -419,8 +463,10 @@ func TestBlessingHandler_AutoblessWithValidAttestation_Processes(t *testing.T) {
 	}
 }
 
-func TestBlessingHandler_AutoblessWithInvalidAttestation_StillProcesses(t *testing.T) {
-	// Invalid attestation should log warning but still process the event
+// TestBlessingHandler_AutoblessWithInvalidAttestation_Drops — R20-C-F4
+// (2026-05-18). Pre-fix invalid attestations were "warn-only" — the
+// event got processed anyway. Now they're dropped.
+func TestBlessingHandler_AutoblessWithInvalidAttestation_Drops(t *testing.T) {
 	_, pubSSH, err := signing.GenerateKeypair()
 	if err != nil {
 		t.Fatalf("keygen: %v", err)
@@ -487,12 +533,12 @@ func TestBlessingHandler_AutoblessWithInvalidAttestation_StillProcesses(t *testi
 		t.Fatalf("Process should not fail on bad attestation: %v", err)
 	}
 
-	// Event should still be processed (warn-only)
+	// R20-C-F4: event must be DROPPED on invalid attestation. The
+	// pre-fix "warn-only" posture admitted a forgery vector — an
+	// attacker emitting an autobless event with a self-signed
+	// attestation would have it accepted as granted.
 	bs := result.(*BlessingState)
-	if len(bs.Blessings) != 1 {
-		t.Fatalf("expected 1 blessing (warn-only), got %d", len(bs.Blessings))
-	}
-	if bs.Blessings[0].Status != "granted" {
-		t.Errorf("status = %q, want %q", bs.Blessings[0].Status, "granted")
+	if len(bs.Blessings) != 0 {
+		t.Errorf("R20-C-F4 regression: invalid attestation produced %d blessings; expected 0", len(bs.Blessings))
 	}
 }

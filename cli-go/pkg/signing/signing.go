@@ -302,7 +302,15 @@ func parsePrivateKey(pemData []byte) (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("invalid private key size")
 	}
 
-	return ed25519.PrivateKey(privKeyBytes), nil
+	// Copy the bytes out of the PEM block. Without this, the returned
+	// PrivateKey aliases readBytes's slice into block.Bytes — and a
+	// subsequent ZeroKey on the returned slice (R11-7's defer in
+	// SignContent and elsewhere) would zero bytes inside the caller's
+	// PEM buffer, defeating R11-7's zeroization on the original buffer
+	// and breaking idempotent re-sign with the same buffer.
+	out := make([]byte, len(privKeyBytes))
+	copy(out, privKeyBytes)
+	return ed25519.PrivateKey(out), nil
 }
 
 // ValidatePublicKey checks whether sshData contains a valid Ed25519 public key

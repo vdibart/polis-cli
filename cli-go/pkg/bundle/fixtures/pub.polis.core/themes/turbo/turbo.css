@@ -1,0 +1,260 @@
+/* vdibart.polis.pub */
+/* Retro computing aesthetic */
+
+:root {
+    /* Deep blue foundation */
+    --color-bg: #000818;
+    --color-bg-light: #001030;
+    --color-surface: #001448;
+    --color-panel: #001a58;
+
+    /* Polis Cyan - the anchor */
+    --color-cyan: #00d4ff;
+    --color-cyan-soft: #80e4ff;
+    --color-cyan-dim: #0090b0;
+    --color-cyan-glow: rgba(0, 212, 255, 0.3);
+
+    /* Text - clean whites and soft blues */
+    --color-text: #ffffff;
+    --color-text-soft: #a0c0d8;
+    --color-text-muted: #7090a8;
+
+    /* Accent - subtle magenta (complements cyan). Soft + bg variants
+       added for v4 stream chrome (filter underline, focus-entry dot,
+       focused-comment ring); without these stream.css's filter-underline
+       + sf-option active states fall back to a SOLS-flavored peach. */
+    --color-accent: #c080c0;
+    --color-accent-soft: #d4a0d4;
+    --color-accent-dim: #806080;
+    --color-accent-bg: rgba(192, 128, 192, 0.08);
+
+    /* Borders */
+    --color-border: rgba(0, 212, 255, 0.3);
+    --color-border-light: rgba(0, 212, 255, 0.45);
+
+    /* Typography */
+    --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+    --font-display: 'Orbitron', var(--font-mono);
+
+    /* Layout */
+    --max-width: 900px;
+}
+
+/* Focus states for accessibility */
+a:focus-visible,
+button:focus-visible,
+[tabindex]:focus-visible {
+    outline: 2px solid var(--color-cyan);
+    outline-offset: 2px;
+}
+
+.theme-link:hover {
+    color: var(--color-cyan);
+}
+
+.theme-link.active {
+    color: var(--color-cyan);
+}
+
+.nav-home {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--color-cyan);
+    text-decoration: none;
+    transition: color 0.2s ease;
+}
+
+.nav-home:hover {
+    color: var(--color-cyan-soft);
+    text-shadow: 0 0 12px var(--color-cyan-glow);
+}
+
+.post-meta .meta-value {
+    color: var(--color-cyan-soft);
+}
+
+.hero-title {
+    font-family: var(--font-mono);
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0 0 0.25rem 0;
+}
+
+.site-bio em {
+    color: var(--color-cyan-soft);
+    font-style: normal;
+}
+
+.site-bio a {
+    color: var(--color-cyan);
+    text-decoration: none;
+}
+
+.section-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-text);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.75rem;
+}
+
+.post-item:hover {
+    border-color: var(--color-cyan);
+}
+
+.post-date {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+}
+
+.post-item:hover .post-title {
+    color: var(--color-cyan);
+    text-shadow: 0 0 10px var(--color-cyan-glow);
+}
+
+.post-item:hover .post-comments {
+    color: var(--color-cyan);
+}
+
+.comment-item:hover {
+    border-color: var(--color-cyan);
+}
+
+.comment-item .comment-author {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-accent);
+}
+
+.links-box {
+    display: flex;
+    align-items: center;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-left: 3px solid var(--color-cyan-dim);
+}
+
+.link-item:hover .link-icon {
+    color: var(--color-cyan);
+}
+
+.link-item:hover .link-label {
+    color: var(--color-cyan);
+}
+
+.comment {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-left: 3px solid var(--color-cyan-dim);
+    padding: 1rem 1.25rem;
+}
+
+.comment-author {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--color-accent);
+    text-decoration: none;
+}
+
+.comment-body a {
+    color: var(--color-cyan);
+    text-decoration: none;
+}
+
+.content-body h1,
+.content-body h2,
+.content-body h3 {
+    color: var(--color-text);
+    margin: 1.5rem 0 0.75rem 0;
+}
+
+.content-body strong,
+.content-body b {
+    color: var(--color-accent);
+    font-weight: 600;
+}
+
+.content-body a {
+    color: var(--color-cyan);
+    text-decoration: none;
+}
+
+.content-body blockquote {
+    border-left: 3px solid var(--color-cyan-dim);
+    margin: 1rem 0;
+    padding-left: 1rem;
+    color: var(--color-text-muted);
+}
+
+.cta-inline summary.cta-link {
+    display: inline;
+    font-size: 0.8rem;
+    color: var(--color-cyan);
+    cursor: pointer;
+    list-style: none;
+    text-decoration: none;
+}
+
+.cta-code pre {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    padding: 1rem;
+    overflow-x: auto;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    margin: 0;
+}
+
+.cta-link {
+    font-size: 0.8rem;
+    color: var(--color-cyan);
+    text-decoration: none;
+}
+
+.post-footer-nav .section-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--color-text);
+    margin: 0 0 1rem 0;
+}
+
+.context-link {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--color-cyan);
+    text-decoration: none;
+    word-break: break-word;
+    line-height: 1.3;
+}
+
+.context-link:hover, .context-readmore:hover {
+    text-decoration: underline;
+}
+.context-readmore { color: var(--color-cyan); }
+
+.view-all:hover {
+    color: var(--color-cyan);
+}
+
+/* ── Site header & post list (v3 mockup design) ────────────── */
+.site-avatar-link, .site-identity-text { text-decoration: none; color: inherit; }
+body { font-family: 'Inter', var(--font-mono); }
+.site-name { color: var(--color-text); font-family: 'Newsreader', Georgia, serif; }
+.site-handle { color: var(--color-text-muted); font-family: var(--font-mono); }
+.site-bio { color: var(--color-text-soft); font-family: 'Newsreader', Georgia, serif; }
+.site-stats { color: var(--color-text-muted); border-color: var(--color-border); }
+.site-stats strong { color: var(--color-text); }
+.site-avatar { background: linear-gradient(135deg, var(--color-cyan-dim), var(--color-cyan)); color: #fff; font-family: 'Newsreader', Georgia, serif; font-style: italic; }
+.sp-date { color: var(--color-text-muted); }
+.sp-title { color: var(--color-text); font-family: 'Newsreader', Georgia, serif; }
+.sp-excerpt { color: var(--color-text-soft); font-family: 'Newsreader', Georgia, serif; }
+.sp-comments { color: var(--color-text-muted); }
+.site-post:hover { background: rgba(0, 212, 255, 0.05); }
+.view-all { color: var(--color-cyan); }
+.view-all:hover { color: var(--color-cyan-soft); }
+.footer-logo { color: var(--color-text-muted); font-family: 'Newsreader', Georgia, serif; font-style: italic; }
+.footer-tagline { color: var(--color-text-muted); }

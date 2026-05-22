@@ -131,7 +131,7 @@ When interactive prompts are auto-skipped in JSON mode, these defaults are used:
     "directories_created": [".polis/keys", "posts", "comments", "metadata"],
     "files_created": [
       ".well-known/polis",
-      "metadata/public.json",
+      "metadata/public.jsonl",
       "metadata/blessed-comments.json",
       "metadata/following.json"
     ],
@@ -403,7 +403,7 @@ Similar structure to `follow`, with `removed_from_following` and `comments_denie
   "data": {
     "posts_indexed": 12,
     "comments_indexed": 34,
-    "index_path": "metadata/public.json"
+    "index_path": "metadata/public.jsonl"
   }
 }
 ```

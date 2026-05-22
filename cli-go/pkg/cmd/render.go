@@ -25,6 +25,18 @@ func handleRender(args []string) {
 		exitError("Not a polis site directory (no .well-known/polis found)")
 	}
 
+	// Refresh the installed shape/theme reference payload from the embedded
+	// fixtures BEFORE loading templates. In production, Medic does this on
+	// its own cadence via version-gated resync; calling it here closes the
+	// developer-experience hole where `polis render` against a freshly-built
+	// CLI binary would still read stale templates from the tenant's installed
+	// shape dir until the next Medic cycle. EnsureReferencePayload is
+	// mtime-idempotent (skips writes when bytes match) so the production
+	// case is a no-op when versions already align.
+	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+		exitError("Failed to refresh reference payload: %v", err)
+	}
+
 	// Find CLI themes directory if not specified
 	themesDir := *cliThemesDir
 	if themesDir == "" {

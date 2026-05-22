@@ -104,10 +104,10 @@ func TestPrivatePath(t *testing.T) {
 		subdirs  []string
 		want     string
 	}{
-		{"pub.polis.post", nil, "/home/alice/mysite/.polis/content/pub.polis.core/posts"},
-		{"pub.polis.post", []string{"drafts"}, "/home/alice/mysite/.polis/content/pub.polis.core/posts/drafts"},
-		{"pub.polis.comment", []string{"pending"}, "/home/alice/mysite/.polis/content/pub.polis.core/comments/pending"},
-		{"pub.polis.comment", []string{"denied"}, "/home/alice/mysite/.polis/content/pub.polis.core/comments/denied"},
+		{"pub.polis.post", nil, "/home/alice/mysite/.polis/bundles/pub.polis.core/posts"},
+		{"pub.polis.post", []string{"drafts"}, "/home/alice/mysite/.polis/bundles/pub.polis.core/posts/drafts"},
+		{"pub.polis.comment", []string{"pending"}, "/home/alice/mysite/.polis/bundles/pub.polis.core/comments/pending"},
+		{"pub.polis.comment", []string{"denied"}, "/home/alice/mysite/.polis/bundles/pub.polis.core/comments/denied"},
 	}
 
 	for _, tt := range tests {
@@ -292,7 +292,7 @@ func TestAbs(t *testing.T) {
 func TestContentTypeNames(t *testing.T) {
 	r := testResolver(t)
 	names := r.ContentTypeNames()
-	if len(names) != 6 {
-		t.Errorf("got %d content types, want 6", len(names))
+	if len(names) != 7 {
+		t.Errorf("got %d content types, want 7", len(names))
 	}
 }

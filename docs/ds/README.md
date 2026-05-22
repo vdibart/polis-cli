@@ -40,8 +40,8 @@ The StorageAdapter interface is the boundary between business logic and persiste
 | `ds_relationship_metadata` | Relationships (blessings, following with status) |
 | `ds_events` | Event stream (ordered, typed events with cursors) |
 | `ds_domain_migrations` | Domain migration records |
-| `admin_blocked_domains` | Operator-blocked domains |
-| `admin_blocked_types` | Operator-blocked event types |
+| `ds_operator_policies` | Operator policy rules (allow/deny, replaces the legacy `admin_blocked_*` tables) |
+| `ds_key_history` | Per-domain Ed25519 key rotation history |
 
 ## Quick Start
 

@@ -94,8 +94,24 @@ func (h *BlessingHandler) Process(events []discovery.StreamEvent, state interfac
 			}
 
 		case "pub.polis.comment.blessing.granted":
-			// Verify DS attestation on autoblessed events (warn-only)
-			if autoBlessed, _ := evt.Payload["auto_blessed"].(bool); autoBlessed && h.DSKeyCache != nil {
+			// R20-C-F4 (2026-05-18): autoblessed events require a
+			// valid DS attestation. Pre-fix, verification failures
+			// were logged but the entry was still merged into
+			// blessingMap — an attacker could emit a fake autobless
+			// event (or one with empty ds_attestation) and the
+			// local cache would accept it as granted. New posture:
+			// drop the event entirely on verification failure when
+			// auto_blessed=true. Manual (non-autobless) grants are
+			// signed by the post author and verified through the
+			// signed-content path; this only gates autobless.
+			if autoBlessed, _ := evt.Payload["auto_blessed"].(bool); autoBlessed {
+				if h.DSKeyCache == nil {
+					// No DS key cache configured — we can't verify
+					// the attestation. Refuse the autobless event
+					// rather than accept on faith.
+					log.Printf("[!] Autobless event for %s dropped: DSKeyCache not configured", sourceURL)
+					continue
+				}
 				dsAttestation, _ := evt.Payload["ds_attestation"].(string)
 				dsKeyID, _ := evt.Payload["ds_key_id"].(string)
 				policyRule, _ := evt.Payload["policy_rule"].(string)
@@ -105,7 +121,8 @@ func (h *BlessingHandler) Process(events []discovery.StreamEvent, state interfac
 				if err := discovery.VerifyAutoblessAttestation(
 					h.DSKeyCache, commentURL, inReplyTo, policyRule, policySource, dsKeyID, dsAttestation,
 				); err != nil {
-					log.Printf("[!] Autobless attestation verification failed for %s: %v", sourceURL, err)
+					log.Printf("[!] Autobless attestation verification failed for %s: %v — dropping event", sourceURL, err)
+					continue
 				}
 			}
 

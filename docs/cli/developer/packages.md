@@ -4,37 +4,57 @@ The Go CLI (`cli-go/`) provides importable packages used by both the CLI binary 
 
 ## Package Hierarchy
 
-All core packages live in `cli-go/pkg/`:
+All core packages live in `cli-go/pkg/`. Grouped by concern:
 
 | Package | Purpose |
 |---------|---------|
+| **Entry points** | |
 | `cmd/` | CLI command handlers, main dispatch logic |
 | `signing/` | Ed25519 SSH signature format (compatible with `ssh-keygen -Y`) |
+| **Content lifecycle** | |
 | `publish/` | Post publishing (sign, write, index, register with DS) |
 | `comment/` | Comment management (sign, beseech, pending/denied state) |
 | `blessing/` | Blessing workflow (requests, grant, deny, beseech, sync) |
+| `tag/` | Tag content type (apply, remove, sign, sync to DS) |
+| `dm/` | Direct message encryption, storage, send/receive pipeline |
+| `metadata/` | Public index management (`public.jsonl`) |
+| `index/` | Index rebuilding |
+| `version/` | Version history parsing/reconstruction |
+| **Discovery / remote** | |
 | `discovery/` | HTTP client for discovery service endpoints |
 | `following/` | `following.json` management |
 | `feed/` | Feed aggregation + cache (JSONL cache, read tracking, staleness) |
 | `notification/` | Local notification CRUD |
 | `stream/` | Store for DS state/config/cursors, notification/follow/blessing handlers |
+| `remote/` | HTTP fetching for remote polis sites |
+| `verify/` | Remote content signature/hash verification |
+| `clone/` | Remote site cloning |
+| `migrate/` | Domain migration |
+| `httppool/` | Shared outbound HTTP client / pooling |
+| `resolve/` | URL → canonical handle/site resolution |
+| **Rendering / bundles** | |
 | `render/` | Markdown to HTML + page rendering |
 | `template/` | Mustache-like template engine |
 | `theme/` | Theme template loading |
 | `snippet/` | Snippet file management |
-| `metadata/` | Public index management (`index.jsonl`) |
+| `bundle/` | Bundle loading, registry, fixture install (`pub.polis.core`) |
+| `sitemap/` | Sitemap generation |
+| **Site state** | |
 | `site/` | Site validation, initialization, `.well-known/polis` |
 | `hooks/` | Post-action automation |
-| `remote/` | HTTP fetching for remote polis sites |
-| `verify/` | Remote content signature/hash verification |
-| `clone/` | Remote site cloning |
-| `version/` | Version history parsing/reconstruction |
-| `index/` | Index rebuilding |
-| `migrate/` | Domain migration |
-| `dm/` | Direct message encryption, storage, send/receive pipeline |
-| `ops/` | Content-type dispatch engine (wraps packages for API) |
-| `url/` | URL normalization |
 | `policy/` | Policy rule loading and evaluation |
+| `policycheck/` | Policy evaluation engine (verb-by-type matrix, layered eval) |
+| `url/` | URL normalization |
+| `atomicfile/` | Atomic file writes (write-temp-then-rename) |
+| **API / dispatch** | |
+| `ops/` | Content-type dispatch engine (wraps packages for API) |
+| **Background actors** (used by webapp's `polis-server` / `polis-full`) | |
+| `patrol/` | Patrol — detect issues with tenant sites |
+| `medic/` | Medic — fix issues Patrol surfaces |
+| `judge/` | Judge — validate signatures, key continuity (proto-TOFU) |
+| `clerk/` | Clerk — pre-registration intake |
+| `chaplain/` | Chaplain — post-registration follow-up |
+| `tailor/` | Tailor — replay Patrol/Medic changes |
 
 ## Import Rules
 
@@ -58,7 +78,7 @@ var Version = "dev"
 func GetGenerator() string { return "polis-cli-go/" + Version }
 ```
 
-The CLI entry point (`cmd/root.go`) propagates the version to all packages:
+The CLI entry point (`cmd/root.go`) propagates the version to the 7 packages that write generator strings into files:
 
 ```go
 func Execute(version string) {
@@ -66,11 +86,15 @@ func Execute(version string) {
     comment.Version = version
     metadata.Version = version
     following.Version = version
-    // ... 10 packages total
+    index.Version = version
+    site.Version = version
+    tag.Version = version
 }
 ```
 
 Metadata files use the generator format (`polis-cli-go/X.Y.Z`) instead of the bare version. The bash CLI uses `polis-cli/$VERSION` format.
+
+> Other packages (e.g. `tailor`) declare a `var Version = "dev"` but do not currently receive a propagated value from `Execute()` — they don't write generator strings to user-visible files today. If a new package starts emitting a generator marker, wire it into the list above.
 
 ### Adding a New Package That Writes Version
 

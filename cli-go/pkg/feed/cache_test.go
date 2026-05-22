@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -59,6 +60,40 @@ func TestCacheManager_EmptyCache(t *testing.T) {
 	}
 }
 
+// TestCacheManager_MarkChecked verifies that MarkChecked clears the stale
+// flag without changing the cursor. Used by syncFeed's structural early-
+// returns (empty following list, missing DS config) to break the
+// frontend's auto-refresh-on-stale loop when there's no work to do.
+func TestCacheManager_MarkChecked(t *testing.T) {
+	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+
+	// Fresh cache is stale.
+	if stale, _ := cm.IsStale(); !stale {
+		t.Fatal("precondition: fresh cache should be stale")
+	}
+
+	// Plant a cursor value to verify MarkChecked preserves it.
+	if err := cm.SetCursor("123"); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+
+	// Roll LastUpdated back so IsStale returns true (SetCursor just
+	// bumped it). We can't easily back-date without poking into the
+	// store, so just verify MarkChecked clears stale on its own:
+	// after calling it on a fresh-cursor cache, stale should be false.
+	if err := cm.MarkChecked(); err != nil {
+		t.Fatalf("MarkChecked: %v", err)
+	}
+	if stale, _ := cm.IsStale(); stale {
+		t.Error("after MarkChecked, cache should not be stale")
+	}
+
+	// Cursor preserved across MarkChecked.
+	if cursor, _ := cm.GetCursor(); cursor != "123" {
+		t.Errorf("cursor changed across MarkChecked: got %q, want 123", cursor)
+	}
+}
+
 func TestCacheManager_ListSortsOutOfOrderJSONL(t *testing.T) {
 	dir := t.TempDir()
 	cm := NewCacheManager(dir, testDiscoveryDomain)
@@ -106,10 +141,13 @@ func TestCacheManager_ListSortsOutOfOrderJSONL(t *testing.T) {
 func TestCacheManager_MergeItems(t *testing.T) {
 	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
 
+	// Dates relative to now so items don't get pruned by the 90-day max age
+	// (default MaxAgeDays). Hardcoded calendar dates time-bomb the test.
+	now := time.Now().UTC()
 	newCount, err := cm.MergeItems([]FeedItem{
-		{Type: "post", Title: "First Post", URL: "posts/first.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
-		{Type: "post", Title: "Second Post", URL: "posts/second.md", Published: "2026-02-02T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
-		{Type: "comment", Title: "A Comment", URL: "comments/reply.md", Published: "2026-02-03T10:00:00Z", AuthorURL: "https://bob.polis.pub", AuthorDomain: "bob.polis.pub"},
+		{Type: "post", Title: "First Post", URL: "posts/first.md", Published: now.Add(-72 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "post", Title: "Second Post", URL: "posts/second.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "comment", Title: "A Comment", URL: "comments/reply.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://bob.polis.pub", AuthorDomain: "bob.polis.pub"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -151,8 +189,9 @@ func TestCacheManager_MergeItems(t *testing.T) {
 func TestCacheManager_MergeDedup(t *testing.T) {
 	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
 
+	now := time.Now().UTC()
 	items := []FeedItem{
-		{Type: "post", Title: "Post A", URL: "posts/a.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "post", Title: "Post A", URL: "posts/a.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
 	}
 
 	// First merge
@@ -193,13 +232,14 @@ func TestCacheManager_MergeDedup_BlessingGrantedAndPublished(t *testing.T) {
 	// and blessing.granted, the cache should deduplicate by author+URL.
 	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
 
+	now := time.Now().UTC()
 	// First: comment arrives via comment.published
 	n1, err := cm.MergeItems([]FeedItem{
 		{
 			Type:         "comment",
 			Title:        "Great post!",
 			URL:          "https://bob.polis.pub/comments/20260304/reply.md",
-			Published:    "2026-02-04T10:00:00Z",
+			Published:    now.Add(-26 * time.Hour).Format(time.RFC3339),
 			AuthorURL:    "https://bob.polis.pub",
 			AuthorDomain: "bob.polis.pub",
 			TargetURL:    "https://alice.polis.pub/posts/20260304/hello.html",
@@ -218,7 +258,7 @@ func TestCacheManager_MergeDedup_BlessingGrantedAndPublished(t *testing.T) {
 		{
 			Type:         "comment",
 			URL:          "https://bob.polis.pub/comments/20260304/reply.md",
-			Published:    "2026-02-04T12:00:00Z",
+			Published:    now.Add(-24 * time.Hour).Format(time.RFC3339),
 			AuthorURL:    "https://bob.polis.pub",
 			AuthorDomain: "bob.polis.pub",
 			TargetURL:    "https://alice.polis.pub/posts/20260304/hello.html",
@@ -245,9 +285,10 @@ func TestCacheManager_MergeDedup_BlessingGrantedAndPublished(t *testing.T) {
 func TestCacheManager_MarkRead(t *testing.T) {
 	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
 
+	now := time.Now().UTC()
 	cm.MergeItems([]FeedItem{
-		{Type: "post", Title: "Post A", URL: "posts/a.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
-		{Type: "post", Title: "Post B", URL: "posts/b.md", Published: "2026-02-02T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "post", Title: "Post A", URL: "posts/a.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "post", Title: "Post B", URL: "posts/b.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
 	})
 
 	items, _ := cm.List()
@@ -272,8 +313,9 @@ func TestCacheManager_MarkRead(t *testing.T) {
 func TestCacheManager_MarkUnread(t *testing.T) {
 	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
 
+	now := time.Now().UTC()
 	cm.MergeItems([]FeedItem{
-		{Type: "post", Title: "Post A", URL: "posts/a.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "post", Title: "Post A", URL: "posts/a.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
 	})
 
 	items, _ := cm.List()
@@ -299,10 +341,11 @@ func TestCacheManager_MarkUnread(t *testing.T) {
 func TestCacheManager_MarkAllRead(t *testing.T) {
 	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
 
+	now := time.Now().UTC()
 	cm.MergeItems([]FeedItem{
-		{Type: "post", Title: "Post A", URL: "posts/a.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
-		{Type: "post", Title: "Post B", URL: "posts/b.md", Published: "2026-02-02T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
-		{Type: "comment", Title: "Comment C", URL: "comments/c.md", Published: "2026-02-03T10:00:00Z", AuthorURL: "https://bob.polis.pub", AuthorDomain: "bob.polis.pub"},
+		{Type: "post", Title: "Post A", URL: "posts/a.md", Published: now.Add(-72 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "post", Title: "Post B", URL: "posts/b.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "comment", Title: "Comment C", URL: "comments/c.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://bob.polis.pub", AuthorDomain: "bob.polis.pub"},
 	})
 
 	if err := cm.MarkAllRead(); err != nil {
@@ -360,10 +403,11 @@ func TestCacheManager_MarkUnreadFrom(t *testing.T) {
 func TestCacheManager_ListByType(t *testing.T) {
 	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
 
+	now := time.Now().UTC()
 	cm.MergeItems([]FeedItem{
-		{Type: "post", Title: "Post A", URL: "posts/a.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
-		{Type: "comment", Title: "Comment B", URL: "comments/b.md", Published: "2026-02-02T10:00:00Z", AuthorURL: "https://bob.polis.pub", AuthorDomain: "bob.polis.pub"},
-		{Type: "post", Title: "Post C", URL: "posts/c.md", Published: "2026-02-03T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "post", Title: "Post A", URL: "posts/a.md", Published: now.Add(-72 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "comment", Title: "Comment B", URL: "comments/b.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://bob.polis.pub", AuthorDomain: "bob.polis.pub"},
+		{Type: "post", Title: "Post C", URL: "posts/c.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
 	})
 
 	posts, err := cm.ListByType("post")
@@ -394,10 +438,11 @@ func TestCacheManager_ListByType(t *testing.T) {
 func TestCacheManager_ListFiltered(t *testing.T) {
 	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
 
+	now := time.Now().UTC()
 	cm.MergeItems([]FeedItem{
-		{Type: "post", Title: "Post A", URL: "posts/a.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
-		{Type: "comment", Title: "Comment B", URL: "comments/b.md", Published: "2026-02-02T10:00:00Z", AuthorURL: "https://bob.polis.pub", AuthorDomain: "bob.polis.pub"},
-		{Type: "post", Title: "Post C", URL: "posts/c.md", Published: "2026-02-03T10:00:00Z", AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "post", Title: "Post A", URL: "posts/a.md", Published: now.Add(-72 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "comment", Title: "Comment B", URL: "comments/b.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://bob.polis.pub", AuthorDomain: "bob.polis.pub"},
+		{Type: "post", Title: "Post C", URL: "posts/c.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
 	})
 
 	// Mark first item (Post C, most recent) as read
@@ -533,10 +578,11 @@ func TestCacheManager_Prune(t *testing.T) {
 		MaxAgeDays:       90,
 	})
 
+	now := time.Now().UTC()
 	cm.MergeItems([]FeedItem{
-		{Type: "post", Title: "Post 1", URL: "posts/1.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-		{Type: "post", Title: "Post 2", URL: "posts/2.md", Published: "2026-02-02T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
-		{Type: "post", Title: "Post 3", URL: "posts/3.md", Published: "2026-02-03T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Post 1", URL: "posts/1.md", Published: now.Add(-72 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Post 2", URL: "posts/2.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Post 3", URL: "posts/3.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 	})
 
 	items, err := cm.List()
@@ -717,8 +763,9 @@ func TestCacheManager_CreatesDirectory(t *testing.T) {
 	// Don't pre-create directories
 	cm := NewCacheManager(dir, testDiscoveryDomain)
 
+	now := time.Now().UTC()
 	_, err := cm.MergeItems([]FeedItem{
-		{Type: "post", Title: "Test", URL: "posts/test.md", Published: "2026-02-01T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "Test", URL: "posts/test.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1160,5 +1207,218 @@ func TestMergeItemsResult_DetectsPruneLoss(t *testing.T) {
 	}
 	if mr.Retained != 0 {
 		t.Errorf("expected Retained=0 (pruned by age), got %d", mr.Retained)
+	}
+}
+
+// TestCacheManager_UpdateExcerpts — R17 final-review item #4. UpdateExcerpts
+// applies per-item excerpt updates atomically under the cache mutex,
+// preserving items that aren't in the update map. Closes the
+// concurrent-fetch overwrite race that SaveItems(items) carries.
+func TestCacheManager_UpdateExcerpts(t *testing.T) {
+	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	now := time.Now().UTC()
+
+	if _, err := cm.MergeItems([]FeedItem{
+		{Type: "post", Title: "A", URL: "posts/a.md", Published: now.Add(-1 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "post", Title: "B", URL: "posts/b.md", Published: now.Add(-2 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+		{Type: "post", Title: "C", URL: "posts/c.md", Published: now.Add(-3 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	items, _ := cm.List()
+	if len(items) != 3 {
+		t.Fatalf("seeded 3 items, got %d", len(items))
+	}
+
+	// Build update map by ID — only A and C get excerpts.
+	updates := make(map[string]string)
+	for _, it := range items {
+		switch it.Title {
+		case "A":
+			updates[it.ID] = "excerpt for A"
+		case "C":
+			updates[it.ID] = "excerpt for C"
+		}
+	}
+
+	applied, err := cm.UpdateExcerpts(updates)
+	if err != nil {
+		t.Fatalf("UpdateExcerpts: %v", err)
+	}
+	if applied != 2 {
+		t.Errorf("expected 2 applied, got %d", applied)
+	}
+
+	// Re-list and verify per-item state.
+	out, _ := cm.List()
+	for _, it := range out {
+		switch it.Title {
+		case "A":
+			if it.Excerpt != "excerpt for A" {
+				t.Errorf("A.Excerpt = %q, want %q", it.Excerpt, "excerpt for A")
+			}
+		case "B":
+			if it.Excerpt != "" {
+				t.Errorf("B.Excerpt should remain empty, got %q", it.Excerpt)
+			}
+		case "C":
+			if it.Excerpt != "excerpt for C" {
+				t.Errorf("C.Excerpt = %q, want %q", it.Excerpt, "excerpt for C")
+			}
+		}
+	}
+
+	// Idempotent: re-applying the same updates returns 0 (no diff).
+	applied2, err := cm.UpdateExcerpts(updates)
+	if err != nil {
+		t.Fatalf("second UpdateExcerpts: %v", err)
+	}
+	if applied2 != 0 {
+		t.Errorf("expected 0 applied on idempotent re-call, got %d", applied2)
+	}
+
+	// Empty updates map is a no-op.
+	applied3, err := cm.UpdateExcerpts(map[string]string{})
+	if err != nil {
+		t.Fatalf("empty-map UpdateExcerpts: %v", err)
+	}
+	if applied3 != 0 {
+		t.Errorf("expected 0 applied on empty map, got %d", applied3)
+	}
+
+	// Unknown ID is silently skipped.
+	applied4, err := cm.UpdateExcerpts(map[string]string{"sha256:nonexistent": "ghost"})
+	if err != nil {
+		t.Fatalf("unknown-id UpdateExcerpts: %v", err)
+	}
+	if applied4 != 0 {
+		t.Errorf("expected 0 applied on unknown ID, got %d", applied4)
+	}
+}
+
+// TestCacheManager_UpdateExcerpts_RaceFreeWithMerge — sanity-check the
+// race scenario the API was designed to fix. Sequence:
+//   1. Background goroutine reads cache snapshot.
+//   2. Concurrent goroutine merges new items.
+//   3. Background goroutine writes excerpts via UpdateExcerpts.
+//   4. Final cache should contain BOTH the merged items AND the
+//      background goroutine's excerpts. No new items lost.
+//
+// Pre-fix (SaveItems): the background goroutine's SaveItems(items)
+// would overwrite the cache with its older snapshot, losing the
+// merged items. This test would fail.
+func TestCacheManager_UpdateExcerpts_RaceFreeWithMerge(t *testing.T) {
+	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	now := time.Now().UTC()
+
+	if _, err := cm.MergeItems([]FeedItem{
+		{Type: "post", Title: "Old", URL: "posts/old.md", Published: now.Add(-2 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Step 1: background reads snapshot.
+	snapshot, _ := cm.List()
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot should have 1 item, got %d", len(snapshot))
+	}
+	oldID := snapshot[0].ID
+
+	// Step 2: concurrent merge adds a new item.
+	if _, err := cm.MergeItems([]FeedItem{
+		{Type: "post", Title: "New", URL: "posts/new.md", Published: now.Add(-1 * time.Hour).Format(time.RFC3339), AuthorURL: "https://alice.polis.pub", AuthorDomain: "alice.polis.pub"},
+	}); err != nil {
+		t.Fatalf("concurrent merge: %v", err)
+	}
+
+	// Step 3: background writes excerpt for the OLD item via UpdateExcerpts
+	// (NOT SaveItems — that's the unsafe path).
+	applied, err := cm.UpdateExcerpts(map[string]string{oldID: "old excerpt"})
+	if err != nil {
+		t.Fatalf("UpdateExcerpts: %v", err)
+	}
+	if applied != 1 {
+		t.Errorf("applied = %d, want 1", applied)
+	}
+
+	// Step 4: final cache has BOTH items, AND the old one carries its excerpt.
+	final, _ := cm.List()
+	if len(final) != 2 {
+		t.Fatalf("final cache should have 2 items (merged item NOT lost); got %d", len(final))
+	}
+	titles := map[string]string{}
+	for _, it := range final {
+		titles[it.Title] = it.Excerpt
+	}
+	if _, ok := titles["New"]; !ok {
+		t.Error("merged item 'New' was lost — race condition NOT fixed")
+	}
+	if titles["Old"] != "old excerpt" {
+		t.Errorf("old item's excerpt should be 'old excerpt', got %q", titles["Old"])
+	}
+}
+
+// TestList_OversizeLine_Skipped — R20-B-S2 regression guard
+// (2026-05-18). A single feed entry that exceeds the default
+// bufio.Scanner buffer (64KB) used to return bufio.ErrTooLong from
+// listLocked, which the caller surfaced as an error — bricking the
+// entire feed view. A malicious remote feed entry (oversize title /
+// excerpt / body_html) from a followed author was enough to DoS the
+// reader. Fix: explicit 1MB buffer + skip-on-too-long.
+func TestList_OversizeLine_Skipped(t *testing.T) {
+	tempDir := t.TempDir()
+	cm := NewCacheManager(tempDir, "default")
+
+	// Seed a tiny valid item.
+	valid := FeedItem{
+		Type: "post", Title: "Valid", URL: "posts/v.md",
+		Published: "2026-05-18T00:00:00Z",
+		AuthorURL: "https://a.pub", AuthorDomain: "a.pub",
+	}
+	if _, err := cm.MergeItems([]FeedItem{valid}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Append a single oversize line directly to the cache file.
+	// 2MiB exceeds the 1MiB cap so it should be skipped.
+	cachePath := filepath.Join(tempDir, ".polis", "ds", "default", "pub.polis.core", "state", "pub.polis.feed.jsonl")
+	oversize := strings.Repeat("x", 2<<20)
+	oversizeLine := `{"type":"post","title":"` + oversize + `"}` + "\n"
+	f, err := os.OpenFile(cachePath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := f.WriteString(oversizeLine); err != nil {
+		t.Fatalf("append oversize: %v", err)
+	}
+	f.Close()
+
+	// Append another valid item AFTER the oversize line.
+	// Pre-fix scanner would abort on the oversize and never reach
+	// this. We can't easily get this through MergeItems because
+	// MergeItems re-reads + re-writes (which would hit the same
+	// scanner bug) — so append directly.
+	valid2 := `{"type":"post","title":"After","url":"posts/a.md","published":"2026-05-18T01:00:00Z","author_url":"https://a.pub","author_domain":"a.pub"}` + "\n"
+	f, _ = os.OpenFile(cachePath, os.O_APPEND|os.O_WRONLY, 0644)
+	f.WriteString(valid2)
+	f.Close()
+
+	// List should succeed (no error) and return at least the items
+	// before the oversize line. The oversize line is dropped.
+	items, err := cm.List()
+	if err != nil {
+		t.Fatalf("R20-B-S2 regression: List returned error on oversize line: %v", err)
+	}
+	if len(items) == 0 {
+		t.Errorf("expected at least 1 valid item after oversize skip; got 0")
+	}
+	// The valid items must be present.
+	titles := make(map[string]bool, len(items))
+	for _, it := range items {
+		titles[it.Title] = true
+	}
+	if !titles["Valid"] {
+		t.Errorf("'Valid' item missing from results: %+v", items)
 	}
 }

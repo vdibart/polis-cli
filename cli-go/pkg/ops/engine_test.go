@@ -25,8 +25,8 @@ func newTestEngine(t *testing.T) (*Engine, string) {
 		"content/pub.polis.core/post",
 		"content/pub.polis.core/comment",
 		"content/pub.polis.core/follow",
-		".polis/content/pub.polis.core/comments/pending",
-		".polis/content/pub.polis.core/comments/drafts",
+		".polis/bundles/pub.polis.core/comments/pending",
+		".polis/bundles/pub.polis.core/comments/drafts",
 		"posts",
 		"comments",
 		"site/snippets",
@@ -632,5 +632,87 @@ func TestListBundlesTypeDetails(t *testing.T) {
 		if !typeNames[expected] {
 			t.Errorf("expected type %q in bundle info", expected)
 		}
+	}
+}
+
+func TestDispatchThemeList(t *testing.T) {
+	engine, _ := newTestEngine(t)
+
+	result, err := engine.Dispatch(context.Background(), ActionRequest{
+		Action:      "list",
+		ContentType: "pub.polis.theme",
+	})
+	if err != nil {
+		t.Fatalf("dispatch theme/list: %v", err)
+	}
+	if result.Status != "success" {
+		t.Errorf("status = %q, want success", result.Status)
+	}
+	count, _ := result.Data["count"].(int)
+	if count < 3 {
+		t.Errorf("expected at least 3 themes (_shared, especial-light, vice), got %d", count)
+	}
+
+	themes, ok := result.Data["themes"].([]map[string]any)
+	if !ok {
+		t.Fatalf("themes should be []map[string]any, got %T", result.Data["themes"])
+	}
+	names := make(map[string]bool)
+	for _, th := range themes {
+		if name, ok := th["name"].(string); ok {
+			names[name] = true
+		}
+	}
+	for _, expected := range []string{"_shared", "especial-light", "vice"} {
+		if !names[expected] {
+			t.Errorf("expected theme %q in list", expected)
+		}
+	}
+}
+
+func TestDispatchThemeGet(t *testing.T) {
+	engine, _ := newTestEngine(t)
+
+	result, err := engine.Dispatch(context.Background(), ActionRequest{
+		Action:      "get",
+		ContentType: "pub.polis.theme",
+		Payload:     map[string]any{"name": "vice"},
+	})
+	if err != nil {
+		t.Fatalf("dispatch theme/get: %v", err)
+	}
+	if result.Data["name"] != "vice" {
+		t.Errorf("name = %v, want vice", result.Data["name"])
+	}
+	if result.Data["css"] != "vice.css" {
+		t.Errorf("css = %v, want vice.css", result.Data["css"])
+	}
+}
+
+func TestDispatchThemeGetUnknown(t *testing.T) {
+	engine, _ := newTestEngine(t)
+
+	_, err := engine.Dispatch(context.Background(), ActionRequest{
+		Action:      "get",
+		ContentType: "pub.polis.theme",
+		Payload:     map[string]any{"name": "nonexistent"},
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown theme")
+	}
+}
+
+func TestDispatchThemeUnsupportedAction(t *testing.T) {
+	engine, _ := newTestEngine(t)
+
+	_, err := engine.Dispatch(context.Background(), ActionRequest{
+		Action:      "delete",
+		ContentType: "pub.polis.theme",
+	})
+	if err == nil {
+		t.Fatal("expected error for unsupported theme action")
+	}
+	if !strings.Contains(err.Error(), "unsupported action") {
+		t.Errorf("expected 'unsupported action' error, got: %v", err)
 	}
 }

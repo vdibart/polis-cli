@@ -72,14 +72,13 @@ func TestWellKnownValidJSON(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
 		Version:     "polis-cli-go/0.57.0",
-		AuthorName:      "Test Author",
-		Email:       "test@example.com",
-		PublicKey:    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		SiteTitle:   "Test Site",
-		Created:     "2026-01-01T00:00:00Z",
-		ActiveTheme: "sols",
+		AuthorName: "Test Author",
+		Email:      "test@example.com",
+		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		SiteTitle:  "Test Site",
+		Created:    "2026-01-01T00:00:00Z",
 		Bundles: map[string]BundleEntry{
-			"pub.polis.core": {Active: true, Path: "content/pub.polis.core/bundle.json"},
+			"pub.polis.core": {Path: "content/pub.polis.core/bundle.json"},
 		},
 	}
 	writeTestWellKnown(t, dir, wk)
@@ -107,14 +106,11 @@ func TestWellKnownValidJSON(t *testing.T) {
 	if loaded.Created != wk.Created {
 		t.Errorf("Created mismatch")
 	}
-	if loaded.ActiveTheme != wk.ActiveTheme {
-		t.Errorf("ActiveTheme mismatch: got %q, want %q", loaded.ActiveTheme, wk.ActiveTheme)
-	}
 	if len(loaded.Bundles) != 1 {
 		t.Errorf("Bundles count: got %d, want 1", len(loaded.Bundles))
 	}
-	if entry, ok := loaded.Bundles["pub.polis.core"]; !ok || !entry.Active {
-		t.Errorf("pub.polis.core bundle should be active")
+	if entry, ok := loaded.Bundles["pub.polis.core"]; !ok || entry.Path != "content/pub.polis.core/bundle.json" {
+		t.Errorf("pub.polis.core bundle path mismatch: %+v", entry)
 	}
 }
 
@@ -181,8 +177,8 @@ func TestBundleRegistryRoundTrip(t *testing.T) {
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:   "2026-01-01T00:00:00Z",
 		Bundles: map[string]BundleEntry{
-			"pub.polis.core":      {Active: true, Path: "content/pub.polis.core/bundle.json"},
-			"com.example.recipes": {Active: false, Path: "content/com.example.recipes/bundle.json"},
+			"pub.polis.core":      {Path: "content/pub.polis.core/bundle.json"},
+			"com.example.recipes": {Path: "content/com.example.recipes/bundle.json"},
 		},
 	}
 	writeTestWellKnown(t, dir, wk)
@@ -197,13 +193,13 @@ func TestBundleRegistryRoundTrip(t *testing.T) {
 	}
 
 	core := loaded.Bundles["pub.polis.core"]
-	if !core.Active || core.Path != "content/pub.polis.core/bundle.json" {
-		t.Errorf("pub.polis.core: active=%v, path=%q", core.Active, core.Path)
+	if core.Path != "content/pub.polis.core/bundle.json" {
+		t.Errorf("pub.polis.core path = %q", core.Path)
 	}
 
 	recipes := loaded.Bundles["com.example.recipes"]
-	if recipes.Active || recipes.Path != "content/com.example.recipes/bundle.json" {
-		t.Errorf("com.example.recipes: active=%v, path=%q", recipes.Active, recipes.Path)
+	if recipes.Path != "content/com.example.recipes/bundle.json" {
+		t.Errorf("com.example.recipes path = %q", recipes.Path)
 	}
 }
 
@@ -230,39 +226,20 @@ func TestNoBundlesField(t *testing.T) {
 // 4. Active Theme Tests
 // ============================================================================
 
+// TestActiveThemeRoundTrip verifies the legacy-fallback path: when
+// .well-known/polis carries an active_theme (pre-1e site, pre-migration),
+// site.GetActiveTheme falls through to it.
 func TestActiveThemeRoundTrip(t *testing.T) {
 	dir := setupTestDir(t)
-	wk := &WellKnown{
-		Version:     "polis-cli-go/0.57.0",
-		AuthorName:      "alice",
-		PublicKey:    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		Created:     "2026-01-01T00:00:00Z",
-		ActiveTheme: "turbo",
-	}
-	writeTestWellKnown(t, dir, wk)
+	// Write a well-known with the legacy active_theme field. The struct no
+	// longer has the field, so we hand-write the JSON to simulate a
+	// pre-1e site that hasn't been migrated yet.
+	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
+	os.WriteFile(filepath.Join(dir, ".well-known", "polis"),
+		[]byte(`{"version":"polis-cli-go/0.57.0","author_name":"alice","public_key":"ssh-ed25519 AAAA","created":"2026-01-01T00:00:00Z","active_theme":"turbo"}`), 0644)
 
 	if got := GetActiveTheme(dir); got != "turbo" {
-		t.Errorf("GetActiveTheme() = %q, want turbo", got)
-	}
-}
-
-func TestSetActiveTheme(t *testing.T) {
-	dir := setupTestDir(t)
-	wk := &WellKnown{
-		Version:     "polis-cli-go/0.57.0",
-		AuthorName:      "alice",
-		PublicKey:    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		Created:     "2026-01-01T00:00:00Z",
-		ActiveTheme: "sols",
-	}
-	writeTestWellKnown(t, dir, wk)
-
-	if err := SetActiveTheme(dir, "zane"); err != nil {
-		t.Fatalf("SetActiveTheme: %v", err)
-	}
-
-	if got := GetActiveTheme(dir); got != "zane" {
-		t.Errorf("After SetActiveTheme, got %q, want zane", got)
+		t.Errorf("GetActiveTheme() = %q, want turbo (legacy fallback)", got)
 	}
 }
 
@@ -296,15 +273,16 @@ func TestLoadBashCLIWellKnown(t *testing.T) {
 	if wk.Created != "2026-01-01T00:00:00Z" {
 		t.Errorf("Created = %q", wk.Created)
 	}
-	if wk.ActiveTheme != "sols" {
-		t.Errorf("ActiveTheme = %q, want sols", wk.ActiveTheme)
-	}
+	// active_theme is no longer parsed into the WellKnown struct (moved to
+	// .polis/bundles/registry.json in 1e). The bash CLI testdata still has
+	// the field — that's fine; the JSON unmarshaler ignores unknown keys.
 	if len(wk.Bundles) != 1 {
 		t.Fatalf("Bundles count = %d, want 1", len(wk.Bundles))
 	}
 	core := wk.Bundles["pub.polis.core"]
-	if !core.Active {
-		t.Error("pub.polis.core should be active")
+	// Listing-is-activation post-C4: presence in Bundles is enough.
+	if core.Path == "" {
+		t.Error("pub.polis.core path should be set")
 	}
 }
 
@@ -439,64 +417,6 @@ func TestSaveCreatesDirectory(t *testing.T) {
 // 8. Helper Function Tests
 // ============================================================================
 
-func TestGetSiteTitle(t *testing.T) {
-	dir := setupTestDir(t)
-	wk := &WellKnown{
-		Version:   "polis-cli-go/0.57.0",
-		AuthorName:    "alice",
-		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		SiteTitle: "My Awesome Site",
-		Created:   "2026-01-01T00:00:00Z",
-	}
-	writeTestWellKnown(t, dir, wk)
-
-	title := GetSiteTitle(dir)
-	if title != "My Awesome Site" {
-		t.Errorf("GetSiteTitle() = %q, want %q", title, "My Awesome Site")
-	}
-}
-
-func TestGetSiteTitleMissing(t *testing.T) {
-	dir := setupTestDir(t)
-	wk := &WellKnown{
-		Version:   "polis-cli-go/0.57.0",
-		AuthorName:    "alice",
-		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		Created:   "2026-01-01T00:00:00Z",
-	}
-	writeTestWellKnown(t, dir, wk)
-
-	title := GetSiteTitle(dir)
-	if title != "" {
-		t.Errorf("GetSiteTitle() = %q, want empty string", title)
-	}
-}
-
-func TestGetPublicKey(t *testing.T) {
-	dir := setupTestDir(t)
-	expectedKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local"
-	wk := &WellKnown{
-		Version:   "polis-cli-go/0.57.0",
-		AuthorName:    "alice",
-		PublicKey: expectedKey,
-		Created:   "2026-01-01T00:00:00Z",
-	}
-	writeTestWellKnown(t, dir, wk)
-
-	key := GetPublicKey(dir)
-	if key != expectedKey {
-		t.Errorf("GetPublicKey() = %q, want %q", key, expectedKey)
-	}
-}
-
-func TestGetPublicKeyMissingFile(t *testing.T) {
-	dir := setupTestDir(t)
-	key := GetPublicKey(dir)
-	if key != "" {
-		t.Errorf("GetPublicKey() should return empty string for missing file, got %q", key)
-	}
-}
-
 // ============================================================================
 // 9. Extra Fields Compatibility Test
 // ============================================================================
@@ -558,7 +478,7 @@ func TestSaveWellKnownIndentation(t *testing.T) {
 		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
 		Created:   "2026-01-01T00:00:00Z",
 		Bundles: map[string]BundleEntry{
-			"pub.polis.core": {Active: true, Path: "content/pub.polis.core/bundle.json"},
+			"pub.polis.core": {Path: "content/pub.polis.core/bundle.json"},
 		},
 	}
 
@@ -835,6 +755,29 @@ func TestGenerateFaviconSVG_MultiCharInitial(t *testing.T) {
 	}
 }
 
+// TestGenerateFaviconSVG_ShapeMatchesAvatar locks in that the favicon
+// renders as a circle (matching .site-avatar { border-radius:50% } in
+// themes/_shared/base.css). Earlier versions used <rect rx="22">, which
+// rendered as a rounded square in browser tabs even when the on-page
+// avatar was round — visually drifted from the user's identity.
+func TestGenerateFaviconSVG_ShapeMatchesAvatar(t *testing.T) {
+	cases := map[string]*AvatarConfig{
+		"plain":      {BG: "#2a5a6a", FG: "#ffffff"},
+		"bordered":   {BG: "#2a5a6a", FG: "#ffffff", Border: "#d06888", BorderW: 2},
+		"patterned":  {BG: "#2a5a6a", FG: "#ffffff", Pattern: "dots", PatternColor: "#3a7a8a"},
+		"nil_config": nil,
+	}
+	for name, cfg := range cases {
+		svg := GenerateFaviconSVG(cfg, "A")
+		if !strings.Contains(svg, `<circle cx="64" cy="64" r="64"`) {
+			t.Errorf("%s: favicon background should be a circle, got %s", name, svg)
+		}
+		if strings.Contains(svg, "rx=\"22\"") {
+			t.Errorf("%s: favicon still uses rect-based rounded-square markup", name)
+		}
+	}
+}
+
 func TestWriteFavicon_CreatesFile(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
@@ -888,6 +831,86 @@ func TestWriteFavicon_MissingWellKnown(t *testing.T) {
 	err := WriteFavicon(dir)
 	if err == nil {
 		t.Error("WriteFavicon should error when .well-known/polis is missing")
+	}
+}
+
+// ============================================================================
+// LoadWellKnownRaw Tests (F10)
+// ============================================================================
+
+func TestLoadWellKnownRaw_NotExist(t *testing.T) {
+	dir := t.TempDir()
+	raw, err := LoadWellKnownRaw(dir)
+	if err != nil {
+		t.Fatalf("unexpected error for missing file: %v", err)
+	}
+	if raw != nil {
+		t.Errorf("raw = %v, want nil for missing file", raw)
+	}
+}
+
+func TestLoadWellKnownRaw_ValidJSON(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
+	os.WriteFile(filepath.Join(dir, ".well-known", "polis"),
+		[]byte(`{"version":"1","public_key":"pk","author_name":"alice","created":"2026-01-01T00:00:00Z"}`), 0644)
+
+	raw, err := LoadWellKnownRaw(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if raw == nil {
+		t.Fatal("raw should not be nil on valid JSON")
+	}
+	if raw["author_name"] != "alice" {
+		t.Errorf("author_name = %v, want alice", raw["author_name"])
+	}
+}
+
+func TestLoadWellKnownRaw_MalformedJSON(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
+	os.WriteFile(filepath.Join(dir, ".well-known", "polis"), []byte("not valid json{"), 0644)
+
+	raw, err := LoadWellKnownRaw(dir)
+	if err == nil {
+		t.Fatal("expected error for malformed JSON, got nil")
+	}
+	if raw != nil {
+		t.Errorf("raw = %v, want nil on parse error", raw)
+	}
+}
+
+func TestLoadWellKnownRaw_PermissionDenied(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root; chmod 0000 would not deny access")
+	}
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
+	path := filepath.Join(dir, ".well-known", "polis")
+	os.WriteFile(path, []byte("{}"), 0644)
+	if err := os.Chmod(path, 0000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer os.Chmod(path, 0644)
+
+	raw, err := LoadWellKnownRaw(dir)
+	if err == nil {
+		t.Fatal("expected error for permission-denied, got nil")
+	}
+	if raw != nil {
+		t.Errorf("raw = %v, want nil on read error", raw)
+	}
+}
+
+// LegacyActiveThemeInWellKnown should remain absent-on-any-error after F10.
+func TestLegacyActiveThemeInWellKnown_UnchangedOnMalformed(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
+	os.WriteFile(filepath.Join(dir, ".well-known", "polis"), []byte("{bad"), 0644)
+
+	if LegacyActiveThemeInWellKnown(dir) {
+		t.Error("LegacyActiveThemeInWellKnown should return false on malformed JSON (assume-absent-on-error)")
 	}
 }
 

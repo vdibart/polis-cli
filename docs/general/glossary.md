@@ -128,9 +128,9 @@ The mechanism by which a bundle processes actions. Three handler types: `builtin
 
 ### manifest
 
-*(Deprecated — absorbed into `.well-known/polis`.)* Formerly `metadata/manifest.json`. The `active_theme` field now lives in `.well-known/polis`; `post_count` and `comment_count` are derived from `content/pub.polis.core/index.jsonl` at runtime.
+*(Deprecated — split between `.well-known/polis` and `.polis/bundles/registry.json`.)* Formerly `metadata/manifest.json`. The `active_theme` and `active_shape` fields now live in `.polis/bundles/registry.json` (per-tenant, private). `.well-known/polis` carries the public identity document. `post_count` and `comment_count` are derived from `content/pub.polis.core/index.jsonl` at runtime.
 
-**Related**: theme, .well-known/polis
+**Related**: theme, shape, bundle, .well-known/polis
 
 ---
 
@@ -190,11 +190,19 @@ A reusable template fragment (HTML or markdown) included in rendered pages via `
 
 ---
 
+### shape
+
+A rendering approach declared by a bundle, comprising the templates and (optionally) client-side scripts that turn content into a user-facing surface. The core bundle ships two shapes: `pub.polis.shapes.v3` (the classic blog — per-post pages, comment threads inline) and `pub.polis.shapes.v4` (the *infinity stream* — single stream-screen, PQL-driven filtering, used on polis.pub and the webapp logged-in view). The active shape is set in `.polis/bundles/registry.json`. Themes are independent: a theme may target one or more shapes, and may override individual shape templates.
+
+**Related**: bundle, theme, content type
+
+---
+
 ### theme
 
-A complete styling package containing HTML templates (`index.html`, `post.html`, `comment.html`, `comment-inline.html`), CSS, and snippets. Polis ships with three themes: turbo, zane, and sols. Set via `active_theme` in `.well-known/polis`.
+A CSS-only presentation package scoped to a bundle and compatible with one or more shapes. Themes live at `.polis/bundles/pub.polis.core/themes/<name>/` per-tenant; the active theme is set via `active_theme` in `.polis/bundles/registry.json`. The core bundle ships: `especial`, `especial-light`, `vice`, `turbo`, `zane`, `studio13`, `studio13-nk` (user-selectable), plus `sols` which is reserved as the logged-out landing theme and filtered out of the user dropdown. A theme may override individual shape templates (e.g. `post.html`) to customize markup.
 
-**Related**: snippet, render, manifest
+**Related**: shape, snippet, bundle, render
 
 ---
 
@@ -218,6 +226,6 @@ SHA-256 hash of content used for content-addressing and change detection. Update
 
 ### .well-known/polis
 
-Public identity document at your domain root. Contains author details, Ed25519 public key, site title, active theme, and bundle registry. Used by the discovery service and other readers to verify content signatures and discover site capabilities.
+Public identity document at your domain root. Contains author details, Ed25519 public key, site title, avatar, and bundle declarations. Used by the discovery service and other readers to verify content signatures and discover site capabilities. (Active theme and active shape live in the *private* `.polis/bundles/registry.json`, not here.)
 
 **Related**: public key, signature, bundle, canonical_url

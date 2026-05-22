@@ -137,14 +137,16 @@ func TestParse_AllKeywordCombos(t *testing.T) {
 		{"deny none from none", "deny", "none", "none"},
 		{"allow all from following", "allow", "all", "following"},
 		{"deny all from followers", "deny", "all", "followers"},
-		{"allow pub.polis.comment from following", "allow", "pub.polis.comment", "following"},
-		{"deny pub.polis.comment.blessing from all", "deny", "pub.polis.comment.blessing", "all"},
-		// New verbs
-		{"emit pub.polis.comment.blessing from self", "emit", "pub.polis.comment.blessing", "self"},
-		{"omit pub.polis.notification from self", "omit", "pub.polis.notification", "self"},
-		{"emit pub.polis.comment.blessing from following", "emit", "pub.polis.comment.blessing", "following"},
-		{"emit pub.polis.comment.blessing from thread-blessed", "emit", "pub.polis.comment.blessing", "thread-blessed"},
-		// New sources with existing verbs
+		{"deny pub.polis.comment from all", "deny", "pub.polis.comment", "all"},
+		// New v2 decision verbs
+		{"bless pub.polis.comment from self", "bless", "pub.polis.comment", "self"},
+		{"bless pub.polis.comment from following", "bless", "pub.polis.comment", "following"},
+		{"bless pub.polis.comment from thread-blessed", "bless", "pub.polis.comment", "thread-blessed"},
+		{"review pub.polis.comment from all", "review", "pub.polis.comment", "all"},
+		// Layer 2 outbound verbs (reserved — parseable but not yet evaluated)
+		{"emit pub.polis.post from self", "emit", "pub.polis.post", "self"},
+		{"omit pub.polis.dm from all", "omit", "pub.polis.dm", "all"},
+		// DM inbound
 		{"allow pub.polis.dm from self", "allow", "pub.polis.dm", "self"},
 		{"deny all from all at evil.corp", "deny", "all", "all"},
 	}
@@ -163,6 +165,101 @@ func TestParse_AllKeywordCombos(t *testing.T) {
 			}
 			if p.Source != tt.source {
 				t.Errorf("source = %q, want %q", p.Source, tt.source)
+			}
+		})
+	}
+}
+
+// TestParse_LegacyEmitBlessingTranslation verifies that legacy
+// "emit pub.polis.comment.blessing from X" rules (as written before the v2
+// grammar refactor, and still present in DS-signed historical attestations)
+// parse to the equivalent v2 form "bless pub.polis.comment from X".
+// The raw rule string is not rewritten by this package — callers that
+// need the original string must preserve it themselves (EvalResult.Rule
+// already does this for signature verification).
+func TestParse_LegacyEmitBlessingTranslation(t *testing.T) {
+	tests := []struct {
+		legacy string
+		source string
+	}{
+		{"emit pub.polis.comment.blessing from self", "self"},
+		{"emit pub.polis.comment.blessing from following", "following"},
+		{"emit pub.polis.comment.blessing from thread-blessed", "thread-blessed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.legacy, func(t *testing.T) {
+			p, err := Parse(tt.legacy)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if p.Action != "bless" {
+				t.Errorf("action = %q, want %q (legacy translated)", p.Action, "bless")
+			}
+			if p.Type != "pub.polis.comment" {
+				t.Errorf("type = %q, want %q (legacy translated)", p.Type, "pub.polis.comment")
+			}
+			if p.Source != tt.source {
+				t.Errorf("source = %q, want %q", p.Source, tt.source)
+			}
+		})
+	}
+}
+
+// TestParse_TenantLayerRejection verifies type+verb combinations that are
+// not meaningful in tenant policy files are rejected with clear errors.
+// See docs/general/policy-grammar.md for the full validation matrix.
+func TestParse_TenantLayerRejection(t *testing.T) {
+	rejected := []string{
+		// Comments have no acceptance layer — allow is meaningless.
+		"allow pub.polis.comment from all",
+		"allow pub.polis.comment from following",
+		// bless/review are comment-only in the tenant layer.
+		"bless pub.polis.post from self",
+		"review pub.polis.dm from all",
+		// allow/deny of post/follow/site are DS-operator concerns.
+		"allow pub.polis.post from all",
+		"allow pub.polis.follow from all",
+	}
+	for _, rule := range rejected {
+		t.Run(rule, func(t *testing.T) {
+			if _, err := Parse(rule); err == nil {
+				t.Errorf("expected tenant-mode parse error for %q", rule)
+			}
+		})
+	}
+}
+
+// TestParse_OperatorLayerAccepts verifies the DS-operator layer accepts
+// the broader set of allow/deny rules that tenant files reject.
+func TestParse_OperatorLayerAccepts(t *testing.T) {
+	accepted := []string{
+		"allow pub.polis.post from all",
+		"allow pub.polis.comment from all",
+		"allow pub.polis.follow from all",
+		"allow pub.polis.site from all",
+		"bless pub.polis.comment from following",
+		"review pub.polis.comment from all",
+	}
+	for _, rule := range accepted {
+		t.Run(rule, func(t *testing.T) {
+			if _, err := ParseInMode(rule, OperatorMode); err != nil {
+				t.Errorf("unexpected operator-mode parse error for %q: %v", rule, err)
+			}
+		})
+	}
+}
+
+// TestParse_OperatorLayerRejects verifies the DS-operator layer rejects
+// emit/omit (which belong to the tenant-outbound Layer 2).
+func TestParse_OperatorLayerRejects(t *testing.T) {
+	rejected := []string{
+		"emit pub.polis.post from self",
+		"omit pub.polis.dm from all",
+	}
+	for _, rule := range rejected {
+		t.Run(rule, func(t *testing.T) {
+			if _, err := ParseInMode(rule, OperatorMode); err == nil {
+				t.Errorf("expected operator-mode parse error for %q", rule)
 			}
 		})
 	}
@@ -194,7 +291,7 @@ func TestParse_OptionalClauses(t *testing.T) {
 	}
 
 	// both at and on
-	p, err = Parse("allow pub.polis.comment from following at friend.com on posts/hello.md")
+	p, err = Parse("bless pub.polis.comment from following at friend.com on posts/hello.md")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -239,15 +336,21 @@ func TestParse_TypeValidation(t *testing.T) {
 	}
 }
 
+// TestParse_RoundTrip exercises rules that survive parse → reconstruct
+// unchanged. The legacy "emit pub.polis.comment.blessing from X" form is
+// intentionally excluded because the parser translates it (see
+// TestParse_LegacyEmitBlessingTranslation).
 func TestParse_RoundTrip(t *testing.T) {
 	rules := []string{
-		"emit pub.polis.comment.blessing from self",
-		"emit pub.polis.comment.blessing from following",
-		"emit pub.polis.comment.blessing from thread-blessed",
-		"omit pub.polis.notification from self",
+		"bless pub.polis.comment from self",
+		"bless pub.polis.comment from following",
+		"bless pub.polis.comment from thread-blessed",
+		"review pub.polis.comment from all",
+		"emit pub.polis.post from self",
+		"omit pub.polis.dm from all",
 		"allow pub.polis.dm from following",
 		"deny pub.polis.dm from all",
-		"allow pub.polis.comment from following at friend.com on posts/hello.md",
+		"bless pub.polis.comment from following at friend.com on posts/hello.md",
 	}
 
 	for _, rule := range rules {
@@ -256,7 +359,6 @@ func TestParse_RoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse error: %v", err)
 			}
-			// Reconstruct the rule string
 			reconstructed := p.Action + " " + p.Type + " from " + p.Source
 			if p.Domain != "" {
 				reconstructed += " at " + p.Domain
@@ -368,7 +470,7 @@ func TestMatchesSource_SelfWithEmptyMyDomain(t *testing.T) {
 
 func TestEvaluate_FirstMatchWins(t *testing.T) {
 	policies := []Policy{
-		{Active: true, Rule: "allow pub.polis.comment from following"},
+		{Active: true, Rule: "bless pub.polis.comment from following"},
 		{Active: true, Rule: "deny pub.polis.comment from all"},
 	}
 
@@ -378,9 +480,9 @@ func TestEvaluate_FirstMatchWins(t *testing.T) {
 
 	evt := Event{Type: "pub.polis.comment.published", ActorDomain: "alice.com"}
 
-	// alice.com is in following -> first rule matches -> allow
-	if got := Evaluate(policies, evt, ctx); got != Allow {
-		t.Errorf("Evaluate = %v, want Allow (first match wins)", got)
+	// alice.com is in following -> first rule matches -> bless
+	if got := Evaluate(policies, evt, ctx); got != Bless {
+		t.Errorf("Evaluate = %v, want Bless (first match wins)", got)
 	}
 
 	// stranger.com is NOT in following -> first rule doesn't match -> second rule (deny all) matches
@@ -485,39 +587,66 @@ func TestEvaluate_MalformedRuleSkipped(t *testing.T) {
 	}
 }
 
-func TestEvaluate_EmitDecision(t *testing.T) {
+func TestEvaluate_BlessDecision(t *testing.T) {
 	policies := []Policy{
-		{Active: true, Rule: "emit pub.polis.comment.blessing from self"},
+		{Active: true, Rule: "bless pub.polis.comment from self"},
 	}
 
 	ctx := EvalContext{MyDomain: "mysite.com"}
-	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "mysite.com"}
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "mysite.com"}
 
 	decision, explicit := EvaluateExplicit(policies, evt, ctx)
-	if decision != Emit || !explicit {
-		t.Errorf("EvaluateExplicit = (%v, %v), want (Emit, true)", decision, explicit)
+	if decision != Bless || !explicit {
+		t.Errorf("EvaluateExplicit = (%v, %v), want (Bless, true)", decision, explicit)
 	}
 }
 
-func TestEvaluate_OmitDecision(t *testing.T) {
+func TestEvaluate_ReviewDecision(t *testing.T) {
 	policies := []Policy{
-		{Active: true, Rule: "omit pub.polis.notification from self"},
+		{Active: true, Rule: "bless pub.polis.comment from following"},
+		{Active: true, Rule: "review pub.polis.comment from all"},
 	}
 
-	ctx := EvalContext{MyDomain: "mysite.com"}
-	evt := Event{Type: "pub.polis.notification.follow", ActorDomain: "mysite.com"}
+	ctx := EvalContext{FollowingDomains: map[string]bool{"alice.com": true}}
 
-	decision, explicit := EvaluateExplicit(policies, evt, ctx)
-	if decision != Omit || !explicit {
-		t.Errorf("EvaluateExplicit = (%v, %v), want (Omit, true)", decision, explicit)
+	// Following -> Bless
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "alice.com"}
+	if got := Evaluate(policies, evt, ctx); got != Bless {
+		t.Errorf("following = %v, want Bless", got)
+	}
+	// Stranger -> Review (explicit pending via terminal catch-all)
+	evt.ActorDomain = "stranger.com"
+	if got := Evaluate(policies, evt, ctx); got != Review {
+		t.Errorf("stranger = %v, want Review", got)
+	}
+}
+
+// TestEvaluate_LegacyEmitBlessingEvaluatesAsBless verifies that historical
+// DS-signed rule strings (containing "emit pub.polis.comment.blessing from X")
+// evaluate to Bless under the new grammar, so old attestations continue to
+// verify against the new decision logic.
+func TestEvaluate_LegacyEmitBlessingEvaluatesAsBless(t *testing.T) {
+	policies := []Policy{
+		{Active: true, Rule: "emit pub.polis.comment.blessing from self"},
+	}
+	ctx := EvalContext{MyDomain: "mysite.com"}
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "mysite.com"}
+
+	result := EvaluateWithLog(policies, evt, ctx)
+	if result.Decision != Bless {
+		t.Errorf("decision = %v, want Bless (legacy translated)", result.Decision)
+	}
+	// Raw rule string is preserved verbatim for signature verification.
+	if result.Rule != "emit pub.polis.comment.blessing from self" {
+		t.Errorf("rule = %q, want legacy string preserved", result.Rule)
 	}
 }
 
 func TestEvaluate_MixedVerbsFirstMatchWins(t *testing.T) {
 	policies := []Policy{
-		{Active: true, Rule: "emit pub.polis.comment.blessing from self"},
-		{Active: true, Rule: "emit pub.polis.comment.blessing from following"},
-		{Active: true, Rule: "omit pub.polis.comment.blessing from all"},
+		{Active: true, Rule: "bless pub.polis.comment from self"},
+		{Active: true, Rule: "bless pub.polis.comment from following"},
+		{Active: true, Rule: "deny pub.polis.comment from all"},
 	}
 
 	ctx := EvalContext{
@@ -525,22 +654,22 @@ func TestEvaluate_MixedVerbsFirstMatchWins(t *testing.T) {
 		FollowingDomains: map[string]bool{"alice.com": true},
 	}
 
-	// Self -> emit (first rule)
-	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "mysite.com"}
-	if got := Evaluate(policies, evt, ctx); got != Emit {
-		t.Errorf("self = %v, want Emit", got)
+	// Self -> bless (first rule)
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "mysite.com"}
+	if got := Evaluate(policies, evt, ctx); got != Bless {
+		t.Errorf("self = %v, want Bless", got)
 	}
 
-	// Following -> emit (second rule)
+	// Following -> bless (second rule)
 	evt.ActorDomain = "alice.com"
-	if got := Evaluate(policies, evt, ctx); got != Emit {
-		t.Errorf("following = %v, want Emit", got)
+	if got := Evaluate(policies, evt, ctx); got != Bless {
+		t.Errorf("following = %v, want Bless", got)
 	}
 
-	// Stranger -> omit (third rule)
+	// Stranger -> deny (third rule)
 	evt.ActorDomain = "stranger.com"
-	if got := Evaluate(policies, evt, ctx); got != Omit {
-		t.Errorf("stranger = %v, want Omit", got)
+	if got := Evaluate(policies, evt, ctx); got != Deny {
+		t.Errorf("stranger = %v, want Deny", got)
 	}
 }
 
@@ -548,17 +677,17 @@ func TestEvaluate_MixedVerbsFirstMatchWins(t *testing.T) {
 // EvaluateExplicit tests
 // ============================================================================
 
-func TestEvaluateExplicit_ExplicitAllow(t *testing.T) {
+func TestEvaluateExplicit_ExplicitBless(t *testing.T) {
 	policies := []Policy{
-		{Active: true, Rule: "allow pub.polis.comment.blessing from following"},
+		{Active: true, Rule: "bless pub.polis.comment from following"},
 	}
 
 	ctx := EvalContext{FollowingDomains: map[string]bool{"alice.com": true}}
-	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "alice.com"}
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "alice.com"}
 
 	decision, explicit := EvaluateExplicit(policies, evt, ctx)
-	if decision != Allow || !explicit {
-		t.Errorf("EvaluateExplicit = (%v, %v), want (Allow, true)", decision, explicit)
+	if decision != Bless || !explicit {
+		t.Errorf("EvaluateExplicit = (%v, %v), want (Bless, true)", decision, explicit)
 	}
 }
 
@@ -578,12 +707,12 @@ func TestEvaluateExplicit_ExplicitDeny(t *testing.T) {
 
 func TestEvaluateExplicit_NoMatch(t *testing.T) {
 	policies := []Policy{
-		{Active: true, Rule: "allow pub.polis.comment.blessing from following"},
+		{Active: true, Rule: "bless pub.polis.comment from following"},
 	}
 
 	ctx := EvalContext{FollowingDomains: map[string]bool{"alice.com": true}}
 	// stranger.com is not following -> no match
-	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "stranger.com"}
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "stranger.com"}
 
 	decision, explicit := EvaluateExplicit(policies, evt, ctx)
 	if decision != Allow || explicit {
@@ -597,8 +726,8 @@ func TestEvaluateExplicit_NoMatch(t *testing.T) {
 
 func TestEvaluateWithLog_MatchedRule(t *testing.T) {
 	policies := []Policy{
-		{Active: true, Rule: "emit pub.polis.comment.blessing from self"},
-		{Active: true, Rule: "emit pub.polis.comment.blessing from following"},
+		{Active: true, Rule: "bless pub.polis.comment from self"},
+		{Active: true, Rule: "bless pub.polis.comment from following"},
 	}
 
 	ctx := EvalContext{
@@ -607,12 +736,12 @@ func TestEvaluateWithLog_MatchedRule(t *testing.T) {
 	}
 
 	// Self match -> first rule
-	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "mysite.com"}
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "mysite.com"}
 	result := EvaluateWithLog(policies, evt, ctx)
-	if result.Decision != Emit || !result.Matched {
-		t.Errorf("decision = %v, matched = %v, want Emit/true", result.Decision, result.Matched)
+	if result.Decision != Bless || !result.Matched {
+		t.Errorf("decision = %v, matched = %v, want Bless/true", result.Decision, result.Matched)
 	}
-	if result.Rule != "emit pub.polis.comment.blessing from self" {
+	if result.Rule != "bless pub.polis.comment from self" {
 		t.Errorf("rule = %q, want self rule", result.Rule)
 	}
 	if result.RuleIdx != 0 {
@@ -622,8 +751,8 @@ func TestEvaluateWithLog_MatchedRule(t *testing.T) {
 	// Following match -> second rule
 	evt.ActorDomain = "alice.com"
 	result = EvaluateWithLog(policies, evt, ctx)
-	if result.Decision != Emit || !result.Matched {
-		t.Errorf("decision = %v, matched = %v, want Emit/true", result.Decision, result.Matched)
+	if result.Decision != Bless || !result.Matched {
+		t.Errorf("decision = %v, matched = %v, want Bless/true", result.Decision, result.Matched)
 	}
 	if result.RuleIdx != 1 {
 		t.Errorf("rule_idx = %d, want 1", result.RuleIdx)
@@ -632,11 +761,11 @@ func TestEvaluateWithLog_MatchedRule(t *testing.T) {
 
 func TestEvaluateWithLog_NoMatch(t *testing.T) {
 	policies := []Policy{
-		{Active: true, Rule: "emit pub.polis.comment.blessing from self"},
+		{Active: true, Rule: "bless pub.polis.comment from self"},
 	}
 
 	ctx := EvalContext{MyDomain: "mysite.com"}
-	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "other.com"}
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "other.com"}
 
 	result := EvaluateWithLog(policies, evt, ctx)
 	if result.Decision != Allow || result.Matched {
@@ -676,7 +805,7 @@ func TestSpec_DomainBlocklist(t *testing.T) {
 
 func TestSpec_CommentsFromFollowingOnly(t *testing.T) {
 	policies := []Policy{
-		{Active: true, Rule: "allow pub.polis.comment from following"},
+		{Active: true, Rule: "bless pub.polis.comment from following"},
 		{Active: true, Rule: "deny pub.polis.comment from all"},
 	}
 
@@ -684,10 +813,10 @@ func TestSpec_CommentsFromFollowingOnly(t *testing.T) {
 		FollowingDomains: map[string]bool{"friend.com": true},
 	}
 
-	// Followed author -> allow
-	evt := Event{Type: "pub.polis.comment.published", ActorDomain: "friend.com"}
-	if got := Evaluate(policies, evt, ctx); got != Allow {
-		t.Errorf("friend.com comment should be allowed, got %v", got)
+	// Followed author -> bless
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "friend.com"}
+	if got := Evaluate(policies, evt, ctx); got != Bless {
+		t.Errorf("friend.com comment should be blessed, got %v", got)
 	}
 
 	// Stranger -> deny
@@ -709,8 +838,8 @@ func TestSpec_PrivateOverridesPublic(t *testing.T) {
 	privPath := filepath.Join(dir, "private.jsonl")
 	pubPath := filepath.Join(dir, "public.jsonl")
 
-	// Private: allow comments from friend.com
-	os.WriteFile(privPath, []byte(`{"active":true,"policy":"allow pub.polis.comment from all at friend.com"}`+"\n"), 0644)
+	// Private: bless comments from friend.com
+	os.WriteFile(privPath, []byte(`{"active":true,"policy":"bless pub.polis.comment from all at friend.com"}`+"\n"), 0644)
 	// Public: deny all comments
 	os.WriteFile(pubPath, []byte(`{"active":true,"policy":"deny pub.polis.comment from all"}`+"\n"), 0644)
 
@@ -721,10 +850,10 @@ func TestSpec_PrivateOverridesPublic(t *testing.T) {
 
 	ctx := EvalContext{}
 
-	// friend.com matches private allow first
-	evt := Event{Type: "pub.polis.comment.published", ActorDomain: "friend.com"}
-	if got := Evaluate(policies, evt, ctx); got != Allow {
-		t.Errorf("friend.com should be allowed (private override), got %v", got)
+	// friend.com matches private bless first
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "friend.com"}
+	if got := Evaluate(policies, evt, ctx); got != Bless {
+		t.Errorf("friend.com should be blessed (private override), got %v", got)
 	}
 
 	// stranger.com doesn't match private (wrong domain), falls to public deny
@@ -736,19 +865,19 @@ func TestSpec_PrivateOverridesPublic(t *testing.T) {
 
 func TestSpec_BlessingAutoDecision(t *testing.T) {
 	policies := []Policy{
-		{Active: true, Rule: "allow pub.polis.comment.blessing from following"},
-		{Active: true, Rule: "deny pub.polis.comment.blessing from all at spam.com"},
+		{Active: true, Rule: "bless pub.polis.comment from following"},
+		{Active: true, Rule: "deny pub.polis.comment from all at spam.com"},
 	}
 
 	ctx := EvalContext{
 		FollowingDomains: map[string]bool{"alice.com": true},
 	}
 
-	// Followed author -> explicit allow (auto-grant)
-	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "alice.com"}
+	// Followed author -> explicit bless (auto-grant)
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "alice.com"}
 	decision, explicit := EvaluateExplicit(policies, evt, ctx)
-	if decision != Allow || !explicit {
-		t.Errorf("alice.com blessing = (%v, %v), want (Allow, true)", decision, explicit)
+	if decision != Bless || !explicit {
+		t.Errorf("alice.com blessing = (%v, %v), want (Bless, true)", decision, explicit)
 	}
 
 	// spam.com -> explicit deny (auto-deny)
@@ -758,7 +887,7 @@ func TestSpec_BlessingAutoDecision(t *testing.T) {
 		t.Errorf("spam.com blessing = (%v, %v), want (Deny, true)", decision, explicit)
 	}
 
-	// stranger.com -> no match (manual review)
+	// stranger.com -> no match (manual review — default pending)
 	evt.ActorDomain = "stranger.com"
 	decision, explicit = EvaluateExplicit(policies, evt, ctx)
 	if decision != Allow || explicit {
@@ -766,10 +895,10 @@ func TestSpec_BlessingAutoDecision(t *testing.T) {
 	}
 }
 
-func TestSpec_EmitBlessingFromSelf(t *testing.T) {
+func TestSpec_BlessFromSelf(t *testing.T) {
 	policies := []Policy{
-		{Active: true, Rule: "emit pub.polis.comment.blessing from self"},
-		{Active: true, Rule: "emit pub.polis.comment.blessing from following"},
+		{Active: true, Rule: "bless pub.polis.comment from self"},
+		{Active: true, Rule: "bless pub.polis.comment from following"},
 	}
 
 	ctx := EvalContext{
@@ -777,21 +906,21 @@ func TestSpec_EmitBlessingFromSelf(t *testing.T) {
 		FollowingDomains: map[string]bool{"alice.com": true},
 	}
 
-	// Self-comment -> emit (auto-bless)
-	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "mysite.com"}
+	// Self-comment -> bless (auto-grant)
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "mysite.com"}
 	decision, explicit := EvaluateExplicit(policies, evt, ctx)
-	if decision != Emit || !explicit {
-		t.Errorf("self blessing = (%v, %v), want (Emit, true)", decision, explicit)
+	if decision != Bless || !explicit {
+		t.Errorf("self blessing = (%v, %v), want (Bless, true)", decision, explicit)
 	}
 
-	// Following -> emit
+	// Following -> bless
 	evt.ActorDomain = "alice.com"
 	decision, explicit = EvaluateExplicit(policies, evt, ctx)
-	if decision != Emit || !explicit {
-		t.Errorf("following blessing = (%v, %v), want (Emit, true)", decision, explicit)
+	if decision != Bless || !explicit {
+		t.Errorf("following blessing = (%v, %v), want (Bless, true)", decision, explicit)
 	}
 
-	// Stranger -> no match -> default Allow (pending)
+	// Stranger -> no match -> default Allow/false (pending)
 	evt.ActorDomain = "stranger.com"
 	decision, explicit = EvaluateExplicit(policies, evt, ctx)
 	if decision != Allow || explicit {
@@ -826,17 +955,18 @@ func TestDefaultPublicPolicyContent(t *testing.T) {
 		}
 	}
 
-	if len(activePolicies) != 6 {
-		t.Fatalf("expected 6 active policies, got %d", len(activePolicies))
+	if len(activePolicies) != 7 {
+		t.Fatalf("expected 7 active policies, got %d", len(activePolicies))
 	}
 
-	// Verify all rules parse correctly
+	// Verify all rules parse correctly under the v2 grammar
 	expectedRules := []string{
 		"allow pub.polis.dm from following",
 		"deny pub.polis.dm from all",
-		"emit pub.polis.comment.blessing from self",
-		"emit pub.polis.comment.blessing from following",
-		"emit pub.polis.comment.blessing from thread-blessed",
+		"bless pub.polis.comment from self",
+		"bless pub.polis.comment from following",
+		"bless pub.polis.comment from thread-blessed",
+		"review pub.polis.comment from all",
 		"deny all from all",
 	}
 	for i, expected := range expectedRules {
@@ -875,13 +1005,6 @@ func TestDefaultPrivatePolicyContent(t *testing.T) {
 
 	if len(activePolicies) != 0 {
 		t.Fatalf("expected 0 active policies (empty private template), got %d", len(activePolicies))
-	}
-}
-
-func TestDefaultPolicyContent_BackwardsCompat(t *testing.T) {
-	// DefaultPolicyContent() should return same as DefaultPublicPolicyContent()
-	if DefaultPolicyContent() != DefaultPublicPolicyContent() {
-		t.Error("DefaultPolicyContent() should delegate to DefaultPublicPolicyContent()")
 	}
 }
 
@@ -942,16 +1065,65 @@ func TestDefaultPolicies_PrivateOverridesPublic(t *testing.T) {
 	}
 
 	// Blessing from blocked.com should be denied by private override
-	evt := Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "blocked.com"}
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "blocked.com"}
 	if got := Evaluate(policies, evt, ctx); got != Deny {
-		t.Errorf("blessing from blocked domain should be denied, got %v", got)
+		t.Errorf("comment from blocked domain should be denied, got %v", got)
 	}
 
-	// Blessing from non-blocked following should still emit
-	evt = Event{Type: "pub.polis.comment.blessing.requested", ActorDomain: "friend.com"}
+	// Comment from non-blocked following should be blessed under v2 defaults
+	evt = Event{Type: "pub.polis.comment", ActorDomain: "friend.com"}
 	ctx.FollowingDomains["friend.com"] = true
-	if got := Evaluate(policies, evt, ctx); got != Emit {
-		t.Errorf("blessing from non-blocked following should emit, got %v", got)
+	if got := Evaluate(policies, evt, ctx); got != Bless {
+		t.Errorf("comment from non-blocked following should be blessed, got %v", got)
+	}
+}
+
+// TestDefaultPolicies_DiscoverPolisPubLandsInReview is the regression test
+// for the bug that motivated the v2 refactor. Under v1 defaults, a comment
+// from an unfollowed domain (like discover.polis.pub) matched no emit rule
+// and silently fell through to the `deny all from all` terminal — producing
+// an auto-deny where a human-review outcome was expected. Under v2 defaults
+// the explicit `review pub.polis.comment from all` terminal fires first,
+// producing the correct Review decision.
+func TestDefaultPolicies_DiscoverPolisPubLandsInReview(t *testing.T) {
+	dir := t.TempDir()
+	pubPath := filepath.Join(dir, "public.jsonl")
+	os.WriteFile(pubPath, []byte(DefaultPublicPolicyContent()), 0644)
+
+	policies, err := LoadPolicies("/nonexistent", pubPath)
+	if err != nil {
+		t.Fatalf("failed to load defaults: %v", err)
+	}
+
+	ctx := EvalContext{
+		MyDomain:         "mysite.com",
+		FollowingDomains: map[string]bool{"friend.com": true},
+	}
+
+	// Unfollowed domain commenting on my post: should land in review,
+	// not be auto-denied by a catch-all.
+	evt := Event{Type: "pub.polis.comment", ActorDomain: "discover.polis.pub"}
+	result := EvaluateWithLog(policies, evt, ctx)
+	if result.Decision != Review {
+		t.Errorf("decision for discover.polis.pub comment = %v, want Review (the v1 bug would produce Deny)", result.Decision)
+	}
+	if !result.Matched {
+		t.Error("review decision should be explicitly matched, not fall-through")
+	}
+	if result.Rule != "review pub.polis.comment from all" {
+		t.Errorf("matched rule = %q, want explicit review terminal", result.Rule)
+	}
+
+	// Followed domain still gets blessed.
+	evt.ActorDomain = "friend.com"
+	if got := Evaluate(policies, evt, ctx); got != Bless {
+		t.Errorf("followed domain = %v, want Bless", got)
+	}
+
+	// Self still gets blessed.
+	evt.ActorDomain = "mysite.com"
+	if got := Evaluate(policies, evt, ctx); got != Bless {
+		t.Errorf("self = %v, want Bless", got)
 	}
 }
 

@@ -1,0 +1,41 @@
+<!--
+    Per-profile entry partial.
+
+    Renders an author profile as a standalone `.entry` in the unified
+    stream grammar. Used by the controller when the filter resolves to
+    profiles — profiles surface as first-class stream items in the
+    owner's unified view.
+
+    Profile entries have no calendar date, so `.entry-meta` carries the
+    author avatar in the time-column slot to keep the timeline-dot
+    column consistent across all entry sub-types.
+
+    Template variables:
+    - {{profile_url}}
+    - {{profile_author_name}}
+    - {{profile_author_domain}}
+    - {{profile_avatar_html}}        — inline avatar markup (svg or div)
+    - {{profile_bio_html}}           — rendered markdown bio
+    - {{profile_post_count}}
+    - {{profile_following_count}}    — optional
+    - {{profile_followers_count}}    — optional
+-->
+<article class="entry entry--profile is-loaded"
+         data-polis-entry-type="profile">
+    <div class="entry-meta">
+        <div class="timeline-dot" aria-hidden="true"></div>
+        <div class="profile-avatar">{{profile_avatar_html}}</div>
+    </div>
+    <a class="entry-body" href="{{profile_url}}">
+        <div class="profile-info">
+            <div class="profile-name">{{profile_author_name}}</div>
+            <div class="profile-domain">{{profile_author_domain}}</div>
+            <div class="profile-bio">{{profile_bio_html}}</div>
+            <div class="profile-stats">
+                <strong>{{profile_post_count}}</strong> posts
+                {{#profile_following_count}} · <strong>{{profile_following_count}}</strong> following{{/profile_following_count}}
+                {{#profile_followers_count}} · <strong>{{profile_followers_count}}</strong> followers{{/profile_followers_count}}
+            </div>
+        </div>
+    </a>
+</article>

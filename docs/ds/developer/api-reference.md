@@ -95,8 +95,6 @@ Rate limit: IP 300/hr
 
 Get the discovery service's public key for verifying attestations and response signatures.
 
-Rate limit: IP 30/hr
-
 **Query parameters:** `key_id` (optional; if omitted returns the current active key)
 
 ```json
@@ -129,6 +127,35 @@ Rate limit: per-domain 5/hr
   "success": true,
   "message": "Site unregistered",
   "domain": "alice.com"
+}
+```
+
+### GET /v1/sites/list
+
+Paginated list of registered sites. Used by profile-discovery and "all profiles" views in the webapp.
+
+Rate limit: per-IP via `DS_RATE_IP_SITES_LIST` (default 300/hr).
+
+**Query parameters:**
+
+| Param | Type | Default | Notes |
+|-------|------|---------|-------|
+| `limit` | int | 100 | Max page size (capped by `DS_QUERY_CONTENT_MAX_LIMIT`) |
+| `offset` | int | 0 | Pagination offset |
+| `sort` | enum | `registered_at` | One of `registered_at`, `domain` |
+| `order` | enum | `desc` | `asc` or `desc` |
+
+```json
+// Response 200
+{
+  "count": 1247,
+  "items": [
+    {
+      "domain": "alice.com",
+      "registered_at": "2026-04-01T12:00:00Z",
+      "key_id": "alice-2026-04"
+    }
+  ]
 }
 ```
 
@@ -332,6 +359,30 @@ Rate limit: per-domain 20/hr
 **Clean break semantics:** Unpublish severs all ties to the published identity. If the content is republished later, it is treated as a completely fresh publication — orphaned blessings are NOT restored, and comment authors must re-beseech for blessing. See [Unpublish Lifecycle](unpublish-lifecycle.md) for full state transition rules.
 
 Emits `pub.polis.post.unpublished` or `pub.polis.comment.unpublished` stream event.
+
+### POST /v1/content/comments/counts
+
+Cross-tenant aggregate comment counts for a batch of post URLs. Used by the stream-screen to render comment-count badges on posts authored across multiple tenants without N+1 fetches.
+
+```json
+// Request
+{
+  "urls": [
+    "https://alice.com/posts/2026/04/hello.md",
+    "https://bob.com/posts/2026/04/welcome.md"
+  ]
+}
+
+// Response 200
+{
+  "counts": {
+    "https://alice.com/posts/2026/04/hello.md": { "total": 7, "blessed": 3 },
+    "https://bob.com/posts/2026/04/welcome.md": { "total": 2, "blessed": 2 }
+  }
+}
+```
+
+Unknown URLs are returned with zero counts. Counts reflect comments that have registered with the DS — not posts hosted privately.
 
 ---
 
@@ -619,122 +670,92 @@ Rate limit: IP 300/hr
 
 ## Admin
 
-All admin endpoints require `Authorization: Bearer <operator-api-key>` header. Rate limit: 30/hr per IP.
+All admin endpoints require `Authorization: Bearer <operator-api-key>` header (set via `OPERATOR_API_KEYS` env var, comma-separated for rotation).
 
-### GET /v1/admin/blocks
+Content blocking is **policy-based**: every block is a row in the `ds_operator_policies` table, expressed in the same grammar as site policies (`allow|deny <type> from <source> [at <domain>]`). The legacy `admin_blocked_domains` / `admin_blocked_types` tables and the `/v1/admin/blocks*` and `/v1/admin/stream/mode` endpoints have been removed.
 
-List all blocks and stream configuration.
+### GET /v1/admin/policies
+
+List all operator policy rules.
 
 ```json
 // Response 200
 {
-  "blocked_domains": [
+  "policies": [
     {
-      "domain": "spam.example.com",
-      "scope": "all",
-      "reason": "spam source"
+      "id": 42,
+      "policy": "deny all from all at spam.example.com",
+      "reason": "spam",
+      "active": true,
+      "created_at": "2026-04-01T12:00:00Z"
     }
-  ],
-  "blocked_types": [
-    {
-      "type": "pub.polis.custom.spam",
-      "reason": "spam type"
-    }
-  ],
-  "stream_config": {
-    "mode": "blocklist",
-    "allowed_types": []
-  }
+  ]
 }
 ```
 
-### POST /v1/admin/blocks/domains
+### POST /v1/admin/policies
 
-Block a domain.
+Add a policy rule. The rule string uses the same v2 grammar as site policies; see `docs/general/policy-grammar.md`.
 
 ```json
 // Request
 {
-  "domain": "spam.example.com",
-  "scope": "all",
-  "reason": "spam source"
+  "policy": "deny all from all at spam.example.com",
+  "reason": "spam"
 }
 
 // Response 200
 {
-  "success": true,
-  "message": "Domain spam.example.com blocked"
+  "id": 42,
+  "policy": "deny all from all at spam.example.com",
+  "reason": "spam",
+  "active": true
 }
 ```
 
-### DELETE /v1/admin/blocks/domains
+### DELETE /v1/admin/policies/:id
 
-Unblock a domain.
+Remove a policy rule by ID.
 
 ```json
-// Request
-{
-  "domain": "spam.example.com"
-}
-
 // Response 200
-{
-  "success": true,
-  "message": "Domain spam.example.com unblocked"
-}
+{ "success": true, "id": 42 }
 ```
 
-### POST /v1/admin/blocks/types
+### PATCH /v1/admin/policies/:id
 
-Block an event type. Core types (`pub.polis.site.*`, `pub.polis.post.*`, `pub.polis.comment.*`, `pub.polis.follow.*`) cannot be blocked.
+Enable or disable a policy without removing it.
 
 ```json
 // Request
-{
-  "type": "pub.polis.custom.spam",
-  "reason": "spam type"
-}
+{ "active": false }
 
 // Response 200
-{
-  "success": true,
-  "message": "Type pub.polis.custom.spam blocked"
-}
+{ "id": 42, "active": false }
 ```
 
-### DELETE /v1/admin/blocks/types
+### POST /v1/admin/block/domain
 
-Unblock an event type.
+Convenience wrapper that adds a `deny all from all at <domain>` policy.
 
 ```json
 // Request
-{
-  "type": "pub.polis.custom.spam"
-}
+{ "domain": "spam.example.com", "reason": "spam" }
 
 // Response 200
-{
-  "success": true,
-  "message": "Type pub.polis.custom.spam unblocked"
-}
+{ "success": true, "policy_id": 43 }
 ```
 
-### POST /v1/admin/stream/mode
+### DELETE /v1/admin/block/domain
 
-Set the stream mode (`blocklist` or `allowlist`).
+Convenience wrapper that removes the matching deny rule.
 
 ```json
 // Request
-{
-  "mode": "blocklist",
-  "allowed_types": []
-}
+{ "domain": "spam.example.com" }
 
 // Response 200
-{
-  "success": true,
-  "message": "Stream mode set to blocklist"
-}
+{ "success": true }
 ```
 
 ### POST /v1/admin/stream/purge

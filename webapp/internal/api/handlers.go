@@ -5,9 +5,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 )
+
+// writeActionTimeout caps every mutating v1 API dispatch so a stuck
+// downstream (DS round-trip, slow disk on DM delivery fan-out) can't
+// hold the request goroutine open indefinitely. Reads use the bare
+// request context — the caller's client timeout governs them.
+const writeActionTimeout = 30 * time.Second
 
 // handlers holds the engine and provides HTTP handler methods.
 type handlers struct {
@@ -24,12 +31,12 @@ func (h *handlers) logSecurity(event string, fields map[string]interface{}) {
 
 // handleContentList handles GET /v1/content/{type}
 func (h *handlers) handleContentList(w http.ResponseWriter, r *http.Request, contentType string) {
-	result, err := h.engine.Dispatch(context.Background(), ops.ActionRequest{
+	result, err := h.engine.Dispatch(r.Context(), ops.ActionRequest{
 		Action:      "list",
 		ContentType: contentType,
 	})
 	if err != nil {
-		handleDispatchError(w, err)
+		h.handleDispatchError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result.Data)
@@ -37,13 +44,13 @@ func (h *handlers) handleContentList(w http.ResponseWriter, r *http.Request, con
 
 // handleContentGet handles GET /v1/content/{type}/{id}
 func (h *handlers) handleContentGet(w http.ResponseWriter, r *http.Request, contentType, id string) {
-	result, err := h.engine.Dispatch(context.Background(), ops.ActionRequest{
+	result, err := h.engine.Dispatch(r.Context(), ops.ActionRequest{
 		Action:      "get",
 		ContentType: contentType,
 		Payload:     map[string]any{"id": id},
 	})
 	if err != nil {
-		handleDispatchError(w, err)
+		h.handleDispatchError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result.Data)
@@ -57,13 +64,15 @@ func (h *handlers) handleContentCreate(w http.ResponseWriter, r *http.Request, c
 		return
 	}
 
-	result, err := h.engine.Dispatch(context.Background(), ops.ActionRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), writeActionTimeout)
+	defer cancel()
+	result, err := h.engine.Dispatch(ctx, ops.ActionRequest{
 		Action:      "create",
 		ContentType: contentType,
 		Payload:     payload,
 	})
 	if err != nil {
-		handleDispatchError(w, err)
+		h.handleDispatchError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, result.Data)
@@ -78,13 +87,15 @@ func (h *handlers) handleContentUpdate(w http.ResponseWriter, r *http.Request, c
 	}
 	payload["id"] = id
 
-	result, err := h.engine.Dispatch(context.Background(), ops.ActionRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), writeActionTimeout)
+	defer cancel()
+	result, err := h.engine.Dispatch(ctx, ops.ActionRequest{
 		Action:      "update",
 		ContentType: contentType,
 		Payload:     payload,
 	})
 	if err != nil {
-		handleDispatchError(w, err)
+		h.handleDispatchError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result.Data)
@@ -92,13 +103,15 @@ func (h *handlers) handleContentUpdate(w http.ResponseWriter, r *http.Request, c
 
 // handleContentDelete handles DELETE /v1/content/{type}/{id}
 func (h *handlers) handleContentDelete(w http.ResponseWriter, r *http.Request, contentType, id string) {
-	result, err := h.engine.Dispatch(context.Background(), ops.ActionRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), writeActionTimeout)
+	defer cancel()
+	result, err := h.engine.Dispatch(ctx, ops.ActionRequest{
 		Action:      "delete",
 		ContentType: contentType,
 		Payload:     map[string]any{"id": id},
 	})
 	if err != nil {
-		handleDispatchError(w, err)
+		h.handleDispatchError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result.Data)
@@ -112,13 +125,15 @@ func (h *handlers) handleContentAction(w http.ResponseWriter, r *http.Request, c
 		return
 	}
 
-	result, err := h.engine.Dispatch(context.Background(), ops.ActionRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), writeActionTimeout)
+	defer cancel()
+	result, err := h.engine.Dispatch(ctx, ops.ActionRequest{
 		Action:      action,
 		ContentType: contentType,
 		Payload:     payload,
 	})
 	if err != nil {
-		handleDispatchError(w, err)
+		h.handleDispatchError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result.Data)
@@ -126,12 +141,12 @@ func (h *handlers) handleContentAction(w http.ResponseWriter, r *http.Request, c
 
 // handleDraftsList handles GET /v1/content/{type}/drafts
 func (h *handlers) handleDraftsList(w http.ResponseWriter, r *http.Request, contentType string) {
-	result, err := h.engine.Dispatch(context.Background(), ops.ActionRequest{
+	result, err := h.engine.Dispatch(r.Context(), ops.ActionRequest{
 		Action:      "draft.list",
 		ContentType: contentType,
 	})
 	if err != nil {
-		handleDispatchError(w, err)
+		h.handleDispatchError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result.Data)
@@ -139,13 +154,13 @@ func (h *handlers) handleDraftsList(w http.ResponseWriter, r *http.Request, cont
 
 // handleDraftsGet handles GET /v1/content/{type}/drafts/{id}
 func (h *handlers) handleDraftsGet(w http.ResponseWriter, r *http.Request, contentType, id string) {
-	result, err := h.engine.Dispatch(context.Background(), ops.ActionRequest{
+	result, err := h.engine.Dispatch(r.Context(), ops.ActionRequest{
 		Action:      "draft.get",
 		ContentType: contentType,
 		Payload:     map[string]any{"id": id},
 	})
 	if err != nil {
-		handleDispatchError(w, err)
+		h.handleDispatchError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result.Data)
@@ -159,13 +174,15 @@ func (h *handlers) handleDraftsCreate(w http.ResponseWriter, r *http.Request, co
 		return
 	}
 
-	result, err := h.engine.Dispatch(context.Background(), ops.ActionRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), writeActionTimeout)
+	defer cancel()
+	result, err := h.engine.Dispatch(ctx, ops.ActionRequest{
 		Action:      "draft.save",
 		ContentType: contentType,
 		Payload:     payload,
 	})
 	if err != nil {
-		handleDispatchError(w, err)
+		h.handleDispatchError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, result.Data)
@@ -173,13 +190,15 @@ func (h *handlers) handleDraftsCreate(w http.ResponseWriter, r *http.Request, co
 
 // handleDraftsDelete handles DELETE /v1/content/{type}/drafts/{id}
 func (h *handlers) handleDraftsDelete(w http.ResponseWriter, r *http.Request, contentType, id string) {
-	result, err := h.engine.Dispatch(context.Background(), ops.ActionRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), writeActionTimeout)
+	defer cancel()
+	result, err := h.engine.Dispatch(ctx, ops.ActionRequest{
 		Action:      "draft.delete",
 		ContentType: contentType,
 		Payload:     map[string]any{"id": id},
 	})
 	if err != nil {
-		handleDispatchError(w, err)
+		h.handleDispatchError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result.Data)
@@ -223,13 +242,15 @@ func (h *handlers) handleDMDeliver(w http.ResponseWriter, r *http.Request, sende
 	}
 	payload["envelope"] = string(envelopeJSON)
 
-	result, err := h.engine.Dispatch(context.Background(), ops.ActionRequest{
+	ctx, cancel := context.WithTimeout(r.Context(), writeActionTimeout)
+	defer cancel()
+	result, err := h.engine.Dispatch(ctx, ops.ActionRequest{
 		Action:      "deliver",
 		ContentType: "pub.polis.dm",
 		Payload:     payload,
 	})
 	if err != nil {
-		handleDispatchError(w, err)
+		h.handleDispatchError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, result.Data)
@@ -248,22 +269,61 @@ func parsePayload(r *http.Request) (map[string]any, error) {
 	return payload, nil
 }
 
-func handleDispatchError(w http.ResponseWriter, err error) {
+// handleDispatchError maps dispatch errors to HTTP responses.
+//
+// R18-15 (2026-05-18): EVERY branch now returns a generic, category-
+// keyed message. Pre-fix the matched sub-cases (not-configured,
+// invalid, not-found, unsupported-action) echoed `err.Error()`
+// verbatim. Downstream packages (dm, following, publish) wrap errors
+// with absolute filesystem paths, DS URLs, or wrapped-chain dumps;
+// any substring match on "invalid" or "not found" surfaced the
+// wrapper verbatim to API callers, leaking server layout.
+//
+// New posture: response body carries only the category code + a
+// short, fixed message that describes the category. The full `err`
+// is logged server-side via `pub.polis.api.dispatch_error` keyed by
+// `request_id` so operators can correlate without leaking layout.
+// Mirrors the previous default arm's posture (R16-15) — completes
+// the scrub.
+func (h *handlers) handleDispatchError(w http.ResponseWriter, r *http.Request, err error) {
 	msg := err.Error()
 
-	// Map known error patterns to HTTP status codes
+	var status int
+	var code, publicMessage string
 	switch {
 	case strings.Contains(msg, "not configured") || strings.Contains(msg, "no private key"):
-		writeError(w, http.StatusServiceUnavailable, "not_configured", msg)
+		status = http.StatusServiceUnavailable
+		code = "not_configured"
+		publicMessage = "The site is not fully configured for this action."
 	case strings.Contains(msg, "required") || strings.Contains(msg, "invalid"):
-		writeError(w, http.StatusBadRequest, "invalid_request", msg)
+		status = http.StatusBadRequest
+		code = "invalid_request"
+		publicMessage = "The request is missing or has invalid fields. Reference X-Request-Id for support."
 	case strings.Contains(msg, "unknown content type") || strings.Contains(msg, "not found"):
-		writeError(w, http.StatusNotFound, "not_found", msg)
+		status = http.StatusNotFound
+		code = "not_found"
+		publicMessage = "The requested resource was not found."
 	case strings.Contains(msg, "unsupported action"):
-		writeError(w, http.StatusBadRequest, "unsupported_action", msg)
+		status = http.StatusBadRequest
+		code = "unsupported_action"
+		publicMessage = "The requested action is not supported on this content type."
 	default:
-		writeError(w, http.StatusInternalServerError, "internal_error", msg)
+		status = http.StatusInternalServerError
+		code = "internal_error"
+		publicMessage = "An internal error occurred. Reference X-Request-Id for support."
 	}
+
+	// Always log the full err server-side, keyed by request_id so we can
+	// correlate without leaking. Previously only the default arm did this.
+	requestID := w.Header().Get("X-Request-Id")
+	h.logSecurity("pub.polis.api.dispatch_error", map[string]interface{}{
+		"request_id": requestID,
+		"path":       r.URL.Path,
+		"method":     r.Method,
+		"code":       code,
+		"error":      msg,
+	})
+	writeError(w, status, code, publicMessage)
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

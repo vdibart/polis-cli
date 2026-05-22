@@ -1,3 +1,29 @@
+// =============================================================================
+// HANDBOOK TRAIL MARKER — DS-to-stream thread (continuous sync, Path A)
+// =============================================================================
+// This file is the *producer* of the continuous sync path. runUnifiedSync()
+// pulls a cursor-paginated batch of events from the DS, fans them out to
+// per-content-type handlers (feed / follow / blessing / notification), and
+// advances the cursor. Runs every ~30 seconds while any browser tab has an
+// SSE connection open.
+//
+// Trail across files (DS-to-stream, continuous sync):
+//   producer (this file)  — webapp/internal/server/sync.go: runUnifiedSync()
+//   DS endpoint           — discovery-service/core/handlers/stream.ts (queryStream)
+//   event-to-FeedItem     — cli-go/pkg/feed/handler.go (FeedHandler.Process)
+//   cursor + cache        — cli-go/pkg/stream/store.go (Store)
+//   webapp HTTP surface   — webapp/internal/server/handlers_stream.go
+//
+// Aggregation path (Path B, complementary): handlers_stream.go batches URLs
+// to discovery-service/core/handlers/counts.ts for cross-tenant decoration.
+//
+// Pull the thread:
+//   github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md      (tour)
+//   github.com/vdibart/polis-cli/blob/main/docs/ds/developer/stream-architecture.md
+//   github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md
+//   github.com/vdibart/polis-cli/blob/main/AGENTS.md                          (map)
+// =============================================================================
+
 package server
 
 import (
@@ -15,7 +41,6 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
-	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
@@ -184,11 +209,17 @@ func (s *Server) queryStreamEvents(myDomain, cursor, syncID string) ([]discovery
 
 	cooldown := time.Duration(vCfg.SuspendCooldownMin) * time.Minute
 	if vState.ShouldSuspendSync(vCfg.MaxConsecutiveDSFails, cooldown) {
-		s.LogWarn("unified sync: [x] DS may be compromised or misconfigured — sync suspended (%d consecutive failures)", vState.DSFailures.Consecutive)
+		s.LogWarn("unified sync paused — %d consecutive DS query failures (next retry after %v cooldown). Check DS connectivity; if this is a self-hosted tenant that is not publicly reachable, registration is not required for read sync but may be needed for publishing.", vState.DSFailures.Consecutive, cooldown)
 		return nil, cursor
 	}
 
-	client := s.NewAuthDSClient(nil, myDomain)
+	// Read-only stream query: NewReadDSClient sends auth headers only
+	// if this tenant is registered with the DS. Unregistered local
+	// tenants (e.g. developing on localhost) sync anonymously — the
+	// DS allows anonymous reads on /v1/stream/unified, and sending
+	// auth headers from a non-publicly-reachable origin would force
+	// the DS into a live well-known fetch that necessarily fails.
+	client := s.NewReadDSClient(nil)
 	client.RequestID = syncID
 
 	// Build followed authors list
@@ -213,7 +244,7 @@ func (s *Server) queryStreamEvents(myDomain, cursor, syncID string) ([]discovery
 
 	if err != nil {
 		vState.RecordDSFailure()
-		s.LogWarn("unified sync: [!] DS query failed — possible signature verification issue")
+		s.LogWarn("unified sync: DS query failed (will retry; %d consecutive failures so far). Enable LOG_LEVEL=2 for the underlying error.", vState.DSFailures.Consecutive)
 		s.LogDebug("unified sync: unified query failed: %v", err)
 	} else {
 		vState.RecordDSSuccess()
@@ -245,115 +276,6 @@ func (s *Server) queryStreamEvents(myDomain, cursor, syncID string) ([]discovery
 	_ = vState.Save(vStore)
 
 	return allEvents, newCursor
-}
-
-// --- Notification Sync Handler ---
-
-type notificationSyncHandler struct {
-	server *Server
-}
-
-func (h *notificationSyncHandler) Name() string { return "notifications" }
-
-func (h *notificationSyncHandler) EventTypes() []string {
-	return (&stream.NotificationHandler{}).EventTypes()
-}
-
-func (h *notificationSyncHandler) Process(events []discovery.StreamEvent) stream.HandlerResult {
-	s := h.server
-
-	baseURL := s.GetBaseURL()
-	if baseURL == "" || s.PrivateKey == nil {
-		return stream.HandlerResult{}
-	}
-
-	myDomain := extractDomainFromURL(baseURL)
-	if myDomain == "" {
-		return stream.HandlerResult{}
-	}
-
-	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
-
-	// Load notification config (rules + muted domains)
-	var config stream.NotificationConfig
-	_ = store.LoadConfig("notifications", &config)
-
-	rules := config.Rules
-	if len(rules) == 0 {
-		rules = notification.DefaultRules()
-		config.Rules = rules
-		_ = store.SaveConfig("notifications", &config)
-	} else {
-		// Merge new default rules not present in saved config
-		defaults := notification.DefaultRules()
-		existingIDs := make(map[string]bool, len(rules))
-		for _, r := range rules {
-			existingIDs[r.ID] = true
-		}
-		added := false
-		for _, d := range defaults {
-			if !existingIDs[d.ID] {
-				rules = append(rules, d)
-				added = true
-			}
-		}
-		if added {
-			config.Rules = rules
-			_ = store.SaveConfig("notifications", &config)
-		}
-	}
-
-	// Build muted domains set
-	mutedDomains := make(map[string]bool, len(config.MutedDomains))
-	for _, d := range config.MutedDomains {
-		mutedDomains[d] = true
-	}
-
-	// Build followed domains set for client-side filtering
-	followedDomains := make(map[string]bool)
-	followingPath := following.DefaultPath(s.DataDir)
-	f, err := following.Load(followingPath)
-	if err == nil {
-		for _, entry := range f.All() {
-			d := discovery.ExtractDomainFromURL(entry.URL)
-			if d != "" {
-				followedDomains[d] = true
-			}
-		}
-	}
-
-	handler := &stream.NotificationHandler{
-		MyDomain:        myDomain,
-		Rules:           rules,
-		MutedDomains:    mutedDomains,
-		FollowedDomains: followedDomains,
-	}
-
-	entries := handler.Process(events)
-	if len(entries) == 0 {
-		return stream.HandlerResult{}
-	}
-
-	mgr := notification.NewManager(s.DataDir, discoveryDomain)
-	added, err := mgr.Append(entries)
-	if err != nil {
-		return stream.HandlerResult{Error: err}
-	}
-
-	// Prune old notifications
-	pruneCfg := notification.DefaultPruneConfig()
-	if config.MaxItems > 0 {
-		pruneCfg.MaxItems = config.MaxItems
-	}
-	if config.MaxAgeDays > 0 {
-		pruneCfg.MaxAgeDays = config.MaxAgeDays
-	}
-	if _, err := mgr.Prune(pruneCfg); err != nil {
-		s.LogWarn("notification prune failed: %v", err)
-	}
-
-	return stream.HandlerResult{NewItems: added}
 }
 
 // --- Feed Sync Handler ---
@@ -421,6 +343,26 @@ func (h *feedSyncHandler) Process(events []discovery.StreamEvent) stream.Handler
 	newCount, err := cm.MergeItems(items)
 	if err != nil {
 		return stream.HandlerResult{Error: err}
+	}
+
+	// step-06/6.l: kick off excerpt fetch immediately on sync, NOT
+	// later on dashboard load. Without this, items without excerpts
+	// wait until handleFeedGrouped's tail-trigger fires when the user
+	// opens the dashboard — yielding a flicker where titles render
+	// without preview text on first paint, then populate on a refresh.
+	// Sync-time is the right moment: the items are fresh, the user
+	// hasn't seen them yet, and the network is being exercised anyway.
+	// kickOffExcerptFetch is idempotent (skips items that already have
+	// an excerpt), so dashboard-load fallback still works for items
+	// that didn't come through this sync handler (e.g., older items
+	// whose excerpts failed earlier).
+	if newCount > 0 {
+		fullItems, listErr := cm.List()
+		if listErr == nil {
+			s.kickOffExcerptFetch(cm, fullItems)
+		} else {
+			s.LogDebug("excerpt fetch on sync skipped (list failed): %v", listErr)
+		}
 	}
 
 	return stream.HandlerResult{NewItems: newCount}
@@ -539,7 +481,10 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 			FollowerDomains:  followerDomains,
 		}
 
-		client := s.NewAuthDSClient(nil, myDomain)
+		// Read-only: fetches blessing-requested event details. See
+		// NewReadDSClient comment in server.go for why this is gated
+		// on local DS registration.
+		client := s.NewReadDSClient(nil)
 		client.RequestID = generateSyncID()
 		hc := s.getHookConfig()
 
@@ -570,20 +515,41 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 				continue // no match -> manual review
 			}
 
-			if evalResult.Decision == policy.Allow || evalResult.Decision == policy.Emit {
-				// Auto-grant
+			// Unified decision event — fires for every matched blessing
+			// evaluation so Axiom can aggregate decision distributions
+			// (how often policies bless / review / deny). Action-specific
+			// events (auto_grant / auto_deny / review_queued) fire below
+			// inside the switch for the specific outcome taken.
+			s.LogEvent("pub.polis.policy.decision", map[string]interface{}{
+				"decision":     string(evalResult.Decision),
+				"content_type": pEvt.Type,
+				"actor_domain": evt.Actor,
+				"rule_matched": evalResult.Rule,
+				"layer":        "tenant-inbound",
+			})
+
+			switch evalResult.Decision {
+			case policy.Bless, policy.Allow, policy.Emit:
+				// Auto-grant (Bless is the new grammar; Allow/Emit retained for legacy)
 				commentVersion, _ := evt.Payload["comment_version"].(string)
 				_, err := blessing.GrantByVersion(s.DataDir, commentVersion, commentURL, inReplyTo, client, hc, s.PrivateKey)
 				if err != nil {
 					s.LogWarn("policy auto-grant failed for %s: %v", commentURL, err)
 				} else {
 					s.LogEvent("pub.polis.comment.blessing.auto_grant", map[string]interface{}{
+						"comment_url": commentURL,
+						"actor":       evt.Actor,
+						"policy_rule": evalResult.Rule,
+					})
+				}
+			case policy.Review:
+				// Explicit pending — leave for human review, no action.
+				s.LogEvent("pub.polis.policy.review_queued", map[string]interface{}{
 					"comment_url": commentURL,
 					"actor":       evt.Actor,
 					"policy_rule": evalResult.Rule,
 				})
-				}
-			} else {
+			case policy.Deny:
 				// Auto-deny
 				_, err := blessing.Deny(commentURL, inReplyTo, client, s.PrivateKey)
 				if err != nil {

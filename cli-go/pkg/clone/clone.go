@@ -113,8 +113,10 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 		return nil, fmt.Errorf("close index file: %w", err)
 	}
 
-	// Download posts
-	postsDir := filepath.Join(targetDir, "content", "pub.polis.core", "post")
+	// Download posts. Modern public indexes (post-bundle-refactor) emit
+	// path-based entries with the URL field left empty — the canonical fetch
+	// URL is derived as serverURL + "/" + entry.Path. Older indexes that
+	// populated URL directly are still supported via the GetPath fallback.
 	for _, entry := range entries {
 		if entry.Type != "post" {
 			continue
@@ -127,15 +129,34 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 			}
 		}
 
+		// Resolve content URL + on-disk relative path. Two cases:
+		//   - Modern indexes (post-bundle-refactor, e.g. discover.polis.pub):
+		//     entry.Path = "content/pub.polis.core/post/.../slug.md",
+		//     entry.URL = "". Derive URL from path.
+		//   - Legacy indexes: entry.Path = "", entry.URL = absolute URL.
+		//     Derive path from URL by stripping serverURL prefix.
+		// Either way we land on a relPath rooted at the content tree so the
+		// local on-disk layout mirrors the remote's source-content layout.
+		relPath := entry.Path
+		if relPath == "" {
+			relPath = strings.TrimPrefix(entry.URL, serverURL+"/")
+		}
+		contentURL := entry.URL
+		if contentURL == "" {
+			contentURL = serverURL + "/" + strings.TrimPrefix(relPath, "/")
+		}
+
 		// Download the post
-		content, err := client.FetchContent(entry.URL)
+		content, err := client.FetchContent(contentURL)
 		if err != nil {
 			result.Errors++
 			continue
 		}
 
-		// Determine local path
-		localPath := urlToLocalPath(entry.URL, serverURL, postsDir)
+		// Local path mirrors the remote's source-content layout under
+		// targetDir so subsequent `polis render` finds the markdown where it
+		// expects.
+		localPath := filepath.Join(targetDir, relPath)
 		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 			result.Errors++
 			continue
@@ -200,13 +221,6 @@ func normalizeURL(url string) string {
 	}
 	url = strings.TrimSuffix(url, "/")
 	return url
-}
-
-// urlToLocalPath converts a remote URL to a local file path.
-func urlToLocalPath(remoteURL, baseURL, localDir string) string {
-	// Remove base URL to get relative path
-	relPath := strings.TrimPrefix(remoteURL, baseURL+"/")
-	return filepath.Join(localDir, relPath)
 }
 
 // loadState loads the clone state from disk.

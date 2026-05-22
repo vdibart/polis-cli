@@ -1,0 +1,55 @@
+<!--
+    Per-DM entry partial.
+
+    LOAD-BEARING — RUNTIME-ONLY: this template is loaded at runtime by the
+    stream controller, NOT by `polis render`. DM bodies live encrypted on
+    disk with the owner's private key; only the owner's authenticated
+    browser session has the decryption context. There is NO static-render
+    path for DMs — the stream shape's `Entry` map in
+    cli-go/pkg/bundle/bundle.go intentionally excludes "dm" so
+    `polis render` never instantiates this template.
+
+    Why this file lives in the shape alongside the other stream-* partials:
+      - Same theme-override mechanism as the other stream-* partials, so
+        tenants can customize DM rendering by shipping their own
+        stream-dm.html in their theme dir without controller changes.
+      - Distributed via the bundle reference payload (//go:embed all:fixtures
+        in cli-go/pkg/bundle/install.go), ensuring every tenant's
+        controller has access to the same template by default.
+      - Lives in the shape root rather than a separate runtime/ subdirectory
+        so the per-template-override resolution rules apply uniformly
+        across all entry sub-types.
+
+    Template variables (instantiated by the controller against the owner's
+    in-memory decrypted DM cache; no server-side rendering):
+    - {{dm_id}}
+    - {{dm_conversation_id}}
+    - {{dm_sender_name}}
+    - {{dm_sender_domain}}
+    - {{dm_sender_avatar_html}}     — inline avatar markup
+    - {{dm_date_human}}
+    - {{dm_body_html}}              — owner-decrypted, then markdown-rendered
+                                      (controller does the render in JS;
+                                      no plaintext ever round-trips through
+                                      the server)
+    - {{dm_unread}}                 — boolean; controls .has-unread state class
+-->
+<article class="entry entry--dm is-loaded {{#dm_unread}}has-unread{{/dm_unread}}"
+         data-polis-entry-type="dm"
+         data-polis-entry-id="{{dm_id}}"
+         data-polis-conversation-id="{{dm_conversation_id}}">
+    <div class="entry-meta">
+        <div class="timeline-dot" aria-hidden="true"></div>
+        <time class="entry-time">{{dm_date_human}}</time>
+    </div>
+    <div class="entry-body">
+        <div class="entry-byline">
+            <div class="dm-sender-avatar">{{dm_sender_avatar_html}}</div>
+            <span class="byline-author">{{dm_sender_name}}</span>
+            <span class="byline-domain">{{dm_sender_domain}}</span>
+        </div>
+        <div class="dm-body">
+            {{dm_body_html}}
+        </div>
+    </div>
+</article>

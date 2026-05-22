@@ -17,8 +17,12 @@ type Policy struct {
 }
 
 // ParsedRule is the structured representation of a policy rule string.
+//
+// The Action field may be any of the six writable verbs in the grammar.
+// See docs/general/policy-grammar.md for the authoritative spec of which
+// verb + type + layer combinations are valid.
 type ParsedRule struct {
-	Action string // "allow", "deny", "emit", or "omit"
+	Action string // "allow", "deny", "emit", "omit", "bless", or "review"
 	Type   string // event type prefix, "all", or "none"
 	Source string // "all", "none", "following", "followers", "self", "thread-blessed"
 	Domain string // optional: actor domain filter (from "at <domain>")
@@ -29,10 +33,27 @@ type ParsedRule struct {
 type Decision string
 
 const (
-	Allow Decision = "allow"
-	Deny  Decision = "deny"
-	Emit  Decision = "emit"
-	Omit  Decision = "omit"
+	Allow  Decision = "allow"
+	Deny   Decision = "deny"
+	Emit   Decision = "emit"
+	Omit   Decision = "omit"
+	Bless  Decision = "bless"  // Layer 1 (tenant inbound): auto-approve comment
+	Review Decision = "review" // Layer 1 (tenant inbound): queue for human review
+)
+
+// ParseMode indicates which policy layer a rule is being parsed for.
+// Different layers accept different verb + type combinations.
+//   - TenantMode: rules from tenant rules.jsonl files (Layer 1 + Layer 2).
+//   - OperatorMode: DS operator policies (Layer 3, stream ingestion).
+//
+// The Go code only ever parses tenant files; OperatorMode exists for
+// symmetry with the TypeScript parser and for future use if the Go
+// package is ever reused by the DS.
+type ParseMode int
+
+const (
+	TenantMode ParseMode = iota
+	OperatorMode
 )
 
 // EvalContext provides runtime context for source matching.
@@ -63,24 +84,26 @@ func DefaultPaths(dataDir string) (privatePath, publicPath string) {
 // Public policies are published at policies/rules.jsonl and visible to the network.
 // They declare the site's public posture — how it engages with the network.
 //
-// Default rules:
-//   - DMs accepted only from following (default social boundary)
+// The file uses v2 grammar (see docs/general/policy-grammar.md). Default rules:
+//   - DMs accepted only from following (Layer 1 inbound)
 //   - DMs denied from everyone else (explicit deny before catch-all)
-//   - Self-comments are auto-blessed (you always bless your own comments)
-//   - Comments from followed authors are auto-blessed (trust your social graph)
-//   - Authors with prior thread blessings are auto-blessed (thread-trust)
-//   - Default-deny catch-all: unknown content types are denied
+//   - Self-comments auto-blessed (bless own content)
+//   - Comments from followed authors auto-blessed (trust social graph)
+//   - Authors with prior thread blessings auto-blessed (thread-trust)
+//   - All other commenters land in review queue (explicit pending)
+//   - Default-deny catch-all for unknown content types
 //
 // DM rules must be in the public file because the sender-side pre-flight
 // check (policycheck.CheckDMEligibilityURL) fetches the recipient's public
 // policy to determine eligibility before sending.
 func DefaultPublicPolicyContent() string {
-	return `{"version":1,"generator":"polis-cli-go/` + policyVersion + `"}
+	return `{"version":2,"generator":"polis-cli-go/` + policyVersion + `"}
 {"active":true,"policy":"allow pub.polis.dm from following"}
 {"active":true,"policy":"deny pub.polis.dm from all"}
-{"active":true,"policy":"emit pub.polis.comment.blessing from self"}
-{"active":true,"policy":"emit pub.polis.comment.blessing from following"}
-{"active":true,"policy":"emit pub.polis.comment.blessing from thread-blessed"}
+{"active":true,"policy":"bless pub.polis.comment from self"}
+{"active":true,"policy":"bless pub.polis.comment from following"}
+{"active":true,"policy":"bless pub.polis.comment from thread-blessed"}
+{"active":true,"policy":"review pub.polis.comment from all"}
 {"active":true,"policy":"deny all from all"}
 `
 }
@@ -93,18 +116,13 @@ func DefaultPublicPolicyContent() string {
 // Empty by default — a new site has nothing to hide. All standard rules live
 // in the public policy. Private overrides are added as needed.
 func DefaultPrivatePolicyContent() string {
-	return `{"version":1,"generator":"polis-cli-go/` + policyVersion + `"}
+	return `{"version":2,"generator":"polis-cli-go/` + policyVersion + `"}
 `
 }
 
-// DefaultPolicyContent returns the default public policy file content for new sites.
-// Deprecated: Use DefaultPublicPolicyContent instead.
-func DefaultPolicyContent() string {
-	return DefaultPublicPolicyContent()
-}
-
-// policyVersion is the current policy file version string.
-const policyVersion = "0.61.0"
+// policyVersion is the current polis-cli-go version string written into the
+// generator field of new policy files. Kept in sync with cli-go/version.txt.
+const policyVersion = "0.63.0"
 
 // LoadPolicies loads policies from private and public JSONL files.
 // Private policies are loaded first (higher priority), then public.

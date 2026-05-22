@@ -138,7 +138,7 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 				ActorDomain: sourceDomain,
 			}
 			decision, matched := policy.EvaluateExplicit(policies, evt, ctx)
-			if matched && (decision == policy.Allow || decision == policy.Emit) {
+			if matched && (decision == policy.Bless || decision == policy.Allow || decision == policy.Emit) {
 				if err := discoveryClient.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "grant", privKey); err != nil {
 					result.CommentsFailed++
 					continue
@@ -152,7 +152,13 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 			"target_domain": discovery.ExtractDomainFromURL(authorURL),
 		}, privKey)
 	} else {
-		fmt.Println("[i] DS blessing/announcement skipped: site not registered")
+		stream.LogSuppressedEmit("pub.polis.follow.announced", "not_registered_locally",
+			"",
+			map[string]interface{}{
+				"target_domain":   discovery.ExtractDomainFromURL(authorURL),
+				"unblessed_count": len(allUnblessed),
+				"ds_url":          du,
+			})
 	}
 
 	return result, nil
@@ -233,6 +239,13 @@ func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient 
 		stream.PublishEvent("pub.polis.follow.removed", map[string]interface{}{
 			"target_domain": discovery.ExtractDomainFromURL(authorURL),
 		}, privKey)
+	} else if !registered {
+		stream.LogSuppressedEmit("pub.polis.follow.removed", "not_registered_locally",
+			"",
+			map[string]interface{}{
+				"target_domain": discovery.ExtractDomainFromURL(authorURL),
+				"ds_url":        du,
+			})
 	}
 
 	return result, nil

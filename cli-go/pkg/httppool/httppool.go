@@ -34,13 +34,6 @@ var defaultTransport = &http.Transport{
 	},
 }
 
-// SharedTransport returns the process-level shared *http.Transport.
-// All packages should use this transport (or NewClient) to benefit
-// from connection pooling across the entire process.
-func SharedTransport() *http.Transport {
-	return defaultTransport
-}
-
 // NewClient returns an *http.Client using the shared transport with the given timeout.
 // Different callers can use different timeouts while sharing the same connection pool.
 func NewClient(timeout time.Duration) *http.Client {
