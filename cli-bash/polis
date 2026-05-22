@@ -28,7 +28,7 @@ set -eo pipefail
 #   4. Hardcoded defaults
 
 # Fixed constants (never configurable - required for discovery)
-VERSION="0.63.0"
+VERSION="0.63.1"
 WELL_KNOWN_DIR=".well-known"
 WELL_KNOWN_FILE="polis"
 

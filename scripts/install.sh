@@ -33,8 +33,41 @@ get_latest_version() {
         grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/'
 }
 
+sha256_of() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$file" | awk '{print $1}'
+    else
+        echo "Error: neither sha256sum nor shasum is available; cannot verify download" >&2
+        exit 1
+    fi
+}
+
+verify_checksum() {
+    local archive_name="$1"
+    local checksums_file="$2"
+    local expected actual
+
+    expected="$(grep "  ${archive_name}$" "$checksums_file" | awk '{print $1}')"
+    if [[ -z "$expected" ]]; then
+        echo "Error: no checksum entry for ${archive_name} in checksums.txt" >&2
+        exit 1
+    fi
+
+    actual="$(sha256_of "$archive_name")"
+    if [[ "$expected" != "$actual" ]]; then
+        echo "Error: checksum mismatch for ${archive_name}" >&2
+        echo "  expected: ${expected}" >&2
+        echo "  actual:   ${actual}" >&2
+        echo "Refusing to install a tampered or corrupted archive." >&2
+        exit 1
+    fi
+}
+
 main() {
-    local platform version archive_name download_url ext
+    local platform version archive_name download_url checksums_url ext
 
     platform="$(detect_platform)"
     version="${POLIS_VERSION:-$(get_latest_version)}"
@@ -46,12 +79,20 @@ main() {
 
     archive_name="polis-${platform}.${ext}"
     download_url="https://github.com/${REPO}/releases/download/v${version}/${archive_name}"
+    checksums_url="https://github.com/${REPO}/releases/download/v${version}/checksums.txt"
 
     mkdir -p "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 
-    echo "[polis] Downloading..."
+    echo "[polis] Downloading archive..."
     curl -fsSL "$download_url" -o "$archive_name"
+
+    echo "[polis] Downloading checksums..."
+    curl -fsSL "$checksums_url" -o "checksums.txt"
+
+    echo "[polis] Verifying checksum..."
+    verify_checksum "$archive_name" "checksums.txt"
+    echo "[polis] Checksum OK"
 
     echo "[polis] Extracting..."
     if [[ "$ext" == "zip" ]]; then
@@ -59,7 +100,7 @@ main() {
     else
         tar xzf "$archive_name"
     fi
-    rm "$archive_name"
+    rm "$archive_name" "checksums.txt"
     chmod +x polis
 
     echo "[polis] Installed to ${INSTALL_DIR}/polis"

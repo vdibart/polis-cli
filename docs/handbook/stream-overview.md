@@ -3,6 +3,8 @@
 > A higher-order tour. Knits together what's happening on the polis.pub stream-screen — the filter widget, the URL behavior, the live data appearing from across the network, the design choices behind it all. Points down into the two deep tours ([url-as-filter](url-as-filter.md), [ds-to-stream](ds-to-stream.md)) for the file-level walks, and out to the [PQL spec](../general/pql.md), the [infinity stream concept doc](../general/infinity-stream.md), and the [DS architecture](../ds/developer/stream-architecture.md) for the philosophy and protocol layers.
 >
 > **Start here if** you've poked around polis.pub and want one explanation that ties together "the filter," "the stream," "the URL," and "the network." Then follow the spokes that interest you.
+>
+> **Scope note.** The Discovery Service source is not part of this public repo. DS-side file references in this tour (`stream.ts`, `counts.ts`) describe behavior that is also fully specified in the [DS API reference](../ds/developer/api-reference.md) and [stream architecture doc](../ds/developer/stream-architecture.md). Webapp- and CLI-side files referenced here are in this repo and clickable.
 
 ## What you see, in one paragraph
 
@@ -40,7 +42,7 @@ The four layers are independent in the codebase — they live in different files
 
 ## The sentence-filter widget — chrome meets filter
 
-The centered widget in the topbar is the single piece of UI that ties chrome and filter together. From [`index.html`](github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/index.html) (line ~305):
+The centered widget in the topbar is the single piece of UI that ties chrome and filter together. From [`index.html`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/index.html) (line ~305):
 
 ```html
 <div class="polis-topbar-filter" id="polis-topbar-filter">
@@ -52,7 +54,7 @@ The centered widget in the topbar is the single piece of UI that ties chrome and
 
 It's a `role="group"` of dropdowns plus a typeahead — five interactive slots that together compose a [PQL sentence](../general/pql.md). The user clicks slot 2 ("activity") and picks "posts"; the widget updates the local sentence state, composes the new URL (`/_/pql/all+posts+from+my+network+by+date`), `replaceState`s history, and tells the stream controller `setFilter(state)` — which clears the visible items and re-fetches matching ones.
 
-The icon row to the left is a *shortcut layer over the same widget*. Each icon is a **preset PQL sentence** that the widget would otherwise compose by hand. From [`owner-extras.js`](github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/owner-extras.js):
+The icon row to the left is a *shortcut layer over the same widget*. Each icon is a **preset PQL sentence** that the widget would otherwise compose by hand. From [`owner-extras.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/owner-extras.js):
 
 ```javascript
 // step-06/6.e: icon-row preset definitions.
@@ -69,7 +71,7 @@ Clicking an icon is **shorthand for "set the sentence to this and re-fire."** Bo
 
 This is why the URL stays a meaningful sentence even when the user uses icons: the user isn't bypassing the language, they're picking phrases from it.
 
-For the file-by-file walk of how the URL pushes through the parser into the controller, **dive into the [URL-as-filter tour](url-as-filter.md)**. It walks [`app.js`](github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/app.js) (the URL intercept), [`pql.js`](github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/pql.js) (the parser/composer), and [`stream.js`](github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js) (the consumer).
+For the file-by-file walk of how the URL pushes through the parser into the controller, **dive into the [URL-as-filter tour](url-as-filter.md)**. It walks [`app.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/app.js) (the URL intercept), [`pql.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/pql.js) (the parser/composer), and [`stream.js`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js) (the consumer).
 
 ---
 
@@ -97,7 +99,7 @@ When the user changes the filter, the controller re-fetches *from the local cach
 
 A second, complementary data path runs alongside: **cross-tenant aggregation queries**. When a post from another tenant scrolls into view, the webapp's stream handler asks the DS "how many comments does this post have across the network?" via `POST /v1/content/comments/counts`. The first 10 items in any rendered page get blocking 500ms fetches; later items get fire-and-forget background fetches that warm a local cache for the next render. The badge numbers on cross-tenant items come from these aggregation queries — they don't fit the cursor-paginated event model because they're aggregations, not events.
 
-For the file-by-file walk of both data paths, **dive into the [DS-to-stream tour](ds-to-stream.md)**. It walks the webapp sync loop ([`sync.go`](github.com/vdibart/polis-cli/blob/main/webapp/internal/server/sync.go)), the DS stream endpoint ([`stream.ts`](github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/stream.ts)), the feed transformer ([`feed/handler.go`](github.com/vdibart/polis-cli/blob/main/cli-go/pkg/feed/handler.go)), the local cache ([`stream/store.go`](github.com/vdibart/polis-cli/blob/main/cli-go/pkg/stream/store.go)), the DS counts endpoint ([`counts.ts`](github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/counts.ts)), and the webapp's stream HTTP handlers ([`handlers_stream.go`](github.com/vdibart/polis-cli/blob/main/webapp/internal/server/handlers_stream.go)).
+For the file-by-file walk of both data paths, **dive into the [DS-to-stream tour](ds-to-stream.md)**. It walks the webapp sync loop ([`sync.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/sync.go)), the DS stream endpoint ([`stream.ts`](https://github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/stream.ts)), the feed transformer ([`feed/handler.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/feed/handler.go)), the local cache ([`stream/store.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/stream/store.go)), the DS counts endpoint ([`counts.ts`](https://github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/counts.ts)), and the webapp's stream HTTP handlers ([`handlers_stream.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/handlers_stream.go)).
 
 ---
 

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.63.1] - 2026-05-22
+
+A small follow-up release closing two longstanding install-trust and documentation gaps. No code-behavior changes to the CLI, webapp, or themes.
+
+### Fixed
+
+- **[Installer] `scripts/install.sh` now verifies the downloaded archive's SHA-256 against the release's `checksums.txt` before extracting**. Previously the script downloaded and unpacked the tarball without any integrity check, despite `SECURITY.md` instructing users to verify checksums manually. The script now fetches `checksums.txt` from the same release, looks up the expected hash for the platform-specific archive, computes the actual hash with `sha256sum` (Linux) or `shasum -a 256` (macOS), and aborts with a clear error on mismatch.
+- **[Docs] AGENTS.md and `docs/handbook/*.md` GitHub links now use `https://` prefixes**. The trail-marker links across the LLM/human handbook were written as `[text](github.com/...)` without a scheme, causing Markdown renderers to treat them as relative paths and 404. All ~25 affected links across `AGENTS.md`, `docs/handbook/url-as-filter.md`, `docs/handbook/ds-to-stream.md`, `docs/handbook/stream-overview.md`, and `docs/handbook/foreign-site-widget.md` are corrected.
+- **[Docs] Discovery Service scope clarified across docs that referenced its source tree**. The DS source is not yet part of this public repo (an open-source release is planned). Previously, several docs (`docs/general/architecture.md`, `docs/general/contributing.md`, `docs/ds/README.md`, `docs/ds/admin/deployment.md`, `docs/handbook/ds-to-stream.md`, `docs/handbook/stream-overview.md`, `AGENTS.md`) referenced `discovery-service/...` paths as if they lived in this repo. Each affected doc now carries a clear scope note pointing readers at the [DS API reference](docs/ds/developer/api-reference.md) and [stream architecture doc](docs/ds/developer/stream-architecture.md) as the stable public contract.
+
 ## [0.63.0] - 2026-05-22
 
 The largest release since the project began publishing: a complete UX pivot from the v3 blog-style shape to the v4 "infinity stream" — a single-screen, sentence-filtered surface that re-aims itself via PQL (Polis Query Language). Both shapes ship together: v4 is the new default, v3 remains for backward compatibility on opt-in sites. Themes and shapes have moved into the bundle system and now ship embedded inside the Go binary, and a new `tailor` standalone binary helps self-hosters migrate sites across versions.

@@ -11,7 +11,7 @@ Polis has four main components:
 | `cli-go/` | Go | Active | Go CLI — core packages imported by the webapp |
 | `webapp/` | Go | Active | Local web interface for managing a Polis site |
 | `cli-bash/` | Bash | Frozen (v0.56.0) | Original CLI — functional but receives no new features |
-| `discovery-service/` | TypeScript | Active | Fly.io/Hono server for discovery coordination |
+| Discovery Service | TypeScript | Active (closed for now) | Fly.io/Hono server for discovery coordination. Source not yet in this public repo; planned for open-source release. The [DS API reference](../ds/developer/api-reference.md) is the stable public contract. |
 
 **Key dependency rule:** The Go CLI (`cli-go/pkg/`) owns all core packages. The webapp imports from the CLI, never the reverse.
 
@@ -180,26 +180,11 @@ shellcheck bin/polis
 - Functions: `snake_case`; constants: `UPPER_SNAKE_CASE`
 - All commands must support `--json` output mode
 
-## Discovery Service (`discovery-service/`)
+## Discovery Service
 
-### Prerequisites
+The DS source is not part of this public repo at this time, so contributions to the DS itself are not yet accepted via pull request. Issues, API-contract feedback, and proposed event-stream additions are very welcome — open an issue against this repo or follow the reporting channels below.
 
-- **Supabase CLI** (`supabase`)
-- **Deno** (for local Edge Function development)
-
-### Development
-
-```bash
-cd discovery-service
-
-# Deploy a specific function
-supabase functions deploy <function-name>
-
-# Deploy all functions
-supabase functions deploy
-```
-
-See [discovery-service/README.md](../discovery-service/README.md) for the full API reference and deployment guide.
+See the [DS API reference](../ds/developer/api-reference.md) and [stream architecture doc](../ds/developer/stream-architecture.md) for the stable public contract that the canonical deployment (and any future open-source release) honors.
 
 ## Pull Request Process
 

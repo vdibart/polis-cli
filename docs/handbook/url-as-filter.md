@@ -32,7 +32,7 @@ This is *not* a feature retrofitted onto a normal SPA router. It's the core desi
 
 Three files carry the thread, in this order: **producer** (intercepts URLs), **grammar** (parses sentences), **consumer** (renders results).
 
-### 1. Producer: [`webapp/internal/webui/www/app.js`](github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/app.js)
+### 1. Producer: [`webapp/internal/webui/www/app.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/app.js)
 
 The owner SPA's navigation dispatch. When you click any link or icon in the topbar, `App.navigateTo(path)` runs. Inside it, the very first check is the PQL URL intercept:
 
@@ -52,7 +52,7 @@ If the parser hasn't loaded yet (early in page life), the dispatch punts gracefu
 
 If the path *isn't* a PQL URL, the same `navigateTo` continues into a fallback that quietly `replaceState`s to `/_/` and renders the default filter. Old v3 routes (`/_/posts`, `/_/blessings`, `/_/messages`) all land here. Hard-cutover by design.
 
-### 2. Grammar: [`webapp/internal/webui/www/pql.js`](github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/pql.js)
+### 2. Grammar: [`webapp/internal/webui/www/pql.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/pql.js)
 
 The parser and composer. Two functions matter most:
 
@@ -65,7 +65,7 @@ Two vocabularies live side by side in this file: the **PQL grammar tokens** (use
 
 This is why the URL is *readable*: the file went out of its way to keep the user-facing vocabulary in the URL itself, even though the internal code uses hyphenated machine tokens.
 
-### 3. Consumer: [`cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js`](github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js)
+### 3. Consumer: [`cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js)
 
 The stream controller — installed per-tenant from the embedded bundle fixture, served at `/bundle-assets/pub.polis.core/shapes/v4/stream.js`. It owns the actual rendering: hydrate the DOM, fetch matching content, insert items, observe scroll.
 

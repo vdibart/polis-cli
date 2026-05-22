@@ -4,6 +4,8 @@ How to deploy your own Polis Discovery Service instance.
 
 **Target audience:** Operators running their own Discovery Service.
 
+> **Scope note.** The DS source code is not yet part of this public repo. This guide documents the deployment shape that the canonical `ds.polis.pub` deployment uses and that the planned open-source reference implementation will support, so it is accurate as a forward-looking spec. Commands that assume a local `discovery-service/` checkout will become runnable once the DS source is released; until then, treat this doc as architectural reference. Sites can point at the canonical DS at `ds.polis.pub` today by setting `DISCOVERY_SERVICE_URL`.
+
 ---
 
 ## Prerequisites

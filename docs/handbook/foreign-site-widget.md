@@ -66,7 +66,7 @@ This is the one that surprises most developers. The static HTML on `alice.polis.
 
 ### 1.a Publish time: empty placeholder
 
-In the shape template ([`cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.html`](github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.html)):
+In the shape template ([`cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.html`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.html)):
 
 ```html
 <!-- The hosted nav-widget populates #polis-nav-root for authenticated
@@ -89,7 +89,7 @@ The CSS in `stream.css` has a clever rule:
 
 This is the *handshake*. The static HTML is correct for anonymous visitors out of the box. The presence of children inside `#polis-nav-root` is the signal "switch to logged-in mode."
 
-### 1.b Serve time: the patch ([`webapp/internal/hosted/nav_inject.go`](github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/nav_inject.go))
+### 1.b Serve time: the patch ([`webapp/internal/hosted/nav_inject.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/nav_inject.go))
 
 When `<you>.polis.pub` requests `alice.polis.pub/posts/2026/01/hello.html` *while logged in*, the hosted webapp's response path runs the page through `injectNavWidgetPlaceholder`:
 
@@ -123,9 +123,9 @@ Two things this function does:
 
 The unauthenticated path is a no-op: `if visitorHandle == "" { return data }`. Anonymous visitors get the page byte-identical to what was rendered. **The widget injection is fundamentally a per-request transformation, not a publish-time decision.**
 
-This function is called from `serveTenantPublic` (in [`hosted.go`](github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/hosted.go)), which delegates to a shared serving handler from `webapp/internal/serve/` and supplies the auth-aware post-process hook.
+This function is called from `serveTenantPublic` (in [`hosted.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/hosted.go)), which delegates to a shared serving handler from `webapp/internal/serve/` and supplies the auth-aware post-process hook.
 
-### 1.c Client side: hydration ([`webapp/internal/hosted/nav/nav.js`](github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/nav/nav.js))
+### 1.c Client side: hydration ([`webapp/internal/hosted/nav/nav.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/nav/nav.js))
 
 By the time the browser parses the page, `#polis-nav-root` has populated `data-home` / `data-handle` / `data-host`, and `<script src="https://polis.pub/nav.js" defer>` is queued.
 
@@ -165,7 +165,7 @@ A few elegant properties fall out of "patch at serve time":
 
 This is the *other* injected widget — the one that shows the comment box or follow button below a post. Different mechanism from the nav widget. We'll walk it briefly because it appears in the same DOM neighborhood.
 
-### 2.a Template ([`stream.html`](github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.html))
+### 2.a Template ([`stream.html`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.html))
 
 The comment/follow widget's container and script tag are in the static template:
 
@@ -180,7 +180,7 @@ The comment/follow widget's container and script tag are in the static template:
 
 Every visitor — anonymous or logged-in — gets this script tag. Versioned URL (`/widget-1.4.4.js`), SRI integrity attribute pinning the bytes. If the bytes get tampered with mid-flight, the browser refuses to execute.
 
-### 2.b Embedded asset ([`webapp/internal/hosted/widget_embed.go`](github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/widget_embed.go))
+### 2.b Embedded asset ([`webapp/internal/hosted/widget_embed.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/widget_embed.go))
 
 ```go
 //go:embed widget/widget.js
@@ -199,7 +199,7 @@ func init() {
 
 The widget JavaScript is embedded into the hosted binary at compile time and the SHA-384 integrity hash is computed once at init. When `polis.pub` serves `/widget-1.4.4.js`, it streams the embedded bytes. The template's `{{widget_integrity}}` variable resolves to the SRI string, so the browser will refuse to run anything that doesn't match.
 
-### 2.c State machine ([`webapp/internal/hosted/widget/widget.js`](github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/widget/widget.js))
+### 2.c State machine ([`webapp/internal/hosted/widget/widget.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/widget/widget.js))
 
 When the widget script runs, it inspects local storage and `*.polis.pub` cookies to determine state:
 
@@ -225,7 +225,7 @@ This is also how `nav.js` knows you're logged in: when the page is requested, th
 
 ---
 
-## Versioning + integrity ([`cli-go/pkg/render/page.go`](github.com/vdibart/polis-cli/blob/main/cli-go/pkg/render/page.go))
+## Versioning + integrity ([`cli-go/pkg/render/page.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/render/page.go))
 
 Both widget scripts are versioned at the URL level:
 

@@ -1,5 +1,7 @@
 # Discovery Service
 
+> **Scope note.** The Discovery Service source code is not yet part of this public repo. The canonical deployment runs at `ds.polis.pub`; an open-source release of the DS reference implementation is planned. The architecture, data model, API, and stream protocol described here are the stable public contract — they apply to both the canonical deployment and any future open-source or alternate implementation. Source-tree paths (`discovery-service/...`) in this doc describe the upstream layout in the private repo and serve as a forward reference for the planned release.
+
 The Discovery Service (DS) is the coordination layer for the polis decentralized network. Individual polis sites are fully independent — they own their content and serve it from their own domains. The DS enables interaction between sites.
 
 ## What It Does
@@ -70,6 +72,5 @@ deno task start
 
 ## See Also
 
-- [discovery-service/README.md](../../discovery-service/README.md) — Source tree overview
 - [docs/general/content-system.md](../general/content-system.md) — Events and content types
 - [docs/general/security-model.md](../general/security-model.md) — Auth model, signature verification

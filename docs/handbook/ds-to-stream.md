@@ -1,6 +1,8 @@
 # Tour: DS to stream
 
 > A guided tour of how content flows from the Discovery Service into the stream-screen you see in your browser. Source-of-truth concept docs live in [`../general/`](../general/); this tour walks the source code with you. Map of all threads: [`../../AGENTS.md`](../../AGENTS.md).
+>
+> **Scope note.** The DS-side files referenced in this tour (e.g. `discovery-service/core/handlers/stream.ts`, `counts.ts`) are not part of this public repo. The DS reference implementation is planned for open-source release; until then, the [DS API reference](../ds/developer/api-reference.md) and [stream architecture doc](../ds/developer/stream-architecture.md) describe the same behavior as a stable public contract. Webapp- and CLI-side files in this tour are all in this repo and clickable.
 
 ## The observation
 
@@ -64,7 +66,7 @@ We'll walk each path through the source.
 
 ## Path A — continuous sync
 
-### A.1 Producer: [`webapp/internal/server/sync.go`](github.com/vdibart/polis-cli/blob/main/webapp/internal/server/sync.go)
+### A.1 Producer: [`webapp/internal/server/sync.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/sync.go)
 
 The webapp runs a background sync goroutine that ticks every ~30 seconds whenever at least one browser tab has an SSE connection open. The core entry point is `runUnifiedSync()`:
 
@@ -83,7 +85,7 @@ Each cycle emits two structured log events for observability:
 
 The `sync_id` correlates all DS HTTP calls within a single cycle via the `X-Request-Id` header.
 
-### A.2 DS endpoint: [`discovery-service/core/handlers/stream.ts`](github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/stream.ts)
+### A.2 DS endpoint: [`discovery-service/core/handlers/stream.ts`](https://github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/stream.ts)
 
 The webapp's sync hits the DS at `/v1/stream/unified?since=<cursor>&involved=<my-domain>&actor=<followed-domains>`. Server-side, this lands in `queryStream` (and `queryStreamUnified` for the multi-filter variant):
 
@@ -108,7 +110,7 @@ Two things to notice. First, the +1 limit trick: the handler fetches one extra r
 
 Cursor pagination is the contract: the response carries the cursor of the last returned event; the next call passes that cursor as `since`.
 
-### A.3 Handlers: [`cli-go/pkg/feed/handler.go`](github.com/vdibart/polis-cli/blob/main/cli-go/pkg/feed/handler.go) (and siblings)
+### A.3 Handlers: [`cli-go/pkg/feed/handler.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/feed/handler.go) (and siblings)
 
 Back on the webapp side, the events returned by the DS go through a fan-out. `runUnifiedSync` knows about four handlers, each one a small interface implementation registered in `sync.go`:
 
@@ -136,7 +138,7 @@ func (h *FeedHandler) Process(events []discovery.StreamEvent) []FeedItem { ... }
 
 The output `FeedItem`s are what eventually land in the local cache as JSONL.
 
-### A.4 Storage: [`cli-go/pkg/stream/store.go`](github.com/vdibart/polis-cli/blob/main/cli-go/pkg/stream/store.go)
+### A.4 Storage: [`cli-go/pkg/stream/store.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/stream/store.go)
 
 The local state and cursor file are managed by `stream.Store`, scoped per discovery service:
 
@@ -151,7 +153,7 @@ The split is deliberate. `config/` carries things you set ("notify me when X hap
 
 The materialized files match cursor keys: cursor `pub.polis.feed` → file `pub.polis.feed.jsonl`. The exception is feed *scopes* — `network` and `global` are separate cached files (the global scope has its own cursor because it's a different DS query), but `followers` and `me` are computed at render time by filtering the network cache via `FilterOptions.AuthorDomains`.
 
-### A.5 Consumer: [`webapp/internal/webui/www/app.js`](github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/app.js) → [`stream.js`](github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js)
+### A.5 Consumer: [`webapp/internal/webui/www/app.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/app.js) → [`stream.js`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js)
 
 When the SPA renders the stream-screen, it fetches from the webapp's local API (`/api/feed?...`), which reads from the JSONL cache populated by the sync loop. The PQL sentence in the URL becomes the filter applied at fetch time. See the [URL-as-filter tour](url-as-filter.md) for that side of the story.
 
@@ -167,7 +169,7 @@ A post in your stream from `bob.polis.pub` shows a comment-count badge: "12 comm
 
 It comes from a cross-tenant aggregation query — Path B.
 
-### B.2 Webapp side: [`webapp/internal/server/handlers_stream.go`](github.com/vdibart/polis-cli/blob/main/webapp/internal/server/handlers_stream.go)
+### B.2 Webapp side: [`webapp/internal/server/handlers_stream.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/handlers_stream.go)
 
 The webapp stream handler stamps comment counts onto items at render time. It uses a **visible-horizon strategy**:
 
@@ -185,7 +187,7 @@ const (
 
 The first 10 items get blocking 500ms fetches — they're about to render and need their counts now or they ship as "0." Items past that horizon get fire-and-forget background fetches that populate a local short-lived cache so the *next* time the user scrolls them into view, the badge already has its number.
 
-### B.3 DS endpoint: [`discovery-service/core/handlers/counts.ts`](github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/counts.ts)
+### B.3 DS endpoint: [`discovery-service/core/handlers/counts.ts`](https://github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/counts.ts)
 
 The webapp batches up to 50 URLs into a single `POST /v1/content/comments/counts` request:
 

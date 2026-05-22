@@ -77,7 +77,7 @@ Polis is a decentralized social system with **four primary surfaces**. Each surf
 
 ### 4. Discovery Service (DS) — the coordination layer
 
-**Where it lives:** `discovery-service/`. `core/` is pure business logic + the `StorageAdapter` interface; `server/` is the Fly.io + Hono adapter (active deployment); `_archived/` holds retired adapters (Supabase) kept as references.
+**Where it lives:** The DS source is currently operated as part of the hosted runtime and is not yet included in this public repo. The canonical deployment runs at `ds.polis.pub`. The public API contract is documented in [`ds/developer/api-reference.md`](../ds/developer/api-reference.md) and is the stable surface integrators and alternate implementations should target. An open-source release of the DS reference implementation is planned but not committed to a date.
 
 **What it owns:**
 - Site registry (who's on the network, what their public key is, what bundles they ship).
