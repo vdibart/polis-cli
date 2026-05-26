@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 )
 
 // normalizeFollowURL ensures consistent URL comparison by lowercasing and trimming trailing slashes.
@@ -69,7 +71,12 @@ func Save(path string, f *FollowingFile) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	if err := os.WriteFile(path, append(data, '\n'), 0644); err != nil {
+	// R23-6: write atomically (tmp+rename) so a crash mid-write can't leave a
+	// truncated following.json. Mode stays 0644 — this is PUBLIC served content
+	// (content/pub.polis.core/follow/), so self-hosters serving it via nginx/
+	// Apache under a different user must be able to read it (the R11-17 lesson:
+	// don't tighten public-facing files to 0600).
+	if err := atomicfile.WriteFile(path, append(data, '\n'), 0644); err != nil {
 		return fmt.Errorf("failed to write following.json: %w", err)
 	}
 

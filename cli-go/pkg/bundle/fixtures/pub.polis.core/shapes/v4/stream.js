@@ -519,6 +519,12 @@
         setupFocusModeClickOutside();
         setupPinnedDotRefresh();
 
+        // Relativize SSR'd timestamps frozen at render time, then keep them
+        // live on a 60s tick. See refreshRelativeTimes for the staleness bug
+        // this addresses (static page shows "just now" indefinitely).
+        refreshRelativeTimes();
+        setInterval(refreshRelativeTimes, 60 * 1000);
+
         // Auto-engage focus mode on canonical permalink pages
         // (rapid-fire #17). When a visitor lands on /posts/.../*.html
         // or /comments/.../*.html, the SSR template puts the target
@@ -2678,17 +2684,33 @@
        changes, audit every innerHTML site.
        ------------------------------------------------------------------ */
 
+    // R20-B-S1: defense-in-depth against author-supplied dangerous URL schemes
+    // (javascript:, data:, vbscript:, file:) reaching <a href>. The publish-side
+    // bluemonday sanitizer strips these from rendered body_html, but feed-cache
+    // fields like TargetURL flow through el() directly without going through
+    // markdown rendering, so a producer-side check here closes the gap.
+    // Accepts http(s)://, mailto:, root-relative /, fragment #, query ?, and any
+    // relative path with no scheme prefix.
+    function isSafeHref(href) {
+        if (typeof href !== 'string' || href === '') return false;
+        return /^(?:https?:|mailto:|\/|#|\?|[^:\/?#]*(?:[\/?#]|$))/i.test(href);
+    }
+
     function el(tag, opts) {
         var node = document.createElement(tag);
         if (opts) {
             if (opts.cls) node.className = opts.cls;
             if (opts.text !== undefined && opts.text !== null) node.textContent = String(opts.text);
-            if (opts.href) node.setAttribute('href', opts.href);
+            if (opts.href) {
+                if (isSafeHref(opts.href)) node.setAttribute('href', opts.href);
+            }
             if (opts.ariaHidden) node.setAttribute('aria-hidden', 'true');
             if (opts.attrs) {
                 for (var k in opts.attrs) {
                     if (Object.prototype.hasOwnProperty.call(opts.attrs, k)) {
-                        node.setAttribute(k, opts.attrs[k]);
+                        var v = opts.attrs[k];
+                        if (k === 'href' && !isSafeHref(v)) continue;
+                        node.setAttribute(k, v);
                     }
                 }
             }
@@ -2703,6 +2725,53 @@
 
     function timelineDot() {
         return el('div', { cls: 'timeline-dot', ariaHidden: true });
+    }
+
+    // ── Relative-time relativization ─────────────────────────────────────
+    // FormatHumanDateTime (Go, template/engine.go) computes the relative
+    // strings ("just now" / "N minutes ago" / "N hours ago") SERVER-SIDE at
+    // render time. On a cached static page — e.g. a published tenant
+    // index.html — that string FREEZES at render time and goes stale: a post
+    // renders "just now" and still says "just now" an hour later, while the
+    // live SPA (which refetches on every filter) shows the correct age. That
+    // mismatch is exactly what a reader sees comparing discover.polis.pub
+    // (static, "just now") against their own stream (live, "55 minutes ago").
+    //
+    // Fix: relativize on the CLIENT from the <time datetime="..."> ISO so every
+    // view recomputes the age at display time, regardless of when the HTML was
+    // rendered. Only the relative window (< 10h) is handled here — older stamps
+    // return null and keep the server's absolute "Month D, YYYY · h:mma" text,
+    // which sidesteps a UTC-vs-local-timezone mismatch between the SSR fallback
+    // (formatted in UTC) and the client. Mirrors FormatHumanDateTime's bands
+    // exactly so SSR'd and client-rendered entries read identically.
+    function relativeTimeFromISO(iso) {
+        if (!iso) return null;
+        var t = new Date(iso);
+        if (isNaN(t.getTime())) return null;
+        var delta = Date.now() - t.getTime();
+        if (delta < 0 || delta >= 10 * 3600 * 1000) return null;
+        if (delta < 60 * 1000) return 'just now';
+        var mins = Math.floor(delta / (60 * 1000));
+        if (mins < 2) return '1 minute ago';
+        if (mins < 60) return mins + ' minutes ago';
+        var hrs = Math.floor(delta / (3600 * 1000));
+        if (hrs < 2) return '1 hour ago';
+        return hrs + ' hours ago';
+    }
+
+    // refreshRelativeTimes rewrites every entry timestamp carrying a parseable
+    // datetime attr to its client-computed relative form. Run at init() (to
+    // correct stale SSR'd values on a cached page) and on a 60s interval (so an
+    // open tab self-updates "just now" → "1 minute ago" without a refetch).
+    // Scoped to `.entry-date-time[datetime]`: the "last active" profile line and
+    // recent-post-date carry no datetime attr, so they're untouched.
+    function refreshRelativeTimes(scope) {
+        var root = scope && scope.querySelectorAll ? scope : document;
+        var nodes = root.querySelectorAll('.entry-date-time[datetime]');
+        for (var i = 0; i < nodes.length; i++) {
+            var rel = relativeTimeFromISO(nodes[i].getAttribute('datetime'));
+            if (rel) nodes[i].textContent = rel;
+        }
     }
 
     function entryShell(typeClass, meta, extraClasses) {
@@ -2775,7 +2844,7 @@
         // mislead), and the byline is always "me" (redundant).
         // 2026-05-15: the right-aligned DRAFT pill was dropped — its
         // role is now covered by the entry-rollover-cta pattern.
-        var dateTime = el('time', { cls: 'entry-date-time', text: meta.published_human });
+        var dateTime = el('time', { cls: 'entry-date-time', text: meta.published_human, attrs: meta.published ? { datetime: meta.published } : null });
         var metaLine = el('div', { cls: 'entry-meta-line', children: [timelineDot(), dateTime] });
         // entry-meta-right hosts the comment-count badge (always) and,
         // on the owner SPA only, the byline-domain link. Public single-
@@ -3323,6 +3392,7 @@
         var dateTime = el('time', {
             cls: 'entry-date-time',
             text: meta.published_human || meta.date_human || '',
+            attrs: meta.published ? { datetime: meta.published } : null,
         });
         var metaLine = el('div', { cls: 'entry-meta-line', children: [timelineDot(), dateTime] });
         if (meta.sender_domain) {
@@ -3375,7 +3445,7 @@
             cls: 'entry-meta-line',
             children: [
                 timelineDot(),
-                el('span', { cls: 'entry-date-time', text: meta.published_human || '' }),
+                el('span', { cls: 'entry-date-time', text: meta.published_human || '', attrs: meta.published ? { datetime: meta.published } : null }),
                 el('span', {
                     cls: 'entry-byline',
                     children: [
@@ -3441,7 +3511,7 @@
             cls: 'entry-meta-line',
             children: [
                 timelineDot(),
-                el('time', { cls: 'entry-date-time', text: meta.published_human || '' }),
+                el('time', { cls: 'entry-date-time', text: meta.published_human || '', attrs: meta.published ? { datetime: meta.published } : null }),
                 el('span', { cls: 'entry-byline', text: actorDomain }),
             ],
         });
@@ -4723,6 +4793,15 @@
         // step 6 owner stream may handle this differently.)
         clearStreamForFilterChange();
         // Reset pagination state so the next fetch starts fresh.
+        // paginationInFlight MUST be cleared too: the refresh affordance
+        // (setupPinnedDotRefresh) routes here, and if a scroll-triggered
+        // fetch is mid-flight when the user clicks refresh, fetchNextPage's
+        // `if (paginationInFlight) return` guard would swallow the refresh
+        // and load nothing. The filter is unchanged on refresh, so any
+        // late-arriving response from the prior fetch is dedup-safe
+        // (appendItemIfNew keys on entry id).
+        paginationInFlight = false;
+        paginationInFlightTop = false;
         paginationCursor = '';
         paginationDone = false;
         paginationFirstFetch = true;
@@ -5094,6 +5173,19 @@
         // sync body.is-activity-mode against filterType regardless of
         // which code path mutated the state.
         onFilterChange: addFilterChangeListener,
+        // Current filter state, same shape as the onFilterChange snapshot.
+        // addFilterChangeListener does NOT replay to new subscribers, and
+        // the initial fireFilterChange happens during hydration (before
+        // late subscribers like owner-extras attach), so a getter lets a
+        // subscriber seed its own state from the live filter on subscribe.
+        getFilter: function () {
+            return {
+                qualifier: filterQualifier,
+                type: filterType,
+                scope: filterScope,
+                modifier: filterModifier,
+            };
+        },
         // step-06/6.h follow-up: re-trigger applyFilter without
         // mutating state. owner-extras calls this after a successful
         // publish to pull the just-published post into the stream.

@@ -32,10 +32,61 @@ type DiscoveryConfig struct {
 // BeseechResult contains the result of a comment beseech request.
 type BeseechResult struct {
 	Success     bool         `json:"success"`
-	Status      string       `json:"status"`  // "created" or "updated"
+	Status      string       `json:"status"` // "created" or "updated"
 	Message     string       `json:"message"`
 	AutoBlessed bool         `json:"auto_blessed"` // true if auto-blessed by discovery
 	Comment     *CommentMeta `json:"comment"`      // comment metadata (for callers that need it for hooks etc.)
+}
+
+// registerCommentContent registers (or re-registers) a comment's content with
+// the discovery service. Shared by BeseechComment (first publish) and
+// RepublishComment (subsequent versions).
+//
+// Re-registering an already-known (type, url) pair makes the DS emit
+// pub.polis.comment.republished and preserve any existing granted/denied blessing
+// relationship — see handleCommentBlessing in
+// discovery-service/core/handlers/content.ts. The comment URL is derived from
+// baseURL + the comment's published date + ID, so callers MUST keep the published
+// timestamp stable across republishes to keep the URL — and thus the DS update
+// detection — stable.
+func registerCommentContent(meta *CommentMeta, commentID string, privateKey []byte, dsURL, dsKey, baseURL string) (*discovery.ContentRegisterResponse, error) {
+	ts, err := time.Parse("2006-01-02T15:04:05Z", meta.Timestamp)
+	if err != nil {
+		return nil, fmt.Errorf("invalid timestamp: %w", err)
+	}
+	dateDir := ts.Format("20060102")
+	commentURL := fmt.Sprintf("%s/comments/%s/%s.md", baseURL, dateDir, commentID)
+
+	commentMetadata := map[string]interface{}{
+		"in_reply_to": meta.InReplyTo,
+		"root_post":   meta.RootPost,
+		"timestamp":   meta.Timestamp,
+	}
+	if meta.InReplyToVersion != "" {
+		commentMetadata["in_reply_to_version"] = meta.InReplyToVersion
+	}
+
+	canonical, err := discovery.MakeContentCanonicalJSON(
+		"pub.polis.comment", commentURL, meta.CommentVersion, meta.Author, commentMetadata,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("canonical JSON: %w", err)
+	}
+
+	sig, err := signing.SignContent(canonical, privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("sign: %w", err)
+	}
+
+	client := discovery.NewClient(dsURL, dsKey)
+	return client.RegisterContent(&discovery.ContentRegisterRequest{
+		Type:      "pub.polis.comment",
+		URL:       commentURL,
+		Version:   meta.CommentVersion,
+		Author:    meta.Author,
+		Metadata:  commentMetadata,
+		Signature: sig,
+	})
 }
 
 // BeseechComment registers a pending comment with the discovery service
@@ -100,50 +151,8 @@ func BeseechComment(dataDir, commentID string, privateKey []byte, dsCfg ...*Disc
 		}, nil
 	}
 
-	// Compute comment URL from base URL + date directory + comment ID
-	ts, err := time.Parse("2006-01-02T15:04:05Z", signed.Meta.Timestamp)
-	if err != nil {
-		return nil, fmt.Errorf("invalid timestamp: %w", err)
-	}
-	dateDir := ts.Format("20060102")
-	commentURL := fmt.Sprintf("%s/comments/%s/%s.md", baseURL, dateDir, commentID)
-
-	// Build metadata for polis.comment content registration
-	commentMetadata := map[string]interface{}{
-		"in_reply_to": signed.Meta.InReplyTo,
-		"root_post":   signed.Meta.RootPost,
-		"timestamp":   signed.Meta.Timestamp,
-	}
-	if signed.Meta.InReplyToVersion != "" {
-		commentMetadata["in_reply_to_version"] = signed.Meta.InReplyToVersion
-	}
-
-	// Build canonical JSON for signing
-	canonical, err := discovery.MakeContentCanonicalJSON(
-		"pub.polis.comment", commentURL, signed.Meta.CommentVersion, signed.Meta.Author, commentMetadata,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("canonical JSON: %w", err)
-	}
-
-	// Sign the canonical payload
-	sig, err := signing.SignContent(canonical, privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("sign: %w", err)
-	}
-
-	// Register with discovery service
-	client := discovery.NewClient(dsURL, dsKey)
-	contentReq := &discovery.ContentRegisterRequest{
-		Type:      "pub.polis.comment",
-		URL:       commentURL,
-		Version:   signed.Meta.CommentVersion,
-		Author:    signed.Meta.Author,
-		Metadata:  commentMetadata,
-		Signature: sig,
-	}
-
-	resp, err := client.RegisterContent(contentReq)
+	// Register the comment content with the discovery service.
+	resp, err := registerCommentContent(signed.Meta, commentID, privateKey, dsURL, dsKey, baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("register: %w", err)
 	}

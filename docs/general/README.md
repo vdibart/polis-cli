@@ -15,10 +15,12 @@ Cross-cutting documentation that applies to the polis project as a whole — pro
 | [content-system.md](content-system.md) | Deep reference: filesystem layout, full `bundle.json` schema, event catalog |
 | [snap-off-architecture.md](snap-off-architecture.md) | The layer-by-layer replaceability table — every layer's default, why you'd replace, how, what you keep |
 | [security-model.md](security-model.md) | Cryptographic foundations, identity, trust model, policies, attack vectors, and threat analysis |
+| [actors.md](actors.md) | The background actors — Patrol, Medic, Judge, Clerk, Chaplain, Reaper, and Tailor — that keep polis sites healthy: what each detects, heals, reconciles, or verifies |
 | [policy-grammar.md](policy-grammar.md) | Authoritative spec for v2 policy grammar (Layer 1/2/3, verb-by-type matrix) |
 | [pql.md](pql.md) | Polis Query Language — sentence-driven stream filtering |
 | [registration-and-privacy.md](registration-and-privacy.md) | DS registration, hard delete, self-hosting your own DS |
 | [vision.md](vision.md) | Project manifesto and experience principles — why polis exists and how it meets users |
+| [in-defense-of-bless.md](in-defense-of-bless.md) | Why polis uses the word "bless" — its four senses, what it actually does here, and what it says about polis that no platform can claim |
 | [glossary.md](glossary.md) | Polis-specific terminology reference |
 | [contributing.md](contributing.md) | Development setup, testing, and contribution guidelines |
 | [security.md](security.md) | Vulnerability reporting policy (threat model is in `security-model.md`) |

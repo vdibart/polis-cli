@@ -101,8 +101,14 @@ func TestStreamItems_DefaultsToMyNetworkAllPosts(t *testing.T) {
 // paginated entries back on visibly different date formats.
 func TestStreamItems_EmitsPublishedHuman(t *testing.T) {
 	s := newConfiguredServer(t)
-	// Pin to a known timestamp so the assertion is exact.
-	pubISO := "2026-04-23T16:12:00Z"
+	// Use a timestamp 5 days back (well inside the 30-day maxStreamWindow cap
+	// so time=all still returns it, yet > 10h old so FormatHumanDateTime emits
+	// the absolute "Month D, YYYY · h:mma" form rather than a relative string).
+	// Derived from now, not a pinned literal, so the test doesn't rot once the
+	// fixed date ages past the look-back window.
+	pub := time.Now().UTC().AddDate(0, 0, -5).Truncate(time.Minute)
+	pubISO := pub.Format(time.RFC3339)
+	wantHuman := pub.Format("January 2, 2006 · 3:04pm")
 	seedNetworkFeed(t, s, []feed.FeedItem{
 		{Type: "post", Title: "P1", URL: "posts/p1.md", Published: pubISO, AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 	})
@@ -115,8 +121,8 @@ func TestStreamItems_EmitsPublishedHuman(t *testing.T) {
 		t.Fatalf("expected 1 item, got %d", len(items))
 	}
 	item, _ := items[0].(map[string]interface{})
-	if got, _ := item["published_human"].(string); got != "April 23, 2026 · 4:12pm" {
-		t.Errorf("published_human = %q, want %q", got, "April 23, 2026 · 4:12pm")
+	if got, _ := item["published_human"].(string); got != wantHuman {
+		t.Errorf("published_human = %q, want %q", got, wantHuman)
 	}
 	// Source ISO timestamp also still present so consumers needing the
 	// machine-readable form aren't forced to reparse.

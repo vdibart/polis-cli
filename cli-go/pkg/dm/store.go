@@ -213,6 +213,20 @@ func (s *Store) AppendMessage(convID, peerDomain, peerURL, from, to, plaintext, 
 			PeerURL:    peerURL,
 		}
 	}
+	// R20-C-F7: dedupe on `msg.ID` (derived from transport nonce). An attacker
+	// who captures a signed-request DM deliver envelope and replays it within
+	// the 5-min freshness window (R20-C-F5 raised the signature replay window
+	// separately) used to land a second visible message — same content, new
+	// timestamp — by walking the AppendMessage path again. With dedup here,
+	// the second AppendMessage is a no-op that returns the originally-stored
+	// message. The conversation index is NOT re-bumped, so unread counts
+	// don't double either.
+	for i := range conv.Messages {
+		if conv.Messages[i].ID == msg.ID {
+			existing := conv.Messages[i]
+			return &existing, nil
+		}
+	}
 	conv.Messages = append(conv.Messages, msg)
 
 	if err := s.SaveConversation(convID, conv); err != nil {

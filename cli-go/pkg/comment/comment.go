@@ -17,6 +17,8 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
+	// Aliased: "version" collides with the many local `version := fm[...]` vars.
+	verhist "github.com/vdibart/polis-cli/cli-go/pkg/version"
 )
 
 var (
@@ -65,14 +67,14 @@ type CommentDraft struct {
 // Uses CLI-compatible field names for interoperability.
 type CommentMeta struct {
 	ID               string   `json:"id"`
-	Title            string   `json:"title,omitempty"`          // Comment title
-	CommentURL       string   `json:"comment_url"`              // Full URL to comment file
-	CommentVersion   string   `json:"comment_version"`          // current-version in frontmatter
-	InReplyTo        string   `json:"in_reply_to"`              // in-reply-to.url in frontmatter
+	Title            string   `json:"title,omitempty"` // Comment title
+	CommentURL       string   `json:"comment_url"`     // Full URL to comment file
+	CommentVersion   string   `json:"comment_version"` // current-version in frontmatter
+	InReplyTo        string   `json:"in_reply_to"`     // in-reply-to.url in frontmatter
 	InReplyToVersion string   `json:"in_reply_to_version,omitempty"`
-	RootPost         string   `json:"root_post"`                // in-reply-to.root-post in frontmatter
-	Author           string   `json:"author"`                   // Derived from site, not in frontmatter
-	Timestamp        string   `json:"timestamp"`                // published in frontmatter
+	RootPost         string   `json:"root_post"` // in-reply-to.root-post in frontmatter
+	Author           string   `json:"author"`    // Derived from site, not in frontmatter
+	Timestamp        string   `json:"timestamp"` // published in frontmatter
 	Updated          string   `json:"updated,omitempty"`
 	Status           string   `json:"status"`
 	VersionHistory   []string `json:"version_history,omitempty"`
@@ -542,6 +544,28 @@ func PublishComment(dataDir, commentID string) error {
 
 	// Append to public.jsonl
 	relativePath := filepath.ToSlash(filepath.Join("content", "pub.polis.core", "comment", dateDir, commentID+".md"))
+
+	// Seed the version history side-car (only if absent, never clobber) so a
+	// later RepublishComment can diff against this base version. The base body is
+	// the canonicalized content without frontmatter — identical to what republish
+	// recomputes as the "old" content for its diff.
+	versionsPath := verhist.GetVersionsFilePath(mdPath, ".versions")
+	if _, statErr := os.Stat(versionsPath); os.IsNotExist(statErr) {
+		baseHash := strings.TrimPrefix(fm["current-version"], "sha256:")
+		if baseHash == "" {
+			baseHash = strings.TrimPrefix(fm["comment_version"], "sha256:")
+		}
+		if baseHash != "" {
+			basePublished := fm["published"]
+			if basePublished == "" {
+				basePublished = timestamp.Format("2006-01-02T15:04:05Z")
+			}
+			baseBody := CanonicalizeContent(StripFrontmatter(content))
+			if err := verhist.InitializeHistory(versionsPath, relativePath, baseBody, baseHash, basePublished); err != nil {
+				_ = err // non-fatal; version history is best-effort
+			}
+		}
+	}
 
 	// Parse nested in-reply-to for the index entry
 	inReplyToURL, _ := ParseNestedInReplyTo(content)

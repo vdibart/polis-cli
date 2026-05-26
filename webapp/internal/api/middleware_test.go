@@ -288,6 +288,28 @@ func TestDMDeliverWithoutSignedHeadersFallsToAuth(t *testing.T) {
 	}
 }
 
+// R18-13: the FQN form `pub.polis.dm` must enter the signed-request branch
+// just like the short form `dm`; pre-fix the FQN path fell through to Bearer
+// auth (which always 401'd remote senders) — same outcome, but the gate vs.
+// Engine.resolveTypeName mismatch was a smell. Asserts the FQN form returns
+// 403 (signed-request verification failed) not 401 (no Bearer).
+func TestDMDeliverFQNFormEntersSignedRequestBranch(t *testing.T) {
+	mux, _, _ := testSetup(t)
+
+	body := jsonBody(t, map[string]any{"message": "hello"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/content/pub.polis.dm/actions/deliver", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Polis-Domain", "attacker.example.com")
+	req.Header.Set("X-Polis-Signature", "invalid-sig")
+	req.Header.Set("X-Polis-Timestamp", "2026-01-01T00:00:00Z")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 (signed-request branch) for FQN path with invalid sig, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // ── Body limit integration through content routes ──────────────────────
 
 func TestContentRouteHasBodyLimit(t *testing.T) {

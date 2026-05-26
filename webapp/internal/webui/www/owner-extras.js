@@ -104,7 +104,19 @@
     var ICON_PRESETS = {
         gateway: {
             label: 'all activity from my network',
-            filter: { qualifier: 'all', type: 'activity', scope: 'my-network' },
+            // modifier:'by-date' must be present even though activity has no
+            // modifier slot (FILTER_MODIFIER_OPTIONS_BY_TYPE has no 'activity'
+            // entry, so updateModifierSlotVisibility hides it and the sentence
+            // stays "all activity from my network"). stream.js's setFilter +
+            // selectOption both FORCE filterModifier='by-date' on a type change
+            // when the type has no modifier table, so the live filter state is
+            // always {…, modifier:'by-date'} on this view. Omitting it here (as
+            // the only preset that did) made filterMatchesPreset compare
+            // 'by-date' !== '' and fail, so clicking the gateway icon while
+            // already on this view fell through to loadPreset (reload) instead
+            // of the scroll-to-top branch. The other four presets all specify
+            // their modifier; this aligns gateway with them.
+            filter: { qualifier: 'all', type: 'activity', scope: 'my-network', modifier: 'by-date' },
             display: { qualifierLabel: 'all', typeLabel: 'activity', scopeLabel: 'my network' },
         },
         paragraph: {
@@ -196,16 +208,19 @@
                 console.warn('[polis-owner-extras] preset button #nav-btn-' + presetName + ' not found');
                 return;
             }
-            // step-06 follow-up (2026-05-08): keep the inline onclick as
-            // a co-handler rather than stripping it. The inline onclick
-            // (set in index.html to App.navigateTo('/feed')) navigates
-            // unconditionally — both fire on click, both end up at /feed.
-            // Stripping it left the icon-buttons reliant on this listener
-            // alone, and a class of issues (focus traps, listener
-            // detachment after legacy renderers swap DOM, race during
-            // owner-extras boot) could silently kill the only path.
-            // Co-handler is robust: even if loadPreset fails, the user
-            // still lands on /feed via the inline handler.
+            // Strip the inline onclick (index.html sets it to
+            // App.navigateTo('/')) so this listener fully owns the click —
+            // same pattern as the edit button below. The inline handler is
+            // a parse-time listener, so it fires FIRST: navigateTo('/')
+            // re-resolves the route, rewrites the URL to /_/, and
+            // re-activates the stream screen (re-rendering the column).
+            // That re-render stepped on the "already on this preset →
+            // scroll to top" branch below, so clicking the active icon
+            // reloaded the stream instead of scrolling up. removeAttribute
+            // here preserves the boot-failure fallback: if owner-extras
+            // never runs, wireIconPresets never strips the attribute, so
+            // the inline navigateTo survives as the safety net.
+            btn.removeAttribute('onclick');
             btn.addEventListener('click', function (ev) {
                 // R27 follow-up: if this preset is already the active
                 // icon, treat the click as "scroll to top" instead of
@@ -792,6 +807,26 @@
             // transition on initial filter hydration.
             pushFilterURL(snapshot);
         });
+
+        // Seed currentFilterSnapshot + activePresetName from the CURRENT
+        // filter. addFilterChangeListener does NOT replay to new
+        // subscribers, and stream.js fires its initial fireFilterChange
+        // during hydration — BEFORE this subscription attaches (it runs in
+        // the ready-promise block, after the controller is up). Without
+        // seeding, both stay null until the user's first filter change, so
+        // the very first click on the already-active preset icon failed the
+        // "already on this preset → scroll to top" condition and fell
+        // through to loadPreset, reloading the stream in place instead of
+        // scrolling up. Seed directly (NOT by invoking the callback above)
+        // so we don't re-fire its side effects — pushFilterURL (would
+        // rewrite the URL on load) and markSurfaceViewed — on first paint.
+        if (typeof stream.getFilter === 'function') {
+            var initialSnapshot = stream.getFilter();
+            if (initialSnapshot) {
+                currentFilterSnapshot = initialSnapshot;
+                syncActiveIconFromFilter(initialSnapshot);
+            }
+        }
     }
 
     // PQL URL push (chunk B). Debounced compose-and-push wired into

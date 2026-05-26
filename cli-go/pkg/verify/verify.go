@@ -278,17 +278,16 @@ func verifyHash(body, currentVersion string) HashResult {
 	// Remove sha256: prefix if present
 	expectedHash := strings.TrimPrefix(currentVersion, "sha256:")
 
-	// Canonicalize and hash the body
+	// Canonicalize and hash the body. The non-canonical raw-byte fallback that
+	// once lived here was removed (R20-C-F9): dual-accepting both canonical and
+	// raw-byte hashes widened the collision surface without serving a real
+	// backwards-compatibility need — every signing path canonicalizes before
+	// hashing, so any historical raw-byte hash on disk was a bug to be surfaced,
+	// not silently accepted.
 	canonicalBody := canonicalizeContent(body)
 	hash := sha256Hash([]byte(canonicalBody))
 
 	if hash == expectedHash {
-		return HashResult{Status: "valid"}
-	}
-
-	// Try without canonicalization (backwards compatibility)
-	directHash := sha256Hash([]byte(body))
-	if directHash == expectedHash {
 		return HashResult{Status: "valid"}
 	}
 

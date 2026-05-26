@@ -162,6 +162,20 @@ func TestVerifyHash(t *testing.T) {
 			t.Errorf("expected 'unknown', got %q", result.Status)
 		}
 	})
+
+	// R20-C-F9: verifyHash used to dual-accept both canonical and raw-byte
+	// hashes; the raw-byte fallback is removed. A hash computed over the
+	// non-canonicalized body must now report 'mismatch' even when the body
+	// canonicalization is non-trivial (here: trailing whitespace differs from
+	// the canonical form).
+	t.Run("raw_byte_hash_rejected", func(t *testing.T) {
+		bodyWithTrailingWS := "Hello, World!\n   \n"
+		rawHash := sha256.Sum256([]byte(bodyWithTrailingWS))
+		result := verifyHash(bodyWithTrailingWS, "sha256:"+fmt.Sprintf("%x", rawHash))
+		if result.Status != "mismatch" {
+			t.Errorf("raw-byte hash should now be rejected as mismatch, got %q", result.Status)
+		}
+	})
 }
 
 func TestExtractContentToSign(t *testing.T) {

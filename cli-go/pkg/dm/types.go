@@ -26,7 +26,7 @@ type ConversationSummary struct {
 	PeerURL       string `json:"peer_url"`
 	LastMessageAt string `json:"last_message_at"`
 	UnreadCount   int    `json:"unread_count"`
-	LastPreview   string `json:"last_preview"` // truncated plaintext for listing
+	LastPreview   string `json:"last_preview"` // encrypted-at-rest preview ("enc:" prefix); see Store.encryptPreview
 }
 
 // Conversation contains the full message history with a peer.

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	"github.com/vdibart/polis-cli/cli-go/pkg/template"
 )
 
 func TestNewPageRenderer(t *testing.T) {
@@ -1465,6 +1466,75 @@ func TestReplyURLAllowed_RejectsInternalAndUnsafe(t *testing.T) {
 				t.Errorf("replyURLAllowed(%q) = %v, want %v", c.url, got, c.want)
 			}
 		})
+	}
+}
+
+// R23-1: the template engine does not HTML-escape, so commenter-controlled
+// reply-context fields must be escaped before render. This guards the
+// escape + URL-scheme-check applied in sanitizeReplyContextForRender.
+func TestSanitizeReplyContextForRender_EscapesAndSchemeChecks(t *testing.T) {
+	ctx := template.NewRenderContext()
+	ctx.InReplyToTitle = `<img src=x onerror=alert(document.cookie)>`
+	ctx.InReplyToExcerpt = `excerpt "with" <script>alert(1)</script>`
+	ctx.InReplyToDomain = `evil.com" onmouseover="alert(1)`
+	ctx.InReplyToURL = `javascript:alert(1)`
+	ctx.RootPostURL = `https://alice.example.com/posts/foo.html?a=1&b=2`
+
+	sanitizeReplyContextForRender(ctx)
+
+	// Title/Excerpt/Domain: no raw markup survives.
+	for name, got := range map[string]string{
+		"title":   ctx.InReplyToTitle,
+		"excerpt": ctx.InReplyToExcerpt,
+		"domain":  ctx.InReplyToDomain,
+	} {
+		if strings.ContainsAny(got, "<>") || strings.Contains(got, `"`) {
+			t.Errorf("%s still contains raw HTML metacharacters after escape: %q", name, got)
+		}
+	}
+	if !strings.Contains(ctx.InReplyToTitle, "&lt;img") {
+		t.Errorf("title should be HTML-escaped, got %q", ctx.InReplyToTitle)
+	}
+
+	// javascript: URL must be neutralized to empty (scheme not allowed).
+	if ctx.InReplyToURL != "" {
+		t.Errorf("javascript: URL should collapse to empty, got %q", ctx.InReplyToURL)
+	}
+
+	// A safe URL is preserved (with & attribute-escaped to &amp;).
+	if !strings.HasPrefix(ctx.RootPostURL, "https://alice.example.com/posts/foo.html") {
+		t.Errorf("safe URL should be preserved, got %q", ctx.RootPostURL)
+	}
+	if strings.Contains(ctx.RootPostURL, "?a=1&b=2") {
+		t.Errorf("ampersand in safe URL should be attribute-escaped to &amp;, got %q", ctx.RootPostURL)
+	}
+}
+
+// R23-1: safeRenderURL keeps dangerous URI schemes out of rendered href/meta
+// attributes while allowing http/https/mailto and relative URLs.
+func TestSafeRenderURL(t *testing.T) {
+	cases := []struct {
+		url  string
+		want string
+	}{
+		// Allowed → preserved
+		{"https://alice.example.com/x.html", "https://alice.example.com/x.html"},
+		{"http://alice.example.com/x.html", "http://alice.example.com/x.html"},
+		{"mailto:a@b.com", "mailto:a@b.com"},
+		{"//cdn.example.com/x", "//cdn.example.com/x"},
+		{"/posts/x.html", "/posts/x.html"},
+		{"posts/x.html", "posts/x.html"},
+		{"", ""},
+		// Dangerous → collapsed to empty
+		{"javascript:alert(1)", ""},
+		{"data:text/html,<script>alert(1)</script>", ""},
+		{"vbscript:msgbox", ""},
+		{"file:///etc/passwd", ""},
+	}
+	for _, c := range cases {
+		if got := safeRenderURL(c.url); got != c.want {
+			t.Errorf("safeRenderURL(%q) = %q, want %q", c.url, got, c.want)
+		}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 )
@@ -102,7 +103,7 @@ func handleRepublish(args []string) {
 
 	remaining := fs.Args()
 	if len(remaining) < 1 {
-		exitError("Usage: polis republish <posts/YYYYMMDD/post.md> [new-content.md]")
+		exitError("Usage: polis republish <posts/YYYYMMDD/post.md | comments/YYYYMMDD/comment.md> [new-content.md]")
 	}
 
 	postPath := remaining[0]
@@ -111,6 +112,13 @@ func handleRepublish(args []string) {
 	// Verify it's a polis site
 	if !isPolisSite(dir) {
 		exitError("Not a polis site directory (no .well-known/polis found)")
+	}
+
+	// Comment republish: branch before the post-specific path check. Accept either
+	// the comments/ mount form or the content-relative path.
+	if strings.HasPrefix(postPath, "comments/") || strings.Contains(postPath, "content/pub.polis.core/comment/") {
+		handleRepublishComment(dir, postPath, remaining)
+		return
 	}
 
 	// Validate the post path
@@ -180,6 +188,73 @@ func handleRepublish(args []string) {
 		fmt.Printf("Republished: %s\n", result.Path)
 		fmt.Printf("Title: %s\n", result.Title)
 		fmt.Printf("Version: %s\n", result.Version)
+	}
+}
+
+// handleRepublishComment republishes an already-published comment, producing a new
+// signed version. It accepts either the comments/ mount form or the content-relative
+// path and normalizes to the content path comment.RepublishComment expects.
+func handleRepublishComment(dir, rawPath string, remaining []string) {
+	contentPath := rawPath
+	if strings.HasPrefix(rawPath, "comments/") {
+		contentPath = "content/pub.polis.core/comment/" + strings.TrimPrefix(rawPath, "comments/")
+	}
+
+	fullPath := filepath.Join(dir, contentPath)
+	if _, err := os.Stat(fullPath); err != nil {
+		exitError("Comment not found at %s", contentPath)
+	}
+
+	privKey, err := loadPrivateKey(dir)
+	if err != nil {
+		exitError("Failed to load private key: %v", err)
+	}
+
+	// New body: from the optional second arg, else the existing comment's body.
+	var markdown string
+	if len(remaining) > 1 {
+		content, err := os.ReadFile(remaining[1])
+		if err != nil {
+			exitError("Failed to read file: %v", err)
+		}
+		markdown = comment.StripFrontmatter(string(content))
+	} else {
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			exitError("Failed to read comment: %v", err)
+		}
+		markdown = comment.StripFrontmatter(string(content))
+	}
+
+	// DS config comes from the comment package globals set in root.go Execute().
+	result, err := comment.RepublishComment(dir, contentPath, markdown, privKey)
+	if err != nil {
+		exitError("Failed to republish comment: %v", err)
+	}
+
+	// NOTE: the v4 stream re-render cascade for comment republish is deferred until
+	// the feature is surfaced in the UI (see plans/comment-versioning-design.md).
+
+	if jsonOutput {
+		outputJSON(map[string]interface{}{
+			"success":        true,
+			"comment_id":     result.CommentID,
+			"path":           result.Path,
+			"version":        result.Version,
+			"blessing_state": result.BlessingState,
+			"rebeseeched":    result.Rebeseeched,
+			"deferred":       result.Deferred,
+		})
+	} else {
+		fmt.Printf("Republished comment: %s\n", result.Path)
+		fmt.Printf("Version: %s\n", result.Version)
+		fmt.Printf("Blessing: %s\n", result.BlessingState)
+		if result.Deferred {
+			fmt.Println("[i] Discovery contact deferred — site not registered.")
+		}
+		if result.RegisterError != "" {
+			fmt.Printf("[!] Discovery registration skipped: %s\n", result.RegisterError)
+		}
 	}
 }
 

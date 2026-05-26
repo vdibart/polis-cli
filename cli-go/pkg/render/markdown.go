@@ -22,6 +22,13 @@ var md goldmark.Markdown
 // handlers while preserving structural HTML that polis authors commonly use.
 var sanitizer *bluemonday.Policy
 
+// safeSrcURLPattern matches URLs safe to put in a `src` attribute on elements
+// where bluemonday's built-in URL-scheme check doesn't reach (notably <source>;
+// bluemonday's isURLAttribute list at sanitize.go:992 omits it). Accepts
+// http(s)://, mailto:, protocol-relative //, root-relative /, and any URL with
+// no scheme (relative paths). Rejects javascript:, data:, vbscript:, file:, etc.
+var safeSrcURLPattern = regexp.MustCompile(`(?i)^(?:https?:|mailto:|//|/|#|\?|[^:/?#]*(?:[/?#]|$))`)
+
 func init() {
 	md = goldmark.New(
 		goldmark.WithExtensions(
@@ -41,8 +48,15 @@ func init() {
 	sanitizer = bluemonday.UGCPolicy()
 	// Structural HTML elements authors use in posts
 	sanitizer.AllowElements("details", "summary", "video", "audio", "source", "picture", "figure", "figcaption", "mark", "kbd", "abbr", "dfn", "ins", "del", "sub", "sup", "ruby", "rt", "rp", "time", "meter", "progress", "dialog")
-	// Video/audio attributes
-	sanitizer.AllowAttrs("src", "type", "controls", "autoplay", "loop", "muted", "poster", "preload", "width", "height").OnElements("video", "audio", "source")
+	// Video/audio attributes — bluemonday URL-scheme-checks `src` on <video>/<audio>
+	// via its internal isURLAttribute list, so the global AllowURLSchemes allowlist
+	// (http/https/mailto, set by UGCPolicy) is enforced here automatically.
+	sanitizer.AllowAttrs("src", "type", "controls", "autoplay", "loop", "muted", "poster", "preload", "width", "height").OnElements("video", "audio")
+	// <source>'s `src` is NOT in bluemonday's isURLAttribute list (sanitize.go:992),
+	// so the global URL-scheme allowlist does not reach it — `<source src="javascript:…">`
+	// would survive sanitization. Enforce safe URLs here via .Matching.
+	sanitizer.AllowAttrs("src").Matching(safeSrcURLPattern).OnElements("source")
+	sanitizer.AllowAttrs("type", "width", "height").OnElements("source")
 	// Data attributes for custom styling
 	sanitizer.AllowDataAttributes()
 	// Class attributes (themes depend on this)

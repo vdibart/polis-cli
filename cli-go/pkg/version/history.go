@@ -3,6 +3,7 @@ package version
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,10 +22,10 @@ type VersionEntry struct {
 
 // HistoryFile represents a parsed .versions file.
 type HistoryFile struct {
-	FormatVersion  string
-	CanonicalFile  string
-	CurrentHash    string
-	Versions       []VersionEntry
+	FormatVersion string
+	CanonicalFile string
+	CurrentHash   string
+	Versions      []VersionEntry
 }
 
 // GetVersionsFilePath returns the path to the versions file for a given canonical file.
@@ -437,4 +438,151 @@ func canonicalizeContent(content string) string {
 		lines = lines[:len(lines)-1]
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// InitializeHistory writes the initial version history side-car at versionsPath,
+// recording the base (parent=none) version as full content. canonicalPath is the
+// site-relative path stored in the header; body is the content without frontmatter;
+// hash is the sha256 hex (no "sha256:" prefix); timestamp is RFC3339. The parent
+// directory (e.g. ".versions/") is created if needed.
+//
+// This is content-type agnostic: posts and comments both call it with the
+// versions path derived via GetVersionsFilePath(canonicalFile, ".versions").
+func InitializeHistory(versionsPath, canonicalPath, body, hash, timestamp string) error {
+	if err := os.MkdirAll(filepath.Dir(versionsPath), 0755); err != nil {
+		return err
+	}
+
+	content := fmt.Sprintf(`# VERSION_FILE_FORMAT=1.0
+# CANONICAL_FILE=%s
+# CURRENT_HASH=sha256:%s
+
+[VERSION sha256:%s]
+TIMESTAMP=%s
+PARENT=none
+FULL_CONTENT_START
+%sFULL_CONTENT_END
+
+`, canonicalPath, hash, hash, timestamp, body)
+
+	return os.WriteFile(versionsPath, []byte(content), 0644)
+}
+
+// AppendHistory appends a new version entry — a unified diff of newBody against
+// oldBody — to the side-car at versionsPath and advances the CURRENT_HASH header.
+// previousHash and newHash are sha256 hex (no prefix). If the side-car does not
+// exist yet, it is created with a header (but no base version); callers that need
+// the prior content to be reconstructable should InitializeHistory with the old
+// content first (see comment republish lazy-init).
+func AppendHistory(versionsPath, canonicalPath, previousHash, newHash, timestamp, oldBody, newBody string) error {
+	if err := os.MkdirAll(filepath.Dir(versionsPath), 0755); err != nil {
+		return err
+	}
+
+	if _, statErr := os.Stat(versionsPath); errors.Is(statErr, os.ErrNotExist) {
+		header := fmt.Sprintf(`# VERSION_FILE_FORMAT=1.0
+# CANONICAL_FILE=%s
+# CURRENT_HASH=sha256:%s
+
+`, canonicalPath, newHash)
+		if err := os.WriteFile(versionsPath, []byte(header), 0644); err != nil {
+			return err
+		}
+	} else if statErr != nil {
+		return statErr
+	} else if err := updateCurrentHash(versionsPath, newHash); err != nil {
+		return err
+	}
+
+	diffContent, err := computeUnifiedDiff(oldBody, newBody)
+	if err != nil {
+		return fmt.Errorf("failed to compute diff: %w", err)
+	}
+
+	entry := fmt.Sprintf(`[VERSION sha256:%s]
+TIMESTAMP=%s
+PARENT=sha256:%s
+DIFF_START
+%sDIFF_END
+
+`, newHash, timestamp, previousHash, diffContent)
+
+	f, err := os.OpenFile(versionsPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	_, err = f.WriteString(entry)
+	return err
+}
+
+// updateCurrentHash rewrites the CURRENT_HASH header line in a side-car file.
+func updateCurrentHash(versionsPath, newHash string) error {
+	content, err := os.ReadFile(versionsPath)
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(content), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "# CURRENT_HASH=") {
+			lines[i] = "# CURRENT_HASH=sha256:" + newHash
+			break
+		}
+	}
+
+	return os.WriteFile(versionsPath, []byte(strings.Join(lines, "\n")), 0644)
+}
+
+// computeUnifiedDiff computes a unified diff between old and new content via the
+// system `diff -u`. Returns the diff output, or empty string if identical.
+func computeUnifiedDiff(oldContent, newContent string) (string, error) {
+	tmpDir, err := os.MkdirTemp("", "polis-diff-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	os.Chmod(tmpDir, 0700)
+
+	oldFile, err := os.CreateTemp(tmpDir, "old-*.txt")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file for old content: %w", err)
+	}
+	defer oldFile.Close()
+
+	newFile, err := os.CreateTemp(tmpDir, "new-*.txt")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file for new content: %w", err)
+	}
+	defer newFile.Close()
+
+	if _, err := oldFile.WriteString(oldContent); err != nil {
+		return "", fmt.Errorf("failed to write old content: %w", err)
+	}
+	if err := oldFile.Close(); err != nil {
+		return "", fmt.Errorf("failed to close old content file: %w", err)
+	}
+
+	if _, err := newFile.WriteString(newContent); err != nil {
+		return "", fmt.Errorf("failed to write new content: %w", err)
+	}
+	if err := newFile.Close(); err != nil {
+		return "", fmt.Errorf("failed to close new content file: %w", err)
+	}
+
+	cmd := exec.Command("diff", "-u", oldFile.Name(), newFile.Name())
+	output, err := cmd.Output()
+
+	// diff returns exit code 1 when files differ, which is expected.
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			if exitErr.ExitCode() == 1 {
+				return string(output), nil
+			}
+		}
+		return "", fmt.Errorf("diff command failed: %w", err)
+	}
+
+	return string(output), nil
 }

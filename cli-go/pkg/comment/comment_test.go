@@ -3,9 +3,11 @@ package comment
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	verhist "github.com/vdibart/polis-cli/cli-go/pkg/version"
 )
 
 func TestGetGenerator_UsesVersion(t *testing.T) {
@@ -173,6 +175,116 @@ This is a **test** comment.`
 	// Verify pending file is NOT removed (publish is a copy, not a move)
 	if _, err := os.Stat(pendingPath); os.IsNotExist(err) {
 		t.Error("pending file should still exist after publish (removed by MoveComment later)")
+	}
+}
+
+func TestPublishComment_CreatesVersionSidecar(t *testing.T) {
+	dataDir := t.TempDir()
+
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "comment"), 0755)
+
+	body := "This is a **test** comment."
+	commentContent := `---
+title: Re: hello-world
+type: comment
+published: 2026-02-15T10:00:00Z
+generator: polis-cli-go/0.50.0
+in-reply-to:
+  url: https://alice.polis.pub/posts/20260215/hello-world.md
+  root-post: https://alice.polis.pub/posts/20260215/hello-world.md
+current-version: sha256:abc123
+author: bob.polis.pub
+signature: fakesig
+---
+
+` + body
+
+	commentID := "bob-hello-world-20260215"
+	pendingPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending", commentID+".md")
+	if err := os.WriteFile(pendingPath, []byte(commentContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := PublishComment(dataDir, commentID); err != nil {
+		t.Fatalf("PublishComment failed: %v", err)
+	}
+
+	// The side-car should sit next to the published comment.
+	mdPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260215", commentID+".md")
+	versionsPath := verhist.GetVersionsFilePath(mdPath, ".versions")
+	if _, err := os.Stat(versionsPath); os.IsNotExist(err) {
+		t.Fatalf("expected version side-car at %s", versionsPath)
+	}
+
+	h, err := verhist.ParseHistoryFile(versionsPath)
+	if err != nil {
+		t.Fatalf("ParseHistoryFile failed: %v", err)
+	}
+	if h.CurrentHash != "sha256:abc123" {
+		t.Errorf("CurrentHash = %q, want sha256:abc123", h.CurrentHash)
+	}
+	if len(h.Versions) != 1 {
+		t.Fatalf("expected 1 base version, got %d", len(h.Versions))
+	}
+	base := h.Versions[0]
+	if base.Parent != "none" {
+		t.Errorf("base Parent = %q, want none", base.Parent)
+	}
+	if base.Hash != "sha256:abc123" {
+		t.Errorf("base Hash = %q, want sha256:abc123", base.Hash)
+	}
+	if !strings.Contains(base.FullContent, "This is a **test** comment.") {
+		t.Errorf("base FullContent missing body, got %q", base.FullContent)
+	}
+}
+
+// Republishing must never clobber an existing side-car's accumulated history.
+func TestPublishComment_DoesNotClobberExistingSidecar(t *testing.T) {
+	dataDir := t.TempDir()
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "comment"), 0755)
+
+	commentContent := `---
+title: Re: hello-world
+type: comment
+published: 2026-02-15T10:00:00Z
+generator: polis-cli-go/0.50.0
+in-reply-to:
+  url: https://alice.polis.pub/posts/20260215/hello-world.md
+  root-post: https://alice.polis.pub/posts/20260215/hello-world.md
+current-version: sha256:abc123
+author: bob.polis.pub
+signature: fakesig
+---
+
+Body.`
+	commentID := "bob-hello-world-20260215"
+	pendingPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending", commentID+".md")
+	os.WriteFile(pendingPath, []byte(commentContent), 0644)
+
+	if err := PublishComment(dataDir, commentID); err != nil {
+		t.Fatalf("first PublishComment failed: %v", err)
+	}
+	mdPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260215", commentID+".md")
+	versionsPath := verhist.GetVersionsFilePath(mdPath, ".versions")
+
+	// Sentinel: pretend history has grown since first publish.
+	sentinel := "# SENTINEL-DO-NOT-CLOBBER\n"
+	f, err := os.OpenFile(versionsPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString(sentinel)
+	f.Close()
+
+	if err := PublishComment(dataDir, commentID); err != nil {
+		t.Fatalf("second PublishComment failed: %v", err)
+	}
+
+	data, _ := os.ReadFile(versionsPath)
+	if !strings.Contains(string(data), "SENTINEL-DO-NOT-CLOBBER") {
+		t.Error("second PublishComment clobbered the existing side-car")
 	}
 }
 

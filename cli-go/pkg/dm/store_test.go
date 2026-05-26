@@ -112,6 +112,48 @@ func TestStore_AppendAndDecryptMessage(t *testing.T) {
 	}
 }
 
+// R20-C-F7: a replayed delivery (same transport nonce → same MessageIDFromNonce)
+// must NOT land a second visible message. AppendMessage dedupes on msg.ID and
+// returns the existing record.
+func TestStore_AppendMessage_DedupesOnMessageID(t *testing.T) {
+	store := testStore(t)
+
+	var nonce [24]byte
+	copy(nonce[:], []byte("replay-nonce-24-bytes!!!"))
+
+	// First delivery — lands.
+	first, err := store.AppendMessage(
+		"conv-replay", "bob.example.com", "https://bob.example.com",
+		"bob.example.com", "alice.example.com",
+		"Hello Alice", "", "received", nonce,
+	)
+	if err != nil {
+		t.Fatalf("AppendMessage 1: %v", err)
+	}
+
+	// Second delivery with same nonce — must be deduped, return the original.
+	second, err := store.AppendMessage(
+		"conv-replay", "bob.example.com", "https://bob.example.com",
+		"bob.example.com", "alice.example.com",
+		"Hello Alice", "", "received", nonce,
+	)
+	if err != nil {
+		t.Fatalf("AppendMessage 2 (replay): %v", err)
+	}
+	if second.ID != first.ID {
+		t.Errorf("replay should return same message ID; first=%s second=%s", first.ID, second.ID)
+	}
+
+	// Load the conversation and confirm only one message landed.
+	conv, err := store.LoadConversation("conv-replay")
+	if err != nil {
+		t.Fatalf("LoadConversation: %v", err)
+	}
+	if len(conv.Messages) != 1 {
+		t.Errorf("expected 1 message after replay, got %d", len(conv.Messages))
+	}
+}
+
 func TestStore_ConversationCRUD(t *testing.T) {
 	store := testStore(t)
 

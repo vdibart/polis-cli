@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/version"
 )
 
 var (
@@ -324,9 +324,8 @@ version-history:
 	// Use filepath.ToSlash to ensure forward slashes on Windows (URLs must not contain backslashes)
 	relativePath := filepath.ToSlash(filepath.Join("content", "pub.polis.core", "post", dateDir, filename+".md"))
 
-	// Initialize version history with CLI-compatible format
-	// Pass content WITHOUT frontmatter (canonicalBody)
-	if err := initializeVersionHistory(dataDir, dateDir, filename, relativePath, canonicalBody, hash, timestamp); err != nil {
+	// Initialize version history side-car. Pass content WITHOUT frontmatter.
+	if err := version.InitializeHistory(version.GetVersionsFilePath(postPath, ".versions"), relativePath, canonicalBody, hash, timestamp); err != nil {
 		// Log but don't fail - version history is nice to have
 		fmt.Printf("[warning] Failed to initialize version history: %v\n", err)
 	}
@@ -406,109 +405,6 @@ func extractSignatureBase64(sig string) string {
 		base64Lines = append(base64Lines, line)
 	}
 	return strings.Join(base64Lines, "")
-}
-
-// computeUnifiedDiff computes a unified diff between old and new content.
-// Returns the diff output, or empty string if contents are identical.
-func computeUnifiedDiff(oldContent, newContent string) (string, error) {
-	// Create a private temp directory (0700) so files aren't world-readable
-	tmpDir, err := os.MkdirTemp("", "polis-diff-*")
-	if err != nil {
-		return "", fmt.Errorf("failed to create temp dir: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-	os.Chmod(tmpDir, 0700)
-
-	// Create temp files for diff inside private directory
-	oldFile, err := os.CreateTemp(tmpDir, "old-*.txt")
-	if err != nil {
-		return "", fmt.Errorf("failed to create temp file for old content: %w", err)
-	}
-	defer oldFile.Close()
-
-	newFile, err := os.CreateTemp(tmpDir, "new-*.txt")
-	if err != nil {
-		return "", fmt.Errorf("failed to create temp file for new content: %w", err)
-	}
-	defer newFile.Close()
-
-	// Write contents and close before diff (defer handles cleanup on error)
-	if _, err := oldFile.WriteString(oldContent); err != nil {
-		return "", fmt.Errorf("failed to write old content: %w", err)
-	}
-	if err := oldFile.Close(); err != nil {
-		return "", fmt.Errorf("failed to close old content file: %w", err)
-	}
-
-	if _, err := newFile.WriteString(newContent); err != nil {
-		return "", fmt.Errorf("failed to write new content: %w", err)
-	}
-	if err := newFile.Close(); err != nil {
-		return "", fmt.Errorf("failed to close new content file: %w", err)
-	}
-
-	// Run diff -u
-	cmd := exec.Command("diff", "-u", oldFile.Name(), newFile.Name())
-	output, err := cmd.Output()
-
-	// diff returns exit code 1 when files differ, which is expected
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			// Exit code 1 means files differ - this is normal
-			if exitErr.ExitCode() == 1 {
-				return string(output), nil
-			}
-		}
-		return "", fmt.Errorf("diff command failed: %w", err)
-	}
-
-	// Exit code 0 means files are identical
-	return string(output), nil
-}
-
-// updateCurrentHashInVersionsFile updates the CURRENT_HASH header in a versions file.
-func updateCurrentHashInVersionsFile(versionsPath, newHash string) error {
-	content, err := os.ReadFile(versionsPath)
-	if err != nil {
-		return fmt.Errorf("failed to read versions file: %w", err)
-	}
-
-	lines := strings.Split(string(content), "\n")
-	for i, line := range lines {
-		if strings.HasPrefix(line, "# CURRENT_HASH=") {
-			lines[i] = "# CURRENT_HASH=sha256:" + newHash
-			break
-		}
-	}
-
-	return os.WriteFile(versionsPath, []byte(strings.Join(lines, "\n")), 0644)
-}
-
-// initializeVersionHistory creates the initial version history file.
-// dateDir should be in format "YYYYMMDD" (e.g., "20260127")
-// canonicalPath is the relative path like "posts/20260128/filename.md"
-// contentWithoutFrontmatter is the body content without YAML frontmatter
-func initializeVersionHistory(dataDir, dateDir, filename, canonicalPath, contentWithoutFrontmatter, hash, timestamp string) error {
-	versionsDir := filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir, ".versions")
-	if err := os.MkdirAll(versionsDir, 0755); err != nil {
-		return err
-	}
-
-	// CLI-compatible format with header and VERSION block
-	versionContent := fmt.Sprintf(`# VERSION_FILE_FORMAT=1.0
-# CANONICAL_FILE=%s
-# CURRENT_HASH=sha256:%s
-
-[VERSION sha256:%s]
-TIMESTAMP=%s
-PARENT=none
-FULL_CONTENT_START
-%sFULL_CONTENT_END
-
-`, canonicalPath, hash, hash, timestamp, contentWithoutFrontmatter)
-
-	versionPath := filepath.Join(versionsDir, filename+".md")
-	return os.WriteFile(versionPath, []byte(versionContent), 0644)
 }
 
 // AppendToIndex appends a post entry to public.jsonl.
@@ -719,16 +615,10 @@ signature: %s
 		return nil, fmt.Errorf("failed to write post file: %w", err)
 	}
 
-	// Update version history file with CLI-compatible format
-	// Path format: posts/YYYYMMDD/filename.md
-	pathParts := strings.Split(postPath, string(filepath.Separator))
-	if len(pathParts) >= 3 {
-		dateDir := pathParts[1]
-		filename := strings.TrimSuffix(pathParts[2], ".md")
-		// Pass content WITHOUT frontmatter for diff computation
-		if err := appendVersionHistory(dataDir, dateDir, filename, postPath, oldHash, hash, updateTimestamp, oldContentWithoutFrontmatter, canonicalBody); err != nil {
-			fmt.Printf("[warning] Failed to update version history: %v\n", err)
-		}
+	// Append to the version history side-car (pass content WITHOUT frontmatter
+	// for diff computation). fullPath is the absolute canonical file path.
+	if err := version.AppendHistory(version.GetVersionsFilePath(fullPath, ".versions"), postPath, oldHash, hash, updateTimestamp, oldContentWithoutFrontmatter, canonicalBody); err != nil {
+		fmt.Printf("[warning] Failed to update version history: %v\n", err)
 	}
 
 	// Update index entry
@@ -760,62 +650,6 @@ signature: %s
 	}
 
 	return result, nil
-}
-
-// appendVersionHistory appends a new version to the version history file.
-// dateDir should be in format "YYYYMMDD" (e.g., "20260127")
-// canonicalPath is the relative path like "posts/20260128/filename.md"
-// previousHash is the hash of the previous version (without sha256: prefix)
-// oldContentWithoutFrontmatter is the previous version's content for diff computation
-// newContentWithoutFrontmatter is the new content for diff computation
-func appendVersionHistory(dataDir, dateDir, filename, canonicalPath, previousHash, newHash, timestamp, oldContentWithoutFrontmatter, newContentWithoutFrontmatter string) error {
-	versionsDir := filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir, ".versions")
-	if err := os.MkdirAll(versionsDir, 0755); err != nil {
-		return err
-	}
-
-	versionPath := filepath.Join(versionsDir, filename+".md")
-
-	// Update CURRENT_HASH in the header
-	if err := updateCurrentHashInVersionsFile(versionPath, newHash); err != nil {
-		// If file doesn't exist, create it with header
-		if os.IsNotExist(err) {
-			header := fmt.Sprintf(`# VERSION_FILE_FORMAT=1.0
-# CANONICAL_FILE=%s
-# CURRENT_HASH=sha256:%s
-
-`, canonicalPath, newHash)
-			if err := os.WriteFile(versionPath, []byte(header), 0644); err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
-	}
-
-	// Compute unified diff
-	diffContent, err := computeUnifiedDiff(oldContentWithoutFrontmatter, newContentWithoutFrontmatter)
-	if err != nil {
-		return fmt.Errorf("failed to compute diff: %w", err)
-	}
-
-	// Append new version entry with diff
-	versionEntry := fmt.Sprintf(`[VERSION sha256:%s]
-TIMESTAMP=%s
-PARENT=sha256:%s
-DIFF_START
-%sDIFF_END
-
-`, newHash, timestamp, previousHash, diffContent)
-
-	f, err := os.OpenFile(versionPath, os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	_, err = f.WriteString(versionEntry)
-	return err
 }
 
 // UpdateIndexEntry updates an existing entry in the index.

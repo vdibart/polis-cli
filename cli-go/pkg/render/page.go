@@ -181,7 +181,7 @@ var DefaultHTTPClient *http.Client
 // Tour: github.com/vdibart/polis-cli/blob/main/docs/handbook/foreign-site-widget.md
 // Map:  github.com/vdibart/polis-cli/blob/main/AGENTS.md
 // ───────────────────────────────────────────────────────────────────────
-const WidgetVersion = "1.4.4"
+const WidgetVersion = "1.4.5"
 
 // PageConfig holds configuration for page rendering.
 type PageConfig struct {
@@ -411,6 +411,11 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 				r.config.DataDir, ctx.InReplyToURL, r.replyCache,
 			)
 		}
+		// R23-1: escape the commenter-controlled / remotely-fetched reply-context
+		// fields before they reach the (non-escaping) template engine. Done here,
+		// after every functional use of the URLs (the .md→.html rewrite above and
+		// the fetch/cache lookup both need the raw URL).
+		sanitizeReplyContextForRender(ctx)
 	}
 
 	// Load blessed comments and recent posts for post pages
@@ -925,11 +930,14 @@ func (r *PageRenderer) loadPublicIndex() ([]template.PostData, []template.Commen
 				inReplyToURL = entry.InReplyTo.URL
 			}
 			comments = append(comments, template.CommentData{
-				URL:            "/" + htmlPath,
-				TargetAuthor:   extractDomain(inReplyToURL),
+				URL: "/" + htmlPath,
+				// R23-1: TargetAuthor + Preview land unescaped in comment-item.html
+				// ({{target_author}}, {{preview}}); the engine doesn't HTML-escape.
+				// entry.Title can be remote/blessed content, so escape both here.
+				TargetAuthor:   html.EscapeString(extractDomain(inReplyToURL)),
 				Published:      entry.Published,
 				PublishedHuman: template.FormatHumanDate(entry.Published),
-				Preview:        truncateText(entry.Title, 100), // Use title as preview
+				Preview:        html.EscapeString(truncateText(entry.Title, 100)), // Use title as preview
 			})
 		}
 	}
@@ -1414,6 +1422,41 @@ func replyURLAllowed(rawURL string) bool {
 	}
 	host := u.Hostname() // strips port + IPv6 brackets
 	return dm.ValidateDomain(host) == nil
+}
+
+// sanitizeReplyContextForRender escapes the commenter-controlled reply-context
+// fields that land in HTML text + href/attribute contexts in the v3 comment
+// shape (comment.html). The template engine substitutes {{var}} WITHOUT
+// HTML-escaping (see template.Engine.substituteVariables), so these fields —
+// the `in_reply_to` frontmatter (URL) and the Title/Excerpt/Domain fetched
+// verbatim from a remote origin — would otherwise be a stored-XSS vector on
+// the host tenant's origin (R23-1). Title/Excerpt/Domain are HTML-escaped;
+// the URLs are scheme-checked (so `javascript:`/`data:`/etc. can't produce a
+// clickable XSS href) and then HTML-escaped (so a quote can't break out of the
+// href/meta attribute). v4 (the stream shape) is unaffected — its client-side
+// renderer assigns metadata via textContent, never innerHTML.
+func sanitizeReplyContextForRender(ctx *template.RenderContext) {
+	ctx.InReplyToTitle = html.EscapeString(ctx.InReplyToTitle)
+	ctx.InReplyToExcerpt = html.EscapeString(ctx.InReplyToExcerpt)
+	ctx.InReplyToDomain = html.EscapeString(ctx.InReplyToDomain)
+	ctx.InReplyToURL = html.EscapeString(safeRenderURL(ctx.InReplyToURL))
+	ctx.RootPostURL = html.EscapeString(safeRenderURL(ctx.RootPostURL))
+}
+
+// safeRenderURL gates a commenter-controlled URL before it is rendered into an
+// href/attribute context (R23-1). It is intentionally MORE permissive than
+// replyURLAllowed — that gate guards the server-side fetch (SSRF) and requires
+// http/https + a real public host; this gate only needs to keep dangerous URI
+// schemes (javascript:, data:, vbscript:, file:) out of the rendered markup,
+// so it reuses the same allowlist as the bluemonday <source src> guard
+// (http/https/mailto/protocol-relative/root-relative/relative). Unsafe inputs
+// collapse to "" so the href renders empty rather than executable. The caller
+// still html.EscapeString's the result to neutralize attribute breakout.
+func safeRenderURL(u string) string {
+	if safeSrcURLPattern.MatchString(u) {
+		return u
+	}
+	return ""
 }
 
 // FetchReplyContextFull fetches a remote post's .md source and extracts

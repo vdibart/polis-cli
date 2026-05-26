@@ -307,6 +307,57 @@ func TestMarkdownToHTML_JavascriptURLStripped(t *testing.T) {
 	}
 }
 
+// R20-D-S4: bluemonday's isURLAttribute list omits <source>, so its global
+// URL-scheme allowlist doesn't reach `<source src>`. The .Matching pattern
+// added in markdown.go must reject dangerous schemes there.
+func TestMarkdownToHTML_SourceSrcDangerousSchemesStripped(t *testing.T) {
+	dangerous := []struct {
+		name  string
+		input string
+	}{
+		{"javascript", `<video controls><source src="javascript:alert(1)" type="video/mp4"></video>`},
+		{"data", `<video controls><source src="data:text/html,<script>alert(1)</script>" type="video/mp4"></video>`},
+		{"vbscript", `<video controls><source src="vbscript:msgbox" type="video/mp4"></video>`},
+		{"file", `<video controls><source src="file:///etc/passwd" type="video/mp4"></video>`},
+	}
+	for _, tt := range dangerous {
+		t.Run(tt.name, func(t *testing.T) {
+			html, err := MarkdownToHTML(tt.input)
+			if err != nil {
+				t.Fatalf("MarkdownToHTML failed: %v", err)
+			}
+			if strings.Contains(html, tt.name+":") {
+				t.Errorf("%s: URL should be stripped from <source src>, got %q", tt.name, html)
+			}
+		})
+	}
+
+	safe := []struct {
+		name  string
+		input string
+	}{
+		{"https", `<video controls><source src="https://cdn.example.com/v.mp4" type="video/mp4"></video>`},
+		{"http", `<video controls><source src="http://cdn.example.com/v.mp4" type="video/mp4"></video>`},
+		{"protocol-relative", `<video controls><source src="//cdn.example.com/v.mp4" type="video/mp4"></video>`},
+		{"root-relative", `<video controls><source src="/media/v.mp4" type="video/mp4"></video>`},
+		{"relative", `<video controls><source src="media/v.mp4" type="video/mp4"></video>`},
+	}
+	for _, tt := range safe {
+		t.Run(tt.name+"_preserved", func(t *testing.T) {
+			html, err := MarkdownToHTML(tt.input)
+			if err != nil {
+				t.Fatalf("MarkdownToHTML failed: %v", err)
+			}
+			if !strings.Contains(html, "<source") {
+				t.Errorf("%s: <source> should be preserved, got %q", tt.name, html)
+			}
+			if !strings.Contains(html, `src="`) {
+				t.Errorf("%s: src attribute should be preserved, got %q", tt.name, html)
+			}
+		})
+	}
+}
+
 func TestMarkdownToHTML_FormStripped(t *testing.T) {
 	input := `<form action="/steal"><input type="text" name="password"><button>Submit</button></form>`
 	html, err := MarkdownToHTML(input)

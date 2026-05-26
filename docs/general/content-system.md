@@ -628,7 +628,7 @@ Comments are replies to posts or other comments, published on the commenter's ow
 - `.polis/bundles/pub.polis.core/comments/pending/` -- comments awaiting blessing
 - `.polis/bundles/pub.polis.core/comments/denied/` -- denied comments
 **Renderer:** `html`
-**Storage:** Dated directories (`YYYYMMDD`), no version history
+**Storage:** Dated directories (`YYYYMMDD`), with version history in `.versions/` (mirrors posts)
 **Public artifacts:** `content/pub.polis.core/comment/blessed.json` -- index of blessed comments
 
 **Actions:**
@@ -638,6 +638,7 @@ Comments are replies to posts or other comments, published on the commenter's ow
 | `list` | List comments from the index. |
 | `get` | Retrieve a single comment. |
 | `create` | Publish a comment and automatically beseech the original author for blessing. |
+| `update` | Republish a comment with edited content (new signed version recorded in `.versions/`; blessing carries forward). |
 | `bless` | Grant blessing to a pending comment (post author action). |
 | `deny` | Deny blessing to a pending comment (post author action). |
 | `revoke` | Revoke a previously granted blessing. |
@@ -646,6 +647,8 @@ Comments are replies to posts or other comments, published on the commenter's ow
 **Events emitted:** `pub.polis.comment.published`, `pub.polis.comment.republished`, `pub.polis.comment.blessing.requested`, `pub.polis.comment.blessing.granted`, `pub.polis.comment.blessing.denied`
 
 **Lifecycle:** Create writes a signed comment with `in_reply_to` metadata, then beseeches the original author via the DS (emitting `pub.polis.comment.blessing.requested`). The post author can bless (emitting `pub.polis.comment.blessing.granted`) or deny (emitting `pub.polis.comment.blessing.denied`). Blessed comments are added to `blessed.json` and rendered alongside the original post. Blessing decisions are policy-driven: by default, comments from self, followed authors, and thread-trusted authors are auto-blessed via `emit` rules in `policies/rules.jsonl`. See `docs/cli/user/policies.md`.
+
+Republish (`update`) produces a new signed version: it preserves the original `published` timestamp (keeping the comment URL stable), records an `updated` timestamp, appends the new version to the `.versions/` side-car, advances `current_version` in `index.jsonl`, and re-registers the content with the DS (emitting `pub.polis.comment.republished`). Blessing state carries forward per the DS's `handleCommentBlessing` logic — a granted blessing is preserved, a denial stays denied (republish cannot launder it back into review), and only a still-pending comment is re-evaluated. `blessed.json` is intentionally left pinned to the blessed version, so divergence from the live `current_version` is the canonical "edited since blessing" signal (`comment.IsEditedSinceBlessing`). As of this writing the capability is wired through the CLI, ops engine, and v1 REST API but not yet surfaced in the webapp UI.
 
 ### `pub.polis.follow`
 

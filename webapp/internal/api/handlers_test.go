@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -361,6 +363,73 @@ func TestHandleContentDeleteReachesHandler(t *testing.T) {
 	// Should not be blocked by auth/routing
 	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden || w.Code == http.StatusMethodNotAllowed {
 		t.Errorf("routing failed with %d, should have reached handler", w.Code)
+	}
+}
+
+// The comment "update" action (republish) must route through Bearer auth and the
+// engine to comment.RepublishComment, producing a new version. DS is unconfigured
+// in the test engine, so this exercises the local-only republish path.
+func TestHandleCommentUpdateRepublishes(t *testing.T) {
+	mux, siteDir, apiKey := testSetup(t)
+
+	rel := "content/pub.polis.core/comment/20260301/test-comment.md"
+	full := filepath.Join(siteDir, rel)
+	os.MkdirAll(filepath.Dir(full), 0755)
+	original := `---
+title: Re: hello
+type: comment
+published: 2026-03-01T00:00:00Z
+author: test.example.com
+generator: polis-cli-go/dev
+in-reply-to:
+  url: https://alice.polis.pub/posts/20260301/hello.md
+  root-post: https://alice.polis.pub/posts/20260301/hello.md
+current-version: sha256:deadbeef
+version-history:
+  - sha256:deadbeef (2026-03-01T00:00:00Z)
+signature: fake
+---
+
+Original body.`
+	if err := os.WriteFile(full, []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	body := jsonBody(t, map[string]any{"path": rel, "markdown": "Edited via the v1 API."})
+	req := httptest.NewRequest(http.MethodPost, "/v1/content/pub.polis.comment/actions/update", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if v, _ := resp["version"].(string); v == "" || v == "sha256:deadbeef" {
+		t.Errorf("expected a new version, got %v", resp["version"])
+	}
+
+	data, _ := os.ReadFile(full)
+	if !strings.Contains(string(data), "Edited via the v1 API.") {
+		t.Error("comment file not updated via API")
+	}
+}
+
+// Without a Bearer token the comment update route must be rejected (401), not
+// reach the engine.
+func TestHandleCommentUpdateRequiresAuth(t *testing.T) {
+	mux, _, _ := testSetup(t)
+
+	body := jsonBody(t, map[string]any{"path": "x", "markdown": "y"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/content/pub.polis.comment/actions/update", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without Bearer, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

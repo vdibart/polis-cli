@@ -877,15 +877,15 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 |--------|--------|
 | **Attack** | Attacker obtains author's private key from `.polis/keys/` |
 | **Mitigation** | File permissions (0600), `.gitignore` exclusion, no network transmission |
-| **Residual risk** | No key revocation mechanism yet; compromised key allows forging until detected |
+| **Residual risk** | No key *revocation*; `polis rotate-key` lets the owner migrate to a fresh key (the DS enforces an old-key-signed transition), but a compromised key allows forging until the owner rotates and the new key propagates |
 
 ### 7.3 Domain Takeover
 
 | Aspect | Detail |
 |--------|--------|
-| **Attack** | Attacker gains control of author's domain and publishes new `.well-known/polis` with their key |
-| **Mitigation** | Previously signed content becomes unverifiable (mismatch with new key) |
-| **Residual risk** | Attacker can publish new content as the domain owner; no key pinning |
+| **Attack** | An attacker who controls the *served* `.well-known/polis` — full domain takeover, but also a rogue CDN edge, a static-host operator with filesystem write (GitHub Pages, Netlify, S3), or a domain reclaimed after expiry — replaces the published `public_key` with their own |
+| **Mitigation** | The `public_key` is the root of trust, so substitution does not retroactively forge history: previously signed content fails verification against the new key. For DS-registered sites the DS keeps a versioned key history and only accepts a rotation carrying a valid transition signature from the *old* key, so an attacker lacking the old private key cannot make the DS adopt their key. JUDGE alerts on unexpected key changes for hosted tenants (Section 8.10). |
+| **Residual risk** | A client verifying content fetched directly from the origin trusts the freshly-fetched key — there is no general client-side TOFU pinning yet. Self-signing the identity file would *not* close this gap: the embedded proof would verify against the same (substituted) key the file declares. The mitigation direction is key pinning / trust-on-first-use, not file self-signing. |
 
 ### 7.4 Discovery Service Compromise
 
@@ -926,7 +926,7 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 |--------|--------|
 | **Attack** | Attacker creates many sites that all follow a target to inflate follower counts |
 | **Mitigation** | Follower counts are informational only; no algorithmic amplification |
-| **Residual risk** | Follower list metadata is public; no rate limiting on follow announcements |
+| **Residual risk** | Follower list metadata is public. The DS rate-limits follow announcements per domain (stream-publish 100/hr), so volume-based inflation is bounded |
 
 ### 7.9 Content Hash Collision
 
@@ -989,7 +989,7 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 | Aspect | Detail |
 |--------|--------|
 | **Attack** | Attacker gains filesystem access to `.polis/bundles/pub.polis.core/dm/` |
-| **Mitigation** | Message content encrypted with secretbox using HKDF-derived key; file permissions 0600; metadata (from, to, timestamp) remains cleartext |
+| **Mitigation** | Message content **and the index preview snippet** are encrypted with secretbox using an HKDF-derived key; file permissions 0600. Only structural routing metadata (from, to, timestamp) remains cleartext |
 | **Residual risk** | Attacker with private key access can derive storage key and decrypt all stored DMs. Metadata (who you message, when, how often) is visible without decryption. |
 
 ### 7.17 DM Sender Impersonation
@@ -1014,7 +1014,7 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 |--------|--------|
 | **Attack** | Observer analyzes cleartext metadata to learn communication patterns |
 | **Mitigation** | Metadata is local to each instance (not centralized); no intermediary server sees both sides |
-| **Residual risk** | Filesystem access reveals: who you message, when, frequency, message sizes. Conversation IDs are deterministic (derivable from both domains). |
+| **Residual risk** | Filesystem access reveals routing metadata only — who you message, when, frequency, message sizes — not message content or previews (both encrypted at rest). Conversation IDs are deterministic (derivable from both domains). |
 
 ### 7.20 Malicious DM Content
 
@@ -1105,12 +1105,12 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 | Aspect | Security Property |
 |--------|-------------------|
 | **Confidentiality (transport)** | NaCl box: X25519 DH + XSalsa20-Poly1305 authenticated encryption |
-| **Confidentiality (storage)** | NaCl secretbox: HKDF-derived symmetric key + XSalsa20-Poly1305 |
+| **Confidentiality (storage)** | NaCl secretbox (HKDF-derived symmetric key + XSalsa20-Poly1305) over both message bodies and the index preview snippets |
 | **Sender authentication** | Ed25519 signed request headers + sender public key inside encrypted payload |
 | **Integrity** | Poly1305 MAC on both transport and storage encryption |
 | **Access control** | Configurable acceptance policy via `rules.jsonl` (followed/anyone/blocked) |
 | **Rate limiting** | Per-sender and global rate limits, checked before expensive crypto operations |
-| **Metadata protection** | No intermediary; metadata local to each instance. Cleartext metadata: sender, recipient, timestamp, size |
+| **Metadata protection** | No intermediary; metadata local to each instance. Cleartext is limited to structural routing metadata (sender, recipient, timestamp, size); message bodies and preview snippets are encrypted at rest |
 | **Forward secrecy** | None in v1 (acknowledged limitation) |
 | **Key rotation** | Storage survives peer key rotation; local key rotation requires re-encryption migration |
 | **Spam resistance** | 7-layer defense: policy → timestamp → global rate → signature verify → per-sender rate → size → process |
@@ -1145,19 +1145,31 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 | **Observability** | All findings emitted as structured JSON events (`judge.sweep`, `judge.fail.*`, `judge.alert.*`, `judge.info.*`) to the hosted runtime's observability backend |
 | **Graceful degradation** | External HTTP failures (item 6) are skipped gracefully with 5-second timeouts; unreachable domains are cached to avoid retry storms |
 
+### 8.11 Rate Limiting and Abuse Prevention
+
+Rate limiting is enforced at every network boundary, returning `429` with a `Retry-After` header when a bucket is exhausted. Client IPs are resolved from the trusted client-IP header set by the edge proxy rather than the spoofable left-most `X-Forwarded-For`, so limits cannot be evaded by forging forwarding headers.
+
+| Boundary | What is limited |
+|----------|-----------------|
+| **DS — per IP** | All query + write endpoints |
+| **DS — per domain** | Authenticated writes (site/content registration and unregistration, stream publish, key rotation) |
+| **Webapp — per IP** | Public content + structured-query endpoints |
+| **Hosted — per IP** | Signup / login / recover, plus per-email caps on recovery, export, and email change |
+| **DM — per sender + global** | Inbound DM delivery, with both per-sender and global caps (configurable) |
+
+The DS per-domain limits are checked at the top of each handler — before any signature verification or outbound `.well-known/polis` fetch — so an attacker cannot force expensive crypto or network round-trips without first consuming budget. DM rate checks sit at layers 3 and 5 of the seven-layer receive pipeline (Section 7.14). Hosted per-IP and per-email maps are swept periodically (by Reaper) to bound memory growth.
+
 ---
 
 ## 9. Known Limitations
 
 | Limitation | Impact | Potential Mitigation |
 |------------|--------|---------------------|
-| **No key revocation** | Compromised key remains valid until domain key is changed | Key revocation list or certificate transparency log |
-| **No key pinning** | Client fetches key on every verification; domain takeover = key replacement | TOFU (Trust On First Use) key pinning. JUDGE's key continuity monitoring (Section 8.10) provides partial mitigation by alerting on unexpected key changes for hosted tenants |
+| **No key revocation** | Key rotation (`polis rotate-key`) lets an owner *replace* a key, but there is no mechanism to actively *revoke* one — a compromised key stays valid until the owner rotates and the new key propagates | Revocation list or certificate-transparency-style log |
+| **No key pinning** | Clients fetch the key fresh on every verification, so a substituted `public_key` is trusted on first contact | TOFU (Trust On First Use) key pinning, possibly anchored on the DS's first-seen key history. JUDGE's key-continuity monitoring (Section 8.10) is a partial mitigation today, alerting on unexpected key changes for hosted tenants. Self-signing the identity file does *not* help — its proof verifies against the same key the file declares |
 | **No forward secrecy** | Key compromise exposes all past signatures (though content is public anyway) | N/A for public content system |
 | **Unencrypted private keys** | Keys stored without password protection | Optional passphrase encryption |
 | **No trusted timestamps** | Self-reported timestamps could be backdated or future-dated | Timestamping authority or blockchain anchoring |
-| **Public following lists** | No way to follow someone privately | Private following list option |
-| **No rate limiting** | DS has limited rate limiting on incoming events | Per-domain rate limits at DS level |
 | **Single key per site** | No key delegation or sub-keys for different operations | Hierarchical key model |
 | **No content encryption for public types** | Public content (posts, comments) is unencrypted by design. Direct messages are end-to-end encrypted (NaCl box) and encrypted at rest (NaCl secretbox). | Per-reader encryption for public content |
 | **No multi-signature** | No support for content requiring multiple signers | Multi-sig threshold signatures |
@@ -1169,14 +1181,19 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 
 ## 10. Future Considerations
 
-### Key Rotation Protocol
+### Key Rotation Protocol ✅ (Implemented)
 
-A formal key rotation protocol would allow:
-1. Generate new keypair
-2. Sign rotation announcement with old key (linking old key to new key)
-3. Publish new public key at `.well-known/polis`
-4. Re-sign existing content with new key (optional)
-5. Old key can verify rotation announcement; new key used for all future content
+`polis rotate-key` implements key rotation end to end:
+1. Generates a new Ed25519 keypair
+2. Signs a canonical rotation message with the **old** key, proving control of both keys
+3. Submits the rotation to the discovery service, which verifies the old-key transition signature, confirms the old key matches the site's current active key, and atomically records the new key in its versioned key history (emitting a signed `pub.polis.site.key_rotated` event)
+4. Publishes the new public key at `.well-known/polis`; the old key is backed up locally unless `--delete-old-key` is passed
+
+Existing content is *not* automatically re-signed, so it stays verifiable only while the old key remains discoverable — rotation moves identity forward, it does not retroactively re-anchor history.
+
+Remaining future work:
+- **Key revocation** (distinct from rotation): a way to actively invalidate a key so prior-trusting parties reject it
+- **Client-side rotation-chain consumption**: general clients (not just the DS) could follow the old-key-signed rotation chain to auto-accept announced rotations and reject *unannounced* key changes — the enforcement half of TOFU
 
 ### Key Revocation
 
@@ -1223,6 +1240,7 @@ Integration with hardware security modules (HSMs) or hardware keys:
 
 | Date | Change |
 |------|--------|
+| 2026-05-24 | Accuracy pass: removed the stale "no rate limiting" limitation and added Section 8.11 documenting the actual per-IP / per-domain / per-sender rate-limiting posture (DS, webapp, hosted, DM); marked the Key Rotation Protocol implemented (Section 10) and reflected `polis rotate-key` + DS-enforced transition signatures across attack vectors 7.2/7.3/7.8 and the key-revocation/pinning limitations; clarified that self-signing `.well-known/polis` does not mitigate key substitution (pinning / TOFU is the direction); removed the "public following lists" limitation (a by-design privacy property already documented in §8.4, not a security gap); credited DM index-preview encryption at rest across §7.16/§7.19/§8.8 (only structural routing metadata remains cleartext) |
 | 2026-03-27 | Added JUDGE automated verification system (Section 8.10): hourly cross-boundary verification covering HTTP content verification, DS attestation audit, key continuity monitoring, policy snapshots, index consistency, and cross-site comment verification. Updated Sections 9 (Known Limitations) and 10 (Future Considerations) to reference JUDGE capabilities |
 | 2026-03-23 | DS attestation signatures for autoblessed comments: DS signs autobless policy evaluation decisions, stored in blessing relationship signature field and stream event payload. Updated Sections 5, 7.4, 8.3, 9, 10 |
 | 2026-03-08 | Accuracy fixes: added `author_name` and `avatar` fields to well-known/polis schema; removed legacy manifest.json migration tables; replaced incorrect single default policy with actual 10-rule defaults across public/private files; added version header documentation for rules.jsonl; updated EvaluateExplicit outcome table with all four decisions (allow/deny/emit/omit) and EvalResult struct; fixed auto-bless example to use `emit` verb; expanded verb semantics documentation; added `version-history` to post frontmatter and `author` to comment frontmatter examples; simplified DM policy provenance text; added EvaluateWithLog to Go interface |

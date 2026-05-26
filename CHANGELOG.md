@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.64.0] - 2026-05-25
+
+A documentation-led release. The headline is **"In Defense of Bless"** — a short essay on why polis uses the word "bless" — joined by a new public **Actors** reference documenting the background jobs that keep polis sites healthy. Alongside the docs is a batch of security hardening (two XSS fixes, atomic writes, auth/replay hygiene), a set of stream/SPA interaction fixes, and the backend plumbing for comment versioning on republish.
+
+### Added
+
+- **[Docs] "In Defense of Bless"** (`docs/general/in-defense-of-bless.md`): A defense of polis terminology — the four senses of the word "bless" (religious, colloquial, gaming, Perl), what the operation actually does here (promote a comment from a loose reference on the commenter's server into a first-class part of the author's conversation), and why no centralized platform could use the word honestly.
+- **[Docs] Actors reference** (`docs/general/actors.md`): A public reference for the seven background actors — Patrol, Medic, Judge, Clerk, Chaplain, Reaper, and Tailor — covering what each detects, heals, reconciles, verifies, or reclaims, plus a complete check matrix and event catalog. Indexed from `docs/general/README.md` and linked from `architecture.md`.
+- **[Go CLI] Comment versioning on republish**: Republishing a comment now records a new signed version in a `.versions/` side-car (mirroring how posts are versioned), preserves the original `published` timestamp so the comment URL stays stable, sets an `updated` timestamp, advances `current_version` in `index.jsonl`, and re-registers with the discovery service (`pub.polis.comment.republished`). Blessing state carries forward — a granted blessing is preserved, a denial stays denied, and only a still-pending comment is re-evaluated. Wired through the CLI, ops engine, and v1 REST API; the webapp UI is intentionally not yet wired while the feature soaks.
+
+### Fixed
+
+- **[Security] Stored XSS in the v3 comment shape (R23-1)**: Reply-context fields fetched from a remote `in_reply_to` target (title, excerpt, domain, URL) were substituted into the v3 (blog) comment templates without HTML-escaping, so a blessed cross-author comment pointing at a hostile origin could execute script on the host tenant's page. Reply-context text fields are now HTML-escaped and their URLs scheme-checked against a safe-scheme allowlist before rendering. The v4 stream shape was unaffected.
+- **[Security] `<source>`-tag URL-scheme bypass in Markdown rendering (R20-D-S4)**: The Markdown sanitizer's global http/https/mailto scheme allowlist did not reach the `src` attribute of `<source>` elements, leaving a gap for dangerous URL schemes. `<source src>` is now scheme-validated explicitly.
+- **[Security] Canonical-only content-hash verification (R20-C-F9)**: Removed a dual-acceptance raw-byte hash fallback from content verification. Every signing path canonicalizes before hashing, so the fallback only widened the collision surface without serving a real compatibility need.
+- **[Security] Atomic writes for following and tag state (R23-6)**: `following.json` and tag files are now written via a temp-file-and-rename helper instead of a direct write, closing a crash-mid-write truncation gap.
+- **[Security] Auth and replay hygiene (R20-A/B/C)**: The widget-connect return URL now requires an http(s) scheme and empty fragment on top of the existing host gate; session creation is now atomic with the active-tenant check (closing a narrow window where a just-reaped handle could mint a usable session); and DM delivery now deduplicates replayed messages by ID.
+- **[Webapp] Stream and SPA interaction fixes**: Topbar preset icons (gateway, paragraph, comment, people, envelope) now scroll to the top when you're already on that view instead of reloading; the public "N following / N followers" link now resolves to a tenant's own social graph (matching the already-public counts) instead of an empty list; the comment composer CTA no longer renders dark-on-dark on light themes; a stream refresh race was resolved; the follow/unfollow confirm modal now mounts at the top level so it is opaque and captures clicks; and relative timestamps on cached static pages no longer go stale (recomputed client-side for the recent window).
+
+### Changed
+
+- **[Docs] Security model accuracy pass** (`docs/general/security-model.md`): Added a rate-limiting and abuse-prevention section documenting which network boundaries are limited (DS, webapp, hosted, DM); marked the key-rotation protocol implemented (`polis rotate-key`, with the discovery service enforcing an old-key-signed transition); refined the key-compromise and domain-takeover attack vectors to reflect this and the client-side trust-on-first-use direction; clarified that self-signing `.well-known/polis` does not mitigate key substitution; and credited DM index-preview encryption at rest (only structural routing metadata remains cleartext).
+- **[Docs] Content model clarifications** (`docs/general/content-types.md`, `content-system.md`): Documented that the follow list is public (published as plain JSON, unlike signed posts/comments), described comment version history, and added the `update` action for comment republish.
+
 ## [0.63.1] - 2026-05-22
 
 A small follow-up release closing two longstanding install-trust and documentation gaps. No code-behavior changes to the CLI, webapp, or themes.

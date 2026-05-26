@@ -16,7 +16,7 @@ The dispatch engine routes every API request and CLI action through the responsi
 
 ## The core content types
 
-The `pub.polis.core` bundle declares seven content types. They divide cleanly into **public** (signed, shareable, rendered to HTML on the author's domain) and **private** (per-tenant local state, never published).
+The `pub.polis.core` bundle declares seven content types: **public** ones published on the author's domain (posts and comments are signed and rendered to HTML; the follow list is published as plain JSON), **private** per-tenant state that is never published, and **derived** local caches.
 
 | Type | Public? | Storage | Purpose |
 |---|---|---|---|
@@ -24,7 +24,7 @@ The `pub.polis.core` bundle declares seven content types. They divide cleanly in
 | `pub.polis.comment` | Public | `content/pub.polis.core/comment/YYYYMMDD/<id>.md` | A reply on another post (or comment). Signed; lives on the commenter's own domain. |
 | `pub.polis.tag` | Public | `content/pub.polis.core/tag/<name>.json` | A tag applied to a target URL. Signed; lets the network categorize content cross-tenant. |
 | `pub.polis.theme` | Public (read-only API) | Declared in the active bundle's `bundle.json` | Theme metadata exposed via the API so the webapp can render a theme picker. |
-| `pub.polis.follow` | Private | `.polis/.../following.json` | Who *you* follow. Local; the DS only sees aggregate follow events. |
+| `pub.polis.follow` | Public | `content/pub.polis.core/follow/following.json` | Who *you* follow. Published as plain JSON (not signed like posts/comments); the DS only sees aggregate follow events. |
 | `pub.polis.dm` | Private | `.polis/.../dm/<thread>/...` | Direct messages — NaCl-encrypted, never registered with the DS. |
 | `pub.polis.feed` | Derived | `.polis/.../feed/*.jsonl` | The aggregated stream of activity from your network. Cached, not authored. |
 

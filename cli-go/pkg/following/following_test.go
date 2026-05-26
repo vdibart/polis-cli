@@ -90,6 +90,33 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 }
 
+// R23-6: following.json is PUBLIC served content (content/pub.polis.core/follow/),
+// written atomically (tmp+rename) but it must stay world-readable (0644) so
+// self-hosters serving via nginx/Apache under a different user can read it.
+// Pins the mode against a future "harden to 0600" that would break serving,
+// and asserts the atomic write leaves no stray .tmp file.
+func TestSave_PublicModeAndNoTmpResidue(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "following.json")
+
+	f := &FollowingFile{Version: Version, Following: []FollowingEntry{}}
+	f.Add("https://example.com")
+	if err := Save(path, f); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0644 {
+		t.Errorf("following.json must be 0644 (public served content), got %04o", perm)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("atomic write left a stray .tmp file")
+	}
+}
+
 func TestLoadNonExistent(t *testing.T) {
 	// Loading non-existent file should return empty following
 	f, err := Load("/non/existent/path.json")

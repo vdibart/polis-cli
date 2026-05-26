@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 )
 
@@ -284,7 +285,10 @@ func signAndWrite(tf *TagFile, path string, privateKey []byte) error {
 	}
 	data = append(data, '\n')
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	// R23-6: write atomically (tmp+rename) so a crash mid-write can't leave a
+	// truncated tag file. Mode stays 0644 — tag files are PUBLIC served content
+	// (content/pub.polis.core/tag/), so don't tighten to 0600 (R11-17 lesson).
+	if err := atomicfile.WriteFile(path, data, 0644); err != nil {
 		return fmt.Errorf("write tag file: %w", err)
 	}
 

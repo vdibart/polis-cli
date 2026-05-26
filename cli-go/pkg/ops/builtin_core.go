@@ -53,7 +53,7 @@ func (h *BuiltinCoreHandler) Actions(contentType string) []string {
 		return []string{"list", "get", "create", "update", "delete", "render",
 			"draft.list", "draft.get", "draft.save", "draft.delete"}
 	case "pub.polis.comment":
-		return []string{"list", "get", "create", "bless", "deny", "revoke", "sync"}
+		return []string{"list", "get", "create", "update", "bless", "deny", "revoke", "sync"}
 	case "pub.polis.follow":
 		return []string{"list", "create", "delete"}
 	case "pub.polis.feed":
@@ -183,9 +183,56 @@ func (h *BuiltinCoreHandler) handleComment(ctx context.Context, req ActionReques
 	switch req.Action {
 	case "create":
 		return h.beseechComment(req, env)
+	case "update":
+		return h.republishComment(req, env)
 	default:
 		return nil, fmt.Errorf("unsupported action %q for pub.polis.comment", req.Action)
 	}
+}
+
+// republishComment produces a new signed version of an already-published comment.
+// It expects the content-relative path (as returned by the comment list / index)
+// in "path" and the new body in "markdown". The DS re-registration it performs
+// emits pub.polis.comment.republished and preserves any granted/denied blessing.
+func (h *BuiltinCoreHandler) republishComment(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	path, _ := req.Payload["path"].(string)
+	markdown, _ := req.Payload["markdown"].(string)
+
+	if path == "" {
+		return nil, fmt.Errorf("path is required")
+	}
+	if strings.TrimSpace(markdown) == "" {
+		return nil, fmt.Errorf("markdown content required")
+	}
+	markdown = comment.StripFrontmatter(markdown)
+
+	var dsCfg *comment.DiscoveryConfig
+	if env.DiscoveryURL != "" && env.BaseURL != "" {
+		dsCfg = &comment.DiscoveryConfig{
+			DiscoveryURL: env.DiscoveryURL,
+			DiscoveryKey: env.DiscoveryKey,
+			BaseURL:      env.BaseURL,
+		}
+	}
+
+	siteDir := env.Resolver.SiteDir()
+	result, err := comment.RepublishComment(siteDir, path, markdown, env.PrivateKey, dsCfg)
+	if err != nil {
+		return nil, fmt.Errorf("republish: %w", err)
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data: map[string]any{
+			"comment_id":     result.CommentID,
+			"path":           result.Path,
+			"version":        result.Version,
+			"signature":      result.Signature,
+			"blessing_state": result.BlessingState,
+			"rebeseeched":    result.Rebeseeched,
+			"deferred":       result.Deferred,
+		},
+	}, nil
 }
 
 // beseechComment sends a comment to the discovery service for blessing.

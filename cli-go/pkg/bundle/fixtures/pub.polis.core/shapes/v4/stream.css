@@ -3547,14 +3547,14 @@ body.is-search-active .entry--ghost-compose {
 }
 .comment-editor-footer button.primary {
     background: var(--color-comment-accent, var(--color-accent, var(--accent, #d8a060)));
-    color: var(--color-bg, #1a1520);
+    color: var(--color-bg, var(--bg, #1a1520));
     border-color: var(--color-comment-accent, var(--color-accent, var(--accent, #d8a060)));
     font-weight: 500;
 }
 .comment-editor-footer button.primary:hover {
     background: color-mix(in srgb, var(--color-comment-accent, var(--color-accent, var(--accent, #d8a060))) 80%, white);
     border-color: color-mix(in srgb, var(--color-comment-accent, var(--color-accent, var(--accent, #d8a060))) 80%, white);
-    color: var(--color-bg, #1a1520);
+    color: var(--color-bg, var(--bg, #1a1520));
 }
 
 /* When the entry has the comment editor open, hide any existing

@@ -105,8 +105,15 @@ func (h *handlers) routeContent(w http.ResponseWriter, r *http.Request, siteDir 
 	needsAuth := r.Method != http.MethodGet || isDraftPath || isPrivateType
 
 	if needsAuth {
-		// Check if this is a signed-request auth (for DM deliver)
-		if contentType == "dm" && len(segments) >= 3 && segments[1] == "actions" && segments[2] == "deliver" {
+		// Check if this is a signed-request auth (for DM deliver). Accept both
+		// the short form ("dm") and the fully-qualified form ("pub.polis.dm")
+		// so this gate stays aligned with Engine.resolveTypeName, which treats
+		// the two as the same type. Pre-R18-13 the FQN form fell through to
+		// Bearer auth (which always 401'd for remote senders); same outcome,
+		// but the gate-vs-resolver mismatch was a smell waiting for a sibling
+		// content type to grow into the same shape.
+		isDMType := contentType == "dm" || contentType == "pub.polis.dm"
+		if isDMType && len(segments) >= 3 && segments[1] == "actions" && segments[2] == "deliver" {
 			// Try signed-request auth first
 			if r.Header.Get("X-Polis-Domain") != "" {
 				senderDomain, err := verifySignedRequest(r)
