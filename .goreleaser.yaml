@@ -91,7 +91,7 @@ builds:
 archives:
   # CLI-only archives
   - id: polis-archives
-    builds:
+    ids:
       - polis
     formats:
       - tar.gz
@@ -105,7 +105,7 @@ archives:
 
   # Webapp-only archives
   - id: polis-server-archives
-    builds:
+    ids:
       - polis-server
     formats:
       - tar.gz
@@ -119,7 +119,7 @@ archives:
 
   # Bundled archives
   - id: polis-full-archives
-    builds:
+    ids:
       - polis-full
     formats:
       - tar.gz
@@ -133,7 +133,7 @@ archives:
 
   # Tailor archives
   - id: tailor-archives
-    builds:
+    ids:
       - tailor
     formats:
       - tar.gz
