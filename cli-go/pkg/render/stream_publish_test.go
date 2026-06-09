@@ -289,9 +289,9 @@ func TestUnpublishStream_LastPost(t *testing.T) {
 		t.Error("solo post HTML should be deleted")
 	}
 
-	// Index now shows empty state.
+	// Index now shows the welcoming empty/getting-started state.
 	indexHTML := mustReadFile(t, filepath.Join(tempDir, "index.html"))
-	assertContains(t, indexHTML, "No posts yet", "empty state after last unpublish")
+	assertContains(t, indexHTML, "stream-getting-started", "empty state after last unpublish")
 }
 
 // TestPublishStream_SitemapIncrementalAndRemove asserts the sitemap evolves with

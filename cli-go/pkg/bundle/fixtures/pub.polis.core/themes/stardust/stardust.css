@@ -1,0 +1,210 @@
+/* stardust — reserved light theme for why.polis.pub (v4 infinity-stream shape).
+ *
+ * Aladdin-Sane palette captured from the Ziggy patterned-jacket photo. CSS-only
+ * DELTA from shapes/v4/stream.css: colour + font + the focus-dot halo ONLY.
+ * Geometry, spacing, chrome, and behaviour are inherited from the shape — see
+ * "Maintainer instructions — mockup fidelity" in plans/stardust-theme.md.
+ *
+ * Visual source of truth: docs/design/v4/mockups/themes/stardust.html.
+ * Expect ongoing colour tuning (esp. the nav green).
+ */
+
+:root {
+    /* ── Ground (warm off-white) ───────────────────────────────── */
+    --color-bg: #f6f1e8;
+    --color-bg-light: #ece6d9;
+    --color-surface: #ffffff;     /* panels, dropdowns */
+    --color-panel: #e9e2d4;
+    --color-tile: #faf6ee;        /* faint warm-white chip (title) + cream nav text */
+
+    /* ── Text (warm espresso) ──────────────────────────────────── */
+    --color-text: #2b2620;
+    --color-text-soft: #544d42;
+    --color-text-muted: #8f877a;
+
+    --color-border: rgba(43, 38, 32, 0.12);
+    --color-border-light: rgba(43, 38, 32, 0.22);
+
+    /* ── Brand colours ─────────────────────────────────────────── */
+    --color-bolt: #1c6f81;        /* petrol-teal — the lead */
+    --color-bolt-soft: #2a8497;
+    --color-bolt-dim: #155561;
+    --color-electric: #0f8fb3;    /* electric teal-blue — title text */
+    --color-ziggy: #c83a2b;       /* red — indicator dots */
+    --color-gold: #c2922f;        /* glam gold — timeline thread + rules + nav trim */
+    --color-gold-dim: #9a7322;
+    --color-gold-light: #e8d39a;  /* light brass — nav identity slot + end-cap dot */
+    --color-nav-bg: #5e7c68;      /* metallic verdigris green — nav band */
+    --color-orange: #e3641f;      /* flame — comment indicator */
+    --color-orange-dim: #c45019;
+
+    /* ── Tokens the v4 shape consumes ──────────────────────────── */
+    /* Accent drives links / filter underline / sf-option active / comment
+       links / focused-comment ring. Lead with petrol-teal. */
+    --color-accent: var(--color-bolt);
+    --color-accent-soft: var(--color-bolt-soft);
+    --color-accent-bg: rgba(28, 111, 129, 0.10);
+
+    /* Timeline: gold thread + red dots, set DIRECTLY (accent alone can't give a
+       gold bar AND red dots; the shape would otherwise derive both from accent). */
+    --color-timeline-bar: rgba(194, 146, 47, 0.42);
+    --color-timeline-dot: var(--color-ziggy);
+
+    /* Light-theme entry hover (the shape's default white-alpha is invisible here). */
+    --color-entry-hover-bg: rgba(0, 0, 0, 0.04);
+
+    /* Topbar (metallic-green band, gold trim; .polis-topbar set below). */
+    --topbar-bg: var(--color-nav-bg);
+    --topbar-border: var(--color-gold);
+
+    /* ── Type ──────────────────────────────────────────────────── */
+    /* Titles/site-name -> Space Grotesk via the shape's --font-title hook.
+       Prose, filter, quips, bio stay Newsreader. Wordmark stays Newsreader
+       (shape default — NOT retouched here; maintainer instruction #2). */
+    --font-title: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-serif: 'Newsreader', Georgia, serif;
+    --font-mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+}
+
+/* ── Topbar: metallic verdigris-green band, gold trim ──────────── */
+/* Flat green — the gold's radial sheen didn't read on the green, so it's dropped.
+   Colour/border only; geometry (height/padding/position) stays the shape's. */
+.polis-topbar {
+    background: var(--color-nav-bg);
+    border-bottom: 1px solid var(--color-gold);
+}
+/* Nav chrome reads cream on the dark green (wordmark FONT untouched = Newsreader). */
+.polis-wordmark { color: var(--color-tile); }
+.polis-wordmark:hover { color: #fff; }
+.polis-signin,
+.polis-handle-label { color: var(--color-tile); }
+.polis-signin:hover,
+.polis-handle-label:hover { color: #fff; }
+
+/* ── Sentence filter on the green nav ──────────────────────────── */
+/* Cream text; cream interactive underline (gold on hover); brass identity slot.
+   Colour only — the filter's position/size is the shape's. */
+.sentence-filter { color: var(--color-tile); }
+.sentence-filter:hover { color: #fff; }
+.sf-slot--interactive { text-decoration-color: var(--color-tile); }
+.sf-slot--interactive:hover { text-decoration-color: var(--color-gold); }
+.sf-slot--identity { color: var(--color-gold-light); }
+
+/* ── Timeline end-cap dot (in the topbar): brass ───────────────── */
+/* Ties the cap of the gold thread to the trim + brass identity slot. */
+.pinned-dot::before { background: var(--color-gold-light); }
+
+/* ── Timeline thread: gold, fading at the ends ─────────────────── */
+/* Background (colour) only; .layout::before position is the shape's. */
+.layout::before {
+    background: linear-gradient(to bottom,
+        transparent 0,
+        var(--color-timeline-bar) 3%,
+        var(--color-timeline-bar) 97%,
+        transparent 100%);
+}
+
+/* ── Indicator dots: red, standard sizes, halo on focus ────────── */
+/* Colour comes from --color-timeline-dot. We do NOT resize the dots — sizes
+   are the shape's standard (post 8px / comment 6px). The focus halo is the only
+   stardust dot treatment (the base shape leaves the focused dot unchanged). */
+.entry.is-focused .timeline-dot,
+.entry.is-focus-mode .timeline-dot,
+.entry.is-focused .entry-rail > .timeline-dot,
+.entry.is-focus-mode .entry-rail > .timeline-dot {
+    box-shadow: 0 0 0 3px rgba(200, 58, 43, 0.18);
+}
+
+/* ── Post title: Space Grotesk, electric-blue on a faint tile chip ─ */
+/* Font comes from --font-title (set above). Quips hide .entry-title, so the
+   chip only shows on headlined posts. */
+.entry-title {
+    color: var(--color-electric);
+    background: var(--color-tile);
+    border: 1px solid var(--color-border);
+    border-radius: 3px;
+    padding: 3px 9px;
+    width: fit-content;
+    max-width: 100%;
+    font-weight: 600;
+    letter-spacing: 0.005em;
+}
+
+/* ── Full post bodies — no clamp, no bottom-fade ───────────────── */
+/* why.polis.pub posts are short manifesto lines; show them complete. The shape
+   caps .entry-content (max-height 50vh) AND masks the bottom 36px of EVERY body
+   unconditionally — which fades the last line (and short single-line posts +
+   their links) even when nothing is truncated. Undo both for this tenant. */
+.entry--post .entry-content,
+.entry--comment-thread .entry-content,
+.focus-content .content-body {
+    max-height: none;
+    overflow: visible;
+    -webkit-mask-image: none;
+    mask-image: none;
+}
+
+/* ── Quip (titleless post): large italic serif, narrow column ──── */
+/* The shape marks a quip's title .is-redundant (hidden); style the adjacent
+   body. NOT .quip-line — that class does not exist in the live shape. */
+.entry--post .entry-title-link.is-redundant + .entry-content,
+.entry--post .entry-title-link.is-redundant + .entry-content p {
+    font-family: var(--font-serif);
+    font-style: italic;
+    font-weight: 500;
+    font-size: 22px;
+    line-height: 1.35;
+    color: var(--color-text);
+}
+/* Narrower measure than headlined bodies (matches the mockup's ~38ch quip). */
+.entry--post .entry-title-link.is-redundant + .entry-content {
+    max-width: 38ch;
+}
+.entry.is-focus-mode .entry-title-link.is-redundant + .entry-content,
+.entry.is-focus-mode .entry-title-link.is-redundant + .entry-content p {
+    font-size: 25px;
+}
+
+/* ── Comment indicator: flame orange ───────────────────────────── */
+.entry-comments-badge { color: var(--color-orange); }
+.entry-comments-badge:hover { color: var(--color-orange-dim); }
+
+/* ── Bio / about pull-quotes (raw HTML <blockquote class="site-quote">) ── */
+/* Italic pull-quotes, NO left rule — the rule competed visually with the gold
+   timeline thread. Also undo the shape's bio clamp + bottom-mask so both quotes
+   and the attribution show in full. */
+.layout-left .site-bio-wrap .site-bio {
+    max-height: none;
+    -webkit-mask-image: none;
+    mask-image: none;
+}
+.layout-left .site-bio blockquote,
+.layout-left .site-quote {
+    margin: 0 0 0.7em;          /* space between the two quotes */
+    padding-left: 0;
+    border-left: none;          /* dropped — competed with the timeline */
+    font-family: var(--font-serif);
+    font-style: italic;
+    font-size: 14.5px;
+    line-height: 1.55;
+    color: var(--color-text-soft);
+}
+.layout-left .site-attr {
+    display: block;             /* <cite> is inline by default */
+    font-style: normal;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1.5;
+    letter-spacing: 0.01em;
+    color: var(--color-text-muted);
+    margin-top: 4px;
+}
+.layout-left .site-attr em { font-style: italic; }
+
+/* ── Avatar: bolt-in-disc, theme-CSS only (no .well-known pattern) ─ */
+/* White disc + petrol-teal bolt as a background data-URI; blank the initial. */
+.site-avatar {
+    background: #ffffff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 56 56'%3E%3Ccircle cx='28' cy='28' r='28' fill='%23ffffff'/%3E%3Cpath d='M21 7 L39 7 L29 25 L36 25 L20 51 L25 29 L16 29 Z' fill='%231c6f81'/%3E%3C/svg%3E") center / cover no-repeat;
+    color: transparent;
+    font-size: 0;
+}

@@ -2,26 +2,32 @@
 
 This guide covers the Polis webapp — a local web interface for managing your Polis site. If you use the command-line tool instead, see [USAGE.md](USAGE.md).
 
-The webapp runs on your computer, modifies files on your disk, and opens in your browser. It is not a hosted web application — there are no accounts, no login, and no database. Your files are the source of truth.
+There are two ways to run Polis:
+
+- **Self-hosted (this guide's main focus).** The webapp runs on *your* computer, modifies files on your disk, and opens in your browser. There are no accounts, no passwords, and no database — your files are the source of truth.
+- **Hosted (e.g. `you.polis.pub`).** A managed Polis space you sign into from any browser. Here there *is* an account, tied to your email and accessed with magic links (no passwords). If you arrived from a "Sign in to polis" or "Welcome to polis" email, see [Hosted Accounts & Signing In](#hosted-accounts--signing-in).
+
+Everything in **Core Features**, **Social Features**, and **Settings** works the same in both modes — the difference is only in how you start up and sign in.
 
 ---
 
 ## Table of Contents
 
 1. [Getting Started](#getting-started)
-2. [Layout & Navigation](#layout--navigation)
-3. [Core Features](#core-features)
-4. [Social Features](#social-features)
-5. [How the Webapp Differs from a Hosted Web App](#how-the-webapp-differs-from-a-hosted-web-app)
-6. [Deploying Your Site](#deploying-your-site)
-7. [Security](#security)
-8. [Settings](#settings)
-9. [Hooks & Automations](#hooks--automations)
-10. [Notifications](#notifications)
-11. [File Structure](#file-structure)
-12. [Troubleshooting](#troubleshooting)
-13. [Manual Operations](#manual-operations)
-14. [Updating the Webapp](#updating-the-webapp)
+2. [Hosted Accounts & Signing In](#hosted-accounts--signing-in)
+3. [Layout & Navigation](#layout--navigation)
+4. [Core Features](#core-features)
+5. [Social Features](#social-features)
+6. [How the Webapp Differs from a Hosted Web App](#how-the-webapp-differs-from-a-hosted-web-app)
+7. [Deploying Your Site](#deploying-your-site)
+8. [Security](#security)
+9. [Settings](#settings)
+10. [Hooks & Automations](#hooks--automations)
+11. [Notifications](#notifications)
+12. [File Structure](#file-structure)
+13. [Troubleshooting](#troubleshooting)
+14. [Manual Operations](#manual-operations)
+15. [Updating the Webapp](#updating-the-webapp)
 
 ---
 
@@ -97,6 +103,52 @@ The UI adapts to where you are in the setup process:
 - **just_arrived** — No site configured yet. Only the welcome/init flow is shown.
 - **first_post** — Site is initialized but no posts published yet. A welcome panel with onboarding steps is shown. Social features are available but sub-tabs may show empty states.
 - **active** — At least one post published. Full navigation is visible.
+
+---
+
+## Hosted Accounts & Signing In
+
+This section applies to the **hosted** Polis service (a space at an address like `you.polis.pub`). If you run the webapp on your own computer, skip it — self-hosting has no accounts or sign-in.
+
+Polis uses **magic links**, not passwords. You prove who you are by clicking a one-time link sent to your email. Every link **expires 15 minutes** after it's sent, and only the most recent link you requested is valid.
+
+### Creating an account
+
+1. Go to the hosted service and enter your email address.
+2. You'll receive a **"Welcome to polis"** email. Click **Create my space**.
+3. That verifies your email and provisions your space. Your new space automatically follows `discover.polis.pub` so your stream has something in it from day one.
+
+Until you click the link your space is *unverified*. If you don't verify within **7 days**, the space is archived — your data is kept safe and can be recovered later (see Troubleshooting below).
+
+### Signing in
+
+1. On the sign-in page, enter the email tied to your space.
+2. You'll receive a **"Sign in to polis"** email. Click **Sign in**.
+3. You're taken straight into your space — no password to remember.
+
+If you didn't request a sign-in link, you can safely ignore the email; your space stays locked.
+
+> **Sign-in is separate from your DM password.** Signing in gets you *into* your space. Reading and sending direct messages may additionally ask for a **message password**, which encrypts your DMs at rest — it's a different secret from your email sign-in. See the messaging docs if you're prompted for it.
+
+### Troubleshooting access
+
+**The email never arrived.**
+- Check your spam/junk folder.
+- Give it a minute — delivery is usually quick but not instant.
+- Request a fresh link from the sign-in page. Requesting a new one invalidates the old one.
+
+**"This link is invalid or has expired."**
+- Links expire after 15 minutes, and only the newest link works. Request a new one and use that.
+- Don't open the link on a different device/browser than you intend to stay signed in on — sign in where you want to end up.
+
+**I need to change my email address.**
+- Sign in, then go to **Settings → Account → Change**. A confirmation link is sent to the *new* address; click it to complete the switch. Your old address stops working once confirmed.
+
+**My space was archived (I didn't verify in time).**
+- Your data isn't lost. Request a link from the sign-in/recover page for the same email to restore access.
+
+**Still stuck.**
+- Use the **Help** link in any Polis email (it points here), or reply to that email.
 
 ---
 

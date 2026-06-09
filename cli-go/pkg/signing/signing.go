@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/pem"
 	"fmt"
+	"strings"
 
 	"filippo.io/edwards25519"
 )
@@ -132,6 +133,58 @@ func VerifySignature(content, publicKeySSH []byte, signature string) (bool, erro
 
 	// Verify against the signing blob, not the raw content
 	return ed25519.Verify(pubKey, signingBlob, sig), nil
+}
+
+// CanonicalizeContent normalizes content to the exact byte form the signer hashes
+// before signing — normalize CRLF/CR to LF, strip leading blank lines, trim
+// trailing whitespace per line, drop trailing blank lines, and end with a single
+// newline (empty stays empty). It MUST match publish.CanonicalizeContent /
+// comment.CanonicalizeContent byte-for-byte (asserted by a byte-equivalence
+// test); it is the single source of truth the verifier packages (verify, judge,
+// patrol) share so their signing-base reconstruction can never drift from the
+// signer. Kept here, not imported from publish/comment, because those packages
+// import signing (an import cycle the other way).
+func CanonicalizeContent(content string) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	content = strings.TrimLeft(content, "\n")
+	lines := strings.Split(content, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], " \t\r")
+	}
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	result := strings.Join(lines, "\n")
+	if result != "" {
+		result += "\n"
+	}
+	return result
+}
+
+// ContentToSign reconstructs the exact bytes that were signed for a post or
+// comment from the full on-disk content (frontmatter + body). It drops the
+// `signature:` line (always) and, for comments, the `author:` line — which is
+// injected into comment frontmatter AFTER signing (see comment.go) and is
+// therefore NOT part of the signed payload — then canonicalizes.
+//
+// This is the single signing-base used by verify/judge/patrol. The bug it fixes:
+// verify previously stripped only `signature:` (the post base) for comments too,
+// leaving the unsigned `author:` line in the hashed payload, so every blessed
+// comment failed the cache's verify-and-gate and was never cached.
+func ContentToSign(content string, isComment bool) string {
+	lines := strings.Split(content, "\n")
+	var out []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "signature:") {
+			continue
+		}
+		if isComment && strings.HasPrefix(line, "author:") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return CanonicalizeContent(strings.Join(out, "\n"))
 }
 
 // encodePrivateKey encodes an Ed25519 private key in OpenSSH PEM format.
@@ -508,7 +561,13 @@ func Ed25519PrivateKeyToX25519(privateKeyPEM []byte) ([32]byte, error) {
 	if err != nil {
 		return [32]byte{}, fmt.Errorf("parse private key: %w", err)
 	}
-	return Ed25519PrivateKeyBytesToX25519(privKey)
+	x, err := Ed25519PrivateKeyBytesToX25519(privKey)
+	// DM-15 (R20-C-F6): zero the parsed private key once we've derived the X25519 scalar.
+	// parsePrivateKey returns a fresh copy (R16-13), so this doesn't disturb the caller.
+	for i := range privKey {
+		privKey[i] = 0
+	}
+	return x, err
 }
 
 // Ed25519PrivateKeyBytesToX25519 converts raw Ed25519 private key bytes to X25519.
@@ -528,6 +587,14 @@ func Ed25519PrivateKeyBytesToX25519(privKey ed25519.PrivateKey) ([32]byte, error
 
 	var x25519Key [32]byte
 	copy(x25519Key[:], h[:32])
+	// DM-15 (R20-C-F6): zero the private intermediates (seed + SHA-512 buffer) instead of
+	// leaving 32+64 bytes of key-derived material in the heap until GC.
+	for i := range seed {
+		seed[i] = 0
+	}
+	for i := range h {
+		h[i] = 0
+	}
 	return x25519Key, nil
 }
 

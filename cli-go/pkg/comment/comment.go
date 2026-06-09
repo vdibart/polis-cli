@@ -245,7 +245,11 @@ func SignComment(dataDir string, draft *CommentDraft, authorIdentity, siteURL st
 	}
 	commentID = ensureUniqueCommentID(dataDir, commentID)
 	dateDir := timestamp.Format("20060102")
-	commentURL := fmt.Sprintf("%s/comments/%s/%s.md", strings.TrimSuffix(siteURL, "/"), dateDir, commentID)
+	// Canonical source-path URL (content/pub.polis.core/comment/...), matching
+	// where PublishComment writes the signed .md — so the comment self-declares
+	// the same URL it is registered + served at. Comments historically used the
+	// /comments/ mount path (Defect 1, plans/comment-registration-severe-bug.md).
+	commentURL := polisurl.CommentContentURL(siteURL, dateDir, commentID)
 
 	// Generate title (from first heading or auto-generate)
 	title := draft.Title

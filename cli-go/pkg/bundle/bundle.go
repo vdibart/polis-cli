@@ -2,7 +2,7 @@
 //
 // A bundle is a namespaced package that declares content types, events,
 // rendering, and storage layout. The initial bundle pub.polis.core ships
-// with four content types: post, comment, follow, and feed.
+// with the content types: post, comment, follow, dm, tag, and theme.
 package bundle
 
 import (
@@ -30,7 +30,7 @@ import (
 //
 // (The wire-format shape name remains "pub.polis.shapes.v4" / map key "v4"
 // for backwards compatibility with installed tenants.)
-const StreamShapeVersion = "1.7.99"
+const StreamShapeVersion = "1.8.52"
 
 // Bundle represents a bundle.json declaration.
 type Bundle struct {
@@ -418,6 +418,33 @@ func (b *Bundle) SourceToMountPath(path string) string {
 	return path
 }
 
+// MountToSourcePath maps a mount-relative path back to its source-relative
+// content path — the inverse of SourceToMountPath. For example,
+// "comments/20260302/slug.md" becomes
+// "content/pub.polis.core/comment/20260302/slug.md" using the comment type's
+// mount config. Returns the original path unchanged if no mapping is found.
+//
+// This backs the mount→content ".md" alias. Comments were historically
+// mis-registered with the discovery service at the mount URL
+// (/comments/<…>.md) instead of the canonical content/<…>.md — see the
+// comment-infra remediation (plans/comment-registration-severe-bug.md,
+// Defect 1). Those DS URLs are signature-bound + the (type,url) upsert key, so
+// they cannot be edited; this mapping lets the mount URL resolve to the real
+// signed artifact. It is a permanent compatibility shim, not a data migration.
+func (b *Bundle) MountToSourcePath(path string) string {
+	for _, ct := range b.Types {
+		if ct.Mount == "" {
+			continue
+		}
+		mountPrefix := strings.TrimPrefix(ct.Mount, "/") + "/"
+		if strings.HasPrefix(path, mountPrefix) {
+			rest := strings.TrimPrefix(path, mountPrefix)
+			return filepath.Join("content", b.Name, ct.Dir, rest)
+		}
+	}
+	return path
+}
+
 // AllEmittedEvents returns all event names emitted by all types in this bundle.
 func (b *Bundle) AllEmittedEvents() []string {
 	var events []string
@@ -558,12 +585,6 @@ func DefaultCoreBundle() *Bundle {
 				Emits:   []string{"pub.polis.follow.announced", "pub.polis.follow.removed"},
 				Private: true, // owner's outbound follow list — auth required on v1 API reads
 			},
-			"pub.polis.feed": {
-				Dir:      "feed",
-				Mount:    "/feed",
-				Renderer: "html",
-				Private:  true, // local feed cache — auth required on v1 API reads
-			},
 			"pub.polis.dm": {
 				Dir:     "dm",
 				Storage: &StorageConfig{Pattern: "flat"},
@@ -673,6 +694,14 @@ func DefaultCoreBundle() *Bundle {
 				Version:          "1.1.0",
 				CSS:              "sols.css",
 				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4"},
+			},
+			// stardust: reserved light theme for why.polis.pub (v4 stream only).
+			// CSS-only delta from the shape; reserved from the picker like sols.
+			"stardust": {
+				Name:             "stardust",
+				Version:          "1.0.0",
+				CSS:              "stardust.css",
+				CompatibleShapes: []string{"pub.polis.shapes.v4"},
 			},
 			// studio13 + studio13-nk: paired themes preserving brand
 			// identity across the v3→v4 split. studio13 (stream-only) is

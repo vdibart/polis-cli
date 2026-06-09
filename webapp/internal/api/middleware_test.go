@@ -272,7 +272,7 @@ func TestDMDeliverWithInvalidSignedRequest(t *testing.T) {
 	}
 }
 
-func TestDMDeliverWithoutSignedHeadersFallsToAuth(t *testing.T) {
+func TestDMDeliverWithoutSignedHeadersRejected(t *testing.T) {
 	mux, _, _ := testSetup(t)
 
 	body := jsonBody(t, map[string]any{"message": "hello"})
@@ -282,9 +282,9 @@ func TestDMDeliverWithoutSignedHeadersFallsToAuth(t *testing.T) {
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
-	// Should fall through to regular auth and fail with 401
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 when no auth at all, got %d: %s", w.Code, w.Body.String())
+	// DM-7: deliver is signed-only — no fall-through to Bearer. Refused with 403.
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 when no signed request, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

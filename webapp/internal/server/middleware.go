@@ -329,11 +329,18 @@ func CSPTenantContent() string {
 // data-action attributes) will let us drop script-src-attr to 'none'.
 func CSPAdminSPA(nonce string) string {
 	scriptElem := "'self' 'nonce-" + nonce + "' https://esm.sh"
+	// 'wasm-unsafe-eval' (on script-src only — it governs WASM compilation; not on
+	// script-src-elem, where it's meaningless) lets the admin SPA instantiate the vendored
+	// Argon2id WASM (hash-wasm) that derives the DM message key in-browser. It permits WASM
+	// compilation ONLY — NOT JS eval()/new Function() — so it does not widen the
+	// script-injection surface, which stays gated by 'self'/nonce. Scoped to the logged-in
+	// admin app. See docs/general/security-model.md (DM crypto) + www/vendor/README.md.
+	scriptSrc := scriptElem + " 'wasm-unsafe-eval'"
 	return strings.Join([]string{
 		"default-src 'self'",
 		// Set script-src as the fallback for older browsers AND explicit
 		// script-src-elem / script-src-attr for CSP3-aware browsers.
-		"script-src " + scriptElem,
+		"script-src " + scriptSrc,
 		"script-src-elem " + scriptElem,
 		"script-src-attr 'unsafe-inline'",
 		// SPA loads Google Fonts (Inter + Newsreader) via <link

@@ -20,24 +20,23 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
-	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
-	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
-	"github.com/vdibart/polis-cli/cli-go/pkg/resolve"
-	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
-	"github.com/vdibart/polis-cli/webapp/internal/api"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
+	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
+	"github.com/vdibart/polis-cli/cli-go/pkg/resolve"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
+	"github.com/vdibart/polis-cli/webapp/internal/api"
 )
 
 // DefaultDiscoveryServiceURL is the default discovery service URL matching the CLI
@@ -137,8 +136,8 @@ type Server struct {
 	PrivateKey       []byte
 	PublicKey        []byte
 	Logger           *Logger
-	LogLevel         int // From .env LOG_LEVEL (default 1)
-	LogRetentionDays int // From .env LOG_RETENTION_DAYS (default 7)
+	LogLevel         int    // From .env LOG_LEVEL (default 1)
+	LogRetentionDays int    // From .env LOG_RETENTION_DAYS (default 7)
 	BaseURL          string // From POLIS_BASE_URL env var (runtime config, not stored in .well-known/polis)
 	DiscoveryURL     string // From .env / env var DISCOVERY_SERVICE_URL (not stored in webapp/config.json)
 	DiscoveryKey     string // From .env / env var DISCOVERY_SERVICE_KEY (not stored in webapp/config.json)
@@ -159,12 +158,27 @@ type Server struct {
 
 	// Unified sync infrastructure
 	syncHandlers   []stream.SyncHandler
-	syncTrigger    chan struct{} // non-blocking channel to trigger on-demand sync
+	syncTrigger    chan struct{}             // non-blocking channel to trigger on-demand sync
 	AuthorKeyCache *discovery.AuthorKeyCache // cached author public keys for signature verification
 
 	// Policy check cache: key is "recipient:myDomain", value is cached result with expiry
 	policyCache   map[string]*policyCacheEntry
 	policyCacheMu sync.Mutex
+
+	// dmKeyringMu serializes DM keyring mutations (set-password, rewrap) for this tenant.
+	// SaveCAS guards the on-disk revision but has a documented TOCTOU between its read-back
+	// and write (see dm/cas.go); the contract requires the server to serialize the whole
+	// load→mutate→SaveCAS sequence per tenant. Each tenant has its own *Server, so a
+	// per-Server mutex is exactly per-tenant (DM-8).
+	dmKeyringMu sync.Mutex
+
+	// RestrictDMEgress enables the outbound DM SSRF guard (DM-4): when true, DM send /
+	// recipient-key / protection-status reject recipient URLs that aren't https to a safe
+	// public host (no IPs, loopback, .internal, ports). Set true by the hosted multi-tenant
+	// entry point (a hostile tenant must not drive the shared server to internal hosts);
+	// left false in localhost mode, where the owner runs on their own machine and may DM a
+	// local instance.
+	RestrictDMEgress bool
 
 	// Cross-tenant comment-count cache: post URL → count + expiry.
 	// Populated by populateCrossTenantCommentCounts in handlers_stream.go.
@@ -173,6 +187,13 @@ type Server struct {
 	commentCountCache   map[string]*commentCountCacheEntry
 	commentCountCacheMu sync.Mutex
 	commentCountFlight  commentCountSingleflight
+
+	// Focus-comment cache + singleflight: post URL → resolved single-latest-
+	// comment response. Backs GET /api/v1/stream/focus-comment (the stream's
+	// read-focus mode, which shows exactly one comment per post).
+	focusCommentCache   map[string]*focusCommentCacheEntry
+	focusCommentCacheMu sync.Mutex
+	latestCommentFlight focusCommentSingleflight
 
 	// SSE client registry
 	sseClients map[chan SSEEvent]struct{}
@@ -190,11 +211,11 @@ type Server struct {
 	// Cached value stays valid as long as both source files'
 	// mtimes are unchanged AND the entry is within mutualsCacheTTL.
 	// Capacity-planning Step-6-Scaling-Concerns row.
-	mutualsCacheMu     sync.Mutex
-	mutualsCacheValue  map[string]bool
-	mutualsCacheAt     time.Time
-	mutualsOutboundMt  time.Time // mtime of following.json when cached
-	mutualsInboundMt   time.Time // mtime of pub.polis.follow.json when cached
+	mutualsCacheMu    sync.Mutex
+	mutualsCacheValue map[string]bool
+	mutualsCacheAt    time.Time
+	mutualsOutboundMt time.Time // mtime of following.json when cached
+	mutualsInboundMt  time.Time // mtime of pub.polis.follow.json when cached
 
 	syncDone chan struct{} // closed by StopSync() to stop the background goroutine
 }
@@ -712,6 +733,7 @@ func (s *Server) newContentEngine() (*ops.Engine, error) {
 		DiscoveryURL: s.DiscoveryURL,
 		DiscoveryKey: s.DiscoveryKey,
 		CLIThemesDir: s.CLIThemesDir,
+		EmitEvent:    s.LogEvent,
 		OnContentChanged: func() {
 			if err := s.RenderSite(); err != nil {
 				s.LogWarn("post-write render failed: %v", err)
@@ -1174,6 +1196,11 @@ func (s *Server) Initialize() {
 	following.DataDir = s.DataDir
 	following.DiscoveryURL = s.DiscoveryURL
 
+	// Render-time read-through for blessed-comment cache misses: populate the
+	// isolated cache via cache.Ingest so a foreign comment is never served from a
+	// public path. No-op when there is no DS configured.
+	InstallBlessedCacheFiller(extractDomainFromURL(s.DiscoveryURL))
+
 	// One-time migration: consolidate author → author_name in .well-known/polis
 	site.MigrateAuthorField(s.DataDir)
 
@@ -1401,27 +1428,27 @@ func (s *Server) broadcastCounts(syncResult SyncResult) {
 
 // CountsPayload contains all badge counts for the frontend.
 type CountsPayload struct {
-	Posts            int `json:"posts"`
-	Drafts           int `json:"drafts"`
-	MyPending        int `json:"my_pending"`
-	MyBlessed        int `json:"my_blessed"`
-	MyDenied         int `json:"my_denied"`
-	MyCommentDrafts  int `json:"my_comment_drafts"`
-	IncomingPending  int `json:"incoming_pending"`
-	IncomingBlessed  int `json:"incoming_blessed"`
-	FeedUnread       int    `json:"feed_unread"`
-	HasNewFeed       bool   `json:"has_new_feed"`
+	Posts           int  `json:"posts"`
+	Drafts          int  `json:"drafts"`
+	MyPending       int  `json:"my_pending"`
+	MyBlessed       int  `json:"my_blessed"`
+	MyDenied        int  `json:"my_denied"`
+	MyCommentDrafts int  `json:"my_comment_drafts"`
+	IncomingPending int  `json:"incoming_pending"`
+	IncomingBlessed int  `json:"incoming_blessed"`
+	FeedUnread      int  `json:"feed_unread"`
+	HasNewFeed      bool `json:"has_new_feed"`
 	// HasNewBlessingInbox / HasNewDM follow the same "new since last view"
 	// pattern as HasNewFeed — each clears when the user activates the
 	// corresponding filter surface (see /api/comment/blessing/viewed and
 	// /api/dm/viewed).
 	HasNewBlessingInbox bool `json:"has_new_blessing_inbox"`
 	HasNewDM            bool `json:"has_new_dm"`
-	Following        int `json:"following"`
-	Followers        int `json:"followers"`
-	NotificationsUnread int `json:"notifications_unread"`
-	BlessingRequests int `json:"blessing_requests"`
-	DMUnread         int `json:"dm_unread"`
+	Following           int  `json:"following"`
+	Followers           int  `json:"followers"`
+	NotificationsUnread int  `json:"notifications_unread"`
+	BlessingRequests    int  `json:"blessing_requests"`
+	DMUnread            int  `json:"dm_unread"`
 }
 
 // computeAllCounts reads all badge counts from local state/filesystem.
@@ -1552,10 +1579,10 @@ func (s *Server) computeAllCounts() CountsPayload {
 
 	// DM unread count
 	if s.PrivateKey != nil {
-		if dmStore, err := s.dmStore(); err == nil {
-			if idx, err := dmStore.LoadIndex(); err == nil {
-				for _, c := range idx.Conversations {
-					counts.DMUnread += c.UnreadCount
+		if mb, _, _, err := s.dmMailbox(); err == nil {
+			if entries, err := mb.RebuildInbox(); err == nil {
+				for _, e := range entries {
+					counts.DMUnread += e.Unread
 				}
 			}
 		}
@@ -1606,10 +1633,10 @@ func (s *Server) computeAllCounts() CountsPayload {
 		_ = store.SetCursor("pub.polis.dm.viewed", time.Now().UTC().Format(time.RFC3339Nano))
 		counts.HasNewDM = false
 	} else if s.PrivateKey != nil {
-		if dmStore, err := s.dmStore(); err == nil {
-			if idx, err := dmStore.LoadIndex(); err == nil {
-				for _, c := range idx.Conversations {
-					if c.UnreadCount > 0 && c.LastMessageAt > dmViewedPos {
+		if mb, _, _, err := s.dmMailbox(); err == nil {
+			if entries, err := mb.RebuildInbox(); err == nil {
+				for _, e := range entries {
+					if e.Unread > 0 && e.LastMessageAt > dmViewedPos {
 						counts.HasNewDM = true
 						break
 					}
@@ -1621,17 +1648,18 @@ func (s *Server) computeAllCounts() CountsPayload {
 	return counts
 }
 
-// dmStore creates a DM store from the server's data dir and private key.
-func (s *Server) dmStore() (*dm.Store, error) {
+// dmMailbox returns the tenant DM mailbox, the site's own domain (for convID↔peer
+// mapping), and the epoch DEKs available without a password (bootstrap server_dek;
+// password epochs stay locked until the SPA unlock).
+func (s *Server) dmMailbox() (*dm.Mailbox, string, map[int][32]byte, error) {
 	if s.PrivateKey == nil {
-		return nil, fmt.Errorf("no private key configured")
+		return nil, "", nil, fmt.Errorf("no private key configured")
 	}
-	privKey, err := signing.ParsePrivateKey(s.PrivateKey)
+	deks, err := dm.LoadAvailableDEKs(s.DataDir)
 	if err != nil {
-		return nil, fmt.Errorf("parse private key: %w", err)
+		return nil, "", nil, err
 	}
-	defer signing.ZeroKey(privKey)
-	return dm.NewStore(s.DataDir, privKey.Seed())
+	return dm.NewMailbox(dm.DMDir(s.DataDir)), dm.ExtractDomainFromURL(s.GetBaseURL()), deks, nil
 }
 
 // syncCommentStatuses checks pending comments against the discovery service
@@ -2009,6 +2037,13 @@ type RunOptions struct {
 	Port       int    // Specific port to bind to (0 = auto-pick an available port)
 	DataMode   string // "owner" (default) or "mirror"; empty == DataModeOwner
 	Surface    string // "editor" or "reader"; empty defaults from DataMode
+	// DevMode (polis serve --dev) injects window.__POLIS_DEV=true, which the SPA
+	// reads to enable the full messaging UI (compose/send) on localhost. By
+	// default localhost DMs are read-only (DMs are a networked/hosted feature; a
+	// served export is offline) — dev mode re-enables the send/compose surface for
+	// development + testing, with the understanding that some of it (delivery to a
+	// real peer) only works against a reachable network. See docs/cli/user/command-reference.md (polis serve).
+	DevMode bool
 }
 
 // resolveModes normalizes RunOptions's flag fields, applying defaults and
@@ -2094,6 +2129,9 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 		server.StartBackgroundSync()
 	}
 
+	// Developer mode (polis serve --dev): re-enable the localhost messaging UI.
+	devMode := len(opts) > 0 && opts[0].DevMode
+
 	// Resolve port: explicit RunOptions.Port wins; otherwise auto-pick.
 	var port int
 	if len(opts) > 0 && opts[0].Port > 0 {
@@ -2141,7 +2179,7 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 		mux.Handle("/bundle-assets/", http.StripPrefix("/bundle-assets/", http.FileServer(http.FS(bundle.ReferencePayloadFS()))))
 
 		// Static files from embedded filesystem with SPA fallback
-		mux.Handle("/", spaHandler(webFS, dataDir))
+		mux.Handle("/", spaHandler(webFS, dataDir, devMode))
 	}
 
 	// R18-18 (2026-05-18): bind is HARDCODED to `localhost` so the
@@ -2189,7 +2227,7 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 // lands in the user's selected theme rather than the sols-flavored default
 // (R23 #4 follow-up — the inline-script localStorage path covered repeat
 // visits but not first-load).
-func spaHandler(fsys fs.FS, dataDir string) http.Handler {
+func spaHandler(fsys fs.FS, dataDir string, devMode bool) http.Handler {
 	fileServer := http.FileServer(http.FS(fsys))
 	serveTemplatedIndex := func(w http.ResponseWriter, r *http.Request) {
 		// Sub-rooted at www/ in cmd/server/main.go via fs.Sub, so paths
@@ -2217,6 +2255,14 @@ func spaHandler(fsys fs.FS, dataDir string) http.Handler {
 		// match the CSP header and gets the importmap blocked.
 		nonce := GenerateCSPNonce()
 		out = strings.ReplaceAll(out, "{{csp_nonce}}", nonce)
+		// Developer mode (polis serve --dev): inject window.__POLIS_DEV so the
+		// SPA enables the localhost messaging UI. Carries the per-response nonce
+		// so it survives the strict admin-SPA CSP (same trick as hosted's
+		// __POLIS_HOSTED injection).
+		if devMode {
+			out = strings.Replace(out, "</head>",
+				fmt.Sprintf(`<script nonce=%q>window.__POLIS_DEV=true;</script></head>`, nonce), 1)
+		}
 		// R18-21: override the default tenant-content CSP from
 		// securityHeadersMiddleware with the admin-SPA variant that
 		// permits this nonce + the Milkdown esm.sh CDN.

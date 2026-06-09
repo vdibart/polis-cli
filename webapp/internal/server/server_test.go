@@ -12,9 +12,13 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/cache"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
-	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
+	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
+	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
+	"github.com/vdibart/polis-cli/cli-go/pkg/render"
+	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 )
 
@@ -378,8 +382,9 @@ func TestBlessingSyncHandler_StoresAutoBlessedComment(t *testing.T) {
 	defer ts.Close()
 
 	s := &Server{
-		DataDir: dataDir,
-		BaseURL: "https://follower1.polis.pub",
+		DataDir:      dataDir,
+		BaseURL:      "https://follower1.polis.pub",
+		DiscoveryURL: "https://ds.polis.pub",
 	}
 
 	handler := &blessingSyncHandler{server: s}
@@ -404,14 +409,19 @@ func TestBlessingSyncHandler_StoresAutoBlessedComment(t *testing.T) {
 		t.Error("expected FilesChanged=true after storing auto-blessed comment")
 	}
 
-	// Verify comment file was written
-	commentPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260222", "abc123.md")
-	data, err := os.ReadFile(commentPath)
-	if err != nil {
-		t.Fatalf("expected comment file at %s, got error: %v", commentPath, err)
+	// The blessed comment is stored in the ISOLATED blessed cache, NOT under our
+	// canonical content/ tree (Defect 3). The cached body is the
+	// frontmatter-stripped markdown.
+	commentURL := ts.URL + "/comments/20260222/abc123.md"
+	body, _, ok := cache.FindBlessed(dataDir, commentURL)
+	if !ok {
+		t.Fatalf("expected blessed comment in the cache for %s", commentURL)
 	}
-	if string(data) != commentContent {
-		t.Errorf("comment content = %q, want %q", string(data), commentContent)
+	if !strings.Contains(string(body), "I really enjoyed this") {
+		t.Errorf("cached comment body = %q, want it to contain the comment text", string(body))
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260222", "abc123.md")); !os.IsNotExist(err) {
+		t.Error("blessed comment must NOT be written under content/ (Defect 3)")
 	}
 
 	// Verify blessed-comments.json was updated
@@ -444,11 +454,7 @@ func TestBlessingSyncHandler_SkipsExistingComment(t *testing.T) {
 	wkData, _ := json.Marshal(wellKnown)
 	os.WriteFile(filepath.Join(dataDir, ".well-known", "polis"), wkData, 0644)
 
-	// Pre-create the comment file
-	commentPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260222", "abc123.md")
-	os.WriteFile(commentPath, []byte("existing content"), 0644)
-
-	// Server that should NOT be called
+	// Server that should NOT be called (the comment is already cached).
 	called := false
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -456,9 +462,16 @@ func TestBlessingSyncHandler_SkipsExistingComment(t *testing.T) {
 	}))
 	defer ts.Close()
 
+	// Pre-cache the blessed comment in the isolated cache.
+	commentURL := ts.URL + "/comments/20260222/abc123.md"
+	if err := cache.StoreBlessed(dataDir, "ds.polis.pub", cache.BlessedSidecar{SourceURL: commentURL, FetchedAt: "t"}, []byte("existing content")); err != nil {
+		t.Fatalf("pre-store cache: %v", err)
+	}
+
 	s := &Server{
-		DataDir: dataDir,
-		BaseURL: "https://follower1.polis.pub",
+		DataDir:      dataDir,
+		BaseURL:      "https://follower1.polis.pub",
+		DiscoveryURL: "https://ds.polis.pub",
 	}
 
 	handler := &blessingSyncHandler{server: s}
@@ -477,16 +490,156 @@ func TestBlessingSyncHandler_SkipsExistingComment(t *testing.T) {
 
 	result := handler.Process(events)
 	if result.FilesChanged {
-		t.Error("expected FilesChanged=false when comment already exists")
+		t.Error("expected FilesChanged=false when comment already cached")
 	}
 	if called {
-		t.Error("expected no HTTP fetch when comment file already exists")
+		t.Error("expected no HTTP fetch when comment already cached")
 	}
 
-	// Verify original content preserved
-	data, _ := os.ReadFile(commentPath)
-	if string(data) != "existing content" {
-		t.Errorf("existing file was overwritten: got %q", string(data))
+	// The cached content is preserved (not re-fetched/overwritten).
+	data, _, ok := cache.FindBlessed(dataDir, commentURL)
+	if !ok || string(data) != "existing content" {
+		t.Errorf("cached content not preserved: got %q (ok=%v)", string(data), ok)
+	}
+}
+
+// TestCacheBlessedComment exercises the shared verify+cache helper directly. Both
+// the real-time grant path (handleBlessingGrant) and the background sync handler
+// (blessingSyncHandler.Process) call this, so its contract — the Defect-3 guarantee
+// (never under content/) plus idempotency — is pinned here once, independent of
+// either caller.
+func TestCacheBlessedComment(t *testing.T) {
+	dataDir := t.TempDir()
+	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
+
+	commentMD := "---\ntitle: Nice\n---\nThoughtful reply."
+	fetches := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches++
+		w.Write([]byte(commentMD))
+	}))
+	defer ts.Close()
+
+	s := &Server{DataDir: dataDir, BaseURL: "https://me.polis.pub", DiscoveryURL: "https://ds.polis.pub"}
+	commentURL := ts.URL + "/comments/20260222/abc.md"
+
+	// A non-comment URL is a no-op (returns false, no fetch).
+	if s.cacheBlessedComment("https://me.polis.pub/posts/20260222/x.md") {
+		t.Error("expected false for a non-comment URL")
+	}
+
+	// A fresh comment is fetched, verify-recorded, stored, and returns true.
+	if !s.cacheBlessedComment(commentURL) {
+		t.Fatal("expected true on first cache of a fresh comment")
+	}
+	body, _, ok := cache.FindBlessed(dataDir, commentURL)
+	if !ok || !strings.Contains(string(body), "Thoughtful reply") {
+		t.Errorf("cached body = %q (ok=%v), want the comment text", string(body), ok)
+	}
+	// The body must NEVER land under our canonical content/ tree (Defect 3).
+	if _, err := os.Stat(filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260222", "abc.md")); !os.IsNotExist(err) {
+		t.Error("blessed comment must NOT be written under content/ (Defect 3)")
+	}
+
+	// Idempotent: a second call is a no-op — already cached → no re-fetch, false.
+	fetchesBefore := fetches
+	if s.cacheBlessedComment(commentURL) {
+		t.Error("expected false when the comment is already cached")
+	}
+	if fetches != fetchesBefore {
+		t.Errorf("expected no re-fetch on a cache hit; fetches went %d→%d", fetchesBefore, fetches)
+	}
+}
+
+// TestCacheBlessedComment_EmitsIngestVerdict verifies the observability event:
+// every ingest emits pub.polis.comment.cache_ingest carrying the signature verdict
+// (feeds the cache-ingest health panel + the "ingest with non-valid signature"
+// canary). Comment-infra WS5 observability.
+func TestCacheBlessedComment_EmitsIngestVerdict(t *testing.T) {
+	dataDir := t.TempDir()
+	logsDir := filepath.Join(t.TempDir(), "logs")
+	os.MkdirAll(logsDir, 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("---\ntitle: x\n---\nBody."))
+	}))
+	defer ts.Close()
+
+	s := &Server{DataDir: dataDir, BaseURL: "https://me.polis.pub", DiscoveryURL: "https://ds.polis.pub"}
+	s.Logger = NewLogger(LogLevelBasic, logsDir)
+
+	if !s.cacheBlessedComment(ts.URL + "/comments/20260101/x.md") {
+		t.Fatal("expected the comment to be cached")
+	}
+
+	entries, _ := os.ReadDir(logsDir)
+	if len(entries) == 0 {
+		t.Fatal("expected a log file")
+	}
+	data, _ := os.ReadFile(filepath.Join(logsDir, entries[0].Name()))
+	content := string(data)
+	if !strings.Contains(content, "[EVENT:pub.polis.comment.cache_ingest]") {
+		t.Errorf("expected a cache_ingest event, got:\n%s", content)
+	}
+	if !strings.Contains(content, "verdict=") {
+		t.Errorf("expected a verdict field on the ingest event, got:\n%s", content)
+	}
+}
+
+// pemSigToBase64 strips the SSHSIG PEM armor to the bare base64 the comment
+// frontmatter `signature:` field stores.
+func pemSigToBase64(pem string) string {
+	var b64 []string
+	for _, line := range strings.Split(pem, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "-----") {
+			continue
+		}
+		b64 = append(b64, line)
+	}
+	return strings.Join(b64, "")
+}
+
+// TestCacheBlessedComment_RefusesInvalidSignature is WS3·b2: a comment served with a
+// present-but-INVALID signature (tampering / key-swap) must be REFUSED — never cached
+// or displayed. (A missing/unverifiable signature still caches, with a canary; this
+// gate fires only on an actively-wrong signature.)
+func TestCacheBlessedComment_RefusesInvalidSignature(t *testing.T) {
+	dataDir := t.TempDir()
+	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
+
+	priv, pub, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A valid-FORMAT SSHSIG over UNRELATED bytes — it will not verify against the
+	// served comment's canonical content, so verify reports status "invalid".
+	sigPEM, err := signing.SignContent([]byte("bytes that were never the comment"), priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sigB64 := pemSigToBase64(sigPEM)
+	comment := "---\ntitle: x\ntype: comment\nsignature: " + sigB64 + "\n---\nBody that was never signed."
+	wk := `{"public_key": "` + strings.TrimSpace(string(pub)) + `"}`
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/.well-known/polis") {
+			w.Write([]byte(wk))
+			return
+		}
+		w.Write([]byte(comment))
+	}))
+	defer ts.Close()
+
+	s := &Server{DataDir: dataDir, BaseURL: "https://me.polis.pub", DiscoveryURL: "https://ds.polis.pub"}
+	commentURL := ts.URL + "/comments/20260101/x.md"
+
+	if s.cacheBlessedComment(commentURL) {
+		t.Error("expected REFUSE (false) for a present-but-invalid signature")
+	}
+	if _, _, ok := cache.FindBlessed(dataDir, commentURL); ok {
+		t.Error("an invalid-signature comment must NOT be cached (WS3·b2)")
 	}
 }
 
@@ -504,8 +657,9 @@ func TestBlessingSyncHandler_IgnoresNonTargetDomain(t *testing.T) {
 	os.WriteFile(filepath.Join(dataDir, ".well-known", "polis"), wkData, 0644)
 
 	s := &Server{
-		DataDir: dataDir,
-		BaseURL: "https://follower1.polis.pub",
+		DataDir:      dataDir,
+		BaseURL:      "https://follower1.polis.pub",
+		DiscoveryURL: "https://ds.polis.pub",
 	}
 
 	handler := &blessingSyncHandler{server: s}
@@ -536,7 +690,7 @@ func TestCursorGreater(t *testing.T) {
 	}{
 		{"5", "4", true},
 		{"4", "5", false},
-		{"30", "4", true},  // was broken with string comparison
+		{"30", "4", true}, // was broken with string comparison
 		{"4", "30", false},
 		{"100", "9", true}, // multi-digit > single-digit
 		{"9", "100", false},
@@ -565,7 +719,7 @@ func newTestFS() fs.FS {
 }
 
 func TestSPAHandler_RootServesIndex(t *testing.T) {
-	handler := spaHandler(newTestFS(), t.TempDir())
+	handler := spaHandler(newTestFS(), t.TempDir(), false)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -578,8 +732,25 @@ func TestSPAHandler_RootServesIndex(t *testing.T) {
 	}
 }
 
+func TestSPAHandler_DevModeInjection(t *testing.T) {
+	fsys := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("<html><head></head><body>SPA</body></html>")},
+	}
+	get := func(dev bool) string {
+		w := httptest.NewRecorder()
+		spaHandler(fsys, t.TempDir(), dev).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+		return w.Body.String()
+	}
+	if body := get(false); strings.Contains(body, "__POLIS_DEV") {
+		t.Errorf("dev off: index.html must NOT inject __POLIS_DEV; got %q", body)
+	}
+	if body := get(true); !strings.Contains(body, "window.__POLIS_DEV=true") {
+		t.Errorf("dev on: index.html must inject window.__POLIS_DEV=true; got %q", body)
+	}
+}
+
 func TestSPAHandler_ExistingAsset(t *testing.T) {
-	handler := spaHandler(newTestFS(), t.TempDir())
+	handler := spaHandler(newTestFS(), t.TempDir(), false)
 
 	for _, path := range []string{"/app.js", "/style.css"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -593,7 +764,7 @@ func TestSPAHandler_ExistingAsset(t *testing.T) {
 }
 
 func TestSPAHandler_DeepLinkFallsBackToIndex(t *testing.T) {
-	handler := spaHandler(newTestFS(), t.TempDir())
+	handler := spaHandler(newTestFS(), t.TempDir(), false)
 
 	deepPaths := []string{
 		"/_/posts",
@@ -1535,5 +1706,105 @@ func TestRunBindIsLoopbackOnly(t *testing.T) {
 		if strings.Contains(src, bad) {
 			t.Errorf("R18-18 regression: server.go contains non-loopback bind pattern %q", bad)
 		}
+	}
+}
+
+func TestBlessingSyncHandler_EvictsOnDeny(t *testing.T) {
+	dataDir := t.TempDir()
+	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
+	wkData, _ := json.Marshal(map[string]string{"base_url": "https://follower1.polis.pub", "public_key": "ssh-ed25519 test"})
+	os.WriteFile(filepath.Join(dataDir, ".well-known", "polis"), wkData, 0644)
+
+	s := &Server{DataDir: dataDir, BaseURL: "https://follower1.polis.pub", DiscoveryURL: "https://ds.polis.pub"}
+	handler := &blessingSyncHandler{server: s}
+
+	commentURL := "https://testpilot.polis.pub/comments/20260222/abc123.md"
+	if err := cache.StoreBlessed(dataDir, "ds.polis.pub", cache.BlessedSidecar{SourceURL: commentURL, FetchedAt: "t"}, []byte("blessed body")); err != nil {
+		t.Fatalf("pre-store: %v", err)
+	}
+	if err := metadata.AddBlessedComment(dataDir, "content/pub.polis.core/post/20260222/my-post.md", metadata.BlessedComment{URL: commentURL}); err != nil {
+		t.Fatalf("add blessed: %v", err)
+	}
+
+	// A blessing.denied for that comment evicts the cached mirror.
+	events := []discovery.StreamEvent{{
+		ID:   json.Number("1"),
+		Type: "pub.polis.comment.blessing.denied",
+		Payload: map[string]interface{}{
+			"comment_url":   commentURL,
+			"target_domain": "follower1.polis.pub",
+		},
+	}}
+	result := handler.Process(events)
+	if !result.FilesChanged {
+		t.Error("expected FilesChanged=true after eviction")
+	}
+	if _, _, ok := cache.FindBlessed(dataDir, commentURL); ok {
+		t.Error("expected blessed comment evicted from cache after deny")
+	}
+}
+
+// TestBlessedCommentLifecycle_E2E is WS5 guard ⑦ (the end-to-end half): it chains
+// the blessed-comment lifecycle that is otherwise only covered link-by-link —
+// grant → display sources from the ISOLATED cache (never content/) → unpublish →
+// evict → display goes empty. Proves the WS3 cache machinery end to end.
+func TestBlessedCommentLifecycle_E2E(t *testing.T) {
+	dataDir := t.TempDir()
+	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
+	wkData, _ := json.Marshal(map[string]string{"base_url": "https://follower1.polis.pub", "public_key": "ssh-ed25519 test"})
+	os.WriteFile(filepath.Join(dataDir, ".well-known", "polis"), wkData, 0644)
+
+	commentBody := "---\ntitle: Re: hi\n---\nGenuinely thoughtful reply."
+	author := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(commentBody))
+	}))
+	defer author.Close()
+
+	s := &Server{DataDir: dataDir, BaseURL: "https://follower1.polis.pub", DiscoveryURL: "https://ds.polis.pub"}
+	handler := &blessingSyncHandler{server: s}
+	commentURL := author.URL + "/comments/20260222/abc.md"
+	inReplyTo := "https://follower1.polis.pub/posts/20260222/my-post.md"
+
+	// 1. GRANT → cache populated, blessed.json updated, nothing under content/.
+	grant := []discovery.StreamEvent{{
+		ID:   json.Number("1"),
+		Type: "pub.polis.comment.blessing.granted",
+		Payload: map[string]interface{}{
+			"target_domain": "follower1.polis.pub",
+			"comment_url":   commentURL,
+			"in_reply_to":   inReplyTo,
+		},
+	}}
+	if r := handler.Process(grant); !r.FilesChanged {
+		t.Fatal("expected FilesChanged after grant")
+	}
+
+	// 2. DISPLAY sources the body from the isolated cache (content/ has no copy).
+	html := render.LoadLocalCommentContent(dataDir, commentURL)
+	if !strings.Contains(html, "thoughtful reply") {
+		t.Fatalf("display did not source the blessed body from cache; got %q", html)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260222", "abc.md")); !os.IsNotExist(err) {
+		t.Error("blessed comment must NOT be under content/ (Defect 3)")
+	}
+
+	// 3. UNPUBLISH → evict (a signed withdrawal, WS3·d).
+	unpub := []discovery.StreamEvent{{
+		ID:   json.Number("2"),
+		Type: "pub.polis.comment.unpublished",
+		Payload: map[string]interface{}{
+			"comment_url": commentURL,
+		},
+	}}
+	if r := handler.Process(unpub); !r.FilesChanged {
+		t.Error("expected FilesChanged after unpublish eviction")
+	}
+
+	// 4. DISPLAY now empty — the cache is gone (and a LOCAL load never re-fetches).
+	if _, _, ok := cache.FindBlessed(dataDir, commentURL); ok {
+		t.Error("expected cache evicted after unpublish")
+	}
+	if html := render.LoadLocalCommentContent(dataDir, commentURL); strings.Contains(html, "thoughtful reply") {
+		t.Errorf("display still shows the unpublished comment; got %q", html)
 	}
 }

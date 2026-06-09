@@ -148,7 +148,7 @@ body { margin: 0; padding: 0; }
 
 body {
     margin: 0;
-    font-family: var(--font-mono);
+    font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
     font-size: 0.95rem;
     line-height: 1.65;
     color: var(--color-text-soft);
@@ -178,7 +178,7 @@ body {
     display: inline-flex;
     flex-direction: column;
     align-items: center;
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-style: italic;
     font-size: 1.4rem;
     font-weight: 500;
@@ -192,7 +192,7 @@ body {
 }
 
 .footer-tagline {
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-style: italic;
     font-size: 0.85rem;
     font-weight: 400;
@@ -531,7 +531,7 @@ body {
 
 .content-body {
     padding: 0;
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     color: var(--color-text-soft);
 }
 

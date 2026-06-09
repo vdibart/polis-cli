@@ -227,13 +227,21 @@ type TagData struct {
 	Updated string
 }
 
-// BlessedCommentData represents a blessed comment on a post.
+// BlessedCommentData represents a blessed comment on a post. The comment
+// renders inside the v4 comment-thread card layout (commenter avatar floats
+// right, handle reveals on rollover, date on the left, small timeline-dot on
+// the rail) — so the per-comment author identity (domain + avatar markup)
+// rides alongside the body. AuthorAvatarHTML is the SSR'd <span class="av">
+// markup from render.AvatarHTML — emitted verbatim into the partial (the
+// avatar markup is self-contained + sanitized at construction).
 type BlessedCommentData struct {
-	URL            string
-	AuthorName     string
-	Published      string
-	PublishedHuman string
-	Content        string
+	URL              string
+	AuthorName       string
+	AuthorDomain     string
+	AuthorAvatarHTML string
+	Published        string
+	PublishedHuman   string
+	Content          string
 }
 
 // New creates a new template engine with the given configuration.
@@ -437,6 +445,18 @@ func FormatHumanDateTime(iso string) string {
 		}
 	}
 	return t.Format("January 2, 2006 · 3:04pm")
+}
+
+var dateYearRe = regexp.MustCompile(`,\s+\d{4}`)
+
+// StripYear removes the ", YYYY" from a FormatHumanDateTime absolute date
+// ("January 2, 2026 · 3:04pm" → "January 2 · 3:04pm"). Relative strings
+// ("3 hours ago", "just now") pass through unchanged. The v4 stream drops
+// the per-entry year — year-markers segment the stream, so repeating it on
+// every row is redundant — and a shorter date keeps the comment-count column
+// closer to the left. Display-only; the underlying datetime attr is intact.
+func StripYear(human string) string {
+	return dateYearRe.ReplaceAllString(human, "")
 }
 
 // FormatYear extracts the calendar year from an ISO 8601 timestamp. Used

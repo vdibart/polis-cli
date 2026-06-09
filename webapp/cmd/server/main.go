@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io/fs"
 	"log"
 	"os"
@@ -25,10 +26,32 @@ func main() {
 	// Invalid combo: --mirror --editor → server.Run rejects at startup.
 	dataMode := ""
 	surface := ""
+	devMode := false
 
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--help", "-h":
+			fmt.Print(`Polis server - run the local web app
+
+Usage:
+  polis-server [options]
+
+Options:
+  -d, --data-dir <path>   Site directory to serve (default: current directory)
+  -p, --port <n>          Port to bind on localhost (default: auto-pick)
+      --dev               Developer mode: enable the localhost messaging UI
+                          (compose/send). DMs are read-only on localhost by
+                          default. See docs/cli/user/command-reference.md (polis serve).
+      --mirror            Serve a read-only clone; default --owner
+      --reader            Reader surface (default --editor for --owner)
+  -h, --help              Show this help
+`)
+			return
+		case "--dev":
+			// Developer mode: enable the localhost messaging UI (compose/send),
+			// which is read-only by default. See docs/cli/user/command-reference.md (polis serve).
+			devMode = true
 		case "--data-dir", "-d":
 			if i+1 < len(args) {
 				dataDir = args[i+1]
@@ -78,5 +101,6 @@ func main() {
 		Port:       port,
 		DataMode:   dataMode,
 		Surface:    surface,
+		DevMode:    devMode,
 	})
 }

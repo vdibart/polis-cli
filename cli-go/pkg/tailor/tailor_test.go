@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 )
 
@@ -138,7 +139,13 @@ func createCurrentSite(t *testing.T) string {
 	os.WriteFile(filepath.Join(dir, ".polis", "storage-salt"), []byte("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"), 0600)
 
 	// DM directories
-	os.MkdirAll(filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "dm", "conv"), 0700)
+	os.MkdirAll(filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "dm", "conversations"), 0700)
+
+	// Epoch-0 DM keyring — a current site has one (checkDMKeyring needs only the
+	// keyring.json, not a signed block, so the fixture's fake key is fine).
+	kr := &dm.Keyring{}
+	kr.AddBootstrapEpoch()
+	kr.Save(dm.DMDir(dir))
 
 	// Webapp config (no deprecated view_mode)
 	os.MkdirAll(filepath.Join(dir, ".polis", "webapp"), 0700)
@@ -748,7 +755,7 @@ func TestDMDirectories_Diagnose(t *testing.T) {
 	if checkMap["dm-directories"].Status != StatusFail {
 		t.Errorf("dm-directories: expected fail, got %s", checkMap["dm-directories"].Status)
 	}
-	if dirExists(filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "dm", "conv")) {
+	if dirExists(filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "dm", "conversations")) {
 		t.Error("Diagnose should not create DM directories")
 	}
 }
@@ -760,7 +767,7 @@ func TestDMDirectories_Apply(t *testing.T) {
 
 	Apply(dir)
 
-	convDir := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "dm", "conv")
+	convDir := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "dm", "conversations")
 	if !dirExists(convDir) {
 		t.Error("Apply should create DM directories")
 	}
@@ -771,39 +778,6 @@ func TestDMDirectories_Apply(t *testing.T) {
 }
 
 // ── DM domain case tests ──────────────────────────────────────────
-
-func TestDMDomainCase_PassesWhenClean(t *testing.T) {
-	dir := createCurrentSite(t)
-
-	result := checkDMDomainCase(&runContext{siteDir: dir, dryRun: false})
-	if result.Status != StatusPass {
-		t.Errorf("expected pass for empty DM dir, got %s: %s", result.Status, result.Message)
-	}
-}
-
-func TestDMDomainCase_FixesMixedCase(t *testing.T) {
-	dir := createCurrentSite(t)
-	convDir := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "dm", "conv")
-
-	// Create a conversation with mixed-case domain
-	conv := `{"peer_domain":"Example.COM","peer_url":"https://Example.COM","messages":[]}`
-	os.WriteFile(filepath.Join(convDir, "abc123.json"), []byte(conv), 0600)
-
-	result := checkDMDomainCase(&runContext{siteDir: dir, dryRun: false})
-	if result.Status != StatusFail {
-		t.Errorf("expected fail, got %s: %s", result.Status, result.Message)
-	}
-
-	// Verify fix
-	data, _ := os.ReadFile(filepath.Join(convDir, "abc123.json"))
-	var fixed struct {
-		PeerDomain string `json:"peer_domain"`
-	}
-	json.Unmarshal(data, &fixed)
-	if fixed.PeerDomain != "example.com" {
-		t.Errorf("expected lowercase domain, got %s", fixed.PeerDomain)
-	}
-}
 
 // ── Policy content convergence tests ─────────────────────────────
 
@@ -1025,6 +999,117 @@ func TestStaleFeedViewedAt_Clean(t *testing.T) {
 	dir := createCurrentSite(t)
 	// No cursors.json at all
 	result := checkStaleFeedViewedAt(&runContext{siteDir: dir, dryRun: true})
+	if result.Status != StatusPass {
+		t.Errorf("expected pass for clean site, got %s: %s", result.Status, result.Message)
+	}
+}
+
+// addLegacyFeedArtifacts injects the retired pub.polis.feed scaffolding into a
+// current-site fixture: the empty public content dir, plus a stale type entry
+// in bundle.json. Simulates a tenant that was created by the older polis init.
+func addLegacyFeedArtifacts(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, "content", "pub.polis.core", "feed"), 0755); err != nil {
+		t.Fatalf("mkdir feed dir: %v", err)
+	}
+	bundlePath := filepath.Join(dir, "content", "pub.polis.core", "bundle.json")
+	b, err := bundle.LoadBundle(bundlePath)
+	if err != nil {
+		t.Fatalf("load bundle: %v", err)
+	}
+	b.Types["pub.polis.feed"] = bundle.ContentType{
+		Dir:      "feed",
+		Mount:    "/feed",
+		Renderer: "html",
+		Private:  true,
+	}
+	if err := bundle.SaveBundle(bundlePath, b); err != nil {
+		t.Fatalf("save bundle: %v", err)
+	}
+}
+
+func TestLegacyFeedScaffolding_Diagnose(t *testing.T) {
+	dir := createCurrentSite(t)
+	addLegacyFeedArtifacts(t, dir)
+
+	result := checkLegacyFeedScaffolding(&runContext{siteDir: dir, dryRun: true})
+	if result.Status != StatusFail {
+		t.Errorf("expected fail, got %s: %s", result.Status, result.Message)
+	}
+	if len(result.Actions) != 2 {
+		t.Errorf("expected 2 actions (dir + bundle.json), got %d", len(result.Actions))
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "content", "pub.polis.core", "feed")); os.IsNotExist(err) {
+		t.Error("Diagnose should not remove dir")
+	}
+	b, _ := bundle.LoadBundle(filepath.Join(dir, "content", "pub.polis.core", "bundle.json"))
+	if _, has := b.Types["pub.polis.feed"]; !has {
+		t.Error("Diagnose should not strip bundle entry")
+	}
+}
+
+func TestLegacyFeedScaffolding_Apply(t *testing.T) {
+	dir := createCurrentSite(t)
+	addLegacyFeedArtifacts(t, dir)
+
+	result := checkLegacyFeedScaffolding(&runContext{siteDir: dir, dryRun: false})
+	if result.Status != StatusFail {
+		t.Errorf("expected fail (applied), got %s: %s", result.Status, result.Message)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "content", "pub.polis.core", "feed")); !os.IsNotExist(err) {
+		t.Error("legacy feed dir should be removed")
+	}
+	b, _ := bundle.LoadBundle(filepath.Join(dir, "content", "pub.polis.core", "bundle.json"))
+	if _, has := b.Types["pub.polis.feed"]; has {
+		t.Error("pub.polis.feed should be stripped from bundle.json")
+	}
+	// Other types preserved
+	if _, has := b.Types["pub.polis.post"]; !has {
+		t.Error("pub.polis.post should be preserved in bundle.json")
+	}
+}
+
+func TestLegacyFeedScaffolding_NonEmptyDirIsFlagged(t *testing.T) {
+	dir := createCurrentSite(t)
+	feedDir := filepath.Join(dir, "content", "pub.polis.core", "feed")
+	os.MkdirAll(feedDir, 0755)
+	// Drop an unexpected file so the dir is non-empty
+	os.WriteFile(filepath.Join(feedDir, "unexpected.txt"), []byte("hi"), 0644)
+
+	result := checkLegacyFeedScaffolding(&runContext{siteDir: dir, dryRun: false})
+	if result.Status != StatusFail {
+		t.Errorf("expected fail (flagged), got %s: %s", result.Status, result.Message)
+	}
+
+	// Non-empty dir must be left in place
+	if _, err := os.Stat(feedDir); os.IsNotExist(err) {
+		t.Error("non-empty legacy feed dir should NOT be removed")
+	}
+	if _, err := os.Stat(filepath.Join(feedDir, "unexpected.txt")); os.IsNotExist(err) {
+		t.Error("unexpected file inside feed dir should be preserved")
+	}
+	// Action should be a flag, not a remove
+	var hasFlag bool
+	for _, a := range result.Actions {
+		if a.Op == "flag" {
+			hasFlag = true
+		}
+		if a.Op == "remove" {
+			t.Error("non-empty dir should produce flag, not remove")
+		}
+	}
+	if !hasFlag {
+		t.Error("expected at least one flag action")
+	}
+}
+
+func TestLegacyFeedScaffolding_Clean(t *testing.T) {
+	dir := createCurrentSite(t)
+	// No legacy artifacts (createCurrentSite uses DefaultCoreBundle which has
+	// pub.polis.feed removed; and there's no content/pub.polis.core/feed dir).
+	result := checkLegacyFeedScaffolding(&runContext{siteDir: dir, dryRun: true})
 	if result.Status != StatusPass {
 		t.Errorf("expected pass for clean site, got %s: %s", result.Status, result.Message)
 	}
@@ -2085,8 +2170,8 @@ func TestCheckRegistryFQNSanity_BareNamesFlagged(t *testing.T) {
 	data, _ := os.ReadFile(regPath)
 	var raw map[string]interface{}
 	json.Unmarshal(data, &raw)
-	raw["active_theme"] = "vice"  // bare name
-	raw["active_shape"] = "v4"    // bare name
+	raw["active_theme"] = "vice" // bare name
+	raw["active_shape"] = "v4"   // bare name
 	out, _ := json.MarshalIndent(raw, "", "  ")
 	os.WriteFile(regPath, out, 0644)
 
@@ -2155,5 +2240,103 @@ func TestStep01Migrations_AllIdempotent(t *testing.T) {
 		if cr.Status != StatusPass {
 			t.Errorf("second pass: %s expected Pass (idempotent), got %s: %s", cr.Name, cr.Status, cr.Message)
 		}
+	}
+}
+
+func TestBlessedCacheGC_RemovesOrphan(t *testing.T) {
+	dir := createCurrentSite(t)
+	blessedDir := filepath.Join(dir, ".polis", "ds", "ds.polis.pub", "pub.polis.core", "cache", "blessed", "alice.polis.pub", "20260601")
+	os.MkdirAll(blessedDir, 0755)
+	// Healthy entry: body + valid sidecar.
+	os.WriteFile(filepath.Join(blessedDir, "good.md"), []byte("body"), 0644)
+	os.WriteFile(filepath.Join(blessedDir, "good.md.meta.json"), []byte(`{"kind":"blessed"}`), 0644)
+	// Orphan: body with NO sidecar.
+	os.WriteFile(filepath.Join(blessedDir, "orphan.md"), []byte("orphan"), 0644)
+
+	result := checkBlessedCacheGC(&runContext{siteDir: dir, dryRun: false})
+	if result.Status != StatusFail {
+		t.Errorf("expected fail (removed orphan), got %s: %s", result.Status, result.Message)
+	}
+	if _, err := os.Stat(filepath.Join(blessedDir, "orphan.md")); !os.IsNotExist(err) {
+		t.Error("orphan body should be removed")
+	}
+	if _, err := os.Stat(filepath.Join(blessedDir, "good.md")); os.IsNotExist(err) {
+		t.Error("healthy (sidecar-backed) entry must be preserved")
+	}
+}
+
+func TestBlessedCacheGC_CleanIsPass(t *testing.T) {
+	dir := createCurrentSite(t)
+	result := checkBlessedCacheGC(&runContext{siteDir: dir, dryRun: true})
+	if result.Status != StatusPass {
+		t.Errorf("expected pass for a site with no blessed cache, got %s: %s", result.Status, result.Message)
+	}
+}
+
+// TestCheckForeignContentInPublicPath_RemovesForeign: a foreign comment in the
+// public tree (+ its rendered mount sibling) is backed up and removed; the
+// owner's own comment is left untouched.
+func TestCheckForeignContentInPublicPath_RemovesForeign(t *testing.T) {
+	dir := t.TempDir()
+	const owner = "discover.polis.pub"
+
+	srcRel := "content/pub.polis.core/comment/20260531/reply.md"
+	mountRel := "comments/20260531/reply.html"
+	os.MkdirAll(filepath.Join(dir, filepath.Dir(srcRel)), 0o755)
+	os.MkdirAll(filepath.Join(dir, filepath.Dir(mountRel)), 0o755)
+	os.WriteFile(filepath.Join(dir, srcRel), []byte("---\nauthor: vdibart.polis.pub\n---\nforeign"), 0o644)
+	os.WriteFile(filepath.Join(dir, mountRel), []byte("<p>foreign</p>"), 0o644)
+	// Owner's OWN comment — must be left untouched.
+	ownRel := "content/pub.polis.core/comment/20260531/mine.md"
+	os.WriteFile(filepath.Join(dir, ownRel), []byte("---\nauthor: discover.polis.pub\n---\nmine"), 0o644)
+
+	backupDir := filepath.Join(dir, ".polis", "tailor-backup", "t")
+	res := checkForeignContentInPublicPath(&runContext{siteDir: dir, dryRun: false, baseURL: "https://" + owner, backupDir: backupDir})
+
+	if res.Status != StatusFail {
+		t.Fatalf("expected fail (foreign content found), got %s", res.Status)
+	}
+	if _, err := os.Stat(filepath.Join(dir, srcRel)); !os.IsNotExist(err) {
+		t.Error("foreign source must be removed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, mountRel)); !os.IsNotExist(err) {
+		t.Error("foreign mount sibling must be removed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ownRel)); err != nil {
+		t.Error("owner's own comment must NOT be removed")
+	}
+	if _, err := os.Stat(filepath.Join(backupDir, srcRel)); err != nil {
+		t.Error("foreign source must be backed up before removal")
+	}
+}
+
+// TestCheckForeignContentInPublicPath_DryRun: a dry-run reports the foreign file
+// but does not remove it.
+func TestCheckForeignContentInPublicPath_DryRun(t *testing.T) {
+	dir := t.TempDir()
+	srcRel := "content/pub.polis.core/comment/20260531/reply.md"
+	os.MkdirAll(filepath.Join(dir, filepath.Dir(srcRel)), 0o755)
+	os.WriteFile(filepath.Join(dir, srcRel), []byte("---\nauthor: vdibart.polis.pub\n---\nforeign"), 0o644)
+
+	res := checkForeignContentInPublicPath(&runContext{siteDir: dir, dryRun: true, baseURL: "https://discover.polis.pub"})
+	if res.Status != StatusFail || len(res.Actions) == 0 {
+		t.Fatalf("dry-run should report the foreign file, got %s (%d actions)", res.Status, len(res.Actions))
+	}
+	if _, err := os.Stat(filepath.Join(dir, srcRel)); err != nil {
+		t.Error("dry-run must NOT remove the file")
+	}
+}
+
+// TestCheckForeignContentInPublicPath_CleanSite: a site holding only its own
+// content passes.
+func TestCheckForeignContentInPublicPath_CleanSite(t *testing.T) {
+	dir := t.TempDir()
+	srcRel := "content/pub.polis.core/comment/20260531/mine.md"
+	os.MkdirAll(filepath.Join(dir, filepath.Dir(srcRel)), 0o755)
+	os.WriteFile(filepath.Join(dir, srcRel), []byte("---\nauthor: discover.polis.pub\n---\nmine"), 0o644)
+
+	res := checkForeignContentInPublicPath(&runContext{siteDir: dir, dryRun: false, baseURL: "https://discover.polis.pub"})
+	if res.Status != StatusPass {
+		t.Errorf("a site with only its own content must pass, got %s: %+v", res.Status, res.Actions)
 	}
 }

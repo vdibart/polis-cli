@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	"github.com/vdibart/polis-cli/cli-go/pkg/cache"
 	"github.com/vdibart/polis-cli/cli-go/pkg/template"
 )
 
@@ -1772,5 +1773,78 @@ func TestLoadOrFetchReplyContext_ConcurrentWritesAllPersist(t *testing.T) {
 		if _, present := final[u]; !present {
 			t.Errorf("entry for %s missing from persisted cache", u)
 		}
+	}
+}
+
+// TestLoadLocalCommentContent_CacheOnly guards the core principle: a foreign
+// blessed comment is rendered ONLY from the isolated blessed-comment cache, never
+// from a public path (comments/ or content/pub.polis.core/comment/). A cache miss
+// returns "" even when legacy public-path copies are present on disk — the
+// renderer must not surface foreign content from a public path.
+func TestLoadLocalCommentContent_CacheOnly(t *testing.T) {
+	dir := t.TempDir()
+	const commentURL = "https://alice.polis.pub/content/pub.polis.core/comment/20260601/reply.md"
+
+	orig := BlessedCacheFiller
+	BlessedCacheFiller = nil // no read-through: a miss is a placeholder
+	defer func() { BlessedCacheFiller = orig }()
+
+	// Legacy foreign copies in BOTH public paths (the Defect-3 artifacts).
+	srcDir := filepath.Join(dir, "content", "pub.polis.core", "comment", "20260601")
+	mountDir := filepath.Join(dir, "comments", "20260601")
+	for _, d := range []string{srcDir, mountDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "reply.md"), []byte("legacy source body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mountDir, "reply.html"), []byte("legacy mount body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No cache entry → a miss must be a placeholder, NOT the public copy.
+	if html := LoadLocalCommentContent(dir, commentURL); html != "" {
+		t.Errorf("a foreign comment must NOT be served from a public path; got %q", html)
+	}
+
+	// Cache entry present → renders from the isolated cache.
+	if err := cache.StoreBlessed(dir, "ds.polis.pub", cache.BlessedSidecar{SourceURL: commentURL, FetchedAt: "t"}, []byte("cached body")); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if html := LoadLocalCommentContent(dir, commentURL); !strings.Contains(html, "cached body") {
+		t.Errorf("expected the cache body, got %q", html)
+	}
+
+	// After eviction → miss again → placeholder, never the public copy.
+	if err := cache.EvictBlessedAnyDS(dir, commentURL); err != nil {
+		t.Fatal(err)
+	}
+	if html := LoadLocalCommentContent(dir, commentURL); html != "" {
+		t.Errorf("after eviction a miss must be a placeholder, not the public copy; got %q", html)
+	}
+}
+
+// TestLoadLocalCommentContent_ReadThroughFiller: on a cache miss, an installed
+// BlessedCacheFiller populates the isolated cache and the comment then renders
+// from it (the synchronous-fill contract; the production webapp filler fills
+// asynchronously and returns false).
+func TestLoadLocalCommentContent_ReadThroughFiller(t *testing.T) {
+	dir := t.TempDir()
+	const commentURL = "https://alice.polis.pub/content/pub.polis.core/comment/20260601/reply.md"
+
+	orig := BlessedCacheFiller
+	defer func() { BlessedCacheFiller = orig }()
+	BlessedCacheFiller = func(dataDir, url string) bool {
+		if url != commentURL {
+			return false
+		}
+		_ = cache.StoreBlessed(dataDir, "ds.polis.pub", cache.BlessedSidecar{SourceURL: url, FetchedAt: "t"}, []byte("filled body"))
+		return true
+	}
+
+	if html := LoadLocalCommentContent(dir, commentURL); !strings.Contains(html, "filled body") {
+		t.Errorf("read-through filler should populate + render, got %q", html)
 	}
 }

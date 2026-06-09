@@ -9,6 +9,12 @@
 //   grammar   — this file (pql.js): parse / compose / parseURL / composeURL
 //   consumer  — bundle-assets/pub.polis.core/shapes/v4/stream.js: applies filter
 //
+// One grammar, three parsers (all assert docs/general/pql-golden.jsonl):
+//   JS — this file        Go — cli-go/pkg/pql        TS — discovery-service/core/pql.ts
+// The sentence is also a server endpoint: GET /pql/<sentence>
+//   webapp — webapp/internal/server/handlers_pql.go (JSON envelope + HTML shell)
+//   DS     — discovery-service/server/src/index.ts (public cross-tenant queries)
+//
 // Pull the thread:
 //   github.com/vdibart/polis-cli/blob/main/docs/general/pql.md          (spec)
 //   github.com/vdibart/polis-cli/blob/main/docs/general/infinity-stream.md (why)
@@ -35,7 +41,7 @@
 //
 // Grammar:
 //   sentence       := qualifier type "from" scope [modifier]
-//   qualifier      := "all" | "new"           ; "new" reserved (R22 #12)
+//   qualifier      := "all" | "new"           ; "new" reserved
 //   type           := "posts" | "comments" | "profiles"
 //                   | "messages" | "drafts" | "activity"
 //   scope          := "me"
@@ -74,10 +80,20 @@
     var TYPE_TO_TOKEN = invertMap(TYPE_TO_INTERNAL);
 
     // Qualifiers. `new` is in the vocabulary for grammar completeness
-    // but currently locked off at the UI layer (R22 #12) — sentence
+    // but currently locked off at the UI layer — sentence
     // dropdown only surfaces `all`. The parser accepts it; the
     // dispatcher ignores qualifier=new for now.
     var QUALIFIERS = ['all', 'new'];
+
+    // Relations. `from` = authored-by (actor axis); `about` = concerns/targets
+    // (involved axis, maps to the DS involvedDomain filter). Exactly one per
+    // sentence. On a tenant the relation+scope clause is optional (see the
+    // defaultScope arg to parse/compose).
+    var RELATIONS = ['from', 'about'];
+
+    // Fully-qualified event types (e.g. pub.polis.follow.announced) are accepted
+    // in the type slot for operational precision, alongside the friendly aliases.
+    var EVENT_TYPE_PATTERN = /^pub\.polis\.[a-z]+(\.[a-z]+)+$/;
 
     // Scope atoms — multi-token phrases that resolve to a single
     // internal value. Order matters when atoms share a leading token
@@ -115,24 +131,37 @@
     //     → { qualifier:"all", type:"activity", scope:"my-network", modifier:null }
     //   "all messages from alice.polis.pub by date"
     //     → { qualifier:"all", type:"dms", scope:"@alice.polis.pub", modifier:"by-date" }
-    function parse(sentence) {
+    // parse: PQL sentence string → filter state object. The optional
+    // defaultScope (the serving tenant, e.g. "@alice.polis.pub") makes the
+    // relation+scope clause optional: when omitted, the filter defaults to
+    // { relation:"from", scope:defaultScope }. Pass nothing/null in the owner
+    // SPA, where scope is always explicit.
+    function parse(sentence, defaultScope) {
         if (typeof sentence !== 'string') return null;
         var tokens = sentence.trim().toLowerCase().split(/\s+/).filter(Boolean);
-        if (tokens.length < 4) return null;
+        if (tokens.length < 2) return null;
 
         var i = 0;
         var qualifier = tokens[i++];
         if (QUALIFIERS.indexOf(qualifier) < 0) return null;
 
         var typeToken = tokens[i++];
-        if (!TYPE_TO_INTERNAL.hasOwnProperty(typeToken)) return null;
-        var type = TYPE_TO_INTERNAL[typeToken];
+        var type = resolveType(typeToken);
+        if (type === null) return null;
 
-        if (tokens[i++] !== 'from') return null;
-
-        var scope = matchScope(tokens, i);
-        if (!scope) return null;
-        i += scope.consumed;
+        var relation = 'from';
+        var scope;
+        if (i < tokens.length && RELATIONS.indexOf(tokens[i]) >= 0) {
+            relation = tokens[i++];
+            var sc = matchScope(tokens, i);
+            if (!sc) return null;
+            scope = sc.value;
+            i += sc.consumed;
+        } else if (defaultScope) {
+            scope = defaultScope; // tenant-relative: clause omitted
+        } else {
+            return null; // strict parse requires a relation + scope clause
+        }
 
         var modifier = null;
         if (i < tokens.length) {
@@ -146,28 +175,56 @@
         return {
             qualifier: qualifier,
             type: type,
-            scope: scope.value,
+            relation: relation,
+            scope: scope,
             modifier: modifier,
         };
     }
 
+    // resolveType: alias → internal value, or a fully-qualified event type
+    // passes through verbatim. Returns null for an unknown type.
+    function resolveType(token) {
+        if (TYPE_TO_INTERNAL.hasOwnProperty(token)) return TYPE_TO_INTERNAL[token];
+        if (EVENT_TYPE_PATTERN.test(token)) return token;
+        return null;
+    }
+
+    // typeTokenFor: internal type value → sentence token (alias or verbatim FQ
+    // event type). Returns null for an invalid value.
+    function typeTokenFor(type) {
+        if (TYPE_TO_TOKEN.hasOwnProperty(type)) return TYPE_TO_TOKEN[type];
+        if (EVENT_TYPE_PATTERN.test(type)) return type;
+        return null;
+    }
+
     // compose: filter state object → PQL sentence string (spaces).
-    // Inverse of parse. Returns "" for any invalid state.
-    function compose(state) {
+    // Inverse of parse. Returns "" for any invalid state. When defaultScope is
+    // supplied and the filter is the tenant default (relation=from,
+    // scope=defaultScope), the relation+scope clause is omitted so the sentence
+    // reads "all posts by date".
+    function compose(state, defaultScope) {
         if (!state) return '';
         var qualifier = state.qualifier || 'all';
         if (QUALIFIERS.indexOf(qualifier) < 0) return '';
 
-        var typeToken = TYPE_TO_TOKEN[state.type];
+        var typeToken = typeTokenFor(state.type);
         if (!typeToken) return '';
 
-        var scopeTokens = scopeToTokens(state.scope);
-        if (!scopeTokens) return '';
+        var relation = state.relation || 'from';
+        if (RELATIONS.indexOf(relation) < 0) return '';
 
         var modifierTokens = state.modifier ? modifierToTokens(state.modifier) : [];
         if (state.modifier && modifierTokens.length === 0) return '';
 
-        return [qualifier, typeToken, 'from']
+        // Tenant-relative omission: drop the clause for the default (from, tenant).
+        if (defaultScope && relation === 'from' && state.scope === defaultScope) {
+            return [qualifier, typeToken].concat(modifierTokens).join(' ');
+        }
+
+        var scopeTokens = scopeToTokens(state.scope);
+        if (!scopeTokens) return '';
+
+        return [qualifier, typeToken, relation]
             .concat(scopeTokens)
             .concat(modifierTokens)
             .join(' ');
@@ -176,9 +233,12 @@
     // parseURL: extract PQL state from a location object.
     // Returns { pqlState }. pqlState is null when the URL isn't a PQL
     // path or when the sentence is malformed.
-    function parseURL(location) {
+    // parseURL: extract PQL state from a location object. Matches both the SPA
+    // form (/_/pql/<sentence>) and the public form (/pql/<sentence>). The
+    // optional defaultScope enables tenant-relative parsing on public pages.
+    function parseURL(location, defaultScope) {
         var pathname = (location && location.pathname) || '';
-        var match = pathname.match(/(?:^|\/)_\/pql\/(.+?)\/?$/);
+        var match = pathname.match(/(?:^|\/)(?:_\/)?pql\/(.+?)\/?$/);
         if (!match) return { pqlState: null };
         // Path-form uses `+` for spaces. decodeURIComponent first to
         // handle any %-encoded characters (recipient handles with dots
@@ -189,16 +249,16 @@
         } catch (e) {
             return { pqlState: null };
         }
-        return { pqlState: parse(sentence) };
+        return { pqlState: parse(sentence, defaultScope) };
     }
 
     // composeURL: filter state → full SPA URL.
     // basePath defaults to '/_'; pass App.basePath for parity. Returns
     // the base path alone when state is invalid (caller renders the
     // default filter at that URL).
-    function composeURL(state, basePath) {
+    function composeURL(state, basePath, defaultScope) {
         var bp = basePath || '/_';
-        var sentence = compose(state);
+        var sentence = compose(state, defaultScope);
         if (!sentence) return bp + '/';
         return bp + '/pql/' + sentence.replace(/ /g, '+');
     }

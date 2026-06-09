@@ -100,66 +100,6 @@ func TestEncryptDecrypt_WrongKey(t *testing.T) {
 	}
 }
 
-func TestStorageEncryption_RoundTrip(t *testing.T) {
-	key, err := DeriveStorageKey([]byte("test-secret-32bytes-for-testing!"), []byte("test-salt-32bytes-for-testing!!"), "test-info")
-	if err != nil {
-		t.Fatalf("derive key: %v", err)
-	}
-
-	plaintext := []byte("Stored message content")
-	ciphertext, nonce, err := EncryptForStorage(plaintext, &key)
-	if err != nil {
-		t.Fatalf("encrypt for storage: %v", err)
-	}
-
-	decrypted, err := DecryptFromStorage(ciphertext, &nonce, &key)
-	if err != nil {
-		t.Fatalf("decrypt from storage: %v", err)
-	}
-
-	if string(decrypted) != "Stored message content" {
-		t.Errorf("storage round-trip mismatch: %q", string(decrypted))
-	}
-}
-
-func TestStorageEncryption_WrongKey(t *testing.T) {
-	key1, _ := DeriveStorageKey([]byte("test-secret-32bytes-for-testing!"), []byte("test-salt-32bytes-for-testing!!"), "info1")
-	key2, _ := DeriveStorageKey([]byte("test-secret-32bytes-for-testing!"), []byte("test-salt-32bytes-for-testing!!"), "info2")
-
-	plaintext := []byte("Secret")
-	ciphertext, nonce, _ := EncryptForStorage(plaintext, &key1)
-
-	_, err := DecryptFromStorage(ciphertext, &nonce, &key2)
-	if err == nil {
-		t.Error("decryption with different key should fail")
-	}
-}
-
-func TestDeriveStorageKey_Deterministic(t *testing.T) {
-	secret := []byte("same-secret-32bytes-for-test!!")
-	salt := []byte("same-salt-32bytes-for-testing!!")
-	info := "polis-dm-storage-v1"
-
-	key1, _ := DeriveStorageKey(secret, salt, info)
-	key2, _ := DeriveStorageKey(secret, salt, info)
-
-	if key1 != key2 {
-		t.Error("same inputs should produce same key")
-	}
-}
-
-func TestDeriveStorageKey_DifferentInfo(t *testing.T) {
-	secret := []byte("same-secret-32bytes-for-test!!")
-	salt := []byte("same-salt-32bytes-for-testing!!")
-
-	key1, _ := DeriveStorageKey(secret, salt, "info1")
-	key2, _ := DeriveStorageKey(secret, salt, "info2")
-
-	if key1 == key2 {
-		t.Error("different info should produce different keys")
-	}
-}
-
 func TestMessageIDFromNonce(t *testing.T) {
 	var nonce [24]byte
 	copy(nonce[:], []byte("test-nonce-24-bytes!!!!"))

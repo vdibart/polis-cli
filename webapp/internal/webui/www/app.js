@@ -48,6 +48,12 @@ const App = {
     // Hosted mode: set via window.__POLIS_HOSTED by the hosted service
     isHosted: !!(window.__POLIS_HOSTED),
 
+    // Developer mode: set via window.__POLIS_DEV by `polis serve --dev`. On
+    // localhost, DM messaging (compose/send) is read-only by default — DMs are a
+    // networked/hosted feature and a served export is offline. Dev mode re-enables
+    // the send/compose UI for development + testing. See docs/cli/user/command-reference.md (polis serve).
+    isDev: !!(window.__POLIS_DEV),
+
     // Snippet state (used by about editor for preview)
     snippetState: {
         editingPath: 'about.md',
@@ -117,7 +123,7 @@ const App = {
         welcome: document.getElementById('welcome-screen'),
         error: document.getElementById('error-screen'),
         dashboard: document.getElementById('dashboard-screen'),
-        // step-06/6.c — v4 stream layout container, shown for any PQL
+        // v4 stream layout container, shown for any PQL
         // filter view. Bare `/_/` lands here; `/_/settings` switches
         // to the dashboard wrapper above.
         stream: document.getElementById('stream-screen'),
@@ -359,7 +365,7 @@ const App = {
             presetBtns.forEach(btn => btn.classList.remove('active'));
         }
 
-        // step-06/6.c — show the v4 filter widget only on stream-screen.
+        // Show the v4 filter widget only on stream-screen.
         // Other screens (legacy dashboard, editor, etc.) hide it so the
         // sentence doesn't confusingly hover over unrelated content.
         const filterEl = document.getElementById('polis-topbar-filter');
@@ -375,8 +381,8 @@ const App = {
         if (this.screens[name]) {
             this.screens[name].classList.remove('hidden');
         }
-        // The 'editor' and 'comment' screen branches were retired in
-        // chunk A — those screens no longer exist. Inline editor cards
+        // The 'editor' and 'comment' screen branches were retired —
+        // those screens no longer exist. Inline editor cards
         // on the v4 stream-screen handle post + comment composition.
     },
 
@@ -460,7 +466,7 @@ const App = {
     },
 
     // Update which nav icon is highlighted based on current view.
-    // step-06/6.a: nav IDs renamed to v4 grammar (gateway/paragraph/comment/people/envelope/edit).
+    // Nav IDs use the v4 grammar (gateway/paragraph/comment/people/envelope/edit).
     _updateNavActive(view) {
         // Only the `conversations` view (bare `/_/` landing) maps to an
         // icon through this helper — the v4 stream-screen wraps the
@@ -730,10 +736,10 @@ const App = {
 
     // Route table: [pattern, config] pairs. Checked in order.
     // Parameterized segments: :id (single segment), :path+ (catch-all, one or more segments).
-    // Routes left after chunks A + B: bare `/_/` (default filter
+    // Routes left: bare `/_/` (default filter
     // landing) and `/_/settings` (the only non-stream surface).
     // Every other filter view — including profiles — is reached via
-    // the PQL URL form (`/_/pql/<sentence>`) the chunk-B parser
+    // the PQL URL form (`/_/pql/<sentence>`) the parser
     // handles. The people-icon click composes to
     // `/_/pql/all+profiles+from+my+network+by+name` automatically
     // via the onFilterChange → composeURL binding.
@@ -747,7 +753,7 @@ const App = {
         'settings':            '/settings',
     },
 
-    // SOCIAL_PLUGINS retired in chunk A. The pulse plugin is gone (its
+    // SOCIAL_PLUGINS retired. The pulse plugin is gone (its
     // dashboard widget didn't fit the tier model); the conversations
     // plugin's `/feed` route is gone (replaced by bare `/_/` landing on
     // the default filter). The plugin-dispatch path in loadViewContent
@@ -817,7 +823,7 @@ const App = {
     // opts.replace: use replaceState instead of pushState
     // opts.skipRender: only update URL, don't render (used during init)
     async navigateTo(path, opts = {}) {
-        // Auto-save-on-navigate retired in chunk A: the v3 editor-screen
+        // Auto-save-on-navigate retired: the v3 editor-screen
         // (and its _buildFullMarkdown / saveDraft helpers) is gone. The
         // v4 inline editor card has its own autosave wired into its
         // close path (see owner-extras.js mountEditorCard).
@@ -833,12 +839,11 @@ const App = {
         }
         const route = this.resolveRoute(path);
         if (!route) {
-            // Unknown-`/_/*`-path fallback (chunk C): render the default
+            // Unknown-`/_/*`-path fallback: render the default
             // filter view + replaceState the URL to the canonical bare
             // basePath. No toast — bookmarks and in-flight links from
             // retired v3 paths land here silently and the user sees a
-            // working surface with a clean URL bar. Hard-cutover per
-            // plan.
+            // working surface with a clean URL bar.
             window.history.replaceState({}, '', this.basePath + '/');
             if (!opts.skipRender) {
                 this.sidebarMode = 'social';
@@ -872,10 +877,8 @@ const App = {
             this.currentView = config.view;
             if (config.tabHint) this._commentsPublishedFilter = config.tabHint;
             this._updateSidebarActiveItem(config.view);
-            // step-06/6.c: /feed view (conversations) routes to the v4
-            // stream layout (stream-screen) instead of the legacy
             // The `conversations` view is the v4 stream-screen — the
-            // canvas that hosts every filter view. The chunk-B PQL
+            // canvas that hosts every filter view. The PQL
             // parser handles `/_/pql/<sentence>` directly (see
             // _navigateToPQL); this branch handles the bare `/_/`
             // landing.
@@ -891,7 +894,7 @@ const App = {
             return;
         }
 
-        // Editor / action / screen dispatch retired in chunk A. The
+        // Editor / action / screen dispatch retired. The
         // /_/posts/new, /_/posts/drafts/:id, /_/posts/:path+,
         // /_/comments/new, /_/comments/drafts/:id routes are gone;
         // the inline editor card on the v4 stream-screen replaces
@@ -904,12 +907,12 @@ const App = {
         return rel ? this.basePath + rel : this.basePath + '/';
     },
 
-    // pathForScreen retired in chunk A — every screen the v3 dispatch
+    // pathForScreen retired — every screen the v3 dispatch
     // used to navigate to (newPost / openDraft / openPost / newComment /
     // openCommentDraft) has been replaced by the v4 stream's inline
     // editor card, which doesn't change the URL.
 
-    // PQL URL dispatch (chunk B). Called from navigateTo when the path
+    // PQL URL dispatch. Called from navigateTo when the path
     // is shaped `/_/pql/<sentence>` (or `/pql/<sentence>` relative).
     // Parses the sentence, replaces the URL with the canonical form,
     // activates the stream-screen, and applies the filter once
@@ -1012,7 +1015,7 @@ const App = {
 
     // Register social plugins: inject routes, view paths, and sidebar buttons.
     // Must run before bindEvents() so dynamically created buttons get click handlers.
-    // _registerPlugins retired in chunk A — SOCIAL_PLUGINS is empty so
+    // _registerPlugins retired — SOCIAL_PLUGINS is empty so
     // there's nothing to register. The hook is preserved as a no-op for
     // any callsite that still references it (init() in particular)
     // until the next pass of dead-code removal.
@@ -1020,10 +1023,18 @@ const App = {
 
     // Initialize app
     async init() {
-        // step-06/6.a: mark this surface as the owner SPA. owner-extras.js
-        // (added in 6.d) and CSS body.is-owner gates branch on this class.
-        // Public per-post artifacts never set this, so layered owner-only
-        // chrome stays cleanly scoped.
+        // Mark this surface as the owner SPA. body.is-owner is the precise
+        // SPA-vs-canonical signal: set ONLY here, read by stream.js
+        // (pagination's surface=spa param, the renderPost owner-mode branch),
+        // owner-extras.js, and the stream.css "Layer-2 owner gate" rules
+        // (search for "Layer-2 owner gate" in stream.css). owner-extras.js
+        // loads alongside this script in the SPA only — by design, never on
+        // canonical pages.
+        // Canonical-page interactive features (auth detection, future
+        // comment-write CTA for logged-in visitors) live in the comment/follow
+        // widget (webapp/internal/hosted/widget/widget.js), which renders in a
+        // Shadow DOM and does NOT touch body classes — so this signal stays
+        // unambiguous.
         document.body.classList.add('is-owner');
 
         // Apply theme before first render to avoid flash
@@ -1052,7 +1063,7 @@ const App = {
                     this.siteBaseUrl = status.base_url || '';
                     this.avatarConfig = status.avatar || null;
                     this.authorName = status.author_name || '';
-                    // Set site theme for nav variable contract (Phase 0)
+                    // Set site theme for nav variable contract
                     if (status.active_theme) {
                         this.siteTheme = status.active_theme;
                         document.documentElement.dataset.siteTheme = status.active_theme;
@@ -1159,7 +1170,7 @@ const App = {
     async _restoreRouteFromURL() {
         const pathname = window.location.pathname;
 
-        // PQL URL intercept (chunk B). Init + popstate both flow
+        // PQL URL intercept. Init + popstate both flow
         // through this path; if the URL is /_/pql/<sentence>, parse
         // and apply the filter. Note: we use replace mode so popstate
         // doesn't push a duplicate history entry on top of the one
@@ -1172,7 +1183,7 @@ const App = {
         const route = this.resolveRoute(pathname);
 
         if (!route) {
-            // Unknown deep-link path (chunk C hard-cutover fallback):
+            // Unknown deep-link path (fallback):
             // render the default filter view + replaceState to the
             // canonical bare basePath. Lands on a working surface;
             // user sees a clean URL bar.
@@ -1187,10 +1198,10 @@ const App = {
 
         const { config, params } = route;
 
-        // URL normalization simplified in chunk A: bare /_/ is the
+        // URL normalization: bare /_/ is the
         // canonical default landing (no longer redirected to /_/feed).
         // /_/settings keeps its path. Every filter view goes through
-        // /_/pql/<sentence> via the chunk-B intercept earlier in this
+        // /_/pql/<sentence> via the intercept earlier in this
         // function. The legacy pathForView-based rewrite is no longer
         // needed since the route table only has paths the user already
         // wrote.
@@ -1203,8 +1214,8 @@ const App = {
             this.currentView = config.view;
             if (config.tabHint) this._commentsPublishedFilter = config.tabHint;
             this._updateSidebarActiveItem(config.view);
-            // step-06/6.e bugfix: parallel the conversations branch in
-            // navigateTo (app.js:808-813). Without this, page-refresh on
+            // Parallel the conversations branch in
+            // navigateTo. Without this, page-refresh on
             // /_/feed silently falls through to v3 conversations rendered
             // into #content-list inside dashboard-screen — the filter
             // widget shows briefly then disappears as showScreen('dashboard')
@@ -1221,7 +1232,7 @@ const App = {
             return;
         }
 
-        // Editor / action dispatch retired in chunk A. See navigateTo
+        // Editor / action dispatch retired. See navigateTo
         // for the rationale — the v3 action routes no longer exist.
     },
 
@@ -1255,7 +1266,7 @@ const App = {
     // Discard a draft. Called by the v4 stream's Discard rollover CTA
     // (owner-extras.js decorateDraft). The v3 editor screen used to own
     // its own delete-draft-btn handler; when that screen was retired
-    // (chunk A) the App.deleteDraft method went with it, leaving the
+    // the App.deleteDraft method went with it, leaving the
     // CTA silently broken — click landed a console warning, no network
     // request, draft stayed put. Restored here as a thin wrapper over
     // DELETE /api/drafts/{id}.
@@ -1266,7 +1277,7 @@ const App = {
     },
 
     // Unpublish a post — moves it back to drafts and emits an
-    // unpublish event to the DS. Same chunk-A regression as
+    // unpublish event to the DS. Same regression as
     // deleteDraft: owner-extras.js's Unpublish rollover CTA referenced
     // App.unpublishPost which had been removed alongside the v3 editor.
     async unpublishPost(sourcePath) {
@@ -1320,14 +1331,17 @@ const App = {
         this.counts.followers = c.followers || 0;
         this.counts.dmUnread = c.dm_unread || 0;
 
-        // Auto-clear: if a flag just fired for the surface the user is
-        // already viewing, immediately advance the cursor. Without this
-        // the dot pops on while they're staring at the view that should
-        // have already "seen" the new items.
+        // Auto-clear comment/envelope when the user is already on that surface:
+        // those views render their items live, so the user has effectively
+        // "seen" the new arrivals. The GATEWAY surface (the activity / all-posts
+        // / all-comments stream family) is deliberately EXCLUDED — the stream
+        // does NOT auto-prepend newly-synced items, so the user hasn't actually
+        // seen them. Let the gateway dot drop in asynchronously for parity with
+        // every other view; it clears ONLY on an explicit gateway icon click
+        // (see wireIconPresets in owner-extras.js).
         if (window.PolisOwnerExtras && typeof window.PolisOwnerExtras.getCurrentSurfaceIcon === 'function') {
             const cur = window.PolisOwnerExtras.getCurrentSurfaceIcon();
-            if (cur === 'gateway' && this.counts.hasNewFeed) this.markSurfaceViewed('gateway');
-            else if (cur === 'comment' && this.counts.hasNewBlessingInbox) this.markSurfaceViewed('comment');
+            if (cur === 'comment' && this.counts.hasNewBlessingInbox) this.markSurfaceViewed('comment');
             else if (cur === 'envelope' && this.counts.hasNewDM) this.markSurfaceViewed('envelope');
         }
 
@@ -1462,10 +1476,10 @@ const App = {
         }
     },
 
-    // Load content for current view. After chunk A's v3 hard cutover the
+    // Load content for current view. After the v3 hard cutover the
     // only dashboard view left is `settings`; everything else either
     // routes through the v4 stream-screen (the conversations short-
-    // circuit in navigateTo, or the chunk-B PQL URL handler) or doesn't
+    // circuit in navigateTo, or the PQL URL handler) or doesn't
     // exist anymore.
     async loadViewContent() {
         const contentHeader = document.querySelector('.content-header');
@@ -1474,6 +1488,14 @@ const App = {
         if (this.currentView === 'settings') {
             if (contentHeader) contentHeader.classList.add('hidden');
             this.renderSettings(contentList);
+            // Re-evaluate the DM "set a password" bar for this route. No
+            // onFilterChange fires on Settings, so without this nudge it would
+            // only appear when carried over from a messages surface (e.g. via
+            // the bar's own link) and be absent when reached via the avatar
+            // dropdown. owner-extras hides the in-bar link while on Settings.
+            if (window.PolisOwnerExtras && typeof window.PolisOwnerExtras.refreshDMSetupBar === 'function') {
+                window.PolisOwnerExtras.refreshDMSetupBar();
+            }
             return;
         }
 
@@ -1483,15 +1505,14 @@ const App = {
         if (contentHeader) contentHeader.classList.remove('hidden');
     },
 
-    // step-06/6.c — activate the v4 stream-screen homepage. Lazy-seeds
+    // Activate the v4 stream-screen homepage. Lazy-seeds
     // the initial filter scope (default: my-network) on first activation;
     // subsequent activations don't reset (preserves user's filter state
     // when navigating away and back). The actual data fetch happens
     // inside the v4 stream.js controller via setFilterScope →
     // applyFilter → fetchNextPage.
     //
-    // Filter visibility is owned by showScreen — we don't touch it here
-    // (review nit cleanup, step-06/6.c follow-up).
+    // Filter visibility is owned by showScreen — we don't touch it here.
     _activateStreamScreen() {
         if (!window.PolisStream) {
             // Controller hasn't loaded yet. Normal path: <script defer>
@@ -1499,7 +1520,7 @@ const App = {
             // retry shouldn't fire in practice. Failure modes that reach
             // here: 404 on /bundle-assets/.../stream.js, network error,
             // syntax error in stream.js parsed too late. Cap the retry
-            // budget (review concern, step-06/6.c follow-up) so we don't
+            // budget so we don't
             // spin forever silently — surface a toast on exhaustion.
             this._streamControllerRetries = (this._streamControllerRetries || 0) + 1;
             if (this._streamControllerRetries > 50) {
@@ -1624,7 +1645,7 @@ const App = {
             await this._restoreRouteFromURL();
         });
 
-        // v3 editor + comment screen wiring retired in chunk A. The
+        // v3 editor + comment screen wiring retired. The
         // publish-btn / delete-draft-btn / markdown-input / editor-*
         // / filename-input / comment-back-btn / save-comment-draft-btn /
         // sign-send-btn listeners + the floating selection toolbar +
@@ -1688,7 +1709,7 @@ const App = {
             }
             // Ctrl/Cmd + Enter to publish from inline feed editor.
             // (Cmd-S / Cmd-Enter / Cmd-Shift-F for the v3 editor +
-            // comment screens were removed in chunk A along with those
+            // comment screens were removed along with those
             // screens. The v4 inline editor card has its own keyboard
             // wiring in owner-extras.js.)
             if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && this._feedEditorOpen && this.currentView === 'conversations') {
@@ -1878,7 +1899,7 @@ const App = {
             return;
         }
         // owner-extras not loaded — no-op fallback. The legacy full-
-        // screen post editor it used to open was retired in chunk A.
+        // screen post editor it used to open was retired.
     },
 
     // Render settings page
@@ -1895,7 +1916,15 @@ const App = {
             // Store existing hooks for advanced panel
             this.existingHooks = settings.existing_hooks || [];
 
-            const themes = (settings.themes || []).filter(t => t.name !== 'sols');
+            // Reserved themes are hidden from the picker (server also rejects them):
+            // sols = logged-out landing, stardust = why.polis.pub.
+            const themes = (settings.themes || []).filter(t => t.name !== 'sols' && t.name !== 'stardust');
+
+            // DM message-security state. The keyring tells us whether the
+            // user has upgraded past the server-readable bootstrap epoch to a
+            // password epoch. A missing keyring (older/un-provisioned site) hides
+            // the section entirely rather than showing a broken control.
+            const dmKeyring = await this._fetchDMKeyring();
 
             let automationsHtml = '';
             if (automations.length === 0) {
@@ -1928,6 +1957,8 @@ const App = {
 
             container.innerHTML = `
                 <div class="settings-container">
+                    ${this._dmMessagesSectionHtml(dmKeyring)}
+
                     <div class="settings-section">
                         <div class="settings-section-label">Your Site</div>
                         <div class="settings-card">
@@ -2130,6 +2161,11 @@ const App = {
             if (this.isHosted) {
                 this.fetchAccountEmail();
             }
+
+            // Deep-link: if we arrived via the setup bar / a
+            // /_/settings#messages-password URL, scroll the Messages section
+            // into view now that it's rendered.
+            this._maybeScrollToMessagesSection();
         } catch (err) {
             container.innerHTML = `
                 <div class="content-list">
@@ -2140,6 +2176,445 @@ const App = {
                 </div>
             `;
         }
+    },
+
+    // ── DM message security ──────────────────────────────────
+    // The "Messages" settings section: set a password (bootstrap → epoch 1),
+    // show the recovery phrase once, and display the secured status. All
+    // crypto runs in the browser (PolisDM) — the server never sees the
+    // password, KEK, DEK, or recovery phrase. See dm.js / dm-crypto.js and
+    // docs/general/security-model.md.
+
+    // _fetchDMKeyring returns the browser-safe keyring view, or null when the
+    // tenant has no keyring (un-provisioned) or DM crypto isn't available.
+    async _fetchDMKeyring() {
+        // No crypto stack loaded → no point offering the control.
+        if (!window.PolisDM || !window.PolisDMCrypto) return null;
+        try {
+            const resp = await fetch('/api/dm/keyring', { credentials: 'same-origin' });
+            if (!resp.ok) return null; // 404 = not provisioned; treat as "no section"
+            return await resp.json();
+        } catch (_) {
+            return null;
+        }
+    },
+
+    // _dmHasPasswordEpoch reports whether the keyring has moved past the
+    // server-readable bootstrap epoch to a user-password epoch.
+    _dmHasPasswordEpoch(keyring) {
+        return !!(keyring && Array.isArray(keyring.epochs)
+            && keyring.epochs.some(e => e.kind === 'password'));
+    },
+
+    // _dmMessagesSectionHtml builds the whole "Messages" settings-section.
+    // Returns '' when there's no keyring so the section is omitted cleanly.
+    _dmMessagesSectionHtml(keyring) {
+        if (!keyring) return '';
+        const inner = this._dmHasPasswordEpoch(keyring)
+            ? this._dmSecuredCardHtml()
+            : this._dmSetupPromptCardHtml();
+        // On localhost the compose/send UI is read-only; say so here so
+        // the Messages controls don't look broken. Setting a password still works.
+        const readOnlyNote = this.dmMessagingReadOnly() ? `
+                <div style="margin-top: 8px; padding: 0 4px; font-size: 0.78rem; color: var(--text-muted); line-height: 1.45;">
+                    Sending messages is disabled on localhost &mdash; you can still set or change your password here, but composing and sending happen in the hosted app. For development, run <code style="font-family: var(--font-mono); background: var(--bg-card); padding: 1px 5px; border-radius: 3px;">polis serve --dev</code>.
+                </div>` : '';
+        return `
+            <div class="settings-section" id="messages-password">
+                <div class="settings-section-label">Messages</div>
+                <div class="settings-card" id="dm-messages-card">
+                    ${inner}
+                </div>
+                ${readOnlyNote}
+            </div>
+        `;
+    },
+
+    // State A1 — no password yet: the soft prompt + "Set a password" CTA.
+    _dmSetupPromptCardHtml() {
+        return `
+            <div class="settings-row settings-row-stacked">
+                <div style="text-align: left;">
+                    <div class="settings-row-value" style="text-align: left; white-space: normal; font-weight: 600;">Message security</div>
+                    <div style="color: var(--text-muted); font-size: 0.85rem; margin-top: 4px; line-height: 1.45;">
+                        Set a password so only you can read your messages — not even we can.
+                        Optional but recommended.
+                    </div>
+                </div>
+                <div class="settings-row-actions" style="margin-top: 11px; align-self: stretch;">
+                    <button class="primary" style="flex: 1;" onclick="App.dmOpenPasswordForm()">Set a password</button>
+                </div>
+            </div>
+        `;
+    },
+
+    // State A4 — secured: status banner + management rows. Change password and
+    // regenerate recovery are O(1) re-wraps; rotate (Flow H) is later.
+    _dmSecuredCardHtml() {
+        return `
+            <div class="settings-row settings-row-stacked">
+                <div class="settings-row-value" style="text-align: left; white-space: normal;">
+                    <span style="color: var(--success-color); font-weight: 600;">&#128274; Your messages are secured</span>
+                    <div style="color: var(--text-muted); font-size: 0.85rem; margin-top: 4px; line-height: 1.45;">
+                        Only you can read your messages. We can't — and neither can anyone with access to the server.
+                    </div>
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">Password:</span>
+                <span class="settings-row-value">Set</span>
+                <div class="settings-row-actions">
+                    <button class="btn-copy" onclick="App.dmOpenChangePasswordForm()">Change</button>
+                </div>
+            </div>
+            <div class="settings-row">
+                <span class="settings-row-label">Recovery:</span>
+                <span class="settings-row-value">12-word phrase</span>
+                <div class="settings-row-actions">
+                    <button class="btn-copy" onclick="App.dmOpenRegenRecoveryForm()">Regenerate</button>
+                </div>
+            </div>
+        `;
+    },
+
+    // _dmUnlockDEKWithPassword unwraps the current password epoch's DEK from a
+    // typed password — the gate for both re-wrap flows (the browser must hold the
+    // DEK to re-wrap it). Throws ErrWrongKey on a wrong password (AEAD tag).
+    async _dmUnlockDEKWithPassword(password) {
+        const kr = await this._fetchDMKeyring();
+        if (!kr || !Array.isArray(kr.epochs)) throw new Error('keyring unavailable');
+        const ep = kr.epochs.find(e => e.id === kr.current);
+        if (!ep || ep.kind !== 'password' || !ep.kdf || !ep.wrapped_dek) {
+            throw new Error('no password epoch to change');
+        }
+        const kek = await window.PolisDMCrypto.deriveKEKPassword(password, ep.kdf);
+        return window.PolisDMCrypto.unwrapDEK(ep.wrapped_dek, kek); // throws ErrWrongKey
+    },
+
+    // _dmInvalidateOwnerKeyringCache tells owner-extras to drop its cached keyring
+    // after a settings-side change (set password / re-wrap), so the send-routing
+    // and the setup bar re-read fresh state. owner-extras may not
+    // be loaded (archive view) — guard the call.
+    _dmInvalidateOwnerKeyringCache() {
+        if (window.PolisOwnerExtras && typeof window.PolisOwnerExtras.invalidateDMKeyringCache === 'function') {
+            window.PolisOwnerExtras.invalidateDMKeyringCache();
+        }
+    },
+
+    // dmMessagingReadOnly reports whether the DM compose/send UI is disabled.
+    // True on plain localhost (a self-host or a served export); false when hosted
+    // or when `polis serve --dev` set window.__POLIS_DEV.
+    dmMessagingReadOnly() {
+        return !(this.isHosted || this.isDev);
+    },
+
+    // ── Change password (Flow G) — O(1) re-wrap ──────────────────────────
+    dmOpenChangePasswordForm() {
+        const card = document.getElementById('dm-messages-card');
+        if (!card) return;
+        card.innerHTML = `
+            <div class="settings-row settings-row-stacked">
+                <div class="settings-row-value" style="text-align: left; white-space: normal; font-weight: 600;">Change your password</div>
+                <input type="password" id="dm-cpw-cur" class="dm-pw-input" autocomplete="current-password"
+                    placeholder="Current password" oninput="App.dmOnChangePasswordInput()"
+                    style="width: 100%; margin-top: 8px; padding: 9px 12px; font-family: var(--font-mono); font-size: 0.9rem; background: var(--bg-light); border: 1px solid var(--border-color); color: var(--text-color); border-radius: var(--radius-sm, 6px);">
+                <input type="password" id="dm-cpw-new" class="dm-pw-input" autocomplete="new-password"
+                    placeholder="New password" oninput="App.dmOnChangePasswordInput()"
+                    style="width: 100%; margin-top: 8px; padding: 9px 12px; font-family: var(--font-mono); font-size: 0.9rem; background: var(--bg-light); border: 1px solid var(--border-color); color: var(--text-color); border-radius: var(--radius-sm, 6px);">
+                <input type="password" id="dm-cpw-new2" class="dm-pw-input" autocomplete="new-password"
+                    placeholder="Confirm new password" oninput="App.dmOnChangePasswordInput()"
+                    style="width: 100%; margin-top: 8px; padding: 9px 12px; font-family: var(--font-mono); font-size: 0.9rem; background: var(--bg-light); border: 1px solid var(--border-color); color: var(--text-color); border-radius: var(--radius-sm, 6px);">
+                <div id="dm-cpw-hint" style="font-size: 0.78rem; color: var(--text-muted); margin-top: 7px; min-height: 1em;"></div>
+                <div style="display: flex; gap: 8px; margin-top: 12px;">
+                    <button class="btn-copy" onclick="App.dmCancelMessagesForm()">Cancel</button>
+                    <button class="primary" id="dm-cpw-go" style="flex: 1;" disabled onclick="App.dmSubmitChangePassword()">Change password</button>
+                </div>
+            </div>
+        `;
+        const cur = document.getElementById('dm-cpw-cur');
+        if (cur) cur.focus();
+    },
+
+    dmOnChangePasswordInput() {
+        const curPw = (document.getElementById('dm-cpw-cur') || {}).value || '';
+        const newPw = (document.getElementById('dm-cpw-new') || {}).value || '';
+        const newPw2 = (document.getElementById('dm-cpw-new2') || {}).value || '';
+        const hint = document.getElementById('dm-cpw-hint');
+        const btn = document.getElementById('dm-cpw-go');
+        const score = this._dmPasswordScore(newPw);
+        let ok = !!curPw && score.ok;
+        let label = score.label;
+        if (score.ok && newPw2 && newPw !== newPw2) { ok = false; label = "New passwords don't match"; }
+        if (hint) {
+            hint.textContent = label;
+            hint.style.color = (ok && newPw === newPw2) ? 'var(--success-color)' : 'var(--text-muted)';
+        }
+        if (btn) btn.disabled = !(ok && newPw === newPw2);
+    },
+
+    async dmSubmitChangePassword() {
+        const curPw = (document.getElementById('dm-cpw-cur') || {}).value || '';
+        const newPw = (document.getElementById('dm-cpw-new') || {}).value || '';
+        const newPw2 = (document.getElementById('dm-cpw-new2') || {}).value || '';
+        if (!curPw || !this._dmPasswordScore(newPw).ok || newPw !== newPw2) return;
+        const btn = document.getElementById('dm-cpw-go');
+        const hint = document.getElementById('dm-cpw-hint');
+        if (btn) { btn.disabled = true; btn.textContent = 'Changing…'; }
+        try {
+            const dek = await this._dmUnlockDEKWithPassword(curPw);
+            await window.PolisDM.changePassword(newPw, dek);
+            this._dmInvalidateOwnerKeyringCache(); // the password wrap changed
+            const card = document.getElementById('dm-messages-card');
+            if (card) card.innerHTML = this._dmSecuredCardHtml();
+            this.showToast('Password changed', 'success');
+        } catch (err) {
+            const wrong = err && err.name === 'ErrWrongKey';
+            if (hint) {
+                hint.textContent = wrong ? 'That current password is incorrect.' : ('Could not change password: ' + (err.message || err));
+                hint.style.color = 'var(--error-color, #d08080)';
+            }
+            if (btn) { btn.disabled = false; btn.textContent = 'Change password'; }
+        }
+    },
+
+    // ── Regenerate recovery phrase (Flow E) — O(1) re-wrap ───────────────
+    dmOpenRegenRecoveryForm() {
+        const card = document.getElementById('dm-messages-card');
+        if (!card) return;
+        card.innerHTML = `
+            <div class="settings-row settings-row-stacked">
+                <div class="settings-row-value" style="text-align: left; white-space: normal; font-weight: 600;">Regenerate recovery phrase</div>
+                <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 6px; line-height: 1.45;">
+                    This creates a new 12-word phrase and <strong>retires the old one</strong> &mdash; the old phrase stops working immediately. Enter your password to continue.
+                </div>
+                <input type="password" id="dm-regen-pw" class="dm-pw-input" autocomplete="current-password"
+                    placeholder="Password" oninput="App.dmOnRegenInput()"
+                    style="width: 100%; margin-top: 9px; padding: 9px 12px; font-family: var(--font-mono); font-size: 0.9rem; background: var(--bg-light); border: 1px solid var(--border-color); color: var(--text-color); border-radius: var(--radius-sm, 6px);">
+                <div id="dm-regen-hint" style="font-size: 0.78rem; color: var(--text-muted); margin-top: 7px; min-height: 1em;"></div>
+                <div style="display: flex; gap: 8px; margin-top: 12px;">
+                    <button class="btn-copy" onclick="App.dmCancelMessagesForm()">Cancel</button>
+                    <button class="primary" id="dm-regen-go" style="flex: 1;" disabled onclick="App.dmSubmitRegenRecovery()">Generate new phrase</button>
+                </div>
+            </div>
+        `;
+        const pw = document.getElementById('dm-regen-pw');
+        if (pw) pw.focus();
+    },
+
+    dmOnRegenInput() {
+        const pw = (document.getElementById('dm-regen-pw') || {}).value || '';
+        const btn = document.getElementById('dm-regen-go');
+        if (btn) btn.disabled = !pw;
+    },
+
+    async dmSubmitRegenRecovery() {
+        const pw = (document.getElementById('dm-regen-pw') || {}).value || '';
+        if (!pw) return;
+        const btn = document.getElementById('dm-regen-go');
+        const hint = document.getElementById('dm-regen-hint');
+        if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
+        try {
+            const dek = await this._dmUnlockDEKWithPassword(pw);
+            const { recoveryPhrase } = await window.PolisDM.regenerateRecovery(dek);
+            this._dmInvalidateOwnerKeyringCache(); // the recovery wrap changed
+            // Reuse the set-password reveal/confirm step; "I've saved it" → secured.
+            this._dmShowRecoveryPhrase(recoveryPhrase);
+        } catch (err) {
+            const wrong = err && err.name === 'ErrWrongKey';
+            if (hint) {
+                hint.textContent = wrong ? 'That password is incorrect.' : ('Could not regenerate: ' + (err.message || err));
+                hint.style.color = 'var(--error-color, #d08080)';
+            }
+            if (btn) { btn.disabled = false; btn.textContent = 'Generate new phrase'; }
+        }
+    },
+
+    // dmCancelMessagesForm returns the Messages card to the secured state.
+    dmCancelMessagesForm() {
+        const card = document.getElementById('dm-messages-card');
+        if (card) card.innerHTML = this._dmSecuredCardHtml();
+    },
+
+    // openMessagesSettings navigates to Settings and scrolls to the Messages
+    // section (the setup bar's "Settings ›" target). renderSettings
+    // isn't awaited by navigateTo, so the scroll is honored at the end of the
+    // render via the request flag + the URL hash.
+    openMessagesSettings() {
+        this._scrollMessagesOnRender = true;
+        this.navigateTo('/settings');
+        // Deep-link the URL so a refresh / shared link lands on the same anchor.
+        try { window.history.replaceState({}, '', this.basePath + '/settings#messages-password'); } catch (_) {}
+    },
+
+    // _maybeScrollToMessagesSection scrolls #messages-password into view when the
+    // user deep-linked to it (setup-bar click, or a /_/settings#messages-password
+    // URL). Briefly highlights the section so the target is obvious.
+    _maybeScrollToMessagesSection() {
+        const wants = this._scrollMessagesOnRender ||
+            (typeof window !== 'undefined' && window.location && window.location.hash === '#messages-password');
+        this._scrollMessagesOnRender = false;
+        if (!wants) return;
+        // Defer two frames so the persistent DM banner (re-evaluated on Settings
+        // entry above) has rendered and laid out — we need its height to offset
+        // the scroll. Without the offset, scrollIntoView lands the section under
+        // the fixed topbar + sticky banner.
+        const run = () => {
+            const el = document.getElementById('messages-password');
+            if (!el) return;
+            const banner = document.querySelector('.dm-banner-host');
+            const nav = document.getElementById('icon-nav');
+            // The bottom edge of whichever fixed/sticky header sits above the
+            // content is exactly the y the section should clear. Prefer the
+            // banner (it sits below the topbar); fall back to the topbar.
+            let offset = 0;
+            if (banner && banner.getBoundingClientRect().height > 0) {
+                offset = banner.getBoundingClientRect().bottom;
+            } else if (nav) {
+                offset = nav.getBoundingClientRect().bottom;
+            }
+            el.style.scrollMarginTop = (offset + 12) + 'px';
+            try { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (_) { el.scrollIntoView(); }
+            el.classList.add('settings-anchor-flash');
+            setTimeout(() => el.classList.remove('settings-anchor-flash'), 1600);
+        };
+        if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => requestAnimationFrame(run));
+        } else {
+            run();
+        }
+    },
+
+    // dmOpenPasswordForm swaps the card to the password-entry step (A2).
+    dmOpenPasswordForm() {
+        const card = document.getElementById('dm-messages-card');
+        if (!card) return;
+        card.innerHTML = `
+            <div class="settings-row settings-row-stacked">
+                <div class="settings-row-value" style="text-align: left; white-space: normal; font-weight: 600;">Choose a password</div>
+                <input type="password" id="dm-pw" class="dm-pw-input" autocomplete="new-password"
+                    placeholder="New password" oninput="App.dmOnPasswordInput()"
+                    style="width: 100%; margin-top: 8px; padding: 9px 12px; font-family: var(--font-mono); font-size: 0.9rem; background: var(--bg-light); border: 1px solid var(--border-color); color: var(--text-color); border-radius: var(--radius-sm, 6px);">
+                <input type="password" id="dm-pw2" class="dm-pw-input" autocomplete="new-password"
+                    placeholder="Confirm password" oninput="App.dmOnPasswordInput()"
+                    style="width: 100%; margin-top: 8px; padding: 9px 12px; font-family: var(--font-mono); font-size: 0.9rem; background: var(--bg-light); border: 1px solid var(--border-color); color: var(--text-color); border-radius: var(--radius-sm, 6px);">
+                <div id="dm-pw-hint" style="font-size: 0.78rem; color: var(--text-muted); margin-top: 7px; min-height: 1em;"></div>
+                <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 9px; line-height: 1.45;">
+                    We never store this password. If you forget it, only the recovery phrase shown next can get you back in &mdash; there is no reset.
+                </div>
+                <div style="display: flex; gap: 8px; margin-top: 12px;">
+                    <button class="btn-copy" onclick="App.dmCancelPasswordForm()">Cancel</button>
+                    <button class="primary" id="dm-pw-continue" style="flex: 1;" disabled onclick="App.dmSubmitPassword()">Continue</button>
+                </div>
+            </div>
+        `;
+        const pw = document.getElementById('dm-pw');
+        if (pw) pw.focus();
+    },
+
+    // dmCancelPasswordForm returns the card to the setup prompt (A1).
+    dmCancelPasswordForm() {
+        const card = document.getElementById('dm-messages-card');
+        if (card) card.innerHTML = this._dmSetupPromptCardHtml();
+    },
+
+    // _dmPasswordScore is a lightweight strength heuristic (length + character
+    // classes). It is NOT zxcvbn — it only enforces a sane floor so users don't
+    // pick trivially weak passwords. The real protection is Argon2id + the AEAD
+    // tag; this is purely a UX nudge. Returns {ok, label}.
+    _dmPasswordScore(pw) {
+        if (!pw) return { ok: false, label: '' };
+        let classes = 0;
+        if (/[a-z]/.test(pw)) classes++;
+        if (/[A-Z]/.test(pw)) classes++;
+        if (/[0-9]/.test(pw)) classes++;
+        if (/[^A-Za-z0-9]/.test(pw)) classes++;
+        if (pw.length < 8) return { ok: false, label: 'Too short — at least 8 characters' };
+        if (pw.length >= 12 && classes >= 2) return { ok: true, label: 'Strong' };
+        if (classes >= 2 || pw.length >= 12) return { ok: true, label: 'OK' };
+        return { ok: false, label: 'Weak — mix in another character type or make it longer' };
+    },
+
+    // dmOnPasswordInput validates on each keystroke, gating the Continue button.
+    dmOnPasswordInput() {
+        const pw = (document.getElementById('dm-pw') || {}).value || '';
+        const pw2 = (document.getElementById('dm-pw2') || {}).value || '';
+        const hint = document.getElementById('dm-pw-hint');
+        const btn = document.getElementById('dm-pw-continue');
+        const score = this._dmPasswordScore(pw);
+        let ok = score.ok;
+        let label = score.label;
+        if (score.ok && pw2 && pw !== pw2) { ok = false; label = "Passwords don't match"; }
+        if (hint) {
+            hint.textContent = label;
+            hint.style.color = ok ? 'var(--success-color)' : 'var(--text-muted)';
+        }
+        if (btn) btn.disabled = !(ok && pw === pw2);
+    },
+
+    // dmSubmitPassword runs the bootstrap→epoch-1 upgrade in the browser
+    // (Argon2id is slow, so the button shows a working state) and then reveals
+    // the recovery phrase exactly once.
+    async dmSubmitPassword() {
+        const pw = (document.getElementById('dm-pw') || {}).value || '';
+        const pw2 = (document.getElementById('dm-pw2') || {}).value || '';
+        if (!this._dmPasswordScore(pw).ok || pw !== pw2) return;
+        const btn = document.getElementById('dm-pw-continue');
+        if (btn) { btn.disabled = true; btn.textContent = 'Securing…'; }
+        try {
+            const { recoveryPhrase } = await window.PolisDM.setPassword(pw);
+            this._dmInvalidateOwnerKeyringCache(); // send-routing + setup bar must see the new epoch
+            this._dmShowRecoveryPhrase(recoveryPhrase);
+        } catch (err) {
+            this.showToast('Could not set password: ' + (err.message || err), 'error');
+            if (btn) { btn.disabled = false; btn.textContent = 'Continue'; }
+        }
+    },
+
+    // _dmShowRecoveryPhrase renders the 12-word phrase once (A3). The phrase is
+    // held only transiently for the Copy button and dropped on acknowledgement —
+    // never persisted on App or sent anywhere.
+    _dmShowRecoveryPhrase(phrase) {
+        this._dmRecoveryPhrase = phrase;
+        const words = phrase.trim().split(/\s+/);
+        const grid = words.map((w, i) =>
+            `<span style="white-space: nowrap;"><i style="color: var(--text-faint); font-style: normal; margin-right: 6px;">${i + 1}</i>${this.escapeHtml(w)}</span>`
+        ).join('');
+        const card = document.getElementById('dm-messages-card');
+        if (!card) return;
+        card.innerHTML = `
+            <div class="settings-row settings-row-stacked">
+                <div class="settings-row-value" style="text-align: left; white-space: normal; font-weight: 600;">Save your recovery phrase</div>
+                <div style="font-size: 0.82rem; color: var(--text-muted); margin-top: 6px; line-height: 1.45;">
+                    These 12 words are the only way back in if you forget your password. Store them somewhere safe &mdash; offline, not in polis. Anyone who has them can read all your messages.
+                </div>
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px 10px; font-family: var(--font-mono); font-size: 0.78rem; background: var(--bg-light); border: 1px dashed var(--border-color); border-radius: 8px; padding: 12px; margin-top: 10px;">
+                    ${grid}
+                </div>
+                <div style="display: flex; gap: 8px; margin-top: 12px;">
+                    <button class="btn-copy" onclick="App.dmCopyRecoveryPhrase()">Copy</button>
+                    <button class="primary" style="flex: 1;" onclick="App.dmConfirmRecoverySaved()">I've saved it</button>
+                </div>
+            </div>
+        `;
+    },
+
+    // dmCopyRecoveryPhrase copies the transiently-held phrase to the clipboard.
+    async dmCopyRecoveryPhrase() {
+        if (!this._dmRecoveryPhrase) return;
+        try {
+            await navigator.clipboard.writeText(this._dmRecoveryPhrase);
+            this.showToast('Recovery phrase copied', 'success');
+        } catch (_) {
+            this.showToast('Could not copy — write the words down instead', 'warning');
+        }
+    },
+
+    // dmConfirmRecoverySaved drops the phrase and flips the card to secured (A4).
+    dmConfirmRecoverySaved() {
+        delete this._dmRecoveryPhrase;
+        const card = document.getElementById('dm-messages-card');
+        if (card) card.innerHTML = this._dmSecuredCardHtml();
+        this.showToast('Your messages are now secured', 'success');
     },
 
     // Truncate public key for display
@@ -3138,7 +3613,7 @@ echo "File: $POLIS_PATH"</code>
         }
 
         // Find the feed item by URL. v3 .feed-item entries are no
-        // longer rendered (chunk A retired renderConversationsTabbed),
+        // longer rendered (renderConversationsTabbed retired),
         // so this early-return path is effectively dead — the v4
         // stream uses owner-extras.mountCommentEditor for comment
         // composition. Kept here as a defensive no-op for any caller
@@ -3359,7 +3834,7 @@ echo "File: $POLIS_PATH"</code>
 
             this.closeInlineCommentEditor();
             await this.loadAllCounts();
-            // Parent-view refresh removed in chunk A — the
+            // Parent-view refresh removed — the
             // renderConversationsTabbed surface this used to refresh
             // is retired. v4 stream handles its own refresh via
             // PolisStream.refresh().
@@ -3977,11 +4452,10 @@ echo "File: $POLIS_PATH"</code>
                     window.open(link, '_blank', 'noopener');
                 } else if (link.startsWith('/_/#')) {
                     // Legacy hash-style notification links (`/_/#blessings`,
-                    // `/_/#feed`, etc.) from before chunk A. The paths they
+                    // `/_/#feed`, etc.). The paths they
                     // pointed at are all retired; route to bare `/_/` and
                     // let the unknown-path fallback land the user on the
-                    // default filter. Friends/family alpha audience absorbs
-                    // the broken-link cost per the hard-cutover decision.
+                    // default filter.
                     this.navigateTo('/');
                 } else {
                     // Internal SPA path — strip basePath prefix and navigate
@@ -4538,8 +5012,8 @@ git push</pre>
 
     // intent=comment: open the comment composer pre-filled.
     //
-    // The v3 #comment-screen this used to mount into is retired in
-    // chunk A. The v4 inline comment editor card (owner-extras.js
+    // The v3 #comment-screen this used to mount into is retired.
+    // The v4 inline comment editor card (owner-extras.js
     // mountCommentEditor) is the replacement, but mounting it
     // pre-filled from an external intent needs additional plumbing
     // (the inline editor wants to anchor against a stream entry).
@@ -4690,7 +5164,7 @@ git push</pre>
         }
     },
 
-    // ── DM section retired (chunk C: v3-DM port to v4 stream surface) ──
+    // ── DM section retired (v3-DM port to v4 stream surface) ──
     //
     // The renderDMConversationList / renderDMThread / renderDMNewConversation
     // functions + their helpers (_dmAvatarHtml, _dmFormatDate, _dmKeyDown,
@@ -4848,7 +5322,7 @@ git push</pre>
         if (pm) pm.focus();
     },
 
-    // ── Focus Mode (v3 editor-screen focus mode) — retired in chunk A
+    // ── Focus Mode (v3 editor-screen focus mode) — retired
     // along with the editor screen itself. Read-focus mode for posts
     // lives in shapes/v4/stream.js (enterFocusMode); write-focus for
     // the inline editor card is handled by owner-extras. ──

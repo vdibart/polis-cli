@@ -30,9 +30,6 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/snippets/", limitBody(s.handleSnippet, MaxSnippetBodySize+4096))
 	mux.HandleFunc("/api/about", limitBody(s.handleAbout, MaxSnippetBodySize+4096))
 
-	// Content-heavy POST routes — hook scripts (32KB + JSON overhead)
-	mux.HandleFunc("/api/automations", limitBody(s.handleAutomations, MaxHookBodySize+4096))
-
 	// Default body limit (1MB) — small-payload POST handlers
 	mux.HandleFunc("/api/init", limitBody(s.handleInit, MaxDefaultBodySize))
 	mux.HandleFunc("/api/link", limitBody(s.handleLink, MaxDefaultBodySize))
@@ -66,10 +63,20 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/rotate-key", limitBody(s.handleRotateKey, MaxDefaultBodySize))
 	mux.HandleFunc("/api/download-site", s.handleDownloadSite)
 	mux.HandleFunc("/api/content/", s.handleContent)
-	mux.HandleFunc("/api/automations/quick", limitBody(s.handleAutomationsQuick, MaxDefaultBodySize))
-	mux.HandleFunc("/api/automations/", limitBody(s.handleAutomation, MaxDefaultBodySize))
 	mux.HandleFunc("/api/templates", s.handleTemplates)
-	mux.HandleFunc("/api/hooks/generate", limitBody(s.handleHooksGenerate, MaxDefaultBodySize))
+
+	// Hook/automation routes — localhost only. Hooks are executable scripts run
+	// server-side and never run on the hosted platform (EnableHooks=false), so
+	// the surface isn't even registered there. The handlers also 403 when
+	// !EnableHooks (defense in depth); this removes the reachable route entirely.
+	// EnableHooks is set before SetupRoutes runs in both Handler() and the
+	// localhost Run path.
+	if s.EnableHooks {
+		mux.HandleFunc("/api/automations", limitBody(s.handleAutomations, MaxHookBodySize+4096))
+		mux.HandleFunc("/api/automations/quick", limitBody(s.handleAutomationsQuick, MaxDefaultBodySize))
+		mux.HandleFunc("/api/automations/", limitBody(s.handleAutomation, MaxDefaultBodySize))
+		mux.HandleFunc("/api/hooks/generate", limitBody(s.handleHooksGenerate, MaxDefaultBodySize))
+	}
 
 	// Site registration API routes
 	mux.HandleFunc("/api/site/registration-status", s.handleSiteRegistrationStatus)
@@ -94,12 +101,24 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/feed/counts", s.handleFeedCounts)
 	mux.HandleFunc("/api/feed/grouped", s.handleFeedGrouped)
 
-	// v1 stream filter endpoint (plan §4.d). Structured-query API consumed
-	// by the stream's filter widget (4.e). GET-only. Wrapped in
-	// publicContentMiddleware (CORS * + per-IP rate limit per plan §4.d
-	// task 3 — the same limiter used for /posts/, /comments/, /content/
-	// when those land in routes).
-	mux.HandleFunc("/api/v1/stream/items", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamItems))
+	// NOTE: /api/v1/stream/items was retired in the PQL hard cutover — the
+	// stream's data path is now GET /pql/<sentence> (registered below). The
+	// handleStreamItems engine still backs it (handleStreamPQL delegates to it).
+	// Read-focus single-latest-comment lookup (read-focus mode shows exactly
+	// one comment per post, blessed or not — sourced from DS). GET-only, same
+	// public wrapper as /stream/items.
+	mux.HandleFunc("/api/v1/stream/focus-comment", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamFocusComment))
+	// Read-focus full-body proxy: returns one post's rendered body so the SPA
+	// can show the whole post (not the excerpt) for cross-tenant entries that
+	// the browser can't fetch directly under its connect-src CSP. GET-only,
+	// same public wrapper as /stream/items.
+	mux.HandleFunc("/api/v1/stream/body", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamBody))
+	// PQL-native data endpoint (pull-PQL-through Phase 3). GET /pql/<sentence>
+	// content-negotiates: Accept: application/json → versioned JSON envelope;
+	// else → HTML infinity-stream shell (Phase 5). Same public wrapper +
+	// per-IP limiter as /stream/items; owner-private (first-person) scopes are
+	// gated at the routing layer (hosted pqlRequiresOwnerAuth / localhost trust).
+	mux.HandleFunc("/pql/", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamPQL))
 	// step-06/6.e: client-emitted structured event endpoint. Owner SPA
 	// posts {event, fields} on icon-preset clicks (pub.polis.stream.
 	// preset_loaded) for usage telemetry. Allowlist-restricted.
@@ -118,9 +137,23 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/notifications/read", limitBody(s.handleNotificationRead, MaxDefaultBodySize))
 
 	// DM API routes
+	mux.HandleFunc("/api/dm/keyring", s.handleDMKeyring)
+	mux.HandleFunc("/api/dm/password", limitBody(s.handleDMSetPassword, MaxDefaultBodySize))
+	// Phase 4.8 O(1) re-wrap: change password / regenerate recovery phrase. The
+	// browser re-wraps the (unchanged) current-epoch DEK; the server stores the new
+	// blob + KDF. No pubkey change → no republish.
+	mux.HandleFunc("/api/dm/password/rewrap", limitBody(s.handleDMRewrapPassword, MaxDefaultBodySize))
 	mux.HandleFunc("/api/dm/conversations", s.handleDMConversations)
 	mux.HandleFunc("/api/dm/conversations/", s.handleDMConversation)
 	mux.HandleFunc("/api/dm/send", limitBody(s.handleDMSend, MaxDefaultBodySize))
+	// Phase 4.6 browser-seal send: resolve the recipient's verified message key,
+	// then relay a browser-sealed envelope (the sender's password-epoch DEK never
+	// reaches the server).
+	mux.HandleFunc("/api/dm/recipient-key", s.handleDMRecipientKey)
+	mux.HandleFunc("/api/dm/send-sealed", limitBody(s.handleDMSendSealed, MaxDefaultBodySize))
+	// Phase 4.10: expose a recipient's signed protection_status to the SPA (server
+	// makes the signed, mutuals-gated query; failures → status:"unknown").
+	mux.HandleFunc("/api/dm/protection-status", s.handleDMProtectionStatus)
 	mux.HandleFunc("/api/dm/mark-read", limitBody(s.handleDMMarkRead, MaxDefaultBodySize))
 	mux.HandleFunc("/api/dm/retry", limitBody(s.handleDMRetry, MaxDefaultBodySize))
 	mux.HandleFunc("/api/dm/recipients", s.handleDMRecipients)
@@ -161,7 +194,7 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 //   - / and any tenant-static path (/posts/, /comments/, /styles.css,
 //     /sitemap.xml, /stream.js, /.well-known/polis, etc.) → served by
 //     tenantStaticHandler via the shared webapp/internal/serve package
-//   - /api/v1/stream/items — structured-query API for the stream
+//   - /pql/<sentence> — PQL-native data + public stream endpoint
 //   - /content/ — source-path 301 redirect to mount paths
 //   - /favicon.svg — generated favicon (avatar-derived)
 //
@@ -172,9 +205,14 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 // in --reader mode — the mux 404s any request that doesn't match a
 // route in this set.
 func SetupReaderRoutes(mux *http.ServeMux, s *Server) {
-	// v1 stream filter endpoint (plan §4.d) — same wrapper as in
-	// SetupRoutes (publicContentMiddleware + per-IP rate limiter).
-	mux.HandleFunc("/api/v1/stream/items", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamItems))
+	// /api/v1/stream/items retired in the PQL hard cutover — see SetupRoutes.
+	// The data path is GET /pql/<sentence> (registered below).
+	// Read-focus single-latest-comment lookup — same wrapper as in SetupRoutes.
+	mux.HandleFunc("/api/v1/stream/focus-comment", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamFocusComment))
+	// Read-focus full-body proxy — same wrapper as in SetupRoutes.
+	mux.HandleFunc("/api/v1/stream/body", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamBody))
+	// PQL-native data endpoint — same wrapper as in SetupRoutes.
+	mux.HandleFunc("/pql/", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamPQL))
 
 	// Content source path redirect (content/ .html → mount path)
 	mux.HandleFunc("/content/", s.handleContentRedirect)

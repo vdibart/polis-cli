@@ -565,26 +565,29 @@ func TestHandleDMDeliverNoAuth(t *testing.T) {
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
-	// Without any auth headers, should get 401
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 for DM deliver without auth, got %d: %s", w.Code, w.Body.String())
+	// DM-7: deliver is a signed-only action. Without X-Polis-Domain it is refused with
+	// 403 (signed request required) — it does NOT fall through to Bearer auth.
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for DM deliver without a signed request, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
-func TestHandleDMDeliverWithBearerAuth(t *testing.T) {
+// TestHandleDMDeliverBearerRejected is the DM-7 regression: a valid Bearer API key must
+// NOT authorize `deliver`. The generic-action Bearer path took `sender_domain` from the
+// body unverified; closing it forces the cryptographic signed-request branch.
+func TestHandleDMDeliverBearerRejected(t *testing.T) {
 	mux, _, apiKey := testSetup(t)
 
-	body := jsonBody(t, map[string]any{"message": "hello"})
+	body := jsonBody(t, map[string]any{"sender_domain": "spoofed.example.com", "envelope": "{}"})
 	req := httptest.NewRequest(http.MethodPost, "/v1/content/dm/actions/deliver", body)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
-	// With Bearer auth, should reach the action handler (not DM deliver)
-	// and fail at dispatch level, not at auth
-	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
-		t.Errorf("auth failed with %d, should have passed", w.Code)
+	// Bearer must not reach the deliver handler — signed request required.
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 (Bearer cannot authorize deliver), got %d: %s", w.Code, w.Body.String())
 	}
 }
 

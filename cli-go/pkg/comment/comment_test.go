@@ -7,8 +7,80 @@ import (
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 	verhist "github.com/vdibart/polis-cli/cli-go/pkg/version"
 )
+
+// TestCommentURLDerivation_AllPathsConsistent is WS5 guard ④: every comment
+// registration path must yield the SAME canonical URL for the same comment.
+// All paths now call polisurl.CommentContentURL, but they derive dateDir two
+// ways — from the TIMESTAMP (SignComment, beseech, sync: ts.Format("20060102"))
+// and from the DISK PATH (Chaplain: filepath.Base(filepath.Dir(path))). These
+// must agree, or Chaplain's daily sweep re-registers comments at a different URL
+// than beseech did, creating duplicate (type,url) rows. This round-trips a real
+// publish and asserts the disk-derived URL == the URL SignComment signed ==
+// canonical source form.
+func TestCommentURLDerivation_AllPathsConsistent(t *testing.T) {
+	dataDir := t.TempDir()
+	for _, d := range []string{
+		filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "drafts"),
+		filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending"),
+		filepath.Join(dataDir, "content", "pub.polis.core", "comment"),
+	} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	privKey := generateTestKey(t)
+	site := "https://bob.polis.pub"
+	draft := &CommentDraft{
+		InReplyTo: "https://alice.polis.pub/posts/20260101/hello.md",
+		Content:   "Consistency check.",
+	}
+	signed, err := SignComment(dataDir, draft, "bob.polis.pub", site, privKey)
+	if err != nil {
+		t.Fatalf("SignComment: %v", err)
+	}
+	if err := PublishComment(dataDir, signed.Meta.ID); err != nil {
+		t.Fatalf("PublishComment: %v", err)
+	}
+
+	// The URL SignComment signed — and that registerCommentContent registers.
+	signedURL := signed.Meta.CommentURL
+
+	// Locate the published canonical .md.
+	var publishedPath string
+	commentRoot := filepath.Join(dataDir, "content", "pub.polis.core", "comment")
+	filepath.WalkDir(commentRoot, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, signed.Meta.ID+".md") {
+			publishedPath = p
+		}
+		return nil
+	})
+	if publishedPath == "" {
+		t.Fatalf("published comment .md not found under %s", commentRoot)
+	}
+
+	// Derive the URL the way Chaplain does (webapp/internal/hosted/chaplain.go,
+	// ~line 467-469): from the on-disk path, NOT the timestamp.
+	chaplainDate := filepath.Base(filepath.Dir(publishedPath))
+	chaplainID := strings.TrimSuffix(filepath.Base(publishedPath), ".md")
+	chaplainURL := polisurl.CommentContentURL(site, chaplainDate, chaplainID)
+
+	if chaplainURL != signedURL {
+		t.Errorf("Chaplain disk-derived URL %q != SignComment URL %q (registration paths drifted)", chaplainURL, signedURL)
+	}
+
+	// And it must be the canonical source form, never the /comments/ mount path.
+	wantPrefix := site + "/content/pub.polis.core/comment/"
+	if !strings.HasPrefix(signedURL, wantPrefix) {
+		t.Errorf("comment URL %q is not canonical (want prefix %q)", signedURL, wantPrefix)
+	}
+	if strings.Contains(signedURL, "/comments/") {
+		t.Errorf("comment URL %q uses the mount path (Defect 1 regression)", signedURL)
+	}
+}
 
 func TestGetGenerator_UsesVersion(t *testing.T) {
 	old := Version
@@ -342,6 +414,35 @@ func TestSignComment_DomainInFrontmatter(t *testing.T) {
 	fm := ParseFrontmatter(string(data))
 	if fm["author"] != "bob.polis.pub" {
 		t.Errorf("Frontmatter author = %q, want %q", fm["author"], "bob.polis.pub")
+	}
+}
+
+// TestSignComment_CanonicalURL is the regression guard for Defect 1: a comment
+// must self-declare (and later register) the CANONICAL source-path URL
+// (content/pub.polis.core/comment/...), NOT the legacy /comments/ mount path.
+func TestSignComment_CanonicalURL(t *testing.T) {
+	dataDir := t.TempDir()
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "drafts"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "denied"), 0755)
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "comment"), 0755)
+
+	privKey := generateTestKey(t)
+	draft := &CommentDraft{
+		InReplyTo: "https://alice.polis.pub/posts/20260101/hello.md",
+		Content:   "Great post!",
+	}
+	signed, err := SignComment(dataDir, draft, "bob.polis.pub", "https://bob.polis.pub", privKey)
+	if err != nil {
+		t.Fatalf("SignComment failed: %v", err)
+	}
+
+	want := "https://bob.polis.pub/content/pub.polis.core/comment/"
+	if !strings.HasPrefix(signed.Meta.CommentURL, want) {
+		t.Errorf("CommentURL = %q, want prefix %q (canonical source path)", signed.Meta.CommentURL, want)
+	}
+	if strings.Contains(signed.Meta.CommentURL, "/comments/") {
+		t.Errorf("CommentURL = %q must NOT use the /comments/ mount path (Defect 1)", signed.Meta.CommentURL)
 	}
 }
 

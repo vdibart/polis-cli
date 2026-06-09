@@ -233,6 +233,93 @@ func TestDataDirStorage_SourceRedirectHTML(t *testing.T) {
 	}
 }
 
+// TestDataDirStorage_MountMdAliasRedirect ensures a mount-path .md request
+// (e.g. /comments/<date>/<id>.md or /posts/<date>/<id>.md) 301-redirects to
+// the canonical content source path. This is the alias that heals comments
+// mis-registered with the discovery service at the mount URL (comment-infra
+// remediation, plans/comment-registration-severe-bug.md, Defect 1): the signed
+// .md lives under content/, never at the mount, so the historical
+// /comments/<…>.md DS URLs must resolve via this redirect.
+func TestDataDirStorage_MountMdAliasRedirect(t *testing.T) {
+	dir := newStaticServeTestDir(t)
+	storage := NewDataDirStorage(dir)
+
+	cases := []struct {
+		url  string
+		want string
+	}{
+		{"/comments/20260302/reply.md", "/content/pub.polis.core/comment/20260302/reply.md"},
+		{"/posts/20260302/slug.md", "/content/pub.polis.core/post/20260302/slug.md"},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodGet, tc.url, nil)
+		w := httptest.NewRecorder()
+		serve.ServeTenantPublic(w, req, storage, "", nil)
+
+		if w.Code != http.StatusMovedPermanently {
+			t.Fatalf("%s: expected 301, got %d", tc.url, w.Code)
+		}
+		if loc := w.Header().Get("Location"); loc != tc.want {
+			t.Errorf("%s: expected redirect to %q, got %q", tc.url, tc.want, loc)
+		}
+	}
+
+	// UNCONDITIONAL contract: a mount .md 301s even when a legacy duplicate
+	// .md physically exists at the mount (pre-split artifact). The canonical
+	// copy is the one under content/; the mount must never serve .md. This
+	// guards against reverting to a 404-fallback that would resurrect the
+	// legacy mount-markdown surface.
+	legacyDir := filepath.Join(dir, "comments", "20260101")
+	if err := os.MkdirAll(legacyDir, 0755); err != nil {
+		t.Fatalf("mkdir legacy mount: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "legacy.md"), []byte("# legacy at mount"), 0644); err != nil {
+		t.Fatalf("write legacy mount md: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/comments/20260101/legacy.md", nil)
+	w := httptest.NewRecorder()
+	serve.ServeTenantPublic(w, req, storage, "", nil)
+	if w.Code != http.StatusMovedPermanently {
+		t.Fatalf("legacy mount .md present: expected 301 (unconditional alias), got %d", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != "/content/pub.polis.core/comment/20260101/legacy.md" {
+		t.Errorf("legacy mount .md: expected redirect to content path, got %q", loc)
+	}
+	if strings.Contains(w.Body.String(), "legacy at mount") {
+		t.Error("mount .md content leaked instead of redirecting")
+	}
+}
+
+// TestDataDirStorage_ContentMdServedNotRedirected ensures the alias is a
+// no-op for the canonical content .md (content/pub.polis.core/comment/...md):
+// it is served as raw markdown, NOT redirected. This proves the full alias
+// chain (mount .md → 301 → content .md → 200) terminates and never loops.
+func TestDataDirStorage_ContentMdServedNotRedirected(t *testing.T) {
+	dir := newStaticServeTestDir(t)
+	cdir := filepath.Join(dir, "content", "pub.polis.core", "comment", "20260302")
+	if err := os.MkdirAll(cdir, 0755); err != nil {
+		t.Fatalf("mkdir comment content: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cdir, "reply.md"), []byte("---\ntype: comment\n---\nhi"), 0644); err != nil {
+		t.Fatalf("write comment md: %v", err)
+	}
+	storage := NewDataDirStorage(dir)
+
+	req := httptest.NewRequest(http.MethodGet, "/content/pub.polis.core/comment/20260302/reply.md", nil)
+	w := httptest.NewRecorder()
+	serve.ServeTenantPublic(w, req, storage, "", nil)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (served, not redirected), got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/markdown") {
+		t.Errorf("expected text/markdown content-type, got %q", ct)
+	}
+	if !strings.Contains(w.Body.String(), "hi") {
+		t.Errorf("expected markdown body, got %q", w.Body.String())
+	}
+}
+
 // TestDataDirStorage_OptionsNonCORS ensures OPTIONS on a non-CORS-prefixed
 // path (e.g. an HTML or CSS file outside posts/comments/content/.well-known)
 // also short-circuits at the top of the handler — no file read, no body.

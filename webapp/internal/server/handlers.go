@@ -2,7 +2,9 @@ package server
 
 import (
 	"archive/zip"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -20,8 +22,8 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/blessing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
-	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
@@ -1841,28 +1843,11 @@ func (s *Server) handleBlessingGrant(w http.ResponseWriter, r *http.Request) {
 		"comment_url": req.CommentURL,
 	})
 
-	// Fetch the remote comment markdown and save it locally so the renderer
-	// can display the comment body on the post page. The comment .md file
-	// lives on the commenter's site, not ours.
-	if commentRelPath := extractCommentRelPath(req.CommentURL); commentRelPath != "" {
-		localPath := filepath.Join(s.DataDir, commentRelPath)
-		if _, err := os.Stat(localPath); os.IsNotExist(err) {
-			rc := s.NewRemoteClient()
-			mdURL := polisurl.NormalizeToMD(req.CommentURL)
-			content, fetchErr := rc.FetchContent(commentSourceURL(mdURL))
-			if fetchErr != nil {
-				// Fallback: try the mount path directly (non-hosted sites may serve .md there)
-				content, fetchErr = rc.FetchContent(mdURL)
-			}
-			if fetchErr == nil {
-				if err := os.MkdirAll(filepath.Dir(localPath), 0755); err == nil {
-					os.WriteFile(localPath, []byte(content), 0644)
-				}
-			} else {
-				log.Printf("[warning] could not fetch remote comment %s: %v", req.CommentURL, fetchErr)
-			}
-		}
-	}
+	// Verify + cache the remote comment in the ISOLATED blessed cache (NEVER
+	// under our content/ tree — Defect 3) so the renderer can display the body on
+	// the post page. Shared with the background sync handler via cacheBlessedComment
+	// so the two Defect-3 write sites can't drift.
+	s.cacheBlessedComment(req.CommentURL)
 
 	// Render site to include the newly blessed comment
 	if err := s.RenderSite(); err != nil {
@@ -2161,14 +2146,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"avatar":               avatarConfig,
 			"author_name":          authorName,
 		},
-		"automations":             automations,
-		"existing_hooks":          existingHooks,
-		"setup_wizard_dismissed":  setupWizardDismissed,
-		"hide_read":               s.Config != nil && s.Config.HideRead,
-		"webapp_theme":            webappTheme,
-		"editor_panel_mode":       editorPanelMode,
-		"active_theme":            activeTheme,
-		"themes":                  themes,
+		"automations":            automations,
+		"existing_hooks":         existingHooks,
+		"setup_wizard_dismissed": setupWizardDismissed,
+		"hide_read":              s.Config != nil && s.Config.HideRead,
+		"webapp_theme":           webappTheme,
+		"editor_panel_mode":      editorPanelMode,
+		"active_theme":           activeTheme,
+		"themes":                 themes,
 	})
 }
 
@@ -2549,6 +2534,15 @@ echo "Hook triggered: %s"
 	})
 }
 
+// reservedThemes are system themes that must not be user-selectable: sols is the
+// logged-out landing theme; stardust is reserved for why.polis.pub. They are
+// also filtered out of the picker list in app.js. Reservation blocks selection
+// only — a tenant can still be put on one via registry.json directly.
+var reservedThemes = map[string]bool{
+	"sols":     true,
+	"stardust": true,
+}
+
 // handleThemeSwitch handles POST /api/settings/theme to switch the site theme.
 func (s *Server) handleThemeSwitch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -2567,8 +2561,12 @@ func (s *Server) handleThemeSwitch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "theme is required", http.StatusBadRequest)
 		return
 	}
-	if req.Theme == "sols" {
-		http.Error(w, "sols is reserved as the system theme and cannot be selected as a personal theme", http.StatusBadRequest)
+	// Reserved themes cannot be selected as a personal theme. sols is the
+	// logged-out landing theme; stardust is reserved for why.polis.pub. (A
+	// tenant can still be put on a reserved theme via registry.json directly —
+	// this only blocks user selection.)
+	if reservedThemes[req.Theme] {
+		http.Error(w, req.Theme+" is reserved and cannot be selected as a personal theme", http.StatusBadRequest)
 		return
 	}
 
@@ -3150,8 +3148,8 @@ func (s *Server) handleSiteRegistrationStatus(w http.ResponseWriter, r *http.Req
 		"configured":    true,
 		"domain":        domain,
 		"is_registered": result.IsRegistered,
-		"created_at":   result.CreatedAt,
-		"registry_url": result.RegistryURL,
+		"created_at":    result.CreatedAt,
+		"registry_url":  result.RegistryURL,
 	})
 }
 
@@ -3207,16 +3205,41 @@ func (s *Server) handleSiteRegister(w http.ResponseWriter, r *http.Request) {
 		s.LogWarn("Failed to write registration marker: %v", err)
 	}
 
+	// Upstream follow-drift guard. A follow made while this site was
+	// unregistered had its announce suppressed; now that we're registered,
+	// reconcile the DS follow graph up to local so those follows are announced
+	// instead of lingering as a "dangling removed" until a Chaplain cycle (and
+	// so self-hosters, who have no Chaplain, recover at all). Best-effort;
+	// mirrors the cli register path.
+	reconciledFollows := 0
+	if reannounced, rerr := following.ReconcileFollowsToDS(
+		following.DefaultPath(s.DataDir), domain, client, s.PrivateKey,
+		&stream.DiscoveryConfig{
+			DiscoveryURL: s.DiscoveryURL,
+			DiscoveryKey: s.DiscoveryKey,
+			BaseURL:      baseURL,
+			DataDir:      s.DataDir,
+		},
+	); rerr != nil {
+		s.LogWarn("follow reconcile after register skipped: %v", rerr)
+	} else {
+		reconciledFollows = len(reannounced)
+		if reconciledFollows > 0 {
+			s.LogInfo("reconciled %d follow(s) to DS after register", reconciledFollows)
+		}
+	}
+
 	s.LogEvent("pub.polis.site.register", map[string]interface{}{
 		"domain": domain,
 	})
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":       result.Success,
-		"domain":        domain,
-		"created_at":   result.CreatedAt,
-		"registry_url": result.RegistryURL,
+		"success":            result.Success,
+		"domain":             domain,
+		"created_at":         result.CreatedAt,
+		"registry_url":       result.RegistryURL,
+		"reconciled_follows": reconciledFollows,
 	})
 }
 
@@ -4072,8 +4095,6 @@ func (s *Server) handleFeedCounts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-
-
 // handleFeedGrouped returns feed items grouped by post URL.
 // Comments are grouped with their target post; posts without comments appear as solo groups.
 // GET /api/feed/grouped
@@ -4318,6 +4339,7 @@ func excerptFetchIndices(items []feed.CachedFeedItem) []int {
 // if any are found, launches a background fetch. Shared by:
 //   - handleFeedGrouped (fallback — fires on dashboard load)
 //   - feedSyncHandler.Process (primary — fires on sync, step-06/6.l)
+//
 // Idempotent: items that already have an Excerpt or non-https URLs
 // are skipped, so calling repeatedly costs only the index scan when
 // the cache is fully hydrated.
@@ -4643,20 +4665,21 @@ func looksLikeHTML(content string) bool {
 
 // extractHTMLBody extracts content between <body> and </body> tags,
 // or between <main> and </main> tags, falling back to the full content.
-// extractCommentRelPath extracts the relative content path (e.g. "content/pub.polis.core/comment/20260222/id.md")
-// from a full comment URL. Returns empty string if the URL doesn't contain /comments/.
+// extractCommentRelPath extracts the relative content path (e.g.
+// "content/pub.polis.core/comment/20260222/id.md") from a full comment URL.
+// Tolerant of BOTH the legacy mount form (/comments/<…>) and the canonical
+// source form (/content/pub.polis.core/comment/<…>) so it keeps working as the
+// DS-registered URL is canonicalized (Defect 1). Returns "" for neither shape.
 func extractCommentRelPath(commentURL string) string {
-	idx := strings.Index(commentURL, "/comments/")
-	if idx < 0 {
-		return ""
-	}
-	// URL mount path is /comments/, map to content source path
-	return "content/pub.polis.core/comment/" + commentURL[idx+len("/comments/"):]
+	return polisurl.CommentURLToContentRel(commentURL)
 }
 
-// commentSourceURL converts a comment mount-path URL to the content source path URL.
-// e.g. "https://alice.polis.pub/comments/20260222/id.md" -> "https://alice.polis.pub/content/pub.polis.core/comment/20260222/id.md"
-// Returns the original URL if it doesn't contain /comments/.
+// commentSourceURL converts a comment URL to the content source-path URL.
+// A mount-path URL (/comments/<…>) is rewritten to /content/pub.polis.core/
+// comment/<…>; a URL already in canonical source form is returned unchanged
+// (the /comments/ segment is absent). e.g.
+// "https://a.polis.pub/comments/20260222/id.md" ->
+// "https://a.polis.pub/content/pub.polis.core/comment/20260222/id.md".
 func commentSourceURL(commentURL string) string {
 	idx := strings.Index(commentURL, "/comments/")
 	if idx < 0 {
@@ -4768,8 +4791,8 @@ func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
 
 	// Sort threads by most recent comment, cap at 10 threads / 5 comments each
 	type threadEntry struct {
-		domain    string
-		comments  []ConversationComment
+		domain     string
+		comments   []ConversationComment
 		mostRecent time.Time
 	}
 	var threads []threadEntry
@@ -4871,9 +4894,9 @@ type PulseAuthor struct {
 // PulseResponse is the JSON shape returned by GET /api/pulse.
 type PulseResponse struct {
 	Network struct {
-		Following      int `json:"following"`
-		Followers      int `json:"followers"`
-		FeedUnread     int `json:"feed_unread"`
+		Following       int `json:"following"`
+		Followers       int `json:"followers"`
+		FeedUnread      int `json:"feed_unread"`
 		IncomingPending int `json:"incoming_pending"`
 	} `json:"network"`
 	Recent     []PulseHighlight `json:"recent"`
@@ -5587,12 +5610,12 @@ func (s *Server) handleNavState(w http.ResponseWriter, r *http.Request) {
 		"author_name": authorName,
 		"home_url":    baseURL,
 		"counts": map[string]int{
-			"posts":              counts.Posts,
-			"following":          counts.Following,
-			"followers":          counts.Followers,
-			"feed_unread":        counts.FeedUnread,
-			"dm_unread":          counts.DMUnread,
-			"blessing_requests":  counts.BlessingRequests,
+			"posts":             counts.Posts,
+			"following":         counts.Following,
+			"followers":         counts.Followers,
+			"feed_unread":       counts.FeedUnread,
+			"dm_unread":         counts.DMUnread,
+			"blessing_requests": counts.BlessingRequests,
 		},
 	}
 	if avatarConfig != nil {
@@ -5625,24 +5648,36 @@ func (s *Server) handleDMConversations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	store, err := s.dmStore()
+	mb, self, _, err := s.dmMailbox()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	idx, err := store.LoadIndex()
+	entries, err := mb.RebuildInbox()
 	if err != nil {
 		s.LogError("dm conversations: %v", err)
 		http.Error(w, "Failed to load conversations", http.StatusInternalServerError)
 		return
 	}
-	store.DecryptIndexPreviews(idx)
+
+	// No server-readable preview under end-to-end encryption (last_preview is empty).
+	convs := make([]map[string]interface{}, 0, len(entries))
+	for _, e := range entries {
+		convs = append(convs, map[string]interface{}{
+			"id":              dm.ComputeConversationID(self, e.Peer),
+			"peer_domain":     e.Peer,
+			"peer_url":        "https://" + e.Peer,
+			"last_message_at": e.LastMessageAt,
+			"unread_count":    e.Unread,
+			"last_preview":    "",
+		})
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"conversations": idx.Conversations,
-		"count":         len(idx.Conversations),
+		"conversations": convs,
+		"count":         len(convs),
 	})
 }
 
@@ -5664,64 +5699,283 @@ func (s *Server) handleDMConversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	store, err := s.dmStore()
+	mb, self, deks, err := s.dmMailbox()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	conv, err := store.LoadConversation(convID)
+	peer, ok, err := mb.PeerForConversationID(self, convID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			http.Error(w, "Conversation not found", http.StatusNotFound)
-		} else {
-			s.LogError("dm conversation load: %v", err)
-			http.Error(w, "Failed to load conversation", http.StatusInternalServerError)
-		}
+		s.LogError("dm conversation resolve: %v", err)
+		http.Error(w, "Failed to load conversation", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "Conversation not found", http.StatusNotFound)
 		return
 	}
 
-	// Decrypt messages
-	type decryptedMsg struct {
+	stored, err := mb.ReadConversation(peer, deks)
+	if err != nil {
+		s.LogError("dm conversation load: %v", err)
+		http.Error(w, "Failed to load conversation", http.StatusInternalServerError)
+		return
+	}
+
+	// content is empty for messages whose epoch DEK is locked (password epoch not
+	// unlocked); the "locked" flag + key_epoch tell the SPA to prompt for unlock.
+	type readMsg struct {
 		ID        string `json:"id"`
 		From      string `json:"from"`
 		To        string `json:"to"`
 		Content   string `json:"content"`
 		ReplyToID string `json:"reply_to_id,omitempty"`
 		Timestamp string `json:"timestamp"`
-		ReadAt    string `json:"read_at,omitempty"`
 		Status    string `json:"status"`
+		KeyEpoch  int    `json:"key_epoch"`
+		Locked    bool   `json:"locked"`
+		// Undecryptable: the epoch DEK was available but the stored box failed to open
+		// (corruption, or a pre-DM-1 injected box). Flagged per-message so one bad box
+		// doesn't fail the whole conversation read (DM-6).
+		Undecryptable bool `json:"undecryptable,omitempty"`
+		// Raw wire box, so the SPA can open a locked (password-epoch) message client-side
+		// after unlocking that epoch's DEK in the browser. Not secret — it's the encrypted
+		// box. Present only when Locked (an unlocked message already carries plaintext in
+		// Content; a bootstrap-epoch message is decrypted server-side).
+		Ciphertext string `json:"ciphertext,omitempty"`
+		Nonce      string `json:"nonce,omitempty"`
+		BoxPub     string `json:"box_pub,omitempty"`
 	}
-	msgs := make([]decryptedMsg, 0, len(conv.Messages))
-	for _, msg := range conv.Messages {
-		plaintext, err := store.DecryptMessage(&msg)
-		if err != nil {
-			s.LogError("dm decrypt message %s: %v", msg.ID, err)
-			plaintext = "[decryption failed]"
+	msgs := make([]readMsg, 0, len(stored))
+	for _, msg := range stored {
+		m := readMsg{
+			ID:            msg.ID,
+			From:          msg.From,
+			To:            msg.To,
+			Content:       msg.Plaintext,
+			ReplyToID:     msg.ReplyTo,
+			Timestamp:     msg.At,
+			Status:        msg.Status,
+			KeyEpoch:      msg.KeyEpoch,
+			Locked:        msg.Locked,
+			Undecryptable: msg.Undecryptable,
 		}
-		msgs = append(msgs, decryptedMsg{
-			ID:        msg.ID,
-			From:      msg.From,
-			To:        msg.To,
-			Content:   plaintext,
-			ReplyToID: msg.ReplyToID,
-			Timestamp: msg.Timestamp,
-			ReadAt:    msg.ReadAt,
-			Status:    msg.Status,
-		})
+		if msg.Locked {
+			m.Ciphertext = msg.Ciphertext
+			m.Nonce = msg.Nonce
+			m.BoxPub = msg.BoxPub
+		}
+		msgs = append(msgs, m)
 	}
 
 	// Auto-mark as read
-	if err := store.MarkRead(convID); err != nil {
+	if err := mb.MarkRead(peer); err != nil {
 		s.LogError("dm mark read: %v", err)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"peer_domain": conv.PeerDomain,
-		"peer_url":    conv.PeerURL,
+		"peer_domain": peer,
+		"peer_url":    "https://" + peer,
 		"messages":    msgs,
 	})
+}
+
+// handleDMKeyring returns the DM keyring's browser-safe view: epoch pubkeys + the wrapped
+// DEK blobs + KDF params the SPA needs to derive a KEK from the user's password and unwrap
+// a password epoch's DEK in-browser. The server-held bootstrap DEK (server_dek) is stripped
+// (BrowserView) — the browser never receives the bootstrap private key.
+func (s *Server) handleDMKeyring(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	kr, err := dm.LoadKeyring(dm.DMDir(s.DataDir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "No DM keyring (not provisioned)", http.StatusNotFound)
+			return
+		}
+		s.LogError("dm keyring load: %v", err)
+		http.Error(w, "Failed to load keyring", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(kr.BrowserView())
+}
+
+// handleDMSetPassword performs the bootstrap→epoch-1 upgrade. The browser mints the epoch
+// keypair, generates the recovery phrase, derives the password + recovery KEKs, and wraps
+// the DEK twice — then POSTs only the wrapped blobs + KDF params + the epoch pubkey here.
+// The server appends the epoch (CAS on revision) and re-signs/publishes the messages-key
+// block. It never sees the password, KEK, DEK, or recovery phrase. Requires the current
+// epoch to be bootstrap (a later change is a re-wrap — see change-password).
+func (s *Server) handleDMSetPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.PrivateKey == nil {
+		http.Error(w, "no private key configured", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		PublicKeyMessages  string       `json:"public_key_messages"`
+		WrappedDEK         string       `json:"wrapped_dek"`
+		WrappedDEKRecovery string       `json:"wrapped_dek_recovery"`
+		KDF                dm.KDFParams `json:"kdf"`
+		RecoveryKDF        dm.KDFParams `json:"recovery_kdf"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if s.handleBodyTooLarge(w, r, err) {
+			return
+		}
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// DM-8: serialize the whole load→mutate→SaveCAS sequence per tenant (covers the
+	// SaveCAS read-back/write TOCTOU and the two-step server_dek clear below).
+	s.dmKeyringMu.Lock()
+	defer s.dmKeyringMu.Unlock()
+
+	dmDir := dm.DMDir(s.DataDir)
+	kr, err := dm.LoadKeyring(dmDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "No DM keyring (not provisioned)", http.StatusNotFound)
+			return
+		}
+		s.LogError("dm set-password load: %v", err)
+		http.Error(w, "Failed to load keyring", http.StatusInternalServerError)
+		return
+	}
+	baseRev := kr.Revision
+
+	id, err := kr.AddPasswordEpoch(req.PublicKeyMessages, req.WrappedDEK, req.WrappedDEKRecovery, req.KDF, req.RecoveryKDF)
+	if err != nil {
+		// "already exists" = the user already has a password epoch.
+		if strings.Contains(err.Error(), "already exists") {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := kr.SaveCAS(dmDir, baseRev); err != nil {
+		if errors.Is(err, dm.ErrRevisionConflict) {
+			http.Error(w, "keyring changed concurrently; reload and retry", http.StatusConflict)
+			return
+		}
+		s.LogError("dm set-password save: %v", err)
+		http.Error(w, "Failed to save keyring", http.StatusInternalServerError)
+		return
+	}
+
+	// Re-sign + publish the messages-key block so the new epoch's pubkey is advertised.
+	if err := site.PublishMessagesKey(s.DataDir, s.PrivateKey); err != nil {
+		s.LogError("dm set-password publish: %v", err)
+		http.Error(w, "Failed to publish messages key", http.StatusInternalServerError)
+		return
+	}
+
+	// Close the bootstrap window: re-seal prior bootstrap-epoch messages FORWARD to the new
+	// password epoch (the server still holds the bootstrap DEK here, so it can), then drop
+	// the operator-readable bootstrap key (`server_dek`). After this, earlier messages are
+	// readable only under the user's password and the operator holds no readable DM key.
+	// Best-effort: the password is already set + functional, so a failure here is logged but
+	// never fails the response (it is retriable, and leaving server_dek loses no data —
+	// those messages simply stay readable until the re-seal succeeds). The clear runs only
+	// if the re-seal fully succeeded, so a message is never orphaned.
+	if bootEp, bootErr := kr.EpochByID(id - 1); bootErr == nil && bootEp.Kind == dm.EpochKindBootstrap {
+		if bootDEK, ok, derr := bootEp.ServerDEKBytes(); derr == nil && ok {
+			newEp, _ := kr.CurrentEpoch()
+			newPubRaw, perr := base64.StdEncoding.DecodeString(newEp.PublicKeyMessages)
+			if perr == nil && len(newPubRaw) == 32 {
+				var newPub [32]byte
+				copy(newPub[:], newPubRaw)
+				mb := dm.NewMailbox(dmDir)
+				if n, rerr := mb.ReencryptBootstrapForward(bootEp.ID, bootDEK, newEp.ID, newPub); rerr != nil {
+					s.LogError("dm set-password: re-seal bootstrap messages forward failed (server_dek retained, retriable): %v", rerr)
+				} else {
+					if kr.ClearBootstrapServerDEK() {
+						if err := kr.SaveCAS(dmDir, baseRev+1); err != nil {
+							s.LogError("dm set-password: clear server_dek save failed (retriable): %v", err)
+						}
+					}
+					s.LogInfo("dm set-password: re-sealed %d bootstrap message(s) forward to epoch %d; bootstrap key cleared", n, newEp.ID)
+				}
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"epoch_id": id, "current_epoch": id})
+}
+
+// handleDMRewrapPassword performs the O(1) re-wrap (phase 4.8): the browser
+// unwraps the current-epoch DEK with the old KEK and re-wraps it under a new
+// password and/or a new recovery-phrase KEK over fresh salts, then POSTs only the
+// new wrapped blob(s) + KDF params here. The server overwrites the current epoch's
+// wrap material (CAS on revision). The DEK + epoch pubkey are unchanged, so — unlike
+// set-password — there is NO messages-key republish. Requires an existing password
+// epoch (set a password first).
+func (s *Server) handleDMRewrapPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		WrappedDEK         string        `json:"wrapped_dek"`
+		KDF                *dm.KDFParams `json:"kdf"`
+		WrappedDEKRecovery string        `json:"wrapped_dek_recovery"`
+		RecoveryKDF        *dm.KDFParams `json:"recovery_kdf"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if s.handleBodyTooLarge(w, r, err) {
+			return
+		}
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// DM-8: serialize per-tenant keyring mutation (see set-password).
+	s.dmKeyringMu.Lock()
+	defer s.dmKeyringMu.Unlock()
+
+	dmDir := dm.DMDir(s.DataDir)
+	kr, err := dm.LoadKeyring(dmDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "No DM keyring (not provisioned)", http.StatusNotFound)
+			return
+		}
+		s.LogError("dm rewrap load: %v", err)
+		http.Error(w, "Failed to load keyring", http.StatusInternalServerError)
+		return
+	}
+	baseRev := kr.Revision
+
+	if err := kr.RewrapCurrentEpoch(req.WrappedDEK, req.KDF, req.WrappedDEKRecovery, req.RecoveryKDF); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := kr.SaveCAS(dmDir, baseRev); err != nil {
+		if errors.Is(err, dm.ErrRevisionConflict) {
+			http.Error(w, "keyring changed concurrently; reload and retry", http.StatusConflict)
+			return
+		}
+		s.LogError("dm rewrap save: %v", err)
+		http.Error(w, "Failed to save keyring", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "revision": kr.Revision})
 }
 
 // handleDMDeleteConversation deletes a DM conversation.
@@ -5732,20 +5986,24 @@ func (s *Server) handleDMDeleteConversation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	store, err := s.dmStore()
+	mb, self, _, err := s.dmMailbox()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if err := store.DeleteConversation(convID); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			http.Error(w, "Conversation not found", http.StatusNotFound)
-		} else {
+	peer, ok, err := mb.PeerForConversationID(self, convID)
+	if err != nil {
+		s.LogError("dm delete resolve: %v", err)
+		http.Error(w, "Failed to delete conversation", http.StatusInternalServerError)
+		return
+	}
+	if ok {
+		if err := mb.DeleteConversation(peer); err != nil {
 			s.LogError("dm delete: %v", err)
 			http.Error(w, "Failed to delete conversation", http.StatusInternalServerError)
+			return
 		}
-		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -5761,9 +6019,8 @@ func (s *Server) handleDMSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	store, err := s.dmStore()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if s.PrivateKey == nil {
+		http.Error(w, "no private key configured", http.StatusBadRequest)
 		return
 	}
 
@@ -5794,6 +6051,12 @@ func (s *Server) handleDMSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid recipient URL", http.StatusBadRequest)
 		return
 	}
+	if s.RestrictDMEgress {
+		if err := dm.ValidateRecipientURL(req.RecipientURL); err != nil {
+			http.Error(w, "Invalid recipient URL: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 
 	domain := s.GetBaseURL()
 	if domain == "" {
@@ -5801,7 +6064,8 @@ func (s *Server) handleDMSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), store, s.SharedHTTPClient)
+	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.DataDir, s.SharedHTTPClient)
+	sender.Logger = dm.EventFunc(s.LogEvent)
 
 	msg, err := sender.SendMessage(req.RecipientURL, req.Content, req.ReplyToID)
 	if err != nil {
@@ -5828,6 +6092,193 @@ func (s *Server) handleDMSend(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleDMRecipientKey resolves a recipient's verified X25519 messages key so the
+// SPA can seal a password-epoch box to it in-browser (phase 4.6). The server does
+// the fetch + signature verification (it holds no secret here); the browser holds
+// the sender's DEK and does the sealing. Read-only.
+func (s *Server) handleDMRecipientKey(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.PrivateKey == nil {
+		http.Error(w, "no private key configured", http.StatusBadRequest)
+		return
+	}
+	recipientURL := r.URL.Query().Get("recipient_url")
+	if recipientURL == "" {
+		http.Error(w, "recipient_url is required", http.StatusBadRequest)
+		return
+	}
+	if _, err := url.Parse(recipientURL); err != nil {
+		http.Error(w, "Invalid recipient URL", http.StatusBadRequest)
+		return
+	}
+	if s.RestrictDMEgress {
+		if err := dm.ValidateRecipientURL(recipientURL); err != nil {
+			http.Error(w, "Invalid recipient URL: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	domain := s.GetBaseURL()
+	if domain == "" {
+		http.Error(w, "Site base URL not configured", http.StatusBadRequest)
+		return
+	}
+	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.DataDir, s.SharedHTTPClient)
+	sender.Logger = dm.EventFunc(s.LogEvent)
+	pubB64, epoch, err := sender.ResolveRecipientKey(recipientURL)
+	if err != nil {
+		// Recipient unreachable / no published key / bad signature — the SPA
+		// can't seal to them. 502: the failure is upstream, not the request.
+		s.LogWarn("dm recipient-key resolve failed (%s): %v", recipientURL, err)
+		http.Error(w, "Could not resolve recipient's message key: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"public_key_messages": pubB64,
+		"recipient_epoch":     epoch,
+	})
+}
+
+// handleDMSendSealed delivers a message whose boxes were sealed in the browser
+// from the sender's unlocked password-epoch DEK (phase 4.6). The server seals
+// nothing — it builds the wire envelope from the browser's delivery box, signs
+// the instance-to-instance deliver request, and stores the sender's pre-sealed
+// box-to-self copy. Bootstrap-epoch sends still go through handleDMSend.
+func (s *Server) handleDMSendSealed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.PrivateKey == nil {
+		http.Error(w, "no private key configured", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		RecipientURL   string `json:"recipient_url"`
+		SenderEpoch    int    `json:"sender_epoch"`
+		RecipientEpoch int    `json:"recipient_epoch"`
+		BoxPub         string `json:"box_pub"`
+		Delivery       struct {
+			Ciphertext string `json:"ciphertext"`
+			Nonce      string `json:"nonce"`
+		} `json:"delivery"`
+		Sent struct {
+			Ciphertext string `json:"ciphertext"`
+			Nonce      string `json:"nonce"`
+		} `json:"sent"`
+		ReplyToID string `json:"reply_to_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if s.handleBodyTooLarge(w, r, err) {
+			return
+		}
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.RecipientURL == "" || req.BoxPub == "" ||
+		req.Delivery.Ciphertext == "" || req.Delivery.Nonce == "" ||
+		req.Sent.Ciphertext == "" || req.Sent.Nonce == "" {
+		http.Error(w, "recipient_url, box_pub, delivery and sent boxes are required", http.StatusBadRequest)
+		return
+	}
+	if _, err := url.Parse(req.RecipientURL); err != nil {
+		http.Error(w, "Invalid recipient URL", http.StatusBadRequest)
+		return
+	}
+	if s.RestrictDMEgress {
+		if err := dm.ValidateRecipientURL(req.RecipientURL); err != nil {
+			http.Error(w, "Invalid recipient URL: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	domain := s.GetBaseURL()
+	if domain == "" {
+		http.Error(w, "Site base URL not configured", http.StatusBadRequest)
+		return
+	}
+	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.DataDir, s.SharedHTTPClient)
+	sender.Logger = dm.EventFunc(s.LogEvent)
+	msg, err := sender.SendSealed(req.RecipientURL, req.SenderEpoch, req.RecipientEpoch, req.BoxPub,
+		dm.SealedBox{Ciphertext: req.Delivery.Ciphertext, Nonce: req.Delivery.Nonce},
+		dm.SealedBox{Ciphertext: req.Sent.Ciphertext, Nonce: req.Sent.Nonce}, req.ReplyToID)
+	if err != nil {
+		if msg != nil {
+			// Saved as "unsent" — delivery failed but the box is stored.
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id": msg.ID,
+				"status":     msg.Status,
+				"warning":    err.Error(),
+			})
+			return
+		}
+		s.LogError("dm send-sealed: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message_id": msg.ID,
+		"status":     msg.Status,
+	})
+}
+
+// handleDMProtectionStatus exposes a recipient's signed protection_status to the
+// SPA (phase 4.10). The browser can't make the signed, mutuals-gated query — the
+// sender's SERVER does it (Sender.FetchProtectionStatus verifies the recipient's
+// identity-key signature). Any failure (recipient unreachable, not a mutual, bad
+// signature) collapses to {status:"unknown"} so the SPA can soft-warn ("couldn't
+// confirm…") rather than mislead. A clean answer returns the single protected bit.
+func (s *Server) handleDMProtectionStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.PrivateKey == nil {
+		http.Error(w, "no private key configured", http.StatusBadRequest)
+		return
+	}
+	recipientURL := r.URL.Query().Get("recipient_url")
+	if recipientURL == "" {
+		http.Error(w, "recipient_url is required", http.StatusBadRequest)
+		return
+	}
+	if _, err := url.Parse(recipientURL); err != nil {
+		http.Error(w, "Invalid recipient URL", http.StatusBadRequest)
+		return
+	}
+	if s.RestrictDMEgress {
+		if err := dm.ValidateRecipientURL(recipientURL); err != nil {
+			http.Error(w, "Invalid recipient URL: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	domain := s.GetBaseURL()
+	if domain == "" {
+		http.Error(w, "Site base URL not configured", http.StatusBadRequest)
+		return
+	}
+	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.DataDir, s.SharedHTTPClient)
+	sender.Logger = dm.EventFunc(s.LogEvent)
+	ps, err := sender.FetchProtectionStatus(recipientURL)
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		// Not an HTTP error: "unknown" is a legitimate UX state (the SPA warns softly).
+		s.LogDebug("dm protection-status unknown for %s: %v", recipientURL, err)
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "unknown"})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "ok",
+		"protected": ps.Protected,
+		"domain":    ps.Domain,
+	})
+}
+
 // handleDMMarkRead marks a conversation as read.
 func (s *Server) handleDMMarkRead(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -5835,7 +6286,7 @@ func (s *Server) handleDMMarkRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	store, err := s.dmStore()
+	mb, self, _, err := s.dmMailbox()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -5857,7 +6308,11 @@ func (s *Server) handleDMMarkRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := store.MarkRead(req.ConversationID); err != nil {
+	peer, ok, err := mb.PeerForConversationID(self, req.ConversationID)
+	if err == nil && ok {
+		err = mb.MarkRead(peer)
+	}
+	if err != nil {
 		s.LogError("dm mark read: %v", err)
 		http.Error(w, "Failed to mark read", http.StatusInternalServerError)
 		return
@@ -5876,13 +6331,13 @@ func (s *Server) handleDMRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	store, err := s.dmStore()
+	mb, self, _, err := s.dmMailbox()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	unsent, err := store.GetUnsentMessages()
+	unsent, err := mb.UnsentMessages()
 	if err != nil {
 		s.LogError("dm retry: %v", err)
 		http.Error(w, "Failed to get unsent messages", http.StatusInternalServerError)
@@ -5898,10 +6353,10 @@ func (s *Server) handleDMRetry(w http.ResponseWriter, r *http.Request) {
 	items := make([]unsentItem, 0, len(unsent))
 	for _, u := range unsent {
 		items = append(items, unsentItem{
-			ConvID:    u.ConvID,
+			ConvID:    dm.ComputeConversationID(self, u.Peer),
 			MessageID: u.Message.ID,
 			To:        u.Message.To,
-			Timestamp: u.Message.Timestamp,
+			Timestamp: u.Message.At,
 		})
 	}
 
@@ -5942,12 +6397,13 @@ func (s *Server) handleDMRecipients(w http.ResponseWriter, r *http.Request) {
 	myDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
 
 	type recipient struct {
-		Domain     string `json:"domain"`
-		URL        string `json:"url"`
-		AuthorName string `json:"author_name,omitempty"`
-		Status     string `json:"status"`           // "open", "no-dm", "no-follow", "unknown"
-		Reason     string `json:"reason,omitempty"`  // human-readable explanation
-		FollowsUs  bool   `json:"follows_us"`        // whether they follow us
+		Domain     string               `json:"domain"`
+		URL        string               `json:"url"`
+		AuthorName string               `json:"author_name,omitempty"`
+		Status     string               `json:"status"`           // "open", "no-dm", "no-follow", "unknown"
+		Reason     string               `json:"reason,omitempty"` // human-readable explanation
+		FollowsUs  bool                 `json:"follows_us"`       // whether they follow us
+		Avatar     *render.AvatarConfig `json:"avatar,omitempty"` // custom avatar, or deterministic hue fallback
 	}
 
 	entries := f.All()
@@ -6016,6 +6472,27 @@ func (s *Server) handleDMRecipients(w http.ResponseWriter, r *http.Request) {
 	if followingChanged {
 		following.Save(followingPath, f)
 	}
+
+	// Resolve each recipient's avatar for the composer list. Uses the shared
+	// 6h author-avatar cache (commentAuthorAvatar → render.LoadOrFetchAuthorAvatar)
+	// — the same cache the stream warms when it renders these authors, so this
+	// is almost always cache hits with no network. Cold entries fetch
+	// /.well-known/polis once; bounded to 5-wide concurrency so opening the
+	// composer never serializes N well-known fetches. commentAuthorAvatar always
+	// returns a non-nil config (custom avatar, or a deterministic hue fallback),
+	// so the client renders a colored avatar for everyone.
+	var avatarWG sync.WaitGroup
+	avatarSem := make(chan struct{}, 5)
+	for i := range results {
+		avatarWG.Add(1)
+		go func(i int) {
+			defer avatarWG.Done()
+			avatarSem <- struct{}{}
+			defer func() { <-avatarSem }()
+			results[i].Avatar = s.commentAuthorAvatar(results[i].Domain)
+		}(i)
+	}
+	avatarWG.Wait()
 
 	// Log aggregate stats
 	duration := time.Since(start)

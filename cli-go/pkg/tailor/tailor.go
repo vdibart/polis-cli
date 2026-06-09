@@ -39,9 +39,9 @@ type Action struct {
 type CheckResult struct {
 	Name    string      `json:"name"`
 	Status  CheckStatus `json:"status"`
-	Message string      `json:"message"`             // what happened / what would happen
-	Reason  string      `json:"reason"`              // why — references the version that introduced the change
-	Actions []Action    `json:"actions,omitempty"`    // specific file operations performed/planned
+	Message string      `json:"message"`           // what happened / what would happen
+	Reason  string      `json:"reason"`            // why — references the version that introduced the change
+	Actions []Action    `json:"actions,omitempty"` // specific file operations performed/planned
 }
 
 // Result is the aggregate output of a tailor run.
@@ -67,6 +67,7 @@ type runContext struct {
 	dryRun    bool
 	baseURL   string // extracted from .well-known/polis or POLIS_BASE_URL before legacy cleanup
 	generator string // e.g. "polis-cli-go/0.59.0"
+	backupDir string // Apply mode: where checks back up files before removing them ("" in Diagnose)
 }
 
 // checkFunc is the signature for individual check functions.
@@ -114,8 +115,7 @@ func allChecks() []checkFunc {
 		checkTagDirectory,
 		checkStorageSalt,
 		checkDMDirectories,
-		checkDMDomainCase,
-		checkDMPreviewEncryption,
+		checkDMKeyring,
 		checkThemeConsolidation,
 		// Phase 7: Config migration
 		checkWebappConfig,
@@ -136,8 +136,11 @@ func allChecks() []checkFunc {
 		// Phase 8: Cleanup
 		checkManifestObsolete,
 		checkEmptyMetadataDir,
+		checkForeignContentInPublicPath,
+		checkBlessedCacheGC,
 		checkStaleScopedFeed,
 		checkStaleFeedViewedAt,
+		checkLegacyFeedScaffolding,
 		checkOrphanedThemeDirs,
 		checkStudio13RenameMigration,
 		// Phase 9: CLI binary (network, runs last)
@@ -228,6 +231,7 @@ func run(siteDir string, dryRun bool, backupDir string, generator string) *Resul
 		dryRun:    dryRun,
 		baseURL:   extractBaseURL(siteDir),
 		generator: generator,
+		backupDir: backupDir,
 	}
 
 	checks := allChecks()

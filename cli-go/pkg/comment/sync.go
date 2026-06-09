@@ -8,6 +8,7 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
+	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
 // SyncResult contains the results of syncing pending comments.
@@ -69,7 +70,7 @@ func SyncPendingComments(dataDir, baseURL string, discoveryClient *discovery.Cli
 				}
 			}
 			dateDir := timestamp.Format("20060102")
-			commentURL = strings.TrimSuffix(baseURL, "/") + "/comments/" + dateDir + "/" + commentID + ".md"
+			commentURL = polisurl.CommentContentURL(baseURL, dateDir, commentID)
 		}
 
 		// Parse in_reply_to: prefer nested format, fall back to flat field
@@ -228,7 +229,7 @@ func SyncFromEvents(dataDir, baseURL string, events []discovery.StreamEvent, hoo
 				}
 			}
 			dateDir := timestamp.Format("20060102")
-			commentURL = strings.TrimSuffix(baseURL, "/") + "/comments/" + dateDir + "/" + commentID + ".md"
+			commentURL = polisurl.CommentContentURL(baseURL, dateDir, commentID)
 		}
 
 		if commentURL == "" {

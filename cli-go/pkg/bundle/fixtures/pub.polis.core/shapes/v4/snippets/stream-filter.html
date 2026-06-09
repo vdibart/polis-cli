@@ -1,22 +1,20 @@
 <!--
-    Stream filter (interactive sentence — step-05/5.d, redesigned 2026-04-29).
+    Stream filter (interactive sentence).
 
     The hydratable sentence-filter for the v4 stream's top chrome.
-    Mirrors the after-step-5 build-target mockup
-    (docs/design/v4/mockups/infinity-stream/02-unified-view-after-
-    step-5-pinned-dot.html). Controller toggles dropdowns + reissues
+    Controller toggles dropdowns + reissues
     structured-query fetches on slot changes.
 
-    Slot grammar (post-2026-04-29 redesign):
+    Slot grammar:
       qualifier  LOCKED to "all". Public visitors have no read-state, so
-                 "new" doesn't apply; step 6 unlocks for the auth'd owner.
+                 "new" doesn't apply; it unlocks for the auth'd owner.
       type       INTERACTIVE — posts / comments / follows. Public default:
                  posts. Replaces the previous {posts, comments, all items}
                  set; "all items" was redundant under the unified stream.
       scope      LOCKED to @<tenant> as identity-stylized text (italic
                  accent, non-interactive — reads as "this is who you're
-                 viewing", not a control). Step 6 unlocks auth-gated
-                 values (my / my-network / dm).
+                 viewing", not a control). The auth'd owner unlocks
+                 auth-gated values (my / my-network / dm).
       modifier   INTERACTIVE — visible ONLY when type=posts. Options:
                  "by date" (default — all posts, newest first) and
                  "with comments" (filters to posts that have ≥1 blessed
@@ -38,7 +36,7 @@
       aria-expanded on interactive slot toggles open state
       [hidden] on the modifier slot when type != posts (controller-managed)
 
-    Step-06/6.b extensions (owner SPA + cross-site auth'd visits):
+    Owner extensions (owner SPA + cross-site auth'd visits):
       - body.is-owner — owner-extras.js sets this; CSS unlocks the
         qualifier and scope slots (they become interactive).
       - .sf-site-typeahead — input element shown when scope=site is
@@ -79,7 +77,7 @@
           aria-haspopup="listbox"
           aria-expanded="false">by date</span>
 
-    <!-- step-06/6.b — site typeahead input. Shown only when scope=site
+    <!-- Site typeahead input. Shown only when scope=site
          is selected (owner-extras.js toggles [hidden]). User types a
          handle prefix; suggestions come from following.json + free-text.
          On selection, controller sets filterScope=@<resolved-handle>

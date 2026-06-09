@@ -58,7 +58,7 @@ comments/                            # mount: /comments
   keys/
     id_ed25519
     id_ed25519.pub
-  storage-salt                     # 32 random bytes (hex), site-wide encryption salt
+  storage-salt                     # 32 random bytes (hex); retained as a tamper canary (Patrol) — no longer a DM key salt
   api-keys.json                      # API key hashes (SHA-256)
   logs/                              # structured event logs
   policies/                          # private policies (evaluated before public)
@@ -246,19 +246,19 @@ Each entry in the `types` map declares a single content type. The key is the ful
       "pub.polis.post.published",
       "pub.polis.post.republished",
       "pub.polis.post.removed"
-    ],
-    "notifications": [
-      {
-        "id": "new-post",
-        "on": "pub.polis.post.published",
-        "relevance": "followed_author",
-        "template": "{{actor}} published a new post",
-        "icon": "pencil"
-      }
     ]
   }
 }
 ```
+
+> **Note — notification rules moved out of `bundle.json`.** Earlier versions
+> declared a `notifications` array on each content type here. As of the
+> step-06 owner-stream work they live in the **private** per-tenant registry
+> (`.polis/bundles/registry.json`, `BundleRegistry.Notifications`) instead, so
+> they're not part of the public content-type contract a third party reads.
+> See [Notification Rules](#notification-rules) below. Patrol/Medic relocates
+> any lingering per-type `notifications` from existing tenants' `bundle.json`
+> on each healing cycle.
 
 #### System Fields
 
@@ -270,6 +270,7 @@ These fields are read by the engine and resolver to route, render, and organize 
 | `mount` | string | no | Public URL path for rendered output (e.g., `/posts`). Must be unique within the bundle. |
 | `renderer` | string | no | Rendering engine. Currently only `html` is supported. |
 | `emits` | string[] | no | Fully namespaced event names this type produces. Used for policy matching and DS validation. |
+| `private` | boolean | no | Marks the type as owner-private (e.g. `pub.polis.follow`, `pub.polis.dm`). The v1 content API requires auth to read these; CI enforces parity with the `isPrivateContentType` allowlist (`webapp/internal/api/router.go`). |
 
 #### User Customization
 
@@ -284,17 +285,31 @@ These fields are read by the handler, not the system. The handler uses them as g
 
 #### Notification Rules
 
-The `notifications` array declares when and how to notify users about events from this content type.
+Notification rules declare when and how to notify the owner about events. They
+are **not** part of the public `bundle.json` content-type declaration — they
+live in the **private** per-tenant registry at `.polis/bundles/registry.json`
+(`BundleRegistry.Notifications`). The canonical default set is seeded by
+`defaultNotificationRules()` in `cli-go/pkg/bundle/config.go`. Keeping them in
+the private registry means a site's notification preferences aren't exposed in
+its world-readable `bundle.json`, and the public content-type contract stays
+purely about *what content exists*, not *how the owner is alerted*.
+
+The rule schema itself is unchanged:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `id` | string | yes | Unique identifier for this rule (across the entire bundle). |
+| `id` | string | yes | Unique identifier for this rule (across the registry). |
 | `on` | string | yes | Event type that triggers this notification. |
 | `relevance` | string | yes | Filter that determines who sees the notification. |
 | `template` | string | yes | Mustache-like template for the notification message. |
 | `icon` | string | no | Icon name (e.g., `pencil`, `comment`, `prayer`, `check`, `x`, `follow`, `unfollow`). |
 | `enabled` | boolean | no | Whether the rule is active. Defaults to `true` if omitted. |
 | `batch` | string | no | Batching window (e.g., `"24h"`). When set, notifications of this type are batched over the window. |
+
+> Third-party bundles *may* still ship a per-type `notifications` array in
+> their own `bundle.json` (the loader/validator still accepts it). The
+> relocation to the private registry applies to the built-in `pub.polis.core`
+> bundle; Patrol/Medic migrates legacy core-bundle entries automatically.
 
 **Relevance values:**
 
@@ -333,11 +348,7 @@ The following are the handler's business and are NOT declared in `bundle.json`:
       "mount": "/posts",
       "renderer": "html",
       "storage": {"pattern": "dated", "date_format": "YYYYMMDD", "versions": true},
-      "emits": ["pub.polis.post.published", "pub.polis.post.republished", "pub.polis.post.removed"],
-      "notifications": [
-        {"id": "new-post", "on": "pub.polis.post.published", "relevance": "followed_author", "template": "{{actor}} published a new post", "icon": "pencil"},
-        {"id": "updated-post", "on": "pub.polis.post.republished", "relevance": "followed_author", "template": "{{actor}} updated a post", "icon": "pencil", "enabled": false}
-      ]
+      "emits": ["pub.polis.post.published", "pub.polis.post.republished", "pub.polis.post.removed"]
     },
     "pub.polis.comment": {
       "dir": "comment",
@@ -347,30 +358,17 @@ The following are the handler's business and are NOT declared in `bundle.json`:
       "emits": [
         "pub.polis.comment.published", "pub.polis.comment.republished",
         "pub.polis.comment.blessing.requested", "pub.polis.comment.blessing.granted", "pub.polis.comment.blessing.denied"
-      ],
-      "notifications": [
-        {"id": "new-comment", "on": "pub.polis.comment.published", "relevance": "target_domain", "template": "{{actor}} commented on {{post_name}}", "icon": "comment"},
-        {"id": "blessing-requested", "on": "pub.polis.comment.blessing.requested", "relevance": "target_domain", "template": "{{actor}} requested a blessing on {{post_name}}", "icon": "prayer"},
-        {"id": "blessing-granted", "on": "pub.polis.comment.blessing.granted", "relevance": "source_domain", "template": "{{actor}} blessed your comment", "icon": "check"},
-        {"id": "blessing-denied", "on": "pub.polis.comment.blessing.denied", "relevance": "source_domain", "template": "{{actor}} denied your comment", "icon": "x"}
       ]
     },
     "pub.polis.follow": {
       "dir": "follow",
       "mount": "/follow",
-      "emits": ["pub.polis.follow.announced", "pub.polis.follow.removed"],
-      "notifications": [
-        {"id": "new-follower", "on": "pub.polis.follow.announced", "relevance": "target_domain", "template": "{{actor}} started following you", "icon": "follow", "batch": "24h"},
-        {"id": "lost-follower", "on": "pub.polis.follow.removed", "relevance": "target_domain", "template": "{{actor}} unfollowed you", "icon": "unfollow"}
-      ]
-    },
-    "pub.polis.feed": {
-      "dir": "feed",
-      "mount": "/feed",
-      "renderer": "html"
+      "private": true,
+      "emits": ["pub.polis.follow.announced", "pub.polis.follow.removed"]
     },
     "pub.polis.dm": {
       "dir": "dm",
+      "private": true,
       "storage": {"pattern": "flat"}
     },
     "pub.polis.tag": {
@@ -378,11 +376,21 @@ The following are the handler's business and are NOT declared in `bundle.json`:
       "mount": "/tags",
       "storage": {"pattern": "flat"},
       "emits": ["pub.polis.tag.applied", "pub.polis.tag.removed"]
+    },
+    "pub.polis.theme": {
+      "dir": "theme",
+      "storage": {"pattern": "flat"},
+      "emits": ["pub.polis.theme.installed", "pub.polis.theme.removed"]
     }
-  },
-  "artifacts": ["index.jsonl"]
+  }
 }
 ```
+
+> Notification rules are intentionally absent from this example — they live in
+> the private registry (see [Notification Rules](#notification-rules)).
+> `pub.polis.follow` and `pub.polis.dm` are `private` (auth-gated reads). The
+> source of truth for this manifest is `DefaultCoreBundle()` in
+> `cli-go/pkg/bundle/bundle.go`.
 
 ### Handler Invocation Contract
 
@@ -676,9 +684,14 @@ Follow is the social graph primitive. It manages the list of authors a site trus
 
 Feed is an aggregated view of content from followed authors. It combines stream events with direct site polling to provide a unified timeline.
 
-**Source path:** `content/pub.polis.core/feed/`
-**Mount path:** `feed/`
-**Renderer:** `html` (can render as RSS or JSON feed)
+> **Note — feed is *not* a declared `types` entry in the core bundle.** Unlike
+> post/comment/follow/dm/tag/theme, `pub.polis.feed` has no entry in
+> `DefaultCoreBundle()`. It's a derived/aggregated view implemented by the
+> `cli-go/pkg/feed` package and materialized into the DS state cache below —
+> there is no `content/pub.polis.core/feed/` source directory or public mount.
+> The `pub.polis.feed` name survives as the cursor/state key, not as a bundle
+> content type.
+
 **DS state:** `.polis/ds/<domain>/pub.polis.core/state/pub.polis.feed.jsonl` (feed item cache)
 **DS config:** `.polis/ds/<domain>/pub.polis.core/config/feed.json` (staleness_minutes, max_items, max_age_days)
 

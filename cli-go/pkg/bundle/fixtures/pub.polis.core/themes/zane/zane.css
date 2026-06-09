@@ -46,6 +46,11 @@
     --color-accent: var(--color-teal);
     --color-accent-soft: var(--color-teal-soft);
     --color-accent-bg: rgba(95, 175, 175, 0.08);
+    /* Secondary hue for links (stream.css content + bio links read this).
+       Teal keeps links cool and distinct from the salmon used on titles/
+       headings, so a single accent doesn't dominate. Mirrors the SPA
+       palette's --color-link in nav-themes.css. */
+    --color-link: var(--color-teal);
     /* Comment-attached chrome (the bordered box around each
        attached comment in entry--comment-thread) uses lavender
        instead of accent so it reads as a distinct semantic layer —

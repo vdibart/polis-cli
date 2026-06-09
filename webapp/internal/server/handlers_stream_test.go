@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/cache"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
@@ -103,12 +104,13 @@ func TestStreamItems_EmitsPublishedHuman(t *testing.T) {
 	s := newConfiguredServer(t)
 	// Use a timestamp 5 days back (well inside the 30-day maxStreamWindow cap
 	// so time=all still returns it, yet > 10h old so FormatHumanDateTime emits
-	// the absolute "Month D, YYYY · h:mma" form rather than a relative string).
+	// the absolute "Month D · h:mma" form rather than a relative string).
 	// Derived from now, not a pinned literal, so the test doesn't rot once the
-	// fixed date ages past the look-back window.
+	// fixed date ages past the look-back window. The v4 stream strips the
+	// per-entry year (template.StripYear), so the expected form omits the year.
 	pub := time.Now().UTC().AddDate(0, 0, -5).Truncate(time.Minute)
 	pubISO := pub.Format(time.RFC3339)
-	wantHuman := pub.Format("January 2, 2006 · 3:04pm")
+	wantHuman := pub.Format("January 2 · 3:04pm")
 	seedNetworkFeed(t, s, []feed.FeedItem{
 		{Type: "post", Title: "P1", URL: "posts/p1.md", Published: pubISO, AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 	})
@@ -1290,19 +1292,14 @@ func TestStreamItems_BlessedCommentsEnriched(t *testing.T) {
 		t.Fatalf("append index: %v", err)
 	}
 
-	// Blessed comment from another tenant. Mirror the comment markdown
-	// into the local comments mount path (publish-time blessing flow
-	// would also populate this). LoadLocalCommentContent strips the
-	// frontmatter and renders the body through goldmark + bluemonday.
+	// Blessed comment from another tenant — populate the ISOLATED blessed cache
+	// (the only place a foreign comment may live; the grant/sync flow + Rosie put
+	// it there). LoadLocalCommentContent reads it from the cache, strips the
+	// frontmatter, and renders the body through goldmark + bluemonday.
 	commentURL := "https://alice.polis.pub/comments/20260506/re-hello.md"
-	commentRel := "20260506/re-hello.md"
-	commentPath := filepath.Join(s.DataDir, "comments", commentRel)
-	if err := os.MkdirAll(filepath.Dir(commentPath), 0755); err != nil {
-		t.Fatalf("mkdir comment: %v", err)
-	}
 	commentBody := "---\ntitle: re Hello\n---\nNice **post**!"
-	if err := os.WriteFile(commentPath, []byte(commentBody), 0644); err != nil {
-		t.Fatalf("write comment: %v", err)
+	if err := cache.StoreBlessed(s.DataDir, "ds.polis.pub", cache.BlessedSidecar{SourceURL: commentURL, FetchedAt: "t"}, []byte(commentBody)); err != nil {
+		t.Fatalf("store blessed cache: %v", err)
 	}
 	if err := metadata.AddBlessedComment(s.DataDir, postPath, metadata.BlessedComment{
 		URL:       commentURL,
@@ -1781,27 +1778,49 @@ func TestStreamItems_DMScopeContract(t *testing.T) {
 // (the SPA fetches them on conversation open via /api/dm/conversations/<id>).
 func TestStreamItemsDM_ReturnsConversationSummaries(t *testing.T) {
 	s := newConfiguredServer(t)
-	store, err := s.dmStore()
+	mb, self, _, err := s.dmMailbox()
 	if err != nil {
-		t.Fatalf("dmStore: %v", err)
+		t.Fatalf("dmMailbox: %v", err)
 	}
 	now := time.Now().UTC()
-	// Two unread, one read. Mixed timestamps so ordering matters.
-	// LastPreview seeded as plaintext — DecryptIndexPreviews passes
-	// non-"enc:"-prefixed strings through unchanged (per the
-	// backwards-compat path documented on dm.Store.DecryptPreview).
-	idx := &dm.ConversationIndex{
-		Conversations: []dm.ConversationSummary{
-			{ID: "conv-a", PeerDomain: "alice.polis.pub", PeerURL: "https://alice.polis.pub", LastMessageAt: now.Add(-1 * time.Hour).Format(time.RFC3339), UnreadCount: 2, LastPreview: "hey alice"},
-			{ID: "conv-b", PeerDomain: "bob.polis.pub", PeerURL: "https://bob.polis.pub", LastMessageAt: now.Add(-3 * time.Hour).Format(time.RFC3339), UnreadCount: 0, LastPreview: "see you later"},
-			{ID: "conv-c", PeerDomain: "charlie.polis.pub", PeerURL: "https://charlie.polis.pub", LastMessageAt: now.Add(-2 * time.Hour).Format(time.RFC3339), UnreadCount: 1, LastPreview: "just a thought"},
-		},
-	}
-	if err := store.SaveIndex(idx); err != nil {
-		t.Fatalf("SaveIndex: %v", err)
-	}
 
-	// qualifier=all: 3 items, ordered newest-first (a, c, b).
+	// Seed three conversations in the mailbox by appending one incoming wire box each,
+	// then overwrite each conversation.json to control ordering (last_message_at) and read
+	// state (read cursor) — the mailbox stamps "now" on append, so we set these directly.
+	seed := func(peer string, lastAgo time.Duration, read bool) {
+		t.Helper()
+		var nonce [24]byte
+		var senderPub [32]byte
+		copy(nonce[:], []byte(peer))
+		if _, err := mb.AppendReceived(peer, peer, 0, []byte("ciphertext"), nonce, senderPub, ""); err != nil {
+			t.Fatalf("AppendReceived %s: %v", peer, err)
+		}
+		lastAt := now.Add(-lastAgo).Format(time.RFC3339)
+		readAt := "" // unread: read cursor before the message
+		if read {
+			readAt = now.Add(time.Hour).Format(time.RFC3339) // after the message → unread 0
+		}
+		meta := dm.ConversationMeta{
+			Peer:           peer,
+			ConversationID: dm.ComputeConversationID(self, peer),
+			CreatedAt:      lastAt,
+			LastMessageAt:  lastAt,
+			ReadAt:         readAt,
+			MessageCount:   1,
+		}
+		data, _ := json.MarshalIndent(meta, "", "  ")
+		path := filepath.Join(dm.DMDir(s.DataDir), "conversations", peer, "conversation.json")
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatalf("write meta %s: %v", peer, err)
+		}
+	}
+	seed("alice.polis.pub", 1*time.Hour, false) // unread, newest
+	seed("bob.polis.pub", 3*time.Hour, true)    // read, oldest
+	seed("charlie.polis.pub", 2*time.Hour, false)
+
+	idAlice := dm.ComputeConversationID(self, "alice.polis.pub")
+
+	// qualifier=all: 3 items, ordered newest-first (alice, charlie, bob).
 	code, resp := streamRequest(t, s, "type=dms&qualifier=all")
 	if code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%v)", code, resp)
@@ -1814,23 +1833,28 @@ func TestStreamItemsDM_ReturnsConversationSummaries(t *testing.T) {
 	if first["type"] != "dm" {
 		t.Errorf("expected type=dm, got %v", first["type"])
 	}
-	if first["conversation_id"] != "conv-a" {
-		t.Errorf("expected newest-first ordering (conv-a), got %v", first["conversation_id"])
+	if first["conversation_id"] != idAlice {
+		t.Errorf("expected newest-first ordering (alice), got %v", first["conversation_id"])
 	}
 	if first["sender_domain"] != "alice.polis.pub" {
 		t.Errorf("expected sender_domain=alice.polis.pub, got %v", first["sender_domain"])
 	}
-	if first["url"] != "/_/messages/conv-a" {
-		t.Errorf("expected url=/_/messages/conv-a, got %v", first["url"])
+	if first["url"] != "/_/messages/"+idAlice {
+		t.Errorf("expected url=/_/messages/%s, got %v", idAlice, first["url"])
 	}
-	if first["body_text"] != "hey alice" {
-		t.Errorf("expected decrypted preview body_text='hey alice', got %v", first["body_text"])
+	// No server-readable preview under end-to-end encryption.
+	if bt, ok := first["body_text"]; ok && bt != "" {
+		t.Errorf("expected empty body_text (no server-readable preview), got %v", bt)
 	}
 	if first["unread"] != true {
-		t.Errorf("expected unread=true (UnreadCount=2), got %v", first["unread"])
+		t.Errorf("expected unread=true, got %v", first["unread"])
 	}
-	// Expected ordering: conv-a (1h ago), conv-c (2h), conv-b (3h).
-	wantOrder := []string{"conv-a", "conv-c", "conv-b"}
+	// Expected ordering: alice (1h ago), charlie (2h), bob (3h).
+	wantOrder := []string{
+		idAlice,
+		dm.ComputeConversationID(self, "charlie.polis.pub"),
+		dm.ComputeConversationID(self, "bob.polis.pub"),
+	}
 	for i, want := range wantOrder {
 		got := items[i].(map[string]interface{})["conversation_id"]
 		if got != want {
@@ -1838,11 +1862,11 @@ func TestStreamItemsDM_ReturnsConversationSummaries(t *testing.T) {
 		}
 	}
 
-	// qualifier=new: only the 2 unread conversations (a + c), b filtered out.
+	// qualifier=new: only the 2 unread conversations (alice + charlie), bob filtered out.
 	_, resp = streamRequest(t, s, "type=dms&qualifier=new")
 	items, _ = resp["items"].([]interface{})
 	if len(items) != 2 {
-		t.Fatalf("qualifier=new should filter to UnreadCount>0; got %d items", len(items))
+		t.Fatalf("qualifier=new should filter to unread; got %d items", len(items))
 	}
 	for _, it := range items {
 		if it.(map[string]interface{})["unread"] != true {
@@ -1850,13 +1874,11 @@ func TestStreamItemsDM_ReturnsConversationSummaries(t *testing.T) {
 		}
 	}
 
-	// Privacy invariant: no encrypted-payload fields surface in the
-	// response. The decrypted preview body_text is the only message-
-	// content surface.
+	// Privacy invariant: no encrypted-payload fields surface in the response.
 	bodyJSON, _ := json.Marshal(resp)
 	if strings.Contains(string(bodyJSON), "encrypted_content") ||
 		strings.Contains(string(bodyJSON), "storage_nonce") ||
-		strings.Contains(string(bodyJSON), "enc:") {
+		strings.Contains(string(bodyJSON), "ciphertext") {
 		t.Errorf("encrypted bytes leaked into response: %s", bodyJSON)
 	}
 }
@@ -2522,5 +2544,80 @@ func TestClientEvent_AllowlistEnforced(t *testing.T) {
 	s.handleClientEvent(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("malformed JSON should 400, got %d", w.Code)
+	}
+}
+
+// TestHandleStreamItemsDMThread_LockedShipsBox verifies phase-4.5 server wiring:
+// a password-epoch message the server can't read (it holds no epoch-1 DEK) is
+// returned as locked, WITHOUT leaking plaintext, but WITH the raw wire box
+// (ciphertext / nonce / box_pub) + key_epoch so the SPA can open it in-browser
+// after the user unlocks that epoch with their password.
+func TestHandleStreamItemsDMThread_LockedShipsBox(t *testing.T) {
+	s := newConfiguredServer(t)
+	const peer = "david.polis.pub"
+	const secret = "meet me at the old pier"
+
+	dmDir := dm.DMDir(s.DataDir)
+
+	// Keyring with only the bootstrap (server-held) epoch on disk — so the
+	// server's LoadAvailableDEKs hands the mailbox only epoch 0's DEK.
+	k := &dm.Keyring{}
+	if _, err := k.AddBootstrapEpoch(); err != nil {
+		t.Fatalf("AddBootstrapEpoch: %v", err)
+	}
+	if err := k.SaveCAS(dmDir, 0); err != nil {
+		t.Fatalf("SaveCAS: %v", err)
+	}
+
+	// A message sealed to a password epoch (1). The server never has this DEK,
+	// so reading it later yields Locked=true.
+	pub1, dek1, err := dm.NewEpochKeypair()
+	if err != nil {
+		t.Fatalf("NewEpochKeypair: %v", err)
+	}
+	mb := dm.NewMailbox(dmDir)
+	if _, err := mb.AppendSent(peer, "testsite.polis.pub", secret, 1, pub1, dek1, "", "sent"); err != nil {
+		t.Fatalf("AppendSent: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/items?type=dms&scope=@"+peer, nil)
+	w := httptest.NewRecorder()
+	s.handleStreamItemsDMThread(w, req, peer, streamCursor{}, 50, "newest")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Items []struct {
+			Type       string `json:"type"`
+			Locked     bool   `json:"locked"`
+			KeyEpoch   int    `json:"key_epoch"`
+			Ciphertext string `json:"ciphertext"`
+			Nonce      string `json:"nonce"`
+			BoxPub     string `json:"box_pub"`
+			BodyText   string `json:"body_text"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (%s)", err, w.Body.String())
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("want 1 item, got %d: %s", len(resp.Items), w.Body.String())
+	}
+	it := resp.Items[0]
+	if it.Type != "dm-message" {
+		t.Errorf("type = %q, want dm-message", it.Type)
+	}
+	if !it.Locked {
+		t.Error("message should be locked (password epoch; server holds no DEK)")
+	}
+	if it.KeyEpoch != 1 {
+		t.Errorf("key_epoch = %d, want 1", it.KeyEpoch)
+	}
+	if it.Ciphertext == "" || it.Nonce == "" || it.BoxPub == "" {
+		t.Errorf("locked item must ship the raw box; got ct=%q nonce=%q box_pub=%q", it.Ciphertext, it.Nonce, it.BoxPub)
+	}
+	if it.BodyText == secret {
+		t.Error("server must NOT expose plaintext for a locked message")
 	}
 }

@@ -79,6 +79,22 @@
          popstate. Loaded before owner-extras so the parser is available
          when the URL-push wiring sets up. -->
     <script src="/pql.js" defer></script>
+    <!-- DM end-to-end crypto stack (phase 4). Same-origin vendored libs +
+         the polis wrappers, loaded in dependency order: vendored IIFEs
+         (tweetnacl → hash-wasm Argon2id → @scure/bip39) populate
+         globalThis.{nacl,hashwasm,scureBip39}; dm-crypto.js wraps them as
+         PolisDMCrypto; dm-session.js holds unwrapped DEKs in memory
+         (PolisDMSession); dm.js exposes the high-level set/unlock flows
+         (PolisDM). All `defer` so they run before DOMContentLoaded, in
+         order — settings + messages consumers invoke them on demand. The
+         Argon2id WASM needs 'wasm-unsafe-eval' (CSPAdminSPA, script-src);
+         same-origin so 'self' covers the rest. See www/vendor/README.md. -->
+    <script src="/vendor/tweetnacl.js" defer></script>
+    <script src="/vendor/hash-wasm-argon2.js" defer></script>
+    <script src="/vendor/bip39.js" defer></script>
+    <script src="/dm-crypto.js" defer></script>
+    <script src="/dm-session.js" defer></script>
+    <script src="/dm.js" defer></script>
     <!-- owner-extras (step-06/6.d). Loaded ONLY by the SPA — public per-post
          artifacts never reference this file. Skeleton + readiness check
          today; subsequent step-6 sub-steps (6.e icon presets, 6.f.2
@@ -372,6 +388,13 @@
             </div>
         </nav>
 
+        <!-- Full-width banner host pinned directly under the sticky topbar — the
+             "fade zone" the mockups (17) attach notices to. owner-extras.js mounts
+             the DM "set a password" setup bar + the localhost read-only banner here
+             (full width, not in the centered content column). Empty/zero-height when
+             no banner applies. -->
+        <div id="dm-banner-host" class="dm-banner-host" aria-live="polite"></div>
+
         <!-- Stream Screen (v4 layout container; shown when navigating to /feed).
              step-06/6.c: brings the v4 stream layout into the SPA homepage so
              the controller (loaded via /bundle-assets/) hydrates a real .stream
@@ -442,7 +465,7 @@
                          tabindex="0" role="button"
                          aria-label="Write a new post">
                     <div class="timeline-dot" aria-hidden="true">+</div>
-                    <p class="ghost-prompt" id="ghost-compose-prompt">yours, truly</p>
+                    <p class="ghost-prompt" id="ghost-compose-prompt">... yours, truly</p>
                 </article>
                 <div class="stream" data-polis-stream-role="owner-spa-homepage">
                     <!-- Real entries appended dynamically by stream.js

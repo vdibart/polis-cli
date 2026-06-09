@@ -133,6 +133,43 @@ func TestProfiles_RelationshipEnum(t *testing.T) {
 	}
 }
 
+// TestProfiles_AvatarPopulated verifies attachProfileAvatars stamps every
+// profile row with an avatar config. Test domains are unreachable, so the
+// fetch falls back to the deterministic hue config — which always carries a
+// non-empty bg — so each row's author_avatar must be present.
+func TestProfiles_AvatarPopulated(t *testing.T) {
+	s := newConfiguredServer(t)
+	now := time.Now().UTC()
+	ff := &following.FollowingFile{Following: []following.FollowingEntry{
+		{URL: "https://alice.polis.pub", AddedAt: now.Format(time.RFC3339), AuthorName: "Alice"},
+		{URL: "https://bob.polis.pub", AddedAt: now.Format(time.RFC3339), AuthorName: "Bob"},
+	}}
+	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+		t.Fatalf("save following: %v", err)
+	}
+
+	code, resp := profilesRequest(t, s, "")
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (resp=%v)", code, resp)
+	}
+	items, _ := resp["items"].([]interface{})
+	if len(items) == 0 {
+		t.Fatal("expected profile items, got none")
+	}
+	for _, it := range items {
+		m := it.(map[string]interface{})
+		domain, _ := m["author_domain"].(string)
+		av, ok := m["author_avatar"].(map[string]interface{})
+		if !ok {
+			t.Errorf("profile %s: missing author_avatar (got %v)", domain, m["author_avatar"])
+			continue
+		}
+		if bg, _ := av["bg"].(string); bg == "" {
+			t.Errorf("profile %s: author_avatar has empty bg (%v)", domain, av)
+		}
+	}
+}
+
 // TestProfiles_DeriveRelationshipTable pins the helper's truth table
 // directly so refactors to the storage path can't silently flip the
 // enum. Same matrix as TestProfiles_RelationshipEnum but at the unit

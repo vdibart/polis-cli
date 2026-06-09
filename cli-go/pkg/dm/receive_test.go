@@ -15,18 +15,17 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 )
 
-// testLogger captures log messages for assertion.
+// testLogger captures emitted events as "action k=v ..." strings for assertion.
 type testLogger struct {
-	infos []string
-	warns []string
+	events []string
 }
 
-func (l *testLogger) Info(format string, args ...interface{}) {
-	l.infos = append(l.infos, fmt.Sprintf(format, args...))
-}
-
-func (l *testLogger) Warn(format string, args ...interface{}) {
-	l.warns = append(l.warns, fmt.Sprintf(format, args...))
+func (l *testLogger) Event(action string, fields map[string]any) {
+	parts := []string{action}
+	for k, v := range fields {
+		parts = append(parts, fmt.Sprintf("%s=%v", k, v))
+	}
+	l.events = append(l.events, strings.Join(parts, " "))
 }
 
 func testReceiver(t *testing.T) (*Receiver, []byte, []byte, []byte, []byte) {
@@ -40,73 +39,161 @@ func testReceiver(t *testing.T) (*Receiver, []byte, []byte, []byte, []byte) {
 	// Generate sender keypair
 	senderPriv, senderPub, _ := signing.GenerateKeypair()
 
-	seed, _ := signing.ParsePrivateKey(privPEM)
-	store, err := NewStore(siteDir, seed.Seed())
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-
 	rl := NewRateLimiter(10, 100)
-	rcv := NewReceiver(privPEM, pubSSH, "bob.example.com", siteDir, store, rl)
+	rcv := NewReceiver(privPEM, pubSSH, "bob.example.com", siteDir, rl)
+
+	// DM-1: inject a fake sender-key fetcher so box_pub authentication passes for the
+	// canonical test sender (epoch 0, key derived from senderPriv — matching buildEnvelope).
+	// Tests exercising the failure path override this.
+	rcv.FetchSenderKeys = fakeSenderKeys(t, senderPriv, senderPub, 0)
+
+	// Provision the receiver's DM keyring (bootstrap epoch) so deliveries can validate
+	// recipient_epoch and there's a messages key to seal to.
+	kr := &Keyring{}
+	if _, err := kr.AddBootstrapEpoch(); err != nil {
+		t.Fatalf("bootstrap epoch: %v", err)
+	}
+	if err := kr.Save(DMDir(siteDir)); err != nil {
+		t.Fatalf("save keyring: %v", err)
+	}
 
 	return rcv, senderPriv, senderPub, privPEM, pubSSH
 }
 
-// buildEnvelope creates a valid encrypted envelope for testing.
-func buildEnvelope(t *testing.T, senderPrivPEM, senderPubSSH, receiverPubSSH []byte, senderDomain, receiverDomain, content string) []byte {
+// fakeSenderKeys returns a Receiver.FetchSenderKeys stub that advertises, for the given
+// sender_epoch, the X25519 messages key derived from senderPrivPEM (matching buildEnvelope's
+// box_pub), signed by the sender's identity key — i.e. an authentic published block.
+func fakeSenderKeys(t *testing.T, senderPrivPEM, senderPubSSH []byte, epoch int) func(string) ([]byte, *MessagesKeyBlock, error) {
+	t.Helper()
+	senderSK, err := signing.Ed25519PrivateKeyToX25519(senderPrivPEM)
+	if err != nil {
+		t.Fatalf("sender SK: %v", err)
+	}
+	senderPK, err := publicFromDEK(senderSK[:])
+	if err != nil {
+		t.Fatalf("sender PK: %v", err)
+	}
+	keyB64 := base64.StdEncoding.EncodeToString(senderPK[:])
+	sig, err := signing.SignContent(canonicalMessagesKey(epoch, keyB64), senderPrivPEM)
+	if err != nil {
+		t.Fatalf("sign messages key: %v", err)
+	}
+	block := &MessagesKeyBlock{Current: MessagesKeyEntry{Epoch: epoch, Key: keyB64, Sig: sig}}
+	return func(string) ([]byte, *MessagesKeyBlock, error) { return senderPubSSH, block, nil }
+}
+
+// buildEnvelope creates a valid wire envelope for testing: the inner payload is box-sealed
+// to the receiver's current epoch messages key (from its keyring), and the envelope carries
+// box_pub (the sender's X25519 pubkey) + recipient_epoch, matching the phase-2 wire model.
+func buildEnvelope(t *testing.T, rcv *Receiver, senderPrivPEM, senderPubSSH []byte, senderDomain, receiverDomain, content string) []byte {
 	t.Helper()
 
 	senderSK, err := signing.Ed25519PrivateKeyToX25519(senderPrivPEM)
 	if err != nil {
 		t.Fatalf("sender SK: %v", err)
 	}
-	receiverPK, err := signing.Ed25519PublicKeyToX25519(receiverPubSSH)
+	senderPK, err := publicFromDEK(senderSK[:])
 	if err != nil {
-		t.Fatalf("receiver PK: %v", err)
+		t.Fatalf("sender PK: %v", err)
 	}
 
-	inner := InnerPayload{
-		Content:         content,
-		SenderPublicKey: string(senderPubSSH),
+	// Seal to the receiver's current epoch messages key.
+	kr, err := LoadKeyring(DMDir(rcv.SiteDir))
+	if err != nil {
+		t.Fatalf("load receiver keyring: %v", err)
 	}
-	innerJSON, _ := json.Marshal(inner)
+	cur, err := kr.CurrentEpoch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recvPKBytes, _ := base64.StdEncoding.DecodeString(cur.PublicKeyMessages)
+	var receiverPK [32]byte
+	copy(receiverPK[:], recvPKBytes)
 
-	ciphertext, nonce, err := Encrypt(innerJSON, &receiverPK, &senderSK)
+	ciphertext, nonce, err := Encrypt([]byte(content), &receiverPK, &senderSK)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
 
 	envelope := MessageEnvelope{
-		Version:          1,
+		Version:          MessageEnvelopeVersion,
 		SenderDomain:     senderDomain,
 		RecipientDomain:  receiverDomain,
 		EncryptedContent: base64.StdEncoding.EncodeToString(ciphertext),
 		Nonce:            base64.StdEncoding.EncodeToString(nonce[:]),
 		Timestamp:        time.Now().UTC().Format(time.RFC3339),
+		BoxPub:           base64.StdEncoding.EncodeToString(senderPK[:]),
+		SenderEpoch:      0,
+		RecipientEpoch:   cur.ID,
 	}
 
 	data, _ := json.Marshal(envelope)
 	return data
 }
 
+// TestReceiveMessage_RejectsUnauthenticatedBoxPub is the DM-1 regression: an envelope whose
+// box_pub is NOT the sender's published messages key (the impersonation primitive — a third
+// party replays a valid signed deliver header but attaches an attacker-generated box_pub and
+// a box sealed under it) must be rejected at receive time, before storage.
+func TestReceiveMessage_RejectsUnauthenticatedBoxPub(t *testing.T) {
+	rcv, senderPriv, senderPub, _, _ := testReceiver(t)
+	policyPath := filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl")
+	os.WriteFile(policyPath, []byte(`{"active":true,"policy":"allow pub.polis.dm from all"}`+"\n"), 0600)
+
+	// Forge: attacker mints their own keypair and seals a chosen message to the receiver's
+	// key, then sets box_pub to the attacker key (NOT alice's published key).
+	attackerPK, attackerSK, err := NewEpochKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr, _ := LoadKeyring(DMDir(rcv.SiteDir))
+	cur, _ := kr.CurrentEpoch()
+	recvPKBytes, _ := base64.StdEncoding.DecodeString(cur.PublicKeyMessages)
+	var receiverPK [32]byte
+	copy(receiverPK[:], recvPKBytes)
+	ct, nonce, err := Encrypt([]byte("forged: trust me, this is alice"), &receiverPK, &attackerSK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := MessageEnvelope{
+		Version:          MessageEnvelopeVersion,
+		SenderDomain:     "alice.example.com",
+		RecipientDomain:  "bob.example.com",
+		EncryptedContent: base64.StdEncoding.EncodeToString(ct),
+		Nonce:            base64.StdEncoding.EncodeToString(nonce[:]),
+		Timestamp:        time.Now().UTC().Format(time.RFC3339),
+		BoxPub:           base64.StdEncoding.EncodeToString(attackerPK[:]),
+		SenderEpoch:      0,
+		RecipientEpoch:   cur.ID,
+	}
+	body, _ := json.Marshal(env)
+
+	// FetchSenderKeys returns alice's authentic block (epoch 0); the forged box_pub won't match.
+	rcv.FetchSenderKeys = fakeSenderKeys(t, senderPriv, senderPub, 0)
+
+	if _, err := rcv.ReceiveMessage("alice.example.com", body, nil); err == nil {
+		t.Fatal("expected rejection of unauthenticated box_pub, got nil error")
+	} else if !strings.Contains(err.Error(), "box_pub") {
+		t.Fatalf("expected box_pub authentication error, got: %v", err)
+	}
+
+	// And nothing was stored.
+	msgs, _ := NewMailbox(DMDir(rcv.SiteDir)).LoadMessages("alice.example.com")
+	if len(msgs) != 0 {
+		t.Fatalf("forged message must not be stored, found %d", len(msgs))
+	}
+}
+
 func TestReceiveMessage_Success(t *testing.T) {
-	rcv, senderPriv, senderPub, _, receiverPub := testReceiver(t)
+	rcv, senderPriv, senderPub, _, _ := testReceiver(t)
 	logger := &testLogger{}
 	rcv.Logger = logger
-
-	// Set up sender's public key in cache (simulate prior fetch)
-	senderX25519PK, _ := signing.Ed25519PublicKeyToX25519(senderPub)
-	rcv.keyCache["alice.example.com"] = &cachedKey{
-		publicKeySSH: senderPub,
-		x25519PK:     senderX25519PK,
-		fetchedAt:    time.Now(),
-	}
 
 	// Write policy allowing DMs from all
 	policyPath := filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl")
 	os.WriteFile(policyPath, []byte(`{"active":true,"policy":"allow pub.polis.dm from all"}`+"\n"), 0600)
 
-	envelope := buildEnvelope(t, senderPriv, senderPub, receiverPub, "alice.example.com", "bob.example.com", "Hello Bob!")
+	envelope := buildEnvelope(t, rcv, senderPriv, senderPub, "alice.example.com", "bob.example.com", "Hello Bob!")
 	msg, err := rcv.ReceiveMessage("alice.example.com", envelope, nil)
 	if err != nil {
 		t.Fatalf("ReceiveMessage: %v", err)
@@ -119,12 +206,12 @@ func TestReceiveMessage_Success(t *testing.T) {
 	}
 
 	// Check structured logs
-	if len(logger.infos) < 2 {
-		t.Errorf("expected at least 2 info logs (received + accepted), got %d", len(logger.infos))
+	if len(logger.events) < 2 {
+		t.Errorf("expected at least 2 info logs (received + accepted), got %d", len(logger.events))
 	}
 	foundReceived := false
 	foundAccepted := false
-	for _, log := range logger.infos {
+	for _, log := range logger.events {
 		if strings.Contains(log, "dm.deliver.received") {
 			foundReceived = true
 		}
@@ -137,6 +224,30 @@ func TestReceiveMessage_Success(t *testing.T) {
 	}
 	if !foundAccepted {
 		t.Error("missing dm.deliver.accepted log")
+	}
+}
+
+// TestReceiveMessage_StaleEpochRejected ensures a delivery sealed to a non-current epoch
+// (a stale cached messages key) is rejected for retry, not stored unreadable — the guard
+// that makes clearing the bootstrap server_dek safe.
+func TestReceiveMessage_StaleEpochRejected(t *testing.T) {
+	rcv, senderPriv, senderPub, _, _ := testReceiver(t)
+	policyPath := filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl")
+	os.WriteFile(policyPath, []byte(`{"active":true,"policy":"allow pub.polis.dm from all"}`+"\n"), 0600)
+
+	envelope := buildEnvelope(t, rcv, senderPriv, senderPub, "alice.example.com", "bob.example.com", "stale")
+	// Rewrite recipient_epoch to a non-current value.
+	var env MessageEnvelope
+	json.Unmarshal(envelope, &env)
+	env.RecipientEpoch = 999
+	patched, _ := json.Marshal(env)
+
+	_, err := rcv.ReceiveMessage("alice.example.com", patched, nil)
+	if err == nil {
+		t.Fatal("expected rejection of a stale recipient_epoch")
+	}
+	if !strings.Contains(err.Error(), "stale recipient_epoch") {
+		t.Errorf("error = %q, want a stale-epoch refetch message", err.Error())
 	}
 }
 
@@ -159,7 +270,7 @@ func TestReceiveMessage_PolicyDenied(t *testing.T) {
 
 	// Check structured log
 	found := false
-	for _, log := range logger.warns {
+	for _, log := range logger.events {
 		if strings.Contains(log, "dm.deliver.policy_denied") && strings.Contains(log, "spam.example.com") {
 			found = true
 		}
@@ -193,7 +304,7 @@ func TestReceiveMessage_GlobalRateLimit(t *testing.T) {
 	}
 
 	found := false
-	for _, log := range logger.warns {
+	for _, log := range logger.events {
 		if strings.Contains(log, "dm.deliver.global_rate_limited") {
 			found = true
 		}
@@ -226,7 +337,7 @@ func TestReceiveMessage_SenderRateLimit(t *testing.T) {
 	}
 
 	found := false
-	for _, log := range logger.warns {
+	for _, log := range logger.events {
 		if strings.Contains(log, "dm.deliver.sender_rate_limited") {
 			found = true
 		}
@@ -255,7 +366,7 @@ func TestReceiveMessage_SizeRejected(t *testing.T) {
 	}
 
 	found := false
-	for _, log := range logger.warns {
+	for _, log := range logger.events {
 		if strings.Contains(log, "dm.deliver.size_rejected") {
 			found = true
 		}
@@ -266,15 +377,7 @@ func TestReceiveMessage_SizeRejected(t *testing.T) {
 }
 
 func TestReceiveMessage_PolicyAllowFollowing(t *testing.T) {
-	rcv, senderPriv, senderPub, _, receiverPub := testReceiver(t)
-
-	// Set up sender key in cache
-	senderX25519PK, _ := signing.Ed25519PublicKeyToX25519(senderPub)
-	rcv.keyCache["alice.example.com"] = &cachedKey{
-		publicKeySSH: senderPub,
-		x25519PK:     senderX25519PK,
-		fetchedAt:    time.Now(),
-	}
+	rcv, senderPriv, senderPub, _, _ := testReceiver(t)
 
 	// Default DM policy: allow from following, deny from all
 	policyPath := filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl")
@@ -285,7 +388,7 @@ func TestReceiveMessage_PolicyAllowFollowing(t *testing.T) {
 
 	followingDomains := map[string]bool{"alice.example.com": true}
 
-	envelope := buildEnvelope(t, senderPriv, senderPub, receiverPub, "alice.example.com", "bob.example.com", "From a friend")
+	envelope := buildEnvelope(t, rcv, senderPriv, senderPub, "alice.example.com", "bob.example.com", "From a friend")
 	msg, err := rcv.ReceiveMessage("alice.example.com", envelope, followingDomains)
 	if err != nil {
 		t.Fatalf("should accept from followed domain: %v", err)
@@ -320,7 +423,7 @@ func TestVerifySignedRequest_ValidSignature(t *testing.T) {
 	privPEM, pubSSH, _ := signing.GenerateKeypair()
 
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	canonicalJSON, _ := MakeDeliverAuthCanonicalJSON("deliver", "alice.example.com", timestamp)
+	canonicalJSON, _ := MakeDeliverAuthCanonicalJSON("deliver", "alice.example.com", "bob.example.com", timestamp, bodyDigest(nil))
 	sig, err := signing.SignContent(canonicalJSON, privPEM)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
@@ -332,7 +435,7 @@ func TestVerifySignedRequest_ValidSignature(t *testing.T) {
 	req.Header.Set("X-Polis-Signature", compactSig)
 	req.Header.Set("X-Polis-Timestamp", timestamp)
 
-	domain, err := VerifySignedRequestWithLogger(req, func(d string) ([]byte, error) {
+	domain, err := VerifySignedRequestWithLogger(req, "bob.example.com", nil, func(d string) ([]byte, error) {
 		return pubSSH, nil
 	}, nil)
 	if err != nil {
@@ -340,6 +443,44 @@ func TestVerifySignedRequest_ValidSignature(t *testing.T) {
 	}
 	if domain != "alice.example.com" {
 		t.Errorf("domain = %q, want alice.example.com", domain)
+	}
+}
+
+// TestVerifySignedRequest_BindsRecipientAndBody is the DM-2 regression: a signature is
+// valid only for the exact recipient domain + body it was signed over. Replaying the same
+// headers against a different recipient, or with a swapped body, must fail.
+func TestVerifySignedRequest_BindsRecipientAndBody(t *testing.T) {
+	privPEM, pubSSH, _ := signing.GenerateKeypair()
+	fetch := func(string) ([]byte, error) { return pubSSH, nil }
+
+	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	body := []byte(`{"envelope":"contents"}`)
+	// Signed for recipient bob.example.com over `body`.
+	canonical, _ := MakeDeliverAuthCanonicalJSON("deliver", "alice.example.com", "bob.example.com", timestamp, bodyDigest(body))
+	sig, err := signing.SignContent(canonical, privPEM)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	compactSig := strings.ReplaceAll(sig, "\n", "")
+	mkReq := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/content/dm/actions/deliver", nil)
+		req.Header.Set("X-Polis-Domain", "alice.example.com")
+		req.Header.Set("X-Polis-Signature", compactSig)
+		req.Header.Set("X-Polis-Timestamp", timestamp)
+		return req
+	}
+
+	// Correct recipient + body → accepted.
+	if _, err := VerifySignedRequestForAction(mkReq(), "deliver", "bob.example.com", body, fetch, nil); err != nil {
+		t.Fatalf("authentic request should verify: %v", err)
+	}
+	// Replayed against a different recipient → rejected (recipient binding).
+	if _, err := VerifySignedRequestForAction(mkReq(), "deliver", "carol.example.com", body, fetch, nil); err == nil {
+		t.Fatal("replay to a different recipient must fail")
+	}
+	// Same recipient, swapped body → rejected (body binding).
+	if _, err := VerifySignedRequestForAction(mkReq(), "deliver", "bob.example.com", []byte(`{"envelope":"TAMPERED"}`), fetch, nil); err == nil {
+		t.Fatal("swapped body must fail")
 	}
 }
 
@@ -352,18 +493,18 @@ func TestVerifySignedRequest_ExpiredTimestamp(t *testing.T) {
 	req.Header.Set("X-Polis-Signature", "dummy")
 	req.Header.Set("X-Polis-Timestamp", timestamp)
 
-	_, err := VerifySignedRequestWithLogger(req, func(d string) ([]byte, error) {
+	_, err := VerifySignedRequestWithLogger(req, "bob.example.com", nil, func(d string) ([]byte, error) {
 		return nil, nil
 	}, logger)
 	if err == nil {
 		t.Fatal("expected timestamp rejection")
 	}
-	if !strings.Contains(err.Error(), "5-minute window") {
+	if !strings.Contains(err.Error(), "freshness window") {
 		t.Errorf("error should mention timestamp window: %v", err)
 	}
 
 	found := false
-	for _, log := range logger.warns {
+	for _, log := range logger.events {
 		if strings.Contains(log, "dm.deliver.timestamp_rejected") {
 			found = true
 		}
@@ -375,7 +516,7 @@ func TestVerifySignedRequest_ExpiredTimestamp(t *testing.T) {
 
 func TestVerifySignedRequest_MissingHeaders(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
-	_, err := VerifySignedRequestWithLogger(req, nil, nil)
+	_, err := VerifySignedRequestWithLogger(req, "bob.example.com", nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for missing headers")
 	}
@@ -393,7 +534,7 @@ func TestVerifySignedRequest_KeyFetchFailure(t *testing.T) {
 	req.Header.Set("X-Polis-Signature", "dummy")
 	req.Header.Set("X-Polis-Timestamp", timestamp)
 
-	_, err := VerifySignedRequestWithLogger(req, func(d string) ([]byte, error) {
+	_, err := VerifySignedRequestWithLogger(req, "bob.example.com", nil, func(d string) ([]byte, error) {
 		return nil, fmt.Errorf("connection refused")
 	}, logger)
 	if err == nil {
@@ -401,7 +542,7 @@ func TestVerifySignedRequest_KeyFetchFailure(t *testing.T) {
 	}
 
 	found := false
-	for _, log := range logger.warns {
+	for _, log := range logger.events {
 		if strings.Contains(log, "dm.deliver.key_fetch_failed") {
 			found = true
 		}
@@ -417,7 +558,7 @@ func TestVerifySignedRequest_InvalidSignature(t *testing.T) {
 	otherPriv, _, _ := signing.GenerateKeypair()
 
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	canonicalJSON, _ := MakeDeliverAuthCanonicalJSON("deliver", "alice.example.com", timestamp)
+	canonicalJSON, _ := MakeDeliverAuthCanonicalJSON("deliver", "alice.example.com", "bob.example.com", timestamp, bodyDigest(nil))
 	// Sign with wrong key
 	sig, _ := signing.SignContent(canonicalJSON, otherPriv)
 	compactSig := strings.ReplaceAll(sig, "\n", "")
@@ -427,7 +568,7 @@ func TestVerifySignedRequest_InvalidSignature(t *testing.T) {
 	req.Header.Set("X-Polis-Signature", compactSig)
 	req.Header.Set("X-Polis-Timestamp", timestamp)
 
-	_, err := VerifySignedRequestWithLogger(req, func(d string) ([]byte, error) {
+	_, err := VerifySignedRequestWithLogger(req, "bob.example.com", nil, func(d string) ([]byte, error) {
 		return pubSSH, nil
 	}, logger)
 	if err == nil {
@@ -435,7 +576,7 @@ func TestVerifySignedRequest_InvalidSignature(t *testing.T) {
 	}
 
 	found := false
-	for _, log := range logger.warns {
+	for _, log := range logger.events {
 		if strings.Contains(log, "dm.deliver.signature_invalid") {
 			found = true
 		}
@@ -473,26 +614,6 @@ func TestFetchPublicKey_HTTPTest(t *testing.T) {
 	}
 }
 
-func TestStripHTMLTags(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"Hello <b>world</b>", "Hello world"},
-		{"<script>alert('xss')</script>", "alert('xss')"},
-		{"No tags here", "No tags here"},
-		{"<a href='evil'>click</a>", "click"},
-		{"", ""},
-	}
-
-	for _, tt := range tests {
-		got := stripHTMLTags(tt.input)
-		if got != tt.want {
-			t.Errorf("stripHTMLTags(%q) = %q, want %q", tt.input, got, tt.want)
-		}
-	}
-}
-
 func TestRestorePEMSignature(t *testing.T) {
 	// Test that compact signatures are properly restored
 	compact := "-----BEGIN SSH SIGNATURE-----" + strings.Repeat("A", 100) + "-----END SSH SIGNATURE-----"
@@ -506,68 +627,8 @@ func TestRestorePEMSignature(t *testing.T) {
 	}
 }
 
-func TestValidateInnerPayload_EmptyContent(t *testing.T) {
-	inner := InnerPayload{Content: "  "}
-	data, _ := json.Marshal(inner)
-
-	rcv := &Receiver{keyCache: make(map[string]*cachedKey)}
-	_, err := validateInnerPayload(data, "alice.example.com", rcv)
-	if err == nil {
-		t.Fatal("should reject empty content")
-	}
-}
-
-func TestValidateInnerPayload_InvalidReplyToID(t *testing.T) {
-	inner := InnerPayload{Content: "Hello", ReplyToID: "not-valid-hex!"}
-	data, _ := json.Marshal(inner)
-
-	rcv := &Receiver{keyCache: make(map[string]*cachedKey)}
-	_, err := validateInnerPayload(data, "alice.example.com", rcv)
-	if err == nil {
-		t.Fatal("should reject invalid reply_to_id")
-	}
-}
-
-func TestValidateInnerPayload_UnknownFields(t *testing.T) {
-	data := []byte(`{"content":"Hello","sender_public_key":"","evil_field":"injection"}`)
-
-	rcv := &Receiver{keyCache: make(map[string]*cachedKey)}
-	_, err := validateInnerPayload(data, "alice.example.com", rcv)
-	if err == nil {
-		t.Fatal("should reject unknown fields")
-	}
-	if !strings.Contains(err.Error(), "unknown field") {
-		t.Errorf("error should mention unknown field: %v", err)
-	}
-}
-
-func TestValidateInnerPayload_HTMLStripping(t *testing.T) {
-	inner := InnerPayload{Content: "Hello <script>alert(1)</script>world"}
-	data, _ := json.Marshal(inner)
-
-	rcv := &Receiver{keyCache: make(map[string]*cachedKey)}
-	result, err := validateInnerPayload(data, "alice.example.com", rcv)
-	if err != nil {
-		t.Fatalf("should succeed: %v", err)
-	}
-	if strings.Contains(result.Content, "<script>") {
-		t.Error("HTML tags should be stripped")
-	}
-	if result.Content != "Hello alert(1)world" {
-		t.Errorf("content = %q, want 'Hello alert(1)world'", result.Content)
-	}
-}
-
 func TestReceiveMessage_CaseInsensitiveDomains(t *testing.T) {
-	rcv, senderPriv, senderPub, _, receiverPub := testReceiver(t)
-
-	// Sender uses mixed case for both domains — should still succeed
-	senderX25519PK, _ := signing.Ed25519PublicKeyToX25519(senderPub)
-	rcv.keyCache["alice.example.com"] = &cachedKey{
-		publicKeySSH: senderPub,
-		x25519PK:     senderX25519PK,
-		fetchedAt:    time.Now(),
-	}
+	rcv, senderPriv, senderPub, _, _ := testReceiver(t)
 
 	// Write permissive DM policy
 	os.MkdirAll(filepath.Join(rcv.SiteDir, ".polis", "policies"), 0700)
@@ -578,9 +639,8 @@ func TestReceiveMessage_CaseInsensitiveDomains(t *testing.T) {
 	)
 
 	// Build envelope with mixed-case domains (simulates david.polis.pub's bug)
-	envelope := buildEnvelope(t, senderPriv, senderPub, receiverPub,
-		"Alice.Example.COM",  // sender uses uppercase
-		"Bob.Example.COM",    // recipient uses uppercase
+	envelope := buildEnvelope(t, rcv, senderPriv, senderPub, "Alice.Example.COM", // sender uses uppercase
+		"Bob.Example.COM", // recipient uses uppercase
 		"Hello with mixed case!")
 
 	msg, err := rcv.ReceiveMessage("Alice.Example.COM", envelope, map[string]bool{
@@ -608,7 +668,7 @@ func TestVerifySignedRequest_NormalizesDomain(t *testing.T) {
 
 	// Sign with mixed-case domain (as the sender would)
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	canonical, _ := MakeDeliverAuthCanonicalJSON("deliver", "Alice.Example.COM", timestamp)
+	canonical, _ := MakeDeliverAuthCanonicalJSON("deliver", "Alice.Example.COM", "bob.example.com", timestamp, bodyDigest(nil))
 	sig, err := signing.SignContent(canonical, privPEM)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
@@ -622,7 +682,7 @@ func TestVerifySignedRequest_NormalizesDomain(t *testing.T) {
 
 	// fetchPublicKey is called with the lowercased domain
 	var fetchedDomain string
-	domain, err := VerifySignedRequestWithLogger(req, func(d string) ([]byte, error) {
+	domain, err := VerifySignedRequestWithLogger(req, "bob.example.com", nil, func(d string) ([]byte, error) {
 		fetchedDomain = d
 		return pubSSH, nil
 	}, nil)

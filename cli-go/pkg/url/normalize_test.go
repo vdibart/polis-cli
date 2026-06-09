@@ -84,3 +84,38 @@ func TestNormalizeToMD(t *testing.T) {
 		})
 	}
 }
+
+func TestCommentContentURL(t *testing.T) {
+	got := CommentContentURL("https://alice.polis.pub", "20260302", "reply-20260302")
+	want := "https://alice.polis.pub/content/pub.polis.core/comment/20260302/reply-20260302.md"
+	if got != want {
+		t.Errorf("CommentContentURL = %q, want %q", got, want)
+	}
+	// Trailing slash on baseURL is trimmed.
+	if got := CommentContentURL("https://alice.polis.pub/", "20260302", "x"); got != "https://alice.polis.pub/content/pub.polis.core/comment/20260302/x.md" {
+		t.Errorf("trailing-slash baseURL not trimmed: %q", got)
+	}
+}
+
+func TestCommentURLToContentRel(t *testing.T) {
+	const want = "content/pub.polis.core/comment/20260302/reply.md"
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"mount .md", "https://a.polis.pub/comments/20260302/reply.md", want},
+		{"mount .html", "https://a.polis.pub/comments/20260302/reply.html", want},
+		{"canonical .md", "https://a.polis.pub/content/pub.polis.core/comment/20260302/reply.md", want},
+		{"canonical .html", "https://a.polis.pub/content/pub.polis.core/comment/20260302/reply.html", want},
+		{"relative mount", "/comments/20260302/reply.md", want},
+		{"no extension", "https://a.polis.pub/comments/20260302/reply", want},
+		{"neither form", "https://a.polis.pub/posts/20260302/slug.md", ""},
+		{"empty", "", ""},
+	}
+	for _, tc := range tests {
+		if got := CommentURLToContentRel(tc.input); got != tc.want {
+			t.Errorf("%s: CommentURLToContentRel(%q) = %q, want %q", tc.name, tc.input, got, tc.want)
+		}
+	}
+}

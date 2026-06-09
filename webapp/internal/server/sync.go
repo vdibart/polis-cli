@@ -30,12 +30,11 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/blessing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/cache"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
@@ -43,7 +42,6 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
-	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
 // SyncResult aggregates results from all handlers in a unified sync run.
@@ -170,15 +168,15 @@ func (s *Server) runUnifiedSync() SyncResult {
 
 	// Log sync completion
 	s.LogEvent("pub.polis.sync.complete", map[string]interface{}{
-		"sync_id":            syncID,
-		"cursor_before":      cursor,
-		"cursor_after":       newCursor,
-		"events_processed":   len(allEvents),
-		"new_notifications":  result.NewNotifications,
-		"new_feed_items":     result.NewFeedItems,
-		"followers_changed":  result.FollowersChanged,
-		"files_changed":      result.FilesChanged,
-		"duration_ms":        time.Since(syncStart).Milliseconds(),
+		"sync_id":           syncID,
+		"cursor_before":     cursor,
+		"cursor_after":      newCursor,
+		"events_processed":  len(allEvents),
+		"new_notifications": result.NewNotifications,
+		"new_feed_items":    result.NewFeedItems,
+		"followers_changed": result.FollowersChanged,
+		"files_changed":     result.FilesChanged,
+		"duration_ms":       time.Since(syncStart).Milliseconds(),
 	})
 
 	return result
@@ -424,7 +422,12 @@ type blessingSyncHandler struct {
 func (h *blessingSyncHandler) Name() string { return "blessings" }
 
 func (h *blessingSyncHandler) EventTypes() []string {
-	return (&stream.BlessingHandler{}).EventTypes()
+	// BlessingHandler covers requested/granted/denied; add comment.unpublished so
+	// a comment author's withdrawal evicts our cached mirror (WS3·d). The DS now
+	// stamps comment.unpublished with target_domain = the post author (derived from
+	// in_reply_to) so the unified stream filter routes it to us — WS6 routing fix,
+	// canary commentUnpublishTargetDomain.
+	return append((&stream.BlessingHandler{}).EventTypes(), "pub.polis.comment.unpublished")
 }
 
 func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.HandlerResult {
@@ -556,10 +559,10 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 					s.LogWarn("policy auto-deny failed for %s: %v", commentURL, err)
 				} else {
 					s.LogEvent("pub.polis.comment.blessing.auto_deny", map[string]interface{}{
-					"comment_url": commentURL,
-					"actor":       evt.Actor,
-					"policy_rule": evalResult.Rule,
-				})
+						"comment_url": commentURL,
+						"actor":       evt.Actor,
+						"policy_rule": evalResult.Rule,
+					})
 				}
 			}
 		}
@@ -569,6 +572,32 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 	// so it appears on our post pages (same as handleBlessingGrant does manually).
 	filesChanged := false
 	for _, evt := range events {
+		// EVICTION (WS3·d): a post-author revoke/deny, or a comment author's
+		// unpublish, removes our cached mirror + drops it from blessed.json so it
+		// stops rendering. We act only on comments we actually cached (FindBlessed
+		// gates it). This honors a signed revocation — a 404 / unreachable author
+		// alone never evicts (the cache exists precisely to survive that).
+		if evt.Type == "pub.polis.comment.blessing.denied" || evt.Type == "pub.polis.comment.unpublished" {
+			cu := firstNonEmptyString(evt.Payload, "comment_url", "source_url", "url")
+			if cu == "" {
+				continue
+			}
+			if _, _, ok := cache.FindBlessed(s.DataDir, cu); !ok {
+				continue
+			}
+			// Evict through the SAME generic op Rosie's Reconcile uses (WS-R1
+			// anti-drift) — the blessed descriptor evicts across DS scopes.
+			evStore := cache.Store{DataDir: s.DataDir, DSDomain: extractDomainFromURL(s.DiscoveryURL)}
+			evDesc := cache.NewBlessedDescriptor(cache.DescriptorConfig{})
+			_ = cache.Evict(evStore, evDesc, cu)
+			if err := metadata.RemoveBlessedComment(s.DataDir, cu); err != nil {
+				s.LogWarn("blessing sync: evict %s: failed to update blessed.json: %v", cu, err)
+			}
+			filesChanged = true
+			s.LogEvent("pub.polis.comment.blessing.evict", map[string]interface{}{"comment_url": cu})
+			continue
+		}
+
 		if evt.Type != "pub.polis.comment.blessing.granted" {
 			continue
 		}
@@ -584,38 +613,11 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 			continue
 		}
 
-		// Extract relative path, e.g. "comments/20260222/id.md"
-		commentRelPath := extractCommentRelPath(commentURL)
-		if commentRelPath == "" {
-			continue
-		}
-
-		// Skip if already stored locally
-		localPath := filepath.Join(s.DataDir, commentRelPath)
-		if _, err := os.Stat(localPath); err == nil {
-			continue
-		}
-
-		// Fetch comment markdown from the commenter's site.
-		// Try the content source path first (where .md files live on hosted sites),
-		// then fall back to the mount path URL for non-hosted/legacy sites.
-		rc := s.NewRemoteClient()
-		mdURL := polisurl.NormalizeToMD(commentURL)
-		content, err := rc.FetchContent(commentSourceURL(mdURL))
-		if err != nil {
-			// Fallback: try the mount path directly (non-hosted sites may serve .md there)
-			content, err = rc.FetchContent(mdURL)
-		}
-		if err != nil {
-			s.LogWarn("blessing sync: failed to fetch comment %s: %v", commentURL, err)
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
-			s.LogWarn("blessing sync: failed to create dir for %s: %v", localPath, err)
-			continue
-		}
-		if err := os.WriteFile(localPath, []byte(content), 0644); err != nil {
-			s.LogWarn("blessing sync: failed to write %s: %v", localPath, err)
+		// Fetch + VERIFY + store into the ISOLATED blessed cache (never under
+		// content/ — Defect 3). Idempotent: a no-op (false) if not a comment URL,
+		// already cached, or the fetch failed. Shared with handleBlessingGrant via
+		// cacheBlessedComment so the two Defect-3 write sites can't drift.
+		if !s.cacheBlessedComment(commentURL) {
 			continue
 		}
 
@@ -632,6 +634,69 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 	}
 
 	return stream.HandlerResult{FilesChanged: filesChanged}
+}
+
+// cacheBlessedComment fetches, verifies, and stores a blessed comment authored by
+// another tenant into the ISOLATED blessed cache
+// (.polis/ds/<ds>/pub.polis.core/cache/blessed/<author>/…) — NEVER under our
+// content/ tree (Defect 3). The post-page renderer reads the body from this cache
+// (render.LoadLocalCommentContent).
+//
+// It is idempotent: a no-op returning false when commentURL is not a comment path,
+// the comment is already cached, or the fetch/store fails. Returns true only when a
+// new entry was written. Both the real-time grant path (handleBlessingGrant) and the
+// background sync handler (blessingSyncHandler.Process) call this, so the two
+// Defect-3 write sites can never drift.
+func (s *Server) cacheBlessedComment(commentURL string) bool {
+	// Route through the SAME generic ingest Rosie's Reconcile uses (WS-R1
+	// anti-drift): the blessed descriptor owns the fetch + verify-and-gate
+	// policy (refuse invalid sig; cache missing/error). Here we only translate
+	// the result into the existing observability events.
+	store := cache.Store{DataDir: s.DataDir, DSDomain: extractDomainFromURL(s.DiscoveryURL)}
+	desc := cache.NewBlessedDescriptor(cache.DescriptorConfig{})
+	res := cache.Ingest(store, desc, commentURL, cache.IngestOptions{})
+
+	switch {
+	case res.Stored:
+		if res.Verdict != "valid" {
+			// missing (unsigned legacy) / error (transient key-fetch) cached with
+			// VerifiedAt unset — preserved availability, flagged for the canary.
+			s.LogWarn("blessed-cache: cached comment %s with UNVERIFIED signature (%s)", commentURL, res.Verdict)
+		}
+		// Emit the ingest verdict + which source path resolved, so the canary
+		// ("ingest with non-valid signature > 0") and the cache-ingest health
+		// panel have a structured signal.
+		s.LogEvent("pub.polis.comment.cache_ingest", map[string]interface{}{
+			"comment_url": commentURL,
+			"verdict":     res.Verdict,
+			"source":      res.Source,
+		})
+		return true
+	case res.Skipped:
+		// Already cached — pinned to the blessed version, edits never refresh.
+		return false
+	case res.Refused:
+		s.LogWarn("blessed-cache: REFUSED comment %s — signature INVALID (tampering/MITM signal)", commentURL)
+		s.LogEvent("pub.polis.comment.cache_ingest", map[string]interface{}{
+			"comment_url": commentURL,
+			"verdict":     "invalid",
+			"refused":     true,
+		})
+		return false
+	case res.Err != nil:
+		// fetch_failed (network) or store_failed (disk). Feeds the cache-ingest
+		// health panel + the canary.
+		s.LogWarn("blessed-cache: failed to cache comment %s: %v", commentURL, res.Err)
+		s.LogEvent("pub.polis.comment.cache_ingest", map[string]interface{}{
+			"comment_url": commentURL,
+			"verdict":     res.Verdict,
+			"error":       res.Err.Error(),
+		})
+		return false
+	default:
+		// unsupported_key — not a comment URL. Silent no-op (as before).
+		return false
+	}
 }
 
 // firstNonEmptyString returns the first non-empty string value from payload

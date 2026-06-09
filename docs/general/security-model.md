@@ -70,53 +70,45 @@ The hash is computed over the canonicalized body content (leading empty lines st
 
 API keys for the v1 REST API are hashed with SHA-256 before storage. Only the hash is persisted in `.polis/api-keys.json`; the plaintext key is shown once at generation time and never stored. Validation uses constant-time comparison (`crypto/subtle.ConstantTimeCompare`) to prevent timing attacks.
 
-### Ed25519 to X25519 Key Conversion
+### Direct Message Encryption
 
-Polis reuses existing Ed25519 signing keys for DM encryption by converting them to X25519 at runtime. This is a well-established pattern used by Signal and libsodium (`crypto_sign_ed25519_pk_to_curve25519`).
+Direct messages are end-to-end encrypted with a **password-derived key the server never
+receives**. The full treatment — threat model, key hierarchy, bootstrap window, recovery
+phrase, lifecycle, and detection limits — is in **[`dm-encryption.md`](dm-encryption.md)**;
+this is the essential posture.
 
-| Conversion | Method |
-|------------|--------|
-| **Private key** | SHA-512 of Ed25519 seed + scalar clamping → X25519 scalar |
-| **Public key** | Edwards→Montgomery point conversion → X25519 point |
-| **Library** | `filippo.io/edwards25519` for point conversion |
-| **Caching** | Conversion is deterministic; results cached in memory |
-| **Storage** | No new key material stored on disk |
+- **Independent messages key.** DMs use a per-epoch X25519 **messages key**, published in
+  `.well-known/polis` and signed by the identity key. They do **not** reuse the Ed25519
+  signing key. The identity key signs the messages key; it never decrypts messages. (The
+  earlier model — Ed25519→X25519 conversion plus an HKDF seed-derived at-rest re-encryption —
+  is retired.)
+- **Two-tier keys.** A per-epoch **DEK** (Data Encryption Key) seals messages with NaCl `box`.
+  The DEK is stored only **wrapped** under a **KEK** (NaCl secretbox), where the KEK is derived
+  in the browser from the user's password (Argon2id, t=3/m=64 MiB/p=4) or recovery phrase
+  (HKDF-SHA256). The server holds only wrapped blobs + ciphertext.
+- **At rest, the stored form is the wire `box` ciphertext** — received messages are kept as
+  received, not re-encrypted under a server-derivable key.
+- **Bootstrap window.** New accounts message with zero setup via a server-held bootstrap key
+  (`server_dek`, plaintext in `keyring.json`) — so bootstrap-era messages are operator-readable.
+  The guarantee is "private from the moment you set a password," not "private always"; setting
+  a password closes the window and clears `server_dek` past a short forwarding grace.
+- **Scope.** "We cannot read your DMs" means **content**. The endpoint operators still see
+  metadata (who/when/how often). Delivery is point-to-point, so no discovery service or central
+  entity is in the message path. Lose both the password and the recovery phrase and the
+  messages are permanently unrecoverable, by design.
 
-### NaCl Box (Transport Encryption)
-
-Direct messages use NaCl box for transport encryption between sender and recipient:
-
-| Property | Detail |
-|----------|--------|
-| **Algorithm** | X25519 Diffie-Hellman key agreement + XSalsa20-Poly1305 authenticated encryption |
-| **Nonce** | Random 24 bytes per message (from `crypto/rand`) |
-| **Integrity** | Poly1305 MAC provides integrity and authenticity |
-| **Library** | `golang.org/x/crypto/nacl/box` |
-
-### NaCl Secretbox (Storage Encryption)
-
-After receiving a DM, content is re-encrypted with a local symmetric key for at-rest storage:
-
-| Property | Detail |
-|----------|--------|
-| **Algorithm** | XSalsa20-Poly1305 symmetric authenticated encryption |
-| **Key** | Derived via HKDF-SHA256 from private key seed + site-wide salt |
-| **Nonce** | Random 24 bytes per message |
-| **Library** | `golang.org/x/crypto/nacl/secretbox` |
-
-### HKDF Key Derivation
-
-Storage keys for encrypted content types are derived using HKDF:
-
-| Property | Detail |
-|----------|--------|
-| **Algorithm** | HKDF-SHA256 |
-| **Secret** | Ed25519 private key seed (32 bytes) |
-| **Salt** | `.polis/storage-salt` (32 random bytes, generated once per site) |
-| **Info** | Purpose string (e.g., `"polis-dm-storage-v1"`) |
-| **Output** | 32-byte symmetric key |
-
-The salt is not secret — its purpose is domain separation. Different content types derive different keys using different `info` strings from the same salt.
+**Browser-crypto disclosure (transparency).** For password epochs, all key derivation and
+message decryption happen **client-side**; the server never receives the password, the KEK, or
+a password-epoch DEK. The password path ships a pinned, conformance-gated browser stack —
+Argon2id (`hash-wasm`/WASM), NaCl box+secretbox (`tweetnacl-js`), HKDF-SHA256 (WebCrypto),
+BIP39 (`@scure/bip39`) — with versions + provenance recorded in
+`webapp/internal/webui/www/vendor/README.md` and proven byte-identical to the Go reference by
+`vendor/conformance.mjs`. The admin SPA's `script-src` includes **`'wasm-unsafe-eval'`**,
+required for WebAssembly *compilation* only — it does **not** permit JS `eval()` and does not
+widen the script-injection surface (gated by `'self'` + per-response nonce). The irreducible
+limit of browser-delivered E2E — an actively malicious operator can serve password-capturing
+JS — is documented, with a strict CSP and the offline export/decrypt path as the
+high-assurance escape. See [`dm-encryption.md`](dm-encryption.md).
 
 ---
 
@@ -989,8 +981,8 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 | Aspect | Detail |
 |--------|--------|
 | **Attack** | Attacker gains filesystem access to `.polis/bundles/pub.polis.core/dm/` |
-| **Mitigation** | Message content **and the index preview snippet** are encrypted with secretbox using an HKDF-derived key; file permissions 0600. Only structural routing metadata (from, to, timestamp) remains cleartext |
-| **Residual risk** | Attacker with private key access can derive storage key and decrypt all stored DMs. Metadata (who you message, when, how often) is visible without decryption. |
+| **Mitigation** | Password-epoch messages are stored as the wire `box` ciphertext; their DEK is held only **wrapped** under a password/recovery KEK (`keyring.json`), so disk access yields ciphertext + wrapped blobs whose recovery is reduced to **offline brute-force of the password** (Argon2id). File permissions 0600. Only routing metadata (from, to, timestamp, `key_epoch`) is cleartext. See [`dm-encryption.md`](dm-encryption.md). |
+| **Residual risk** | **Bootstrap-epoch** messages (before the user set a password) are readable — their DEK (`server_dek`) is plaintext in the keyring by design (the bootstrap window). A weak password falls to offline cracking. Metadata is visible without decryption. The private *identity* key does **not** derive the message key. |
 
 ### 7.17 DM Sender Impersonation
 
@@ -1005,7 +997,7 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 | Aspect | Detail |
 |--------|--------|
 | **Attack** | Sender rotates key; previously sent DMs become unverifiable if receiver cached old key |
-| **Mitigation** | Transport encryption is per-delivery (receiver decrypts immediately); storage uses local key derived from receiver's own private key, unaffected by sender rotation |
+| **Mitigation** | Each message carries the sender's epoch + `box_pub`, and a `key_epoch` tag, so a stored message is decryptable regardless of later sender or receiver rotation; the receiver's stored copy is sealed under its own per-epoch DEK, unaffected by sender rotation |
 | **Residual risk** | DMs in flight during sender key rotation may fail signature verification; sender must retry after rotation completes |
 
 ### 7.19 DM Metadata Exposure

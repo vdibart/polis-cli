@@ -51,3 +51,41 @@ func NormalizeToMD(rawURL string) string {
 
 	return parsed.String()
 }
+
+// commentMountSeg / commentSrcSeg are the two URL shapes a comment can take.
+// Mount (legacy / historical DS registration) vs canonical source path.
+const (
+	commentMountSeg = "/comments/"
+	commentSrcSeg   = "/content/pub.polis.core/comment/"
+)
+
+// CommentContentURL builds the CANONICAL (source-path) URL for a comment —
+// e.g. https://site/content/pub.polis.core/comment/20260302/<id>.md. This is
+// the same path PublishComment writes the signed .md to, so the DS-registered
+// URL dereferences the canonical artifact (posts register their source path the
+// same way). Comments historically (mis)registered the /comments/ mount path —
+// see plans/comment-registration-severe-bug.md, Defect 1.
+func CommentContentURL(baseURL, dateDir, commentID string) string {
+	return strings.TrimSuffix(baseURL, "/") + commentSrcSeg + dateDir + "/" + commentID + ".md"
+}
+
+// CommentURLToContentRel converts a comment URL — in EITHER the legacy mount
+// form (.../comments/<date>/<id>.{md,html}) or the canonical source form
+// (.../content/pub.polis.core/comment/<date>/<id>.{md,html}) — to the canonical
+// site-relative source path "content/pub.polis.core/comment/<date>/<id>.md".
+// Returns "" if the URL matches neither shape. Tolerant of both forms so the
+// comment-URL canonicalization (Defect 1) can flip producers without breaking
+// consumers mid-transition.
+func CommentURLToContentRel(commentURL string) string {
+	var rest string
+	if i := strings.Index(commentURL, commentSrcSeg); i >= 0 {
+		rest = commentURL[i+len(commentSrcSeg):]
+	} else if i := strings.Index(commentURL, commentMountSeg); i >= 0 {
+		rest = commentURL[i+len(commentMountSeg):]
+	} else {
+		return ""
+	}
+	rest = strings.TrimSuffix(rest, ".html")
+	rest = strings.TrimSuffix(rest, ".md")
+	return "content/pub.polis.core/comment/" + rest + ".md"
+}

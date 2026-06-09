@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.65.0] - 2026-06-08
+
+An extra-large release headlined by **end-to-end encrypted direct messages** and **PQL everywhere** — the polis query language now drives every read surface, including a public `/pql/<sentence>` endpoint with a versioned JSON API. Also ships a new **Stardust** theme, a substantial **stream read-focus** overhaul, and a blessed-comment cache that keeps cross-network comment counts stable.
+
+### Added
+
+- **[DM] End-to-end encrypted direct messages.** Direct messages are now sealed with a key derived from a password the server never receives. A per-epoch X25519 *messages key* (published in `.well-known/polis`, signed by the identity key but never used to decrypt) protects each message with NaCl `box`; the data-encryption key is stored only wrapped under a password- or recovery-phrase-derived key (Argon2id / HKDF-SHA256), all derived in the browser. New accounts can message immediately via a server-held bootstrap key; setting a password closes that window. Includes a BIP39 recovery phrase, point-to-point server-to-server delivery with no central broker, and a documented threat model. The at-rest format and wire protocol are specified for independent implementation in `cli-go/pkg/dm/FORMAT.md` and `PROTOCOL.md`, with cross-implementation test vectors.
+- **[DM] `polis dm decrypt`.** Decrypt and print your messages locally from a site or an unzipped `.polis` export — prompts for your password (or `--phrase` for the recovery phrase), reads the secret without echo, and never stores or transmits it. The friendlier path is to run `polis serve` inside an export and read in the web UI offline (localhost messaging is read-only by default).
+- **[DM] Docs.** New `docs/general/dm-encryption.md` (authoritative treatment — threat model, key hierarchy, bootstrap window, recovery, limits) and a `docs/handbook/dm-encryption.md` source-walking tour.
+- **[PQL] Public `/pql/<sentence>` endpoint + JSON API.** The polis query language now backs every read surface. A tenant's bare root redirects to `/pql/all+posts+by+date`; the same path serves the infinity-stream HTML or, with `Accept: application/json`, a versioned (`pql.v1`) JSON envelope — the developer-facing query API, documented in `docs/ds/developer/pql-json-api.md`. Adds the `about` relation (alongside `from`), fully-qualified event types, tenant-relative queries (the `from`/`about` clause is optional on a tenant), and an explicit scope-resolution boundary for first-person scopes.
+- **[PQL] Shared grammar fixtures.** `docs/general/pql-vocabulary.json` (canonical machine-readable vocabulary) and `docs/general/pql-golden.jsonl` (golden fixtures) are now the single source of truth that all parsers — the browser JS, the Go `pkg/pql`, and the discovery service — assert against, so the grammar can't drift.
+- **[Theme] Stardust.** A new reserved theme with a Space Grotesk title font and a metallic-green (verdigris / cream / brass) nav.
+- **[Webapp] Stream read-focus.** Clicking into a post on the stream now opens it in place — a canonical per-post page and the index are one shape driven by one controller, so scrolling either lands you in the same infinite list. Cross-tenant article bodies are lifted from a stable `data-polis-focus` marker via a same-origin proxy. Avatars, inline site identity, and comment focus render at full fidelity.
+
+### Changed
+
+- **[Webapp] Blessed-comment cache with deterministic counts.** Cross-network comment counts are now stamped for the whole page in one batched discovery-service call per render, replacing a visible-horizon heuristic that made badges flicker `0↔1↔0` as posts scrolled or caches expired. Backed by a new render-through blessed-comment cache (`cli-go/pkg/cache`).
+- **[Docs] Security model — DM section rewritten** (`docs/general/security-model.md`): replaces the retired Ed25519→X25519 / HKDF-storage description with the new password-derived two-tier (DEK/KEK) model, the bootstrap window, and a browser-crypto transparency disclosure.
+- **[Docs] PQL, content, and handbook updates** reflecting the query-everywhere model and the stream read-focus behavior; the webapp user manual now covers both self-hosted and hosted sign-in.
+
+### Fixed
+
+- **[CLI] Comment registration uses the canonical source URL.** Comments now register and verify against their canonical content path consistently across the bash and Go CLIs and the discovery service, fixing a class of registration/rendering mismatches.
+- **[Signing] Standard SSHSIG envelope** verifiability is enforced, and the comment-aware signing base is de-duplicated across the verification paths.
+- **[Webapp] A large batch of stream/v4 UI fixes** — read-focus URL tracking and fallbacks, comment-thread enrichment in the activity view, caret visibility in the post and comment editors, light-theme contrast on the DM composer and comment CTA, in-flight fetch cancellation on filter change, and timeline/avatar layout polish.
+- **[Webapp] Hook routes are no longer registered when hooks are disabled.**
+
 ## [0.64.0] - 2026-05-25
 
 A documentation-led release. The headline is **"In Defense of Bless"** — a short essay on why polis uses the word "bless" — joined by a new public **Actors** reference documenting the background jobs that keep polis sites healthy. Alongside the docs is a batch of security hardening (two XSS fixes, atomic writes, auth/replay hygiene), a set of stream/SPA interaction fixes, and the backend plumbing for comment versioning on republish.

@@ -1,33 +1,58 @@
 <!--
-    Blessed comment partial for v4 SHAPE.
+    Blessed comment partial for v4 SHAPE — per-post canonical page surface.
 
-    Rendered inside `.entry-comments-panel` for the focus entry's
-    pre-loaded blessed-comment list. Iterated server-side via
+    Rendered inside `.entry-comments-panel` for the focus entry's pre-loaded
+    blessed-comment list. Iterated server-side via
     {{#blessed_comments}}{{> snippets/blessed-comment}}{{/blessed_comments}}
     in stream.html.
 
-    Comment-content trust chain: same as v3 — content is rendered
-    markdown via cli-go/pkg/render's bluemonday-sanitized HTML pipeline
-    at publish time. The {{content}} substitution is raw HTML the
-    template engine emits verbatim.
+    Visual language matches the v4 stream's comment-thread card "commentsView"
+    treatment — the commenter's avatar floats right in the card
+    with a rollover-revealed handle, the date sits on the left, and a small
+    timeline dot anchors the card to the rail at the comment's row. The
+    .comment-attached + .entry-avatar-link + .entry-handle + .timeline-dot
+    classes are shared with the SPA's renderCommentThread output, scoped here
+    via the per-post-page rules in stream.css.
 
-    Class grammar matches `themes/_shared/base.css`'s `.comment` /
-    `.comment-header` / `.comment-author` / `.comment-date` /
-    `.comment-body` rules — themes inherit those via the concat
-    pipeline, so per-theme CSS overrides apply automatically.
+    Trust chain:
+    - {{content}} is markdown rendered through cli-go/pkg/render
+      (goldmark + bluemonday) at publish time. Emitted verbatim by the
+      template engine.
+    - {{author_avatar_html}} is the SSR output of render.AvatarHTML — a
+      <span class="av"> with inline style; self-contained markup the engine
+      emits verbatim.
 
     Template variables:
-    - {{url}}              — author's site URL (linkified)
-    - {{author_name}}      — author handle / display name
-    - {{published_human}}  — human-readable date string
-    - {{content}}          — bluemonday-sanitized HTML body
+    - {{url}}                — comment's canonical URL (linkified)
+    - {{author_name}}        — display name (currently the author domain)
+    - {{author_domain}}      — handle (e.g. vdibart.polis.pub)
+    - {{author_avatar_html}} — SSR'd avatar <span> (28px, floated right)
+    - {{published_human}}    — human-readable date string
+    - {{content}}            — bluemonday-sanitized HTML body
 -->
-<div class="comment">
-    <div class="comment-header">
-        <a href="{{url}}" class="comment-author">{{author_name}}</a>
-        <span class="comment-date">{{published_human}}</span>
+<div class="comment-attached comment-attached--canonical">
+    <!-- Meta line: date on the LEFT, commenter handle pushed RIGHT. The handle
+         carries .is-shown so it renders STATICALLY (the base .entry-handle is
+         opacity:0 / hover-reveal). is-shown is load-bearing for robustness: the
+         .entry-handle.is-shown { opacity:1 } rule has existed in every stream.css
+         version, so the byline shows even when a re-rendered page is paired with
+         an older installed stream.css (deploy skew). It sits directly above the
+         body rail below. -->
+    <div class="comment-meta-line">
+        <time class="comment-date-time">{{published_human}}</time>
+        <a class="entry-handle is-shown" href="{{url}}">{{author_domain}}</a>
     </div>
-    <div class="comment-body">
-        {{content}}
+    <!-- Body rail: the small timeline dot (anchored to the comment body's first
+         line) + the commenter chip + the comment body — matching the SPA's
+         buildFocusCommentCard. The chip is a rail SIBLING of the body (not
+         inside it), so it's absolutely positioned top-right with a reserved
+         body column (.comment-attached .entry-rail > .entry-avatar-link in
+         stream.css) — every line stops at the chip's edge, no float-wrap. -->
+    <div class="entry-rail">
+        <div class="timeline-dot timeline-dot--small" aria-hidden="true"></div>
+        <a class="entry-avatar-link" href="{{url}}" aria-label="{{author_domain}}">{{author_avatar_html}}</a>
+        <div class="comment-body">
+            {{content}}
+        </div>
     </div>
 </div>

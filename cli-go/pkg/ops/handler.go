@@ -32,7 +32,10 @@ type HandlerEnv struct {
 	DiscoveryURL string
 	DiscoveryKey string
 	CLIThemesDir string
-	Bundle       *bundle.Bundle
+	// EmitEvent, if set, routes structured operation events to the host's event
+	// sink (e.g. the webapp's Server.LogEvent → action=<name>). nil = discard.
+	EmitEvent func(action string, fields map[string]any)
+	Bundle    *bundle.Bundle
 }
 
 // ExecutableHandler dispatches to an external binary via JSON stdin/stdout.

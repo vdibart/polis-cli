@@ -1,14 +1,14 @@
 <!DOCTYPE html>
 <!--
-    pql_test.html — standalone in-browser test runner for pql.js.
+    _pql_test.html — standalone in-browser test runner for pql.js.
 
-    Open `/pql_test.html` in a browser running the SPA (any local
-    polis-server instance will serve this file from the embedded
-    webFS) to verify the parser. No test framework — inline
-    assertions, pass/fail rendered to the page.
+    Filename starts with `_` so Go's `//go:embed www/*` skips it —
+    this file is NOT shipped in production builds. To use it for
+    dev verification: rename to `pql_test.html`, build the server,
+    open `/pql_test.html` in the browser, then rename back before
+    committing.
 
-    Used for chunk B verification + as a regression catch when the
-    PQL vocabulary changes.
+    Used as a regression catch when the PQL vocabulary changes.
 -->
 <html>
 <head>

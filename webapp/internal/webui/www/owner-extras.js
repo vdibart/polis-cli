@@ -8,27 +8,26 @@
 // (CSS converges, code diverges along file boundaries) is enforced
 // here.
 //
-// What lives here (now and in subsequent step-6 sub-steps):
-//   - 6.d (this file): skeleton + readiness check + onEscape registration
-//     for the avatar dropdown menu. The Edit About menu item is wired
-//     in index.html directly (calls App.openAboutEditor); owner-extras
-//     doesn't need to mediate.
-//   - 6.e: icon-row preset buttons (gateway/paragraph/comment/people/
+// What lives here:
+//   - Skeleton + readiness check + onEscape registration for the avatar
+//     dropdown menu. The Edit About menu item is wired in index.html
+//     directly (calls App.openAboutEditor); owner-extras doesn't need
+//     to mediate.
+//   - Icon-row preset buttons (gateway/paragraph/comment/people/
 //     envelope/edit) — calls PolisStream.setFilterScope/Type/etc.
 //     to load preset sentences. Indicator-dot wiring against existing
 //     /api/counts plumbing.
-//   - 6.f.2: activity render mode — afterRender hooks per type that
+//   - Activity render mode — afterRender hooks per type that
 //     consume notification rule templates from registry.json.
-//   - 6.g: optional Layer-4 DM renderer override.
-//   - 6.h: inline post editor card.
-//   - 6.i: stream-item afterRender decorators (unpublish / bless / deny
+//   - Optional Layer-4 DM renderer override.
+//   - Inline post editor card.
+//   - Stream-item afterRender decorators (unpublish / bless / deny
 //     hover affordances).
-//   - 6.j: comment-WRITE CTA on canonical pages.
+//   - Comment-WRITE CTA on canonical pages.
 //
 // API surface (window.PolisOwnerExtras):
 //   .ready                 — Promise that resolves when window.PolisStream
 //                            is available + body.is-owner is set.
-//   (More methods land as sub-steps need them.)
 
 (function () {
     'use strict';
@@ -72,14 +71,13 @@
     // would only close if the cursor isn't over the menu. The actual
     // mechanism: focus-within is also a hover-trigger via CSS; blurring
     // any focused descendant + simulating a mouseleave is overkill for
-    // a hover-only menu. For 6.d we register the onEscape hook as a
-    // no-op stub for the avatar menu — the natural close (move cursor
-    // away) is the dominant pattern. Future sub-steps that add JS-
-    // toggled menus (compose surface in 6.h) will register real Esc
-    // handlers via the same registry.
+    // a hover-only menu. We register the onEscape hook as a no-op stub
+    // for the avatar menu — the natural close (move cursor away) is the
+    // dominant pattern. JS-toggled menus (the compose surface) register
+    // real Esc handlers via the same registry.
     function registerAvatarMenuEscape(stream) {
         // Stub registration so the onEscape registry has at least one
-        // entry from owner-extras; future sub-steps add real handlers.
+        // entry from owner-extras; real handlers attach elsewhere.
         // No-op for the avatar menu itself (CSS-hover-driven).
         stream.onEscape(function () {
             // Reserved for future menu-close behavior. Currently no-op:
@@ -87,7 +85,7 @@
         });
     }
 
-    // step-06/6.e: icon-row preset definitions.
+    // Icon-row preset definitions.
     //
     // Each preset corresponds to one of the 5 sentence-loading icons in
     // the topbar (avatar | gateway | paragraph | comment | people |
@@ -96,10 +94,9 @@
     // needed), then emits pub.polis.stream.preset_loaded telemetry.
     //
     // The 'edit' icon is intentionally NOT in this map — it's the
-    // inline editor trigger (lands in 6.h). For 6.e it falls through
-    // to its existing onclick (App.navigateTo('/posts/new'), legacy
-    // editor) so users can still compose; 6.h replaces.
-    // R22 #12: qualifier locked to 'all' across every preset; the
+    // inline editor trigger. The inline editor replaces the legacy
+    // onclick (App.navigateTo('/posts/new')).
+    // Qualifier is locked to 'all' across every preset; the
     // 'new' option is no longer surfaced in the dropdown.
     var ICON_PRESETS = {
         gateway: {
@@ -130,8 +127,8 @@
             display: { qualifierLabel: 'all', typeLabel: 'comments', scopeLabel: 'all polis', modifierLabel: 'to bless' },
         },
         people: {
-            // 06-profiles: people icon rewires from the obsolete
-            // type=follows preset to the new type=profiles surface.
+            // People icon points at the type=profiles surface (replacing
+            // the obsolete type=follows preset).
             // Default qualifier is my-network (the natural "manage who
             // I follow" landing), default sort is by-name.
             label: 'all profiles from my network by name',
@@ -139,7 +136,7 @@
             display: { qualifierLabel: 'all', typeLabel: 'profiles', scopeLabel: 'my network', modifierLabel: 'by name' },
         },
         envelope: {
-            // R24 follow-up #4: dms locked to scope=my-mutuals
+            // dms locked to scope=my-mutuals
             // (DMs are between mutuals — drafts is the only type
             // that locks to scope=me). Preset values mirror the lock
             // so the rollover tooltip + loaded sentence stay
@@ -194,12 +191,12 @@
     }
 
     // Wire each icon button to its preset. Removes the legacy onclick
-    // attribute the icon ships with (App.navigateTo, set in 6.a as a
-    // placeholder) and replaces with a click listener that loads the
+    // attribute the icon ships with (App.navigateTo, a placeholder)
+    // and replaces with a click listener that loads the
     // preset filter. Runs on DOMContentLoaded — buttons exist by then
     // (they're static markup in index.html).
     //
-    // step-06/6.h: also wires the edit icon (not in ICON_PRESETS — it's
+    // Also wires the edit icon (not in ICON_PRESETS — it's
     // not a filter preset; it opens the inline editor card).
     function wireIconPresets(stream) {
         Object.keys(ICON_PRESETS).forEach(function (presetName) {
@@ -222,7 +219,23 @@
             // the inline navigateTo survives as the safety net.
             btn.removeAttribute('onclick');
             btn.addEventListener('click', function (ev) {
-                // R27 follow-up: if this preset is already the active
+                // Gateway is the unread-activity surface, and a click on it is
+                // now the ONLY thing that clears its dot (the SSE auto-clear and
+                // the filter-activation edge-trigger both skip gateway, so the
+                // dot can drop in asynchronously while the user reads). Clear it
+                // on the explicit click — both branches below (scroll/refresh
+                // while already here, or loadPreset) surface the latest activity,
+                // so marking the surface viewed is correct either way.
+                // Capture whether new activity was waiting BEFORE markSurfaceViewed
+                // clears the flag — it drives the "load new items in one click"
+                // branch below.
+                var hadNewActivity = !!(presetName === 'gateway'
+                    && window.App && window.App.counts && window.App.counts.hasNewFeed);
+                if (presetName === 'gateway' &&
+                    window.App && typeof window.App.markSurfaceViewed === 'function') {
+                    window.App.markSurfaceViewed('gateway');
+                }
+                // If this preset is already the active
                 // icon, treat the click as "scroll to top" instead of
                 // re-applying the same filter. Check activePresetName
                 // (owner-extras' tracked state), NOT btn.classList —
@@ -231,7 +244,7 @@
                 // icons share view='conversations', so the DOM class
                 // gives a false positive within this handler.
                 //
-                // 2026-05-18: tighten the same-icon check to "filter
+                // Tighten the same-icon check to "filter
                 // exactly matches the preset's default" rather than just
                 // "icon-family matches". matchIconForFilter is loose
                 // (type=dms → envelope regardless of scope), so a user
@@ -243,10 +256,47 @@
                 // INBOX (preset filter), not scroll-to-top of the
                 // current thread. Compare against ICON_PRESETS[name]
                 // .filter field-by-field.
-                if (activePresetName === presetName
+                // Only take the scroll-to-top/refresh shortcut when the stream
+                // screen is actually visible. On a non-stream surface (e.g.
+                // /_/settings) the filter snapshot still matches the last
+                // preset, so without this guard clicking the active icon
+                // refreshed the HIDDEN stream and never navigated back —
+                // the click read as "dropped." When the stream isn't visible
+                // we fall through to loadPreset, which navigates to it first.
+                var streamScreenVisible = (function () {
+                    var ss = document.getElementById('stream-screen');
+                    return ss && !ss.classList.contains('hidden');
+                })();
+                if (streamScreenVisible
+                    && activePresetName === presetName
                     && filterMatchesPreset(currentFilterSnapshot, ICON_PRESETS[presetName].filter)) {
                     ev.preventDefault();
-                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                    // Already on this view. Two intents depending on scroll:
+                    //   - Scrolled down → "take me back to the top" (the
+                    //     original scroll-to-top affordance).
+                    //   - Already at the top → "refresh" — re-fetch the latest
+                    //     content from the server (same path as the pinned-dot
+                    //     refresh / PolisStream.refresh → applyFilter). A feed
+                    //     left open for hours goes stale (e.g. discover keeps
+                    //     posting every 2h); a second click on the active icon
+                    //     at the top is the natural "catch me up" gesture
+                    //     without hunting for the pinned dot. 4px matches
+                    //     stream.js's TOP_RESTORE_THRESHOLD.
+                    var canRefresh = window.PolisStream
+                        && typeof window.PolisStream.refresh === 'function';
+                    if (hadNewActivity && canRefresh) {
+                        // New activity just dropped (gateway dot was lit). Pull it
+                        // in immediately — scroll to top AND refresh in a single
+                        // click, regardless of current scroll position. Without
+                        // this, a click while scrolled down only scrolled to the
+                        // top and the user had to click a second time to load.
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                        window.PolisStream.refresh();
+                    } else if (window.scrollY <= 4 && canRefresh) {
+                        window.PolisStream.refresh();
+                    } else {
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }
                     return;
                 }
                 loadPreset(presetName);
@@ -259,8 +309,8 @@
             // no comparable "fall back to navigateTo" inline handler.
             // Inline onclick set in index.html points at /posts/new
             // (legacy editor) which we DO want to suppress; remove it
-            // and let addEventListener own the click. R24 #4: the icon
-            // is now a toggle — second click closes the editor.
+            // and let addEventListener own the click. The icon
+            // is a toggle — second click closes the editor.
             editBtn.removeAttribute('onclick');
             editBtn.addEventListener('click', function (ev) {
                 ev.preventDefault();
@@ -374,7 +424,7 @@
         populateMobileNavHeader();
     }
 
-    // step-06/6.e bugfix: when a preset loads, the clicked icon should
+    // When a preset loads, the clicked icon should
     // show as active. The base SPA's _updateNavActive only fires on
     // VIEW changes (currentView → icon mapping), and preset clicks
     // don't change the view (filterScope/Type/etc. change on the same
@@ -407,9 +457,33 @@
     // (legacy /_/blessings or similar), navigate to /feed first so
     // there's somewhere for the filter widget to live; once the SPA
     // resolves the route + activates stream-screen, apply the filter.
+    // Effective following count from the App's cached /api/counts payload.
+    // Used to decide the people-icon landing scope (below). Defaults to a
+    // non-zero sentinel when counts haven't loaded yet so a momentary boot
+    // race can't bounce a following user to all-polis — only a CONFIRMED
+    // zero flips the default.
+    function knownFollowingCount() {
+        if (window.App && window.App.counts && typeof window.App.counts.following === 'number') {
+            return window.App.counts.following;
+        }
+        return -1; // unknown
+    }
+
     function loadPreset(presetName) {
         var preset = ICON_PRESETS[presetName];
         if (!preset) return;
+
+        // People icon: when the user follows nobody, "all profiles from my
+        // network" is always empty — land them on "all polis" instead so they
+        // immediately see authors to follow. Once they follow anyone, keep the
+        // my-network default (the natural "manage who I follow" landing).
+        if (presetName === 'people' && knownFollowingCount() === 0) {
+            preset = {
+                label: 'all profiles from all polis by name',
+                filter: { qualifier: 'all', type: 'profiles', scope: 'all-polis', modifier: 'by-name' },
+                display: { qualifierLabel: 'all', typeLabel: 'profiles', scopeLabel: 'all polis', modifierLabel: 'by name' },
+            };
+        }
 
         var apply = function () {
             // setFilter fires onFilterChange → activity-mode class
@@ -446,7 +520,7 @@
         }
     }
 
-    // step-06/6.f.2 — Activity render mode (Layer 3 portion).
+    // Activity render mode (Layer 3 portion).
     //
     // When the user picks the activity filter type (gateway preset,
     // setFilter sets type='activity'), owner-extras:
@@ -474,7 +548,7 @@
         follow: 'pub.polis.follow.announced',
     };
 
-    // step-06/6.f.2 review concern #4: client-side icon glyph
+    // Client-side icon glyph
     // resolution. Mirrors iconLookup in cli-go/pkg/bundle/bundle.go
     // (the Go-side map used by NotificationRules() to resolve symbolic
     // names to display characters). Without this, the activity-signal
@@ -538,7 +612,7 @@
     // from the entry meta. Unknown placeholders pass through as-is so
     // they're visible during debugging instead of silently empty.
     //
-    // step-06/6.f.2 review nit #9: expected entry-meta shape (passed
+    // Expected entry-meta shape (passed
     // into the afterRender hooks; comes from streamItemResponse JSON
     // server-side):
     //   {
@@ -580,7 +654,7 @@
     // Append an .activity-signal element to the entry. Idempotent — if
     // a signal already exists (e.g., re-render), replace it.
     //
-    // Layout (per resolved-feedback 2026-05-07):
+    // Layout:
     //   [icon] [handle-button] [verb-from-rule]
     //          <title>
     //          <excerpt-1-2-lines>
@@ -599,7 +673,7 @@
     // letting activity entries feel content-rich rather than thin.
     function appendActivitySignal(entry, meta) {
         if (!entry) return;
-        // 06-profiles: follow events get their own visual treatment in
+        // Follow events get their own visual treatment in
         // renderFollow (italic body "followed <target>" + byline; no
         // gutter glyph). Short-circuit here so that if this dormant
         // signal layer is ever revived, follow events don't end up with
@@ -731,19 +805,19 @@
     // anyway, but we skip the DOM work to keep render cost down on
     // non-activity views).
     //
-    // step-06/6.f.2 review concern #1: also subscribes to
+    // Also subscribes to
     // PolisStream.onFilterChange so body.is-activity-mode tracks ANY
     // filter-type change (preset click, dropdown pick, programmatic
     // setFilterType) — not just the preset-click code path. Without
     // this, picking type=activity from the dropdown left body.is-
     // activity-mode unset and the Layer-2 CSS gate didn't engage.
-    // R20-5 redesign: activity is now a heterogenous union of natural
+    // Activity is a heterogenous union of natural
     // per-type renderings (renderPost, renderCommentThread, renderFollow)
     // — no projection. We still toggle body.is-activity-mode so CSS can
     // tighten the body-cap to a smaller preview, but we no longer
     // append .activity-signal pills or wire whole-entry click. The
     // natural .entry-title-link click already opens the canonical
-    // post/comment page (which auto-engages focus mode per R20/R17),
+    // post/comment page (which auto-engages focus mode),
     // and the public stream's no-hover-tint convention applies
     // unchanged. Plumbing for the prior projection (notification
     // rules, activity-signal CSS, appendActivitySignal builder) is
@@ -770,13 +844,21 @@
             // the matching preset name, or null if no preset matches.
             syncActiveIconFromFilter(snapshot);
             // Edge-triggered "mark this surface viewed" — clears the
-            // gateway / comment / envelope nav dot the first time the
-            // user lands on each surface in a session, regardless of
-            // the entry path (icon click, PQL URL, dropdown). Same
-            // bucketing as syncActiveIconFromFilter so the icon-highlight
-            // and dot-clear stay in lockstep.
+            // comment / envelope nav dot the first time the user lands on
+            // each surface in a session, regardless of the entry path (icon
+            // click, PQL URL, dropdown). Same bucketing as
+            // syncActiveIconFromFilter so the icon-highlight and dot-clear
+            // stay in lockstep.
+            //
+            // GATEWAY is intentionally NOT in this set: the activity /
+            // all-posts / all-comments stream family must clear ONLY on an
+            // explicit gateway icon click. The stream doesn't auto-prepend
+            // newly-synced items, so merely landing on the surface (via a PQL
+            // URL, the dropdown, or the default landing) doesn't mean the user
+            // has seen them — the dot should persist until they click gateway.
+            // The gateway click handler in wireIconPresets clears it explicitly.
             var matched = matchIconForFilter(snapshot);
-            var isSurface = matched === 'gateway' || matched === 'comment' || matched === 'envelope';
+            var isSurface = matched === 'comment' || matched === 'envelope';
             if (isSurface && matched !== prevSurfaceIcon &&
                 window.App && typeof window.App.markSurfaceViewed === 'function') {
                 window.App.markSurfaceViewed(matched);
@@ -788,7 +870,7 @@
             // it doesn't make sense on a comments stream. The nav +
             // still opens the editor unchanged.
             syncCommentsFilterClass(snapshot.type);
-            // 06-profiles Phase 3: ensure the .entry--search row is
+            // Ensure the .entry--search row is
             // mounted at the top of the stream under
             // (profiles, all-polis), removed otherwise.
             ensureSearchEntryMounted(snapshot);
@@ -798,8 +880,25 @@
             // between dm scopes doesn't spam /api/dm/conversations.
             if (snapshot.type === 'dms') {
                 refreshDMScopeOptions();
+            } else {
+                // Left the DM surfaces → tear down the unlock CTA.
+                hideDMUnlockBar();
+                dmPendingUnlockEpoch = null;
+                // Close the new-message composer too — it's anchored to the
+                // top of the stream and would otherwise stay open and "follow"
+                // the user onto comments/profiles/etc. The composer only makes
+                // sense on a DM surface, so leaving the section dismisses it.
+                if (isDMComposerOpen()) {
+                    closeDMComposer();
+                }
             }
-            // PQL URL push (chunk B). Compose the snapshot to a
+            // Setup bar + recipient warning + read-only
+            // banner: each self-guards (hide off the DM surface / per state). Setup
+            // bar first so it sits above the read-only banner in the nav host.
+            maybeShowDMSetupBar(snapshot);
+            maybeShowReadOnlyBanner(snapshot);
+            maybeShowRecipientWarning(snapshot);
+            // PQL URL push. Compose the snapshot to a
             // /_/pql/<sentence> URL and push to history. Debounced
             // 300ms so rapid slot edits don't shovel five entries
             // into the back stack. First push uses replaceState to
@@ -829,7 +928,7 @@
         }
     }
 
-    // PQL URL push (chunk B). Debounced compose-and-push wired into
+    // PQL URL push. Debounced compose-and-push wired into
     // the onFilterChange subscription above. First push after page
     // load uses replaceState so the implicit /_/ → /_/pql/… transition
     // doesn't leave a useless history entry; subsequent pushes use
@@ -890,7 +989,7 @@
         return dmScopeCache.inflight;
     }
 
-    // 06-profiles Phase 3: search entry lifecycle. The .entry--search
+    // Search entry lifecycle. The .entry--search
     // is a stream entry that sits as the first child of the .stream
     // container under filterType=profiles && filterScope=all-polis.
     // It's part of the rail visually (the magnifying-glass replaces
@@ -939,15 +1038,16 @@
             return;
         }
         if (existing) {
-            // Already mounted; just refresh the placeholder to match
-            // the current scope (matters when toggling all-polis ↔
-            // my-network without leaving the surface).
+            // Already mounted; just refresh the placeholder + scope-switch
+            // CTA to match the current scope (matters when toggling all-polis
+            // ↔ my-network without leaving the surface).
             var existingInput = existing.querySelector('input');
             if (existingInput) {
                 existingInput.placeholder = snapshot.scope === 'my-network'
                     ? 'Search my follows by handle or name…'
                     : 'Search profiles by handle or name…';
             }
+            updateSearchScopeSwitch(existing, snapshot.scope);
             return;
         }
 
@@ -1004,9 +1104,43 @@
         });
         article.appendChild(input);
 
+        // Subtle scope-switch CTA under the search box. Gives readers a one-
+        // click path between "my follows" and "all polis" — the main lever for
+        // someone looking to add new sites to follow.
+        updateSearchScopeSwitch(article, snapshot.scope);
+
         // Insert as the first child of the stream container so the
         // search row sits at the top of the timeline.
         streamRoot.insertBefore(article, streamRoot.firstChild);
+    }
+
+    // Build/refresh the scope-switch CTA inside the mounted search row. The
+    // label + target flip with the current scope: on my-network it offers the
+    // wider all-polis directory (find new sites); on all-polis it offers to
+    // narrow back to the sites you already follow. onclick is reassigned each
+    // call (not addEventListener) so refreshes never stack handlers.
+    function updateSearchScopeSwitch(article, scope) {
+        if (!article) return;
+        var sw = article.querySelector('.search-scope-switch');
+        if (!sw) {
+            sw = document.createElement('button');
+            sw.type = 'button';
+            sw.className = 'search-scope-switch';
+            article.appendChild(sw);
+        }
+        var toAllPolis = scope !== 'all-polis';
+        sw.textContent = toAllPolis
+            ? 'Looking for new sites to follow? Search all polis →'
+            : '← Search only the sites you follow';
+        sw.onclick = function (ev) {
+            ev.preventDefault();
+            if (window.PolisStream && typeof window.PolisStream.setFilter === 'function') {
+                window.PolisStream.setFilter(
+                    { scope: toAllPolis ? 'all-polis' : 'my-network' },
+                    { scopeLabel: toAllPolis ? 'all polis' : 'my network' }
+                );
+            }
+        };
     }
 
     function syncCommentsFilterClass(filterType) {
@@ -1067,7 +1201,7 @@
     }
 
     // ====================================================================
-    // step-06/6.i — Stream-item afterRender decorators (owner actions)
+    // Stream-item afterRender decorators (owner actions)
     // ====================================================================
     //
     // Hover-revealed action chrome on each entry the owner has
@@ -1162,19 +1296,14 @@
     function decoratePost(entry, meta) {
         if (!meta) return;
         var ownDomain = ownerDomain();
-        // R26 #5 prototype: cross-author posts surface the "add
-        // comment" affordance on the timeline-dot itself (replaces
-        // the dot with a comment icon on hover) rather than as a
-        // right-justified action button. Visual cue reads as "click
-        // here to add to the timeline". Mark the entry + wire the
-        // click; CSS handles the dot → icon swap on hover.
+        // Cross-author posts surface the "add comment" affordance on the
+        // below-post comment badge: .entry--commentable drives the badge's
+        // hover icon-swap (comment → add-comment, accent), and wireCommentAddBadge
+        // wires the click to enter read-focus + open the in-focus comment editor.
+        // (Comments can only be created from read-focus — see mountCommentEditor.)
         if (ownDomain && meta.author_domain && meta.author_domain !== ownDomain && meta.url) {
             entry.classList.add('entry--commentable');
-            // Wire the comment-add CTA inline (mounts the new editor as a
-            // child of this entry) instead of navigating to the legacy
-            // /comments/new screen. wireCommentAddCTA factors out the dot
-            // event handler so decoratePost + decorateComment stay in sync.
-            wireCommentAddCTA(entry, meta.url, meta.author_domain);
+            wireCommentAddBadge(entry, meta.url, meta.author_domain);
             return;
         }
         if (meta.author_domain !== ownDomain) return;
@@ -1185,14 +1314,14 @@
         // comments-badge hover-+ swap (no reason to invite a self-
         // comment in the "all posts by me" view).
         entry.classList.add('entry--mine');
-        // R20-10: drafts ride the post renderer (see
+        // Drafts ride the post renderer (see
         // handleStreamItemsDrafts), so they hit this hook too. Mark the
         // entry so CSS can prepend a "Draft" pill on the meta-line —
         // matches the v4 entry layout convention rather than letting
         // drafts read as published posts.
         if (meta.draft) {
             entry.classList.add('is-draft');
-            // R28: click on draft title/body opens the embedded editor
+            // Click on draft title/body opens the embedded editor
             // pre-filled with the draft (instead of navigating to the
             // legacy /_/posts/drafts/<id> route). Derive the draft id
             // from meta.url's trailing slug. The link's href is left
@@ -1316,24 +1445,11 @@
         var owner = ownerDomain();
         if (!owner) return;
 
-        // Item #4: comment-add hover affordance on comment entries
-        // whose target post is by someone else. Parallels decoratePost's
-        // .entry--commentable wiring — same dot-becomes-+ rollover CSS
-        // applies. Click goes to /comments/new?reply_to=<target post
-        // URL>, i.e. add a comment to the POST this comment belongs to
-        // (not nest under the comment itself). Self-authored comments
-        // still get this rollover when their target post is by someone
-        // else; the existing self-comment branch below appends an
-        // Unpublish action button on the right (separate slot from the
-        // dot). Comments on the owner's own posts skip the rollover —
-        // same logic as decoratePost skipping own posts.
-        if (meta.target_url && meta.target_domain && meta.target_domain !== owner) {
-            entry.classList.add('entry--commentable');
-            // Same wiring as decoratePost — target the POST this comment
-            // belongs to (meta.target_url), not the comment itself. The
-            // editor mounts inline as a child of this entry--comment-thread.
-            wireCommentAddCTA(entry, meta.target_url, meta.target_domain);
-        }
+        // No add-comment affordance on comment-thread entries: comments can
+        // only be created from the READ-FOCUS of a POST (you can only comment
+        // once you've seen the full post). The comments view shows the
+        // post-as-context, not the full post — so the add affordance lives only
+        // on post entries' below-post badge (decoratePost / wireCommentAddBadge).
 
         // Owner's own outgoing comment → unpublish via source path.
         // App.unpublishComment now accepts either a comment_id (legacy
@@ -1396,7 +1512,7 @@
         // peer's handle. The stream re-renders into thread mode via
         // the renderDMMessage path. Internal scope value is
         // `@<peerDomain>` to match parseStreamScope's expectation;
-        // PQL parser (chunk B) will translate to/from the bare URL
+        // PQL parser will translate to/from the bare URL
         // form `<peerDomain>.polis.pub`.
         var peerDomain = meta.sender_domain || '';
         if (peerDomain && !entry.dataset.polisDmClickWired) {
@@ -1441,7 +1557,559 @@
         appendActionsContainer(entry, [btn]);
     }
 
-    // 06-profiles Phase 2: rollover-CTA wiring for profile entries.
+    // ── DM message decryption + unlock ──────────────────────────────────
+    //
+    // Password-epoch messages arrive from the server as a locked placeholder
+    // plus the raw wire box (ciphertext / nonce / box_pub / key_epoch). The
+    // server can't read them — only the user's password can. When the epoch
+    // DEK is unlocked in-session (PolisDMSession), we open the box in the
+    // browser and swap in the plaintext; otherwise we surface an inline
+    // "enter your password" CTA over the messages view. The password, KEK,
+    // and DEK never leave the browser.
+
+    function dmCrypto() { return window.PolisDMCrypto; }
+    function dmSession() { return window.PolisDMSession; }
+
+    // Browser-view keyring (epochs + kdf + wrapped_dek), lazily fetched on the
+    // first unlock attempt. Refetched with force=true if an epoch is missing
+    // (e.g. a password was just set in another tab).
+    var dmKeyringCache = null;
+    function fetchDMKeyring(force) {
+        if (dmKeyringCache && !force) return Promise.resolve(dmKeyringCache);
+        return fetch('/api/dm/keyring', { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (k) { dmKeyringCache = k; return k; });
+    }
+
+    // The epoch the current render pass found locked-and-unopened, so the
+    // unlock bar prompts for the right key. scheduleUnlockBar coalesces the
+    // per-message decorator calls into a single bar show after the batch.
+    var dmPendingUnlockEpoch = null;
+    var dmUnlockBarScheduled = false;
+
+    function decorateDMMessage(entry, meta) {
+        if (!entry || !meta || !meta.locked) return;
+        // No crypto stack (e.g. archive view, or libs failed to load) → leave
+        // the server placeholder in place.
+        if (!dmCrypto() || !dmSession()) return;
+        var bodyEl = entry.querySelector('.entry-body');
+        if (!bodyEl) return;
+        var epoch = meta.key_epoch || 0;
+        if (dmSession().isUnlocked(epoch)) {
+            try {
+                var dek = dmSession().dek(epoch);
+                bodyEl.textContent = dmCrypto().openBox(meta.ciphertext, meta.nonce, meta.box_pub, dek);
+                entry.classList.remove('is-locked');
+                return;
+            } catch (e) {
+                // A held DEK that can't open the box shouldn't happen; fall
+                // through to the locked state rather than show a broken entry.
+                console.warn('[owner-extras] DM open failed:', e);
+            }
+        }
+        entry.classList.add('is-locked');
+        bodyEl.textContent = '🔒 Locked — enter your password to read';
+        dmPendingUnlockEpoch = epoch;
+        scheduleUnlockBar();
+    }
+
+    function scheduleUnlockBar() {
+        if (dmUnlockBarScheduled) return;
+        dmUnlockBarScheduled = true;
+        // Run once after the synchronous render batch settles so a thread with
+        // many locked messages shows a single bar for the right epoch.
+        setTimeout(function () {
+            dmUnlockBarScheduled = false;
+            if (dmPendingUnlockEpoch != null) showDMUnlockBar(dmPendingUnlockEpoch);
+        }, 0);
+    }
+
+    function dmLayoutRight() {
+        return document.querySelector('#stream-screen .layout-right');
+    }
+
+    // dmBannerHost is the full-width slot pinned under the topbar (index.html) where
+    // the setup + read-only banners mount — design precedent: attached to the nav, not
+    // in the centered content column. Falls back to .layout-right if absent.
+    function dmBannerHost() {
+        return document.getElementById('dm-banner-host') || dmLayoutRight();
+    }
+
+    // showDMUnlockBar mounts (once) and reveals the inline unlock CTA as a
+    // sibling ABOVE .stream inside .layout-right — outside .stream so the
+    // controller's re-render can't displace it. The common login-unlock
+    // happens in place, with no trip to settings.
+    function showDMUnlockBar(epoch) {
+        var host = dmLayoutRight();
+        if (!host) return;
+        var bar = document.getElementById('dm-unlock-bar');
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'dm-unlock-bar';
+            bar.className = 'dm-unlock-bar';
+
+            var prompt = document.createElement('div');
+            prompt.className = 'dm-unlock-prompt';
+
+            // Password field (default mode).
+            var input = document.createElement('input');
+            input.type = 'password';
+            input.className = 'dm-unlock-input';
+            input.autocomplete = 'current-password';
+            input.placeholder = 'Password';
+
+            // Recovery-phrase field (the forgot-password path).
+            var phrase = document.createElement('textarea');
+            phrase.className = 'dm-unlock-phrase';
+            phrase.rows = 2;
+            phrase.placeholder = 'Your 12-word recovery phrase';
+            phrase.autocomplete = 'off';
+            phrase.spellcheck = false;
+
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'dm-unlock-btn primary';
+            btn.textContent = 'Unlock';
+
+            var row = document.createElement('div');
+            row.className = 'dm-unlock-row';
+            row.appendChild(input);
+            row.appendChild(phrase);
+            row.appendChild(btn);
+
+            var err = document.createElement('div');
+            err.className = 'dm-unlock-error';
+
+            // Toggles password ↔ recovery-phrase entry.
+            var toggle = document.createElement('a');
+            toggle.className = 'dm-unlock-toggle';
+            toggle.href = '#';
+
+            bar.appendChild(prompt);
+            bar.appendChild(row);
+            bar.appendChild(err);
+            bar.appendChild(toggle);
+
+            btn.addEventListener('click', function () { submitDMUnlock(bar); });
+            input.addEventListener('keydown', function (ev) {
+                if (ev.key === 'Enter') { ev.preventDefault(); submitDMUnlock(bar); }
+            });
+            phrase.addEventListener('keydown', function (ev) {
+                // Enter submits; the phrase is one line (Shift+Enter still inserts a newline).
+                if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); submitDMUnlock(bar); }
+            });
+            toggle.addEventListener('click', function (ev) {
+                ev.preventDefault();
+                setDMUnlockMode(bar, bar.dataset.mode === 'phrase' ? 'password' : 'phrase');
+            });
+
+            var streamEl = host.querySelector('.stream');
+            host.insertBefore(bar, streamEl);
+        }
+        bar.dataset.epoch = String(epoch);
+        setDMUnlockMode(bar, 'password'); // always reopen on the password path
+        bar.classList.remove('hidden');
+    }
+
+    // setDMUnlockMode flips the unlock bar between password entry and
+    // recovery-phrase entry. Clears any prior error + the inactive
+    // field's value so a forgotten secret never lingers in the DOM.
+    function setDMUnlockMode(bar, mode) {
+        bar.dataset.mode = mode;
+        var prompt = bar.querySelector('.dm-unlock-prompt');
+        var input = bar.querySelector('.dm-unlock-input');
+        var phrase = bar.querySelector('.dm-unlock-phrase');
+        var toggle = bar.querySelector('.dm-unlock-toggle');
+        var err = bar.querySelector('.dm-unlock-error');
+        if (err) err.textContent = '';
+        if (mode === 'phrase') {
+            prompt.textContent = 'Enter your 12-word recovery phrase';
+            input.classList.add('hidden'); input.value = '';
+            phrase.classList.remove('hidden');
+            toggle.textContent = 'Use your password instead';
+            phrase.focus();
+        } else {
+            prompt.textContent = 'Enter your password to read these messages';
+            phrase.classList.add('hidden'); phrase.value = '';
+            input.classList.remove('hidden');
+            toggle.textContent = 'Forgot your password? Use your recovery phrase';
+            input.focus();
+        }
+    }
+
+    function hideDMUnlockBar() {
+        var bar = document.getElementById('dm-unlock-bar');
+        if (bar) bar.classList.add('hidden');
+    }
+
+    function submitDMUnlock(bar) {
+        var mode = bar.dataset.mode === 'phrase' ? 'phrase' : 'password';
+        var input = bar.querySelector('.dm-unlock-input');
+        var phraseEl = bar.querySelector('.dm-unlock-phrase');
+        var errEl = bar.querySelector('.dm-unlock-error');
+        var btn = bar.querySelector('.dm-unlock-btn');
+        var epoch = parseInt(bar.dataset.epoch || '0', 10);
+        var secret = mode === 'phrase' ? ((phraseEl && phraseEl.value) || '') : ((input && input.value) || '');
+        if (!secret.trim()) return;
+        errEl.textContent = '';
+        btn.disabled = true;
+        btn.textContent = 'Unlocking…';
+        // Both KDFs are intentionally slow (Argon2id) / cheap (HKDF) — the working
+        // state covers the wait. Each path unwraps the SAME DEK via a different wrap:
+        //   password → kdf + wrapped_dek
+        //   phrase   → recovery_kdf + wrapped_dek_recovery.
+        fetchDMKeyring().then(function (kr) {
+            if (!kr || !Array.isArray(kr.epochs)) throw new Error('keyring unavailable');
+            var ep = kr.epochs.filter(function (e) { return e.id === epoch; })[0];
+            if (!ep) throw new Error('epoch ' + epoch + ' not found');
+            if (mode === 'phrase') {
+                if (!ep.recovery_kdf || !ep.wrapped_dek_recovery) {
+                    throw new Error('epoch ' + epoch + ' has no recovery key');
+                }
+                var entropy;
+                try {
+                    // Validates the BIP39 checksum; throws on bad words / length.
+                    entropy = dmCrypto().phraseToEntropy(secret);
+                } catch (_) {
+                    var bad = new Error("That's not a valid recovery phrase — check the words and try again.");
+                    bad.userFacing = true;
+                    throw bad;
+                }
+                return dmCrypto().deriveKEKRecovery(entropy, ep.recovery_kdf).then(function (kek) {
+                    // unwrapDEK throws ErrWrongKey when the phrase is valid but wrong.
+                    var dek = dmCrypto().unwrapDEK(ep.wrapped_dek_recovery, kek);
+                    dmSession().unlock(epoch, dek);
+                });
+            }
+            if (!ep.kdf || !ep.wrapped_dek) throw new Error('epoch ' + epoch + ' has no wrapped key');
+            return dmCrypto().deriveKEKPassword(secret, ep.kdf).then(function (kek) {
+                // unwrapDEK throws ErrWrongKey on a bad password (AEAD tag).
+                var dek = dmCrypto().unwrapDEK(ep.wrapped_dek, kek);
+                dmSession().unlock(epoch, dek);
+            });
+        }).then(function () {
+            if (input) input.value = '';
+            if (phraseEl) phraseEl.value = '';
+            dmPendingUnlockEpoch = null;
+            hideDMUnlockBar();
+            // Re-render the thread — the decorator now opens every locked box.
+            if (window.PolisStream && typeof window.PolisStream.refresh === 'function') {
+                window.PolisStream.refresh();
+            }
+        }).catch(function (e) {
+            var msg;
+            if (e && e.name === 'ErrWrongKey') {
+                msg = mode === 'phrase'
+                    ? "That recovery phrase didn't unlock your messages."
+                    : "That password didn't unlock your messages.";
+            } else if (e && e.userFacing) {
+                msg = e.message;
+            } else {
+                msg = 'Unlock failed: ' + (e && e.message ? e.message : e);
+            }
+            errEl.textContent = msg;
+            btn.disabled = false;
+            btn.textContent = 'Unlock';
+            var active = mode === 'phrase' ? phraseEl : input;
+            if (active) { active.focus(); if (active.select) active.select(); }
+        });
+    }
+
+    // ── DM "set a password" setup bar ───────────────────────────────────
+    //
+    // A persistent nudge in the top of the messages column: shown once the user
+    // has DMs but no password epoch. It never dismisses (the nudge stands until
+    // they secure their messages) and links into Settings → Messages. Scoped to
+    // the DM surface — that's where the prompt is relevant.
+
+    var dmConvCountCache = { at: 0, count: null, inflight: null };
+    function dmHasConversations() {
+        var now = Date.now();
+        if (dmConvCountCache.count != null && (now - dmConvCountCache.at) < 30 * 1000) {
+            return Promise.resolve(dmConvCountCache.count > 0);
+        }
+        if (dmConvCountCache.inflight) return dmConvCountCache.inflight;
+        dmConvCountCache.inflight = fetch('/api/dm/conversations', { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : { conversations: [] }; })
+            .then(function (data) {
+                dmConvCountCache.count = ((data && data.conversations) || []).length;
+                dmConvCountCache.at = Date.now();
+                return dmConvCountCache.count > 0;
+            })
+            .catch(function () { return false; })
+            .then(function (v) { dmConvCountCache.inflight = null; return v; });
+        return dmConvCountCache.inflight;
+    }
+
+    // dmHasPasswordEpoch → true / false / null(unknown). Uses the cached keyring.
+    function dmHasPasswordEpoch() {
+        return fetchDMKeyring().then(function (kr) {
+            if (!kr || !Array.isArray(kr.epochs)) return null;
+            return kr.epochs.some(function (e) { return e.kind === 'password'; });
+        }).catch(function () { return null; });
+    }
+
+    // onSettingsView reports whether the SPA is currently showing the Settings
+    // page. The setup bar is shown here too (not only on DM surfaces) so the
+    // "set a password" nudge is consistent however the user reached Settings —
+    // via the bar's own link OR the avatar dropdown. (Pre-fix it only appeared
+    // on Settings when carried over from a messages surface, since the filter
+    // snapshot — the sole trigger — didn't change on navigation.) On Settings
+    // the in-bar link is suppressed because it would be a no-op.
+    function onSettingsView() {
+        if (window.App && window.App.currentView === 'settings') return true;
+        var p = (window.location && window.location.pathname) || '';
+        return /\/settings$/.test(p);
+    }
+
+    // maybeShowDMSetupBar: visible iff (no password epoch) ∧ (on a DM surface OR
+    // on the Settings page). Off both, it's hidden.
+    function maybeShowDMSetupBar(snapshot) {
+        var onDM = !!(snapshot && snapshot.type === 'dms');
+        if (!onDM && !onSettingsView()) { hideDMSetupBar(); return; }
+        // Shown whenever there's no password epoch — regardless of whether the
+        // user has conversations yet, and regardless of read-only mode (setting
+        // a password is a local keyring op that works offline too).
+        dmHasPasswordEpoch().then(function (hasPw) {
+            if (hasPw === false) showDMSetupBar(); // false = definitely no password epoch
+            else hideDMSetupBar();                 // true / null(unknown) → don't nudge
+        });
+    }
+
+    // Canonical user-facing DM-encryption guide. The warning banners deep-link
+    // into its section anchors so users can get the background behind each
+    // caution (matches the doc-link convention already used by the hosted ToS
+    // and landing-page FAQ — github blob URL, opens in a new tab).
+    var DM_DOC_URL = 'https://github.com/vdibart/polis-cli/blob/main/docs/general/dm-encryption.md';
+
+    function showDMSetupBar() {
+        var host = dmBannerHost();
+        if (!host) return;
+        var bar = document.getElementById('dm-setup-bar');
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'dm-setup-bar';
+            bar.className = 'dm-setup-bar';
+            bar.innerHTML =
+                '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>' +
+                '<span class="dm-setup-bar-text">Set a password to secure your messages</span>' +
+                '<a class="dm-setup-bar-doc" href="' + DM_DOC_URL + '#bootstrap-window" target="_blank" rel="noopener">Why?</a>' +
+                '<span class="dm-setup-bar-sep" aria-hidden="true">|</span>' +
+                '<a class="dm-setup-bar-link" href="#">Settings ›</a>';
+            bar.querySelector('.dm-setup-bar-link').addEventListener('click', function (ev) {
+                ev.preventDefault();
+                if (window.App && typeof window.App.openMessagesSettings === 'function') {
+                    window.App.openMessagesSettings();
+                }
+            });
+            host.appendChild(bar); // full-width banner host, pinned under the nav
+        }
+        // On Settings the link + separator would be a no-op (you're already
+        // there) — CSS hides them off this class.
+        bar.classList.toggle('on-settings', onSettingsView());
+        bar.classList.remove('hidden');
+    }
+
+    function hideDMSetupBar() {
+        var bar = document.getElementById('dm-setup-bar');
+        if (bar) bar.classList.add('hidden');
+    }
+
+    // invalidateDMKeyringCache drops the cached keyring + conversation count so the
+    // next read re-fetches. app.js calls this after a settings-side keyring change
+    // (set password, re-wrap) so the send-routing and the setup bar
+    // don't act on a stale "bootstrap, no password" view.
+    function invalidateDMKeyringCache() {
+        dmKeyringCache = null;
+        dmConvCountCache = { at: 0, count: null, inflight: null };
+        maybeShowDMSetupBar(currentFilterSnapshot);
+    }
+
+    // refreshDMSetupBar re-evaluates the setup bar against the current route +
+    // keyring. app.js calls it when entering Settings — no onFilterChange fires
+    // there, so this is what makes the nudge appear (and its link hide) on the
+    // Settings page regardless of how the user navigated in.
+    function refreshDMSetupBar() {
+        maybeShowDMSetupBar(currentFilterSnapshot);
+    }
+
+    // dmReadOnly mirrors App.dmMessagingReadOnly(): true on plain localhost
+    // (self-host or served export), false when hosted or `polis serve --dev`.
+    function dmReadOnly() {
+        return !!(window.App && typeof window.App.dmMessagingReadOnly === 'function' && window.App.dmMessagingReadOnly());
+    }
+
+    // ── Read-only messages banner ───────────────────────────────────────
+    // On a localhost DM surface (no --dev), a neutral banner explains that
+    // compose/send is disabled. Mounts in the full-width nav banner host; may stack
+    // under the "set a password" setup bar (setting a password works offline too).
+    function maybeShowReadOnlyBanner(snapshot) {
+        var onDM = snapshot && snapshot.type === 'dms';
+        if (!onDM || !dmReadOnly()) { hideReadOnlyBanner(); return; }
+        var host = dmBannerHost();
+        if (!host) return;
+        var bar = document.getElementById('dm-readonly-bar');
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'dm-readonly-bar';
+            bar.className = 'dm-readonly-bar';
+            // Eye-with-slash: reading-only, not a lock (distinct from the setup bar).
+            bar.innerHTML =
+                '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="2.5"/><line x1="3" y1="3" x2="21" y2="21"/></svg>' +
+                '<span>Reading only — sending is disabled on localhost. Run <code>polis serve --dev</code> to enable it.</span>' +
+                '<span class="dm-banner-sep" aria-hidden="true">|</span>' +
+                '<a class="dm-banner-doc" href="' + DM_DOC_URL + '#local-decryption" target="_blank" rel="noopener">Learn more ›</a>';
+            host.appendChild(bar); // full-width banner host, pinned under the nav
+        }
+        bar.classList.remove('hidden');
+    }
+    function hideReadOnlyBanner() {
+        var bar = document.getElementById('dm-readonly-bar');
+        if (bar) bar.classList.add('hidden');
+    }
+
+    // ── Recipient protection-status warnings ─────────────────────────────
+    //
+    // "<peer> hasn't set a password" (or "couldn't confirm…") when you're viewing
+    // a thread with / composing to a recipient who hasn't secured their messages.
+    // The browser can't make the signed, mutuals-gated query — the sender's SERVER
+    // does (GET /api/dm/protection-status → {status:"ok",protected} | {status:
+    // "unknown"}). Cached per peer (60s) so opening a thread / picking a recipient
+    // doesn't refetch on every filter change.
+
+    var dmProtectionCache = {}; // peerDomain -> { at, result, inflight }
+
+    function dmFetchProtectionStatus(peerDomain) {
+        var now = Date.now();
+        var entry = dmProtectionCache[peerDomain] || (dmProtectionCache[peerDomain] = {});
+        if (entry.result && (now - entry.at) < 60 * 1000) return Promise.resolve(entry.result);
+        if (entry.inflight) return entry.inflight;
+        entry.inflight = fetch('/api/dm/protection-status?recipient_url=' + encodeURIComponent('https://' + peerDomain), { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : { status: 'unknown' }; })
+            .catch(function () { return { status: 'unknown' }; })
+            .then(function (res) { entry.result = res; entry.at = Date.now(); entry.inflight = null; return res; });
+        return entry.inflight;
+    }
+
+    // dmProtectionWarning → warning copy for a status result, or '' when the
+    // recipient is protected (no warning). Softened copy for the unknown case.
+    function dmProtectionWarning(peerDomain, res) {
+        if (!res || (res.status === 'ok' && res.protected)) return '';
+        if (res.status === 'unknown') {
+            return "Couldn't confirm whether " + peerDomain + " has secured their messages.";
+        }
+        return peerDomain + " hasn't set a password — messages you send may be readable on their server.";
+    }
+
+    // maybeShowRecipientWarning shows the conversation-detail warning bar for the
+    // peer in scope (scope='@<peer>'); hidden on the inbox / off the DM surface.
+    function maybeShowRecipientWarning(snapshot) {
+        var onThread = snapshot && snapshot.type === 'dms' &&
+            typeof snapshot.scope === 'string' && snapshot.scope.charAt(0) === '@';
+        // Skip in read-only: protection_status is a send-time, networked concern
+        // (and the network may be unreachable on a served export).
+        if (!onThread || dmReadOnly()) { hideRecipientWarning(); return; }
+        var peer = snapshot.scope.slice(1);
+        dmFetchProtectionStatus(peer).then(function (res) {
+            // A slow fetch may resolve after the user moved on — re-check scope.
+            var s = currentFilterSnapshot;
+            if (!s || s.scope !== '@' + peer) return;
+            var msg = dmProtectionWarning(peer, res);
+            if (msg) showRecipientWarning(msg);
+            else hideRecipientWarning();
+        });
+    }
+
+    function showRecipientWarning(msg) {
+        var host = dmLayoutRight();
+        if (!host) return;
+        var bar = document.getElementById('dm-recipient-warning');
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'dm-recipient-warning';
+            bar.className = 'dm-recipient-warning';
+            bar.innerHTML =
+                '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 4.3 2.6 18a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.3a2 2 0 0 0-3.4 0Z"/></svg>' +
+                '<span class="dm-recipient-warning-text"></span>' +
+                '<span class="dm-banner-sep" aria-hidden="true">|</span>' +
+                '<a class="dm-banner-doc" href="' + DM_DOC_URL + '#what-this-protects" target="_blank" rel="noopener">Learn more ›</a>';
+            // Below the setup bar (if present), above the stream.
+            host.insertBefore(bar, host.querySelector('.stream'));
+        }
+        bar.querySelector('.dm-recipient-warning-text').textContent = msg;
+        bar.classList.remove('hidden');
+    }
+
+    function hideRecipientWarning() {
+        var bar = document.getElementById('dm-recipient-warning');
+        if (bar) bar.classList.add('hidden');
+    }
+
+    // sendDMMessage routes an outgoing DM by the sender's current epoch.
+    // Bootstrap epoch → server-side seal (/api/dm/send, unchanged). Password
+    // epoch → the box is sealed in the BROWSER from the unlocked DEK and only the
+    // ciphertext leaves: resolve the recipient's verified key, seal a delivery box
+    // (to them) + a box-to-self (for re-reading), POST /api/dm/send-sealed. The
+    // password / KEK / DEK never reach the server. Resolves on success; rejects on
+    // failure (the caller toasts and keeps the composer open).
+    function sendDMMessage(recipientURL, content) {
+        return fetchDMKeyring().then(function (kr) {
+            var cur = (kr && Array.isArray(kr.epochs))
+                ? kr.epochs.filter(function (e) { return e.id === kr.current; })[0]
+                : null;
+            if (!cur || cur.kind !== 'password') {
+                // Bootstrap (or no keyring) → today's server-side seal.
+                return postSendJSON('/api/dm/send', { recipient_url: recipientURL, content: content });
+            }
+            if (!dmCrypto() || !dmSession()) {
+                throw new Error('Secure messaging is unavailable in this view.');
+            }
+            if (!dmSession().isUnlocked(cur.id)) {
+                // Can't seal without the DEK — prompt for it in place.
+                showDMUnlockBar(cur.id);
+                throw new Error('Unlock your messages to send — enter your password above.');
+            }
+            var dek = dmSession().dek(cur.id);
+            var myPub = cur.public_key_messages;
+            return fetch('/api/dm/recipient-key?recipient_url=' + encodeURIComponent(recipientURL), {
+                credentials: 'same-origin',
+            }).then(function (r) {
+                if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+                return r.json();
+            }).then(function (rk) {
+                // Two boxes from the same DEK: one to the recipient (wire), one to
+                // self (local re-read). PolisDMCrypto.sealBox → { ciphertext, nonce }.
+                var delivery = dmCrypto().sealBox(content, rk.public_key_messages, dek);
+                var sent = dmCrypto().sealBox(content, myPub, dek);
+                return postSendJSON('/api/dm/send-sealed', {
+                    recipient_url: recipientURL,
+                    sender_epoch: cur.id,
+                    recipient_epoch: rk.recipient_epoch,
+                    box_pub: myPub,
+                    delivery: delivery,
+                    sent: sent,
+                });
+            });
+        });
+    }
+
+    // postSendJSON POSTs and resolves on ok OR 202 (saved-as-unsent), matching the
+    // send handlers' "message stored even if delivery failed" contract.
+    function postSendJSON(path, body) {
+        return fetch(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify(body),
+        }).then(function (r) {
+            if (!r.ok && r.status !== 202) {
+                return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+            }
+            return r.json();
+        });
+    }
+
+    // Rollover-CTA wiring for profile entries.
     //
     // renderProfile in stream.js leaves an empty .entry-actions slot
     // on each entry; this decorator fills it with a Follow or Unfollow
@@ -1466,11 +2134,11 @@
         // singleton semantics. Opening one collapses any other
         // .recent-post-attached.is-expanded on the page. The CSS
         // handles the visual swap (line-clamp on/off, chevron rotate,
-        // accent border deepening). The full-body lazy-fetch the
-        // mockup hints at is deferred — Phase 2 ships excerpt-only
-        // since the feed cache already carries it; Phase 2.x can
-        // wire the per-post fetch off the data-polis-recent-post-url
-        // attribute we already set in renderProfile.
+        // accent border deepening). The full-body lazy-fetch is
+        // deferred — this ships excerpt-only since the feed cache
+        // already carries it; a later pass can wire the per-post
+        // fetch off the data-polis-recent-post-url attribute we
+        // already set in renderProfile.
         var attached = entry.querySelector(':scope > .recent-post-attached');
         if (attached && !attached.dataset.polisExpandWired) {
             attached.dataset.polisExpandWired = '1';
@@ -1553,6 +2221,7 @@
         stream.afterRender('post', decoratePost);
         stream.afterRender('comment', decorateComment);
         stream.afterRender('dm', decorateDM);
+        stream.afterRender('dm-message', decorateDMMessage);
         stream.afterRender('profile', decorateProfile);
     }
 
@@ -1597,7 +2266,7 @@
     }
 
     // ====================================================================
-    // R22 #11 — Scratch-column owner card
+    // Scratch-column owner card
     // ====================================================================
     //
     // Mirrors the v4 public site-identity layout: avatar + name +
@@ -1658,7 +2327,7 @@
         var show = ownerCardTypes[t] && s === 'me';
         var wasHidden = card.classList.contains('hidden');
         card.classList.toggle('hidden', !show);
-        // 2026-05-18: when transitioning from hidden→visible, re-run the
+        // When transitioning from hidden→visible, re-run the
         // bio overflow measurement. setupAboutToggle's initial pass may
         // have run while the card was display:none (initial SSR filter
         // is "from my network", not "me", so the card boots hidden) —
@@ -1672,7 +2341,7 @@
     }
 
     function loadOwnerCardIdentity() {
-        // R25 follow-up: previously guarded on `window.App` but the
+        // Previously guarded on `window.App` but the
         // SPA declares App as a top-level `const`, which doesn't
         // attach to window in modern script semantics. The guard
         // therefore short-circuited every invocation — /api/status
@@ -1683,15 +2352,15 @@
             .then(function (resp) { return resp.ok ? resp.json() : null; })
             .then(function (data) {
                 if (!data) return;
-                // R23 #6: avatar element removed from owner card markup.
-                // R25 follow-up #4: populate the topbar label at the
+                // Avatar element removed from owner card markup.
+                // Populate the topbar label at the
                 // right edge with site_title from .well-known/polis
                 // (the human-readable site name), falling back to
                 // author_name, then to the base_url hostname. base_url
                 // becomes the link target either way.
                 var topbarHandle = document.getElementById('polis-topbar-handle');
                 if (topbarHandle) {
-                    // 2026-05-18: the topbar identity marker is the polis
+                    // The topbar identity marker is the polis
                     // handle (e.g. `vdibart.polis.pub`), not a site title
                     // or author name. Always derive from base_url hostname.
                     // Earlier cascade tried site_title first, but on hosted
@@ -1711,7 +2380,7 @@
                     topbarHandle.textContent = label;
                     if (data.base_url) topbarHandle.setAttribute('href', data.base_url);
                 }
-                // 2026-05-18: only show name when it differs from the
+                // Only show name when it differs from the
                 // handle. Tenants that haven't set a distinct author_name
                 // publish the bare domain as their "name" (e.g. discover
                 // .polis.pub's .well-known has author_name="discover
@@ -1866,16 +2535,16 @@
     }
 
     // ====================================================================
-    // step-06/6.h — Inline post editor card
+    // Inline post editor card
     // ====================================================================
     //
     // Editor lives as a real .entry inside .stream — same DOM grammar as
     // a regular stream entry (timeline-dot + content), with editor-
     // specific chrome and a sentinel data-polis-pinned="editor" attr
     // that the filter-change clear logic in stream.js skips so the
-    // editor stays put across filter changes (resolved decision #17).
+    // editor stays put across filter changes.
     //
-    // Spec (resolved decisions #13, #17, #18, #19):
+    // Behavior:
     //   - Click edit icon → editor mounts as first item in the timeline.
     //   - Fixed-height card (CSS); inner scroll on body. Stream below
     //     remains visible.
@@ -1971,10 +2640,10 @@
             // doing both. Without this, clicking the Edit rollover CTA on
             // a post the user had previously click-focused leaves the
             // read-focus dim+blur active AND mounts the editor on top,
-            // visually combining both modes. Same class of bug we fixed
-            // for drafts at 3d56ff9 (eligibility exclusion) — generalized
-            // here to all editor entry points so any future surface that
-            // calls openEditor gets the clean transition for free.
+            // visually combining both modes. Same class of bug as the
+            // drafts eligibility-exclusion fix — generalized here to all
+            // editor entry points so any future surface that calls
+            // openEditor gets the clean transition for free.
             if (window.PolisStream && typeof window.PolisStream.exitFocusMode === 'function') {
                 try { window.PolisStream.exitFocusMode(); } catch (e) { /* ignore */ }
             }
@@ -2147,7 +2816,7 @@
         for (var i = 0; i < hidden.length; i++) {
             hidden[i].classList.remove('is-being-edited');
         }
-        // R24 follow-up #6: drop the active state on the edit nav
+        // Drop the active state on the edit nav
         // button — the editor is no longer open.
         var editBtn = document.getElementById('nav-btn-edit');
         if (editBtn) editBtn.classList.remove('active');
@@ -2173,7 +2842,7 @@
         // up from inputs and textareas inside the card.
         card.setAttribute('tabindex', '-1');
 
-        // R27 follow-up: editor card omits the timeline-dot. The dot
+        // Editor card omits the timeline-dot. The dot
         // marked the editor's position on the timeline like other
         // entries, but the editor is a compose surface, not a real
         // post indicator — and once the card was pinned right under
@@ -2196,7 +2865,7 @@
         railPlus.addEventListener('click', function () { closeEditor(); });
         card.appendChild(railPlus);
 
-        // R23 #16: header bar dropped — body is the first thing in
+        // Header bar dropped — body is the first thing in
         // the card. Status indicator + cancel button move to the
         // footer alongside Save / Publish so the top of the editor is
         // distraction-free.
@@ -2214,7 +2883,7 @@
 
         var bodyWrap = document.createElement('div');
         bodyWrap.className = 'editor-card-body';
-        // R22 #8: textarea is visible by DEFAULT; the milkdown-mount
+        // Textarea is visible by DEFAULT; the milkdown-mount
         // starts hidden. When MilkdownBridge.create successfully
         // hydrates the mount, we swap visibility (textarea → hidden,
         // mount → visible). Earlier shape had the mount visible from
@@ -2236,7 +2905,7 @@
 
         var footer = document.createElement('div');
         footer.className = 'editor-card-footer';
-        // R23 #16: status indicator + cancel button moved here from
+        // Status indicator + cancel button moved here from
         // the dropped header. Order across the row: [status] [hint]
         // [...] [cancel] [save] [publish].
         var hint = document.createElement('span');
@@ -2282,7 +2951,7 @@
         // event before initializing. Falls back to the textarea by
         // un-hiding it if Milkdown ultimately fails (the bridge fires
         // ready exactly once per page, so we use a memoized flag).
-        // R22 #8: textarea is the always-on baseline. We try to mount
+        // Textarea is the always-on baseline. We try to mount
         // Milkdown over it; on success we hide the textarea + reveal
         // the mount. On failure (or if MilkdownBridge never loads),
         // the textarea stays visible and the user can still type.
@@ -2343,7 +3012,7 @@
         // ProseMirror's initial render).
         bodyArea.focus();
 
-        // R24 follow-up #6: light up the edit nav button so the user
+        // Light up the edit nav button so the user
         // can read at a glance "the editor is currently open". Cleared
         // by closeEditor.
         var editBtn = document.getElementById('nav-btn-edit');
@@ -2540,12 +3209,12 @@
     // Portability — buildCommentEditorCard is a pure factory: every
     // I/O path is supplied as a callback. owner-extras passes SPA-
     // flavored callbacks here (sign+beseech + /api/comments/drafts);
-    // Phase 3 widget integration will pass widget-flavored callbacks
+    // widget integration passes widget-flavored callbacks
     // (POST /api/widget/comment + bearer token + skip drafts). The
     // DOM + CSS + Milkdown wiring is identical across surfaces.
 
     // ====================================================================
-    // DM COMPOSER MODAL (chunk C — v3-DM port)
+    // DM COMPOSER MODAL
     // ====================================================================
     //
     // Two modes, branched in openDMComposer:
@@ -2563,8 +3232,6 @@
     // the ghost-compose entry at the top of the stream. Keyboard nav:
     // arrow keys move through the picker list, Enter selects, Esc
     // dismisses.
-    //
-    // Design source: docs/design/v4/mockups/07-messages.html.
 
     var DM_COMPOSER_SELECTOR = '.entry--composer[data-polis-pinned="dm-composer"]';
     var DM_COMPOSER_BODY_ID = 'dm-composer-body';
@@ -2590,6 +3257,15 @@
     // place of the ghost-compose entry.
     function openDMComposer(mode, opts) {
         opts = opts || {};
+        // Read-only localhost: the compose/send UI is disabled. The
+        // single chokepoint — ghost-compose, reply CTA, and the empty-state
+        // "send a message" all route here. Re-enable with `polis serve --dev`.
+        if (window.App && typeof window.App.dmMessagingReadOnly === 'function' && window.App.dmMessagingReadOnly()) {
+            if (window.App.showToast) {
+                window.App.showToast('Messages are read-only here. Run `polis serve --dev` to enable sending.', 'info', 5000);
+            }
+            return;
+        }
         if (isDMComposerOpen()) {
             closeDMComposer();
         }
@@ -2766,13 +3442,37 @@
         body.appendChild(toolbar);
         card.appendChild(body);
 
+        // Pre-send protection warning: "they haven't set a password".
+        // Hidden until we have a recipient + a non-protected status.
+        var warn = document.createElement('div');
+        warn.className = 'composer-warning hidden';
+        card.appendChild(warn);
+
         // 'reply' mode: body always visible. 'new' mode: body hidden
         // until a recipient is selected (CSS class flip).
         if (mode === 'reply') {
             card.classList.add('is-reply');
+            if (opts.replyPeer) dmShowComposerWarning(card, opts.replyPeer);
         }
 
         return card;
+    }
+
+    // dmShowComposerWarning fills (or hides) the composer's pre-send warning line
+    // from the recipient's protection status.
+    function dmShowComposerWarning(card, peerDomain) {
+        var warn = card && card.querySelector('.composer-warning');
+        if (!warn || !peerDomain) return;
+        dmFetchProtectionStatus(peerDomain).then(function (res) {
+            var msg = dmProtectionWarning(peerDomain, res);
+            if (msg) {
+                warn.textContent = '⚠ ' + msg;
+                warn.classList.remove('hidden');
+            } else {
+                warn.textContent = '';
+                warn.classList.add('hidden');
+            }
+        });
     }
 
     // Fetch the mutuals list for the recipient picker. Uses the same
@@ -2804,9 +3504,21 @@
                                 url: r.url,
                                 name: r.author_name || r.domain.split('.')[0],
                                 status: r.status,
+                                reason: r.reason,
                                 followsUs: r.follows_us,
+                                avatar: r.avatar, // custom avatar config, or hue fallback (server-resolved)
                                 hasConv: !!convDomains[r.domain],
                             };
+                        });
+                        // /api/dm/recipients returns recipients in following.json
+                        // (insertion) order, which reads as random to the user.
+                        // Sort by the displayed name (case-insensitive, handle
+                        // fallback) so the picker is scannable. Sorting the source
+                        // array — not just the rendered slice — keeps renderMutualsList
+                        // and handleRecipientKeydown's index math in agreement.
+                        dmComposerState.mutuals.sort(function (a, b) {
+                            return (a.name || a.domain || '').toLowerCase()
+                                .localeCompare((b.name || b.domain || '').toLowerCase());
                         });
                         renderMutualsList();
                     });
@@ -2814,6 +3526,45 @@
             .catch(function (e) {
                 console.warn('[owner-extras] load DM recipients failed:', e);
             });
+    }
+
+    // recipientStatusLabel maps the /api/dm/recipients status to a short
+    // right-column cue for non-selectable rows. Statuses mirror the server
+    // (handlers.go / policycheck): "no-follow" (they don't follow you back),
+    // "no-dm" (their DM policy declined your domain), "unknown" (the check
+    // failed). "open" rows never reach here.
+    //
+    // no-follow and no-dm are collapsed into one "not mutuals" cue: under the
+    // default policy (allow pub.polis.dm from following + deny from all) both
+    // reduce to the same thing — DMs are gated on a mutual follow — and two
+    // near-synonymous labels ("doesn't follow you" / "won't accept DMs") read
+    // as harsher and more confusing than the single fact they convey. The
+    // precise server `reason` is still surfaced as the row's hover title.
+    function recipientStatusLabel(status) {
+        switch (status) {
+            case 'no-follow':
+            case 'no-dm':
+                return 'not mutuals';
+            default:
+                return "can't reach";
+        }
+    }
+
+    // applyRecipientAvatar paints a composer avatar (.av) from the server-
+    // resolved avatar config, mirroring the stream's buildAvatar: a real
+    // pattern blanks the initial, otherwise the single initial shows over the
+    // bg. Reuses App._buildAvatarStyle so pattern/border handling stays in one
+    // place. Falls back to the bare initial if no config / App is unavailable.
+    function applyRecipientAvatar(node, m) {
+        var initial = ((m && (m.name || m.domain)) || '?').charAt(0).toUpperCase();
+        var cfg = m && m.avatar;
+        if (cfg && cfg.bg && window.App && typeof window.App._buildAvatarStyle === 'function') {
+            node.setAttribute('style', window.App._buildAvatarStyle(cfg));
+            var hasPattern = !!(cfg.pattern && cfg.pattern !== 'none' && cfg.pattern_color);
+            node.textContent = hasPattern ? '' : initial;
+        } else {
+            node.textContent = initial;
+        }
     }
 
     function renderMutualsList() {
@@ -2842,7 +3593,7 @@
 
             var av = document.createElement('span');
             av.className = 'av';
-            av.textContent = (m.name || m.domain || '?')[0].toUpperCase();
+            applyRecipientAvatar(av, m);
             row.appendChild(av);
 
             var nameBlock = document.createElement('div');
@@ -2857,15 +3608,26 @@
             nameBlock.appendChild(handleEl);
             row.appendChild(nameBlock);
 
-            if (m.hasConv) {
-                var tag = document.createElement('span');
-                tag.className = 'has-conv';
-                tag.textContent = 'in conversation';
-                row.appendChild(tag);
-            }
-
+            // Right-column tag. Selectable mutuals with an existing thread
+            // get the mint "in conversation" cue; non-selectable rows get a
+            // muted reason cue ("not mutuals" / "dms off" / "unavailable") so
+            // the disabled treatment isn't a silent dead-end — the user sees
+            // WHY they can't write to that author.
             if (m.status === 'open') {
+                if (m.hasConv) {
+                    var tag = document.createElement('span');
+                    tag.className = 'has-conv';
+                    tag.textContent = 'in conversation';
+                    row.appendChild(tag);
+                }
                 row.addEventListener('click', function () { selectRecipient(m); });
+            } else {
+                var reason = document.createElement('span');
+                reason.className = 'recipient-status';
+                reason.textContent = recipientStatusLabel(m.status);
+                // Fuller server explanation on hover (e.g. "Does not accept DMs from you").
+                if (m.reason) row.title = m.reason;
+                row.appendChild(reason);
             }
             list.appendChild(row);
         });
@@ -2927,7 +3689,7 @@
             selectedSlot.innerHTML = '';
             var av = document.createElement('span');
             av.className = 'av';
-            av.textContent = (m.name || m.domain || '?')[0].toUpperCase();
+            applyRecipientAvatar(av, m);
             selectedSlot.appendChild(av);
 
             var info = document.createElement('div');
@@ -2954,6 +3716,8 @@
             });
             selectedSlot.appendChild(changeLink);
         }
+        // Pre-send protection warning for the picked recipient.
+        dmShowComposerWarning(card, m.domain);
         var body = document.getElementById(DM_COMPOSER_BODY_ID);
         if (body) body.focus();
     }
@@ -2986,17 +3750,9 @@
         if (!recipientURL) return;
 
         dmComposerState.submitInFlight = true;
-        fetch('/api/dm/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin',
-            body: JSON.stringify({ recipient_url: recipientURL, content: content }),
-        }).then(function (r) {
-            if (!r.ok && r.status !== 202) {
-                return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
-            }
-            return r.json();
-        }).then(function () {
+        // Routes by current epoch: bootstrap → server seal; password → browser
+        // seal. See sendDMMessage.
+        sendDMMessage(recipientURL, content).then(function () {
             // Per spec:
             //   new mode → jump to that conversation's thread view, editor closes.
             //   reply mode → editor closes; user re-opens via CTA to write again.
@@ -3026,7 +3782,7 @@
     }
 
     // ====================================================================
-    // COMMENT EDITOR CARD — original v3-comment-replacement section below
+    // COMMENT EDITOR CARD
     // ====================================================================
 
     var COMMENT_EDITOR_BODY_ID = 'stream-comment-editor-body';
@@ -3040,6 +3796,7 @@
         draftId: '',
         autoSaveTimer: null,
         submitInFlight: false,
+        focusExitHandler: null, // listener that closes the editor on focus exit
     };
 
     function isCommentEditorOpen() {
@@ -3059,7 +3816,7 @@
 
     // buildCommentEditorCard — pure factory. Returns an HTMLElement
     // ready to mount inside a post entry. All I/O goes through the
-    // supplied callbacks (see Phase 3 portability constraints above).
+    // supplied callbacks (see the portability constraints above).
     //
     // opts:
     //   targetPostUrl      — required, the URL of the post being replied to
@@ -3278,31 +4035,33 @@
     function mountCommentEditor(entry, targetPostUrl, targetPostDomain) {
         if (!entry || !targetPostUrl) return;
         // Toggle-close if the editor is already open on this same entry —
-        // matches the post editor's rail-+ behavior (re-click closes).
+        // re-clicking the comment badge in read-focus closes it.
         if (isCommentEditorOpen() && commentEditorState.entry === entry) {
             closeCommentEditor();
             return;
         }
         // Singleton: close any other open editor first. Draft is
-        // preserved by the in-flight autosave (which fires on input);
-        // explicitly trigger one final save before tearing down so any
-        // unsaved keystrokes flush.
+        // preserved by the in-flight autosave (which fires on input).
         if (isCommentEditorOpen()) {
             closeCommentEditor();
         }
-        // Exit any active read-focus — same pattern as openEditor.
-        // Without this, clicking the timeline-dot CTA on a post the
-        // user had previously click-focused mounts the comment editor
-        // on top of the still-active read-focus dim+blur.
-        if (window.PolisStream && typeof window.PolisStream.exitFocusMode === 'function') {
-            try { window.PolisStream.exitFocusMode(); } catch (e) { /* ignore */ }
+        // Comments are created ONLY from read-focus (you can only add a comment
+        // once you've seen the full post). Enter focus on this post (no-op if
+        // already focused), then mount the editor INTO the focus comment slot —
+        // it replaces whatever comment would be shown there; closing it re-shows
+        // the comment via PolisStream.showFocusComment.
+        var PS = window.PolisStream || {};
+        if (typeof PS.enterFocusMode === 'function' && !entry.classList.contains('is-focus-mode')) {
+            try { PS.enterFocusMode(entry); } catch (e) { /* ignore */ }
         }
+        var slot = (typeof PS.ensureFocusCommentSlot === 'function') ? PS.ensureFocusCommentSlot(entry) : null;
+        if (!slot) return;   // can't host the editor without the focus comment slot
+        if (typeof PS.openComments === 'function') { try { PS.openComments(entry); } catch (e) { /* ignore */ } }
 
         commentEditorState.entry = entry;
         commentEditorState.targetPostUrl = targetPostUrl;
         commentEditorState.draftId = '';
         commentEditorState.submitInFlight = false;
-        entry.classList.add('has-open-comment-editor');
 
         var card = buildCommentEditorCard({
             targetPostUrl: targetPostUrl,
@@ -3347,7 +4106,7 @@
                 // (network / server error). In all three beseech
                 // outcomes we close the editor + refresh the stream
                 // because the comment IS captured locally; only the
-                // toast varies. Matches v3's pattern at app.js:5763.
+                // toast varies.
                 return fetch('/api/comments/sign', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -3369,13 +4128,18 @@
                         ? window.App.showToast.bind(window.App)
                         : function () {};
                     var finishUp = function () {
-                        closeCommentEditor();
-                        // Re-fetch the stream so the new comment lands in
-                        // the attached-comment slot on this post — per Q2:
-                        // "editor closes, new comment fills the slot."
-                        if (window.PolisStream && typeof window.PolisStream.refresh === 'function') {
-                            window.PolisStream.refresh();
+                        // Optimistic: stamp the just-submitted comment so it
+                        // fills the slot when the editor closes, bump the count,
+                        // and STAY in read-focus (no full-stream refresh). The
+                        // server-rendered comment replaces this on the next load.
+                        var submittedEntry = commentEditorState.entry;
+                        if (submittedEntry && window.PolisStream) {
+                            if (typeof window.PolisStream.setFocusComment === 'function') {
+                                window.PolisStream.setFocusComment(submittedEntry, buildOptimisticComment(payload.content));
+                            }
+                            bumpCommentCount(submittedEntry);
                         }
+                        closeCommentEditor();   // removes editor → showFocusComment renders the new comment
                     };
                     return fetch('/api/comments/beseech', {
                         method: 'POST',
@@ -3418,11 +4182,17 @@
             onCancel: function () { closeCommentEditor(); },
         });
 
-        // Mount as the LAST child of the entry article. Per the plan, the
-        // editor occupies the slot that .comment-attached / .entry-comments-
-        // panel--cards would live in. Those siblings are hidden via
-        // .has-open-comment-editor CSS rule — we don't reorder the DOM.
-        entry.appendChild(card);
+        // Mount the editor INTO the focus comment slot, literally replacing the
+        // shown comment. Closing the editor re-renders the cached comment here
+        // (PolisStream.showFocusComment), so the slot toggles comment ↔ editor.
+        slot.textContent = '';
+        slot.appendChild(card);
+
+        // Comments are a read-focus-only surface: if the reader leaves focus
+        // (Esc / click-outside), the shape dispatches 'polis:focus-exit' and the
+        // editor closes itself.
+        commentEditorState.focusExitHandler = function () { closeCommentEditor(); };
+        entry.addEventListener('polis:focus-exit', commentEditorState.focusExitHandler);
 
         // Kick off Milkdown over the textarea. Same lazy-import pattern
         // as the post editor — App._initMilkdown handles the bridge load
@@ -3465,45 +4235,89 @@
             clearTimeout(commentEditorState.autoSaveTimer);
             commentEditorState.autoSaveTimer = null;
         }
-        if (commentEditorState.entry) {
-            commentEditorState.entry.classList.remove('has-open-comment-editor');
-            var card = commentEditorState.entry.querySelector(COMMENT_EDITOR_SELECTOR);
+        var openEntry = commentEditorState.entry;
+        if (openEntry) {
+            if (commentEditorState.focusExitHandler) {
+                openEntry.removeEventListener('polis:focus-exit', commentEditorState.focusExitHandler);
+            }
+            // Remove the editor card from the slot FIRST, then ask the shape to
+            // re-render the cached comment into the now-free slot — shows a
+            // comment if one exists, else empties it. Stays in read-focus.
+            var card = openEntry.querySelector(COMMENT_EDITOR_SELECTOR);
             if (card && card.parentNode) card.parentNode.removeChild(card);
+            if (window.PolisStream && typeof window.PolisStream.showFocusComment === 'function') {
+                try { window.PolisStream.showFocusComment(openEntry); } catch (e) { /* ignore */ }
+            }
         }
+        commentEditorState.focusExitHandler = null;
         commentEditorState.entry = null;
         commentEditorState.targetPostUrl = '';
         commentEditorState.draftId = '';
         commentEditorState.submitInFlight = false;
     }
 
-    // wireCommentAddCTA — shared helper called from both decoratePost
-    // and decorateComment. Both decorators historically navigated to
-    // /comments/new?reply_to=<url>; this helper centralizes the
-    // mountCommentEditor swap so wiring stays in sync across entry
-    // types.
-    function wireCommentAddCTA(entry, targetPostUrl, targetPostDomain) {
+    // wireCommentAddBadge — the add-comment affordance now lives on the
+    // below-post comment badge (the timeline dot is no longer involved). On a
+    // commentable post the badge click enters read-focus + opens the in-focus
+    // comment editor in the comment slot (and toggles it closed on re-click);
+    // mountCommentEditor handles the enter-focus + slot mount + toggle.
+    function wireCommentAddBadge(entry, targetPostUrl, targetPostDomain) {
         if (!entry || !targetPostUrl) return;
-        // Dot lives inside the entry's meta container (.entry-meta-line
-        // for posts, .entry-meta for the legacy sub-types). Scope to
-        // the meta container's direct child so we never grab the
-        // nested .timeline-dot--small inside .comment-attached (that
-        // dot belongs to the attached comment, not the post-level CTA).
-        var dot = entry.querySelector(
-            ':scope > .entry-meta-line > .timeline-dot, :scope > .entry-meta > .timeline-dot'
-        );
-        if (!dot) return;
-        dot.setAttribute('role', 'button');
-        dot.setAttribute('title', 'Reply to this post');
-        dot.setAttribute('aria-label', 'Reply to this post');
-        dot.addEventListener('click', function (ev) {
+        var badge = entry.querySelector(':scope > .entry-rail > .entry-comments-badge');
+        if (!badge) return;
+        badge.setAttribute('title', 'Add a comment');
+        badge.addEventListener('click', function (ev) {
+            // Modifier-clicks fall through to native nav (cmd-click opens the
+            // #comments anchor in a new tab).
+            if (ev.metaKey || ev.ctrlKey || ev.shiftKey) return;
             ev.preventDefault();
-            ev.stopPropagation();
+            ev.stopPropagation();   // don't let bindCardClick also enter focus
             mountCommentEditor(entry, targetPostUrl, targetPostDomain);
         });
     }
 
-    // Public surface. Other owner-extras entry points (6.h inline
-    // editor, etc.) will append to this object as they land.
+    // escapeCommentHTML — minimal HTML-escape for the optimistic comment body.
+    function escapeCommentHTML(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    // buildOptimisticComment builds a focus-comment payload for the
+    // just-submitted comment so it fills the slot immediately (staying in
+    // read-focus). The author is the owner → identity suppressed (no handle /
+    // avatar — "I know who I am"), time reads "just now", body is the typed text
+    // escaped into paragraphs. Markdown isn't rendered client-side; the
+    // server-rendered comment replaces this on the next stream load.
+    function buildOptimisticComment(content) {
+        var text = String(content || '').trim();
+        var paras = text ? text.split(/\n{2,}/).map(function (p) {
+            return '<p>' + escapeCommentHTML(p).replace(/\n/g, '<br>') + '</p>';
+        }).join('') : '';
+        return {
+            author_domain: '',
+            author_name: '',
+            published_human: 'just now',
+            content_html: paras,
+            author_avatar: null,
+            url: '#',
+        };
+    }
+
+    // bumpCommentCount increments the post's below-post comment-count badge.
+    function bumpCommentCount(entry) {
+        if (!entry) return;
+        var countEl = entry.querySelector(':scope > .entry-rail > .entry-comments-badge .count');
+        if (!countEl) return;
+        var n = parseInt(entry.dataset.polisCommentCount || countEl.textContent || '0', 10);
+        if (isNaN(n)) n = 0;
+        n += 1;
+        entry.dataset.polisCommentCount = String(n);
+        countEl.textContent = String(n);
+    }
+
+    // Public surface. Other owner-extras entry points (inline
+    // editor, etc.) append to this object.
     var ready = waitForController().then(function (stream) {
         registerAvatarMenuEscape(stream);
         // Register owner-only filter-type options (activity / dms /
@@ -3512,10 +4326,10 @@
         // owner SPA needs the additional types so the type-slot
         // dropdown surfaces them and the sentence filter renders
         // correctly (e.g. "new activity from my network").
-        // (mentions is grammar-parsed but feature-deferred per
-        // resolved-decision #9; not registered here.)
+        // (mentions is grammar-parsed but feature-deferred;
+        // not registered here.)
         if (typeof stream.replaceFilterOptions === 'function') {
-            // 06-profiles: "follows" removed from the type slot.
+            // "follows" removed from the type slot.
             // "profiles" added as a sibling between comments and
             // messages. posts + comments remain indented under
             // activity to read as a hierarchy. dms surfaces as
@@ -3546,7 +4360,7 @@
         // init and have the controller attach its standard slot
         // click-handlers.
         if (typeof stream.unlockSlot === 'function') {
-            // R22 #12: qualifier stays locked to "all" — drop the
+            // Qualifier stays locked to "all" — drop the
             // `new` option entirely. Read-state tracking is unreliable
             // enough across types that filtering on it produced
             // confusing results; collapse to all-only and treat the
@@ -3556,12 +4370,12 @@
         wireIconPresets(stream);
         wireMobileNav();
         registerActivityDecorators(stream);
-        // step-06/6.i: hover-revealed owner-action chrome on each
+        // Hover-revealed owner-action chrome on each
         // stream entry (unpublish on own posts/comments, bless/deny
         // on incoming blessing requests, mark-read on unread DMs).
         registerStreamItemDecorators(stream);
         setupReadPersistence();
-        // R22 #11: scratch-column owner card — populates avatar +
+        // Scratch-column owner card — populates avatar +
         // bio + counts and wires the inline-edit flow.
         setupOwnerCard();
         // (Editor keyboard handling is card-scoped — wired in
@@ -3583,13 +4397,20 @@
         loadPreset: loadPreset,
         ICON_PRESETS: ICON_PRESETS,
         syncActivityModeClass: syncActivityModeClass,
-        // step-06/6.h: editor card public surface.
+        // Editor card public surface.
         openEditor: openEditor,
         closeEditor: closeEditor,
         // DM composer surface (needed so App.toggleCompose can close
         // an already-open DM composer when the nav + is clicked).
         isDMComposerOpen: isDMComposerOpen,
         closeDMComposer: closeDMComposer,
+        // app.js calls this after a settings-side keyring change
+        // (set password / re-wrap) so cached send-routing + the setup bar
+        // re-read fresh state instead of a stale "no password" view.
+        invalidateDMKeyringCache: invalidateDMKeyringCache,
+        // app.js calls this on Settings entry so the "set a password" bar
+        // appears there consistently (no filter-change fires on that route).
+        refreshDMSetupBar: refreshDMSetupBar,
         // Read by App._applyCountsFromSSE: when a counts push raises
         // hasNew* for the surface the user is already viewing, the
         // SPA auto-advances the cursor so the dot never appears for a

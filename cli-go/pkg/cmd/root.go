@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
+	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/index"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
@@ -104,6 +105,7 @@ func Execute(args []string) {
 	// as fallback when no explicit generator parameter is passed.
 	publish.Version = Version
 	comment.Version = Version
+	dm.Version = Version
 	metadata.Version = Version
 	following.Version = Version
 	index.Version = Version

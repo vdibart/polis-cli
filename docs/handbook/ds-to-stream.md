@@ -171,21 +171,24 @@ It comes from a cross-tenant aggregation query — Path B.
 
 ### B.2 Webapp side: [`webapp/internal/server/handlers_stream.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/handlers_stream.go)
 
-The webapp stream handler stamps comment counts onto items at render time. It uses a **visible-horizon strategy**:
+The webapp stream handler stamps comment counts onto items at render time. It fetches the **whole page's counts in one batched DS call**, synchronously, so every post is stamped deterministically each render:
 
 ```go
-// items[0:visibleHorizon] in the paginated page are treated as "likely visible
-// above the fold" and get a sync DS fetch with a strict timeout; items past
-// the horizon get a fire-and-forget background fetch that populates the cache
-// for the next render.
+// The whole page's uncached counts are fetched in ONE batched DS call (the
+// counts endpoint accepts up to streamCountBatchMax URLs per request)
+// synchronously, so every post on the page is stamped deterministically each
+// render. A prior visibleHorizon heuristic (sync the first N, background the
+// rest) left below-the-fold posts — and any post on a cold cache — showing 0
+// until a later render warmed the cache, then dropping back to 0 when the TTL
+// expired: the badge flipped 0↔1↔0 across navigations.
 const (
-    visibleHorizon              = 10
+    streamCountBatchMax         = 50 // matches DS COMMENT_COUNTS_MAX_URLS
     visibleCountFetchTimeout    = 500 * time.Millisecond
     backgroundCountFetchTimeout = 5 * time.Second
 )
 ```
 
-The first 10 items get blocking 500ms fetches — they're about to render and need their counts now or they ship as "0." Items past that horizon get fire-and-forget background fetches that populate a local short-lived cache so the *next* time the user scrolls them into view, the badge already has its number.
+An earlier design used a "visible-horizon" heuristic — sync-fetch the first 10 items, background-fetch the rest — but it made badges flicker `0↔1↔0` as below-the-fold and cold-cache posts shipped "0," warmed on a later render, then reset when the count cache's TTL expired. The current handler trades that for one batched fetch of up to `streamCountBatchMax` (50) URLs per render, so a post's badge is the same number every time it renders. Only an explicit oversized `limit` (more than 50 items) spills past the cap, and that overflow falls back to a background fill.
 
 ### B.3 DS endpoint: [`discovery-service/core/handlers/counts.ts`](https://github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/counts.ts)
 

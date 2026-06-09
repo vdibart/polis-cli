@@ -37,7 +37,7 @@ type InitOptions struct {
 type InitResult struct {
 	Success      bool     `json:"success"`
 	SiteDir      string   `json:"site_dir"`
-	PublicKey     string   `json:"public_key"`
+	PublicKey    string   `json:"public_key"`
 	DirsCreated  []string `json:"directories_created,omitempty"`
 	FilesCreated []string `json:"files_created,omitempty"`
 	KeyPaths     struct {
@@ -94,14 +94,13 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 		filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "comments", "pending"),
 		filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "comments", "denied"),
 		// DM storage (encrypted conversations)
-		filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "dm", "conv"),
+		filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "dm", "conversations"),
 		// Site resources
 		filepath.Join(siteDir, "site", "snippets"),
 		// Public content (pub.polis.core)
 		filepath.Join(siteDir, "content", "pub.polis.core", "post"),
 		filepath.Join(siteDir, "content", "pub.polis.core", "comment"),
 		filepath.Join(siteDir, "content", "pub.polis.core", "follow"),
-		filepath.Join(siteDir, "content", "pub.polis.core", "feed"),
 		filepath.Join(siteDir, "content", "pub.polis.core", "tag"),
 		// Policies
 		filepath.Join(siteDir, "policies"),
@@ -180,6 +179,13 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 
 	if err := SaveWellKnown(siteDir, wk); err != nil {
 		return nil, fmt.Errorf("failed to create .well-known/polis: %w", err)
+	}
+
+	// Provision the DM keyring (bootstrap epoch) and publish its signed
+	// public_key_messages block into .well-known/polis, so the site can receive
+	// encrypted DMs from message #1. Medic performs the same on existing tenants.
+	if err := ProvisionAndPublishMessagesKey(siteDir, privKey); err != nil {
+		return nil, fmt.Errorf("failed to provision DM keys: %w", err)
 	}
 
 	// Generate favicon from avatar config

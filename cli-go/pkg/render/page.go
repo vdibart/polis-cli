@@ -16,11 +16,13 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	"github.com/vdibart/polis-cli/cli-go/pkg/cache"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/template"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
+	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
 // replyCacheMu serializes read-modify-write access to the on-disk
@@ -168,6 +170,16 @@ func StripHTMLComments(s string) string {
 // (e.g., fetching reply context during rendering). Set by the calling application
 // to enable connection pooling. If nil, a short-timeout client is created per call.
 var DefaultHTTPClient *http.Client
+
+// BlessedCacheFiller is the render-time read-through for a blessed-comment cache
+// MISS, installed by the webapp at startup. It fetches the comment from its
+// author and populates the isolated blessed cache THROUGH cache.Ingest (the same
+// verify-and-gate + provenance plumbing Rosie uses), returning true when it wrote
+// a cache entry (so LoadLocalCommentContent re-reads + renders it). It must NOT
+// block page render unboundedly — it is single-flighted and negative-cached by
+// the webapp. nil by default → CLI static render / offline returns a placeholder
+// (empty string) on a miss. See LoadLocalCommentContent.
+var BlessedCacheFiller func(dataDir, commentURL string) bool
 
 // WidgetVersion is the single source of truth for the current polis widget version.
 // Update this constant when widget.js changes. Theme snippets reference it via
@@ -973,11 +985,35 @@ func (r *PageRenderer) loadBlessedCommentsForPost(postPath string) ([]template.B
 			commentURL = strings.TrimSuffix(commentURL, ".md") + ".html"
 		}
 
+		// Commenter avatar — fetched per author with hue fallback, matching
+		// the v4 comment-thread card design (mockup 16). Renders at 28px to
+		// match the stream's commenter-avatar size; floated right inside the
+		// card via the blessed-comment.html template + the .comment-attached
+		// scoping in stream.css.
+		authorDomain := extractDomain(comment.URL)
+		avatarCfg, ok := LoadOrFetchAuthorAvatar(authorDomain)
+		if !ok || avatarCfg.BG == "" {
+			avatarCfg = FallbackAvatarConfig(authorDomain)
+		}
+		initial := ""
+		if authorDomain != "" {
+			initial = strings.ToUpper(authorDomain[:1])
+		}
+		avatarHTML := AvatarHTML(avatarCfg, initial, 28)
+
 		results = append(results, template.BlessedCommentData{
-			URL:            commentURL,
-			AuthorName:     extractDomain(comment.URL),
-			Published:      comment.BlessedAt,
-			PublishedHuman: template.FormatHumanDate(comment.BlessedAt),
+			URL:              commentURL,
+			AuthorName:       authorDomain,
+			AuthorDomain:     authorDomain,
+			AuthorAvatarHTML: avatarHTML,
+			Published:        comment.BlessedAt,
+			// v4 canonical comment cards share the stream meta-line date
+			// shape ("May 25 · 10:00pm" / relative for recent) — NOT v3's
+			// year-bearing "May 25, 2026". StripYear matches the post
+			// meta-line above it; FormatHumanDateTime adds the time + the
+			// recent-relative form so the comment date reads like every
+			// other v4 timestamp on the page.
+			PublishedHuman: template.StripYear(template.FormatHumanDateTime(comment.BlessedAt)),
 			Content:        content,
 		})
 	}
@@ -985,65 +1021,71 @@ func (r *PageRenderer) loadBlessedCommentsForPost(postPath string) ([]template.B
 	return results, nil
 }
 
-// loadLocalCommentContent tries to resolve a comment URL to a local file and load its content.
-// Returns rendered HTML content if found, empty string otherwise.
-// Checks both mount path (comments/) and source path (content/pub.polis.core/comment/).
+// loadLocalCommentContent resolves a blessed comment URL to rendered HTML from
+// the isolated blessed-comment cache. Returns empty string if not available.
 func (r *PageRenderer) loadLocalCommentContent(commentURL string) string {
-	return LoadLocalCommentContent(r.config.DataDir, r.config.CommentsSourceDir, commentURL)
+	return LoadLocalCommentContent(r.config.DataDir, commentURL)
 }
 
-// LoadLocalCommentContent resolves a blessed comment's URL to local markdown
-// and renders it through the same goldmark + bluemonday pipeline used by
-// per-post page rendering. Used by the stream items handler to enrich posts
-// with their inline blessed comments without re-fetching from the comment
-// author's site (blessed comments are already mirrored locally on the
-// post owner's tenant). Returns empty string on any failure (missing file,
-// unrecognized URL shape, render error) — callers must treat empty as
-// "no inline content available" and degrade gracefully.
+// LoadLocalCommentContent renders a foreign blessed comment for inline display,
+// reading it ONLY from the isolated blessed-comment cache
+// (.polis/ds/<ds>/pub.polis.core/cache/blessed/<author>/…) through the same
+// goldmark + bluemonday pipeline as per-post rendering. It NEVER reads a public
+// path (comments/ or content/pub.polis.core/comment/): serving one tenant's
+// comment from another tenant's public tree is exactly the Defect-3 violation
+// the cache exists to prevent.
 //
-// commentsSourceDir may be empty; if so only the mount path (comments/) is
-// checked.
-func LoadLocalCommentContent(dataDir, commentsSourceDir, commentURL string) string {
-	// Try to extract relative path from URL (e.g., comments/20260101/id.md)
-	suffix := ""
-	if idx := strings.Index(commentURL, "/comments/"); idx >= 0 {
-		suffix = commentURL[idx+len("/comments/"):] // "20260101/id.md"
-	} else if strings.HasPrefix(commentURL, "comments/") {
-		suffix = strings.TrimPrefix(commentURL, "comments/")
+// On a cache MISS it read-throughs via BlessedCacheFiller (installed by the
+// webapp), which fetches the comment from its author and populates the cache via
+// the SAME cache.Ingest plumbing Rosie uses — so render-created entries carry a
+// proper provenance sidecar and are never rogue to Rosie's integrity/GC. When
+// the filler is unset (CLI static render / offline), a miss is a graceful empty
+// string. Callers MUST treat "" as "no inline content available" and degrade.
+func LoadLocalCommentContent(dataDir, commentURL string) string {
+	data, _, ok := cache.FindBlessed(dataDir, commentURL)
+	if !ok && BlessedCacheFiller != nil && BlessedCacheFiller(dataDir, commentURL) {
+		data, _, ok = cache.FindBlessed(dataDir, commentURL)
 	}
-
-	if suffix == "" {
+	if !ok {
 		return ""
 	}
+	return renderCommentMarkdownBody(data)
+}
 
-	// Ensure .md extension
-	if !strings.HasSuffix(suffix, ".md") {
-		suffix = strings.TrimSuffix(suffix, ".html") + ".md"
+// LoadOwnCommentContent renders the SITE OWNER's OWN comment for inline display,
+// reading it from the owner's local public path (the comments/ mount or the
+// content/pub.polis.core/comment/ source). This is the owner's canonical content
+// living in the owner's own tree — reading it here is NOT a foreign-content
+// violation. Callers MUST use this only for comments the owner authored (author
+// domain == the owner's domain); FOREIGN blessed comments go through
+// LoadLocalCommentContent (isolated cache only, never a public path). Returns ""
+// when not found, rendered through the same goldmark + bluemonday pipeline.
+func LoadOwnCommentContent(dataDir, commentURL string) string {
+	rel := polisurl.CommentURLToContentRel(commentURL)
+	if rel == "" {
+		return ""
 	}
-
-	// Try multiple candidate paths: mount path first, then source content path
-	candidates := []string{
+	suffix := strings.TrimPrefix(rel, "content/pub.polis.core/comment/") // "<date>/<id>.md"
+	for _, p := range []string{
 		filepath.Join(dataDir, "comments", suffix),
-	}
-	if commentsSourceDir != "" {
-		candidates = append(candidates, filepath.Join(dataDir, commentsSourceDir, suffix))
-	}
-
-	for _, fullPath := range candidates {
-		data, err := os.ReadFile(fullPath)
-		if err != nil {
-			continue
+		filepath.Join(dataDir, "content", "pub.polis.core", "comment", suffix),
+	} {
+		if data, err := os.ReadFile(p); err == nil {
+			return renderCommentMarkdownBody(data)
 		}
-		// Strip frontmatter and render markdown
-		body := stripFrontmatter(string(data))
-		html, err := MarkdownToHTML(body)
-		if err != nil {
-			return body
-		}
-		return html
 	}
-
 	return ""
+}
+
+// renderCommentMarkdownBody strips frontmatter and renders a comment .md body to
+// sanitized HTML, returning the raw body on render error (best-effort display).
+func renderCommentMarkdownBody(data []byte) string {
+	body := stripFrontmatter(string(data))
+	html, err := MarkdownToHTML(body)
+	if err != nil {
+		return body
+	}
+	return html
 }
 
 // getSiteTitle returns the site title from .well-known/polis.
@@ -1117,10 +1159,79 @@ var avatarPatterns = map[string]func(color string) string{
 	},
 }
 
-// buildAvatarHTML returns pre-rendered HTML for the site avatar.
-// Uses avatar config from .well-known/polis if available, otherwise generates
-// a default initial-letter avatar. Supports bg, fg, border, and pattern rendering
-// matching the nav.js/app.js avatar implementation.
+// AvatarConfig is a site's avatar customization. Sourced from the author's
+// .well-known/polis "avatar" block today (moving into the content bundle
+// later) — callers needing a REMOTE author's avatar should go through the
+// LoadOrFetchAuthorAvatar seam rather than reading .well-known directly. The
+// zero value (empty BG) means "no custom avatar" → default initial.
+type AvatarConfig struct {
+	BG           string `json:"bg"`
+	FG           string `json:"fg"`
+	Border       string `json:"border"`
+	BorderW      int    `json:"border_w"`
+	Pattern      string `json:"pattern"`
+	PatternColor string `json:"pattern_color"`
+}
+
+// AvatarHTML renders a <span class="avatar-initial"> for the given avatar
+// config. When cfg.BG is set it applies bg/fg/border and (if present) the SVG
+// pattern as a base64 data-URI background; a pattern blanks the initial
+// (matching nav.js/app.js). When cfg.BG is empty it returns the default
+// unstyled initial (theme CSS styles it). sizePx > 0 sets width/height/
+// line-height inline so one config renders at any size (stream chip vs
+// settings preview); sizePx == 0 leaves sizing to CSS (the local nav avatar).
+// initial is the already-derived display glyph — the caller chooses its source.
+//
+// This is the single source of avatar markup, shared by the local site avatar
+// (buildAvatarHTML) and per-author stream enrichment. The JS renderer
+// (shapes/v4/stream.js buildAvatar) mirrors this output; keep them in step.
+func AvatarHTML(cfg AvatarConfig, initial string, sizePx int) string {
+	sizeStyle := ""
+	if sizePx > 0 {
+		sizeStyle = fmt.Sprintf("width:%dpx;height:%dpx;line-height:%dpx;", sizePx, sizePx, sizePx)
+	}
+
+	// No custom avatar: default unstyled initial (+ optional inline size).
+	if cfg.BG == "" {
+		if sizeStyle != "" {
+			return fmt.Sprintf(`<span class="avatar-initial" style="%s">%s</span>`,
+				sizeStyle, html.EscapeString(initial))
+		}
+		return fmt.Sprintf(`<span class="avatar-initial">%s</span>`, html.EscapeString(initial))
+	}
+
+	// Build inline style matching nav.js buildAvatarStyle.
+	style := fmt.Sprintf("background-color:%s;color:%s;",
+		html.EscapeString(cfg.BG), html.EscapeString(cfg.FG))
+
+	if cfg.Border != "" && cfg.BorderW > 0 {
+		style += fmt.Sprintf("border:%dpx solid %s;", cfg.BorderW, html.EscapeString(cfg.Border))
+	}
+
+	// Pattern support.
+	hasPattern := false
+	if cfg.Pattern != "" && cfg.Pattern != "none" && cfg.PatternColor != "" {
+		if gen, ok := avatarPatterns[cfg.Pattern]; ok {
+			svg := gen(cfg.PatternColor)
+			b64 := base64.StdEncoding.EncodeToString([]byte(svg))
+			style += fmt.Sprintf("background-image:url(data:image/svg+xml;base64,%s);background-size:cover;", b64)
+			hasPattern = true
+		}
+	}
+
+	// Hide the initial when a pattern is set (matching nav.js behavior).
+	displayInitial := html.EscapeString(initial)
+	if hasPattern {
+		displayInitial = ""
+	}
+
+	return fmt.Sprintf(`<span class="avatar-initial" style="%s%s">%s</span>`,
+		sizeStyle, style, displayInitial)
+}
+
+// buildAvatarHTML returns pre-rendered HTML for the LOCAL site's avatar, from
+// the .well-known/polis avatar config (or a default initial-letter avatar).
+// Thin wrapper over AvatarHTML; sizePx 0 leaves sizing to theme CSS.
 func (r *PageRenderer) buildAvatarHTML() string {
 	authorName := r.getAuthorName()
 	if authorName == "" {
@@ -1132,57 +1243,24 @@ func (r *PageRenderer) buildAvatarHTML() string {
 		initial = string(runes[0])
 	}
 
-	// Try to load avatar config from .well-known/polis
+	return AvatarHTML(r.loadLocalAvatarConfig(), initial, 0)
+}
+
+// loadLocalAvatarConfig reads the serving site's avatar block from
+// .well-known/polis. Returns the zero AvatarConfig when absent or unparseable.
+func (r *PageRenderer) loadLocalAvatarConfig() AvatarConfig {
 	wkPath := filepath.Join(r.config.DataDir, ".well-known", "polis")
 	data, err := os.ReadFile(wkPath)
-	if err == nil {
-		var wk struct {
-			Avatar *struct {
-				BG           string `json:"bg"`
-				FG           string `json:"fg"`
-				Border       string `json:"border"`
-				BorderW      int    `json:"border_w"`
-				Pattern      string `json:"pattern"`
-				PatternColor string `json:"pattern_color"`
-			} `json:"avatar"`
-		}
-		if err := json.Unmarshal(data, &wk); err == nil && wk.Avatar != nil && wk.Avatar.BG != "" {
-			av := wk.Avatar
-
-			// Build inline style matching nav.js buildAvatarStyle
-			style := fmt.Sprintf("background-color:%s;color:%s;",
-				html.EscapeString(av.BG),
-				html.EscapeString(av.FG))
-
-			if av.Border != "" && av.BorderW > 0 {
-				style += fmt.Sprintf("border:%dpx solid %s;",
-					av.BorderW, html.EscapeString(av.Border))
-			}
-
-			// Pattern support
-			hasPattern := false
-			if av.Pattern != "" && av.Pattern != "none" && av.PatternColor != "" {
-				if gen, ok := avatarPatterns[av.Pattern]; ok {
-					svg := gen(av.PatternColor)
-					b64 := base64.StdEncoding.EncodeToString([]byte(svg))
-					style += fmt.Sprintf("background-image:url(data:image/svg+xml;base64,%s);background-size:cover;", b64)
-					hasPattern = true
-				}
-			}
-
-			// Hide initial when custom pattern is set (matching nav.js behavior)
-			displayInitial := html.EscapeString(initial)
-			if hasPattern {
-				displayInitial = ""
-			}
-
-			return fmt.Sprintf(`<span class="avatar-initial" style="%s">%s</span>`,
-				style, displayInitial)
-		}
+	if err != nil {
+		return AvatarConfig{}
 	}
-
-	// Default: unstyled initial (theme CSS provides default avatar styling)
-	return fmt.Sprintf(`<span class="avatar-initial">%s</span>`, html.EscapeString(initial))
+	var wk struct {
+		Avatar *AvatarConfig `json:"avatar"`
+	}
+	if err := json.Unmarshal(data, &wk); err != nil || wk.Avatar == nil {
+		return AvatarConfig{}
+	}
+	return *wk.Avatar
 }
 
 // buildURL builds a full URL for a file path.
@@ -1228,7 +1306,7 @@ func parseFrontmatter(content string) map[string]string {
 // yamlUnquote strips outer YAML quote characters (double or single) and
 // unescapes the inner content per YAML quoting rules. Handles the
 // double-quoted form (`"\"foo\""` → `"foo"`) and single-quoted form
-// (`'it''s'` → `it's`); plain (unquoted) values pass through unchanged.
+// (`'it”s'` → `it's`); plain (unquoted) values pass through unchanged.
 //
 // This is a deliberately small subset of the full YAML escape grammar —
 // polis frontmatter only uses titles and a few other simple string
@@ -1669,6 +1747,29 @@ func LoadOrFetchReplyContext(dataDir, htmlURL string, ttl time.Duration) (ReplyC
 		return entry, false
 	}
 	return fetched, true
+}
+
+// LoadOrFetchCommentHTML fetches a remote comment's markdown body and renders
+// it to sanitized HTML, reusing the reply-context cache / SSRF gate (replyURLAllowed)
+// / singleflight / 24h disk cache / negative cache via LoadOrFetchReplyContext.
+//
+// Used by the stream's read-focus mode to show exactly one comment fetched
+// from the commenter's origin site. Returns ("", false) when the comment can't
+// be fetched or carries no body — callers degrade gracefully (render the
+// comment header with author + date, empty body). MarkdownToHTML
+// (goldmark + bluemonday) sanitizes the body server-side before it reaches the
+// client, which is the load-bearing guarantee for rendering unblessed remote
+// comments inline.
+func LoadOrFetchCommentHTML(dataDir, commentURL string, ttl time.Duration) (string, bool) {
+	entry, ok := LoadOrFetchReplyContext(dataDir, commentURL, ttl)
+	if !ok || entry.BodyMD == "" {
+		return "", false
+	}
+	html, err := MarkdownToHTML(entry.BodyMD)
+	if err != nil {
+		return "", false
+	}
+	return html, true
 }
 
 // mountToSourceURL converts a mount-path URL to a content source path URL.

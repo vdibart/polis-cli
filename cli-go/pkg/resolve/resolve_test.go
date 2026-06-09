@@ -56,7 +56,6 @@ func TestContentPath(t *testing.T) {
 		{"pub.polis.post", "/home/alice/mysite/content/pub.polis.core/post"},
 		{"pub.polis.comment", "/home/alice/mysite/content/pub.polis.core/comment"},
 		{"pub.polis.follow", "/home/alice/mysite/content/pub.polis.core/follow"},
-		{"pub.polis.feed", "/home/alice/mysite/content/pub.polis.core/feed"},
 	}
 
 	for _, tt := range tests {
@@ -81,7 +80,6 @@ func TestMountPath(t *testing.T) {
 		{"pub.polis.post", "/home/alice/mysite/posts"},
 		{"pub.polis.comment", "/home/alice/mysite/comments"},
 		{"pub.polis.follow", "/home/alice/mysite/follow"},
-		{"pub.polis.feed", "/home/alice/mysite/feed"},
 	}
 
 	for _, tt := range tests {
@@ -246,7 +244,6 @@ func TestMountToType(t *testing.T) {
 		{"/posts", "pub.polis.post"},
 		{"/comments", "pub.polis.comment"},
 		{"/follow", "pub.polis.follow"},
-		{"/feed", "pub.polis.feed"},
 		{"posts", "pub.polis.post"}, // without leading slash
 	}
 
@@ -292,7 +289,7 @@ func TestAbs(t *testing.T) {
 func TestContentTypeNames(t *testing.T) {
 	r := testResolver(t)
 	names := r.ContentTypeNames()
-	if len(names) != 7 {
-		t.Errorf("got %d content types, want 7", len(names))
+	if len(names) != 6 {
+		t.Errorf("got %d content types, want 6", len(names))
 	}
 }

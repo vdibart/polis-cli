@@ -209,8 +209,16 @@ func (e *Engine) renderBlessedCommentsSection(content string, ctx *RenderContext
 	for _, bc := range ctx.BlessedComments {
 		// Create a temporary context for this iteration
 		iterCtx := &RenderContext{
-			URL:            bc.URL,
-			AuthorName:     bc.AuthorName,
+			URL:        bc.URL,
+			AuthorName: bc.AuthorName,
+			// AuthorDomain MUST be set here, not only in substituteLoopVariables
+			// below: processPartials (called next) runs ctx-variable substitution
+			// with this iterCtx, and the engine maps {{author_domain}} ->
+			// ctx.AuthorDomain. An unset field blanks {{author_domain}} in the
+			// expanded partial BEFORE the loop-variable pass can fill it — which
+			// rendered an empty <a class="entry-handle"> (no commenter byline) on
+			// the canonical per-post comment card.
+			AuthorDomain:   bc.AuthorDomain,
 			Published:      bc.Published,
 			PublishedHuman: bc.PublishedHuman,
 			Content:        bc.Content,
@@ -229,11 +237,13 @@ func (e *Engine) renderBlessedCommentsSection(content string, ctx *RenderContext
 
 		// Substitute loop-specific variables
 		rendered := e.substituteLoopVariables(processed, map[string]string{
-			"url":             bc.URL,
-			"author_name":     bc.AuthorName,
-			"published":       bc.Published,
-			"published_human": bc.PublishedHuman,
-			"content":         bc.Content,
+			"url":                bc.URL,
+			"author_name":        bc.AuthorName,
+			"author_domain":      bc.AuthorDomain,
+			"author_avatar_html": bc.AuthorAvatarHTML,
+			"published":          bc.Published,
+			"published_human":    bc.PublishedHuman,
+			"content":            bc.Content,
 		})
 
 		builder.WriteString(rendered)

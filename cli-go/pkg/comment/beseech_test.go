@@ -1,11 +1,92 @@
 package comment
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+// TestBeseechFlagContract_SharedFixture is WS5 ⑤: the Go PRODUCER
+// (commentRegistrationMetadata) asserts against the SAME shared golden fixture the
+// Deno CONSUMER (commentBeseechRequested) does, so the cross-language beseech-flag
+// wire shape (Defect 4 decouple) cannot drift. The Go side proves that the metadata
+// it emits for each intent (beseech true/false) lands in a fixture case whose
+// beseech_requested interpretation matches that intent.
+func TestBeseechFlagContract_SharedFixture(t *testing.T) {
+	root := repoRootForContract(t)
+	data, err := os.ReadFile(filepath.Join(root, "discovery-service", "core", "contract-fixtures", "beseech-flag.json"))
+	if err != nil {
+		t.Fatalf("read shared fixture: %v", err)
+	}
+	var fx struct {
+		Cases []struct {
+			Name             string                 `json:"name"`
+			Metadata         map[string]interface{} `json:"metadata"`
+			BeseechRequested bool                   `json:"beseech_requested"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &fx); err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+
+	// Classify the beseech-key state a metadata object encodes.
+	stateOf := func(md map[string]interface{}) string {
+		v, ok := md["beseech"]
+		if !ok {
+			return "absent"
+		}
+		if b, isBool := v.(bool); isBool {
+			if b {
+				return "true"
+			}
+			return "false"
+		}
+		return "other"
+	}
+	wantRequested := map[string]bool{}
+	for _, c := range fx.Cases {
+		wantRequested[stateOf(c.Metadata)] = c.BeseechRequested
+	}
+
+	meta := &CommentMeta{InReplyTo: "https://a/posts/x.md", RootPost: "https://a/posts/x.md", Timestamp: "2026-01-01T00:00:00Z"}
+	for _, beseech := range []bool{true, false} {
+		state := stateOf(commentRegistrationMetadata(meta, beseech))
+		req, ok := wantRequested[state]
+		if !ok {
+			t.Fatalf("producer emitted beseech-state %q (intent beseech=%v) that the shared fixture does not cover", state, beseech)
+		}
+		if req != beseech {
+			t.Errorf("contract drift: producer intent beseech=%v emits state %q, but the fixture maps that to beseech_requested=%v", beseech, state, req)
+		}
+	}
+}
+
+// repoRootForContract walks up from the test's working dir to the repo root
+// (the directory containing both cli-go/ and discovery-service/).
+func repoRootForContract(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if dirExists(filepath.Join(dir, "cli-go")) && dirExists(filepath.Join(dir, "discovery-service")) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Skip("repo root (cli-go/ + discovery-service/) not found — skipping cross-language contract test")
+		}
+		dir = parent
+	}
+}
+
+func dirExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.IsDir()
+}
 
 func TestBeseechComment_NotConfigured(t *testing.T) {
 	oldURL, oldKey, oldBase := DiscoveryURL, DiscoveryKey, BaseURL
@@ -152,5 +233,45 @@ func TestBeseechComment_NotRegisteredLocally(t *testing.T) {
 	)
 	if _, err := os.Stat(pendingPath); err != nil {
 		t.Errorf("expected pending comment to remain at %s: %v", pendingPath, err)
+	}
+}
+
+// TestCommentRegistrationMetadata_BeseechFlag is the regression guard for the
+// Defect-4 publish-vs-beseech decouple. When beseech=true (the default flow)
+// the metadata must be IDENTICAL to the historical payload — no `beseech` key —
+// so existing clients and signatures are unaffected. When beseech=false the
+// signed metadata must carry beseech=false so the DS registers content without
+// requesting a blessing (publish-only).
+func TestCommentRegistrationMetadata_BeseechFlag(t *testing.T) {
+	meta := &CommentMeta{
+		InReplyTo: "https://alice.polis.pub/content/pub.polis.core/post/20260101/hello.md",
+		RootPost:  "https://alice.polis.pub/content/pub.polis.core/post/20260101/hello.md",
+		Timestamp: "2026-06-01T15:04:05Z",
+	}
+
+	// beseech=true → no `beseech` key (byte-identical to the historical default).
+	withBeseech := commentRegistrationMetadata(meta, true)
+	if _, present := withBeseech["beseech"]; present {
+		t.Errorf("beseech=true must OMIT the beseech key, got %v", withBeseech["beseech"])
+	}
+	for _, k := range []string{"in_reply_to", "root_post", "timestamp"} {
+		if _, ok := withBeseech[k]; !ok {
+			t.Errorf("missing expected metadata key %q", k)
+		}
+	}
+
+	// beseech=false → metadata.beseech == false (publish-only signal to the DS).
+	noBeseech := commentRegistrationMetadata(meta, false)
+	if v, ok := noBeseech["beseech"]; !ok || v != false {
+		t.Errorf("beseech=false must set metadata.beseech=false, got %v (present=%v)", v, ok)
+	}
+
+	// in_reply_to_version is included only when set.
+	if _, ok := commentRegistrationMetadata(meta, true)["in_reply_to_version"]; ok {
+		t.Error("in_reply_to_version must be omitted when empty")
+	}
+	meta.InReplyToVersion = "sha256:deadbeef"
+	if v := commentRegistrationMetadata(meta, true)["in_reply_to_version"]; v != "sha256:deadbeef" {
+		t.Errorf("in_reply_to_version = %v, want sha256:deadbeef", v)
 	}
 }

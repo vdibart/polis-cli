@@ -4,45 +4,37 @@
     Three concerns bundled into one file:
 
     1. Topbar chrome (.polis-topbar* / .polis-wordmark / .pinned-dot /
-       .sentence-filter) — palette flows from the tenant's active theme
-       per the step-05/5.d build-target lock-in. Earlier conventions
-       (SOLS-hardcoded for logged-out, viewer-theme for logged-in) are
-       superseded — nav and content read as one page in the tenant's
-       theme. Hosted nav-widget retheming removal lives in step 6.d.
+       .sentence-filter) — palette flows from the tenant's active theme.
+       Earlier conventions (SOLS-hardcoded for logged-out, viewer-theme
+       for logged-in) are superseded — nav and content read as one page
+       in the tenant's theme.
 
     2. Two-column layout (.layout / .layout-left / .layout-right) +
        year-marker + entry grammar (.stream / .entry / state classes) —
        sticky bio card on the left, scrolling content on the right,
        vertical timeline bar centered in the gap, pinned-dot in the
-       topbar visually anchors the bar to the chrome (step-05/5.g).
+       topbar visually anchors the bar to the chrome.
        Mobile collapses to single-column at ≤900px.
 
     3. Entry sub-type layouts (.entry--post / --comment / --profile /
        --mention / --dm) — palette-referencing rules use --color-*
        variables from the active theme. Posts ship the new
-       entry-meta-line markup (5.g); the other sub-types still use
+       entry-meta-line markup; the other sub-types still use
        the legacy .entry-meta block — they only render in the owner SPA
-       (step 6) and will get the same line treatment then.
-
-    Build-target reference: docs/design/v4/mockups/infinity-stream/
-    02-unified-view-after-step-5-pinned-dot.html (vice/dark) +
-    02-unified-view-after-step-5-especial-light.html (especial-light).
-    Sibling logged-in mockup variants exist for theme + chrome reference;
-    production matches pinned-dot.
+       and will get the same line treatment then.
 
     DIRECTION-HOOK convention: any rule whose semantic flips under
     stream-direction reversal (newest-on-top vs newest-on-bottom)
     carries a DIRECTION-HOOK comment immediately above the rule.
-    `grep -r "DIRECTION-HOOK"` is the audit tool. Cheap reversibility
-    lever per D-DIRECTION.
+    `grep -r "DIRECTION-HOOK"` is the audit tool. A cheap reversibility
+    lever.
 */
 
 /* ==========================================================================
-   0. LAYOUT VARS — single source of truth (step-05/5.d + 5.g)
+   0. LAYOUT VARS — single source of truth
    Tune these to adjust page proportions; bar/dot/filter-anchor derive
    automatically via calc(). Use 100% (NOT 100vw) inside the absolute-
    positioning calcs so scrollbar width doesn't push elements off the bar.
-   See the build-target mockup for the visual rationale.
    ========================================================================== */
 
 :root {
@@ -61,14 +53,81 @@
        .item-excerpt, .comment-detail-text, .mc-excerpt, .conv-preview,
        .msg-bubble. */
     --stream-body-font-size: 17px;
+    /* Body line-height — single source of truth, consumed by the prose
+       rule (.entry-content / .content-body) AND by the timeline-dot
+       first-line-center calc below, so the two can never drift. */
+    --stream-body-line-height: 1.7;
+    /* The post body's top padding (.entry-body--excerpt / --expanded). It's
+       deliberate hover-area inset, and it sits between the rail's top and the
+       first text line — so the dot anchor has to clear it. Named here so the
+       padding and the dot anchor share one constant and can't drift. */
+    --entry-body-pad-y: 10px;
+    /* Cap-height optical lift. The geometric center of the first LINE BOX sits
+       low relative to where the eye reads the line's middle: with the generous
+       1.7 line-height the box carries a lot of leading, and the eye anchors on
+       the CAPITAL at the line start, whose mass (baseline → cap-height) lives
+       in the upper part of the box. Lifting the dot by this amount lands it on
+       the capital's optical midline instead of the line-box center. One named
+       knob, shared by the dot AND the avatar-top so they stay locked. */
+    --dot-cap-lift: 4px;
+    /* Avatar chip size (matches buildAvatar(…, 28) in stream.js) + how far
+       down the chip the dot's horizontal line should intersect. The avatar is
+       a CIRCLE, so anchoring its TOP edge to the dot line reads as too low —
+       the visual mass sits below the top curve. Lifting the chip so the dot
+       line crosses it at 25% of its height lands the line through the chip's
+       upper body instead of skimming its top edge. Shared by every avatar-top
+       anchor below so post + comment chips lift consistently. */
+    --entry-avatar-size: 28px;
+    --entry-avatar-dot-inset: calc(var(--entry-avatar-size) / 4);
+    /* Reserved avatar column. The post chip is absolutely positioned top-right
+       (not floated), --entry-avatar-inset from the content column's right edge;
+       the body reserves --entry-avatar-gutter on the right so EVERY line stops
+       at the chip's edge and the column under it stays clear (no float-wrap).
+       Gutter = inset + chip + a 16px text gap (matches the old float's left
+       margin, so the text ends where the wrapped lines used to). */
+    --entry-avatar-inset: 8px;
+    --entry-avatar-gutter: calc(var(--entry-avatar-inset) + var(--entry-avatar-size) + 16px);
+    /* Comment-card chips share the post chip's reserved-column vars: the card
+       has no right padding, so its rail right edge IS the column edge — same
+       --entry-avatar-inset / --entry-avatar-gutter as the post, landing the
+       comment chip + handle + body at the post's right edge. */
+    /* Timeline-dot vertical anchor.
+       The dot aligns to the midline of the body's FIRST text line, not the
+       date row. The .entry-rail wrapper's top is the body's border-box top,
+       and the first text line sits below it by the body's top padding
+       (--entry-body-pad-y) + half the first line (font-size * line-height /
+       2). The - 1px is a small optical nudge (body text rides slightly high
+       in its line box; the excerpt's 1.55 line-height vs the expanded body's
+       1.7 also splits the difference here). Every term is a shared layout
+       constant — change the font or the padding and this re-derives, no
+       per-context magic. The entry-content's 6px top margin is zeroed when
+       the title is hidden (rule below) so excerpt and expanded agree on the
+       first-line position. Comment bodies are smaller; see
+       --stream-comment-line-center. */
+    --stream-post-line-center: calc(var(--entry-body-pad-y) + var(--stream-body-font-size) * var(--stream-body-line-height) / 2 - var(--dot-cap-lift));
+    /* Comment-body first-line center (body 15px / 1.65). Same shape as the
+       post anchor minus the post body padding — the comment rail wraps the
+       comment body directly, so there's no body padding to clear; the
+       comment-attached card padding is OUTSIDE the rail. Shares --dot-cap-lift. */
+    --stream-comment-line-center: calc(15px * 1.65 / 2 - var(--dot-cap-lift));
 
-    /* Layout dimensions. The two-column stream layout (5.g) drives most
+    /* Layout dimensions. The two-column stream layout drives most
        of these; topbar geometry derives from the same set so the
        timeline-cap dot lines up with the bar below. */
     --layout-padding-x: 16px;        /* page edge → content */
     --layout-padding-bottom: 96px;
-    --layout-col1: 320px;            /* left bio-card column width */
-    --layout-gap: 96px;              /* col1 → right content column */
+    /* Halve the timeline gutter and hand the reclaimed width to the bio
+       column. The content column's
+       left edge is padding-x + col1 + gap = 16 + 368 + 48 = 432 — exactly
+       what it was at the old 320/96 split, so the stream doesn't move.
+       What changes: the gap narrows 96→48 (the timeline bar now sits 24px
+       to the right, centered in the tighter gutter), and the bio column
+       grows 320→368 (+48px), giving the bio blurb more room. The bar,
+       the topbar cap-dot (.pinned-dot), and the sentence filter all derive
+       their x from col1+gap via --timeline-bar-x / the filter anchor calc,
+       so they shift right in lockstep and stay aligned. */
+    --layout-col1: 368px;            /* left bio-card column width */
+    --layout-gap: 48px;              /* col1 → right content column */
     --layout-max-width: 1140px;
     /* Visual-balance shift. The grid is bio (320) + gap (96) + content (1fr).
        Mathematically centering the container leaves the visually-heavier
@@ -99,7 +158,7 @@
 
     /* Topbar palette tokens. Themes set --topbar-bg / --topbar-border
        directly; if a theme doesn't, the fallbacks below cover it.
-       step-06 follow-up: the owner SPA loads stream.css (for shape
+       The owner SPA loads stream.css (for shape
        layout) but does NOT load the per-theme stream.css (where
        --color-bg-light / --color-bg get set). Without a fallback
        through the SPA's nav-theme contract, the topbar would render
@@ -112,7 +171,17 @@
     --topbar-bg: var(--color-bg-light, var(--color-bg, var(--nav-bg, #1a1525)));
     --topbar-border: var(--color-border, var(--nav-border, rgba(255, 255, 255, 0.08)));
 
-    /* R26 #2 — text tokens. Same cascade pattern as --topbar-bg:
+    /* Compose-"+" disc — the dark node behind the write-anchor "+", shared by
+       the ghost-compose row's dot AND the post editor's rail-"+"
+       (.editor-card-plus, the editor-open state) so they read as one affordance
+       across views/states. Rest: nav bg lifted ~30% toward the muted text color
+       (a quiet dark node that lets the accent "+" pop). Active/hover: nav bg
+       lifted ~42% toward --color-accent (a dark accent tint, not white). All
+       theme-derived, so every theme gets its own coherent result. */
+    --compose-disc-bg: color-mix(in srgb, var(--topbar-bg) 70%, var(--color-text-muted));
+    --compose-disc-bg-active: color-mix(in srgb, var(--topbar-bg) 58%, var(--color-accent, var(--accent, #d8a060)));
+
+    /* Text tokens. Same cascade pattern as --topbar-bg:
        defaults assume a dark theme (peachy light text), but chain
        through the webapp's --text-primary / --text-soft / --text-muted
        so the owner SPA (which loads stream.css for layout but does
@@ -126,7 +195,7 @@
     --color-text-muted: var(--text-muted,     var(--text-tertiary,  rgba(255, 255, 255, 0.55)));
 
     /* Filter underline tokens — drive the interactive-slot underline
-       color. R22 #2: derive from --color-accent at ~55% alpha so the
+       color. Derive from --color-accent at ~55% alpha so the
        resting-state underline is always visibly present (not just on
        hover). Earlier shape used --color-accent-soft which is themed
        at very low alpha (0.08–0.10) on the owner SPA palette and
@@ -196,7 +265,7 @@ body:focus { outline: none; }
     align-items: center;
     padding: 0 16px;
     background: var(--topbar-bg);
-    /* Softened nav→content separator (UI-refinement review 2026-04-28).
+    /* Softened nav→content separator.
        Themes set --topbar-border (or --color-border via the fallback)
        at full theme-accent alpha; halve it via color-mix so the line
        reads as a hint rather than a hard edge. color-mix(in srgb)
@@ -204,7 +273,7 @@ body:focus { outline: none; }
        browser the property is simply ignored and the border falls
        back to nothing, which is an acceptable graceful-degrade. */
     border-bottom: 1px solid color-mix(in srgb, var(--topbar-border) 35%, transparent);
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 14px;
     box-sizing: border-box;
 }
@@ -212,7 +281,7 @@ body:focus { outline: none; }
 /* Wordmark — left-edge of the topbar (the .polis-topbar's padding-x
    gives the breathing room). */
 .polis-wordmark {
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-style: italic;
     font-size: 24px;
     font-weight: 550;
@@ -244,7 +313,7 @@ body:focus { outline: none; }
     color: var(--color-text-soft, #d4c8b8);
     opacity: 0.6;
     text-decoration: none;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 13px;
     letter-spacing: 0.04em;
     line-height: 1;
@@ -257,7 +326,7 @@ body:focus { outline: none; }
     color: var(--color-text, #f0e8dc);
 }
 
-/* R25 follow-up #4: owner-side handle label at the right edge of the
+/* Owner-side handle label at the right edge of the
    topbar. Same anchor position the .polis-signin uses on the public
    surface, but the typography matches .byline-domain (JetBrains Mono,
    muted) so the handle reads consistently with how it appears in the
@@ -268,10 +337,9 @@ body:focus { outline: none; }
     margin-left: auto;
     flex: 0 0 auto;
     padding: 0 4px;
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    /* R25 follow-up: bump from 12px → 14px so the handle reads
-       comfortably as a sibling label to the wordmark / nav icons
-       at typical viewing distance. Still keeps the muted-monospace
+    font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
+    /* The handle reads comfortably as a sibling label to the wordmark /
+       nav icons at typical viewing distance. Keeps the muted-monospace
        attribution treatment that matches the stream byline. */
     font-size: 14px;
     letter-spacing: 0.02em;
@@ -294,17 +362,24 @@ body:focus { outline: none; }
     display: none;
 }
 
-/* step-06/6.a — Layer-2 owner gate. body.is-owner is set by the owner SPA's
-   app.js init AND (in 6.d) by owner-extras.js when an authenticated owner
-   visits any v4-rendered tenant page. The static sign-in is redundant once
-   the visitor IS the owner; hide it. The :has() rule above already covers
-   the hosted-nav-widget case; this rule covers SPA + future owner-extras
-   contexts where the hosted nav doesn't load. */
+/* Layer-2 owner gate. body.is-owner is set ONLY by the owner SPA's app.js
+   bootstrap (webapp/internal/webui/www/app.js); canonical pages never have
+   it. owner-extras.js (which loads alongside app.js in the SPA only — by
+   design) reads this class but does not set it. The convention is therefore a
+   precise SPA-vs-canonical signal — see also the stream.js pagination's
+   surface=spa query param, the .entry-actions reveal below, and the
+   handlers_stream.go count gate. On canonical pages the comment/follow
+   widget (webapp/internal/hosted/widget/widget.js) handles owner/visitor
+   state inside its Shadow DOM and does NOT touch body classes.
+
+   The static sign-in is redundant once the visitor IS the owner; hide it.
+   The :has() rule above already covers the hosted-nav-widget case; this
+   rule covers the SPA. */
 body.is-owner .polis-signin {
     display: none;
 }
 
-/* Activity render mode (R20-5 redesign). Earlier pass projected
+/* Activity render mode. Earlier pass projected
    each entry into a custom .activity-signal pill — replaced here
    with a heterogenous union of natural per-type renderings (post,
    comment-thread, follow). The only adjustment relative to a normal
@@ -328,23 +403,23 @@ body.is-activity-mode .entry--comment-thread .entry-content {
     display: none;
 }
 
-/* step-06/6.h — Inline post editor as first stream item.
+/* Inline post editor as first stream item.
    Editor card is mounted by owner-extras when the user clicks the
    edit icon. Marked with data-polis-pinned="editor" so the filter-
    change clear logic in stream.js doesn't tear it down. Acts as a
    "giant editable content card" — same DOM grammar as a regular
    .entry (timeline-dot + content) but with editor-specific chrome.
 
-   Resolved-decision spec (#13/#17/#18/#19):
+   Behavior spec:
    - Fixed height (50-60vh max), inner scrollbar on body.
    - Sticky across filter changes only; dismissed by Cancel.
    - Tiered Esc: in focus mode → exit focus; out of focus → close.
    - Ctrl+Shift+F → full-screen takeover via body.is-editor-focus. */
 .entry.entry--editor {
-    /* Light-touch treatment (rapid-fire #15): the editor reads like a
+    /* Light-touch treatment: the editor reads like a
        post being authored in place — no card frame, no border ring,
        no surface fill.
-       R27 follow-up: pin sticky-top right against the topbar and
+       Pin sticky-top right against the topbar and
        move the nav-content-gap into top padding so the card's solid
        bg extends from the topbar's bottom edge through the title
        (was: gap strip above editor showed posts scrolling behind).
@@ -379,7 +454,7 @@ body.is-activity-mode .entry--comment-thread .entry-content {
     border-radius: 0;
     padding: var(--nav-content-gap) 0 2.5em;
     margin-bottom: 1.2em;
-    /* R27 follow-up: fixed height (not max-height) so the body claims
+    /* Fixed height (not max-height) so the body claims
        the full vertical room regardless of content — with min-heights
        dropped from the textarea + milkdown-mount, max-height alone
        let the card collapse to ~content size on empty editors. */
@@ -467,42 +542,31 @@ body.is-activity-mode .entry--comment-thread .entry-content {
    sits on top of the rail. Hover swaps to --network-color matching
    the ghost + and the nav + treatment. */
 .editor-card-plus {
+    /* The editor-open state of the write-anchor "+": the SAME compose disc as
+       the ghost-compose dot (shared --compose-disc-bg + the grouped "+" bars
+       above), so opening the editor reads as the ghost's "+" persisting rather
+       than swapping for a different glyph. Position is editor-card-specific. */
     position: absolute;
     top: calc(var(--nav-content-gap) + 6px);
-    left: calc(-1 * var(--layout-gap) / 2 - 10px);
-    width: 20px;
-    height: 20px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: transparent;
+    left: calc(-1 * var(--layout-gap) / 2 - 9.5px);
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--compose-disc-bg);
     border: none;
     padding: 0;
     margin: 0;
     cursor: pointer;
-    font-family: 'Inter', system-ui, sans-serif;
-    font-size: 18px;
-    font-weight: 600;
-    line-height: 1;
-    color: color-mix(in srgb, var(--color-text-muted) 55%, transparent);
-    transition: color 0.15s ease;
+    transition: background 0.15s ease;
     z-index: 7;
-}
-.editor-card-plus::before {
-    /* The visible "+" character. Using a pseudo on the button (rather
-       than textContent) so the bare glyph never gets selected when
-       the user click-drags through the area. */
-    content: '+';
-    transform: translateY(-1px);   /* optical center */
 }
 .editor-card-plus:hover,
 .editor-card-plus:focus-visible {
-    color: var(--network-color, var(--color-accent));
+    background: var(--compose-disc-bg-active);
 }
 .editor-card-plus:focus-visible {
     outline: 2px solid var(--network-color, var(--color-accent));
     outline-offset: 3px;
-    border-radius: 4px;
 }
 /* Focus mode replaces the rail-+ with a full-width dashed rule (via
    body.is-editor-focus .entry--editor::before further down). Hide
@@ -512,7 +576,7 @@ body.is-editor-focus .editor-card-plus {
 }
 .entry--editor .editor-card-body {
     /* Body grows to fill remaining card height (flex:1 1 auto) and
-       scrolls internally for long prose. R27 follow-up: dropped
+       scrolls internally for long prose. Dropped
        textarea/milkdown min-heights elsewhere so the body never
        claims more than its actual share of the card, eliminating
        the always-visible inner scrollbar on empty editors.
@@ -543,11 +607,22 @@ body.is-editor-focus .editor-card-plus {
     background: transparent;
     border: none;
     color: var(--color-text, var(--text-primary, #e8e0f0));
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-size: 1em;
     line-height: 1.5;
     resize: none;
     outline: none;
+}
+/* The body is a typing surface — force the text caret across the whole
+   editable region (textarea, milkdown mount, ProseMirror contenteditable,
+   and the empty space below the content). Without this the cursor inherits
+   a pointer (from ProseMirror/Milkdown defaults), reading as "click a link"
+   over a write area. The footer buttons are siblings of .editor-card-body,
+   so they keep their own cursor:pointer. */
+.entry--editor .editor-card-body,
+.entry--editor .editor-card-body .milkdown-mount,
+.entry--editor .editor-card-body .milkdown-mount .ProseMirror {
+    cursor: text;
 }
 .entry--editor .editor-card-body textarea::placeholder {
     color: var(--color-text-soft, var(--text-secondary, #a09ab0));
@@ -601,7 +676,7 @@ body.is-editor-focus .editor-card-plus {
     color: var(--color-text-soft, var(--text-secondary, #a09ab0));
 }
 .entry--editor .editor-card-footer button {
-    /* R27 follow-up: Cancel / Save-as-draft are muted text-only
+    /* Cancel / Save-as-draft are muted text-only
        affordances so Publish is the obvious primary action. No
        border, no background; muted color at rest, full text color
        on hover. The primary button below keeps its solid fill. */
@@ -646,7 +721,7 @@ body.is-editor-focus .editor-card-plus {
     display: none;
 }
 
-/* step-06/6.j — Comment-WRITE CTA fallback styling.
+/* Comment-WRITE CTA fallback styling.
    #polis-widget renders inside the focus entry as the comment-write
    surface mount point. The hosted widget (widget.js from polis.pub)
    attaches a closed Shadow DOM to it on hydration, which hides the
@@ -656,8 +731,8 @@ body.is-editor-focus .editor-card-plus {
    sites + visitors with widget script blocked a path back to the
    polis.pub-hosted comment flow.
 
-   2026-05-18 (post-deploy): #polis-widget hidden across all focus
-   entries while we revisit the comment flow. The border-top rule
+   #polis-widget is currently hidden across all focus
+   entries while the comment flow is being revisited. The border-top rule
    that was visually separating the widget from the post body goes
    away with it (CSS rule below sets display:none which removes the
    element from layout entirely — no rule, no margin, no padding).
@@ -677,7 +752,7 @@ body.is-editor-focus .editor-card-plus {
     text-decoration: underline;
 }
 
-/* step-06/6.i — owner action chrome on stream entries.
+/* Owner action chrome on stream entries.
    Hover-revealed action buttons (unpublish / bless / deny / mark-read)
    that owner-extras' afterRender hooks attach to entries the owner has
    authority over. Layered cleanly:
@@ -739,7 +814,7 @@ body.is-editor-focus .editor-card-plus {
     /* Anchor below the meta-line so the actions don't overlap the
        right-side comment indicator + byline. Approx 32px = date-time
        (14px) + meta-line margin-bottom (6px) + a touch of breathing
-       room. Pre-2026-05-16 the actions sat at top:0.6em which painted
+       room. An earlier shape sat the actions at top:0.6em which painted
        directly on top of the .entry-meta-right group. */
     top: 32px;
     right: 0.8em;
@@ -749,6 +824,20 @@ body.is-editor-focus .editor-card-plus {
 body.is-owner .entry:hover > .entry-actions,
 body.is-owner .entry:focus-within > .entry-actions {
     display: flex;
+}
+/* Comment-thread entries: the top:32px slot lands in the post body's upper-
+   right where the post author avatar floats (with a rollover handle), so the
+   actions and the revealed handle crowd each other — especially obvious when
+   the post has no title and the body is short. Move the actions to the
+   comment-attached card's bottom-right, well clear of the post region, and
+   give the card extra bottom padding (when actions are present) so the button
+   doesn't sit on the last line of the comment body. */
+.entry--comment-thread > .entry-actions {
+    top: auto;
+    bottom: 12px;
+}
+body.is-owner .entry--comment-thread:has(> .entry-actions) .comment-attached {
+    padding-bottom: 36px;
 }
 .entry-actions button {
     background: var(--bg-card, var(--color-surface, #2a2838));
@@ -786,7 +875,7 @@ body.is-owner .entry:focus-within > .entry-actions {
    to read as quiet context. The viewport's overflow is locked so
    no page scrollbar appears while focused.
    Esc exits focus mode (editor stays as the inline card; tiered Esc
-   semantics per resolved decision #18). */
+   semantics). */
 body.is-editor-focus {
     overflow: hidden;
 }
@@ -899,8 +988,7 @@ body.is-editor-focus .entry--editor::after {
        wrapper inherits its "static position" from the flex container
        — which on a child-of-flex with align-items:center is
        browser-implementation-fuzzy and was leaving the sentence
-       sitting ~3-4px above the dot's centerline. UI-refinement
-       review 2026-04-28 round 4. */
+       sitting ~3-4px above the dot's centerline. */
     top: 50%;
     transform: translateY(-50%);
     left: calc(
@@ -923,7 +1011,7 @@ body.is-editor-focus .entry--editor::after {
    reads as part of the same visual system. Same 100% (vs 100vw) note
    applies as on the filter above. */
 .pinned-dot {
-    /* R22 #10: invisible 36×36 button — the visible dot is a small
+    /* Invisible 36×36 button — the visible dot is a small
        centered ::before; the surrounding padding is pure click-area.
        Earlier shape made the visible 8px dot itself the click target
        (and grew it to 30px on hover), but the cursor covered the
@@ -985,12 +1073,12 @@ body.is-editor-focus .entry--editor::after {
 }
 
 /* ==========================================================================
-   2. SENTENCE FILTER — four-slot interactive (step-05/5.d)
+   2. SENTENCE FILTER — four-slot interactive
    See snippets/stream-filter.html for slot grammar + selector convention.
    ========================================================================== */
 
 .sentence-filter {
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-style: italic;
     font-size: 23px;             /* centerpiece — absolute-positioned in
                                     the topbar (topbar-height is fixed at
@@ -1027,8 +1115,8 @@ body.is-editor-focus .entry--editor::after {
 
 /* INTERACTIVE slot: subtle underline that strengthens on hover. The
    underline alone is the affordance — the chevron suffix was distracting
-   in the sentence rhythm and was dropped per UI-refinement review
-   2026-04-28. Color stays in step with the sentence so it doesn't shout. */
+   in the sentence rhythm and was dropped. Color stays in step with the
+   sentence so it doesn't shout. */
 .sf-slot--interactive {
     cursor: pointer;
     text-decoration: underline;
@@ -1057,7 +1145,7 @@ body.is-editor-focus .entry--editor::after {
     opacity: 0.85;
 }
 
-/* Modifier slot (post-2026-04-29 filter-grammar redesign) is conditionally
+/* Modifier slot is conditionally
    visible: present only when type=posts. Other types hide it via the
    [hidden] attribute, which collapses the slot AND drops the inline-flex
    gap that otherwise leaves a phantom space in the sentence. */
@@ -1103,14 +1191,14 @@ body.is-editor-focus .entry--editor::after {
        2. Owner SPA: no v4 theme CSS loaded; falls back to --bg-card from
           the SPA's own style.css (dark: #2a2838, light: #faf7f2).
        3. Neither defined: hardcoded dark surface so the popover stays
-          readable. (step-06/6.c follow-up — was previously rgba()
-          translucent default that bled stream text through the menu.) */
+          readable. (Was previously an rgba() translucent default that
+          bled stream text through the menu.) */
     background: var(--color-surface, var(--bg-card, #2a2838));
     border: 1px solid var(--color-border-light, var(--border, rgba(255, 255, 255, 0.10)));
     border-radius: 8px;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
     padding: 4px;
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-style: normal;
     font-size: 13px;
     font-weight: 400;
@@ -1131,7 +1219,7 @@ body.is-editor-focus .entry--editor::after {
     background: var(--color-accent-bg, rgba(216, 160, 96, 0.08));
     color: var(--color-text, #f0e8dc);
 }
-/* R24 #2: indented options visually nest under their parent — used
+/* Indented options visually nest under their parent — used
    for posts/comments/follows under "activity" in the type dropdown.
    The left padding shift signals the parent-child relationship
    without needing a separate group header. */
@@ -1154,7 +1242,7 @@ body.is-editor-focus .entry--editor::after {
 .sentence-filter.filter-loading {}
 
 /* ==========================================================================
-   3. TWO-COLUMN LAYOUT (step-05/5.g)
+   3. TWO-COLUMN LAYOUT
    Centered max-width container; left column sticks at viewport top below
    the topbar; right column scrolls with the page. Vertical timeline bar
    sits in the center of the gap between columns (drawn via .layout::before).
@@ -1220,6 +1308,13 @@ body.is-editor-focus .entry--editor::after {
     overflow-y: auto;
     scrollbar-width: thin;
     scrollbar-color: var(--color-border, rgba(255, 255, 255, 0.08)) transparent;
+    /* Bio breathing room. The gutter pass widened col1, but the
+       bio content just expanded to fill it and ended up CLOSER to the timeline
+       (the bar centers in the now-tighter gutter, so the bio↔bar gap shrank).
+       The reclaimed space should be breathing room, not wider text: this right
+       padding keeps the bio at a comfortable measure and pushes its right edge
+       well clear of the timeline bar. Tunable. */
+    padding-right: 48px;
 }
 .layout-left::-webkit-scrollbar { width: 4px; }
 .layout-left::-webkit-scrollbar-thumb {
@@ -1231,7 +1326,7 @@ body.is-editor-focus .entry--editor::after {
     min-width: 0;       /* allow shrink inside grid */
 }
 
-/* Site identity (left column) — adapted from the build-target mockup.
+/* Site identity (left column).
    Avatar + name/handle in a horizontal row; bio + stats flow below.
    The follow widget mounts under the identity card; hosted nav-widget
    populates it for authenticated visitors. */
@@ -1256,7 +1351,7 @@ body.is-editor-focus .entry--editor::after {
     align-self: stretch;
 }
 
-/* 2026-05-18 (post-deploy): clamp the follow widget to the column
+/* Clamp the follow widget to the column
    width and clip overflow. The hosted widget renders into a shadow
    DOM (`#polis-widget-follow`); its internal signup form carries
    240px-wide inputs that would otherwise force horizontal scroll on
@@ -1273,9 +1368,7 @@ body.is-editor-focus .entry--editor::after {
    .site-follow` rule (0,2,0) on specificity, so `position: static`
    here defeats the absolute-positioning and the widget lands under
    the bio in the flex column. Also kills the horizontal page scroll
-   the right:-120px was triggering. Verified 2026-05-18 against
-   discover.polis.pub which was rendering Follow next to the bio
-   with a horizontal scrollbar until this rule was added. */
+   the right:-120px was triggering. */
 .layout-left .site-follow {
     align-self: stretch;
     min-width: 0;
@@ -1284,7 +1377,7 @@ body.is-editor-focus .entry--editor::after {
     position: static;
 }
 
-/* 2026-05-18 (post-deploy follow-up): visual reorder via flex `order`.
+/* Visual reorder via flex `order`.
    The HTML reorder in stream.html only affects NEW renders — tenants
    with already-published pages keep their old DOM order (avatar-row,
    bio, stats, follow) until they re-publish. CSS `order` reorders
@@ -1312,7 +1405,7 @@ body.is-editor-focus .entry--editor::after {
     display: flex;
     align-items: center;
     justify-content: center;
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-style: italic;
     font-weight: 600;
     font-size: 18px;
@@ -1327,7 +1420,7 @@ body.is-editor-focus .entry--editor::after {
     min-width: 0;
 }
 .site-name {
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-title, 'Newsreader', Georgia, serif);
     font-size: 22px;
     font-weight: 500;
     line-height: 1.15;
@@ -1340,23 +1433,33 @@ body.is-editor-focus .entry--editor::after {
        Inter. Same treatment is applied to .byline-domain (the upper-right
        handle in entry meta-lines) so both surfaces of the same handle
        read identically. */
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
     font-size: 12px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
     letter-spacing: 0.02em;
     margin-top: 2px;
+    text-decoration: none;
+    transition: color 0.12s ease;
+}
+/* Hover-underline the bio-card handle, matching the stream's .entry-handle
+   rollover (accent color + underline + 3px offset). The handle sits inside
+   the .site-identity-text link, so the whole card is already clickable; this
+   just gives the identifier the same affordance the stream handle has. */
+.site-handle:hover {
+    color: var(--color-accent, var(--accent, #d8a060));
+    text-decoration: underline;
+    text-underline-offset: 3px;
 }
 /* `.layout-left` scoping bumps specificity above the theme CSS files
    (vice, especial-light, studio13 all override `.site-bio` to
    Newsreader serif for v3-era styling). theme.css loads AFTER stream.css
    in the styles.css concat — same single-class specificity loses on
-   source order. The v4 build-target mockup specifies Inter for the
+   source order. The v4 design specifies Inter for the
    bio and stats; .layout-left is v4-only so this scoping doesn't leak
-   to v3. UI-refinement review 2026-04-28 round 7. */
+   to v3. */
 .layout-left .site-bio {
-    font-family: 'Inter', sans-serif;
-    /* 2026-05-18: bumped DOWN from 14px → 13px per user feedback. Bio is
-       supporting context (the timeline + stream is the centerpiece);
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
+    /* Bio is supporting context (the timeline + stream is the centerpiece);
        a slightly smaller bio keeps it visually subordinate and gets
        more lines of bio above the viewport fold without expanding. */
     font-size: 13px;
@@ -1365,8 +1468,7 @@ body.is-editor-focus .entry--editor::after {
     margin-top: 6px;
     /* themes/_shared/base.css indents .site-bio + .site-stats 62px to
        sit under the v3 layout's avatar+name row. v4's bio card aligns
-       bio + stats with the avatar's left edge per the build-target
-       mockup, so override to 0. */
+       bio + stats with the avatar's left edge, so override to 0. */
     padding-left: 0;
 }
 /* Bio comes from snippets/about.md rendered as markdown — HTML output wraps
@@ -1375,6 +1477,30 @@ body.is-editor-focus .entry--editor::after {
    reads as "two ideas" not "one wall of text". */
 .layout-left .site-bio p { margin: 0; }
 .layout-left .site-bio p + p { margin-top: 0.9em; }
+/* Bio links were unstyled in the SPA — the bundle theme CSS (which carries
+   the v3 `.site-bio a` rule) isn't loaded here, so about.md links fell back
+   to the browser-default underlined blue, off-palette in every theme. Style
+   them off the same --color-link → accent chain as content links so they
+   read as themed across all themes. */
+.layout-left .site-bio a {
+    color: var(--color-link, var(--color-accent, var(--accent, #d8a060)));
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+/* Bio lists: the SPA's `* { margin:0; padding:0 }` reset strips list
+   indentation, collapsing about.md bullet/number lists to flat, bullet-less
+   lines — unlike the rendered public page (no such reset), where the same
+   markdown shows a normal indented list. Restore the list affordances so the
+   preview matches the public bio. (list-style survives the reset; it's the
+   padding-left the bullets hang in that's lost.) */
+.layout-left .site-bio ul,
+.layout-left .site-bio ol {
+    margin: 0.5em 0;
+    padding-left: 1.4em;
+}
+.layout-left .site-bio ul { list-style: disc; }
+.layout-left .site-bio ol { list-style: decimal; }
+.layout-left .site-bio li { margin: 0.15em 0; }
 /* Empty about.md collapses the rendered bio to <p></p> or whitespace; hide
    the wrapper too so it doesn't leave a phantom gap between identity-row
    and stats. */
@@ -1416,7 +1542,7 @@ body.is-editor-focus .entry--editor::after {
     margin-top: 4px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
     cursor: pointer;
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 12px;
     letter-spacing: 0.02em;
     text-decoration: underline;
@@ -1457,7 +1583,7 @@ body.is-editor-focus .entry--editor::after {
     padding: 18px 8px 12px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
     cursor: pointer;
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 12px;
     letter-spacing: 0.02em;
     text-align: left;
@@ -1472,7 +1598,7 @@ body.is-editor-focus .entry--editor::after {
 }
 .layout-left .site-bio-hide-floating[hidden] { display: none; }
 .layout-left .site-stats {
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 12px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
     display: flex;
@@ -1520,7 +1646,7 @@ body.is-editor-focus .entry--editor::after {
    year); JS-paginated entries don't currently emit interim year markers
    (follow-up polish — siblings rarely cross year boundaries on a single
    page load). */
-/* Year-marker retired 2026-04-29 per UI-refinement review: a fixed
+/* Year-marker retired: a fixed
    year header above .stream fought scroll-up pagination across years
    and added little value (the date+time line on each entry already
    carries the year). Future: re-introduce as a JS-driven indicator
@@ -1560,7 +1686,7 @@ body.is-editor-focus .entry--editor::after {
     z-index: 30;
     height: 120px;
     margin-bottom: -120px;
-    /* R24 #1: same fallback chain as .bottom-fade so the gradient
+    /* Same fallback chain as .bottom-fade so the gradient
        resolves to the page's actual bg across all themes (owner SPA
        included, where --color-bg isn't set by a per-theme stream-css). */
     background: linear-gradient(
@@ -1589,14 +1715,14 @@ body.has-open-editor .stream-top-fade {
    move to the top edge — covered by the DIRECTION-HOOK at the controller
    level when reversal config lands.
 
-   Height + gradient stops bumped per UI-refinement review 2026-04-28:
+   Height + gradient stops are tuned so
    the page should fade off as much as possible at the bottom (replaces
    the dropped site-footer's visual close). Larger height + earlier
    gradient ramp produces a long, gradual fade that reads as
    "content continues, you're at the edge of the visible region"
    rather than a hard stop. */
 .bottom-fade {
-    /* R23 #5 follow-up: fade target needs to match the actual page
+    /* Fade target needs to match the actual page
        background, not the v4 stream's --color-bg token. The owner SPA
        loads stream.css for layout but NOT a per-theme stream-css, so
        --color-bg stays at the hardcoded #1a1525 fallback (sols-purple)
@@ -1612,7 +1738,7 @@ body.has-open-editor .stream-top-fade {
     bottom: 0;
     left: 0;
     right: 0;
-    /* R26 #1: trimmed from 240px → 140px. Earlier height left a tall
+    /* Earlier height left a tall
        opaque band at the viewport bottom that ate reading space; the
        gradient still reads as "more below" with a shorter ramp. */
     height: 140px;
@@ -1631,12 +1757,11 @@ body.has-open-editor .stream-top-fade {
    ========================================================================== */
 
 /* DIRECTION-HOOK: stream-direction is read by the controller to drive
-   scroll, prefetch, and DOM insertion ordering. Default newest-top per
-   D-DIRECTION. */
+   scroll, prefetch, and DOM insertion ordering. Default newest-top. */
 .stream {
     display: flex;
     flex-direction: column;
-    gap: 36px;          /* generous breathing room between entries (build-target) */
+    gap: 36px;          /* generous breathing room between entries */
 }
 
 /* DIRECTION-HOOK: stream-fade-out marks the end of statically-rendered
@@ -1692,7 +1817,7 @@ body.has-open-editor .stream-top-fade {
     animation: sentinel-pulse 1.4s ease-in-out infinite;
 }
 .stream-loading-sentinel .sentinel-text {
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 12px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
     font-style: italic;
@@ -1708,7 +1833,7 @@ body.has-open-editor .stream-top-fade {
    shape's chrome: italic newsreader for the headline + CTA, Inter for
    the muted detail line. The CTA uses the same underline-strengthens-
    on-hover affordance as the filter slots so it reads as part of the
-   same interactive language. UI-refinement review 2026-04-28 round 5+6. */
+   same interactive language. */
 .stream-empty-state {
     /* position:relative so the timeline-dot inside anchors here. */
     position: relative;
@@ -1736,11 +1861,11 @@ body.has-open-editor .stream-top-fade {
    page reads as "this filter has no results" instead of contradicting
    itself with an off-filter post above the message. The class is
    added/removed by stream.js's setEmptyStateMode() — no other CSS
-   depends on it. (Pre-2026-04-29 also hid the year-marker, which
+   depends on it. (An earlier shape also hid the year-marker, which
    has been retired wholesale.) */
 .layout-right.is-empty-state .stream > .entry.is-focused { display: none; }
 .stream-empty-state-art {
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
     font-size: 18px;
     line-height: 1.15;
     letter-spacing: 0.08em;
@@ -1758,7 +1883,7 @@ body.has-open-editor .stream-top-fade {
     }
 }
 .stream-empty-state-headline {
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-style: italic;
     font-size: 22px;
     font-weight: 400;
@@ -1767,7 +1892,7 @@ body.has-open-editor .stream-top-fade {
     letter-spacing: 0.005em;
 }
 .stream-empty-state-detail {
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 13.5px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
     margin: 0;
@@ -1776,7 +1901,7 @@ body.has-open-editor .stream-top-fade {
 }
 .stream-empty-state-cta {
     margin-top: 6px;
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-style: italic;
     font-size: 17px;
     color: var(--color-text-soft, #d4c8b8);
@@ -1795,10 +1920,10 @@ body.has-open-editor .stream-top-fade {
 }
 
 /* ==========================================================================
-   5. ENTRY GRAMMAR — base layout shared across sub-types (step-05/5.g)
+   5. ENTRY GRAMMAR — base layout shared across sub-types
    Posts use the new entry-meta-line markup. Comment/profile/mention/dm
    keep the legacy .entry-meta block — they only render in the owner SPA
-   (step 6) and will get the same treatment then.
+   and will get the same treatment then.
    ========================================================================== */
 
 .entry {
@@ -1835,8 +1960,70 @@ body.has-open-editor .stream-top-fade {
     z-index: 1;
     pointer-events: none;
 }
+/* ── .entry-rail — the timeline-dot's structural anchor.
+   The dot must align to the first line of the BODY, not
+   the date row. Rather than push the dot down from a meta container by a
+   per-context magic offset (fragile: it bakes in meta height, margins,
+   focus padding, and body line-height, and every entry type drifts
+   independently), we wrap the body text element in a relative, NON-clipping
+   rail and drop the dot in as its first child. The rail's top == the body's
+   first line, so a single vertical value (--stream-post-line-center) lands
+   the dot correctly in every context — post / comment / focus / public —
+   with no special-casing. Non-clipping is load-bearing: the post body
+   (.entry-content) is overflow:hidden for the long-body fade, which would
+   clip a gutter dot placed inside it; the rail sits OUTSIDE that clip.
+   Horizontal x is unchanged — it still comes from the base .timeline-dot
+   gutter calc (and the --small / indent variants), which is stable
+   geometry off --layout-gap. */
+.entry-rail {
+    position: relative;
+}
+.entry-rail > .timeline-dot {
+    top: var(--rail-line-center, var(--stream-post-line-center));
+    /* translateY(-50%) inherited from the base .timeline-dot rule makes
+       `top` the dot's CENTER. The --small comment dot overrides nothing
+       here; it shares this rule and just carries a different
+       --rail-line-center via its rail (see .comment-attached). */
+    transform: translateY(-50%);
+}
+/* Comment rails carry the comment body's first-line center (smaller type).
+   .comment-attached sets the var for the nested comment rail inside it. */
+.comment-attached,
+.entry--comment .entry-rail {
+    --rail-line-center: var(--stream-comment-line-center);
+}
+/* Comment-thread POST-region rail (a DIRECT child of the entry, distinct from
+   the nested comment rail inside .comment-attached). Its post body — unlike a
+   standalone .entry--post body — carries NO top padding, so the first line
+   sits at the rail top: anchor = half-line - cap-lift, without
+   --entry-body-pad-y. */
+.entry--comment-thread > .entry-rail {
+    --rail-line-center: calc(var(--stream-body-font-size) * var(--stream-body-line-height) / 2 - var(--dot-cap-lift));
+}
+/* Comment-card chips — RESERVED COLUMN, same model AND same vars as the post
+   chip. The card carries no right padding, so the comment rail's right edge is
+   the column edge: the chip sits at --entry-avatar-inset and the comment body
+   reserves --entry-avatar-gutter, landing the chip + handle + body at the
+   parent post's right edge. Vertical: top = the dot line minus the
+   25%-of-height inset, so the dot's horizontal line crosses the chip at 25%. */
+.comment-attached .entry-rail > .entry-avatar-link {
+    position: absolute;
+    float: none;
+    margin: 0;
+    top: calc(var(--rail-line-center, var(--stream-comment-line-center)) - var(--entry-avatar-dot-inset));
+    /* The card now has no right padding, so the comment rail's right edge IS
+       the column edge — the chip uses the SAME inset/gutter as the post chip,
+       landing it at the post chip's x. */
+    right: var(--entry-avatar-inset);
+}
+.comment-attached .entry-rail:has(> .entry-avatar-link) .comment-body {
+    padding-right: var(--entry-avatar-gutter);
+}
+/* (The comment-thread post-as-context chip now uses the same reserved-column
+   treatment as the main post chip — see the .entry--post / .entry--comment-
+   thread post-chip rule near the avatar section below.) */
 /* ==========================================================================
-   GHOST COMPOSE ENTRY — the universal write-anchor (Variant E).
+   GHOST COMPOSE ENTRY — the universal write-anchor.
    Rendered as the first child of .stream. Same .entry grammar, but with
    a typographic + in place of the 8px solid dot and an italic "yours,
    truly" prompt in place of a meta line + title. Resting state matches
@@ -1874,59 +2061,78 @@ body.is-filter-comments .entry--ghost-compose {
     display: none;
 }
 .entry--ghost-compose .timeline-dot {
-    /* Override the 8px solid dot with a typographic + sized to match
-       the visual mass of the solid sibling dots. Container widened to
-       20px so the glyph never clips; left-shifted by the half-width
-       delta (10px vs the default 4px) so the glyph's optical center
-       stays on the bar's x. Vertical: top:3px brings the glyph's
-       optical center down to the x-height of the italic Newsreader
-       prompt sitting beside it (20px font / line-height 1.3 → text
-       x-height ≈ 13px from line-box top; glyph center sits at half
-       the 20px container, so top:3px moves it from 9px → 13px).
-       transform:none cancels the base .timeline-dot rule's
-       translateY(-50%) — ghost-compose's dot is a direct child of
-       .entry (no meta-line wrapper) and its `top` value is already
-       the final position, not a 50% reference. */
-    background: transparent;
-    border-radius: 0;
-    width: 20px;
-    height: 20px;
-    /* Pure-geometric centering of the 20px container would be -gap/2
-       - 10px. The bar's -1px AA nudge in --timeline-bar-x puts the
-       bar's visual midline at -gap/2 - 0.5px (not -gap/2), so the
-       container needs to shift 0.5px LEFT to land its center on the
-       bar — same convention as the base entry dot's -4.5px (=
-       -half-width - 0.5px). Inter's "+" glyph sits near-symmetric in
-       its em box, so the container-center alignment carries through
-       to the visible stroke. */
-    left: calc(-1 * var(--layout-gap) / 2 - 10.5px);
-    top: 3px;
+    /* A SOLID filled disc in
+       the inactive/gray color, with the "+" itself in the active/rollover
+       color (--network-color) — "rollover-color on gray". The disc is
+       sized to hug the "+" so the two read as a single component, and the
+       fill is opaque so the timeline bar behind it doesn't show through.
+       The "+" is drawn as two centered bars (::before vertical, ::after
+       horizontal) rather than a text glyph: that guarantees perfect
+       optical centering in the disc independent of font "+"-metrics, which
+       is what was throwing the glyph off-center before. The literal "+" in
+       the markup is hidden via color:transparent / font-size:0.
+       transform:none cancels the base .timeline-dot rule's translateY(-50%)
+       — this dot is a direct child of .entry (no meta-line wrapper) and its
+       `top` is already the final position, not a 50% reference. */
+    /* Disc fill — the shared compose-disc color (a quiet dark node that lets
+       the accent "+" pop). Opaque, so the timeline bar behind it doesn't show. */
+    background: var(--compose-disc-bg);
+    border: none;
+    border-radius: 50%;
+    width: 18px;
+    height: 18px;
+    /* Centering on the bar: half the 18px disc is 9px; +0.5px carries the
+       bar's -1px AA nudge (same convention as the base dot's -4.5px =
+       -half-width - 0.5px) so the disc's center lands on the bar's midline. */
+    left: calc(-1 * var(--layout-gap) / 2 - 9.5px);
+    /* Vertical: disc center (top + 9px) sits on the prompt's first-line
+       optical center (~13px from the line-box top for the 20px italic
+       Newsreader at line-height 1.3) → top ≈ 4px. */
+    top: 4px;
     transform: none;
-    /* Match the .ghost-prompt color exactly so the glyph and the
-       label read as a single visual unit at rest. */
-    color: color-mix(in srgb, var(--color-text-muted) 55%, transparent);
-    font-family: 'Inter', system-ui, sans-serif;
-    font-size: 18px;
-    font-weight: 600;
-    line-height: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: color 0.15s ease;
-    /* Above the bar (z-index:2) so the glyph isn't bisected. */
+    /* Hide the literal "+" text node; the visible + is the two pseudo bars. */
+    color: transparent;
+    font-size: 0;
+    transition: background 0.15s ease;
+    /* Above the bar so the disc reads as a clean solid node on the thread. */
     z-index: 3;
-    /* Make the + glyph itself an interactive hit target (parallel to
-       .entry--commentable's timeline-dot pattern, where the dot is
-       click/hover-active in the gutter). Click bubbles to the parent
-       .entry's onclick — no risk of double-firing since the entry has
-       a single handler. Without this, the dot's pointer-events:none
-       meant cursor over the + in the gutter passed through to nothing,
-       so neither :hover nor click registered. */
+    /* Make the disc itself an interactive hit target (parallel to
+       .entry--commentable's timeline-dot pattern). Click bubbles to the
+       parent .entry's onclick. */
     pointer-events: auto;
     cursor: pointer;
 }
+/* The "+" — two bars crossing at the disc's exact center, in the
+   active/rollover color. 9px long × 2px thick inside the 18px disc: bolder
+   stroke so the cross reads clearly, still tight to the circle so the + and
+   the disc read as one unit. Shared by the ghost-compose dot AND the post
+   editor's rail-"+" (.editor-card-plus) so the two states match. */
+.entry--ghost-compose .timeline-dot::before,
+.entry--ghost-compose .timeline-dot::after,
+.editor-card-plus::before,
+.editor-card-plus::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    background: var(--network-color, var(--color-accent));
+    border-radius: 1px;
+    transition: background 0.15s ease;
+}
+.entry--ghost-compose .timeline-dot::before,
+.editor-card-plus::before {            /* vertical bar */
+    width: 2px;
+    height: 9px;
+    transform: translate(-50%, -50%);
+}
+.entry--ghost-compose .timeline-dot::after,
+.editor-card-plus::after {             /* horizontal bar */
+    width: 9px;
+    height: 2px;
+    transform: translate(-50%, -50%);
+}
 .ghost-prompt {
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-style: italic;
     font-size: 20px;
     font-weight: 400;
@@ -1949,7 +2155,11 @@ body.is-filter-comments .entry--ghost-compose {
    no visual change, no broken hover. */
 .entry--ghost-compose:hover .timeline-dot,
 .entry--ghost-compose:focus-visible .timeline-dot {
-    color: var(--network-color, var(--color-accent));
+    /* Active state: the disc warms to the shared accent tint (not the old
+       jarring white). The "+" stays --network-color, so on themes with a
+       distinct network color (vice: coral disc + teal "+") the cross pops via
+       contrast; on mono themes it's a brighter "+" on a darker-accent disc. */
+    background: var(--compose-disc-bg-active);
 }
 .entry--ghost-compose:hover .ghost-prompt,
 .entry--ghost-compose:focus-visible .ghost-prompt {
@@ -1966,8 +2176,8 @@ body.is-filter-comments .entry--ghost-compose {
    from the multi-entry unified-stream design (where scroll-driven
    focus changes need a visual marker for the currently-anchored
    entry); on a canonical per-post page the focus is fixed and the
-   ring read as "unread" emphasis instead of "you are here". Removed
-   per UI-refinement review 2026-04-28 round 11. The hook stays
+   ring read as "unread" emphasis instead of "you are here". Removed.
+   The hook stays
    reserved (empty rule) so the owner SPA / feed contexts can
    reintroduce a distinct focused-state treatment if needed without
    touching the SSR side. */
@@ -1981,97 +2191,28 @@ body.is-filter-comments .entry--ghost-compose {
     box-shadow: 0 0 0 3px var(--color-accent-bg, rgba(216, 160, 96, 0.25));
 }
 
-/* Comment-add affordance on the timeline-dot.
-   Entries marked .entry--commentable (owner-extras decoratePost
-   tags cross-author posts) get a hover-driven swap: the dot's
-   ::before fades out and a 28×28 comment-add icon (::after) fades
-   in, signaling "click here to add to the timeline".
-
-   Structure:
-     .timeline-dot     → 8×8 click target (its color provided by
-                         ::before so we can swap on hover)
-     ::before          → visible dot fill, fades out on hover
-     ::after           → 28×28 comment-add icon centered on the dot,
-                         fades in on hover; receives the click via
-                         pointer-events inheritance from the dot
-     .entry::before    → full-height invisible hit strip in the gutter
-                         (between bar and entry's left edge) so hover
-                         anywhere on the gutter triggers the same swap.
-
-   Selector scope: `.entry-meta-line > .timeline-dot` targets only the
-   post's own dot (lives in the meta-line) and never the nested
-   .timeline-dot--small inside .comment-attached (lives in the post
-   body). Pre-refactor this was `.entry > .timeline-dot`; the meta-line
-   anchor preserves the same exclusion under the new DOM. */
-.entry--commentable .entry-meta-line > .timeline-dot {
-    background: transparent;
-    box-shadow: none;
+/* The timeline dot is NO LONGER a comment-add affordance.
+   The add-comment affordance moved to the below-post comment badge. The dot is
+   just clickable to open read-focus, like the rest of the entry: pointer-events
+   :auto + cursor:pointer so a click on the dot bubbles to bindCardClick (which
+   enters focus mode). .entry--commentable now only marks posts whose badge gets
+   the add-comment hover (see the badge rules below). */
+.entry--post .entry-rail > .timeline-dot,
+.entry--comment-thread > .entry-rail > .timeline-dot {
     pointer-events: auto;
     cursor: pointer;
 }
-.entry--commentable .entry-meta-line > .timeline-dot::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: var(--color-timeline-dot);
-    border-radius: 50%;
-    transition: opacity 0.15s ease;
-}
-.entry--commentable.has-unread .entry-meta-line > .timeline-dot::before {
+/* Unread dot — accent fill + glow ring (formerly carried by the commentable
+   dot's ::before; now applied directly since the dot has no pseudo fill). */
+.entry.has-unread .entry-rail > .timeline-dot {
     background: var(--color-accent, var(--accent, #d8a060));
     box-shadow: 0 0 0 3px var(--color-accent-bg, rgba(216, 160, 96, 0.25));
-}
-.entry--commentable .entry-meta-line > .timeline-dot::after {
-    /* 28×28 comment-add icon centered on the 8×8 dot. Inherits
-       pointer-events:auto from the dot, so clicking the icon area
-       fires the dot's click handler. */
-    content: '';
-    position: absolute;
-    top: -10px;
-    left: -10px;
-    width: 28px;
-    height: 28px;
-    background: var(--color-accent, var(--accent, #d8a060));
-    /* Speech bubble + "+" — pairs with the .add-plus glyph used by
-       the right-justified comment badge. Same visual vocabulary. */
-    -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z'/><line x1='12' y1='7.5' x2='12' y2='12.5'/><line x1='9.5' y1='10' x2='14.5' y2='10'/></svg>") center / 65% no-repeat;
-            mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z'/><line x1='12' y1='7.5' x2='12' y2='12.5'/><line x1='9.5' y1='10' x2='14.5' y2='10'/></svg>") center / 65% no-repeat;
-    opacity: 0;
-    transition: opacity 0.15s ease;
-}
-/* Gutter hit zone — invisible strip between the timeline bar and
-   the entry's left edge, full entry height. Paints at z-index auto
-   (level 5 in .layout's stacking context), BELOW the bar (z-index:1,
-   level 6) so the bar still reads continuous through the gutter.
-   Bar has pointer-events:none, so hover passes through to this
-   pseudo, firing .entry:hover. Sits above .layout's hit-test
-   surface so cursor events actually reach it. */
-.entry--commentable.entry::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: calc(-1 * var(--layout-gap) / 2 - 14px);
-    width: calc(var(--layout-gap) / 2 + 14px);
-    pointer-events: auto;
-}
-/* Hover anywhere on the entry (including the gutter pseudo) or on
-   the dot/icon: fade the visible dot out, fade the icon in. The
-   .entry-meta-line scope keeps the swap on the post's own dot and
-   spares the nested .timeline-dot--small inside .comment-attached. */
-.entry--commentable:hover .entry-meta-line > .timeline-dot::before,
-.entry--commentable .entry-meta-line > .timeline-dot:hover::before {
-    opacity: 0;
-}
-.entry--commentable:hover .entry-meta-line > .timeline-dot::after,
-.entry--commentable .entry-meta-line > .timeline-dot:hover::after {
-    opacity: 1;
 }
 
 /* Entry meta-line: date+time on the left, comment-badge (or aux info)
    on the right. Center-aligned so the badge's SVG glyph (16px box,
    taller than the 12px date text's cap-height) lines up visually with
-   the date instead of riding above it. Pre-2026-05-06 used baseline
+   the date instead of riding above it. An earlier shape used baseline
    alignment, which worked while the badge SVG was 13px (its top edge
    sat near the cap-height) but read as misaligned at 16px. */
 /* Meta containers — host the timestamp (flex-centered) and serve as
@@ -2084,15 +2225,31 @@ body.is-filter-comments .entry--ghost-compose {
     position: relative;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+    /* LEFT-clustered "date · count" (was space-between with a right-side
+       byline+badge group). The date sits in a fixed-width slot so the count
+       column-locks at a constant x down the timeline; gap:0 because the slot
+       width + sep margins control the spacing. */
+    justify-content: flex-start;
+    gap: 0;
     margin-bottom: 6px;
+}
+/* Fixed date slot → the "· count" cluster begins at the same x on every row,
+   so the comment count scans straight down. Sized for the no-year long date
+   ("September 22 · 11:30pm"); shorter dates leave trailing space (the column).
+   Tunable via --stream-date-slot. */
+.entry-meta-line > .entry-date-time {
+    min-width: var(--stream-date-slot, 124px);
+    flex-shrink: 0;
+}
+.entry-meta-line > .entry-meta-sep {
+    margin: 0 7px;
+    flex-shrink: 0;
 }
 .entry-meta {
     position: relative;
 }
 .entry-date-time {
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 12px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
     letter-spacing: 0.02em;
@@ -2123,7 +2280,7 @@ body.is-filter-comments .entry--ghost-compose {
     display: none !important;
 }
 .entry-meta-aux {
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 11px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
     letter-spacing: 0.02em;
@@ -2133,7 +2290,7 @@ body.is-filter-comments .entry--ghost-compose {
 }
 .entry-meta-aux .meta-label { opacity: 0.7; }
 .entry-meta-aux .meta-value {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
     font-size: 10.5px;
 }
 
@@ -2152,7 +2309,7 @@ body.is-filter-comments .entry--ghost-compose {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 13px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
     text-decoration: none;
@@ -2163,19 +2320,19 @@ body.is-filter-comments .entry--ghost-compose {
 .entry-comments-badge svg {
     width: 16px;
     height: 16px;
+    /* display:block removes the inline-image baseline gap so align-items:center
+       on the badge centers the icon box cleanly against the count digit
+       (line-height:1 on both). The byline that the count used to align to is
+       gone; icon + count now center to each other. */
+    display: block;
     stroke: currentColor;
     fill: none;
     stroke-width: 1.5;
     stroke-linecap: round;
     stroke-linejoin: round;
     /* Optical nudge: the speech-bubble's visible mass sits in the upper
-       portion of its 16px box (the path occupies y=3..17 of viewBox 24,
-       scaled). Without this 1px down-shift, the icon reads as riding
-       above the byline + count text in the meta-line. The shift only
-       moves the icon — the count text in .count keeps its natural
-       baseline, so the icon and count are intentionally NOT centered
-       to each other inside the badge; both are aligned to the byline
-       text. */
+       portion of its 16px box (path occupies y≈3..17 of the 24 viewBox),
+       so a 1px down-shift lands its visual center on the digit's center. */
     transform: translateY(1px);
 }
 /* Default-state count text. Crossfaded out on .entry:hover (where the
@@ -2193,30 +2350,22 @@ body.is-filter-comments .entry--ghost-compose {
     font-variant-numeric: tabular-nums;
     transition: opacity 0.15s ease;
 }
-/* Hover-state add-plus glyph. Stacked on top of the count via absolute
-   positioning so the swap doesn't reflow neighboring DOM. Optical-center
-   adjustment: text "+" sits low in its line-box because the visual
-   cross is anchored above the descender line — a bare translateY(-50%)
-   centers the BOX, but the visual plus reads as floating-low next to
-   the comment-icon's center. The extra -2px lift puts the plus's
-   visual cross on the icon's center axis. */
-.entry-comments-badge .add-plus {
+/* Hover-state add-comment icon (speech bubble + "+"). Stacked directly over the
+   rest comment icon (absolute, left:0) so the swap doesn't reflow the count.
+   Hidden at rest; revealed (in the accent color) when the badge is hovered on a
+   commentable post — see the badge-hover rule below. The base
+   `.entry-comments-badge svg` rule also matches it (size/stroke); this rule adds
+   the overlay positioning + accent color. The translate matches the rest icon's
+   +1px optical nudge so the two register exactly during the crossfade. */
+.entry-comments-badge .icon-add-comment {
     position: absolute;
-    right: 0;
+    left: 0;
     top: 50%;
-    transform: translateY(calc(-50% - 2px));
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-family: 'Inter', sans-serif;
-    font-size: 18px;
-    font-weight: 700;
-    line-height: 1;
-    min-width: 14px;
+    transform: translate(0, calc(-50% + 1px));
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.15s ease;
     color: var(--color-accent, var(--accent, #d8a060));
+    transition: opacity 0.15s ease;
 }
 .entry.has-unread .entry-comments-badge {
     color: var(--color-accent, var(--accent, #d8a060));
@@ -2230,6 +2379,28 @@ body.is-filter-comments .entry--ghost-compose {
    is intentionally a no-op so nothing collapses. */
 .entry-comments-badge.is-empty {
     /* keep slot visible */
+}
+
+/* Comment indicator BELOW the post. Moved out of the meta-line to sit under
+   the post body, left-aligned with the date / title / body. As the last child
+   of the body rail it lands below the body's content AND the "show more"
+   toggle, and rides down when the post expands.
+
+   LARGE HIT TARGET: the badge spans the FULL card width with vertical padding,
+   so hovering/clicking anywhere on the comment row (not just the tiny
+   icon+count) triggers the rollover + opens the editor. align-items:center
+   keeps the icon+count vertically centered in the taller row; the negative
+   margin-top cancels the padding-top so the icon still hugs the post (the
+   padding just grows the clickable/hover area up and down); the icon+count
+   stay left-aligned (justify-content default). */
+.entry-rail > .entry-comments-badge {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 7px 0;
+    margin-top: -7px;     /* cancels padding-top → icon still hugs the post */
+    margin-bottom: 7px;   /* 7px padding-bottom + 7px = 14px below, as before */
+    clear: both;
 }
 
 /* Right-side meta-line group: wraps byline + separator + comments-badge
@@ -2299,73 +2470,156 @@ body.is-filter-comments .entry--ghost-compose {
     display: none;
 }
 
-/* ── Hover: badge swap ──
-   On hover of any .entry--post or .entry--comment (the whole card, not
-   just the badge), the badge transforms into the add-comment cue. Three
-   things happen:
-   1. Badge color shifts from muted gray → accent (so the comment
-      icon picks up the same accent treatment as the plus).
-   2. Count text crossfades to opacity 0.
-   3. add-plus crossfades to opacity 1.
-   For empty badges, visibility flips from hidden → visible too.
-   Suppressed in activity mode (body.is-activity-mode) — activity is a
-   scannable summary, not an action surface; visitors who want to
-   comment switch out of activity mode first. Also keeps the chrome
-   off entries that aren't post/comment in mixed activity feeds. */
-body:not(.is-activity-mode) .entry--post:hover .entry-comments-badge,
-body:not(.is-activity-mode) .entry--comment:hover .entry-comments-badge {
+/* ==========================================================================
+   CROSS-AUTHOR AVATAR (v4 site-identity)
+   A 28px avatar floated right INSIDE the post content — the body wraps around
+   it and the body's left edge stays flush to the rail (float:right raggeds the
+   interior, not the rail-facing edge). The whole element is a LINK to the
+   post's canonical URL; the handle lives in the header row and is revealed on
+   entry hover / focus (above the avatar). Built by renderPost from server-enriched
+   author_avatar; own-author entries carry no avatar (identity suppressed).
+   .entry-avatar-link is intentionally NOT a focus-trigger class, so
+   bindCardClick lets it navigate natively while a body click opens focus mode.
+   ========================================================================== */
+.entry--post { display: flow-root; }   /* contain the float; wrap the body */
+
+.entry-avatar-link {
+    float: right;
+    width: 28px;
+    height: 28px;
+    margin: 3px 0 6px 16px;   /* top: sits just under the header; left: gap to the wrapped text */
+    text-decoration: none;
+    cursor: pointer;
+}
+.entry-avatar-link .avatar-initial {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    overflow: hidden;
+    flex-shrink: 0;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
+    font-style: italic;
+    font-weight: 600;
+    color: #fff;
+    line-height: 1;
+    background-size: cover;
+    font-size: 13px;            /* scaled for the 28px chip */
+}
+
+/* Avatar right-edge standardization. The chip must share ONE x down the whole
+   stream — at rest, expanded, and on comment cards — so opening read-focus
+   never shifts it. The reference inset is 8px from the article's right edge:
+   - expanded post: avatar lives INSIDE .entry-content, itself inside the
+     8px-padded .entry-body--expanded → 8px inset (base margin-right:0).
+   - comment card: 14px card padding − 6px margin-right (rule below) → 8px.
+   - excerpt post: the avatar is a DIRECT child of the body rail (it can't nest
+     inside the excerpt <a> without invalid nested anchors), and the rail spans
+     the article edge, so it floats at that edge — 8px too far right, and it
+     jumped left when injectBody moved it into .entry-content on focus-open.
+     Match the others by insetting it 8px here; once moved into .entry-content
+     this rail-direct-child selector no longer applies and the body padding
+     supplies the inset instead.
+   - activity entries (announcement / follow): the avatar is a DIRECT child of
+     the article (these aren't part of the dot-anchor rail refactor) and is
+     NEVER moved into a padded body (no injectBody / read-focus path), so they
+     float at the article edge too — 8px too far right, leaving their chip
+     misaligned with the post chips above and below. Same permanent 8px inset. */
+.entry--announcement > .entry-avatar-link,
+.entry--follow > .entry-avatar-link {
+    margin-right: 8px;
+}
+/* Post avatar — RESERVED COLUMN. A float
+   only wraps the lines that vertically overlap the chip, so the title wrapped
+   but the body below flowed full-width UNDER the avatar. Instead, position the
+   chip absolutely top-right and reserve a fixed right gutter on the body (rule
+   below): every line stops at the chip's edge and the column under it stays
+   clear. This also unifies the excerpt + expanded forms into ONE rule (same
+   top, measured from the rail = body top) and lets injectBody stop relocating
+   the chip into .entry-content.
+   Vertical: top = the dot line minus the 25%-of-height inset, so the dot's
+   horizontal line crosses the chip at 25% of its height (see
+   --entry-avatar-dot-inset). The dot line is the rail's own line-center
+   (--rail-line-center → --stream-post-line-center for the main post rail; the
+   comment-thread post rail sets its own padding-free value), so the chip and
+   dot track per-rail. Horizontal: --entry-avatar-inset from the rail's right
+   edge (the rail spans the content column). Covers the main post rail AND the
+   comment-thread post-as-context rail (same treatment). */
+.entry--post .entry-rail > .entry-avatar-link,
+.entry--comment-thread > .entry-rail > .entry-avatar-link {
+    position: absolute;
+    float: none;
+    margin: 0;
+    top: calc(var(--rail-line-center, var(--stream-post-line-center)) - var(--entry-avatar-dot-inset));
+    right: var(--entry-avatar-inset);
+}
+/* Reserve the chip's column on the body so no line flows under it — only when
+   the post actually has an avatar (cross-author). Own posts have no chip and
+   keep the full text width. */
+.entry--post .entry-rail:has(> .entry-avatar-link) .entry-body,
+.entry--comment-thread > .entry-rail:has(> .entry-avatar-link) .entry-body {
+    padding-right: var(--entry-avatar-gutter);
+}
+
+/* Handle — in the HEADER row (meta line), pushed to the right. Hidden at rest;
+   revealed on entry hover or keyboard focus-within. Kept out of the
+   avatar so the body's overflow cap can't clip it, and so it has room under the
+   header. Links to the post. Soft fade so sweeping the cursor down the stream
+   doesn't strobe. */
+.entry-handle {
+    margin-left: auto;   /* push to the right of its header flex row */
+    font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
+    font-style: normal;  /* the comment header is italic Newsreader; the handle is upright mono */
+    font-size: 10.5px;
+    color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
+    text-decoration: none;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity 0.16s ease, color 0.12s ease;
+}
+.entry:hover .entry-handle,
+.entry:focus-within .entry-handle {
+    opacity: 1;
+}
+/* is-shown: statically rendered (always visible) — used on the no-avatar side
+   of a comment-thread (e.g. the commenter handle in the activity view). */
+.entry-handle.is-shown {
+    opacity: 1;
+}
+.entry-handle:hover {
+    color: var(--color-accent, var(--accent, #d8a060));
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
+/* Short posts: keep the inline blessed-comments panel below the floated
+   avatar rather than wrapping its remainder. */
+.entry-comments-panel { clear: both; }
+
+/* In read focus mode the avatar stays where it floats (no jump) and the header
+   handle is revealed statically (not hover-gated). Both link to the post. */
+.entry.is-focus-mode .entry-handle {
+    opacity: 1;
+}
+
+/* ── Hover: post → add-comment affordance on the below-post badge ──
+   On a COMMENTABLE post, hovering ANYWHERE on the post entry crossfades the
+   comment badge's rest icon (grey/inactive) OUT and the add-comment icon
+   (speech bubble + "+", the accent/active color — the same glyph the timeline
+   dot used to show) IN, and tints the count to accent — signaling "this post
+   takes comments". The CLICK splits by target: clicking the post body opens
+   read-focus (read-only, no editor — bindCardClick); clicking the comment badge
+   (its large full-width hit area) opens read-focus AND the in-focus editor
+   (wireCommentAddBadge). Works in EVERY view (condensed stream, activity, and
+   read-focus); commentable posts only (you only comment on others' posts). */
+.entry--commentable:hover .entry-comments-badge {
     color: var(--color-accent, var(--accent, #d8a060));
 }
-body:not(.is-activity-mode) .entry--post:hover .entry-comments-badge.is-empty,
-body:not(.is-activity-mode) .entry--comment:hover .entry-comments-badge.is-empty {
-    visibility: visible;
-}
-body:not(.is-activity-mode) .entry--post:hover .entry-comments-badge .count,
-body:not(.is-activity-mode) .entry--comment:hover .entry-comments-badge .count {
+.entry--commentable:hover .entry-comments-badge svg:not(.icon-add-comment) {
     opacity: 0;
 }
-body:not(.is-activity-mode) .entry--post:hover .entry-comments-badge .add-plus,
-body:not(.is-activity-mode) .entry--comment:hover .entry-comments-badge .add-plus {
+.entry--commentable:hover .entry-comments-badge .icon-add-comment {
     opacity: 1;
-}
-
-/* Suppress the comments-badge hover-+ swap on .entry--commentable entries:
-   the timeline-dot is already the comment-add CTA (decoratePost /
-   decorateComment wire that). Without this scope, hovering a cross-author
-   post shows TWO + affordances simultaneously (left dot + middle badge),
-   which reads as duplicate chrome. The badge stays as a comment-count
-   display only — count visible at rest, click still navigates to the
-   inline comments anchor. */
-body:not(.is-activity-mode) .entry--commentable.entry--post:hover .entry-comments-badge.is-empty,
-body:not(.is-activity-mode) .entry--commentable.entry--comment:hover .entry-comments-badge.is-empty {
-    visibility: hidden;
-}
-body:not(.is-activity-mode) .entry--commentable.entry--post:hover .entry-comments-badge .count,
-body:not(.is-activity-mode) .entry--commentable.entry--comment:hover .entry-comments-badge .count {
-    opacity: 1;
-}
-body:not(.is-activity-mode) .entry--commentable.entry--post:hover .entry-comments-badge .add-plus,
-body:not(.is-activity-mode) .entry--commentable.entry--comment:hover .entry-comments-badge .add-plus {
-    opacity: 0;
-}
-
-/* Suppress the comments-badge hover-+ swap on .entry--mine (own-author)
-   entries: there's no reason to invite the user to comment on their own
-   post in the "all posts by me" view (which is the primary surface that
-   shows .entry--mine entries). Same mechanism as the .entry--commentable
-   block above — count stays visible at rest, click still navigates to
-   the inline comments anchor. */
-body:not(.is-activity-mode) .entry--mine.entry--post:hover .entry-comments-badge.is-empty,
-body:not(.is-activity-mode) .entry--mine.entry--comment:hover .entry-comments-badge.is-empty {
-    visibility: hidden;
-}
-body:not(.is-activity-mode) .entry--mine.entry--post:hover .entry-comments-badge .count,
-body:not(.is-activity-mode) .entry--mine.entry--comment:hover .entry-comments-badge .count {
-    opacity: 1;
-}
-body:not(.is-activity-mode) .entry--mine.entry--post:hover .entry-comments-badge .add-plus,
-body:not(.is-activity-mode) .entry--mine.entry--comment:hover .entry-comments-badge .add-plus {
-    opacity: 0;
 }
 
 /* (The own-post byline-hide rule moved up to the .entry-meta-right
@@ -2385,7 +2639,7 @@ body:not(.is-activity-mode) .entry--mine.entry--comment:hover .entry-comments-ba
 /* ── Legacy .entry-meta block — comment/profile/mention/dm renderers
    in stream.js still emit this shape; preserved so they render
    reasonably in the public per-post page if they show up via filter
-   change. Owner SPA (step 6) will migrate these to entry-meta-line. */
+   change. The owner SPA will migrate these to entry-meta-line. */
 .entry-meta {
     font-size: 12px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
@@ -2418,7 +2672,7 @@ body:not(.is-activity-mode) .entry--mine.entry--comment:hover .entry-comments-ba
     /* Match .site-handle (the bio component's domain label) so the same
        handle reads with the same typography wherever it appears.
        JetBrains Mono — domain handles are identifiers, not prose. */
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
     font-size: 12px;
     letter-spacing: 0.02em;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
@@ -2445,7 +2699,7 @@ body:not(.is-activity-mode) .entry--mine.entry--comment:hover .entry-comments-ba
     margin-left: 8px;
 }
 
-/* Comment-READ panel (step-05/5.i Phase B).
+/* Comment-READ panel.
    Default state: collapsed (max-height:0 + overflow:hidden) so the
    panel is DOM-present for SEO + the noscript fallback but visually
    hidden until the controller opens it on click/keypress.
@@ -2464,7 +2718,7 @@ body:not(.is-activity-mode) .entry--mine.entry--comment:hover .entry-comments-ba
 
    `prefers-reduced-motion`: skip the transition entirely so motion-
    sensitive users still get the open/close behavior without the
-   slide. Worker decision per Q-PB2 (manager review fold-in 2026-04-28). */
+   slide. */
 .entry-comments-panel {
     max-height: 0;
     overflow: hidden;
@@ -2564,7 +2818,7 @@ body:not(.is-activity-mode) .entry--mine.entry--comment:hover .entry-comments-ba
     align-items: baseline;
     gap: 8px;
     font-style: italic;
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-size: 13px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
     margin-bottom: 4px;
@@ -2581,16 +2835,50 @@ body:not(.is-activity-mode) .entry--mine.entry--comment:hover .entry-comments-ba
     color: inherit;
     opacity: 0.7;
     font-style: normal;
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 12px;
     letter-spacing: 0.02em;
     font-variant-numeric: tabular-nums;
 }
 .entry-comments-panel--cards .comment-body {
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-size: 15px;
     line-height: 1.65;
     color: var(--color-text, #e8d8c4);
+}
+
+/* Read-focus single-latest-comment panel (.entry-focus-comment). The collapsed
+   stream shows no comments; entering focus lazily loads exactly ONE comment and
+   buildFocusCommentCard renders it with the SHARED canonical card style
+   (.comment-attached--canonical), so read-focus and the per-post page look
+   identical. No label, no CTA — opening focus on (conceptually) the canonical
+   post loads the comment in place rather than linking the reader to where they
+   already are. The .entry-focus-comment-slot is the single replaceable
+   container (the future add-comment-in-focus editor swaps the card inside it). */
+/* The panel's overflow:hidden (needed for the max-height open/close animation,
+   which also keeps the comment hidden in the collapsed stream) would clip the
+   timeline dot — it sits ~55px left of the content column, in the rail gutter.
+   Extend the panel's box leftward by one layout-gap so the gutter is inside the
+   un-clipped box, with a compensating padding-left that keeps the label / card
+   / CTA at their original x. The gutter is already visible space (the post's
+   own dot renders there), so extending into it adds no page overflow. */
+.entry-comments-panel.entry-focus-comment {
+    margin-left: calc(-1 * var(--layout-gap));
+    padding-left: var(--layout-gap);
+}
+.entry.comments-open .entry-comments-panel.entry-focus-comment {
+    padding: 12px 0 12px var(--layout-gap);
+}
+/* Per-post canonical comments panel — same un-clip trick. The SSR'd
+   blessed-comment.html partials render .comment-attached--canonical cards
+   here, each carrying a .timeline-dot--small in the rail gutter; the
+   panel's overflow:hidden (animation cap) would otherwise clip them. */
+#comments.entry-comments-panel {
+    margin-left: calc(-1 * var(--layout-gap));
+    padding-left: var(--layout-gap);
+}
+.entry.comments-open #comments.entry-comments-panel {
+    padding: 12px 0 12px var(--layout-gap);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -2623,7 +2911,7 @@ body:not(.is-activity-mode) .entry--mine.entry--comment:hover .entry-comments-ba
      - The focal entry holds opacity:1 + filter:none. Intentionally
        NO transform, NO box-shadow, NO padding-block bump. Its bg
        matches the viewport so the post reads as text on the page,
-       not as a card on a page. Per-2026-05-15 user note: the prior
+       not as a card on a page. The prior
        lift+shadow+padding treatment "read as cheap glass / a card"
        — the refined target is "the page just got quieter."
      - Click anywhere on the dimmed chrome → setupFocusModeClickOutside
@@ -2638,20 +2926,41 @@ body:not(.is-activity-mode) .entry--mine.entry--comment:hover .entry-comments-ba
      - .entry--comment-thread (always renders body inline)
      - non-empty .entry-comments-badge (worth focusing to read comments)
 
-   Anti-divergence: a 2026-05 audit confirmed no body.is-owner rules
+   Anti-divergence: an audit confirmed no body.is-owner rules
    override .polis-topbar / .layout-left opacity or filter, and no
    surface-specific !important rules fight the dim. Keep it that way.
    ═══════════════════════════════════════════════════════════════════════ */
-body.focus-mode .polis-topbar,
 body.focus-mode .layout-left,
 body.focus-mode .stream > .entry:not(.is-focus-mode),
-body.focus-mode .stream-top-fade,
 body.focus-mode .bottom-fade {
     opacity: 0.30;
     filter: blur(2px);
     transition: opacity 480ms cubic-bezier(0.22, 1, 0.36, 1),
                 filter 480ms cubic-bezier(0.22, 1, 0.36, 1);
 }
+
+/* The topbar recedes too, but it must stay OPAQUE — dimming the bar's own
+   opacity made it translucent, so the focal post's text was legible THROUGH
+   the nav as it scrolled up under it (very obvious with a light theme over
+   dark content). Paint the bar with the page bg and fade its CONTENTS via
+   > * instead, mirroring the editor-focus treatment. The > * selector keeps
+   this surface-agnostic: it dims whatever chrome each surface puts in the bar
+   (SPA icon row + handle, public wordmark + sign-in) without enumerating it.
+   border-bottom goes transparent so a crisp rule doesn't sit under the
+   otherwise-receded bar. */
+body.focus-mode .polis-topbar {
+    background: var(--color-bg, var(--bg, #1a1525));
+    border-bottom-color: transparent;
+}
+body.focus-mode .polis-topbar > * {
+    opacity: 0.30;
+    filter: blur(2px);
+    transition: opacity 480ms cubic-bezier(0.22, 1, 0.36, 1),
+                filter 480ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* The stream-top-fade stays at FULL strength in focus mode (not dimmed) so the
+   focal post still feathers softly into the opaque nav as it scrolls up,
+   instead of meeting a hard edge. */
 
 /* The focal entry holds at full opacity / no filter. No transform,
    no box-shadow, no padding bump — it stays exactly in its layout
@@ -2660,6 +2969,26 @@ body.focus-mode .entry.is-focus-mode {
     opacity: 1;
     filter: none;
     transition: opacity 480ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Scroll room for the LAST entry in read-focus. enterFocusMode scrolls
+   the focal entry's top under the topbar; for the last item there's no
+   content below it to scroll against, so its top can't reach the reading
+   band — the auto-close IntersectionObserver then installs with the entry
+   below its trigger band and fires immediately, so focus "opens then snaps
+   shut" and the comments panel never gets viewport room. Adding the spacer
+   on BODY (below .layout) rather than on .layout/.stream keeps the timeline
+   bar — which bottom-anchors inside .layout — from stretching into the
+   blank space. The space sits under the dimmed chrome, so it's invisible;
+   scrolling down into it exits focus, which is the intended gesture.
+
+   Scoped to the owner SPA (body.is-owner): that's the infinity-scroll
+   surface where you reach a genuine last-loaded item. Public canonical
+   per-post pages auto-enter focus on load and always render siblings
+   below the focal post, so they neither need the spacer nor want the
+   extra scrollbar length on every page. */
+body.is-owner.focus-mode {
+    padding-bottom: 90vh;
 }
 
 /* Default state (no focus mode): smooth restore. Same curve so
@@ -2732,7 +3061,7 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
 /* Stale — TTL expired; will refetch on next visibility cross. */
 .entry.is-stale {}
 
-/* 404 — origin returned 404. Per D-PROXY: silent skip in display. */
+/* 404 — origin returned 404. Silent skip in display. */
 .entry.is-404 {
     display: none;
 }
@@ -2774,25 +3103,28 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
 /* --- entry--post ---
    Padding picks up extra top/bottom room (was 4px) so the hover tint
    has visible breathing room between the highlight box and the entry-
-   meta-line above. UI-refinement review 2026-04-28. */
+   meta-line above. */
 .entry--post .entry-body--excerpt {
     display: block;
     text-decoration: none;
     color: inherit;
     border-radius: 4px;
-    padding: 10px 8px;
+    padding: var(--entry-body-pad-y) 8px;   /* top pad shared with the dot anchor */
     margin-left: -8px;
 }
 
-/* Whole-card background hover dropped 2026-04-29 per UI review:
-   "let's try losing the background accent/highlight color on rollover".
+/* Whole-card background hover is intentionally dropped — no background
+   accent/highlight color on rollover.
    Hover cue now flows entirely through the title-color change
    (.entry-title-link:hover .entry-title) plus the cursor:pointer that
    the <a> element provides natively. */
 
 .entry-title {
     margin: 0 0 6px;
-    font-family: 'Newsreader', Georgia, serif;
+    /* --font-title: dormant title token. Unset on every existing theme (they
+       fall back to Newsreader = unchanged). stardust sets it to Space Grotesk.
+       Deliberately NOT --font-display (already 'Orbitron' on 9 themes). */
+    font-family: var(--font-title, 'Newsreader', Georgia, serif);
     font-size: 18px;
     font-weight: 500;
     line-height: 1.3;
@@ -2802,31 +3134,31 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
 
 .entry-excerpt {
     margin: 0;
-    /* R27 follow-up: serif body to match the focus/expanded entry-
+    /* Serif body to match the focus/expanded entry-
        content prose. v4 public reads cohesively when both excerpt
        (collapsed) and full body (expanded) share the same typeface;
        the prior Inter/Newsreader split read as two voices in one
        stream. Font-size centralized via --stream-body-font-size
        at :root (top of file) — SPA + public pages stay in sync. */
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-size: var(--stream-body-font-size);
     line-height: 1.55;
     color: var(--color-text-soft, #d4c8b8);
 }
 
 /* --- entry--post lazy-fetched expanded form ---
-   When the controller lazy-fetches a sibling entry's body (4.c), it
+   When the controller lazy-fetches a sibling entry's body, it
    restructures the entry-body from `<a class="entry-body--excerpt">`
    to `<div class="entry-body--expanded">` — the title becomes its
    own link, the body is non-link content (avoiding nested-<a>).
 
-   Per BL-4 Option A: lazy-fetched body content stays compact-styled,
+   Lazy-fetched body content stays compact-styled,
    matching the excerpt size/density, NOT the SSR'd focus prose
    styling. Keeps the stream visually uniform.
 */
 .entry--post .entry-body--expanded {
     display: block;
-    padding: 10px 8px;
+    padding: var(--entry-body-pad-y) 8px;   /* top pad shared with the dot anchor */
     margin-left: -8px;
     border-radius: 4px;
     /* Cursor lives on the eligible-entry rule below (.entry--post:has(...))
@@ -2834,8 +3166,8 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
        so a default cursor signals "nothing to click here". */
 }
 
-/* Whole-card background hover dropped 2026-04-29 per UI review:
-   "let's try losing the background accent/highlight color on rollover".
+/* Whole-card background hover is intentionally dropped — no background
+   accent/highlight color on rollover.
    The title-color change on .entry-title-link:hover carries the cue;
    the .entry-body--expanded:hover background tint was creating a
    competing visual + made the card feel "selected" rather than
@@ -2871,6 +3203,17 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
 .entry--post .entry-body--excerpt .entry-title.is-redundant {
     display: none;
 }
+/* When the title is hidden, the expanded body's .entry-content becomes the
+   first visible element — drop its title-separator top margin so its first
+   line sits flush at the body's top padding, matching the excerpt form. This
+   keeps the timeline dot anchor (--stream-post-line-center, which assumes the
+   first line sits at --entry-body-pad-y) correct in both forms. The title-
+   link is display:none but still a DOM sibling, so the `+` combinator
+   matches. */
+.entry--post .entry-title-link.is-redundant + .entry-content,
+.entry--comment-thread .entry-title-link.is-redundant + .entry-content {
+    margin-top: 0;
+}
 
 /* Post body — uniform prose styling across focus and siblings. The
    stream presents as a single uniform list; there's no per-position
@@ -2886,7 +3229,11 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
 
 .entry--post .entry-content a,
 .entry--comment-thread .entry-content a {
-    color: var(--color-accent, var(--accent, #d8a060));
+    /* Links read off --color-link so a theme can give them a SECONDARY
+       hue distinct from its primary accent (timeline/headings), keeping
+       a single accent from dominating the page. Falls back to the accent
+       when a theme doesn't set one, so existing themes are unchanged. */
+    color: var(--color-link, var(--color-accent, var(--accent, #d8a060)));
     text-decoration: underline;
 }
 
@@ -2898,7 +3245,7 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
 
    Click behavior: the focus body is JS-bound (stream.js setupCardClicks)
    to navigate to the focus's canonical URL on click — same as siblings.
-   Pre-2026-04-29 it toggled the comment-READ panel instead, but that
+   An earlier shape toggled the comment-READ panel instead, but that
    caused a focus-tracker URL-bar bug (panel open → layout shift →
    focus tracker pushState'd to whichever entry was now closest to
    viewport center). Comment panel access stays via the comment-badge
@@ -2939,7 +3286,7 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
 .focus-content .content-body,
 .entry--post .entry-content,
 .entry--comment-thread .entry-content {
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     /* Centralized via --stream-body-font-size at :root (top of file).
        Pairs with .entry-excerpt so collapsed and expanded forms stay
        locked; SPA + public per-post pages stay in sync. */
@@ -2989,7 +3336,7 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
     margin-top: 6px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
     cursor: pointer;
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 12px;
     letter-spacing: 0.02em;
     text-decoration: underline;
@@ -3013,7 +3360,7 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
 }
 .focus-content .content-body h1,
 .entry--post .entry-content h1 {
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-size: 28px;
     font-weight: 500;
     line-height: 1.2;
@@ -3022,14 +3369,22 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
     letter-spacing: -0.005em;
 }
 
-/* Focus entry title styling unified with sibling .entry-title in
-   2026-04-29: the focus h1 carries the .entry-title class (instead of
+/* Focus entry title styling unified with sibling .entry-title:
+   the focus h1 carries the .entry-title class (instead of
    .focus-title), so the existing .entry-title rule + the
    .entry-title-link:hover .entry-title color-change rule both apply
    to the focus's clickable title. */
 .focus-content .content-body p,
 .entry--post .entry-content p {
     margin: 0 0 12px;
+}
+/* Drop the trailing paragraph's bottom margin so the body ends flush — this
+   was padding out the space above the below-post comment indicator (the
+   excerpt form's single <p> already has margin:0, so this also keeps excerpt
+   and expanded posts spaced consistently). */
+.focus-content .content-body > :last-child,
+.entry--post .entry-content > :last-child {
+    margin-bottom: 0;
 }
 
 /* --- entry--comment --- */
@@ -3040,7 +3395,7 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
 }
 
 /* ============================================================
-   entry--search (06-profiles Phase 3)
+   entry--search
    Modeled on entry--editor: a "light-touch" affordance that lives
    ON the timeline rather than above it. The timeline-dot is
    replaced by a magnifying-glass glyph on the rail (parallel to
@@ -3057,7 +3412,7 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
     position: absolute;
     /* Align with the timeline-dot column. .timeline-dot sits at
        left: calc(-1 * var(--layout-gap)/2 - 5px) and is 8px wide,
-       so its CENTER is at -layout-gap/2 - 1px (after the 2026-05-18
+       so its CENTER is at -layout-gap/2 - 1px (after the
        optical-midline nudge). The search glyph is 16px; center it
        at the same point by shifting left by 8px more (-9px total). */
     top: 4px;
@@ -3124,6 +3479,30 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
         var(--network-color, var(--color-accent)) 75%,
         transparent);
 }
+/* Scope-switch CTA — a subtle text link under the search box that toggles
+   the directory scope (my follows ↔ all polis). Low-key by default so it
+   doesn't compete with the input; brightens to the network accent on hover,
+   matching the search row's own rollover language. */
+.entry--search .search-scope-switch {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
+    font-size: 12px;
+    letter-spacing: 0.01em;
+    color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
+    transition: color 0.15s ease;
+}
+.entry--search .search-scope-switch:hover,
+.entry--search .search-scope-switch:focus-visible {
+    color: var(--network-color, var(--color-accent));
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    outline: none;
+}
 /* When the search row is mounted (profiles + all-polis), it visually
    replaces the ghost-compose slot at the top of the stream. owner-
    extras toggles body.is-search-active around the mount/unmount. */
@@ -3132,9 +3511,8 @@ body.is-search-active .entry--ghost-compose {
 }
 
 /* ============================================================
-   entry--profile (06-profiles Phase 2)
-   Ported from docs/design/v4/mockups/06-profiles-and-activity.html
-   panel 2. The legacy avatar/bio/stats shape (used by an earlier
+   entry--profile
+   The legacy avatar/bio/stats shape (used by an earlier
    prototype) is replaced by a directory-style entry: meta-line +
    title + passive state-line + optional .recent-post-attached +
    .entry-actions rollover-CTA slot. The timeline rail still
@@ -3163,6 +3541,35 @@ body.is-search-active .entry--ghost-compose {
    the label text carries the relationship nuance. */
 .entry--profile .entry-byline.follow-state {
     font-weight: 500;
+    /* Inline after the date with a · separator (see .entry-meta-sep). The
+       status used to be flush-right, but the avatar now owns the top-right
+       reserved column. flex-shrink:0 keeps the label intact when the row's
+       right gutter narrows it. */
+    flex-shrink: 0;
+}
+
+/* Profile avatar — reserved-column chip in the top-right, mirroring the
+   stream-post avatar. Pinned to the entry (the .entry-avatar-link base rule
+   floats it; override to absolute). The meta-line + title get a right gutter
+   so a long name or status label doesn't run under it. */
+.entry--profile > .entry-avatar-link {
+    position: absolute;
+    top: 4px;
+    right: var(--entry-avatar-inset, 8px);
+    float: none;
+    margin: 0;
+}
+.entry--profile:has(> .entry-avatar-link) .entry-meta-line,
+.entry--profile:has(> .entry-avatar-link) .entry-title {
+    padding-right: var(--entry-avatar-gutter, 52px);
+}
+
+/* Profile rollover CTA (Follow / Unfollow): the avatar now sits in the
+   top-right corner (top:4px, 28px tall), so drop the actions just below it,
+   right-aligned under the avatar instead of the default top:32px slot. */
+.entry--profile > .entry-actions {
+    top: calc(4px + var(--entry-avatar-size, 28px) + 6px);
+    right: var(--entry-avatar-inset, 8px);
 }
 .entry--profile .entry-byline.follow-state.is-following {
     color: var(--color-mint, #6ec0a0);
@@ -3175,8 +3582,8 @@ body.is-search-active .entry--ghost-compose {
    .recent-post-attached — sunset variant of .comment-attached
    (search "comment-attached" elsewhere in this file for the lavender
    sibling). border-left + tinted gradient bg + chevron, used for the
-   most-recent-post preview in a profile entry. Click-to-expand will
-   be wired in Phase 2 task 16 by owner-extras.js.
+   most-recent-post preview in a profile entry. Click-to-expand is
+   wired by owner-extras.js.
    ============================================================ */
 .entry--profile .recent-post-attached {
     position: relative;
@@ -3292,22 +3699,29 @@ body.is-search-active .entry--ghost-compose {
     /* In between the big 8px post dot and the original 5px size — at
        6px the comment dot reads as a deliberate, visible affordance
        (not visually missing) while still clearly differentiated from
-       the big post dot above it.
-       Position-absolute origin is the padding-box edge of .comment-attached
-       (margin-left 24 + border-left 2 = 26px right of the column edge).
-       Same offset convention as the big dot: -gap/2 - half-width, plus
-       the 26px shift to undo the frame indent. */
+       the big post dot above it. */
     width: 6px;
     height: 6px;
+    /* Base (non-rail) case — the comment EDITOR card (owner-extras) carries
+       a bare .timeline-dot--small as a direct child of .comment-attached
+       (origin = its padding-box edge: margin-left 24 + border-left 2 = 26px
+       right of the column edge). -gap/2 - half-width - 26px lands it on the
+       bar; top:11px aligns with the editor's meta-line. The dot-anchor
+       refactor's .comment-attached comment cards override both below. */
     left: calc(-1 * var(--layout-gap) / 2 - 3px - 26px);
-    top: 11px;      /* aligns with first baseline of .comment-meta-line
-                       (12px top padding on .comment-attached pushes the
-                       text down from the block edge; visual baseline of
-                       the 13px italic text lands ~11px down) */
-    /* Cancel the base .timeline-dot's translateY(-50%): the small dot
-       is anchored to .comment-attached (not a meta-line) and its `top`
-       is the final position, not a 50% reference. */
+    top: 11px;
+    /* Cancel the base .timeline-dot's translateY(-50%) for this fixed top. */
     transform: none;
+}
+/* Refactored comment cards: the small dot lives in a body rail
+   (.comment-attached > .comment-meta-line + .entry-rail). The rail wraps the
+   comment body directly, so the dot anchors to the body's first line via
+   .entry-rail > .timeline-dot (top: --rail-line-center, translateY centered).
+   Only the horizontal needs adjusting here: the rail sits inside the card's
+   16px left padding, so the gutter shift is 26px (frame indent) + 16px
+   (padding) = 42px. */
+.entry-rail > .timeline-dot--small {
+    left: calc(-1 * var(--layout-gap) / 2 - 3px - 42px);
 }
 
 /* Comment block visually attached to the post above: a subtle accent
@@ -3317,11 +3731,16 @@ body.is-search-active .entry--ghost-compose {
    tight 20px top margin keeps the post-comment pair feeling like a
    bonded unit; the looser margin-bottom on the entry itself (below)
    pushes the next comment-thread entry away. */
-.entry--comment-thread .comment-attached {
+.entry--comment-thread .comment-attached,
+.comment-attached--canonical {
     position: relative;
+    display: flow-root;   /* contain the floated commenter avatar */
     margin-top: 20px;
     margin-left: 24px;
-    padding: 12px 14px 4px 16px;
+    /* No right padding — the comment's handle + avatar share the parent post's
+       right edge (column-right / column-right - inset). The card keeps its left
+       indent + tint, but its right content lines up with the post's. */
+    padding: 12px 0 4px 16px;
     /* Border + tint default to the theme's accent (the existing
        behavior across most themes). Themes that want a distinct
        hue for the comment-attached chrome can set
@@ -3345,12 +3764,13 @@ body.is-search-active .entry--ghost-compose {
     margin-bottom: 16px;
 }
 
-.entry--comment-thread .comment-meta-line {
+.entry--comment-thread .comment-meta-line,
+.comment-attached--canonical .comment-meta-line {
     display: flex;
     align-items: center;
     gap: 8px;
     font-style: italic;
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-size: 13px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
     margin-bottom: 6px;
@@ -3376,11 +3796,47 @@ body.is-search-active .entry--ghost-compose {
     font-weight: 500;
 }
 
-.entry--comment-thread .comment-attached .comment-body {
-    font-family: 'Newsreader', Georgia, serif;
+.entry--comment-thread .comment-attached .comment-body,
+.comment-attached--canonical .comment-body {
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-size: 15px;
     line-height: 1.65;
     color: var(--color-text, #e8d8c4);
+    /* The card has no right padding now; keep avatar-less comment text off the
+       column edge. The avatar gutter (--entry-avatar-gutter) overrides this when
+       a chip is present (the :has rule near .entry-rail above). */
+    padding-right: 8px;
+}
+
+/* Comments view: the originating post's handle is pushed to the
+   right of its meta line (date stays left); the commenter's 24px avatar floats
+   right inside the comment card (the focus), reusing .entry-avatar-link /
+   .entry-handle with a card-sized chip. */
+.entry--comment-thread .entry-meta-line .byline-domain-link {
+    margin-left: auto;
+}
+/* The commenter chip's 28px size is inherited from the base .entry-avatar-link;
+   its position (absolute top-right, overhanging the card padding to share the
+   post chips' x) is set by the reserved-column rule near .entry-rail above. */
+
+/* The commenter handle on the canonical comment card renders statically via the
+   .is-shown class on the element (blessed-comment.html + buildFocusCommentCard),
+   not a card-scoped opacity override — .entry-handle.is-shown is in every
+   stream.css version, so the byline survives a re-rendered-page / stale-CSS
+   deploy skew. */
+
+/* Canonical comment card date: match the POST meta-line date (.entry-date-time)
+   — upright Inter, not the italic Newsreader the comment-meta-line otherwise
+   imposes. The handle is already upright mono, so this brings the date in line
+   and the meta row reads like a post's date row (the canonical comment entry
+   style). Shared by the SSR per-post card and the JS read-focus card, which now
+   render identical markup. */
+.comment-attached--canonical .comment-date-time {
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
+    font-style: normal;
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    font-variant-numeric: tabular-nums;
 }
 
 .entry--comment-thread .entry-content--unavailable {
@@ -3436,7 +3892,7 @@ body.is-search-active .entry--ghost-compose {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-style: italic;
     font-size: 13px;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
@@ -3477,7 +3933,7 @@ body.is-search-active .entry--ghost-compose {
     min-height: 220px;
     padding: 8px 0;
     margin-bottom: 6px;
-    font-family: 'Newsreader', Georgia, serif;
+    font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-size: 15px;
     line-height: 1.6;
     color: var(--color-text, #e8d8c4);
@@ -3508,13 +3964,23 @@ body.is-search-active .entry--ghost-compose {
     background: transparent;
 }
 .comment-editor-body > .milkdown-mount.hidden { display: none; }
+/* Write-area cursor: the editable region (textarea, milkdown mount, and the
+   ProseMirror contenteditable) must show a text caret, not the arrow/pointer
+   ProseMirror/Milkdown defaults to — same fix as the post editor
+   (.entry--editor .editor-card-body above). */
+.comment-editor-body,
+.comment-editor-body > textarea,
+.comment-editor-body > .milkdown-mount,
+.comment-editor-body > .milkdown-mount .ProseMirror {
+    cursor: text;
+}
 
 .comment-editor-footer {
     display: flex;
     align-items: center;
     gap: 0.6em;
     padding-top: 4px;
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 12.5px;
 }
 .comment-editor-footer .spacer { flex: 1; }
@@ -3526,7 +3992,7 @@ body.is-search-active .entry--ghost-compose {
     color: color-mix(in srgb, var(--color-comment-accent, var(--color-accent, var(--accent, #d8a060))) 70%, var(--color-text-muted, rgba(255, 255, 255, 0.55)));
 }
 .comment-editor-footer button {
-    font-family: 'Inter', sans-serif;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
     font-size: 12.5px;
     padding: 5px 12px;
     background: transparent;
@@ -3557,26 +4023,26 @@ body.is-search-active .entry--ghost-compose {
     color: var(--color-bg, var(--bg, #1a1520));
 }
 
-/* When the entry has the comment editor open, hide any existing
-   attached-comment or blessed-comments-panel sibling so the editor
-   visually replaces it in the same slot. The flip lives on the entry
-   article via .has-open-comment-editor (set/cleared by
-   mountCommentEditor / closeCommentEditor in owner-extras.js). The
-   sibling DOM is preserved — only hidden — so closing the editor
-   re-shows it without a re-render. */
-.entry.has-open-comment-editor .comment-attached,
-.entry.has-open-comment-editor .entry-comments-panel,
-.entry.has-open-comment-editor .entry-comments-panel--cards {
-    display: none;
-}
+/* (The comment editor now mounts INTO the focus comment slot
+   (.entry-focus-comment-slot), literally replacing the shown comment, so there
+   is no longer a sibling to hide — the old .has-open-comment-editor display:none
+   rule was removed. The editor's open/close swaps the slot's content; the shape
+   re-renders the cached comment on close via PolisStream.showFocusComment.) */
 
-/* --- entry--follow (06-profiles: follow events render inside ACTIVITY
+/* --- entry--follow (follow events render inside ACTIVITY
    via renderFollow in stream.js — no dedicated type=follows surface
-   any more). The body is a single italic line "followed <target>"
-   (or "unfollowed <target>") with the actor handle living in the
-   meta-line as a standard byline. No timeline-gutter glyph — the
-   timeline-dot is the only marker, same as posts/comments. */
-.entry--follow .follow-event-body {
+   any more). The body reads "actor followed target" (or "unfollowed"):
+   both the actor and the target are clickable mono links with a hover
+   underline; the verb between them is muted italic. No timeline-gutter
+   glyph — the timeline-dot is the only marker, same as posts/comments. */
+/* Shared with entry--announcement (renderAnnouncement reuses .follow-event-
+   body for every activity-signal line: follow/unfollow, blessing granted/
+   requested, site-registered). */
+/* flow-root contains the floated activity-source avatar chip (entry-avatar-
+   link) the same way .entry--post does, so the body line wraps around it. */
+.entry--announcement { display: flow-root; }
+.entry--follow .follow-event-body,
+.entry--announcement .follow-event-body {
     font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-style: italic;
     font-size: 14.5px;
@@ -3584,18 +4050,31 @@ body.is-search-active .entry--ghost-compose {
     color: var(--color-text-soft, #d4c8b8);
     margin: 0;
 }
-.entry--follow .follow-event-body .verb {
+.entry--follow .follow-event-body .verb,
+.entry--announcement .follow-event-body .verb {
     color: var(--color-text-muted, #a09484);
     margin-right: 4px;
 }
-.entry--follow .follow-event-body .target {
-    font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+.entry--follow .follow-event-body .target,
+.entry--announcement .follow-event-body .target,
+.entry--follow .follow-event-body .actor,
+.entry--announcement .follow-event-body .actor {
+    font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
     font-style: normal;
     font-size: 13px;
     color: var(--color-text, var(--text-primary, #f0e8e0));
     text-decoration: none;
 }
-.entry--follow .follow-event-body .target:hover {
+/* The actor leads the line; give it the same gap the verb carries before the
+   target so "actor verb target" breathes evenly. */
+.entry--follow .follow-event-body .actor,
+.entry--announcement .follow-event-body .actor {
+    margin-right: 4px;
+}
+.entry--follow .follow-event-body a.target:hover,
+.entry--announcement .follow-event-body a.target:hover,
+.entry--follow .follow-event-body a.actor:hover,
+.entry--announcement .follow-event-body a.actor:hover {
     color: var(--color-accent, var(--accent, #e8a060));
     text-decoration: underline;
     text-underline-offset: 2px;
@@ -3617,9 +4096,7 @@ body.is-search-active .entry--ghost-compose {
    + faint mint-tint to differentiate sender direction without breaking
    the rail-as-anchor metaphor (timeline-dot stays at the rail's x
    position). Picked over chat-bubble alignment because the rail is
-   the navigational spine of the entire v4 surface. See mockup
-   docs/design/v4/mockups/07-messages.html panel 6 for the design
-   comparison. */
+   the navigational spine of the entire v4 surface. */
 :root {
     --color-message-accent: var(--color-mint, #6ec0a0);
 }
@@ -3661,10 +4138,10 @@ body.is-search-active .entry--ghost-compose {
    Mounted in place of the ghost-compose entry when the user invokes
    the DM composer ("yours, truly" CTA on a DM surface). Two modes:
    'new' (recipient picker + first-message editor) and 'reply' (just
-   the editor). See docs/design/v4/mockups/07-messages.html panels 2/3/7. */
+   the editor). */
 .entry--composer {
     background: var(--color-bg-light, color-mix(in srgb, var(--color-bg) 85%, white 15%));
-    border: 1px solid var(--color-border-soft, rgba(255,255,255,0.08));
+    border: 1px solid var(--color-border, rgba(128,128,128,0.18));
     border-radius: 8px;
     padding: 16px 18px;
 }
@@ -3685,6 +4162,15 @@ body.is-search-active .entry--ghost-compose {
     justify-content: space-between;
     align-items: center;
 }
+/* The composer card (unlike .entry--editor, which has 0 horizontal padding)
+   carries padding:16px 18px + a 1px border, so the header — the dot's
+   containing block — starts ~19px right of the entry's left edge. The base
+   .timeline-dot offset is measured from the entry's left edge, so without
+   this the dot floats 19px right of the timeline bar. Pull it back by that
+   content inset so it lands on the bar like every other entry's dot. */
+.entry--composer .composer-header .timeline-dot {
+    left: calc(-1 * var(--layout-gap) / 2 - 4.5px - 19px);
+}
 .entry--composer .composer-header .composer-context {
     font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-style: italic;
@@ -3694,12 +4180,12 @@ body.is-search-active .entry--ghost-compose {
     color: var(--color-text-soft, #d4c8b8);
 }
 .entry--composer .composer-header .composer-context-peer {
-    font-family: var(--font-mono, 'JetBrains Mono', monospace);
+    font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
     font-size: 12px;
     color: var(--color-accent, var(--color-pink-soft, #e080a0));
 }
 .entry--composer .composer-close {
-    color: var(--color-text-faint, rgba(255,255,255,0.35));
+    color: var(--color-text-muted, #78746c);
     font-size: 16px;
     cursor: pointer;
     user-select: none;
@@ -3711,13 +4197,13 @@ body.is-search-active .entry--ghost-compose {
     font-size: 14px;
     background: transparent;
     border: none;
-    border-bottom: 1px dashed var(--color-border-soft, rgba(255,255,255,0.08));
+    border-bottom: 1px dashed var(--color-border, rgba(128,128,128,0.18));
     color: var(--color-text, #f0e8e0);
     padding: 6px 0 8px;
     outline: none;
 }
 .entry--composer .recipient-input::placeholder {
-    color: var(--color-text-faint, rgba(255,255,255,0.35));
+    color: var(--color-text-muted, #78746c);
     font-style: italic;
 }
 .entry--composer .recipient-input:focus {
@@ -3746,8 +4232,12 @@ body.is-search-active .entry--ghost-compose {
     cursor: pointer;
 }
 .entry--composer .mutual-row:hover,
-.entry--composer .mutual-row.is-focused { background: rgba(255,255,255,0.04); }
-.entry--composer .mutual-row.is-disabled { opacity: 0.4; cursor: not-allowed; }
+.entry--composer .mutual-row.is-focused { background: color-mix(in srgb, var(--color-text, #888) 7%, transparent); }
+/* Disabled rows stay dimmed to read as non-selectable, but not so faint
+   that the reason cue is illegible (0.55, up from 0.4). No hover affordance
+   — they aren't clickable. */
+.entry--composer .mutual-row.is-disabled { opacity: 0.55; cursor: not-allowed; }
+.entry--composer .mutual-row.is-disabled:hover { background: none; }
 .entry--composer .mutual-row .av {
     width: 32px; height: 32px;
     border-radius: 50%;
@@ -3769,7 +4259,7 @@ body.is-search-active .entry--ghost-compose {
     line-height: 1.2;
 }
 .entry--composer .mutual-row .handle-line {
-    font-family: var(--font-mono, 'JetBrains Mono', monospace);
+    font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
     font-size: 11px;
     color: var(--color-text-muted, rgba(255,255,255,0.55));
     margin-top: 2px;
@@ -3781,6 +4271,18 @@ body.is-search-active .entry--ghost-compose {
     text-transform: uppercase;
     color: var(--color-mint, #6ec0a0);
     opacity: 0.85;
+}
+/* Reason cue on a non-selectable row ("NOT MUTUALS" / "DMS OFF" /
+   "UNAVAILABLE"). Same chip geometry as .has-conv but a muted tone — it
+   explains the dimmed treatment rather than inviting a click. */
+.entry--composer .mutual-row .recipient-status {
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-text-muted, #78746c);
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 /* Selected-recipient state: collapse the picker, surface the chosen
    recipient with a mint accent, reveal the message body. */
@@ -3814,7 +4316,7 @@ body.is-search-active .entry--ghost-compose {
     font-size: 11px;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: var(--color-text-faint, rgba(255,255,255,0.35));
+    color: var(--color-text-muted, #78746c);
 }
 .entry--composer .selected-recipient .to-line {
     font-family: var(--font-content, 'Newsreader', Georgia, serif);
@@ -3822,7 +4324,7 @@ body.is-search-active .entry--ghost-compose {
     color: var(--color-text, #f0e8e0);
 }
 .entry--composer .selected-recipient .to-line .to-handle {
-    font-family: var(--font-mono, 'JetBrains Mono', monospace);
+    font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
     font-size: 11.5px;
     color: var(--color-text-muted, rgba(255,255,255,0.55));
 }
@@ -3853,7 +4355,7 @@ body.is-search-active .entry--ghost-compose {
     resize: vertical;
 }
 .entry--composer .composer-body textarea::placeholder {
-    color: var(--color-text-faint, rgba(255,255,255,0.35));
+    color: var(--color-text-muted, #78746c);
     font-style: italic;
 }
 .entry--composer .composer-toolbar {
@@ -3862,7 +4364,7 @@ body.is-search-active .entry--ghost-compose {
     gap: 8px;
     margin-top: 10px;
     padding-top: 10px;
-    border-top: 1px dashed var(--color-border-soft, rgba(255,255,255,0.08));
+    border-top: 1px dashed var(--color-border, rgba(128,128,128,0.18));
 }
 .entry--composer .composer-toolbar button {
     font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
@@ -3871,7 +4373,7 @@ body.is-search-active .entry--ghost-compose {
     padding: 5px 14px;
     border-radius: 4px;
     border: 1px solid var(--color-border, rgba(208,104,136,0.30));
-    background: rgba(255,255,255,0.04);
+    background: color-mix(in srgb, var(--color-text, #888) 7%, transparent);
     color: var(--color-text-soft, #d4c8b8);
     cursor: pointer;
 }
@@ -3892,7 +4394,7 @@ body.is-search-active .entry--ghost-compose {
    composer visually replaces the ghost prompt at the top of the stream. */
 .entry--ghost-compose.hidden { display: none; }
 
-/* Section 8 (SITE FOOTER) was dropped per UI-refinement review 2026-04-28.
+/* Section 8 (SITE FOOTER) was intentionally dropped.
    The closing visual is now the longer bottom-fade overlay; tenant
    attribution survives in the page-bottom HTML comment. */
 
@@ -3900,9 +4402,8 @@ body.is-search-active .entry--ghost-compose {
    for the rationale. Two-tier breakpoint:
      - 1260-1399px:  60px shift  (margin to absorb = 60)
      - 1400+px:     130px shift  (more aggressive shift toward optical
-                                  center; landed via owner feedback that
-                                  the content column felt too far right
-                                  on wide displays).
+                                  center, so the content column doesn't
+                                  feel too far right on wide displays).
    The shift cascades through .layout, .polis-topbar-filter, and
    .pinned-dot automatically — they all read the same variable. */
 @media (min-width: 1260px) {
@@ -3917,7 +4418,7 @@ body.is-search-active .entry--ghost-compose {
 }
 
 /* ==========================================================================
-   9. RESPONSIVE — mobile single-column collapse (step-05/5.g)
+   9. RESPONSIVE — mobile single-column collapse
    Two breakpoints:
      ≤ 900px  — layout collapses to single column; bio card moves above
                 stream; timeline bar + dots hide; topbar stacks; filter
@@ -3998,7 +4499,7 @@ body.is-search-active .entry--ghost-compose {
     /* Bio card stays as a row on mobile; identity-row already is.
        Scoping under .layout-left to match the desktop rules' specificity
        (theme CSS overrides the bare .site-bio selector).
-       2026-05-18: desktop base bio is 13px so mobile bumps DOWN to 12px
+       The desktop base bio is 13px so mobile bumps DOWN to 12px
        to stay subordinate at narrow widths. */
     .layout-left .site-identity { gap: 12px; }
     .layout-left .site-bio { font-size: 12px; }

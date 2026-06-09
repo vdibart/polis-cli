@@ -19,11 +19,10 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
-	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
-	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 )
 
 // semverPattern matches a bare semver string like "0.42.0".
@@ -1178,18 +1177,45 @@ func checkStorageSalt(ctx *runContext) CheckResult {
 	return CheckResult{Name: name, Status: StatusFail, Message: "Created storage salt", Reason: reason, Actions: actions}
 }
 
-// checkDMDirectories ensures .polis/bundles/pub.polis.core/dm/conv/ exists with 0700 perms.
+// checkDMKeyring provisions the tenant's epoch-0 DM keys (keyring.json + bootstrap epoch)
+// and publishes the signed public_key_messages block — the self-host mirror of the
+// Patrol/Medic deploy-upgrade detector. Non-destructive: an existing keyring is untouched.
+func checkDMKeyring(ctx *runContext) CheckResult {
+	const name = "dm-keyring"
+	const reason = "Encrypted DM requires an epoch-0 keyring (.polis/bundles/pub.polis.core/dm/keyring.json) with a published public_key_messages block"
+
+	kr, err := dm.LoadKeyring(dm.DMDir(ctx.siteDir))
+	if err == nil && len(kr.Epochs) > 0 && kr.SchemaVersion >= dm.KeyringSchemaVersion {
+		return pass(name, "DM keyring present")
+	}
+
+	actions := []Action{{Op: "create", Path: ".polis/bundles/pub.polis.core/dm/keyring.json", Detail: "epoch-0 bootstrap keyring + published messages key"}}
+	if ctx.dryRun {
+		return fail(name, "Missing epoch-0 DM keyring", reason, actions)
+	}
+
+	privPEM, err := os.ReadFile(filepath.Join(ctx.siteDir, ".polis", "keys", "id_ed25519"))
+	if err != nil {
+		return skip(name, "Cannot read private key to provision DM keyring", reason)
+	}
+	if err := site.ProvisionAndPublishMessagesKey(ctx.siteDir, privPEM); err != nil {
+		return skip(name, fmt.Sprintf("Failed to provision DM keyring: %v", err), reason)
+	}
+	return CheckResult{Name: name, Status: StatusFail, Message: "Created epoch-0 DM keyring", Reason: reason, Actions: actions}
+}
+
+// checkDMDirectories ensures .polis/bundles/pub.polis.core/dm/conversations/ exists with 0700 perms.
 func checkDMDirectories(ctx *runContext) CheckResult {
 	const name = "dm-directories"
-	const reason = "DM conversations are stored in .polis/bundles/pub.polis.core/dm/conv/ with restricted permissions"
+	const reason = "DM conversations are stored in .polis/bundles/pub.polis.core/dm/conversations/ with restricted permissions"
 
-	convPath := filepath.Join(ctx.siteDir, ".polis", "bundles", "pub.polis.core", "dm", "conv")
+	convPath := filepath.Join(ctx.siteDir, ".polis", "bundles", "pub.polis.core", "dm", "conversations")
 
 	if dirExists(convPath) {
 		// Check permissions
 		info, err := os.Stat(convPath)
 		if err == nil && info.Mode().Perm() != 0700 {
-			actions := []Action{{Op: "update", Path: ".polis/bundles/pub.polis.core/dm/conv", Detail: fmt.Sprintf("chmod %o → 0700", info.Mode().Perm())}}
+			actions := []Action{{Op: "update", Path: ".polis/bundles/pub.polis.core/dm/conversations", Detail: fmt.Sprintf("chmod %o → 0700", info.Mode().Perm())}}
 			if ctx.dryRun {
 				return fail(name, fmt.Sprintf("DM directory has unsafe permissions: %o", info.Mode().Perm()), reason, actions)
 			}
@@ -1199,7 +1225,7 @@ func checkDMDirectories(ctx *runContext) CheckResult {
 		return pass(name, "DM directories present with correct permissions")
 	}
 
-	actions := []Action{{Op: "create", Path: ".polis/bundles/pub.polis.core/dm/conv"}}
+	actions := []Action{{Op: "create", Path: ".polis/bundles/pub.polis.core/dm/conversations"}}
 
 	if ctx.dryRun {
 		return fail(name, "Missing DM directories", reason, actions)
@@ -1209,138 +1235,6 @@ func checkDMDirectories(ctx *runContext) CheckResult {
 		return fail(name, fmt.Sprintf("Failed to create: %v", err), reason, actions)
 	}
 	return CheckResult{Name: name, Status: StatusFail, Message: "Created DM directories", Reason: reason, Actions: actions}
-}
-
-// checkDMDomainCase normalizes mixed-case domains to lowercase in DM conversations.
-func checkDMDomainCase(ctx *runContext) CheckResult {
-	const name = "dm-domain-case"
-	const reason = "DNS hostnames are case-insensitive (RFC 1123) — mixed-case domains cause conversation ID mismatches"
-
-	convPath := filepath.Join(ctx.siteDir, ".polis", "bundles", "pub.polis.core", "dm", "conv")
-	if !dirExists(convPath) {
-		return pass(name, "No DM conversations to check")
-	}
-
-	entries, err := os.ReadDir(convPath)
-	if err != nil {
-		return pass(name, "No DM conversations to check")
-	}
-
-	var mixedCaseFiles []string
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(convPath, entry.Name()))
-		if err != nil {
-			continue
-		}
-		var conv struct {
-			PeerDomain string `json:"peer_domain"`
-		}
-		if err := json.Unmarshal(data, &conv); err != nil {
-			continue
-		}
-		if conv.PeerDomain != strings.ToLower(conv.PeerDomain) {
-			mixedCaseFiles = append(mixedCaseFiles, entry.Name())
-		}
-	}
-
-	// Also check conversations index
-	idxPath := filepath.Join(ctx.siteDir, ".polis", "bundles", "pub.polis.core", "dm", "conversations.json")
-	if idxData, err := os.ReadFile(idxPath); err == nil {
-		var idx struct {
-			Conversations []map[string]interface{} `json:"conversations"`
-		}
-		if json.Unmarshal(idxData, &idx) == nil {
-			for _, c := range idx.Conversations {
-				if pd, ok := c["peer_domain"].(string); ok && pd != strings.ToLower(pd) {
-					if len(mixedCaseFiles) == 0 {
-						mixedCaseFiles = append(mixedCaseFiles, "conversations.json")
-					}
-					break
-				}
-			}
-		}
-	}
-
-	if len(mixedCaseFiles) == 0 {
-		return pass(name, "All DM domains are lowercase")
-	}
-
-	actions := []Action{{Op: "update", Path: ".polis/bundles/pub.polis.core/dm", Detail: fmt.Sprintf("normalize %d file(s)", len(mixedCaseFiles))}}
-
-	if ctx.dryRun {
-		return fail(name, fmt.Sprintf("%d DM file(s) with mixed-case domains", len(mixedCaseFiles)), reason, actions)
-	}
-
-	healDMDomainCase(ctx.siteDir)
-	return CheckResult{Name: name, Status: StatusFail, Message: fmt.Sprintf("Normalized domains in %d DM file(s)", len(mixedCaseFiles)), Reason: reason, Actions: actions}
-}
-
-// checkDMPreviewEncryption encrypts plaintext DM previews at rest.
-func checkDMPreviewEncryption(ctx *runContext) CheckResult {
-	const name = "dm-preview-encryption"
-	const reason = "DM conversation previews must be encrypted at rest for privacy"
-
-	idxPath := filepath.Join(ctx.siteDir, ".polis", "bundles", "pub.polis.core", "dm", "conversations.json")
-	if !fileExists(idxPath) {
-		return pass(name, "No DM conversations index")
-	}
-
-	// Check if any conversations have plaintext previews
-	data, err := os.ReadFile(idxPath)
-	if err != nil {
-		return pass(name, "Cannot read conversations index")
-	}
-
-	var idx struct {
-		Conversations []map[string]interface{} `json:"conversations"`
-	}
-	if err := json.Unmarshal(data, &idx); err != nil {
-		return pass(name, "Cannot parse conversations index")
-	}
-
-	plaintextCount := 0
-	for _, c := range idx.Conversations {
-		preview, _ := c["last_message_preview"].(string)
-		encrypted, _ := c["last_message_preview_encrypted"].(bool)
-		if preview != "" && !encrypted {
-			plaintextCount++
-		}
-	}
-
-	if plaintextCount == 0 {
-		return pass(name, "All DM previews encrypted")
-	}
-
-	actions := []Action{{Op: "update", Path: ".polis/bundles/pub.polis.core/dm/conversations.json", Detail: fmt.Sprintf("encrypt %d plaintext preview(s)", plaintextCount)}}
-
-	if ctx.dryRun {
-		return fail(name, fmt.Sprintf("%d DM preview(s) need encryption", plaintextCount), reason, actions)
-	}
-
-	// Need private key to derive storage key
-	privPEM, err := os.ReadFile(filepath.Join(ctx.siteDir, ".polis", "keys", "id_ed25519"))
-	if err != nil {
-		return skip(name, "Cannot read private key for encryption", reason)
-	}
-	privKey, err := signing.ParsePrivateKey(privPEM)
-	if err != nil {
-		return skip(name, "Cannot parse private key for encryption", reason)
-	}
-	defer signing.ZeroKey(privKey)
-
-	store, err := dm.NewStore(ctx.siteDir, privKey.Seed())
-	if err != nil {
-		return skip(name, fmt.Sprintf("Cannot create DM store: %v", err), reason)
-	}
-
-	if err := store.EncryptPlaintextPreviews(); err != nil {
-		return skip(name, fmt.Sprintf("Encryption failed: %v", err), reason)
-	}
-
-	return CheckResult{Name: name, Status: StatusFail, Message: fmt.Sprintf("Encrypted %d plaintext DM preview(s)", plaintextCount), Reason: reason, Actions: actions}
 }
 
 // ── Phase 6 (cont): Policy content convergence ──────────────────────
@@ -1457,112 +1351,6 @@ func checkWebappViewMode(ctx *runContext) CheckResult {
 
 // ── Helpers for new checks ─────────────────────────────────────────
 
-// healDMDomainCase normalizes mixed-case domains to lowercase in DM conversations.
-func healDMDomainCase(siteDir string) {
-	dmBase := filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "dm")
-	convDir := filepath.Join(dmBase, "conv")
-
-	entries, err := os.ReadDir(convDir)
-	if err != nil {
-		return
-	}
-
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".json") || entry.IsDir() {
-			continue
-		}
-		path := filepath.Join(convDir, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-
-		var conv struct {
-			PeerDomain string          `json:"peer_domain"`
-			PeerURL    string          `json:"peer_url"`
-			Messages   json.RawMessage `json:"messages"`
-		}
-		if err := json.Unmarshal(data, &conv); err != nil {
-			continue
-		}
-
-		changed := false
-		lower := strings.ToLower(conv.PeerDomain)
-		if lower != conv.PeerDomain {
-			conv.PeerDomain = lower
-			changed = true
-		}
-
-		var messages []map[string]interface{}
-		if err := json.Unmarshal(conv.Messages, &messages); err == nil {
-			for i, msg := range messages {
-				if from, ok := msg["from"].(string); ok {
-					if lf := strings.ToLower(from); lf != from {
-						messages[i]["from"] = lf
-						changed = true
-					}
-				}
-				if to, ok := msg["to"].(string); ok {
-					if lt := strings.ToLower(to); lt != to {
-						messages[i]["to"] = lt
-						changed = true
-					}
-				}
-			}
-		}
-
-		if !changed {
-			continue
-		}
-
-		msgBytes, err := json.Marshal(messages)
-		if err != nil {
-			continue
-		}
-		out := map[string]interface{}{
-			"peer_domain": conv.PeerDomain,
-			"peer_url":    conv.PeerURL,
-			"messages":    json.RawMessage(msgBytes),
-		}
-		outData, err := json.MarshalIndent(out, "", "  ")
-		if err != nil {
-			continue
-		}
-		outData = append(outData, '\n')
-		os.WriteFile(path, outData, 0600)
-	}
-
-	// Fix conversations index
-	idxPath := filepath.Join(dmBase, "conversations.json")
-	idxData, err := os.ReadFile(idxPath)
-	if err != nil {
-		return
-	}
-	var idx struct {
-		Conversations []map[string]interface{} `json:"conversations"`
-	}
-	if err := json.Unmarshal(idxData, &idx); err != nil {
-		return
-	}
-	changed := false
-	for i, c := range idx.Conversations {
-		if pd, ok := c["peer_domain"].(string); ok {
-			if lp := strings.ToLower(pd); lp != pd {
-				idx.Conversations[i]["peer_domain"] = lp
-				changed = true
-			}
-		}
-	}
-	if changed {
-		outData, err := json.MarshalIndent(idx, "", "  ")
-		if err != nil {
-			return
-		}
-		outData = append(outData, '\n')
-		os.WriteFile(idxPath, outData, 0600)
-	}
-}
-
 // appendPolicyRule appends a JSONL rule line to a policy file.
 func appendPolicyRule(path, ruleLine string) error {
 	existing, err := os.ReadFile(path)
@@ -1583,6 +1371,179 @@ func appendPolicyRule(path, ruleLine string) error {
 	}
 	_, err = f.WriteString(ruleLine + "\n")
 	return err
+}
+
+// checkBlessedCacheGC is the self-hoster equivalent of the hosted Rosie actor's
+// GC pass: it removes structurally-orphaned blessed-comment cache entries — a
+// cached body with no readable .meta.json provenance sidecar, which is unsafe
+// to display and regenerable by a later sync.
+//
+// SCOPE: this is the OFFLINE slice of Rosie a self-hoster can run without a live
+// discovery client. The full custodian work — reconcile (desired-vs-present:
+// re-fetch missing, evict withdrawn/denied) and integrity re-verification —
+// needs DS access + network and runs in the hosted Rosie goroutine
+// (webapp/internal/hosted/rosie.go) or whenever the self-hosted webapp syncs.
+// See plans/rosie-cache-custodian-design.md (WS-R2: "Tailor-integrated check").
+// checkForeignContentInPublicPath enforces the core principle that no content
+// authored by ANOTHER tenant may live in this site's PUBLIC paths. It walks the
+// public comment + post SOURCE trees (content/pub.polis.core/{comment,post}) for
+// .md files whose frontmatter `author` is not this site's own domain — the
+// Defect-3 copies the old blessing flow left behind — backs each up (Apply mode)
+// and removes it, plus its rendered mount sibling ({comments,posts}/…html). This
+// is the self-hoster equivalent of Medic's foreign-content quarantine; the
+// isolated blessed-comment cache (+ Rosie/render read-through) is the only place
+// a foreign comment may live. The owner's OWN content (author == site domain) is
+// canonical and left untouched.
+func checkForeignContentInPublicPath(ctx *runContext) CheckResult {
+	name := "foreign-content-in-public-path"
+	reason := "no content authored by another tenant may live in a public path; the isolated blessed-comment cache is its only home (comment-registration-severe-bug / rosie-cache-custodian)"
+
+	owner := tailorSiteDomain(ctx.baseURL)
+	if owner == "" {
+		return pass(name, "site domain unknown — skipped")
+	}
+
+	var actions []Action
+	for _, ct := range []struct{ sub, mount string }{{"comment", "comments"}, {"post", "posts"}} {
+		root := filepath.Join(ctx.siteDir, "content", "pub.polis.core", ct.sub)
+		srcPrefix := "content/pub.polis.core/" + ct.sub + "/"
+		filepath.WalkDir(root, func(path string, d os.DirEntry, werr error) error {
+			if werr != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if path != root && strings.HasPrefix(d.Name(), ".") {
+					return filepath.SkipDir // .versions/, etc.
+				}
+				return nil
+			}
+			if !strings.HasSuffix(d.Name(), ".md") {
+				return nil
+			}
+			author := tailorFrontmatterAuthor(path)
+			if author == "" || author == owner {
+				return nil // owner's own content (or unknowable) — leave it
+			}
+			rel, _ := filepath.Rel(ctx.siteDir, path)
+			rel = filepath.ToSlash(rel)
+			if !ctx.dryRun {
+				backupFile(ctx.siteDir, ctx.backupDir, rel)
+				os.Remove(path)
+			}
+			actions = append(actions, Action{Op: "remove", Path: rel, Detail: fmt.Sprintf("foreign content in public path (author=%s)", author)})
+
+			// Rendered mount sibling (no frontmatter to scan) — remove by association.
+			mountRel := ct.mount + "/" + strings.TrimSuffix(strings.TrimPrefix(rel, srcPrefix), ".md") + ".html"
+			if _, e := os.Stat(filepath.Join(ctx.siteDir, mountRel)); e == nil {
+				if !ctx.dryRun {
+					backupFile(ctx.siteDir, ctx.backupDir, mountRel)
+					os.Remove(filepath.Join(ctx.siteDir, mountRel))
+				}
+				actions = append(actions, Action{Op: "remove", Path: mountRel, Detail: fmt.Sprintf("foreign content in public path, rendered mount (author=%s)", author)})
+			}
+			return nil
+		})
+	}
+
+	if len(actions) == 0 {
+		return pass(name, "no foreign content in public paths")
+	}
+	return fail(name, fmt.Sprintf("removed %d foreign file(s) from public paths", len(actions)), reason, actions)
+}
+
+// tailorSiteDomain extracts the bare host from the site's base URL (no net/url
+// dependency): strips scheme, path, and port. "" if baseURL is empty.
+func tailorSiteDomain(baseURL string) string {
+	s := strings.TrimSpace(baseURL)
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := strings.IndexAny(s, "/:"); i >= 0 {
+		s = s[:i]
+	}
+	return s
+}
+
+// tailorFrontmatterAuthor reads the YAML frontmatter `author` field of a markdown
+// file (mirrors clerk/patrol's local extractors — kept local to keep the actors
+// independent). Returns "" when not found.
+func tailorFrontmatterAuthor(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	inFM := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "---" {
+			if inFM {
+				return "" // end of frontmatter, author not found
+			}
+			inFM = true
+			continue
+		}
+		if !inFM {
+			continue
+		}
+		if strings.HasPrefix(line, "author:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "author:"))
+		}
+	}
+	return ""
+}
+
+func checkBlessedCacheGC(ctx *runContext) CheckResult {
+	name := "blessed-cache-gc"
+	reason := "an orphan blessed-comment cache body (no provenance sidecar) is unsafe to display and regenerable; Rosie GCs them (rosie-cache-custodian)"
+
+	dsDir := filepath.Join(ctx.siteDir, ".polis", "ds")
+	entries, err := os.ReadDir(dsDir)
+	if err != nil {
+		return CheckResult{Name: name, Status: StatusPass, Message: "no DS directory"}
+	}
+
+	var actions []Action
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		blessedRoot := filepath.Join(dsDir, entry.Name(), "pub.polis.core", "cache", "blessed")
+		filepath.WalkDir(blessedRoot, func(path string, d os.DirEntry, werr error) error {
+			if werr != nil || d.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(d.Name(), ".md") || strings.HasSuffix(d.Name(), ".meta.json") {
+				return nil
+			}
+			// Orphan = body whose sidecar is missing or unreadable.
+			if data, e := os.ReadFile(path + ".meta.json"); e == nil {
+				var probe map[string]any
+				if json.Unmarshal(data, &probe) == nil {
+					return nil // healthy
+				}
+			}
+			relPath, _ := filepath.Rel(ctx.siteDir, path)
+			if !ctx.dryRun {
+				os.Remove(path)
+				os.Remove(path + ".meta.json")
+			}
+			actions = append(actions, Action{Op: "remove", Path: relPath, Detail: "orphan blessed-cache body (no sidecar)"})
+			return nil
+		})
+	}
+
+	if len(actions) == 0 {
+		return CheckResult{Name: name, Status: StatusPass, Message: "no orphan blessed-cache entries"}
+	}
+	return CheckResult{
+		Name:    name,
+		Status:  StatusFail,
+		Reason:  reason,
+		Message: fmt.Sprintf("removed %d orphan blessed-cache entr(ies)", len(actions)),
+		Actions: actions,
+	}
 }
 
 // checkStaleScopedFeed removes deprecated scoped feed cache files (followers, me).
@@ -1689,6 +1650,70 @@ func checkStaleFeedViewedAt(ctx *runContext) CheckResult {
 		Status:  StatusFail,
 		Reason:  reason,
 		Message: fmt.Sprintf("removed pub.polis.feed.viewed_at from %d cursors file(s)", len(actions)),
+		Actions: actions,
+	}
+}
+
+// checkLegacyFeedScaffolding retires the legacy pub.polis.feed content-type
+// scaffolding: the empty public content/pub.polis.core/feed/ directory created
+// by older polis init, and any stale "pub.polis.feed" entry left in
+// content/pub.polis.core/bundle.json after the type was retired (MergeDefaults
+// is additive-only and won't strip removed types). The real feed cache lives
+// under .polis/ds/<domain>/state/pub.polis.feed*.jsonl and is unaffected.
+//
+// Defensive: only remove the dir if it's empty — nothing should ever write
+// there, but if something has, leave the contents in place for the operator.
+func checkLegacyFeedScaffolding(ctx *runContext) CheckResult {
+	name := "legacy-feed-scaffolding"
+	reason := "pub.polis.feed retired as a public content type; only the private DS state files remain"
+
+	var actions []Action
+
+	dirRel := filepath.Join("content", "pub.polis.core", "feed")
+	dirFull := filepath.Join(ctx.siteDir, dirRel)
+	if entries, err := os.ReadDir(dirFull); err == nil {
+		if len(entries) == 0 {
+			if !ctx.dryRun {
+				os.Remove(dirFull)
+			}
+			actions = append(actions, Action{
+				Op:     "remove",
+				Path:   dirRel,
+				Detail: "retired empty legacy pub.polis.feed content dir",
+			})
+		} else {
+			actions = append(actions, Action{
+				Op:     "flag",
+				Path:   dirRel,
+				Detail: fmt.Sprintf("legacy pub.polis.feed dir has %d unexpected entries; left in place for operator review", len(entries)),
+			})
+		}
+	}
+
+	bundleRel := filepath.Join("content", "pub.polis.core", "bundle.json")
+	bundleFull := filepath.Join(ctx.siteDir, bundleRel)
+	if b, err := bundle.LoadBundle(bundleFull); err == nil {
+		if _, has := b.Types["pub.polis.feed"]; has {
+			delete(b.Types, "pub.polis.feed")
+			if !ctx.dryRun {
+				bundle.SaveBundle(bundleFull, b)
+			}
+			actions = append(actions, Action{
+				Op:     "remove_key",
+				Path:   bundleRel,
+				Detail: "removed retired pub.polis.feed declaration",
+			})
+		}
+	}
+
+	if len(actions) == 0 {
+		return CheckResult{Name: name, Status: StatusPass, Message: "no legacy pub.polis.feed scaffolding"}
+	}
+	return CheckResult{
+		Name:    name,
+		Status:  StatusFail,
+		Reason:  reason,
+		Message: fmt.Sprintf("retired %d legacy pub.polis.feed artifact(s)", len(actions)),
 		Actions: actions,
 	}
 }
@@ -2405,8 +2430,8 @@ func checkKeyConsistency(ctx *runContext) CheckResult {
 		return pass(name, "public key matches between .polis/keys/ and .well-known/polis")
 	}
 	action := Action{
-		Op:   "flag",
-		Path: ".well-known/polis, .polis/keys/id_ed25519.pub",
+		Op:     "flag",
+		Path:   ".well-known/polis, .polis/keys/id_ed25519.pub",
 		Detail: "public_key divergence — verify which is correct (rotated key not updated in well-known? tampered well-known?) and reconcile manually",
 	}
 	return fail(name,

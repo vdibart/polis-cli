@@ -30,10 +30,12 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
+	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	"github.com/vdibart/polis-cli/cli-go/pkg/template"
 )
@@ -63,6 +65,11 @@ type profileItem struct {
 	Published      string             `json:"published,omitempty"`       // alias of LastActive for renderer parity
 	PublishedHuman string             `json:"published_human,omitempty"` // relative form ("2h ago")
 	RecentPost     *profileRecentPost `json:"recent_post,omitempty"`
+	// AuthorAvatar carries the profile's avatar config so the SPA can render
+	// the same 28px chip the stream shows. Resolved by attachProfileAvatars;
+	// a deterministic hue fallback is synthesized when the author has no
+	// custom avatar, so every row gets one.
+	AuthorAvatar *render.AvatarConfig `json:"author_avatar,omitempty"`
 }
 
 // profileRecentPost is the nested most-recent-post snapshot. Used by the
@@ -420,6 +427,62 @@ func (s *Server) buildAllPolisProfiles(r *http.Request, sortBy, search, cursor s
 	return items, resp.NextCursor, nil
 }
 
+// attachProfileAvatars resolves an avatar config for every profile in the
+// list and sets item.AuthorAvatar in place. Each unique domain is fetched
+// once via render.LoadOrFetchAuthorAvatar (bounded to 5 concurrent, cached
+// 6h and shared with the post/comment avatar paths); a deterministic hue
+// fallback is synthesized when the author has no custom avatar, so every
+// row gets a config. Mirrors buildAuthorAvatars (which keys by item URL);
+// profiles key by domain since each row is one author.
+func (s *Server) attachProfileAvatars(items []profileItem) {
+	if len(items) == 0 {
+		return
+	}
+	uniq := make(map[string]bool, len(items))
+	for i := range items {
+		if items[i].AuthorDomain != "" {
+			uniq[items[i].AuthorDomain] = true
+		}
+	}
+	if len(uniq) == 0 {
+		return
+	}
+
+	type result struct {
+		domain string
+		cfg    render.AvatarConfig
+	}
+	results := make(chan result, len(uniq))
+	sem := make(chan struct{}, 5)
+	var wg sync.WaitGroup
+	for domain := range uniq {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(d string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			cfg, ok := render.LoadOrFetchAuthorAvatar(d)
+			if !ok || cfg.BG == "" {
+				cfg = render.FallbackAvatarConfig(d)
+			}
+			results <- result{domain: d, cfg: cfg}
+		}(domain)
+	}
+	wg.Wait()
+	close(results)
+
+	byDomain := make(map[string]render.AvatarConfig, len(uniq))
+	for r := range results {
+		byDomain[r.domain] = r.cfg
+	}
+	for i := range items {
+		if cfg, ok := byDomain[items[i].AuthorDomain]; ok {
+			c := cfg // copy so each pointer is independent
+			items[i].AuthorAvatar = &c
+		}
+	}
+}
+
 // handleProfiles serves GET /api/profiles.
 //
 // Defaults (matching the sentence-filter grammar):
@@ -488,6 +551,7 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 		if items == nil {
 			items = []profileItem{}
 		}
+		s.attachProfileAvatars(items)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		resp := map[string]interface{}{
@@ -509,11 +573,12 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
 	if items == nil {
 		items = []profileItem{}
 	}
+	s.attachProfileAvatars(items)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"items": items,
 		"count": len(items),

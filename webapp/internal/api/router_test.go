@@ -270,6 +270,24 @@ func TestDMListRequiresAuth(t *testing.T) {
 	}
 }
 
+// protection_status is a signed-request site-to-site action. Without signed-request
+// headers (and without a bearer token) it must be gated, not served — confirming the
+// route is wired and falls through to the auth requirement. The full signature path needs
+// a remote key fetch and is covered at the dm/ops layer.
+func TestDMProtectionStatusRequiresAuth(t *testing.T) {
+	mux, _, _ := testSetup(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/content/dm/actions/protection_status", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	// DM-7: signed-only action — without a signed request it is refused with 403
+	// (not fallen through to Bearer/401).
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for unsigned protection_status, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestDMGetByIDRequiresAuth(t *testing.T) {
 	mux, _, _ := testSetup(t)
 
@@ -295,36 +313,11 @@ func TestDMListWithAuth(t *testing.T) {
 	}
 }
 
-func TestFeedListRequiresAuth(t *testing.T) {
-	mux, _, _ := testSetup(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/content/feed", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 for GET feed without auth, got %d", w.Code)
-	}
-}
-
-func TestFeedListWithAuth(t *testing.T) {
-	mux, _, apiKey := testSetup(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/content/feed", nil)
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
-		t.Errorf("expected feed list to pass auth, got %d", w.Code)
-	}
-}
-
 func TestPrivateTypesFullNameRequiresAuth(t *testing.T) {
 	mux, _, _ := testSetup(t)
 
 	// Verify auth is required even when using fully-qualified type names
-	for _, typeName := range []string{"pub.polis.dm", "pub.polis.feed", "pub.polis.follow"} {
+	for _, typeName := range []string{"pub.polis.dm", "pub.polis.follow"} {
 		req := httptest.NewRequest(http.MethodGet, "/v1/content/"+typeName, nil)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)

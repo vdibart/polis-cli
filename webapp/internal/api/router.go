@@ -20,9 +20,12 @@
 package api
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"strings"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 )
 
@@ -113,18 +116,43 @@ func (h *handlers) routeContent(w http.ResponseWriter, r *http.Request, siteDir 
 		// but the gate-vs-resolver mismatch was a smell waiting for a sibling
 		// content type to grow into the same shape.
 		isDMType := contentType == "dm" || contentType == "pub.polis.dm"
-		if isDMType && len(segments) >= 3 && segments[1] == "actions" && segments[2] == "deliver" {
-			// Try signed-request auth first
-			if r.Header.Get("X-Polis-Domain") != "" {
-				senderDomain, err := verifySignedRequest(r)
-				if err != nil {
-					writeError(w, http.StatusForbidden, "forbidden", "Signed request verification failed: "+err.Error())
-					return
-				}
-				// Inject verified sender domain into the action dispatch
-				h.handleDMDeliver(w, r, senderDomain)
+		isDMSignedAction := isDMType && len(segments) >= 3 && segments[1] == "actions" &&
+			(segments[2] == "deliver" || segments[2] == "protection_status")
+		if isDMSignedAction {
+			// Site-to-site actions (`deliver`, `protection_status`) authenticate ONLY with
+			// signed-request headers — never a bearer API key. The signed-request branch
+			// cryptographically establishes the caller domain; the generic Bearer path
+			// (handleContentAction) would take `sender_domain` from the request body
+			// unverified, letting a key holder forge inbound DMs with spoofed attribution
+			// (DM-7). So a request without X-Polis-Domain is refused here rather than
+			// falling through to Bearer auth.
+			if r.Header.Get("X-Polis-Domain") == "" {
+				writeError(w, http.StatusForbidden, "forbidden", "This action requires a signed site-to-site request (X-Polis-Domain/Signature/Timestamp).")
 				return
 			}
+			// DM-2: the signature binds the recipient domain + body digest. Read the raw
+			// body once for the digest and reset it so the downstream handler can re-read.
+			// recipientDomain is OUR configured domain (engine.BaseURL), never the request
+			// Host. Body is already capped by the limitBody MaxBytesReader.
+			body, rerr := io.ReadAll(r.Body)
+			if rerr != nil {
+				writeError(w, http.StatusBadRequest, "invalid_request", "could not read request body")
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			recipientDomain := dm.ExtractDomainFromURL(h.engine.BaseURL)
+			callerDomain, err := dm.VerifySignedRequestForAction(r, segments[2], recipientDomain, body, fetchRemotePublicKey, nil)
+			if err != nil {
+				writeError(w, http.StatusForbidden, "forbidden", "Signed request verification failed: "+err.Error())
+				return
+			}
+			// Inject the verified caller domain into the action dispatch.
+			if segments[2] == "deliver" {
+				h.handleDMDeliver(w, r, callerDomain)
+			} else {
+				h.handleDMProtectionStatus(w, r, callerDomain)
+			}
+			return
 		}
 
 		auth := r.Header.Get("Authorization")
@@ -229,8 +257,6 @@ func (h *handlers) routeContent(w http.ResponseWriter, r *http.Request, siteDir 
 func isPrivateContentType(shortOrFull string) bool {
 	switch shortOrFull {
 	case "dm", "pub.polis.dm":
-		return true
-	case "feed", "pub.polis.feed":
 		return true
 	case "follow", "pub.polis.follow":
 		return true

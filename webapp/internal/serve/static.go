@@ -65,7 +65,18 @@ func ServeTenantPublic(
 	urlPath := r.URL.Path
 
 	// Map root to index.html
-	if urlPath == "/" || urlPath == "" {
+	if urlPath == "/" || urlPath == "" || urlPath == "/index.html" {
+		// PQL landing redirect: a human browser (Accept: text/html) landing on
+		// the bare tenant root — or the explicit /index.html — is sent to the
+		// canonical PQL URL so the address bar reflects the filter (and
+		// scroll-driven post URLs build on it). Programmatic / non-HTML clients
+		// still get index.html unchanged. handlers_pql.go's HTML branch reads
+		// index.html directly (relPath), never via "/" or "/index.html", so
+		// this can't loop back into itself.
+		if r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
+			http.Redirect(w, r, "/pql/all+posts+by+date", http.StatusFound)
+			return
+		}
 		urlPath = "/index.html"
 	}
 
@@ -108,6 +119,29 @@ func ServeTenantPublic(
 		if b != nil {
 			if mounted := b.SourceToMountPath(clean); mounted != clean {
 				http.Redirect(w, r, "/"+mounted, http.StatusMovedPermanently)
+				return
+			}
+		}
+	}
+
+	// Mount-path .md alias → canonical content source path (301). The signed
+	// markdown lives ONLY under content/pub.polis.core/<type>/; the mount dirs
+	// (posts/, comments/) hold rendered .html. So ANY mount .md request 301s to
+	// its canonical content/ path — unconditionally, even when a legacy
+	// duplicate .md physically exists at the mount (pre-split artifact; the
+	// canonical copy is the one under content/). This (a) heals comments
+	// mis-registered with the discovery service at the mount URL (comment-infra
+	// remediation, plans/comment-registration-severe-bug.md, Defect 1: those DS
+	// URLs are signature-bound + the (type,url) upsert key, so this is a
+	// PERMANENT compatibility shim), and (b) canonicalizes onto a single source
+	// of truth. Programmability is preserved — a client swapping .html→.md still
+	// gets the markdown, served canonically from content/. content/... is a
+	// no-op for MountToSourcePath, so the canonical .md is served as raw
+	// markdown below without looping.
+	if strings.HasSuffix(clean, ".md") {
+		if b := storage.LoadBundle(handle); b != nil {
+			if src := b.MountToSourcePath(clean); src != clean {
+				http.Redirect(w, r, "/"+src, http.StatusMovedPermanently)
 				return
 			}
 		}

@@ -48,63 +48,58 @@
 -->
 <article class="entry entry--post entry--commentable is-loaded is-expanded {{is_above_focus}}"
          data-polis-entry-type="post">
-    <!-- Timeline dot doubles as the comment-add affordance. The base
-         8×8 dot reads as a normal "post indicator" at rest; on hover
-         it swaps to a comment-add icon (speech bubble + "+"). Clicking
-         it navigates to the post's reply widget. The full-height
-         invisible gutter strip (.entry--commentable.entry::before)
-         catches hover across the whole column gap. Replaces the
-         right-side .entry-comments-badge that previously occupied
-         that slot.
-
-         Lives INSIDE .entry-meta-line so its absolute positioning
-         resolves against the meta-line box — vertical center of the
-         dot matches the timestamp's vertical center by construction. -->
+    <!-- Meta line: just the date now (v4 site-identity). This is the public
+         single-author page, so there is NO cross-author avatar here
+         (renderPost adds the floated avatar for the owner's mixed-author
+         stream). The timeline dot moved to the body rail below (anchors to the
+         post's first line), and the comment indicator moved BELOW the post
+         (left-aligned with the body) — both mirror the JS renderPost. -->
     <div class="entry-meta-line">
-        <a class="timeline-dot" href="{{url}}#polis-widget" aria-label="Add a comment"></a>
         <time class="entry-date-time" datetime="{{published}}">{{published_human}}</time>
-        <!-- Right side: comment-count badge. Always rendered, even
-             at 0, so the indicator reads as "this post has N
-             comments" rather than appearing only on posts that
-             already have conversation. Mirrors the JS-side
-             renderPost shape so dynamic siblings below the seam
-             render identically. -->
-        <span class="entry-meta-right">
-            <a class="entry-comments-badge" href="{{url}}#comments">
-                <!-- SVG path matches stream.js's buildCommentSVG exactly
-                     so SSR'd entries and JS-paginated entries render
-                     the same icon. Stroke/fill come from .entry-
-                     comments-badge svg in stream.css. -->
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>
-                </svg>
-                <span class="count">{{comment_count}}</span>
-                <span class="add-plus" aria-hidden="true">+</span>
+    </div>
+    <!-- Body rail: the timeline dot is just a position marker now (no longer a
+         comment-add affordance — that moved to the comment badge below). The
+         rail anchors the dot to the body's first line (.entry-rail in
+         stream.css). Mirrors the JS bodyRail() output. -->
+    <div class="entry-rail">
+        <div class="timeline-dot" aria-hidden="true"></div>
+        <div class="entry-body entry-body--expanded">
+            <a class="entry-title-link {{title_link_state}}" href="{{url}}">
+                <h3 class="entry-title">{{title}}</h3>
             </a>
-        </span>
-    </div>
-    <div class="entry-body entry-body--expanded">
-        <a class="entry-title-link {{title_link_state}}" href="{{url}}">
-            <h3 class="entry-title">{{title}}</h3>
-        </a>
-        <div class="entry-content">
-            {{body_html}}
+            <div class="entry-content">
+                {{body_html}}
+            </div>
+            <!-- Long-post collapse toggle (see stream.html focus comment). -->
+            <button class="post-body-toggle" type="button" aria-expanded="false" hidden>show more</button>
         </div>
-        <!-- Long-post collapse toggle (see stream.html focus comment). -->
-        <button class="post-body-toggle" type="button" aria-expanded="false" hidden>show more</button>
+        <!-- Comment indicator BELOW the post body, left-aligned with the date /
+             title / body (mirrors the JS renderPost; styled by
+             .entry-rail > .entry-comments-badge). Always rendered, even at 0.
+             Two stacked SVGs: the rest comment icon + the hover add-comment icon
+             (.icon-add-comment, revealed on a commentable post). Paths match
+             stream.js's buildCommentSVG / buildAddCommentSVG exactly. -->
+        <a class="entry-comments-badge" href="{{url}}#comments">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>
+            </svg>
+            <svg class="icon-add-comment" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>
+                <line x1="12" y1="7.5" x2="12" y2="12.5"/>
+                <line x1="9.5" y1="10" x2="14.5" y2="10"/>
+            </svg>
+            <span class="count">{{comment_count}}</span>
+        </a>
     </div>
-    <!-- Blessed-comments panel: same DOM shape as the focus entry's
-         panel in stream.html, so enterFocusMode + openCommentsPanel
-         animate it identically. The --cards modifier scopes the
-         bordered-card visual treatment to the stream-list context
-         (matches .entry--comment-thread .comment-attached); the per-
-         post focus page's panel uses the plain class and keeps the
-         simpler separator look. Iteration is no-op when the SSR
-         context omits blessed_comments (e.g., per-post pages where
-         only the FOCUS post carries comments inline). -->
-    <div class="entry-comments-panel entry-comments-panel--cards">
-{{#blessed_comments}}
-        {{> snippets/blessed-comment}}
-{{/blessed_comments}}
-    </div>
+    <!-- No SSR comments panel for siblings. Read-focus loads the single
+         latest comment lazily via fetchFocusComment, which BUILDS the panel
+         on demand — exactly the JS-rendered renderPost path (dynamic stream
+         entries also ship no panel). An EMPTY <div class="entry-comments-
+         panel"> here is actively harmful: enterFocusMode treats any present
+         panel as "already loaded" and calls openCommentsPanel on it instead
+         of fetchFocusComment, so the comment never loads and the reader sees
+         an empty panel animate open (the read-focus "comment doesn't appear"
+         bug). The SSR context never populates blessed_comments for siblings
+         today, so the div was always empty — only the FOCUS entry (stream.html)
+         carries its blessed comments inline. -->
 </article>

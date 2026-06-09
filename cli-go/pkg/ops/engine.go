@@ -27,6 +27,10 @@ type Engine struct {
 	CLIThemesDir string
 	Logger       Logger
 
+	// EmitEvent, if set, routes structured operation events (e.g. dm.* security
+	// signals) to the host's event sink. nil = discard.
+	EmitEvent func(action string, fields map[string]any)
+
 	// OnContentChanged is called after any write operation succeeds.
 	OnContentChanged func()
 
@@ -82,6 +86,7 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		DiscoveryKey:     cfg.DiscoveryKey,
 		CLIThemesDir:     cfg.CLIThemesDir,
 		Logger:           cfg.Logger,
+		EmitEvent:        cfg.EmitEvent,
 		OnContentChanged: cfg.OnContentChanged,
 		handlers:         make(map[string]Handler),
 	}
@@ -109,6 +114,7 @@ type EngineConfig struct {
 	DiscoveryKey     string
 	CLIThemesDir     string
 	Logger           Logger
+	EmitEvent        func(action string, fields map[string]any)
 	OnContentChanged func()
 }
 
@@ -147,6 +153,7 @@ func (e *Engine) Dispatch(ctx context.Context, req ActionRequest) (*ActionResult
 		DiscoveryURL: e.DiscoveryURL,
 		DiscoveryKey: e.DiscoveryKey,
 		CLIThemesDir: e.CLIThemesDir,
+		EmitEvent:    e.EmitEvent,
 		Bundle:       b,
 	}
 

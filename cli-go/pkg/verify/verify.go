@@ -20,14 +20,14 @@ const (
 
 // VerificationResult contains the results of content verification.
 type VerificationResult struct {
-	URL              string      `json:"url"`
-	Type             ContentType `json:"type"`
-	Title            string      `json:"title"`
-	Published        string      `json:"published"`
-	CurrentVersion   string      `json:"current_version"`
-	Generator        string      `json:"generator,omitempty"`
-	InReplyTo        string      `json:"in_reply_to,omitempty"`
-	Author           string      `json:"author,omitempty"`
+	URL              string          `json:"url"`
+	Type             ContentType     `json:"type"`
+	Title            string          `json:"title"`
+	Published        string          `json:"published"`
+	CurrentVersion   string          `json:"current_version"`
+	Generator        string          `json:"generator,omitempty"`
+	InReplyTo        string          `json:"in_reply_to,omitempty"`
+	Author           string          `json:"author,omitempty"`
 	Signature        SignatureResult `json:"signature"`
 	Hash             HashResult      `json:"hash"`
 	ValidationIssues []string        `json:"validation_issues,omitempty"`
@@ -36,7 +36,7 @@ type VerificationResult struct {
 
 // SignatureResult contains signature verification status.
 type SignatureResult struct {
-	Status  string `json:"status"`  // valid, invalid, missing, error
+	Status  string `json:"status"` // valid, invalid, missing, error
 	Message string `json:"message"`
 }
 
@@ -47,13 +47,13 @@ type HashResult struct {
 
 // Frontmatter holds parsed frontmatter fields.
 type Frontmatter struct {
-	Title          string
-	Type           string
-	Published      string
-	CurrentVersion string
-	Signature      string
-	Generator      string
-	InReplyTo      string
+	Title            string
+	Type             string
+	Published        string
+	CurrentVersion   string
+	Signature        string
+	Generator        string
+	InReplyTo        string
 	InReplyToVersion string
 }
 
@@ -110,7 +110,7 @@ func VerifyContent(contentURL string) (*VerificationResult, error) {
 	}
 
 	// Verify signature
-	sigResult := verifySignature(content, publicKey, fm.Signature, authorIdentity)
+	sigResult := verifySignature(content, publicKey, fm.Signature, contentType == TypeComment)
 
 	// Verify hash
 	hashResult := verifyHash(body, fm.CurrentVersion)
@@ -219,7 +219,7 @@ func parseFrontmatter(content string) (*Frontmatter, string, error) {
 }
 
 // verifySignature verifies the content signature against the public key.
-func verifySignature(content, publicKey, signature, authorIdentity string) SignatureResult {
+func verifySignature(content, publicKey, signature string, isComment bool) SignatureResult {
 	if publicKey == "" {
 		return SignatureResult{
 			Status:  "error",
@@ -234,11 +234,19 @@ func verifySignature(content, publicKey, signature, authorIdentity string) Signa
 		}
 	}
 
-	// Extract the content to verify (everything before signature line)
-	contentToVerify := extractContentToSign(content, authorIdentity)
+	// Published files store the signature as bare base64 in the `signature:`
+	// frontmatter field. signing.VerifySignature -> parseSSHSignature requires a
+	// PEM-armored SSH SIGNATURE block, so rewrap it (matching judge/patrol's
+	// reconstructSSHSignature). If it already looks like a PEM block, leave it.
+	sshSig := strings.TrimSpace(signature)
+	if !strings.HasPrefix(sshSig, "-----BEGIN") {
+		sshSig = reconstructSSHSignature(sshSig)
+	}
 
-	// Verify signature
-	valid, err := signing.VerifySignature([]byte(contentToVerify), []byte(publicKey), signature)
+	// Reconstruct the exact bytes that were signed and verify (comment-aware:
+	// comments drop the after-signing-injected author line — signing.ContentToSign).
+	contentToVerify := signing.ContentToSign(content, isComment)
+	valid, err := signing.VerifySignature([]byte(contentToVerify), []byte(publicKey), sshSig)
 	if err != nil || !valid {
 		return SignatureResult{
 			Status:  "invalid",
@@ -252,21 +260,31 @@ func verifySignature(content, publicKey, signature, authorIdentity string) Signa
 	}
 }
 
-// extractContentToSign extracts the content portion that should be signed.
-// This matches the bash CLI behavior: everything up to the signature line.
-func extractContentToSign(content, authorIdentity string) string {
-	lines := strings.Split(content, "\n")
-	var result []string
+// reconstructSSHSignature rewraps a bare-base64 signature (as stored in the
+// `signature:` frontmatter field) into the PEM-armored SSH SIGNATURE block that
+// signing.parseSSHSignature expects. Mirrors judge.reconstructSSHSignature and
+// patrol.reconstructSSHSignature.
+func reconstructSSHSignature(base64Body string) string {
+	return "-----BEGIN SSH SIGNATURE-----\n" + wrapBase64(base64Body, 76) + "\n-----END SSH SIGNATURE-----"
+}
 
-	for _, line := range lines {
-		if strings.HasPrefix(line, "signature:") {
-			break
-		}
-		result = append(result, line)
+// wrapBase64 wraps a base64 string at the given line width.
+func wrapBase64(s string, width int) string {
+	if width <= 0 {
+		return s
 	}
-
-	// Add trailing newline for consistency
-	return strings.Join(result, "\n") + "\n"
+	var b strings.Builder
+	for i := 0; i < len(s); i += width {
+		end := i + width
+		if end > len(s) {
+			end = len(s)
+		}
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(s[i:end])
+	}
+	return b.String()
 }
 
 // verifyHash verifies the content hash against the current-version field.
@@ -284,7 +302,7 @@ func verifyHash(body, currentVersion string) HashResult {
 	// backwards-compatibility need — every signing path canonicalizes before
 	// hashing, so any historical raw-byte hash on disk was a bug to be surfaced,
 	// not silently accepted.
-	canonicalBody := canonicalizeContent(body)
+	canonicalBody := signing.CanonicalizeContent(body)
 	hash := sha256Hash([]byte(canonicalBody))
 
 	if hash == expectedHash {
@@ -292,26 +310,6 @@ func verifyHash(body, currentVersion string) HashResult {
 	}
 
 	return HashResult{Status: "mismatch"}
-}
-
-// canonicalizeContent normalizes content for consistent hashing.
-// Strips leading empty lines, trailing whitespace, and ensures single trailing newline.
-func canonicalizeContent(content string) string {
-	// Strip leading empty lines
-	content = strings.TrimLeft(content, "\n")
-
-	// Strip trailing whitespace from each line and trailing empty lines
-	lines := strings.Split(content, "\n")
-	for i := range lines {
-		lines[i] = strings.TrimRight(lines[i], " \t")
-	}
-
-	// Remove trailing empty lines
-	for len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-
-	return strings.Join(lines, "\n") + "\n"
 }
 
 // sha256Hash computes SHA-256 hash of content.

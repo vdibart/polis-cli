@@ -255,15 +255,34 @@ func TestRenderAll_StreamBlessedCommentsPanel(t *testing.T) {
 	assertContains(t, postHTML, `class="entry-comments-panel" id="comments"`,
 		"comment panel rendered under focus body")
 
-	// blessed-comment partial substituted: comment block + author domain
-	// (extractDomain pulls "bob.example.org" from the comment URL) +
-	// human-readable bless date ("April 24, 2026").
-	assertContains(t, postHTML, `class="comment"`, "blessed comment block rendered")
-	assertContains(t, postHTML, `class="comment-author"`, "comment-author element rendered")
-	assertContains(t, postHTML, `class="comment-date"`, "comment-date element rendered")
+	// blessed-comment partial substituted with v4 comment-thread card markup
+	// (mockup 16): .comment-attached--canonical wrapper + .timeline-dot--small
+	// on the rail + .entry-avatar-link with the SSR'd avatar + .comment-meta-
+	// line carrying date on left + .entry-handle on right + .comment-body.
+	assertContains(t, postHTML, `class="comment-attached comment-attached--canonical"`,
+		"blessed comment card rendered in v4 layout")
+	assertContains(t, postHTML, `class="timeline-dot timeline-dot--small"`,
+		"comment timeline dot rendered")
+	// Dot-anchor refactor: the small dot lives in an .entry-rail wrapping the
+	// comment body, so it anchors to the body's first line (not the date row).
+	assertContains(t, postHTML, `class="entry-rail"`,
+		"comment body rail rendered (dot-anchor refactor)")
+	assertContains(t, postHTML, `class="entry-avatar-link"`,
+		"commenter avatar link rendered")
+	assertContains(t, postHTML, `class="comment-meta-line"`,
+		"comment meta line rendered")
+	assertContains(t, postHTML, `class="comment-date-time"`,
+		"comment date element rendered")
+	assertContains(t, postHTML, `class="entry-handle is-shown"`,
+		"commenter handle rendered statically (is-shown) at the right edge of the meta line")
 	assertContains(t, postHTML, `class="comment-body"`, "comment-body element rendered")
-	assertContains(t, postHTML, "bob.example.org",
-		"comment author domain extracted from URL")
+	// The domain must be the handle's TEXT content, not just present in the
+	// href / avatar aria-label. Regression: {{author_domain}} was blanked by
+	// the partial-expansion pass (iterCtx missing AuthorDomain), leaving an
+	// EMPTY <a class="entry-handle"> — the byline disappeared while the URL
+	// still carried the domain.
+	assertContains(t, postHTML, `>bob.example.org</a>`,
+		"commenter domain rendered as the handle byline text")
 }
 
 // TestRenderAll_StreamBlessedCommentsPanel_Empty locks in the no-comments
@@ -556,11 +575,15 @@ func TestRenderAll_StreamLayoutAndDateFormat(t *testing.T) {
 	// New entry-meta-line markup (replaces the old .entry-meta grid block).
 	assertContains(t, indexHTML, `class="entry-meta-line"`, "entry-meta-line present")
 	assertContains(t, indexHTML, `class="entry-date-time"`, "entry-date-time present")
-	// Date+time format ("April 23, 2026 · 4:12pm") matches handlers_stream.go's
+	// Date+time format — the v4 stream drops the per-entry year via
+	// template.StripYear ("April 23 · 4:12pm"); matches handlers_stream.go's
 	// emission. SSR-vs-dynamic drift would surface here as a missing substring.
-	assertContains(t, indexHTML, "April 23, 2026 · 4:12pm", "focus published_human full date+time")
+	assertContains(t, indexHTML, "April 23 · 4:12pm", "focus published_human date+time (year stripped)")
+	if strings.Contains(indexHTML, "April 23, 2026 · 4:12pm") {
+		t.Errorf("per-entry year should be stripped in the v4 stream, but the full date is present")
+	}
 	// Sibling also re-formatted — guarantees both ends of the SSR window match.
-	assertContains(t, indexHTML, "April 21, 2026 · 8:30am", "sibling published_human full date+time")
+	assertContains(t, indexHTML, "April 21 · 8:30am", "sibling published_human date+time (year stripped)")
 }
 
 // TestRenderAll_StreamSiteIdentityBlock asserts the .site-bio + .site-stats
@@ -805,6 +828,12 @@ func TestRenderAll_StreamSinglePost(t *testing.T) {
 	// to the focus class list when the timeline-dot replaced the right-side
 	// .entry-comments-badge as the add-comment affordance.
 	assertContains(t, indexHTML, "entry entry--post entry--commentable is-focused", "focus entry uses unified grammar")
+	// Dot-anchor refactor: the focus post's timeline dot lives in an .entry-rail
+	// wrapping the title + .focus-content marker, so it anchors to the post's
+	// first line. The rail sits AROUND the marker — the protocol marker stays
+	// intact for cross-tenant extraction.
+	assertContains(t, indexHTML, `class="entry-rail"`, "focus post body rail rendered (dot-anchor refactor)")
+	assertContains(t, indexHTML, `data-polis-focus="true"`, "focus-content protocol marker preserved")
 	// Cache-bust: controller URL carries the active StreamShapeVersion as ?v=
 	// so a shape bump invalidates browser cache of the previous /stream.js
 	// (step-04/4.g, follow-up tracker option a).
@@ -1092,7 +1121,22 @@ func TestRenderAll_StreamEmptyCorpus(t *testing.T) {
 	}
 
 	indexHTML := mustReadFile(t, filepath.Join(tempDir, "index.html"))
-	assertContains(t, indexHTML, "No posts yet", "empty-state message")
+	// Welcoming getting-started state: the placeholder block + the real
+	// site-identity chrome a populated page renders (so an empty site reads
+	// as "new", not "broken"), and the preserved focus-content demarcation.
+	assertContains(t, indexHTML, "stream-getting-started", "empty-state placeholder block")
+	assertContains(t, indexHTML, "just getting started on polis", "empty-state copy")
+	assertContains(t, indexHTML, `class="site-identity"`, "empty-state identity chrome")
+	assertContains(t, indexHTML, `class="polis-topbar"`, "empty-state topbar chrome")
+	// Hardcoded, non-interactive sentence filter (no controller on this static
+	// page): keeps the topbar consistent with a populated page's centerpiece.
+	// Mirrors the live snippet markup but without the role=button/aria-haspopup
+	// control attributes.
+	assertContains(t, indexHTML, `class="sentence-filter"`, "empty-state sentence filter")
+	assertContains(t, indexHTML, `data-filter-slot="scope"`, "empty-state filter scope slot")
+	if strings.Contains(indexHTML, `aria-haspopup="listbox"`) {
+		t.Error("empty-state sentence filter should be inert (no aria-haspopup control attrs)")
+	}
 	assertContains(t, indexHTML, `data-polis-focus="true"`, "empty-state demarcation")
 }
 

@@ -25,12 +25,6 @@ func limitBody(next http.HandlerFunc, maxBytes int64) http.HandlerFunc {
 	}
 }
 
-// verifySignedRequest checks X-Polis-Domain/Signature/Timestamp headers.
-// Returns the verified sender domain or an error.
-func verifySignedRequest(r *http.Request) (string, error) {
-	return dm.VerifySignedRequestWithLogger(r, fetchRemotePublicKey, nil)
-}
-
 // fetchRemotePublicKey fetches the public key for a domain from .well-known/polis.
 // Used as the key-fetching callback for signed request verification.
 func fetchRemotePublicKey(domain string) ([]byte, error) {

@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
@@ -151,6 +153,16 @@ func handleRotateKey(args []string) {
 	}
 	if err := os.WriteFile(wellKnownPath, append(updatedWK, '\n'), 0644); err != nil {
 		exitError("Failed to write .well-known/polis: %v", err)
+	}
+
+	// Re-sign the public_key_messages block under the NEW identity key. The DM messages
+	// keys themselves don't change (they're independent of the identity key) — only the
+	// signatures over them are refreshed, so no window has stale signatures. Skip tenants
+	// with no DM keyring. (Phase 2.6; Judge expects a one-time re-baseline.)
+	if _, err := os.Stat(filepath.Join(dm.DMDir(dir), "keyring.json")); err == nil {
+		if err := site.PublishMessagesKey(dir, privPEM); err != nil {
+			exitError("Failed to re-sign public_key_messages: %v", err)
+		}
 	}
 
 	if !jsonOutput {

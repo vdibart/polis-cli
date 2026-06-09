@@ -42,7 +42,7 @@ become `+` in the URL, nothing else.
 ## Grammar
 
 ```
-sentence    := qualifier type "from" scope [modifier]
+sentence    := qualifier type relation scope [modifier]
 
 qualifier   := "all" | "new"
                ; "new" is reserved but currently locked off in the UI
@@ -50,12 +50,27 @@ qualifier   := "all" | "new"
 
 type        := "posts" | "comments" | "profiles"
              | "messages" | "drafts" | "activity"
+             | <event-type>
+               ; friendly aliases each expand to a SET of event types
+               ; (e.g. "posts" = pub.polis.post.published +
+               ; pub.polis.post.republished). A fully-qualified event
+               ; type (pub.polis.follow.announced) is also accepted for
+               ; operational precision — see "The type slot" below.
+
+relation    := "from" | "about"
+               ; "from"  = authored-by (the actor axis).
+               ; "about" = concerns / is-directed-at (the involved axis;
+               ;           maps to the DS involvedDomain filter).
+               ; Exactly one relation per sentence. On a tenant the
+               ; relation+scope clause is OPTIONAL (see "Tenant-relative
+               ; PQL" below).
 
 scope       := "me"
              | "my" "network"
              | "my" "mutuals"
              | "all" "polis"
              | <handle>
+             | <handle> "'s" "network"
                ; <handle> is a fully-qualified domain (e.g.
                ; alice.polis.pub, sub.alice.polis.pub).
 
@@ -67,6 +82,34 @@ sort_key    := "date" | "name" | "activity"
 filter_key  := "comments"
 action_key  := "bless"
 ```
+
+## The two relations: `from` and `about`
+
+`from` selects by **who wrote it** (actor). `about` selects by **who
+it concerns** (target/source — the event "involves" that handle):
+
+| Sentence | Meaning |
+|---|---|
+| `all activity from my network` | events my network authored |
+| `all activity about me` | events about me — someone blessed my comment, commented on my post, followed me (notifications/mentions) |
+| `all activity about alice.polis.pub` | what's happening around Alice |
+
+`about <handle>` maps onto the discovery service's existing
+`involvedDomain` filter (target OR source = handle). Combining
+relations (`from X about Y`) is reserved for a future grammar
+extension; today a sentence carries exactly one.
+
+## The type slot — aliases and fully-qualified event types
+
+The friendly type tokens are **abbreviations**. `posts` is not one
+event type — it expands to the *set* `{pub.polis.post.published,
+pub.polis.post.republished}`, and carries a render shape. The slot also
+accepts a **fully-qualified event type** (matching
+`pub.polis.<seg>.<seg>…`) for operational precision — e.g.
+`all pub.polis.follow.announced from alice.polis.pub` (used by the
+parity/reconcile actors). FQ event types are a discovery-service / CLI
+concern; the per-tenant webapp surface serves the alias (content-view)
+types and rejects FQ types (use the DS `/pql/` endpoint for those).
 
 The parser tokenizes on `+` (in the URL) or whitespace (in the
 displayed sentence), then walks the token stream positionally.
@@ -186,6 +229,87 @@ The topbar's centered widget is a UI surface for composing PQL sentences without
 
 **Icon-row presets vs widget composition.** Clicking an icon button (gateway, paragraph, comment, people, envelope) loads a *preset* PQL sentence — fast common views. Composing in the widget is the *general case* — anything the grammar allows. Both produce URLs that look the same; nothing about a preset path is privileged.
 
+## Tenant-relative PQL (the `from` clause is optional on a tenant)
+
+On a per-tenant surface (`<handle>.polis.pub/pql/…`) the relation+scope
+clause is **optional**. When omitted, it defaults to `from
+@<this-tenant>` — because "this tenant" is the obvious subject of a
+query directed at the tenant's own domain:
+
+| On `alice.polis.pub` | Resolves to |
+|---|---|
+| `/pql/all+posts+by+date` | `all posts from alice.polis.pub by date` |
+| `/pql/all+comments+by+date` | `all comments from alice.polis.pub by date` |
+| `/pql/all+profiles+by+name` | `all profiles from alice.polis.pub by name` |
+
+The composer is symmetric: when the scope equals the tenant default
+(and the relation is `from`), the clause is omitted from the URL — so
+the bar reads `…/pql/all+posts+by+date`, not the verbose form. The
+discovery service has no single tenant, so a missing clause there
+defaults to `from all polis` (the cross-tenant index).
+
+The owner SPA always uses explicit scopes (`from me`, `from my
+network`) under its `/_/pql/…` shell route.
+
+## Scope-resolution boundary (who resolves what)
+
+PQL is one grammar, but **where a scope can be resolved** differs by
+surface. The test is the first-person tokens **`me` / `my`**:
+
+| Scope | Resolved by | On the DS? |
+|---|---|---|
+| `all polis`, `<handle>`, `about <handle>`, `<handle>'s network` | public — anyone | ✅ yes |
+| `me`, `my network`, `my mutuals` (+ `about me`) | the **owner**, via the webapp/auth API | ❌ rejected (`PQL_OWNER_RELATIVE_UNSUPPORTED`) |
+| `messages` (DMs), `drafts` (types) | the owner only | ❌ owner-local |
+
+This is a **dispatch policy, not a grammar fork** — all three parsers
+(JS/Go/TS) parse every scope identically; each *surface* then narrows
+what it will resolve:
+
+- **Discovery service** (`ds…/pql/…`) resolves only public scopes; it
+  rejects first-person scopes with a 400 + a `warn` log. It still
+  authenticates callers — but only for *visibility* (denial filtering),
+  never to interpret a first-person scope.
+- **Tenant webapp** (`<handle>.polis.pub/pql/…`) resolves first-person
+  scopes only for the authenticated owner (same-origin session); it
+  rejects them for anonymous visitors. It also rejects the `about`
+  relation and FQ event types (DS-only).
+
+Why the line: a first-person scope's *meaning* depends on whose follow
+graph it's read against. The owner's site is the authority on "my
+network"; the DS is a cross-tenant index and deliberately does not
+interpret a caller's personal relative context. The line is an explicit
+initial boundary, revisitable later.
+
+## JSON API + the versioned envelope
+
+`GET /pql/<sentence>` content-negotiates on `Accept`:
+
+- `Accept: application/json` (or `?format=json`) → the JSON envelope.
+- otherwise → the HTML infinity-stream page.
+
+The envelope is **versioned** so the shape can evolve without breaking
+integrators:
+
+```json
+{
+  "version": "pql.v1",
+  "query": "all posts from alice.polis.pub by date",
+  "url": "/pql/all+posts+by+date",
+  "parsed": { "qualifier": "all", "type": "posts", "relation": "from",
+              "scope": "@alice.polis.pub", "modifier": "by-date" },
+  "tenant": "alice.polis.pub",
+  "items": [ /* … */ ],
+  "pagination": { "next_cursor": "…", "has_more": true }
+}
+```
+
+`query` echoes the *resolved* sentence (explicit scope); `url` is the
+short shareable form. On the tenant webapp `items` are rendered content
+items; on the DS `items` are raw stream events (and there is no
+`tenant` field). Full developer reference:
+[`../ds/developer/pql-json-api.md`](../ds/developer/pql-json-api.md).
+
 ## Reserved tokens
 
 These exist in the grammar but are currently not surfaced in the UI:
@@ -248,6 +372,17 @@ The mapping is only at the URL boundary — server routes, code
 identifiers, and config keys all use the internal form. Adding a
 new vocabulary term: add a row to the parser's lookup tables.
 
+**Canonical machine-readable vocabulary.** The lookup tables above
+(qualifiers, types, relations, scope atoms, modifiers, handle pattern)
+are mirrored in [`pql-vocabulary.json`](pql-vocabulary.json), which every
+parser embeds/loads — the JS parser (`pql.js`), the Go parser
+(`cli-go/pkg/pql`), and the DS TypeScript parser
+(`discovery-service/core/pql.ts`). All three assert against the shared
+golden corpus [`pql-golden.jsonl`](pql-golden.jsonl) so the grammar can
+never drift between languages. When you add a vocabulary term, edit the
+JSON + add a golden line; the parsers pick it up and the cross-language
+tests enforce agreement.
+
 ## Future direction
 
 PQL is intentionally aligned with [`policy-grammar.md`](policy-grammar.md) (the inbound-rule grammar — same `qualifier type scope` shape). A user fluent in one is fluent in both. That alignment isn't decoration; it's a bet that *sentence-as-filter* and *sentence-as-rule* converge as polis matures.
@@ -271,7 +406,17 @@ When PQL grows beyond the owner SPA, this doc is the authoritative spec — the 
 
 ## Pointer
 
-Parser implementation: `webapp/internal/webui/www/pql.js`.
+Parser implementations (all assert against the shared
+[`pql-golden.jsonl`](pql-golden.jsonl) + [`pql-vocabulary.json`](pql-vocabulary.json)):
+
+- **JS** — `webapp/internal/webui/www/pql.js` (owner SPA + public template)
+- **Go** — `cli-go/pkg/pql/` (webapp `/pql/` handler; future CLI)
+- **TS** — `discovery-service/core/pql.ts` (DS `/pql/` endpoint)
+
+Endpoints: tenant `GET /pql/<sentence>`
+(`webapp/internal/server/handlers_pql.go`); discovery service
+`GET /pql/:sentence` (`discovery-service/server/src/index.ts` →
+`pqlToStreamQueryFilters` in `core/handlers/stream.ts`).
 
 `plans/todo.md`'s GRAMMAR section is a one-line pointer to this
 doc — that's the canonical place to look. Prior to chunk B (v3

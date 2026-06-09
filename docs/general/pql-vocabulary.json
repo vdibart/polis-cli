@@ -1,0 +1,51 @@
+{
+  "$comment": "CANONICAL PQL vocabulary. Single source of truth for ALL parsers (JS: webapp/internal/webui/www/pql.js; Go: cli-go/pkg/pql; TS: discovery-service/core/pql.ts). Each parser embeds/loads this file so the grammar can never drift. The spec prose lives in docs/general/pql.md; this file is the machine-readable form. Golden fixtures that all three parsers assert against: docs/general/pql-golden.jsonl.",
+  "version": "pql.v1",
+
+  "grammar": "qualifier type relation scope [modifier]",
+
+  "qualifiers": ["all", "new"],
+
+  "relations": ["from", "about"],
+  "$relations_comment": "from = authored-by (actor axis). about = concerns/targets (involved axis; maps to the DS involvedDomain filter). Exactly one relation per sentence. On a tenant the relation+scope clause is optional and defaults to (from, @<tenant>).",
+
+  "types": {
+    "posts": "posts",
+    "comments": "comments",
+    "profiles": "profiles",
+    "messages": "dms",
+    "drafts": "drafts",
+    "activity": "activity"
+  },
+  "$types_comment": "User-facing alias -> internal value. Only messages->dms is remapped; the rest pass through. The type slot ALSO accepts a fully-qualified event type matching event_type_pattern (e.g. pub.polis.follow.announced) for operational precision; FQ types pass through verbatim as the internal value.",
+
+  "event_type_sets": {
+    "posts": ["pub.polis.post.published", "pub.polis.post.republished"],
+    "comments": ["pub.polis.comment.published", "pub.polis.comment.republished"],
+    "profiles": ["pub.polis.site.registered", "pub.polis.follow.announced"],
+    "activity": []
+  },
+  "$event_type_sets_comment": "Expansion of view aliases to the DS stream event types they cover (used by discovery-service pqlToStreamQueryFilters). activity = [] means no type filter (all events). drafts/messages are owner-local and not DS-resolvable, so they have no expansion.",
+
+  "scope_atoms": [
+    { "tokens": ["me"], "value": "me" },
+    { "tokens": ["my", "network"], "value": "my-network" },
+    { "tokens": ["my", "mutuals"], "value": "my-mutuals" },
+    { "tokens": ["all", "polis"], "value": "all-polis" }
+  ],
+  "$scope_atoms_comment": "Multi-token scope phrases -> internal value. Order matters when atoms share a leading token. Bare handles (FQDN matching handle_pattern) -> @<handle>. Possessive form <handle>'s network -> @<handle>:network.",
+
+  "first_person_scopes": ["me", "my-network", "my-mutuals"],
+  "$first_person_comment": "SCOPE-RESOLUTION BOUNDARY. These owner-relative scopes are resolvable ONLY by the webapp/auth API against the authenticated owner. The DS dispatcher REJECTS them (400 PQL_OWNER_RELATIVE_UNSUPPORTED) and the webapp rejects them for anonymous visitors. The grammar still PARSES them everywhere; this is a per-surface dispatch policy, not a grammar fork.",
+
+  "modifiers": [
+    { "tokens": ["by", "date"], "value": "by-date" },
+    { "tokens": ["by", "name"], "value": "by-name" },
+    { "tokens": ["by", "activity"], "value": "by-activity" },
+    { "tokens": ["with", "comments"], "value": "with-comments" },
+    { "tokens": ["to", "bless"], "value": "to-bless" }
+  ],
+
+  "handle_pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$",
+  "event_type_pattern": "^pub\\.polis\\.[a-z]+(\\.[a-z]+)+$"
+}

@@ -32,6 +32,8 @@ Index file (`content/pub.polis.core/comment/blessed.json`) storing approved comm
 
 An author's approval of a comment, making it visible and amplified to their audience. The blessing model is polis's anti-spam mechanism: comments exist regardless, but only blessed ones are promoted. Statuses: pending, blessed, denied.
 
+For the rationale behind the term and the model — why "bless" rather than "approve"/"moderate", and why curation lives with the author — see [In Defense of Bless](in-defense-of-bless.md).
+
 **Related**: beseech, comment, follow
 
 ---

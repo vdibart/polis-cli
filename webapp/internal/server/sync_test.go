@@ -2,13 +2,17 @@ package server
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/cache"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
+	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 )
 
@@ -1051,5 +1055,65 @@ func TestExcerptFetchIndices(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ============================================================================
+// WS-R1 anti-drift convergence
+// ============================================================================
+
+// TestRealTimeAndReconcileConverge proves the webapp real-time ingest
+// (cacheBlessedComment) and Rosie's Reconcile operate on ONE store via ONE
+// generic ingest path: after the real-time path caches a comment, a Reconcile
+// over the same descriptor sees it already present (Kept, not Refetched). If the
+// two had drifted onto separate stores/formats, Reconcile would re-fetch (or
+// fail to find) it.
+func TestRealTimeAndReconcileConverge(t *testing.T) {
+	dataDir := t.TempDir()
+	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
+
+	commentMD := "---\ntitle: Reply\ntype: comment\n---\nA blessed reply."
+	author := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(commentMD))
+	}))
+	defer author.Close()
+	commentURL := author.URL + "/content/pub.polis.core/comment/20260601/abc.md"
+
+	s := &Server{DataDir: dataDir, BaseURL: "https://carol.polis.pub", DiscoveryURL: "https://ds.polis.pub"}
+
+	// Real-time path caches the comment.
+	if !s.cacheBlessedComment(commentURL) {
+		t.Fatal("real-time cacheBlessedComment should store the comment")
+	}
+	// And the post author's render index records it.
+	if err := metadata.AddBlessedComment(dataDir, "posts/20260601/p.md", metadata.BlessedComment{URL: commentURL}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A DS that still grants this comment to carol (the post author).
+	ds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(discovery.RelationshipQueryResponse{
+			Records: []discovery.RelationshipRecord{
+				{SourceURL: commentURL, TargetURL: "https://carol.polis.pub/posts/20260601/p.md", Status: "granted"},
+			},
+		})
+	}))
+	defer ds.Close()
+
+	// Reconcile over the SAME store the real-time path wrote to.
+	store := cache.Store{DataDir: dataDir, DSDomain: "ds.polis.pub"}
+	desc := cache.NewBlessedDescriptor(cache.DescriptorConfig{
+		Client: &discovery.Client{BaseURL: ds.URL, HTTPClient: ds.Client()},
+		Domain: "carol.polis.pub",
+	})
+	rep, err := cache.Reconcile(store, desc, cache.ReconcileOptions{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rep.Refetched != 0 {
+		t.Errorf("reconcile re-fetched an entry the real-time path already cached — paths drifted: %+v", rep)
+	}
+	if rep.Kept != 1 || rep.Evicted != 0 {
+		t.Errorf("expected the real-time entry kept (1) + nothing evicted, got %+v", rep)
 	}
 }

@@ -6,18 +6,21 @@
 
 1. *Religion.* To confer favor or approval; to acknowledge the good in those under one's care. — *"the priest blessed the congregation"*
 2. *Colloquial.* To wish well; to regard with gratitude or affection. — *"bless you"; "I'm blessed"; "bless this mess"*
-3. *Gaming.* To grant a boon or buff; to upgrade or strengthen a character. — *receiving a god's blessing in* Hades
-4. *Programming (Perl).* To turn a loose, anonymous reference into a first-class object — throwaway data given an identity and a place in the system. — `bless $ref, $class`
+3. *Gaming.* To grant a boon or buff; to upgrade or strengthen a character's traits or inventory. — *receiving a god's blessing in* Hades
+4. *Programming (Perl).* To convert a loose, anonymous, throwaway reference into a first-class object.  — `bless $ref, $class`
 
 ---
 
-We get it. For some people the word lands wrong — and it's almost always
-definition 1 doing it: the religious register, the sense of someone set above
-you, handing down approval from on high. Fair. That's the loudest sense of the
-word. Hold it loosely for a minute, though, because it isn't the one doing the
-work here.
+"Why would you use such a potentially devisive name instead of just calling it
+'approve' or 'endorse' like other platforms?"
 
-When you bless a comment in polis, the operation is closer to the last three
+Fair question.  We get it. For some people the word lands wrong — and it's almost
+always definition 1 setting that tone: the religious context, the sense of someone
+set above you, handing down approval from on high.  But "blessing" in polis carries
+a unique meaning that highlights why polis is different, and we think once you
+understand that you'll see why the word fits perfectly.
+
+When you bless a comment in polis, the effect is closer to the last three
 definitions than the first. Say you comment on alice.polis.pub's article. That
 comment lives on *your* server — Alice can't delete it, and she didn't have to
 let you write it. What she can do is *bless* it: promote it from a loose

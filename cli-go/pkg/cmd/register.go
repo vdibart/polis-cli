@@ -7,7 +7,9 @@ import (
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
@@ -75,16 +77,39 @@ func handleSiteRegister(client *discovery.Client, dir, domain string, privKey []
 		fmt.Fprintf(os.Stderr, "[!] Warning: could not write registration marker: %v\n", err)
 	}
 
+	// Upstream follow-drift guard. A follow made while this site was
+	// unregistered had its announce suppressed (writes require registration),
+	// leaving the DS short of following.json. Now that we're registered,
+	// reconcile the DS up to local so those follows are announced instead of
+	// lingering as a "dangling removed" until a Chaplain cycle — and so self-
+	// hosters (no Chaplain) recover at all. Best-effort.
+	reconciledFollows := 0
+	dsCfg := &stream.DiscoveryConfig{
+		DiscoveryURL: client.BaseURL,
+		DiscoveryKey: client.APIKey,
+		BaseURL:      "https://" + domain,
+		DataDir:      dir,
+	}
+	if reannounced, rerr := following.ReconcileFollowsToDS(following.DefaultPath(dir), domain, client, privKey, dsCfg); rerr != nil {
+		fmt.Fprintf(os.Stderr, "[!] Warning: follow reconcile skipped: %v\n", rerr)
+	} else {
+		reconciledFollows = len(reannounced)
+	}
+
 	if jsonOutput {
 		outputJSON(map[string]interface{}{
-			"success":       result.Success,
-			"domain":        domain,
-			"created_at": result.CreatedAt,
-			"registry_url":  result.RegistryURL,
+			"success":            result.Success,
+			"domain":             domain,
+			"created_at":         result.CreatedAt,
+			"registry_url":       result.RegistryURL,
+			"reconciled_follows": reconciledFollows,
 		})
 	} else {
 		fmt.Printf("Site registered: %s\n", domain)
 		fmt.Printf("Registry URL: %s\n", result.RegistryURL)
+		if reconciledFollows > 0 {
+			fmt.Printf("[i] Reconciled %d follow(s) to the discovery service\n", reconciledFollows)
+		}
 	}
 }
 

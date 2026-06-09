@@ -5,6 +5,9 @@ import (
 	"crypto/ed25519"
 	"crypto/sha512"
 	"encoding/pem"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -189,8 +192,9 @@ func TestParsePrivateKey(t *testing.T) {
 // The returned PrivateKey must be a copy of the bytes from the PEM block,
 // not a slice aliasing into it. Otherwise ZeroKey on the returned key (e.g.,
 // SignContent's defer) zeroes bytes inside the caller's PEM buffer, which:
-//   (a) defeats R11-7's separate ZeroKey-of-the-PEM-buffer path, and
-//   (b) breaks idempotent re-sign with the same buffer.
+//
+//	(a) defeats R11-7's separate ZeroKey-of-the-PEM-buffer path, and
+//	(b) breaks idempotent re-sign with the same buffer.
 func TestParsePrivateKey_DoesNotAliasPEMBuffer(t *testing.T) {
 	privKeyPEM, _, _ := GenerateKeypair()
 	pemSnapshot := append([]byte(nil), privKeyPEM...)
@@ -426,6 +430,158 @@ func TestSignContent_EmbeddedPublicKey(t *testing.T) {
 	}
 	if allZero {
 		t.Error("embedded public key is all zeros — ZeroKey called before extracting pubkey")
+	}
+}
+
+// parsedSSHSIG holds the fields of an SSHSIG blob needed to verify it the way
+// standard tooling (ssh-keygen -Y verify) does: against the EMBEDDED public key.
+type parsedSSHSIG struct {
+	embeddedKey ed25519.PublicKey
+	namespace   string
+	hashAlg     string
+	rawSig      []byte
+}
+
+// parseSSHSIGForTest decodes a PEM-armored SSH SIGNATURE into its fields. Unlike
+// the production parseSSHSignature (which discards the embedded key and verifies
+// against an externally-supplied key — deliberately lenient), this exposes the
+// embedded key so tests can assert strict, standard-SSHSIG verifiability.
+func parseSSHSIGForTest(t *testing.T, sig string) parsedSSHSIG {
+	t.Helper()
+	block, _ := pem.Decode([]byte(sig))
+	if block == nil {
+		t.Fatal("failed to decode signature PEM")
+	}
+	data := block.Bytes
+	if len(data) < 6 || string(data[:6]) != sshSigMagic {
+		t.Fatalf("bad SSHSIG magic")
+	}
+	data = data[6:]
+	var (
+		err     error
+		pubBlob []byte
+		ns      string
+		halg    string
+		sigBlob []byte
+	)
+	if _, data, err = readUint32(data); err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if pubBlob, data, err = readBytes(data); err != nil {
+		t.Fatalf("read pubkey blob: %v", err)
+	}
+	if ns, data, err = readString(data); err != nil {
+		t.Fatalf("read namespace: %v", err)
+	}
+	if _, data, err = readString(data); err != nil { // reserved
+		t.Fatalf("read reserved: %v", err)
+	}
+	if halg, data, err = readString(data); err != nil {
+		t.Fatalf("read hash algorithm: %v", err)
+	}
+	if sigBlob, _, err = readBytes(data); err != nil {
+		t.Fatalf("read signature blob: %v", err)
+	}
+	// pubBlob: string(keytype) + bytes(key)
+	if _, pubBlob, err = readString(pubBlob); err != nil {
+		t.Fatalf("read pubkey type: %v", err)
+	}
+	keyBytes, _, err := readBytes(pubBlob)
+	if err != nil {
+		t.Fatalf("read pubkey bytes: %v", err)
+	}
+	// sigBlob: string(keytype) + bytes(rawsig)
+	if _, sigBlob, err = readString(sigBlob); err != nil {
+		t.Fatalf("read sig type: %v", err)
+	}
+	rawSig, _, err := readBytes(sigBlob)
+	if err != nil {
+		t.Fatalf("read raw signature: %v", err)
+	}
+	return parsedSSHSIG{ed25519.PublicKey(keyBytes), ns, halg, rawSig}
+}
+
+// TestSignContent_VerifiesAgainstEmbeddedKey is the strict guard: a signature
+// must verify against ITS OWN embedded public key, which is exactly what
+// ssh-keygen -Y verify and any third party do. The production VerifySignature
+// is intentionally lenient (it verifies against the real key fetched from
+// .well-known/polis and ignores the embedded key), so it — and Judge/Patrol —
+// cannot see a malformed envelope. This test catches ANY envelope corruption
+// (the 0.59.0 all-zeros bug, or a wrong/garbled embedded key), generalizing
+// TestSignContent_EmbeddedPublicKey beyond the all-zeros case.
+func TestSignContent_VerifiesAgainstEmbeddedKey(t *testing.T) {
+	privKeyPEM, _, err := GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair failed: %v", err)
+	}
+	content := []byte("strict embedded-key verification\nsecond line\n")
+
+	sig, err := SignContent(content, privKeyPEM)
+	if err != nil {
+		t.Fatalf("SignContent failed: %v", err)
+	}
+
+	p := parseSSHSIGForTest(t, sig)
+
+	if p.namespace != sshNamespace {
+		t.Errorf("namespace = %q, want %q", p.namespace, sshNamespace)
+	}
+	if p.hashAlg != hashAlgorithm {
+		t.Errorf("hash algorithm = %q, want %q", p.hashAlg, hashAlgorithm)
+	}
+
+	// Standard SSHSIG semantics: rebuild the signing blob and verify the raw
+	// signature against the EMBEDDED key. A malformed envelope fails here even
+	// though the lenient VerifySignature (against the real key) would pass.
+	blob := buildSigningBlob(content)
+	if !ed25519.Verify(p.embeddedKey, blob, p.rawSig) {
+		t.Fatal("signature does not verify against its own embedded public key — " +
+			"the SSHSIG envelope is malformed (this is the property 0.59.0 broke " +
+			"and that standard ssh-keygen verification enforces)")
+	}
+}
+
+// TestSignContent_SSHKeygenInterop is the true independent oracle: it verifies a
+// freshly-signed signature with the real `ssh-keygen -Y verify` binary, not our
+// own Go code. If ssh-keygen rejects it, our SSHSIG envelope is not standard-
+// interoperable. Skipped when ssh-keygen is unavailable so the suite stays
+// hermetic; CI should run it (and a corpus-wide variant) as the canary that
+// would have caught 0.59.0 — see the envelope-remediation plan.
+func TestSignContent_SSHKeygenInterop(t *testing.T) {
+	keygen, err := exec.LookPath("ssh-keygen")
+	if err != nil {
+		t.Skip("ssh-keygen not available; skipping standard-tooling interop oracle")
+	}
+
+	privKeyPEM, pubKeySSH, err := GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair failed: %v", err)
+	}
+	content := []byte("ssh-keygen interop content\nwith multiple lines\n")
+
+	sig, err := SignContent(content, privKeyPEM)
+	if err != nil {
+		t.Fatalf("SignContent failed: %v", err)
+	}
+
+	dir := t.TempDir()
+	allowed := filepath.Join(dir, "allowed_signers")
+	// allowed_signers line: <principal> <keytype> <keydata> [comment]
+	if err := os.WriteFile(allowed, []byte("polis "+strings.TrimSpace(string(pubKeySSH))+"\n"), 0o600); err != nil {
+		t.Fatalf("write allowed_signers: %v", err)
+	}
+	sigFile := filepath.Join(dir, "content.sig")
+	if err := os.WriteFile(sigFile, []byte(sig), 0o600); err != nil {
+		t.Fatalf("write sig file: %v", err)
+	}
+
+	cmd := exec.Command(keygen, "-Y", "verify",
+		"-f", allowed, "-I", "polis", "-n", sshNamespace, "-s", sigFile)
+	cmd.Stdin = bytes.NewReader(content)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("ssh-keygen -Y verify rejected a freshly-signed signature "+
+			"(SSHSIG envelope is not standard-interoperable): %v\n%s", err, out)
 	}
 }
 

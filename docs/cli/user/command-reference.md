@@ -1013,6 +1013,7 @@ polis dm <subcommand> [options]
 | `send` | `polis dm send <recipient_url> <message>` | Send a DM to a recipient |
 | `retry` | `polis dm retry [conversation_id]` | Retry delivering unsent messages |
 | `config` | `polis dm config` | Show DM acceptance policy from rules.jsonl |
+| `decrypt` | `polis dm decrypt [--phrase] [--conversation <id>] [--json]` | Decrypt and print your messages from a local or exported site |
 
 **Examples:**
 
@@ -1031,11 +1032,18 @@ polis dm retry
 
 # Show DM policy configuration
 polis dm config
+
+# Decrypt your messages from an unzipped export (prompts for your password)
+polis dm decrypt
+polis dm decrypt --phrase          # unlock with your recovery phrase instead
+polis dm decrypt --conversation f8e7d6c5b4a3f2e1 --json
 ```
 
 **Sending:** Fetches the recipient's public key from `.well-known/polis`, encrypts the message with NaCl box (X25519 + XSalsa20-Poly1305), and POSTs to the recipient's `/v1/content/dm/actions/deliver` endpoint. On delivery failure, the message is saved locally as "unsent" and retryable via `polis dm retry`.
 
 **Receiving:** Requires running the webapp or headless API server. CLI-only users can send DMs but cannot receive them (no server to accept incoming deliveries).
+
+**Decrypting an export (`polis dm decrypt`):** point it at an unzipped `.polis` export (or a local site) to print your message plaintext. Bootstrap-epoch messages (received before you set a message password) open with no prompt — the server-held key travels in the export. Password-epoch messages prompt for your **password** (or, with `--phrase`, your **recovery phrase**); the secret is read without echo, used only for the local unwrap, and never stored or transmitted. All decryption runs locally with the same crypto as the browser. The friendlier read path is to run `polis serve` in the export and read in the web UI — see [`polis serve`](#polis-serve-options) below. The on-disk format is documented in `cli-go/pkg/dm/FORMAT.md`.
 
 **Policy:** DM acceptance is controlled via policy rules in `.polis/policies/rules.jsonl`. By default, `allow pub.polis.dm from following` + `deny pub.polis.dm from all` restricts DMs to followed domains. The policy system also supports `emit`/`omit` verbs for blessing and notification control, and `self`/`thread-blessed` sources. See `docs/cli/user/policies.md` for the full grammar and common recipes. Use `polis dm config` to view current rules.
 
@@ -1166,7 +1174,23 @@ Start the polis HTTP server (the webapp). Only available in the bundled binary (
 polis serve                            # bind to default port
 polis serve --port 8080                # custom port
 polis serve --data-dir /path/to/site   # serve a site outside cwd
+polis serve --dev                      # developer mode (enable localhost messaging UI)
+polis serve --help                     # show all options
 ```
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `-d, --data-dir <path>` | Site directory to serve (default: current directory) |
+| `-p, --port <n>` | Port to bind on localhost (default: auto-pick) |
+| `--dev` | **Developer mode** — enable the localhost messaging compose/send UI (read-only by default; see below) |
+| `--mirror` | Serve a read-only clone (data tenancy); default is `--owner` |
+| `--reader` | Reader surface; default is `--editor` for `--owner` |
+
+**Reading an exported archive offline:** unzip your `.polis` export, run `polis serve` inside it, open the printed localhost URL, and enter your message password to read your DMs in the same web UI you use hosted — no network, no CLI crypto. (For a scriptable extract, see [`polis dm decrypt`](#polis-dm) above.)
+
+**Localhost messages are read-only by default.** Direct messages are a networked feature (a message is sealed in your browser and delivered point-to-point to the recipient's running instance), and a served export is offline. So on plain localhost the messages view renders read-only: the conversation list and threads display (and password epochs unlock with your password or recovery phrase, exactly as hosted), but the composer, send, mark-read sync, and recipient-protection checks are disabled, with a *"Reading only — sending is disabled on localhost"* banner and a matching note in **Settings → Messages**. Setting or changing your message password still works offline. The `--dev` flag re-enables the compose/send UI for development and testing (delivery to a real peer still requires a reachable network). The signal is purely `window.__POLIS_HOSTED` (injected by the hosted service) plus the `--dev` override — there is no separate "archive" mode or per-site toggle.
 
 See the [Webapp User Manual](../../webapp/user/user-manual.md) for full usage. Webapp-only and bundled-binary build instructions are in [docs/cli/README.md](../README.md).
 
@@ -1528,9 +1552,11 @@ Always use `polis migrate <new-domain>` when changing domains - don't just edit 
 
 > **Deprecated** — The TUI is deprecated as of v0.46.0. Use the [webapp](WEBAPP-USER-MANUAL.md) instead for an interactive interface.
 
-## Upgrading (polis-upgrade)
+## Upgrading
 
-For version migrations and binary updates, see [UPGRADING.md](UPGRADING.md).
+**Go CLI / self-hosters:** use **Tailor** to bring an existing site up to the current spec — `tailor --apply` runs in one pass for any historical layout, defaults to a dry-run diagnosis, and writes a timestamped backup before changing anything. See [actors.md](../../general/actors.md#tailor). (Tailor migrates *site data and layout*; it does not download binaries — the Go CLI ships as a single binary you replace directly.)
+
+**Bash CLI:** `polis-upgrade` is the bash-specific tool for both site migrations and binary self-update (downloading updated `polis`/`polis-tui` binaries). Run `polis-upgrade --help` for the full set of options.
 
 ## Shell Completion
 

@@ -540,7 +540,7 @@ func (r *PageRenderer) renderStreamFile(focus template.PostData, siblingsAbove, 
 	// loadPostsAndComments via FormatHumanDate ("April 23, 2026" — no time);
 	// re-format here so v3 paths stay date-only while v4 gets date+time.
 	// PublishedYear feeds the year-marker above the focus entry (5.g layout).
-	ctx.PublishedHuman = template.FormatHumanDateTime(focus.Published)
+	ctx.PublishedHuman = template.StripYear(template.FormatHumanDateTime(focus.Published))
 	ctx.PublishedYear = template.FormatYear(focus.Published)
 	ctx.URL = r.buildURL(strings.TrimPrefix(focus.URL, "/"))
 	// FocusPathURL is the path-form canonical URL (no scheme/host) used
@@ -695,14 +695,14 @@ func (r *PageRenderer) renderStreamFile(focus template.PostData, siblingsAbove, 
 	v4SiblingsAbove := make([]template.PostData, len(siblingsAbove))
 	copy(v4SiblingsAbove, siblingsAbove)
 	for i := range v4SiblingsAbove {
-		v4SiblingsAbove[i].PublishedHuman = template.FormatHumanDateTime(v4SiblingsAbove[i].Published)
+		v4SiblingsAbove[i].PublishedHuman = template.StripYear(template.FormatHumanDateTime(v4SiblingsAbove[i].Published))
 	}
 	ctx.SiblingsAbove = v4SiblingsAbove
 
 	v4SiblingsBelow := make([]template.PostData, len(siblingsBelow))
 	copy(v4SiblingsBelow, siblingsBelow)
 	for i := range v4SiblingsBelow {
-		v4SiblingsBelow[i].PublishedHuman = template.FormatHumanDateTime(v4SiblingsBelow[i].Published)
+		v4SiblingsBelow[i].PublishedHuman = template.StripYear(template.FormatHumanDateTime(v4SiblingsBelow[i].Published))
 	}
 	ctx.Siblings = v4SiblingsBelow
 
@@ -721,37 +721,164 @@ func (r *PageRenderer) renderStreamFile(focus template.PostData, siblingsAbove, 
 	return nil
 }
 
-// renderStreamEmptyIndex writes a minimal index.html for tenants with zero posts.
-// Kept intentionally thin — the site still needs an entry page so the domain
-// resolves to something sensible, but there's no stream content to render.
+// renderStreamEmptyIndex writes a welcoming "getting started" index.html for
+// tenants with zero posts. Rather than a bare title + "no posts" stub (which
+// reads as broken — theme colors but none of the page architecture), it
+// reproduces the SAME chrome a populated stream renders: the polis topbar, the
+// sticky site-identity card (avatar + name/handle + bio), and a centered
+// stream column carrying a friendly placeholder instead of a focus post.
+//
+// This is cheap to do faithfully because renderStreamAll writes a fresh
+// styles.css (= stream.css + active theme) BEFORE the empty-corpus branch, so
+// every layout class used here (.polis-topbar, .layout, .site-identity,
+// .site-avatar, .site-bio, …) is already present in the tenant's stylesheet.
+// Only the small .stream-getting-started block needs its own scoped <style>.
 func (r *PageRenderer) renderStreamEmptyIndex() error {
 	if err := os.MkdirAll(r.config.DataDir, 0755); err != nil {
 		return err
 	}
 	siteTitle := r.getSiteTitle()
-	author := r.getAuthorName()
-	if author == "" {
-		author = r.getAuthorDomain()
+	authorName := r.getAuthorName()
+	authorDomain := r.getAuthorDomain()
+	// Suppress a name that merely echoes the domain (matches the populated
+	// stream's site-identity treatment in renderStreamFile) so the card
+	// doesn't print the handle twice.
+	if strings.EqualFold(strings.TrimSpace(authorName), strings.TrimSpace(authorDomain)) {
+		authorName = ""
 	}
+	avatarHTML := r.buildAvatarHTML()
+
+	// Bio: same source as a populated page's site-identity card
+	// (site/snippets/about.md → HTML). Absent/empty file leaves the block
+	// empty; .site-bio:empty collapses it in CSS.
+	var bioHTML string
+	aboutPath := filepath.Join(r.config.DataDir, "site", "snippets", "about.md")
+	if data, err := os.ReadFile(aboutPath); err == nil {
+		if html, err := MarkdownToHTML(string(data)); err == nil {
+			bioHTML = html
+		}
+	}
+
+	// Friendly subject for the placeholder copy: the display name when set,
+	// else the handle component of the domain ("krispykiger" from
+	// "krispykiger.polis.pub"), else a neutral fallback.
+	subject := authorName
+	if subject == "" {
+		subject = streamHandleFromDomain(authorDomain)
+	}
+	if subject == "" {
+		subject = "This site"
+	}
+
 	// Empty-corpus canonical: self-canonical to the tenant's index URL. There
 	// are no posts to point at, but emitting a canonical (vs. omitting one)
 	// keeps crawlers from picking some other URL as canonical via header
 	// heuristics. Decision recorded in step-03 Execution Report (3.b specific).
 	canonical := r.buildURL("index.html")
+	widgetHome := r.config.BaseURL
+	widgetHandle := streamHandleFromDomain(authorDomain)
+	widgetHost := streamHostFromDomain(authorDomain)
+
+	// Site-name line is omitted entirely when it would echo the handle, so
+	// the identity card doesn't carry an empty bold row.
+	var siteNameLine string
+	if authorName != "" {
+		siteNameLine = fmt.Sprintf(`<div class="site-name">%s</div>`, attrEscape(authorName))
+	}
+
 	body := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>%s</title>
 <link rel="canonical" href="%s">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="base.css">
 <link rel="stylesheet" href="styles.css">
-</head><body>
-<main class="focus-content" data-polis-focus="true">
-  <h1>%s</h1>
-  <p>No posts yet.</p>
-</main>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  .stream-getting-started { max-width: 30rem; margin: 7vh auto 0; padding: 1.5rem; text-align: center; }
+  .stream-getting-started .gs-glyph { width: 40px; height: 40px; color: var(--color-accent, #c8a878); opacity: .85; margin-bottom: 1rem; }
+  .stream-getting-started .gs-title { font-family: var(--font-content, 'Newsreader', Georgia, serif); font-weight: 500; font-size: 1.5rem; line-height: 1.3; margin: 0 0 .75rem; color: var(--color-text, #f0e8e0); }
+  .stream-getting-started .gs-body { font-family: var(--font-ui, 'Inter', system-ui, sans-serif); font-size: .95rem; line-height: 1.6; color: var(--color-text-muted, #a09484); margin: 0; }
+  /* This static page ships no stream.js, so the bio's JS expand-toggle
+     (setupAboutToggle) never wires up. Un-cap + un-mask the bio so it shows
+     in full instead of fading out behind a collapse with no way to expand. */
+  .layout-left .site-bio-wrap .site-bio { max-height: none; -webkit-mask-image: none; mask-image: none; }
+  /* The sentence filter is hardcoded + inert here (no controller to drive it):
+     keep the live styling but strip the interactive affordances (pointer
+     cursor, hover underline-shift) so it reads as a static label, not a
+     control. Likewise neutralize the cap-dot's hover refresh arrow. */
+  .polis-topbar-filter .sentence-filter, .polis-topbar-filter .sf-slot { cursor: default; }
+  .polis-topbar-filter .sf-slot--interactive:hover { text-decoration-color: var(--filter-underline); }
+  .pinned-dot { cursor: default; }
+  .pinned-dot:hover, .pinned-dot:focus-visible { background: transparent; -webkit-mask: none; mask: none; }
+  .pinned-dot:hover::before, .pinned-dot:focus-visible::before { opacity: 1; }
+</style>
+</head>
+<body class="polis-stream stream-at-newest" data-polis-site-title="%s" data-polis-site-domain="%s" tabindex="-1">
+<nav class="polis-topbar" aria-label="Polis navigation">
+  <a class="polis-wordmark" href="https://polis.pub/">polis</a>
+  <div id="polis-nav-root" data-home="%s" data-handle="%s" data-host="%s"></div>
+  <!-- Hardcoded, non-interactive sentence filter — mirrors the live
+       snippets/stream-filter markup so it inherits the same styling, but
+       drops the role/tabindex/aria-haspopup control attributes (there's no
+       controller on this static page). Reads "all posts from <tenant> by
+       date", the default landing filter a populated page would show. -->
+  <div class="polis-topbar-filter">
+    <div class="sentence-filter" role="group" aria-label="Stream filter">
+      <span class="sf-slot sf-slot--locked" data-filter-slot="qualifier">all</span>
+      <span class="sf-slot sf-slot--interactive" data-filter-slot="type">posts</span>
+      <span class="sf-connector">from</span>
+      <span class="sf-slot sf-slot--identity" data-filter-slot="scope">%s</span>
+      <span class="sf-slot sf-slot--interactive sf-slot--modifier" data-filter-slot="modifier">by date</span>
+    </div>
+  </div>
+  <span class="pinned-dot" aria-hidden="true"></span>
+  <a class="polis-signin" href="https://polis.pub/">sign in</a>
+</nav>
+<div class="layout">
+  <aside class="layout-left">
+    <div class="site-identity">
+      <div class="site-identity-row">
+        <a href="/index.html" class="site-avatar-link"><div class="site-avatar">%s</div></a>
+        <a href="/index.html" class="site-identity-text">%s<div class="site-handle">%s</div></a>
+      </div>
+      <div class="site-bio-wrap"><div class="site-bio">%s</div></div>
+      <div class="site-follow" id="polis-widget-follow" data-author="%s"></div>
+    </div>
+  </aside>
+  <main class="layout-right">
+    <div class="stream" data-polis-stream-role="static-focus-and-siblings">
+      <div class="stream-getting-started">
+        <svg class="gs-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+        <main class="focus-content" data-polis-focus="true">
+          <h2 class="gs-title">Nothing here yet — but the ink's still wet.</h2>
+          <p class="gs-body">%s is just getting started on polis. The first signed post is on its way — check back soon.</p>
+        </main>
+      </div>
+    </div>
+  </main>
+</div>
 </body></html>
-`, attrEscape(siteTitle), attrEscape(canonical), attrEscape(author))
+`,
+		attrEscape(siteTitle),
+		attrEscape(canonical),
+		attrEscape(siteTitle),
+		attrEscape(authorDomain),
+		attrEscape(widgetHome),
+		attrEscape(widgetHandle),
+		attrEscape(widgetHost),
+		attrEscape(authorDomain), // sentence-filter identity slot (scope)
+		avatarHTML,
+		siteNameLine,
+		attrEscape(authorDomain),
+		bioHTML,
+		attrEscape(authorDomain),
+		attrEscape(subject),
+	)
 	return os.WriteFile(filepath.Join(r.config.DataDir, "index.html"), []byte(body), 0644)
 }
 

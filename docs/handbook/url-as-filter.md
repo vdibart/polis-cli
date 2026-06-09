@@ -74,7 +74,7 @@ The stream controller — installed per-tenant from the embedded bundle fixture,
 - `setFilterScope(value, opts)`, `setFilterType(value)`, etc. — programmatic filter mutation. When the icon row in the topbar wires up a preset, these are the functions it calls.
 - `applyFilter()` — clears the dynamic entries and re-fetches matching content for the current filter state.
 - `appendEntry`, `clearDynamicEntries`, `getEntries` — DOM-side primitives.
-- `renderers.{post,comment,profile,mention,dm}` — type-specific renderers; `registerRenderer` lets `owner-extras.js` override for owner-only views (e.g., DM with decryption indicator).
+- `renderers.{post,comment,profile,mention,dm,dm-message,follow,announcement}` — type-specific renderers (`announcement`/`follow` draw the activity-feed lines: "actor followed target", blessings, site-registered); `registerRenderer` lets `owner-extras.js` override for owner-only views (e.g., DM with decryption indicator).
 - `afterRender(type, fn)` — extension hook fired after a renderer produces DOM; the place where owner-only chrome (bless/edit/deny rollovers) gets bolted on without touching the base renderer.
 
 The scroll-driven URL update closes the loop the other way: an `IntersectionObserver` watches each entry, and when the focused entry changes, the controller calls `history.replaceState` to update the URL with the focused item's path. This is what you saw scrolling — the URL is the *current view*, even when the change came from your scroll wheel rather than a click.
@@ -133,9 +133,12 @@ If you followed the thread end-to-end:
 
 - The URL on polis.pub is meaningful — it's a sentence in a grammar (PQL).
 - The grammar is parseable both ways (sentence ↔ filter-state); the URL is the canonical form of "what view is on screen."
-- Three files carry the thread end-to-end: `app.js` (intercept), `pql.js` (grammar), `stream.js` (apply).
+- The grammar is now **one contract across three languages** — `pql.js` (browser), `cli-go/pkg/pql` (Go), `discovery-service/core/pql.ts` (TS) — all asserting the same `docs/general/pql-golden.jsonl` so they can't drift.
+- The same sentence is also a **server endpoint**: `GET /pql/<sentence>` content-negotiates (JSON envelope for the SPA/devs, HTML infinity-stream for visitors), and the discovery service exposes its own `/pql/` for public cross-tenant queries. A bare tenant root (`<handle>.polis.pub/`) redirects a browser to `/pql/all+posts+by+date`.
 - This isn't a routing trick — it's the core architecture of the v4 stream-screen, which is itself a *shape* polis sites can opt into.
 - The same grammar that filters the stream is intentionally close to the grammar that writes policy rules. Polis is leaning into "sentence as primary abstraction" across multiple surfaces.
+
+See [`../general/pql.md`](../general/pql.md) for the grammar (incl. the `from`/`about` relations and the scope-resolution boundary) and [`../ds/developer/pql-json-api.md`](../ds/developer/pql-json-api.md) for the JSON API.
 
 If you want to go deeper:
 

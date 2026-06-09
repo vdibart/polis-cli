@@ -176,6 +176,11 @@ html[data-site-theme="zane"] {
   --accent-color: #d97054; --text-color: #f0f0f0; --text-soft: #d0d0d0; --text-muted: #9a9a9a;
   --border-color: rgba(95,175,175,0.12); --border-light: rgba(95,175,175,0.2);
   --color-comment-accent: #6888a0;
+  /* Secondary hue for links so the salmon accent (timeline, headings, dots)
+     doesn't carry every interactive element too. Teal is zane's cool
+     counterpart — matches the bundle theme's `.content-body a`/`.site-bio a`
+     intent on public pages. Consumed by stream.css's content + bio links. */
+  --color-link: #5fafaf;
 }
 
 /* especial — dark, premium */

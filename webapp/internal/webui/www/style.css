@@ -7477,3 +7477,288 @@ a.activity-event:hover {
 #owner-card-bio:empty + .site-bio-toggle {
     display: none;
 }
+
+/* ── DM message unlock (phase 4.5) ──────────────────────────────────────
+   Inline "enter your password to read these messages" CTA, mounted by
+   owner-extras.js as a sibling above .stream when a DM thread contains
+   password-epoch messages whose DEK isn't unlocked this session. The
+   password/KEK/DEK never leave the browser (PolisDMCrypto/PolisDMSession);
+   submitting derives the epoch DEK and re-renders the thread in place. */
+.dm-unlock-bar {
+    margin: 4px 14px 14px;
+    padding: 14px 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--accent-mid, rgba(200, 168, 120, 0.25));
+    border-radius: var(--radius, 10px);
+}
+.dm-unlock-bar.hidden { display: none; }
+.dm-unlock-prompt {
+    font-family: var(--font-content, serif);
+    font-size: 0.95rem;
+    color: var(--text-primary);
+    margin-bottom: 10px;
+}
+.dm-unlock-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+.dm-unlock-input {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 11px;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.9rem;
+    background: var(--bg-light);
+    border: 1px solid var(--border-color);
+    color: var(--text-color);
+    border-radius: var(--radius-sm, 6px);
+}
+.dm-unlock-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.dm-unlock-btn {
+    flex-shrink: 0;
+}
+/* Recovery-phrase entry (phase 4.7) — the forgot-password path. Shares the row,
+   but the field is a multi-word textarea, and a toggle link flips the mode. */
+.dm-unlock-phrase {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 11px;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.85rem;
+    line-height: 1.45;
+    resize: none;
+    background: var(--bg-light);
+    border: 1px solid var(--border-color);
+    color: var(--text-color);
+    border-radius: var(--radius-sm, 6px);
+}
+.dm-unlock-phrase:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.dm-unlock-toggle {
+    display: inline-block;
+    margin-top: 9px;
+    font-size: 0.78rem;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: none;
+}
+.dm-unlock-toggle:hover {
+    text-decoration: underline;
+}
+.dm-unlock-error {
+    margin-top: 8px;
+    font-size: 0.8rem;
+    color: var(--salmon);
+    min-height: 1em;
+}
+/* Locked message body, until the epoch is unlocked. */
+.entry--message.is-locked .entry-body {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+/* ── Full-width DM banner host (mockup 17) ──────────────────────────────
+   Pinned directly under the sticky topbar; the setup + read-only banners
+   mount here edge-to-edge, absorbing the top-fade zone (not in the centered
+   content column). Empty/zero-height when no banner applies. */
+.dm-banner-host {
+    position: sticky;
+    top: var(--header-height, 50px);
+    /* Must sit below the nav's stacking context (see the compound rule
+       below): the avatar dropdown drops out of the nav INTO this banner's
+       vertical band, and if the banner won the stacking it would paint over
+       the menu — and crossing it would break the menu's :hover, closing it
+       before the cursor reaches Settings. */
+    z-index: 90;
+}
+/* The nav element carries BOTH .icon-nav (z-index:100, this file) and
+   .polis-topbar (z-index:50, v4 stream.css). Equal specificity → stream.css
+   loads later and wins, dropping the nav's real stacking context to 50 —
+   below .dm-banner-host (90). This compound selector (specificity 0,2,0)
+   beats both single-class rules regardless of load order, restoring the nav
+   (and its z-index:200 avatar dropdown) above the banner. */
+.icon-nav.polis-topbar { z-index: 100; }
+
+/* ── DM "set a password" setup bar (phase 4.9, Flow B) ──────────────────
+   Persistent nudge shown on any messages surface when there's no password
+   epoch. Never dismisses; links into Settings → Messages. Full-width,
+   attached under the nav. */
+.dm-setup-bar {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 16px;
+    background: var(--accent);
+    color: #1a1510;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.18);
+    font-size: 0.82rem;
+    font-weight: 500;
+}
+.dm-setup-bar.hidden { display: none; }
+.dm-setup-bar svg {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+.dm-setup-bar svg path,
+.dm-setup-bar svg rect {
+    fill: none;
+    stroke: #1a1510;
+    stroke-width: 1.9;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+/* Text sits inline with the link (no flex:1 push) so the "Settings ›" CTA
+   reads as part of the copy, separated by a thin pipe. */
+.dm-setup-bar-sep {
+    color: rgba(26, 21, 16, 0.4);
+    font-weight: 400;
+    user-select: none;
+}
+.dm-setup-bar-link {
+    white-space: nowrap;
+    font-weight: 600;
+    color: #1a1510;
+    text-decoration: underline;
+    cursor: pointer;
+}
+/* Doc link ("Why?") into the DM-encryption guide. margin-left:auto pushes
+   the whole CTA cluster (Why | Settings ›) to the right edge so the lead
+   copy reads cleanly on the left. Survives the on-settings hide (the
+   background is still useful from Settings). */
+.dm-setup-bar-doc {
+    margin-left: auto;
+    white-space: nowrap;
+    font-weight: 600;
+    color: #1a1510;
+    text-decoration: underline;
+    cursor: pointer;
+}
+/* On the Settings page the Settings link + separator would be a no-op — hide them. */
+.dm-setup-bar.on-settings .dm-setup-bar-sep,
+.dm-setup-bar.on-settings .dm-setup-bar-link { display: none; }
+
+/* Shared doc link for the read-only + recipient-warning banners. Sits inline
+   immediately after the banner copy (separated by a thin pipe) rather than
+   floating at the far-right edge where it was easy to miss. Inherits the
+   banner's text color; opens the DM-encryption guide. */
+.dm-banner-doc {
+    white-space: nowrap;
+    font-weight: 600;
+    color: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+    opacity: 0.85;
+}
+.dm-banner-doc:hover { opacity: 1; }
+/* Pipe between the banner copy and its doc link. The copy may shrink so the
+   "| Learn more ›" pair stays adjacent on a narrow banner instead of the link
+   wrapping off on its own. */
+.dm-banner-sep {
+    flex-shrink: 0;
+    opacity: 0.4;
+    font-weight: 400;
+    user-select: none;
+}
+.dm-recipient-warning .dm-recipient-warning-text,
+.dm-readonly-bar > span:first-of-type {
+    min-width: 0;
+}
+
+/* Brief highlight when a deep-link scrolls to the Messages settings section. */
+.settings-anchor-flash {
+    animation: settings-anchor-flash 1.6s ease-out;
+}
+@keyframes settings-anchor-flash {
+    0%, 25% { background: var(--accent-soft, rgba(200, 168, 120, 0.12)); border-radius: var(--radius, 10px); }
+    100% { background: transparent; }
+}
+
+/* ── Recipient protection warning (phase 4.10, Flow C) ──────────────────
+   A caution (not a call-to-action like .dm-setup-bar): the RECIPIENT hasn't
+   secured their messages, or we couldn't confirm. Amber, softer than the
+   accent setup bar so the two read as distinct concerns if both show. */
+.dm-recipient-warning {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 0 14px 12px;
+    padding: 8px 13px;
+    background: var(--warning-bg, rgba(208, 168, 96, 0.1));
+    border: 1px solid var(--warning-color, #d0a860);
+    border-radius: var(--radius-sm, 6px);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+.dm-recipient-warning.hidden { display: none; }
+.dm-recipient-warning svg {
+    width: 15px;
+    height: 15px;
+    flex-shrink: 0;
+}
+.dm-recipient-warning svg path {
+    fill: none;
+    stroke: var(--warning-color, #d0a860);
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+/* Read-only messages banner (phase 7) — neutral/muted, distinct from the accent
+   setup bar and the amber warning: it's a calm statement of fact, not a CTA.
+   Full-width, attached under the nav (may stack below the setup bar). */
+.dm-readonly-bar {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 16px;
+    background: var(--bg-light);
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+.dm-readonly-bar.hidden { display: none; }
+.dm-readonly-bar svg {
+    width: 15px;
+    height: 15px;
+    flex-shrink: 0;
+}
+.dm-readonly-bar svg path,
+.dm-readonly-bar svg rect,
+.dm-readonly-bar svg circle,
+.dm-readonly-bar svg line {
+    fill: none;
+    stroke: var(--text-muted);
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+.dm-readonly-bar code {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.92em;
+    color: var(--text-primary);
+    background: var(--bg-card);
+    padding: 1px 5px;
+    border-radius: 3px;
+}
+
+/* Pre-send protection warning inside the DM composer. */
+.composer-warning {
+    margin-top: 9px;
+    padding: 7px 10px;
+    background: var(--warning-bg, rgba(208, 168, 96, 0.1));
+    border-left: 2px solid var(--warning-color, #d0a860);
+    border-radius: 0 4px 4px 0;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+.composer-warning.hidden { display: none; }

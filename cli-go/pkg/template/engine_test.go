@@ -754,6 +754,23 @@ func TestFormatHumanDateTime(t *testing.T) {
 	}
 }
 
+func TestStripYear(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"April 23, 2026 · 4:12pm", "April 23 · 4:12pm"},
+		{"January 8, 2026 · 8:30am", "January 8 · 8:30am"},
+		{"December 25, 2026 · 12:00am", "December 25 · 12:00am"},
+		// Relative strings (no year) pass through unchanged.
+		{"just now", "just now"},
+		{"3 hours ago", "3 hours ago"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		if got := StripYear(tc.in); got != tc.want {
+			t.Errorf("StripYear(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestFormatYear(t *testing.T) {
 	tests := []struct {
 		input    string

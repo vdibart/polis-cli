@@ -80,7 +80,7 @@ When `polis init` creates a site, it installs the bundle's reference payload und
 └── themes/...
 ```
 
-This is what the renderer reads at runtime. **It is never edited by hand on hosted sites** — hosted runtime actors forcibly resync it on every cycle, so any drift between the on-disk copy and the binary's embedded source is corrected automatically. Self-hosters get the same migrations via `polis tailor apply`.
+This is what the renderer reads at runtime. **It is never edited by hand on hosted sites** — Patrol/Medic forcibly resync it on every cycle, so any drift between the on-disk copy and the binary's embedded source is corrected automatically (see [`actors.md`](actors.md)). Self-hosters get the same migrations via `polis tailor apply`.
 
 ### 3. Per-tenant registry (`.polis/bundles/registry.json`)
 
@@ -165,3 +165,4 @@ Custom content types are governed by the same [policy grammar](policy-grammar.md
 - [content-system.md](content-system.md) — The deep reference: filesystem layout, full `bundle.json` schema, validation rules, complete event catalog.
 - [architecture.md](architecture.md) — The four surfaces (CLI, webapp, polis.pub, DS) bundles live within.
 - [api/developer/dispatch-engine.md](../api/developer/dispatch-engine.md) — How the dispatch engine routes actions to bundle handlers.
+- [actors.md](actors.md) — Patrol/Medic, the actors that keep tenant bundle installs in sync with the embedded source of truth.

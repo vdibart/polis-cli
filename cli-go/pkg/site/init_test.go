@@ -32,12 +32,11 @@ func TestInit_BundleLayout(t *testing.T) {
 		".polis/bundles/pub.polis.core/comments/drafts",
 		".polis/bundles/pub.polis.core/comments/pending",
 		".polis/bundles/pub.polis.core/comments/denied",
-		".polis/bundles/pub.polis.core/dm/conv",
+		".polis/bundles/pub.polis.core/dm/conversations",
 		"site/snippets",
 		"content/pub.polis.core/post",
 		"content/pub.polis.core/comment",
 		"content/pub.polis.core/follow",
-		"content/pub.polis.core/feed",
 		"content/pub.polis.core/tag",
 		"policies",
 		".well-known",
@@ -156,8 +155,8 @@ func TestInit_BundleJsonIsValid(t *testing.T) {
 	}
 
 	types, _ := raw["types"].(map[string]interface{})
-	if len(types) != 7 {
-		t.Errorf("types count = %d, want 7", len(types))
+	if len(types) != 6 {
+		t.Errorf("types count = %d, want 6", len(types))
 	}
 }
 
@@ -490,7 +489,7 @@ func TestInit_PassesAllPatrolChecks(t *testing.T) {
 	}
 
 	// DM directories must exist with correct permissions
-	dmConvDir := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "dm", "conv")
+	dmConvDir := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "dm", "conversations")
 	info, err := os.Stat(dmConvDir)
 	if err != nil {
 		t.Fatalf("DM conv directory should exist: %v", err)

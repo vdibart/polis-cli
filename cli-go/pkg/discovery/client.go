@@ -651,6 +651,100 @@ func (c *Client) FetchCommentCountsCtx(ctx context.Context, urls []string) (map[
 	return out, nil
 }
 
+// LatestCommentsRequest is the payload for POST /v1/content/comments/latest.
+type LatestCommentsRequest struct {
+	URLs []string `json:"urls"`
+}
+
+// LatestComment describes the single most-recent comment on a post, regardless
+// of blessing status. URL is the DS canonical (.md) comment URL; AuthorDomain
+// is the commenter's domain; Published is the comment's frontmatter timestamp
+// (may be empty for legacy comments registered without one).
+type LatestComment struct {
+	URL          string `json:"url"`
+	AuthorDomain string `json:"author_domain"`
+	Published    string `json:"published"`
+	Version      string `json:"version"`
+}
+
+// LatestCommentsResponse is the response from the latest-comment endpoint.
+// Latest is keyed by the normalized post URL (DS canonical form). Posts with
+// no comments are omitted from the response.
+type LatestCommentsResponse struct {
+	Latest map[string]LatestComment `json:"latest"`
+}
+
+// FetchLatestCommentsCtx queries the DS for the single most-recent comment on
+// a batch of post URLs (blessed or not). Returns a map keyed by the URL form
+// the CALLER provided (not the normalized form) so callers don't re-map the
+// result. Posts with no comments are absent from the map.
+//
+// Empty input short-circuits with an empty map — no DS roundtrip.
+//
+// The provided context governs the request lifetime; stream-handler callers
+// pass a strict timeout so read-focus never blocks beyond their budget.
+func (c *Client) FetchLatestCommentsCtx(ctx context.Context, urls []string) (map[string]LatestComment, error) {
+	if len(urls) == 0 {
+		return map[string]LatestComment{}, nil
+	}
+
+	// Normalize for the wire, but remember the caller's form so the returned
+	// map keys round-trip exactly (mirrors FetchCommentCountsCtx).
+	normalized := make([]string, 0, len(urls))
+	callerByNormalized := make(map[string][]string, len(urls))
+	for _, u := range urls {
+		n := normalizeURLForDS(u)
+		if _, seen := callerByNormalized[n]; !seen {
+			normalized = append(normalized, n)
+		}
+		callerByNormalized[n] = append(callerByNormalized[n], u)
+	}
+
+	body, err := json.Marshal(LatestCommentsRequest{URLs: normalized})
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	endpoint := c.BaseURL + "/v1/content/comments/latest"
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	resp, err := c.doWithTiming(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("latest comments request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("latest comments failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var parsed LatestCommentsResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	// Re-key by the caller's URL form. Each normalized URL in the response
+	// may map to one or more caller URLs.
+	out := make(map[string]LatestComment, len(urls))
+	for normURL, lc := range parsed.Latest {
+		for _, originalURL := range callerByNormalized[normURL] {
+			out[originalURL] = lc
+		}
+	}
+	return out, nil
+}
+
 // ============================================================================
 // Relationship Methods
 // ============================================================================

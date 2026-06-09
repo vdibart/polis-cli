@@ -9,7 +9,7 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
-	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"golang.org/x/term"
 )
 
 func handleDM(args []string) {
@@ -43,6 +43,8 @@ func handleDM(args []string) {
 		handleDMRetry(convID)
 	case "config":
 		handleDMConfig()
+	case "decrypt":
+		handleDMDecrypt(subArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown dm subcommand: %s\n", subcommand)
 		printDMUsage()
@@ -62,47 +64,47 @@ Subcommands:
   send <url> <message>    Send a DM to a recipient
   retry [conversation_id] Retry delivering unsent messages
   config                  Show DM acceptance policy
+  decrypt [options]       Decrypt and print your messages from a local/exported site
+
+Options for 'decrypt':
+  --phrase                Unlock with your recovery phrase instead of your password
+  --conversation <id>     Limit output to one conversation
+  --json                  Machine-readable output
+
+  Bootstrap-epoch messages decrypt with no prompt (their key is in the export);
+  password epochs prompt for the password (or the recovery phrase with --phrase).
+  Neither secret is ever stored or transmitted — decryption happens locally.
 `)
 }
 
-func loadDMStore() *dm.Store {
+// loadDMMailbox returns the tenant mailbox, the site's own domain (for convID mapping),
+// and the epoch DEKs available without a password (bootstrap server_dek).
+func loadDMMailbox() (*dm.Mailbox, string, map[int][32]byte) {
 	dataDir := getDataDir()
-	privPEM, err := os.ReadFile(dataDir + "/.polis/keys/id_ed25519")
+	deks, err := dm.LoadAvailableDEKs(dataDir)
 	if err != nil {
-		exitError("Cannot read private key: %v", err)
+		exitError("Cannot load DM keys: %v", err)
 	}
-
-	privKey, err := signing.ParsePrivateKey(privPEM)
-	if err != nil {
-		exitError("Invalid private key: %v", err)
-	}
-	defer signing.ZeroKey(privKey)
-
-	store, err := dm.NewStore(dataDir, privKey.Seed())
-	if err != nil {
-		exitError("Cannot initialize DM store: %v", err)
-	}
-	return store
+	self := dm.ExtractDomainFromURL(baseURL)
+	return dm.NewMailbox(dm.DMDir(dataDir)), self, deks
 }
 
 func handleDMList() {
-	store := loadDMStore()
+	mb, self, _ := loadDMMailbox()
 
-	idx, err := store.LoadIndex()
+	entries, err := mb.RebuildInbox()
 	if err != nil {
 		exitError("Load conversations: %v", err)
 	}
-	store.DecryptIndexPreviews(idx)
 
 	if jsonOutput {
-		convMaps := make([]map[string]interface{}, 0, len(idx.Conversations))
-		for _, c := range idx.Conversations {
+		convMaps := make([]map[string]interface{}, 0, len(entries))
+		for _, e := range entries {
 			convMaps = append(convMaps, map[string]interface{}{
-				"id":              c.ID,
-				"peer_domain":     c.PeerDomain,
-				"last_message_at": c.LastMessageAt,
-				"unread_count":    c.UnreadCount,
-				"last_preview":    c.LastPreview,
+				"id":              dm.ComputeConversationID(self, e.Peer),
+				"peer_domain":     e.Peer,
+				"last_message_at": e.LastMessageAt,
+				"unread_count":    e.Unread,
 			})
 		}
 		outputJSON(map[string]interface{}{
@@ -116,80 +118,246 @@ func handleDMList() {
 		return
 	}
 
-	if len(idx.Conversations) == 0 {
+	if len(entries) == 0 {
 		fmt.Println("[i] No DM conversations")
 		return
 	}
 
-	for _, c := range idx.Conversations {
+	for _, e := range entries {
 		unread := ""
-		if c.UnreadCount > 0 {
-			unread = fmt.Sprintf(" (%d unread)", c.UnreadCount)
+		if e.Unread > 0 {
+			unread = fmt.Sprintf(" (%d unread)", e.Unread)
 		}
-		fmt.Printf("  %s  %s%s\n", c.ID, c.PeerDomain, unread)
-		if c.LastPreview != "" {
-			preview := c.LastPreview
-			if len(preview) > 60 {
-				preview = preview[:60] + "..."
-			}
-			fmt.Printf("           %s\n", preview)
-		}
+		fmt.Printf("  %s  %s%s\n", dm.ComputeConversationID(self, e.Peer), e.Peer, unread)
 	}
 }
 
-func handleDMRead(convID string) {
-	store := loadDMStore()
+// handleDMDecrypt reads a local or exported .polis site and prints DM plaintext.
+// It is the offline/durability read path documented in cli-go/pkg/dm/FORMAT.md:
+// bootstrap-epoch messages open with the server-held key carried in the export (no
+// prompt); password epochs are unwrapped from the user's password (or recovery
+// phrase, with --phrase). Neither secret is stored or transmitted — all crypto
+// runs locally with golang.org/x/crypto (Argon2id + NaCl), byte-for-byte the same
+// wrap the browser produced. The DataDir is the (possibly read-only) export dir.
+func handleDMDecrypt(args []string) {
+	usePhrase := false
+	convFilter := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--phrase", "--recovery":
+			usePhrase = true
+		case "--conversation", "-c":
+			if i+1 >= len(args) {
+				exitError("--conversation needs a conversation id")
+			}
+			convFilter = args[i+1]
+			i++
+		default:
+			exitError("Unknown option for 'dm decrypt': %s", args[i])
+		}
+	}
 
-	conv, err := store.LoadConversation(convID)
+	dataDir := getDataDir()
+	dmDir := dm.DMDir(dataDir)
+	kr, err := dm.LoadKeyring(dmDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			exitError("No DM keyring at %s — is this an unzipped polis site export?", dmDir)
+		}
+		exitError("Load keyring: %v", err)
+	}
+
+	// Bootstrap (server-held) DEKs need no prompt; collect them first.
+	deks, err := dm.LoadAvailableDEKs(dataDir)
+	if err != nil {
+		exitError("Load available keys: %v", err)
+	}
+
+	// Unlock every password epoch from the supplied secret.
+	var pwEpochs []int
+	for _, e := range kr.Epochs {
+		if e.Kind == dm.EpochKindPassword {
+			pwEpochs = append(pwEpochs, e.ID)
+		}
+	}
+	if len(pwEpochs) > 0 {
+		secret := promptDMSecret(usePhrase)
+		if secret == "" {
+			exitError("No %s entered.", secretLabel(usePhrase))
+		}
+		for _, id := range pwEpochs {
+			var d []byte
+			if usePhrase {
+				d, err = kr.UnlockEpochWithPhrase(id, secret)
+			} else {
+				d, err = kr.UnlockEpochWithPassword(id, []byte(secret))
+			}
+			if err != nil {
+				exitError("Could not unlock epoch %d — wrong %s? (%v)", id, secretLabel(usePhrase), err)
+			}
+			var dek [32]byte
+			copy(dek[:], d)
+			deks[id] = dek
+		}
+	}
+
+	mb := dm.NewMailbox(dmDir)
+	self := dm.ExtractDomainFromURL(baseURL)
+	entries, err := mb.RebuildInbox()
+	if err != nil {
+		exitError("List conversations: %v", err)
+	}
+
+	type outMsg struct {
+		ID       string `json:"id"`
+		From     string `json:"from"`
+		To       string `json:"to"`
+		Content  string `json:"content"`
+		At       string `json:"timestamp"`
+		KeyEpoch int    `json:"key_epoch"`
+		Locked   bool   `json:"locked"`
+	}
+	type outConv struct {
+		ID       string   `json:"id"`
+		Peer     string   `json:"peer_domain"`
+		Messages []outMsg `json:"messages"`
+	}
+
+	var convs []outConv
+	for _, e := range entries {
+		id := dm.ComputeConversationID(self, e.Peer)
+		if convFilter != "" && convFilter != id {
+			continue
+		}
+		msgs, err := mb.ReadConversation(e.Peer, deks)
+		if err != nil {
+			exitError("Read conversation with %s: %v", e.Peer, err)
+		}
+		oc := outConv{ID: id, Peer: e.Peer}
+		for _, m := range msgs {
+			oc.Messages = append(oc.Messages, outMsg{
+				ID: m.ID, From: m.From, To: m.To, Content: m.Plaintext,
+				At: m.At, KeyEpoch: m.KeyEpoch, Locked: m.Locked,
+			})
+		}
+		convs = append(convs, oc)
+	}
+
+	if jsonOutput {
+		outputJSON(map[string]interface{}{
+			"status":  "success",
+			"command": "dm decrypt",
+			"data":    map[string]interface{}{"conversations": convs, "count": len(convs)},
+		})
+		return
+	}
+
+	if len(convs) == 0 {
+		fmt.Println("[i] No conversations to decrypt.")
+		return
+	}
+	for _, c := range convs {
+		fmt.Printf("=== %s (%s) ===\n", c.Peer, c.ID)
+		for _, m := range c.Messages {
+			content := m.Content
+			if m.Locked {
+				content = "[locked — this message is sealed under a different key/epoch]"
+			}
+			ts := m.At
+			if len(ts) >= 16 {
+				ts = ts[:16]
+			}
+			fmt.Printf("  [%s] %s\n    %s\n", ts, m.From, content)
+		}
+		fmt.Println()
+	}
+}
+
+func secretLabel(phrase bool) string {
+	if phrase {
+		return "recovery phrase"
+	}
+	return "password"
+}
+
+// promptDMSecret reads the password / recovery phrase. On a terminal it reads
+// without echo; when stdin is piped it reads a single line (scripting). The secret
+// is held only for the unwrap and never written anywhere.
+func promptDMSecret(phrase bool) string {
+	label := secretLabel(phrase)
+	fmt.Fprintf(os.Stderr, "Enter your message %s: ", label)
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		b, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			exitError("Read %s: %v", label, err)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	sc := bufio.NewScanner(os.Stdin)
+	if sc.Scan() {
+		return strings.TrimSpace(sc.Text())
+	}
+	return ""
+}
+
+func handleDMRead(convID string) {
+	mb, self, deks := loadDMMailbox()
+
+	peer, ok, err := mb.PeerForConversationID(self, convID)
+	if err != nil {
+		exitError("Resolve conversation: %v", err)
+	}
+	if !ok {
+		exitError("Conversation not found: %s", convID)
+	}
+	msgs, err := mb.ReadConversation(peer, deks)
 	if err != nil {
 		exitError("Load conversation: %v", err)
 	}
 
 	if jsonOutput {
-		msgMaps := make([]map[string]interface{}, 0, len(conv.Messages))
-		for _, msg := range conv.Messages {
-			content, _ := store.DecryptMessage(&msg)
-			m := map[string]interface{}{
+		msgMaps := make([]map[string]interface{}, 0, len(msgs))
+		for _, msg := range msgs {
+			msgMaps = append(msgMaps, map[string]interface{}{
 				"id":        msg.ID,
 				"from":      msg.From,
 				"to":        msg.To,
-				"content":   content,
-				"timestamp": msg.Timestamp,
+				"content":   msg.Plaintext,
+				"timestamp": msg.At,
 				"status":    msg.Status,
-			}
-			if msg.ReadAt != "" {
-				m["read_at"] = msg.ReadAt
-			}
-			msgMaps = append(msgMaps, m)
+				"key_epoch": msg.KeyEpoch,
+				"locked":    msg.Locked,
+			})
 		}
 		outputJSON(map[string]interface{}{
 			"status":  "success",
 			"command": "dm read",
 			"data": map[string]interface{}{
 				"conversation_id": convID,
-				"peer_domain":     conv.PeerDomain,
+				"peer_domain":     peer,
 				"messages":        msgMaps,
 			},
 		})
 		return
 	}
 
-	fmt.Printf("Conversation with %s\n\n", conv.PeerDomain)
-	for _, msg := range conv.Messages {
-		content, err := store.DecryptMessage(&msg)
-		if err != nil {
-			content = "[decryption error]"
+	fmt.Printf("Conversation with %s\n\n", peer)
+	for _, msg := range msgs {
+		content := msg.Plaintext
+		if msg.Locked {
+			content = "[locked — unlock with your password to read]"
 		}
 		status := ""
 		if msg.Status == "unsent" {
 			status = " [unsent]"
 		}
-		fmt.Printf("  [%s] %s%s\n", msg.Timestamp[:16], msg.From, status)
+		fmt.Printf("  [%s] %s%s\n", msg.At[:16], msg.From, status)
 		fmt.Printf("    %s\n\n", content)
 	}
 
 	// Mark as read
-	store.MarkRead(convID)
+	mb.MarkRead(peer)
 }
 
 func handleDMSend(recipientURL, content string) {
@@ -203,14 +371,12 @@ func handleDMSend(recipientURL, content string) {
 		exitError("Cannot read public key: %v", err)
 	}
 
-	store := loadDMStore()
-
 	domain := baseURL
 	if domain == "" {
 		exitError("POLIS_BASE_URL must be set to send DMs")
 	}
 
-	sender := dm.NewSender(privPEM, pubSSH, dm.ExtractDomainFromURL(domain), store)
+	sender := dm.NewSender(privPEM, pubSSH, dm.ExtractDomainFromURL(domain), dataDir)
 	msg, err := sender.SendMessage(recipientURL, content, "")
 
 	if jsonOutput {
@@ -245,18 +411,18 @@ func handleDMSend(recipientURL, content string) {
 }
 
 func handleDMRetry(convID string) {
-	store := loadDMStore()
+	mb, self, _ := loadDMMailbox()
 
-	unsent, err := store.GetUnsentMessages()
+	unsent, err := mb.UnsentMessages()
 	if err != nil {
 		exitError("Get unsent messages: %v", err)
 	}
 
 	if convID != "" {
 		// Filter to specific conversation
-		var filtered []dm.UnsentMessage
+		var filtered []dm.UnsentMailboxMessage
 		for _, u := range unsent {
-			if u.ConvID == convID {
+			if dm.ComputeConversationID(self, u.Peer) == convID {
 				filtered = append(filtered, u)
 			}
 		}
@@ -267,10 +433,10 @@ func handleDMRetry(convID string) {
 		unsentMaps := make([]map[string]interface{}, 0, len(unsent))
 		for _, u := range unsent {
 			unsentMaps = append(unsentMaps, map[string]interface{}{
-				"conversation_id": u.ConvID,
+				"conversation_id": dm.ComputeConversationID(self, u.Peer),
 				"message_id":      u.Message.ID,
 				"to":              u.Message.To,
-				"timestamp":       u.Message.Timestamp,
+				"timestamp":       u.Message.At,
 			})
 		}
 		outputJSON(map[string]interface{}{
@@ -291,7 +457,7 @@ func handleDMRetry(convID string) {
 
 	fmt.Printf("[i] %d unsent message(s):\n", len(unsent))
 	for _, u := range unsent {
-		fmt.Printf("  %s → %s (%s)\n", u.Message.ID, u.Message.To, u.Message.Timestamp[:16])
+		fmt.Printf("  %s → %s (%s)\n", u.Message.ID, u.Message.To, u.Message.At[:16])
 	}
 }
 

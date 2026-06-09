@@ -116,7 +116,6 @@ func TestResolveShortTypeName(t *testing.T) {
 		{"post", "pub.polis.post"},
 		{"comment", "pub.polis.comment"},
 		{"follow", "pub.polis.follow"},
-		{"feed", "pub.polis.feed"},
 		{"pub.polis.post", "pub.polis.post"},
 		{"unknown", "unknown"},
 	}
@@ -502,21 +501,6 @@ func TestCommentCreateMissingID(t *testing.T) {
 
 // ── Feed operations ─────────────────────────────────────────────────
 
-func TestFeedUnsupportedAction(t *testing.T) {
-	engine, _ := newTestEngine(t)
-
-	_, err := engine.Dispatch(context.Background(), ActionRequest{
-		Action:      "list",
-		ContentType: "pub.polis.feed",
-	})
-	if err == nil {
-		t.Fatal("expected error for unimplemented feed action")
-	}
-	if !strings.Contains(err.Error(), "unsupported action") {
-		t.Errorf("expected 'unsupported action' error, got: %s", err.Error())
-	}
-}
-
 // ── Follow unsupported action ───────────────────────────────────────
 
 func TestFollowUnsupportedAction(t *testing.T) {
@@ -585,7 +569,6 @@ func TestBuiltinCoreHandlerActions(t *testing.T) {
 		{"pub.polis.post", false, "create"},
 		{"pub.polis.comment", false, "bless"},
 		{"pub.polis.follow", false, "list"},
-		{"pub.polis.feed", false, "refresh"},
 		{"pub.unknown", true, ""},
 	}
 	for _, tt := range tests {
@@ -628,7 +611,7 @@ func TestListBundlesTypeDetails(t *testing.T) {
 	for _, ti := range info.Types {
 		typeNames[ti.Name] = true
 	}
-	for _, expected := range []string{"pub.polis.post", "pub.polis.comment", "pub.polis.follow", "pub.polis.feed"} {
+	for _, expected := range []string{"pub.polis.post", "pub.polis.comment", "pub.polis.follow"} {
 		if !typeNames[expected] {
 			t.Errorf("expected type %q in bundle info", expected)
 		}

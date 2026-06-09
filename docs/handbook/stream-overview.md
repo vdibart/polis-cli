@@ -97,7 +97,7 @@ A filter is only useful if there's content to filter against. The stream-screen'
 
 When the user changes the filter, the controller re-fetches *from the local cache* — no DS roundtrip — because the relevant events are already there. The DS roundtrip is the continuous sync; the filter is a query over what's already been pulled.
 
-A second, complementary data path runs alongside: **cross-tenant aggregation queries**. When a post from another tenant scrolls into view, the webapp's stream handler asks the DS "how many comments does this post have across the network?" via `POST /v1/content/comments/counts`. The first 10 items in any rendered page get blocking 500ms fetches; later items get fire-and-forget background fetches that warm a local cache for the next render. The badge numbers on cross-tenant items come from these aggregation queries — they don't fit the cursor-paginated event model because they're aggregations, not events.
+A second, complementary data path runs alongside: **cross-tenant aggregation queries**. When posts from other tenants are in a rendered page, the webapp's stream handler asks the DS "how many comments does each of these have across the network?" via `POST /v1/content/comments/counts`. The whole page's uncached counts go in **one batched fetch** (up to 50 URLs) per render, so every post is stamped deterministically — an earlier "visible-horizon" heuristic that synced the first 10 and backgrounded the rest was removed because it made badges flicker `0↔1↔0`. The badge numbers on cross-tenant items come from these aggregation queries — they don't fit the cursor-paginated event model because they're aggregations, not events.
 
 For the file-by-file walk of both data paths, **dive into the [DS-to-stream tour](ds-to-stream.md)**. It walks the webapp sync loop ([`sync.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/sync.go)), the DS stream endpoint ([`stream.ts`](https://github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/stream.ts)), the feed transformer ([`feed/handler.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/feed/handler.go)), the local cache ([`stream/store.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/stream/store.go)), the DS counts endpoint ([`counts.ts`](https://github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/counts.ts)), and the webapp's stream HTTP handlers ([`handlers_stream.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/handlers_stream.go)).
 
@@ -120,11 +120,78 @@ The stream-screen renders **a single mixed list**:
                                                         │ (decorate)
                                                         ▼
                                   DS comment-counts  ◄──┘
-                                  (visible-horizon
-                                   strategy)
+                                  (one batched fetch
+                                   per render)
 ```
 
 The two threads converge on `stream.js` — the consumer of the URL and the renderer of the cached + decorated items. Read both tours and the convergence is what makes the third pass (the high-leverage move you can build from this code) feel natural.
+
+---
+
+## One surface, two entry points — why a canonical page *is* the index
+
+Here's a behavior that looks like magic until you see the seam: open
+`<you>.polis.pub` (the index) and scroll down — you slide through a stream of
+posts. Now open a single post's canonical URL directly
+(`<you>.polis.pub/posts/.../`, the deep-link) and scroll — you slide through
+*the same stream*, just anchored on that post. The two pages are
+**UI-indistinguishable**, and that's on purpose.
+
+The reason is that both pages render the **same v4 shape**, driven by the same
+`stream.js` controller, paginating against the same `GET /pql/<sentence>` endpoint (the `/api/v1/stream/items` endpoint was retired in the PQL hard cutover; its engine still backs `/pql/` internally):
+
+- The **index** SSRs the newest post as the focal entry, with siblings below.
+- A **canonical per-post page** SSRs *that* post as the focal entry — inside a
+  protocol marker `<main class="focus-content" data-polis-focus="true">` — with
+  its siblings below it ([`stream-post.html`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream-post.html),
+  [`stream.html`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.html)).
+  On load it auto-enters read-focus on that post and then paginates older
+  siblings on scroll — the *exact* fetch the index runs. A per-post page is an
+  index page that happens to start at a specific post.
+
+So scrolling either page lands you in the same infinite list. The only
+difference is the anchor.
+
+### How the illusion is built — content extraction off a stable marker
+
+The other half of the illusion runs the opposite direction. On the index, when
+you click into a post to read it (read-focus), the body has to come from
+*somewhere* — and for a **cross-tenant** post the stream only cached an
+excerpt. So the controller fetches that post's canonical page and **extracts
+the article body straight out of the markup** by reading the
+`data-polis-focus="true"` region. That marker is a deliberate
+*selector-convention*: every polis page exposes its main content under the same
+hook, so any page's article can be lifted out and dropped into another page's
+stream without the reader ever leaving.
+
+```
+   index.html stream                 some-author.polis.pub/posts/x/
+   ───────────────────               ──────────────────────────────
+   [excerpt card] ──click──►  fetch canonical HTML
+                              parse out <main data-polis-focus="true">
+                              inject that body into the card in place
+                              (same typography, same focus CSS)
+   reader never navigates away; the card just *became* the article
+```
+
+- Same-origin (your own posts) extract directly via `fetchBody`; cross-origin
+  posts route through a same-origin proxy
+  ([`handleStreamBody`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/handlers_stream.go),
+  `/api/v1/stream/body`) because the SPA's CSP `connect-src` forbids a direct
+  cross-tenant browser fetch. Either way the body is pulled from the same
+  `data-polis-focus` marker on the far page.
+- The read-focus visual treatment is a **single source of truth** in
+  [`stream.css`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.css)
+  (search "read-focus" — the §read-focus block) shared by the index SPA, the
+  per-post page, and the hosted multi-tenant renderer. That's why a post reads
+  identically whether you reached it by scrolling the index or by opening its
+  canonical URL: nothing re-styles it per surface.
+
+The payoff: there is no "article page" vs "feed page" split to maintain. There
+is one shape, one controller, one focus treatment, and a marker convention that
+lets any canonical page double as both a standalone document *and* a unit of
+content another stream can absorb. The deep-link and the index are two doors
+into the same room.
 
 ---
 
@@ -160,7 +227,7 @@ This overview points at three layers of deeper reading. Pick what matches your q
 ### Deep tours (the "how")
 
 - [`url-as-filter.md`](url-as-filter.md) — The URL ↔ sentence ↔ filter-state path through `app.js` → `pql.js` → `stream.js`.
-- [`ds-to-stream.md`](ds-to-stream.md) — The two data paths: continuous sync (events → cache → render) and on-demand aggregation (visible-horizon counts stamping).
+- [`ds-to-stream.md`](ds-to-stream.md) — The two data paths: continuous sync (events → cache → render) and on-demand aggregation (batched counts stamping).
 
 ### Architectural context (the "where")
 
@@ -175,7 +242,7 @@ If you want to do something concrete that touches both threads, the canonical ex
 
 1. Decide the sentence — say, **all comments from my mutuals by date** (a "what my close circle is saying" view).
 2. Pick an icon (or design one).
-3. Add the preset to `owner-extras.js` ICON_ROW_PRESETS (the gateway/paragraph/comment/etc. table). Its `filter` field is a PQL filter-state object; the widget's `setFilter` API consumes it directly.
+3. Add the preset to `owner-extras.js` `ICON_PRESETS` (the gateway/paragraph/comment/etc. table). Its `filter` field is a PQL filter-state object; the widget's `setFilter` API consumes it directly.
 4. Add the icon to `index.html`'s icon-row (with an `id="nav-btn-<name>"` and an SVG icon).
 5. If the new sentence requires a vocabulary token that doesn't exist yet (e.g., a new `scope` value), add it to `pql.js`'s lookup tables.
 6. If the new sentence needs server-side filter support (a new comparison the local cache or the DS doesn't know about), extend the feed handler or the DS query.

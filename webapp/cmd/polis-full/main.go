@@ -2,6 +2,7 @@
 package main
 
 import (
+	"fmt"
 	"io/fs"
 	"log"
 	"os"
@@ -28,6 +29,32 @@ func main() {
 	}
 }
 
+func printServeUsage() {
+	fmt.Print(`Polis serve - run the local web app
+
+Usage:
+  polis serve [options]
+
+Options:
+  -d, --data-dir <path>   Site directory to serve (default: current directory)
+  -p, --port <n>          Port to bind on localhost (default: auto-pick)
+      --dev               Developer mode: enable the localhost messaging UI
+                          (compose/send). DMs are read-only on localhost by
+                          default — a served export is offline and DMs are a
+                          networked feature. With --dev the send/compose UI is
+                          shown for development + testing; delivery to a real
+                          peer still requires a reachable network.
+      --mirror            Serve a read-only clone (data tenancy); default --owner
+      --reader            Reader surface (default --editor for --owner)
+  -h, --help              Show this help
+
+Read an exported archive offline:
+  unzip your .polis export, run 'polis serve' inside it, open the localhost URL,
+  and enter your password to read your messages. See 'polis dm decrypt --help'
+  for the CLI extract path.
+`)
+}
+
 func runServer(args []string, cliVersion string) {
 	dataDir := "."
 	port := 0 // 0 = auto-pick
@@ -36,9 +63,17 @@ func runServer(args []string, cliVersion string) {
 	// full description; same parsing rules apply.
 	dataMode := ""
 	surface := ""
+	devMode := false
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--help", "-h":
+			printServeUsage()
+			return
+		case "--dev":
+			// Developer mode: enable the localhost messaging UI (read-only by
+			// default). See docs/cli/user/command-reference.md (polis serve).
+			devMode = true
 		case "--data-dir", "-d":
 			if i+1 < len(args) {
 				dataDir = args[i+1]
@@ -88,5 +123,6 @@ func runServer(args []string, cliVersion string) {
 		Port:       port,
 		DataMode:   dataMode,
 		Surface:    surface,
+		DevMode:    devMode,
 	})
 }

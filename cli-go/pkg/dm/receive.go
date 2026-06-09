@@ -6,11 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
-	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
@@ -19,14 +16,12 @@ import (
 const (
 	// maxDMPayloadSize is the maximum encrypted message size (64KB).
 	maxDMPayloadSize = 64 * 1024
-	// maxPlaintextSize is the maximum decrypted content size (32KB).
-	maxPlaintextSize = 32 * 1024
-	// timestampWindow is the maximum age of a signed request (5 minutes).
-	timestampWindow = 5 * time.Minute
+	// timestampWindow bounds signed-request freshness (DM-11). Tightened from 5m to 2m now
+	// that the signature binds recipient + body (DM-2) and receipt dedups on message ID
+	// (DM-3): the only thing the window must tolerate is honest clock skew between sites,
+	// not a generous replay budget. ±2m via Abs below.
+	timestampWindow = 2 * time.Minute
 )
-
-// validHexID matches 16-char hex strings for reply_to_id validation.
-var validHexID = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 // Receiver handles incoming DM deliveries from remote instances.
 type Receiver struct {
@@ -34,33 +29,41 @@ type Receiver struct {
 	PublicKeySSH   []byte
 	Domain         string
 	SiteDir        string
-	Store          *Store
 	RateLimiter    *RateLimiter
 	Logger         Logger
 	MaxMessageSize int // max encrypted envelope size in bytes (default: 64KB)
 
-	myX25519SK [32]byte
-	initOnce   sync.Once
-	initErr    error
-
-	// Remote public key cache
-	keyCache   map[string]*cachedKey
-	keyCacheMu sync.Mutex
-	httpClient *http.Client
+	// FetchSenderKeys returns a sender domain's identity public key (OpenSSH) and its
+	// signed public_key_messages block, used to authenticate an incoming box_pub against
+	// the sender's published keys (DM-1). Nil → a default .well-known/polis fetch. Tests
+	// inject a fake.
+	FetchSenderKeys func(domain string) (identityPubSSH []byte, block *MessagesKeyBlock, err error)
 }
 
-// Logger is the interface for DM operation logging.
-// Implementations should support structured key=value fields in the format string.
+// Logger receives structured DM operation events. Implementations route them to
+// the host's structured event sink (action=<name>, source=...), so DM signals
+// (signature_invalid, rate-limited, policy_denied, send/deliver outcomes) are
+// queryable in Axiom rather than discarded or buried in logfmt text. Previously
+// this was a printf Info/Warn logger AND was never wired in production
+// (nopLogger), so DM events reached neither disk nor Axiom.
 type Logger interface {
-	Info(format string, args ...interface{})
-	Warn(format string, args ...interface{})
+	Event(action string, fields map[string]any)
 }
 
-// nopLogger discards log messages.
+// EventFunc adapts a plain emit function (e.g. the webapp's Server.LogEvent) to a
+// dm.Logger.
+type EventFunc func(action string, fields map[string]any)
+
+func (f EventFunc) Event(action string, fields map[string]any) {
+	if f != nil {
+		f(action, fields)
+	}
+}
+
+// nopLogger discards events.
 type nopLogger struct{}
 
-func (nopLogger) Info(string, ...interface{}) {}
-func (nopLogger) Warn(string, ...interface{}) {}
+func (nopLogger) Event(string, map[string]any) {}
 
 // LogEvent is a structured log entry for the DM delivery pipeline.
 type LogEvent struct {
@@ -80,35 +83,33 @@ type LogEvent struct {
 
 // NewReceiver creates a Receiver for handling incoming DM deliveries.
 // The domain is normalized to lowercase (DNS hostnames are case-insensitive per RFC 1123).
-func NewReceiver(privateKeyPEM, publicKeySSH []byte, domain, siteDir string, store *Store, rl *RateLimiter) *Receiver {
+func NewReceiver(privateKeyPEM, publicKeySSH []byte, domain, siteDir string, rl *RateLimiter) *Receiver {
 	return &Receiver{
 		PrivateKeyPEM:  privateKeyPEM,
 		PublicKeySSH:   publicKeySSH,
 		Domain:         strings.ToLower(domain),
 		SiteDir:        siteDir,
-		Store:          store,
 		RateLimiter:    rl,
 		Logger:         nopLogger{},
 		MaxMessageSize: maxDMPayloadSize,
-		keyCache:       make(map[string]*cachedKey),
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
 	}
 }
 
-// ensureKeys derives the X25519 secret key once.
-func (rcv *Receiver) ensureKeys() error {
-	rcv.initOnce.Do(func() {
-		rcv.myX25519SK, rcv.initErr = signing.Ed25519PrivateKeyToX25519(rcv.PrivateKeyPEM)
-	})
-	return rcv.initErr
+// VerifySignedRequestWithLogger verifies a `deliver`-action signed request, binding the
+// recipient domain + body digest (DM-2). recipientDomain is the verifier's OWN configured
+// domain (never the request Host — that's attacker-controlled); body is the raw request body.
+func VerifySignedRequestWithLogger(r *http.Request, recipientDomain string, body []byte, fetchPublicKey func(domain string) ([]byte, error), logger Logger) (string, error) {
+	return VerifySignedRequestForAction(r, "deliver", recipientDomain, body, fetchPublicKey, logger)
 }
 
-// VerifySignedRequestWithLogger is like VerifySignedRequest but accepts a Logger
-// for structured pipeline logging of timestamp rejection, key fetch failures,
-// and signature verification failures.
-func VerifySignedRequestWithLogger(r *http.Request, fetchPublicKey func(domain string) ([]byte, error), logger Logger) (string, error) {
+// VerifySignedRequestForAction verifies a signed site-to-site request for a specific
+// action (e.g. "deliver", "protection_status"). The caller signs the canonical auth JSON
+// {action, domain, recipient, timestamp, body_sha256} with its identity key; we reconstruct
+// it — binding the verifier's OWN recipient domain and the digest of the received body — and
+// verify against the caller's identity public key. Returns the verified (lowercased) caller
+// domain. recipientDomain MUST be the verifier's own configured domain (NOT the request Host,
+// which the caller controls); body is the raw request body (nil for bodyless actions).
+func VerifySignedRequestForAction(r *http.Request, action, recipientDomain string, body []byte, fetchPublicKey func(domain string) ([]byte, error), logger Logger) (string, error) {
 	if logger == nil {
 		logger = nopLogger{}
 	}
@@ -121,7 +122,7 @@ func VerifySignedRequestWithLogger(r *http.Request, fetchPublicKey func(domain s
 		return "", fmt.Errorf("missing signed request headers")
 	}
 
-	// Use original case for signature verification (sender signed with their case),
+	// Use original case for signature verification (caller signed with their case),
 	// but return lowercase domain for all downstream use.
 	domain := strings.ToLower(rawDomain)
 
@@ -132,22 +133,25 @@ func VerifySignedRequestWithLogger(r *http.Request, fetchPublicKey func(domain s
 	}
 	delta := time.Since(ts)
 	if delta.Abs() > timestampWindow {
-		logger.Warn("event=dm.deliver.timestamp_rejected sender_domain=%s timestamp_delta_seconds=%.0f",
-			domain, delta.Seconds())
-		return "", fmt.Errorf("timestamp outside 5-minute window")
+		logger.Event("dm."+action+".timestamp_rejected", map[string]any{
+			"sender_domain": domain, "timestamp_delta_seconds": delta.Seconds()})
+		return "", fmt.Errorf("timestamp outside freshness window")
 	}
 
-	// Reconstruct canonical JSON using original domain case (sender signed with their case)
-	canonicalJSON, err := MakeDeliverAuthCanonicalJSON("deliver", rawDomain, timestamp)
+	// Reconstruct canonical JSON using original domain case (caller signed with their case),
+	// binding our own recipient domain + the received body digest (DM-2). A header replayed
+	// against a different recipient (recipientDomain mismatch) or with a swapped body
+	// (digest mismatch) fails signature verification here.
+	canonicalJSON, err := MakeDeliverAuthCanonicalJSON(action, rawDomain, strings.ToLower(recipientDomain), timestamp, bodyDigest(body))
 	if err != nil {
 		return "", fmt.Errorf("build canonical JSON: %w", err)
 	}
 
-	// Layer 4: Fetch sender's public key (medium cost — remote fetch, cached)
+	// Layer 4: Fetch caller's public key (medium cost — remote fetch, cached)
 	publicKeySSH, err := fetchPublicKey(domain)
 	if err != nil {
-		logger.Warn("event=dm.deliver.key_fetch_failed sender_domain=%s error=%q url=%q",
-			domain, err.Error(), "https://"+domain+"/.well-known/polis")
+		logger.Event("dm."+action+".key_fetch_failed", map[string]any{
+			"sender_domain": domain, "error": err.Error(), "url": "https://" + domain + "/.well-known/polis"})
 		return "", fmt.Errorf("fetch sender public key: %w", err)
 	}
 
@@ -157,11 +161,11 @@ func VerifySignedRequestWithLogger(r *http.Request, fetchPublicKey func(domain s
 
 	valid, err := signing.VerifySignature(canonicalJSON, publicKeySSH, fullSig)
 	if err != nil {
-		logger.Warn("event=dm.deliver.signature_invalid sender_domain=%s error=%q", domain, err.Error())
+		logger.Event("dm."+action+".signature_invalid", map[string]any{"sender_domain": domain, "error": err.Error()})
 		return "", fmt.Errorf("verify signature: %w", err)
 	}
 	if !valid {
-		logger.Warn("event=dm.deliver.signature_invalid sender_domain=%s error=%q", domain, "signature verification failed")
+		logger.Event("dm."+action+".signature_invalid", map[string]any{"sender_domain": domain, "error": "signature verification failed"})
 		return "", fmt.Errorf("invalid signature")
 	}
 
@@ -192,14 +196,15 @@ func restorePEMSignature(compact string) string {
 	return strings.Join(lines, "\n")
 }
 
-// ReceiveMessage processes an incoming DM delivery.
-// It performs the full 7-layer defense pipeline:
-// 1. Policy check, 2. Timestamp (handled by VerifySignedRequest),
-// 3. Global rate limit, 4. Signature verify (handled by VerifySignedRequest),
-// 5. Per-sender rate limit, 6. Size check, 7. Decrypt + store.
+// ReceiveMessage processes an incoming DM delivery. The signature (timestamp + sig) was
+// verified upstream (VerifySignedRequestForAction). This applies the remaining checks and
+// stores the sender's wire box **as-is** via the mailbox — it does NOT decrypt: a hosted
+// recipient on a password epoch holds no DEK, and not opening the box is the point. The
+// stored key_epoch comes from the wire (recipient_epoch), validated against the keyring.
 //
-// Each step produces a structured log event for abuse detection and debugging.
-func (rcv *Receiver) ReceiveMessage(senderDomain string, envelopeBody []byte, followingDomains map[string]bool) (*Message, error) {
+//  1. Policy check  3. Global rate limit  5. Per-sender rate limit  6. Size check
+//  7. Validate recipient_epoch + store wire box (no decrypt)
+func (rcv *Receiver) ReceiveMessage(senderDomain string, envelopeBody []byte, followingDomains map[string]bool) (*MailboxMessage, error) {
 	// Normalize domain to lowercase — DNS hostnames are case-insensitive (RFC 1123)
 	senderDomain = strings.ToLower(senderDomain)
 
@@ -208,41 +213,37 @@ func (rcv *Receiver) ReceiveMessage(senderDomain string, envelopeBody []byte, fo
 		return nil, fmt.Errorf("invalid sender domain: %w", err)
 	}
 
-	if err := rcv.ensureKeys(); err != nil {
-		return nil, fmt.Errorf("init receiver keys: %w", err)
-	}
-
 	// Log receipt
-	rcv.Logger.Info("event=dm.deliver.received sender_domain=%s recipient_domain=%s content_length=%d",
-		senderDomain, rcv.Domain, len(envelopeBody))
+	rcv.Logger.Event("dm.deliver.received", map[string]any{
+		"sender_domain": senderDomain, "recipient_domain": rcv.Domain, "content_length": len(envelopeBody)})
 
 	// Layer 1: Policy check (near-zero cost — in-memory lookup)
 	if err := rcv.checkPolicy(senderDomain, followingDomains); err != nil {
-		rcv.Logger.Warn("event=dm.deliver.policy_denied sender_domain=%s recipient_domain=%s reason=%q",
-			senderDomain, rcv.Domain, err.Error())
+		rcv.Logger.Event("dm.deliver.policy_denied", map[string]any{
+			"sender_domain": senderDomain, "recipient_domain": rcv.Domain, "reason": err.Error()})
 		return nil, fmt.Errorf("policy denied: %w", err)
 	}
 
 	// Layer 3: Global rate limit (near-zero cost — in-memory counter)
 	if rcv.RateLimiter != nil && !rcv.RateLimiter.AllowGlobal() {
 		count, limit := rcv.RateLimiter.GlobalStatus()
-		rcv.Logger.Warn("event=dm.deliver.global_rate_limited sender_domain=%s recipient_domain=%s current_count=%d limit=%d",
-			senderDomain, rcv.Domain, count, limit)
+		rcv.Logger.Event("dm.deliver.global_rate_limited", map[string]any{
+			"sender_domain": senderDomain, "recipient_domain": rcv.Domain, "current_count": count, "limit": limit})
 		return nil, fmt.Errorf("global rate limit exceeded")
 	}
 
 	// Layer 5: Per-sender rate limit (near-zero cost — in-memory counter)
 	if rcv.RateLimiter != nil && !rcv.RateLimiter.AllowSender(senderDomain) {
 		count, limit := rcv.RateLimiter.SenderStatus(senderDomain)
-		rcv.Logger.Warn("event=dm.deliver.sender_rate_limited sender_domain=%s recipient_domain=%s sender_count=%d limit=%d",
-			senderDomain, rcv.Domain, count, limit)
+		rcv.Logger.Event("dm.deliver.sender_rate_limited", map[string]any{
+			"sender_domain": senderDomain, "recipient_domain": rcv.Domain, "sender_count": count, "limit": limit})
 		return nil, fmt.Errorf("per-sender rate limit exceeded")
 	}
 
 	// Layer 6: Size check (near-zero cost)
 	if len(envelopeBody) > rcv.MaxMessageSize {
-		rcv.Logger.Warn("event=dm.deliver.size_rejected sender_domain=%s recipient_domain=%s content_length=%d limit=%d",
-			senderDomain, rcv.Domain, len(envelopeBody), rcv.MaxMessageSize)
+		rcv.Logger.Event("dm.deliver.size_rejected", map[string]any{
+			"sender_domain": senderDomain, "recipient_domain": rcv.Domain, "content_length": len(envelopeBody), "limit": rcv.MaxMessageSize})
 		return nil, fmt.Errorf("message too large: %d bytes (max %d)", len(envelopeBody), rcv.MaxMessageSize)
 	}
 
@@ -252,8 +253,8 @@ func (rcv *Receiver) ReceiveMessage(senderDomain string, envelopeBody []byte, fo
 		return nil, fmt.Errorf("invalid envelope: %w", err)
 	}
 
-	if envelope.Version != 1 {
-		return nil, fmt.Errorf("unsupported envelope version: %d", envelope.Version)
+	if envelope.Version != MessageEnvelopeVersion {
+		return nil, fmt.Errorf("unsupported envelope version: %d (want %d)", envelope.Version, MessageEnvelopeVersion)
 	}
 	if !strings.EqualFold(envelope.SenderDomain, senderDomain) {
 		return nil, fmt.Errorf("sender domain mismatch: header=%s envelope=%s", senderDomain, envelope.SenderDomain)
@@ -262,7 +263,8 @@ func (rcv *Receiver) ReceiveMessage(senderDomain string, envelopeBody []byte, fo
 		return nil, fmt.Errorf("recipient domain mismatch: expected=%s got=%s", rcv.Domain, envelope.RecipientDomain)
 	}
 
-	// Decode encrypted content and nonce
+	// Decode the wire box: ciphertext, nonce, and the sender's box public key (needed to
+	// open it later, client-side). The server never opens it here.
 	ciphertext, err := base64.StdEncoding.DecodeString(envelope.EncryptedContent)
 	if err != nil {
 		return nil, fmt.Errorf("decode ciphertext: %w", err)
@@ -277,117 +279,72 @@ func (rcv *Receiver) ReceiveMessage(senderDomain string, envelopeBody []byte, fo
 	var nonce [24]byte
 	copy(nonce[:], nonceBytes)
 
-	// Layer 7: Decrypt (medium cost — remote fetch + crypto)
-	senderX25519PK, err := rcv.fetchSenderX25519Key(senderDomain)
+	if envelope.BoxPub == "" {
+		return nil, fmt.Errorf("envelope missing box_pub")
+	}
+	boxPubBytes, err := base64.StdEncoding.DecodeString(envelope.BoxPub)
+	if err != nil || len(boxPubBytes) != 32 {
+		return nil, fmt.Errorf("invalid box_pub")
+	}
+	var senderPub [32]byte
+	copy(senderPub[:], boxPubBytes)
+
+	// Validate recipient_epoch against our keyring: the sender must seal to our CURRENT
+	// epoch (the only one published as `.current`). A non-current epoch means a stale
+	// cached messages key — reject so the sender refetches and re-seals. This is also what
+	// makes clearing the bootstrap `server_dek` safe: after a password is set, a late
+	// message still addressed to the (now non-current, key-cleared) bootstrap epoch is
+	// rejected for retry rather than stored as ciphertext nobody can ever open.
+	kr, err := LoadKeyring(DMDir(rcv.SiteDir))
 	if err != nil {
-		rcv.Logger.Warn("event=dm.deliver.key_fetch_failed sender_domain=%s recipient_domain=%s error=%q url=%q",
-			senderDomain, rcv.Domain, err.Error(), "https://"+senderDomain+"/.well-known/polis")
-		return nil, fmt.Errorf("fetch sender key: %w", err)
+		return nil, fmt.Errorf("load keyring (site not provisioned for DMs?): %w", err)
+	}
+	if envelope.RecipientEpoch != kr.Current {
+		rcv.Logger.Event("dm.deliver.stale_epoch", map[string]any{
+			"sender_domain": senderDomain, "recipient_domain": rcv.Domain, "recipient_epoch": envelope.RecipientEpoch, "current_epoch": kr.Current})
+		return nil, fmt.Errorf("stale recipient_epoch %d (current is %d — refetch messages key and retry)", envelope.RecipientEpoch, kr.Current)
 	}
 
-	plaintext, err := Decrypt(ciphertext, &nonce, &senderX25519PK, &rcv.myX25519SK)
-	if err != nil {
-		rcv.Logger.Warn("event=dm.deliver.decrypt_failed sender_domain=%s recipient_domain=%s error=%q",
-			senderDomain, rcv.Domain, err.Error())
-		return nil, fmt.Errorf("decrypt: %w", err)
+	// DM-1: authenticate box_pub against the sender's published messages keys. The deliver
+	// signature covers only {action, domain, timestamp}, not the box — so without this a
+	// party who can present a valid signed header for senderDomain (e.g. by replaying one
+	// observed within the timestamp window) could attach an attacker-generated box_pub and a
+	// box sealed under it, and the recipient would decrypt attacker-chosen plaintext
+	// attributed to senderDomain. Requiring box_pub to equal the sender's identity-signed
+	// messages key for sender_epoch binds the box-opening key to the DS-attested identity.
+	// Done here (receive time, incoming only) — never at read time, where a stored box_pub
+	// may legitimately be an unpublished ephemeral key (bootstrap forward re-seal) or the
+	// recipient's own key (box-to-self).
+	fetch := rcv.FetchSenderKeys
+	if fetch == nil {
+		fetch = fetchSenderKeysDefault
+	}
+	idPub, block, ferr := fetch(senderDomain)
+	if ferr != nil {
+		rcv.Logger.Event("dm.deliver.sender_key_fetch_failed", map[string]any{
+			"sender_domain": senderDomain, "recipient_domain": rcv.Domain, "error": ferr.Error()})
+		return nil, fmt.Errorf("authenticate sender box_pub: fetch sender keys: %w", ferr)
+	}
+	if verr := VerifyBoxPub(idPub, block, envelope.SenderEpoch, senderPub); verr != nil {
+		rcv.Logger.Event("dm.deliver.box_pub_unauthenticated", map[string]any{
+			"sender_domain": senderDomain, "recipient_domain": rcv.Domain, "sender_epoch": envelope.SenderEpoch, "reason": verr.Error()})
+		return nil, fmt.Errorf("box_pub failed sender authentication: %w", verr)
 	}
 
-	// Post-decryption validation
-	inner, err := validateInnerPayload(plaintext, senderDomain, rcv)
+	// Store the wire box as-is via the mailbox (key_epoch = the recipient epoch it was
+	// sealed to). No re-seal, no decrypt. reply_to is envelope metadata; the message body
+	// stays sealed and opens client-side on read.
+	mb := NewMailbox(DMDir(rcv.SiteDir))
+	msg, err := mb.AppendReceived(senderDomain, senderDomain, envelope.RecipientEpoch, ciphertext, nonce, senderPub, envelope.ReplyTo)
 	if err != nil {
-		rcv.Logger.Warn("event=dm.deliver.validation_failed sender_domain=%s recipient_domain=%s error=%q",
-			senderDomain, rcv.Domain, err.Error())
-		return nil, fmt.Errorf("inner payload validation: %w", err)
+		return nil, fmt.Errorf("store received message: %w", err)
 	}
 
-	// Determine sender URL for storage
-	senderURL := "https://" + senderDomain
-
-	// Store message (re-encrypted with storage key)
 	convID := ComputeConversationID(rcv.Domain, senderDomain)
-	msg, err := rcv.Store.AppendMessage(convID, senderDomain, senderURL,
-		senderDomain, rcv.Domain, inner.Content, inner.ReplyToID, "received", nonce)
-	if err != nil {
-		return nil, fmt.Errorf("store message: %w", err)
-	}
-
-	rcv.Logger.Info("event=dm.deliver.accepted sender_domain=%s recipient_domain=%s conversation_id=%s message_id=%s",
-		senderDomain, rcv.Domain, convID, msg.ID)
+	rcv.Logger.Event("dm.deliver.accepted", map[string]any{
+		"sender_domain": senderDomain, "recipient_domain": rcv.Domain, "conversation_id": convID, "message_id": msg.ID, "key_epoch": envelope.RecipientEpoch})
 
 	return msg, nil
-}
-
-// validateInnerPayload validates the decrypted inner payload.
-func validateInnerPayload(plaintext []byte, senderDomain string, rcv *Receiver) (*InnerPayload, error) {
-	// Must be valid UTF-8
-	if !utf8.Valid(plaintext) {
-		return nil, fmt.Errorf("content is not valid UTF-8")
-	}
-
-	// Size check on plaintext
-	if len(plaintext) > maxPlaintextSize {
-		return nil, fmt.Errorf("plaintext too large: %d bytes (max %d)", len(plaintext), maxPlaintextSize)
-	}
-
-	var inner InnerPayload
-	if err := json.Unmarshal(plaintext, &inner); err != nil {
-		return nil, fmt.Errorf("invalid inner JSON: %w", err)
-	}
-
-	// Reject unknown fields by re-marshaling and comparing
-	known, _ := json.Marshal(inner)
-	var rawMap map[string]json.RawMessage
-	json.Unmarshal(plaintext, &rawMap)
-	var knownMap map[string]json.RawMessage
-	json.Unmarshal(known, &knownMap)
-	for key := range rawMap {
-		if _, ok := knownMap[key]; !ok {
-			return nil, fmt.Errorf("unknown field in inner payload: %s", key)
-		}
-	}
-
-	// Content must not be empty
-	if strings.TrimSpace(inner.Content) == "" {
-		return nil, fmt.Errorf("empty content")
-	}
-
-	// Strip HTML tags from content (DM content is plaintext only)
-	inner.Content = stripHTMLTags(inner.Content)
-
-	// Validate reply_to_id format if present
-	if inner.ReplyToID != "" && !validHexID.MatchString(inner.ReplyToID) {
-		return nil, fmt.Errorf("invalid reply_to_id format")
-	}
-
-	// Verify sender public key matches the authenticated sender
-	if inner.SenderPublicKey != "" {
-		innerDomain, err := rcv.domainForPublicKey(inner.SenderPublicKey, senderDomain)
-		if err != nil || innerDomain != senderDomain {
-			return nil, fmt.Errorf("sender_public_key mismatch")
-		}
-	}
-
-	return &inner, nil
-}
-
-// stripHTMLTags removes HTML tags from text.
-func stripHTMLTags(s string) string {
-	var result strings.Builder
-	inTag := false
-	for _, r := range s {
-		if r == '<' {
-			inTag = true
-			continue
-		}
-		if r == '>' && inTag {
-			inTag = false
-			continue
-		}
-		if !inTag {
-			result.WriteRune(r)
-		}
-	}
-	return result.String()
 }
 
 // checkPolicy evaluates DM acceptance policy for the sender domain.
@@ -419,62 +376,44 @@ func (rcv *Receiver) checkPolicy(senderDomain string, followingDomains map[strin
 	return nil
 }
 
-// fetchSenderX25519Key fetches a sender's Ed25519 public key and converts to X25519.
-func (rcv *Receiver) fetchSenderX25519Key(senderDomain string) ([32]byte, error) {
-	if err := ValidateDomain(senderDomain); err != nil {
-		return [32]byte{}, fmt.Errorf("invalid sender domain: %w", err)
+// fetchSenderKeysDefault fetches a sender domain's identity public key (OpenSSH) and its
+// signed public_key_messages block from .well-known/polis — the default for
+// Receiver.FetchSenderKeys (DM-1 box_pub authentication). Domain is SSRF-validated.
+func fetchSenderKeysDefault(domain string) ([]byte, *MessagesKeyBlock, error) {
+	if err := ValidateDomain(domain); err != nil {
+		return nil, nil, fmt.Errorf("invalid domain: %w", err)
 	}
-	cacheKey := strings.ToLower(senderDomain)
-	rcv.keyCacheMu.Lock()
-	if cached, ok := rcv.keyCache[cacheKey]; ok && time.Since(cached.fetchedAt) < keyCacheTTL {
-		rcv.keyCacheMu.Unlock()
-		return cached.x25519PK, nil
-	}
-	rcv.keyCacheMu.Unlock()
-
-	wellKnownURL := "https://" + senderDomain + "/.well-known/polis"
-	resp, err := rcv.httpClient.Get(wellKnownURL)
+	client := &http.Client{Timeout: 10 * time.Second}
+	wellKnownURL := "https://" + domain + "/.well-known/polis"
+	resp, err := client.Get(wellKnownURL)
 	if err != nil {
-		return [32]byte{}, fmt.Errorf("fetch %s: %w", wellKnownURL, err)
+		return nil, nil, fmt.Errorf("fetch %s: %w", wellKnownURL, err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		return [32]byte{}, fmt.Errorf("fetch %s: HTTP %d", wellKnownURL, resp.StatusCode)
+		return nil, nil, fmt.Errorf("fetch %s: HTTP %d", wellKnownURL, resp.StatusCode)
 	}
-
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxWellKnownSize))
 	if err != nil {
-		return [32]byte{}, err
+		return nil, nil, err
 	}
-
 	var wk struct {
-		PublicKey string `json:"public_key"`
+		PublicKey         string            `json:"public_key"`
+		PublicKeyMessages *MessagesKeyBlock `json:"public_key_messages"`
 	}
 	if err := json.Unmarshal(body, &wk); err != nil {
-		return [32]byte{}, fmt.Errorf("parse .well-known/polis: %w", err)
+		return nil, nil, fmt.Errorf("parse .well-known/polis: %w", err)
 	}
 	if wk.PublicKey == "" {
-		return [32]byte{}, fmt.Errorf("no public_key in .well-known/polis")
+		return nil, nil, fmt.Errorf("no public_key in .well-known/polis")
 	}
 	if err := signing.ValidatePublicKey([]byte(wk.PublicKey)); err != nil {
-		return [32]byte{}, fmt.Errorf("invalid public key from %s: %w", senderDomain, err)
+		return nil, nil, fmt.Errorf("invalid public key from %s: %w", domain, err)
 	}
-
-	x25519PK, err := signing.Ed25519PublicKeyToX25519([]byte(wk.PublicKey))
-	if err != nil {
-		return [32]byte{}, fmt.Errorf("convert to X25519: %w", err)
+	if wk.PublicKeyMessages == nil {
+		return nil, nil, fmt.Errorf("sender %s published no public_key_messages", domain)
 	}
-
-	rcv.keyCacheMu.Lock()
-	rcv.keyCache[cacheKey] = &cachedKey{
-		publicKeySSH: []byte(wk.PublicKey),
-		x25519PK:    x25519PK,
-		fetchedAt:   time.Now(),
-	}
-	rcv.keyCacheMu.Unlock()
-
-	return x25519PK, nil
+	return []byte(wk.PublicKey), wk.PublicKeyMessages, nil
 }
 
 // FetchPublicKey fetches the Ed25519 public key for a domain from .well-known/polis.
@@ -514,24 +453,4 @@ func FetchPublicKey(domain string) ([]byte, error) {
 	}
 
 	return []byte(wk.PublicKey), nil
-}
-
-// domainForPublicKey checks if the given public key matches the cached key for a domain.
-func (rcv *Receiver) domainForPublicKey(pubKeyStr, expectedDomain string) (string, error) {
-	rcv.keyCacheMu.Lock()
-	cached, ok := rcv.keyCache[strings.ToLower(expectedDomain)]
-	var cachedPubKey string
-	if ok {
-		cachedPubKey = string(cached.publicKeySSH) // string() copies the bytes, safe after unlock
-	}
-	rcv.keyCacheMu.Unlock()
-
-	if !ok {
-		return "", fmt.Errorf("no cached key for domain %s", expectedDomain)
-	}
-
-	if strings.TrimSpace(cachedPubKey) == strings.TrimSpace(pubKeyStr) {
-		return expectedDomain, nil
-	}
-	return "", fmt.Errorf("public key does not match domain %s", expectedDomain)
 }

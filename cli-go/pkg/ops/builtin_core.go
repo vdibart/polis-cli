@@ -3,6 +3,7 @@ package ops
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,7 +15,6 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
-	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
 )
 
@@ -34,8 +34,6 @@ func (h *BuiltinCoreHandler) Handle(ctx context.Context, req ActionRequest, env 
 		return h.handleComment(ctx, req, env)
 	case "pub.polis.follow":
 		return h.handleFollow(ctx, req, env)
-	case "pub.polis.feed":
-		return h.handleFeed(ctx, req, env)
 	case "pub.polis.dm":
 		return h.handleDM(ctx, req, env)
 	case "pub.polis.tag":
@@ -56,10 +54,8 @@ func (h *BuiltinCoreHandler) Actions(contentType string) []string {
 		return []string{"list", "get", "create", "update", "bless", "deny", "revoke", "sync"}
 	case "pub.polis.follow":
 		return []string{"list", "create", "delete"}
-	case "pub.polis.feed":
-		return []string{"list", "refresh"}
 	case "pub.polis.dm":
-		return []string{"list", "get", "send", "deliver", "mark_read", "delete", "retry"}
+		return []string{"list", "get", "send", "deliver", "protection_status", "mark_read", "delete", "retry"}
 	case "pub.polis.tag":
 		return []string{"list", "apply", "remove", "delete"}
 	case "pub.polis.theme":
@@ -315,15 +311,6 @@ func (h *BuiltinCoreHandler) listFollowing(env HandlerEnv) (*ActionResult, error
 	}, nil
 }
 
-// ── Feed operations ─────────────────────────────────────────────────
-
-func (h *BuiltinCoreHandler) handleFeed(ctx context.Context, req ActionRequest, env HandlerEnv) (*ActionResult, error) {
-	switch req.Action {
-	default:
-		return nil, fmt.Errorf("unsupported action %q for pub.polis.feed", req.Action)
-	}
-}
-
 // ── DM operations ───────────────────────────────────────────────────
 
 func (h *BuiltinCoreHandler) handleDM(ctx context.Context, req ActionRequest, env HandlerEnv) (*ActionResult, error) {
@@ -336,6 +323,8 @@ func (h *BuiltinCoreHandler) handleDM(ctx context.Context, req ActionRequest, en
 		return h.sendDM(req, env)
 	case "deliver":
 		return h.deliverDM(req, env)
+	case "protection_status":
+		return h.protectionStatusDM(req, env)
 	case "mark_read":
 		return h.markDMRead(req, env)
 	case "delete":
@@ -347,37 +336,37 @@ func (h *BuiltinCoreHandler) handleDM(ctx context.Context, req ActionRequest, en
 	}
 }
 
-func (h *BuiltinCoreHandler) dmStore(env HandlerEnv) (*dm.Store, error) {
+// dmMailbox returns the tenant mailbox, the site's own domain (for convID mapping), and
+// the epoch DEKs the server can open without a password (bootstrap server_dek; password
+// epochs stay locked until the SPA unlock).
+func (h *BuiltinCoreHandler) dmMailbox(env HandlerEnv) (*dm.Mailbox, string, map[int][32]byte, error) {
 	siteDir := env.Resolver.SiteDir()
-	privKey, err := signing.ParsePrivateKey(env.PrivateKey)
+	deks, err := dm.LoadAvailableDEKs(siteDir)
 	if err != nil {
-		return nil, fmt.Errorf("parse private key: %w", err)
+		return nil, "", nil, err
 	}
-	defer signing.ZeroKey(privKey)
-	return dm.NewStore(siteDir, privKey.Seed())
+	return dm.NewMailbox(dm.DMDir(siteDir)), dm.ExtractDomainFromURL(env.BaseURL), deks, nil
 }
 
 func (h *BuiltinCoreHandler) listDMConversations(env HandlerEnv) (*ActionResult, error) {
-	store, err := h.dmStore(env)
+	mb, selfDomain, _, err := h.dmMailbox(env)
 	if err != nil {
 		return nil, err
 	}
-
-	idx, err := store.LoadIndex()
+	entries, err := mb.RebuildInbox()
 	if err != nil {
 		return nil, fmt.Errorf("load conversations: %w", err)
 	}
-	store.DecryptIndexPreviews(idx)
 
-	convMaps := make([]map[string]any, 0, len(idx.Conversations))
-	for _, c := range idx.Conversations {
+	convMaps := make([]map[string]any, 0, len(entries))
+	for _, e := range entries {
 		convMaps = append(convMaps, map[string]any{
-			"id":              c.ID,
-			"peer_domain":     c.PeerDomain,
-			"peer_url":        c.PeerURL,
-			"last_message_at": c.LastMessageAt,
-			"unread_count":    c.UnreadCount,
-			"last_preview":    c.LastPreview,
+			"id":              dm.ComputeConversationID(selfDomain, e.Peer),
+			"peer_domain":     e.Peer,
+			"peer_url":        "https://" + e.Peer,
+			"last_message_at": e.LastMessageAt,
+			"unread_count":    e.Unread,
+			"last_preview":    "", // no server-readable preview under end-to-end encryption
 		})
 	}
 
@@ -396,33 +385,39 @@ func (h *BuiltinCoreHandler) getDMConversation(req ActionRequest, env HandlerEnv
 		return nil, fmt.Errorf("conversation id required")
 	}
 
-	store, err := h.dmStore(env)
+	mb, selfDomain, deks, err := h.dmMailbox(env)
 	if err != nil {
 		return nil, err
 	}
-
-	conv, err := store.LoadConversation(convID)
+	peer, ok, err := mb.PeerForConversationID(selfDomain, convID)
 	if err != nil {
-		return nil, fmt.Errorf("load conversation: %w", err)
+		return nil, fmt.Errorf("resolve conversation: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("conversation not found")
 	}
 
-	// Decrypt messages for response
-	msgMaps := make([]map[string]any, 0, len(conv.Messages))
-	for _, msg := range conv.Messages {
-		content, _ := store.DecryptMessage(&msg)
+	msgs, err := mb.ReadConversation(peer, deks)
+	if err != nil {
+		return nil, fmt.Errorf("read conversation: %w", err)
+	}
+
+	// content is empty for messages whose epoch DEK is locked (password epoch not
+	// unlocked); the "locked" flag + key_epoch tell the UI to prompt for unlock.
+	msgMaps := make([]map[string]any, 0, len(msgs))
+	for _, msg := range msgs {
 		m := map[string]any{
 			"id":        msg.ID,
 			"from":      msg.From,
 			"to":        msg.To,
-			"content":   content,
-			"timestamp": msg.Timestamp,
+			"content":   msg.Plaintext,
+			"timestamp": msg.At,
 			"status":    msg.Status,
+			"key_epoch": msg.KeyEpoch,
+			"locked":    msg.Locked,
 		}
-		if msg.ReadAt != "" {
-			m["read_at"] = msg.ReadAt
-		}
-		if msg.ReplyToID != "" {
-			m["reply_to_id"] = msg.ReplyToID
+		if msg.ReplyTo != "" {
+			m["reply_to_id"] = msg.ReplyTo
 		}
 		msgMaps = append(msgMaps, m)
 	}
@@ -431,8 +426,8 @@ func (h *BuiltinCoreHandler) getDMConversation(req ActionRequest, env HandlerEnv
 		Status: "success",
 		Data: map[string]any{
 			"conversation_id": convID,
-			"peer_domain":     conv.PeerDomain,
-			"peer_url":        conv.PeerURL,
+			"peer_domain":     peer,
+			"peer_url":        "https://" + peer,
 			"messages":        msgMaps,
 			"count":           len(msgMaps),
 		},
@@ -450,13 +445,12 @@ func (h *BuiltinCoreHandler) sendDM(req ActionRequest, env HandlerEnv) (*ActionR
 	if strings.TrimSpace(content) == "" {
 		return nil, fmt.Errorf("content required")
 	}
-
-	store, err := h.dmStore(env)
-	if err != nil {
-		return nil, err
+	// DM-4: outbound SSRF guard on the v1 API send path (https + safe host).
+	if err := dm.ValidateRecipientURL(recipientURL); err != nil {
+		return nil, fmt.Errorf("invalid recipient_url: %w", err)
 	}
 
-	sender := dm.NewSender(env.PrivateKey, env.PublicKey, env.BaseURL, store)
+	sender := dm.NewSender(env.PrivateKey, env.PublicKey, env.BaseURL, env.Resolver.SiteDir())
 	// Extract domain from BaseURL
 	sender.Domain = dm.ExtractDomainFromURL(env.BaseURL)
 
@@ -493,30 +487,17 @@ func (h *BuiltinCoreHandler) deliverDM(req ActionRequest, env HandlerEnv) (*Acti
 		return nil, fmt.Errorf("envelope required")
 	}
 
-	store, err := h.dmStore(env)
-	if err != nil {
-		return nil, err
-	}
-
 	// Load following domains for policy check
 	siteDir := env.Resolver.SiteDir()
-	followingPath := following.DefaultPath(siteDir)
-	followingDomains := make(map[string]bool)
-	if f, err := following.Load(followingPath); err == nil {
-		for _, e := range f.All() {
-			domain := dm.ExtractDomainFromURL(e.URL)
-			if domain != "" {
-				followingDomains[domain] = true
-			}
-		}
-	}
+	followingDomains := loadFollowingDomains(siteDir)
 
 	rl := dm.NewRateLimiter(envInt("POLIS_DM_RATE_PER_SENDER", 0), envInt("POLIS_DM_RATE_GLOBAL", 0))
-	receiver := dm.NewReceiver(env.PrivateKey, env.PublicKey, env.BaseURL, siteDir, store, rl)
+	receiver := dm.NewReceiver(env.PrivateKey, env.PublicKey, env.BaseURL, siteDir, rl)
 	if maxSize := envInt("POLIS_DM_MAX_SIZE", 0); maxSize > 0 {
 		receiver.MaxMessageSize = maxSize
 	}
 	receiver.Domain = dm.ExtractDomainFromURL(env.BaseURL)
+	receiver.Logger = dm.EventFunc(env.EmitEvent)
 
 	msg, err := receiver.ReceiveMessage(senderDomain, []byte(envelopeJSON), followingDomains)
 	if err != nil {
@@ -533,18 +514,71 @@ func (h *BuiltinCoreHandler) deliverDM(req ActionRequest, env HandlerEnv) (*Acti
 	}, nil
 }
 
+// loadFollowingDomains returns the set of domains this site follows, keyed lowercase.
+// Shared by the deliver policy gate and the protection_status follow-file front-check.
+func loadFollowingDomains(siteDir string) map[string]bool {
+	followingDomains := make(map[string]bool)
+	if f, err := following.Load(following.DefaultPath(siteDir)); err == nil {
+		for _, e := range f.All() {
+			if domain := dm.ExtractDomainFromURL(e.URL); domain != "" {
+				followingDomains[strings.ToLower(domain)] = true
+			}
+		}
+	}
+	return followingDomains
+}
+
+// protectionStatusDM answers a signed protection_status query (gate #3): is this site's
+// messages secured? It returns a signed {protected} bit only to a caller in this site's
+// follow relationship; non-followers get a forbidden error (mapped to 403). The verified
+// caller domain is injected by the API router after checking the signed-request headers.
+func (h *BuiltinCoreHandler) protectionStatusDM(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	callerDomain, _ := req.Payload["sender_domain"].(string)
+	if callerDomain == "" {
+		return nil, fmt.Errorf("sender_domain required (set by signed-request auth)")
+	}
+
+	siteDir := env.Resolver.SiteDir()
+	responderDomain := dm.ExtractDomainFromURL(env.BaseURL)
+	followingDomains := loadFollowingDomains(siteDir)
+
+	ps, err := dm.BuildProtectionStatus(siteDir, responderDomain, env.PrivateKey, callerDomain, followingDomains)
+	if err != nil {
+		if errors.Is(err, dm.ErrProtectionStatusForbidden) {
+			return nil, fmt.Errorf("forbidden: caller not in follow relationship")
+		}
+		return nil, fmt.Errorf("protection_status: %w", err)
+	}
+
+	return &ActionResult{
+		Status: "success",
+		Data: map[string]any{
+			"domain":    ps.Domain,
+			"protected": ps.Protected,
+			"at":        ps.At,
+			"sig":       ps.Sig,
+		},
+	}, nil
+}
+
 func (h *BuiltinCoreHandler) markDMRead(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
 	convID, _ := req.Payload["conversation_id"].(string)
 	if convID == "" {
 		return nil, fmt.Errorf("conversation_id required")
 	}
 
-	store, err := h.dmStore(env)
+	mb, selfDomain, _, err := h.dmMailbox(env)
 	if err != nil {
 		return nil, err
 	}
-
-	if err := store.MarkRead(convID); err != nil {
+	peer, ok, err := mb.PeerForConversationID(selfDomain, convID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve conversation: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("conversation not found")
+	}
+	if err := mb.MarkRead(peer); err != nil {
 		return nil, fmt.Errorf("mark read: %w", err)
 	}
 
@@ -560,13 +594,18 @@ func (h *BuiltinCoreHandler) deleteDMConversation(req ActionRequest, env Handler
 		return nil, fmt.Errorf("conversation id required")
 	}
 
-	store, err := h.dmStore(env)
+	mb, selfDomain, _, err := h.dmMailbox(env)
 	if err != nil {
 		return nil, err
 	}
-
-	if err := store.DeleteConversation(convID); err != nil {
-		return nil, fmt.Errorf("delete conversation: %w", err)
+	peer, ok, err := mb.PeerForConversationID(selfDomain, convID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve conversation: %w", err)
+	}
+	if ok {
+		if err := mb.DeleteConversation(peer); err != nil {
+			return nil, fmt.Errorf("delete conversation: %w", err)
+		}
 	}
 
 	return &ActionResult{
@@ -576,12 +615,12 @@ func (h *BuiltinCoreHandler) deleteDMConversation(req ActionRequest, env Handler
 }
 
 func (h *BuiltinCoreHandler) retryDM(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
-	store, err := h.dmStore(env)
+	mb, selfDomain, _, err := h.dmMailbox(env)
 	if err != nil {
 		return nil, err
 	}
 
-	unsent, err := store.GetUnsentMessages()
+	unsent, err := mb.UnsentMessages()
 	if err != nil {
 		return nil, fmt.Errorf("get unsent: %w", err)
 	}
@@ -593,16 +632,15 @@ func (h *BuiltinCoreHandler) retryDM(req ActionRequest, env HandlerEnv) (*Action
 		}, nil
 	}
 
-	// For now, just report unsent messages — actual retry requires
-	// re-encrypting and re-delivering, which needs the recipient's key.
-	// The full retry path will re-compose the message from stored plaintext.
+	// Report unsent messages — actual re-delivery (re-fetch key, re-box, re-POST) is a
+	// follow-up; surfacing them lets the UI show "failed to send".
 	unsentMaps := make([]map[string]any, 0, len(unsent))
 	for _, u := range unsent {
 		unsentMaps = append(unsentMaps, map[string]any{
-			"conversation_id": u.ConvID,
+			"conversation_id": dm.ComputeConversationID(selfDomain, u.Peer),
 			"message_id":      u.Message.ID,
 			"to":              u.Message.To,
-			"timestamp":       u.Message.Timestamp,
+			"timestamp":       u.Message.At,
 		})
 	}
 

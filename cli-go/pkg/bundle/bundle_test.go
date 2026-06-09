@@ -28,8 +28,8 @@ func TestLoadBundle(t *testing.T) {
 	if loaded.Name != "pub.polis.core" {
 		t.Errorf("got name %q, want pub.polis.core", loaded.Name)
 	}
-	if len(loaded.Types) != 7 {
-		t.Errorf("got %d types, want 7", len(loaded.Types))
+	if len(loaded.Types) != 6 {
+		t.Errorf("got %d types, want 6", len(loaded.Types))
 	}
 }
 
@@ -43,7 +43,6 @@ func TestContentDir(t *testing.T) {
 		{"pub.polis.post", "content/pub.polis.core/post"},
 		{"pub.polis.comment", "content/pub.polis.core/comment"},
 		{"pub.polis.follow", "content/pub.polis.core/follow"},
-		{"pub.polis.feed", "content/pub.polis.core/feed"},
 	}
 
 	for _, tt := range tests {
@@ -68,7 +67,6 @@ func TestMountDir(t *testing.T) {
 		{"pub.polis.post", "posts"},
 		{"pub.polis.comment", "comments"},
 		{"pub.polis.follow", "follow"},
-		{"pub.polis.feed", "feed"},
 	}
 
 	for _, tt := range tests {
@@ -93,7 +91,6 @@ func TestPrivateDir(t *testing.T) {
 		{"pub.polis.post", ".polis/bundles/pub.polis.core/posts"},
 		{"pub.polis.comment", ".polis/bundles/pub.polis.core/comments"},
 		{"pub.polis.follow", ".polis/bundles/pub.polis.core/follows"},
-		{"pub.polis.feed", ".polis/bundles/pub.polis.core/feeds"},
 	}
 
 	for _, tt := range tests {
@@ -120,8 +117,6 @@ func TestSourceToMountPath(t *testing.T) {
 		{"content/pub.polis.core/post/20260302/slug.md", "posts/20260302/slug.md"},
 		// Comment source → mount
 		{"content/pub.polis.core/comment/20260302/reply.html", "comments/20260302/reply.html"},
-		// Feed source → mount
-		{"content/pub.polis.core/feed/index.html", "feed/index.html"},
 		// No match — returned unchanged
 		{"some/other/path.html", "some/other/path.html"},
 		{"content/com.example/post/foo.html", "content/com.example/post/foo.html"},
@@ -133,6 +128,45 @@ func TestSourceToMountPath(t *testing.T) {
 		got := b.SourceToMountPath(tt.input)
 		if got != tt.want {
 			t.Errorf("SourceToMountPath(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestMountToSourcePath(t *testing.T) {
+	b := DefaultCoreBundle()
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		// Comment mount .md → canonical source (the alias's core case:
+		// heals DS records registered at the /comments/<…>.md mount URL).
+		{"comments/20260302/reply.md", "content/pub.polis.core/comment/20260302/reply.md"},
+		// Post mount .md → canonical source.
+		{"posts/20260302/slug.md", "content/pub.polis.core/post/20260302/slug.md"},
+		// Symmetric for .html too (inverse of SourceToMountPath).
+		{"comments/20260302/reply.html", "content/pub.polis.core/comment/20260302/reply.html"},
+		// Already a content/ source path — NOT a mount prefix → unchanged
+		// (so the alias never double-rewrites the canonical artifact).
+		{"content/pub.polis.core/comment/20260302/reply.md", "content/pub.polis.core/comment/20260302/reply.md"},
+		// No mount match — returned unchanged.
+		{"some/other/path.md", "some/other/path.md"},
+	}
+
+	for _, tt := range tests {
+		got := b.MountToSourcePath(tt.input)
+		if got != tt.want {
+			t.Errorf("MountToSourcePath(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+
+	// Round-trip: source → mount → source is identity for mounted types.
+	for _, src := range []string{
+		"content/pub.polis.core/comment/20260302/reply.md",
+		"content/pub.polis.core/post/20260302/slug.md",
+	} {
+		if got := b.MountToSourcePath(b.SourceToMountPath(src)); got != src {
+			t.Errorf("round-trip MountToSourcePath(SourceToMountPath(%q)) = %q, want %q", src, got, src)
 		}
 	}
 }
@@ -387,6 +421,22 @@ func TestDefaultCoreBundle_Studio13NkDisplayName(t *testing.T) {
 		if t2 != nil && t2.DisplayName != "" {
 			t.Errorf("%s DisplayName = %q, want empty (Name is the label)", name, t2.DisplayName)
 		}
+	}
+}
+
+// TestDefaultCoreBundle_Stardust covers the reserved why.polis.pub theme: it is
+// registered, CSS-only, and v4-stream-only (like studio13).
+func TestDefaultCoreBundle_Stardust(t *testing.T) {
+	b := DefaultCoreBundle()
+	th, err := b.GetTheme("stardust")
+	if err != nil {
+		t.Fatalf("GetTheme(\"stardust\"): %v", err)
+	}
+	if th.CSS != "stardust.css" {
+		t.Errorf("stardust CSS = %q, want %q", th.CSS, "stardust.css")
+	}
+	if len(th.CompatibleShapes) != 1 || th.CompatibleShapes[0] != "pub.polis.shapes.v4" {
+		t.Errorf("stardust CompatibleShapes = %v, want [pub.polis.shapes.v4]", th.CompatibleShapes)
 	}
 }
 

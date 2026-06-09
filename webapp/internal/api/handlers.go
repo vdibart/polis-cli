@@ -256,6 +256,26 @@ func (h *handlers) handleDMDeliver(w http.ResponseWriter, r *http.Request, sende
 	writeJSON(w, http.StatusCreated, result.Data)
 }
 
+// handleDMProtectionStatus handles POST /v1/content/dm/actions/protection_status with
+// signed-request auth. The callerDomain has been verified by the signed request
+// middleware. The body is ignored — the only input is the verified caller. The handler
+// returns a signed {protected} bit, or 403 if the caller is not in the responder's follow
+// relationship (gate #3).
+func (h *handlers) handleDMProtectionStatus(w http.ResponseWriter, r *http.Request, callerDomain string) {
+	ctx, cancel := context.WithTimeout(r.Context(), writeActionTimeout)
+	defer cancel()
+	result, err := h.engine.Dispatch(ctx, ops.ActionRequest{
+		Action:      "protection_status",
+		ContentType: "pub.polis.dm",
+		Payload:     map[string]any{"sender_domain": callerDomain},
+	})
+	if err != nil {
+		h.handleDispatchError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result.Data)
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 func parsePayload(r *http.Request) (map[string]any, error) {
@@ -299,6 +319,10 @@ func (h *handlers) handleDispatchError(w http.ResponseWriter, r *http.Request, e
 		status = http.StatusBadRequest
 		code = "invalid_request"
 		publicMessage = "The request is missing or has invalid fields. Reference X-Request-Id for support."
+	case strings.Contains(msg, "forbidden"):
+		status = http.StatusForbidden
+		code = "forbidden"
+		publicMessage = "Not permitted."
 	case strings.Contains(msg, "unknown content type") || strings.Contains(msg, "not found"):
 		status = http.StatusNotFound
 		code = "not_found"

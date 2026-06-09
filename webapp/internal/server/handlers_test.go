@@ -3,6 +3,7 @@ package server
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
@@ -6584,6 +6586,23 @@ func TestHandleThemeSwitch_SolsReserved(t *testing.T) {
 	}
 }
 
+func TestHandleThemeSwitch_StardustReserved(t *testing.T) {
+	s := newTestServer(t)
+
+	body := jsonBody(t, map[string]string{"theme": "stardust"})
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/theme", body)
+	w := httptest.NewRecorder()
+
+	s.handleThemeSwitch(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "reserved") {
+		t.Errorf("expected error about stardust being reserved, got: %s", w.Body.String())
+	}
+}
+
 func TestHandleSettings_IncludesThemes(t *testing.T) {
 	s := newConfiguredServer(t)
 	setupTestTheme(t, s, "sols")
@@ -6896,7 +6915,6 @@ func TestHandleSSE_MethodNotAllowed(t *testing.T) {
 		t.Errorf("expected 405, got %d", w.Code)
 	}
 }
-
 
 func TestComputeAllCounts_WithFollowing(t *testing.T) {
 	s := newConfiguredServer(t)
@@ -8029,6 +8047,215 @@ func TestContentRedirectMethodNotAllowed(t *testing.T) {
 
 // --- DM handler tests ---
 
+func TestHandleDMKeyring(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Not provisioned yet → 404.
+	req := httptest.NewRequest(http.MethodGet, "/api/dm/keyring", nil)
+	w := httptest.NewRecorder()
+	s.handleDMKeyring(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 before provisioning, got %d", w.Code)
+	}
+
+	// Provision a keyring with a password epoch (bootstrap holds a server_dek; epoch 1
+	// holds wrapped_dek + kdf).
+	kr := &dm.Keyring{}
+	if _, err := kr.AddBootstrapEpoch(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := kr.SetPassword([]byte("pw")); err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.Save(dm.DMDir(s.DataDir)); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/dm/keyring", nil)
+	w = httptest.NewRecorder()
+	s.handleDMKeyring(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	// The wrapped material the browser needs to unlock is present.
+	if !strings.Contains(body, "wrapped_dek") || !strings.Contains(body, "argon2id") {
+		t.Errorf("keyring response should expose wrapped_dek + kdf; got: %s", body)
+	}
+	// The server-held bootstrap private key MUST NOT be served to the browser.
+	if strings.Contains(body, "server_dek") {
+		t.Errorf("keyring response must never contain server_dek; got: %s", body)
+	}
+}
+
+func TestHandleDMSetPassword(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Provision the bootstrap keyring (as Medic/init would).
+	kr := &dm.Keyring{}
+	if _, err := kr.AddBootstrapEpoch(); err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.Save(dm.DMDir(s.DataDir)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A browser-built payload (the server never sees the password/DEK; wrapped blobs are
+	// opaque to it). A real pubkey so the republished block verifies.
+	epochPub := base64.StdEncoding.EncodeToString(bytesSeq(32))
+	payload := map[string]interface{}{
+		"public_key_messages":  epochPub,
+		"wrapped_dek":          "d2hhdGV2ZXI=",
+		"wrapped_dek_recovery": "cmVjb3Zlcnk=",
+		"kdf":                  map[string]interface{}{"algo": "argon2id", "salt": "AAECAwQFBgcICQoLDA0ODw==", "t": 3, "m": 65536, "p": 4},
+		"recovery_kdf":         map[string]interface{}{"algo": "hkdf-sha256", "salt": "EBESExQVFhcYGRobHB0eHw=="},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/dm/password", jsonBody(t, payload))
+	w := httptest.NewRecorder()
+	s.handleDMSetPassword(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["epoch_id"] != float64(1) {
+		t.Errorf("epoch_id = %v, want 1", resp["epoch_id"])
+	}
+
+	// Keyring now has the password epoch as current.
+	reloaded, err := dm.LoadKeyring(dm.DMDir(s.DataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := reloaded.CurrentEpoch()
+	if cur.ID != 1 || cur.Kind != dm.EpochKindPassword || cur.PublicKeyMessages != epochPub {
+		t.Errorf("current epoch = %+v, want password epoch 1 with the provided pubkey", cur)
+	}
+
+	// The messages-key block was republished and the new epoch verifies against identity.
+	wkData, err := os.ReadFile(filepath.Join(s.DataDir, ".well-known", "polis"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wk struct {
+		PublicKeyMessages *dm.MessagesKeyBlock `json:"public_key_messages"`
+	}
+	json.Unmarshal(wkData, &wk)
+	if wk.PublicKeyMessages == nil || wk.PublicKeyMessages.Current.Epoch != 1 || wk.PublicKeyMessages.Current.Key != epochPub {
+		t.Fatalf("published block should advertise epoch 1 with the new key; got %+v", wk.PublicKeyMessages)
+	}
+	if ok, err := dm.VerifyMessagesKeyEntry(wk.PublicKeyMessages.Current, s.PublicKey); err != nil || !ok {
+		t.Errorf("republished block must verify against the identity key: ok=%v err=%v", ok, err)
+	}
+
+	// A second set-password is rejected (password already set → 409).
+	req2 := httptest.NewRequest(http.MethodPost, "/api/dm/password", jsonBody(t, payload))
+	w2 := httptest.NewRecorder()
+	s.handleDMSetPassword(w2, req2)
+	if w2.Code != http.StatusConflict {
+		t.Errorf("second set-password should be 409, got %d", w2.Code)
+	}
+}
+
+// TestHandleDMRewrapPassword covers the phase-4.8 O(1) re-wrap: the server
+// overwrites the current epoch's wrap material in place (no new epoch, no pubkey
+// change, no republish), bumping the revision; and rejects a re-wrap when there's
+// no password epoch yet.
+func TestHandleDMRewrapPassword(t *testing.T) {
+	s := newConfiguredServer(t)
+	dmDir := dm.DMDir(s.DataDir)
+
+	// Re-wrap before any password epoch exists → 400.
+	earlyKr := &dm.Keyring{}
+	if _, err := earlyKr.AddBootstrapEpoch(); err != nil {
+		t.Fatal(err)
+	}
+	if err := earlyKr.Save(dmDir); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/dm/password/rewrap", jsonBody(t, map[string]interface{}{
+		"wrapped_dek": "bmV3", "kdf": map[string]interface{}{"algo": "argon2id", "salt": "AAA=", "t": 3, "m": 65536, "p": 4},
+	}))
+	w := httptest.NewRecorder()
+	s.handleDMRewrapPassword(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("rewrap with no password epoch should be 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Now provision a password epoch and capture its current state.
+	epochPub := base64.StdEncoding.EncodeToString(bytesSeq(32))
+	if _, err := earlyKr.AddPasswordEpoch(epochPub, "b2xkLXdyYXA=", "b2xkLXJlYw==",
+		dm.KDFParams{Algo: "argon2id", Salt: "b2xkLXNhbHQ=", Time: 3, Memory: 65536, Threads: 4},
+		dm.KDFParams{Algo: "hkdf-sha256", Salt: "b2xkLXJlYy1zYWx0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := earlyKr.Save(dmDir); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := dm.LoadKeyring(dmDir)
+	revBefore := before.Revision
+
+	// Change-password re-wrap: new wrapped_dek + kdf only (recovery untouched).
+	req = httptest.NewRequest(http.MethodPost, "/api/dm/password/rewrap", jsonBody(t, map[string]interface{}{
+		"wrapped_dek": "bmV3LXdyYXA=",
+		"kdf":         map[string]interface{}{"algo": "argon2id", "salt": "bmV3LXNhbHQ=", "t": 3, "m": 65536, "p": 4},
+	}))
+	w = httptest.NewRecorder()
+	s.handleDMRewrapPassword(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("rewrap should be 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	after, err := dm.LoadKeyring(dmDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := after.CurrentEpoch()
+	if cur.WrappedDEK != "bmV3LXdyYXA=" {
+		t.Errorf("wrapped_dek not updated: %q", cur.WrappedDEK)
+	}
+	if cur.KDF == nil || cur.KDF.Salt != "bmV3LXNhbHQ=" {
+		t.Errorf("kdf salt not updated: %+v", cur.KDF)
+	}
+	// Recovery wrap + epoch pubkey + epoch id are untouched; revision bumped.
+	if cur.WrappedDEKRecovery != "b2xkLXJlYw==" {
+		t.Errorf("recovery wrap should be untouched, got %q", cur.WrappedDEKRecovery)
+	}
+	if cur.PublicKeyMessages != epochPub || cur.ID != 1 {
+		t.Errorf("re-wrap must not change the epoch pubkey/id: %+v", cur)
+	}
+	if after.Revision <= revBefore {
+		t.Errorf("revision should bump: before=%d after=%d", revBefore, after.Revision)
+	}
+
+	// Empty body → nothing to re-wrap → 400.
+	req = httptest.NewRequest(http.MethodPost, "/api/dm/password/rewrap", jsonBody(t, map[string]interface{}{}))
+	w = httptest.NewRecorder()
+	s.handleDMRewrapPassword(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("empty rewrap should be 400, got %d", w.Code)
+	}
+
+	// Wrong method → 405.
+	req = httptest.NewRequest(http.MethodGet, "/api/dm/password/rewrap", nil)
+	w = httptest.NewRecorder()
+	s.handleDMRewrapPassword(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET should be 405, got %d", w.Code)
+	}
+}
+
+// bytesSeq returns n bytes 0,1,2,…
+func bytesSeq(n int) []byte {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(i)
+	}
+	return b
+}
+
 func TestHandleDMConversations_Empty(t *testing.T) {
 	s := newConfiguredServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/dm/conversations", nil)
@@ -8196,6 +8423,9 @@ func TestHandleDMRecipients_PolicyCheck(t *testing.T) {
 			AuthorName string `json:"author_name"`
 			Status     string `json:"status"`
 			Reason     string `json:"reason"`
+			Avatar     *struct {
+				BG string `json:"bg"`
+			} `json:"avatar"`
 		} `json:"recipients"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -8213,6 +8443,15 @@ func TestHandleDMRecipients_PolicyCheck(t *testing.T) {
 	// Second site denies all DMs
 	if resp.Recipients[1].Status != "no-dm" {
 		t.Errorf("expected 'no-dm' for deny-all site, got %q", resp.Recipients[1].Status)
+	}
+
+	// Every recipient carries an avatar config so the composer can render a
+	// real avatar (or the deterministic hue fallback when the site has none /
+	// is unreachable, as these https-forced mock fetches are).
+	for i, rec := range resp.Recipients {
+		if rec.Avatar == nil || rec.Avatar.BG == "" {
+			t.Errorf("recipient[%d] (%s): expected a non-empty avatar config, got %+v", i, rec.AuthorName, rec.Avatar)
+		}
 	}
 }
 
@@ -8622,6 +8861,7 @@ func TestCSPAdminSPA_NonceInjection(t *testing.T) {
 // covers <script> tags). The admin-SPA CSP must:
 //   - allow inline event handlers via script-src-attr 'unsafe-inline'
 //   - keep script-src-elem strict (nonce-only, no 'unsafe-inline')
+//
 // so a future XSS via <script> injection still can't execute, but
 // existing inline-handler UI affordances keep working.
 func TestCSPAdminSPA_AllowsInlineEventHandlers(t *testing.T) {
@@ -8666,7 +8906,7 @@ func TestSpaHandler_CSPNonceInjection(t *testing.T) {
 		},
 	}
 	tmp := t.TempDir()
-	handler := spaHandler(fsys, tmp)
+	handler := spaHandler(fsys, tmp, false)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -9075,5 +9315,292 @@ func TestHandleSiteRegistrationStatus_MethodNotAllowed(t *testing.T) {
 
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+// TestHandleDMSendSealed_StoresBoxAndDelivers verifies phase-4.6 browser-seal
+// send: the server relays the browser's pre-sealed delivery box to the recipient
+// and stores the browser's pre-sealed box-to-self copy VERBATIM (it seals
+// nothing — the sender's password-epoch DEK never reaches it).
+func TestHandleDMSendSealed_StoresBoxAndDelivers(t *testing.T) {
+	var delivered int
+	recipient := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/v1/content/dm/actions/deliver") {
+			delivered++
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer recipient.Close()
+
+	s := newConfiguredServer(t)
+
+	pub, dek, err := dm.NewEpochKeypair()
+	if err != nil {
+		t.Fatalf("NewEpochKeypair: %v", err)
+	}
+	boxPub := base64.StdEncoding.EncodeToString(pub[:])
+	// Two boxes as the browser would produce them (here both sealed to self —
+	// the server treats them as opaque ciphertext either way).
+	dCt, dN, _ := dm.Encrypt([]byte("see you thursday"), &pub, &dek)
+	sCt, sN, _ := dm.Encrypt([]byte("see you thursday"), &pub, &dek)
+	sentCtB64 := base64.StdEncoding.EncodeToString(sCt)
+
+	body := jsonBody(t, map[string]interface{}{
+		"recipient_url":   recipient.URL,
+		"sender_epoch":    1,
+		"recipient_epoch": 1,
+		"box_pub":         boxPub,
+		"delivery": map[string]string{
+			"ciphertext": base64.StdEncoding.EncodeToString(dCt),
+			"nonce":      base64.StdEncoding.EncodeToString(dN[:]),
+		},
+		"sent": map[string]string{
+			"ciphertext": sentCtB64,
+			"nonce":      base64.StdEncoding.EncodeToString(sN[:]),
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/dm/send-sealed", body)
+	w := httptest.NewRecorder()
+	s.handleDMSendSealed(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	if delivered != 1 {
+		t.Errorf("recipient should have received exactly 1 delivery, got %d", delivered)
+	}
+
+	peer := dm.ExtractDomainFromURL(recipient.URL)
+	msgs, err := dm.NewMailbox(dm.DMDir(s.DataDir)).LoadMessages(peer)
+	if err != nil {
+		t.Fatalf("LoadMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 stored message, got %d", len(msgs))
+	}
+	m := msgs[0]
+	if m.Dir != dm.DirOut {
+		t.Errorf("dir = %q, want %q", m.Dir, dm.DirOut)
+	}
+	if m.KeyEpoch != 1 {
+		t.Errorf("key_epoch = %d, want 1", m.KeyEpoch)
+	}
+	if m.Ciphertext != sentCtB64 {
+		t.Error("stored ciphertext must be the browser's sent box, stored verbatim (no re-seal)")
+	}
+	if m.BoxPub != boxPub {
+		t.Errorf("box_pub = %q, want %q", m.BoxPub, boxPub)
+	}
+}
+
+// TestHandleDMSend_EgressGuardBlocksSSRF is the DM-4 regression: with RestrictDMEgress on
+// (hosted multi-tenant), a recipient_url pointing at an internal/metadata host is refused
+// before any outbound fetch. With the guard off (localhost), the same URL is not blocked by
+// this check (it fails later, on the fetch).
+func TestHandleDMSend_EgressGuardBlocksSSRF(t *testing.T) {
+	s := newConfiguredServer(t)
+	s.RestrictDMEgress = true
+
+	for _, target := range []string{
+		"http://169.254.169.254/latest/meta-data/",
+		"https://169.254.169.254/",
+		"http://localhost:6379/",
+		"https://db.internal/",
+	} {
+		body := jsonBody(t, map[string]string{"recipient_url": target, "content": "hi"})
+		req := httptest.NewRequest(http.MethodPost, "/api/dm/send", body)
+		w := httptest.NewRecorder()
+		s.handleDMSend(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("RestrictDMEgress should reject %q with 400, got %d: %s", target, w.Code, w.Body.String())
+		}
+	}
+}
+
+// TestHandleDMSendSealed_Validation rejects missing required fields and wrong methods.
+func TestHandleDMSendSealed_Validation(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Wrong method.
+	req := httptest.NewRequest(http.MethodGet, "/api/dm/send-sealed", nil)
+	w := httptest.NewRecorder()
+	s.handleDMSendSealed(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET: status %d, want 405", w.Code)
+	}
+
+	// Missing boxes.
+	req = httptest.NewRequest(http.MethodPost, "/api/dm/send-sealed", jsonBody(t, map[string]interface{}{
+		"recipient_url": "https://bob.polis.pub",
+	}))
+	w = httptest.NewRecorder()
+	s.handleDMSendSealed(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("missing boxes: status %d, want 400", w.Code)
+	}
+}
+
+// TestHandleDMRecipientKey_Validation covers method + missing-arg paths (the
+// happy path needs a live recipient with a published, signed messages key,
+// exercised by the dm package's interop tests).
+func TestHandleDMRecipientKey_Validation(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/dm/recipient-key", nil)
+	w := httptest.NewRecorder()
+	s.handleDMRecipientKey(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST: status %d, want 405", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/dm/recipient-key", nil)
+	w = httptest.NewRecorder()
+	s.handleDMRecipientKey(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("missing recipient_url: status %d, want 400", w.Code)
+	}
+}
+
+// TestHandleDMProtectionStatus covers the phase-4.10 endpoint: method/arg
+// validation, and that a recipient who refuses / is unreachable collapses to
+// status:"unknown" (so the SPA soft-warns rather than misleads). The signed
+// happy path is exercised by the dm package's protection/interop tests.
+func TestHandleDMProtectionStatus(t *testing.T) {
+	s := newConfiguredServer(t)
+
+	// Wrong method → 405.
+	req := httptest.NewRequest(http.MethodPost, "/api/dm/protection-status", nil)
+	w := httptest.NewRecorder()
+	s.handleDMProtectionStatus(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST: status %d, want 405", w.Code)
+	}
+
+	// Missing recipient_url → 400.
+	req = httptest.NewRequest(http.MethodGet, "/api/dm/protection-status", nil)
+	w = httptest.NewRecorder()
+	s.handleDMProtectionStatus(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("missing recipient_url: status %d, want 400", w.Code)
+	}
+
+	// Recipient refuses the signed query (e.g. not a mutual) → status:"unknown", 200.
+	recip := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer recip.Close()
+	req = httptest.NewRequest(http.MethodGet, "/api/dm/protection-status?recipient_url="+recip.URL, nil)
+	w = httptest.NewRecorder()
+	s.handleDMProtectionStatus(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("unknown path: status %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["status"] != "unknown" {
+		t.Errorf("refused recipient should yield status=unknown, got %v", resp["status"])
+	}
+}
+
+// TestHandleDMSetPassword_ClosesBootstrapWindow verifies the phase-7/6 follow-up: setting
+// a password re-seals prior bootstrap-epoch messages FORWARD to the new epoch and clears the
+// operator-readable bootstrap server_dek. After it, the message is readable only under the
+// new epoch's DEK and the bootstrap key is gone.
+func TestHandleDMSetPassword_ClosesBootstrapWindow(t *testing.T) {
+	s := newConfiguredServer(t)
+	dmDir := dm.DMDir(s.DataDir)
+	const peer = "alice.example.com"
+	const secret = "see you in the window"
+
+	// Provision a bootstrap keyring and capture its DEK + pubkey.
+	kr := &dm.Keyring{}
+	bootDEK, err := kr.AddBootstrapEpoch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.Save(dmDir); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, _ := dm.LoadKeyring(dmDir)
+	bootPubRaw, _ := base64.StdEncoding.DecodeString(reloaded.Epochs[0].PublicKeyMessages)
+	var bootPub [32]byte
+	copy(bootPub[:], bootPubRaw)
+
+	// Store a bootstrap-epoch received message (sealed to our bootstrap pubkey).
+	ephPub, ephSK, _ := dm.NewEpochKeypair()
+	ct, nonce, _ := dm.Encrypt([]byte(secret), &bootPub, &ephSK)
+	mb := dm.NewMailbox(dmDir)
+	if _, err := mb.AppendReceived(peer, peer, 0, ct, nonce, ephPub, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Browser-minted epoch-1 keypair; the real pubkey is the re-seal target.
+	newPub, newDEK, _ := dm.NewEpochKeypair()
+	payload := map[string]interface{}{
+		"public_key_messages":  base64.StdEncoding.EncodeToString(newPub[:]),
+		"wrapped_dek":          "d2hhdGV2ZXI=",
+		"wrapped_dek_recovery": "cmVjb3Zlcnk=",
+		"kdf":                  map[string]interface{}{"algo": "argon2id", "salt": "AAECAwQFBgcICQoLDA0ODw==", "t": 3, "m": 65536, "p": 4},
+		"recovery_kdf":         map[string]interface{}{"algo": "hkdf-sha256", "salt": "EBESExQVFhcYGRobHB0eHw=="},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/dm/password", jsonBody(t, payload))
+	w := httptest.NewRecorder()
+	s.handleDMSetPassword(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("set-password: %d %s", w.Code, w.Body.String())
+	}
+
+	// Bootstrap server_dek must be cleared.
+	after, _ := dm.LoadKeyring(dmDir)
+	if after.Epochs[0].ServerDEK != "" {
+		t.Error("bootstrap server_dek must be cleared after set-password")
+	}
+
+	// The message is now readable ONLY under the new epoch DEK, tagged epoch 1.
+	withNew, err := mb.ReadConversation(peer, map[int][32]byte{1: newDEK})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withNew) != 1 || withNew[0].Locked || withNew[0].KeyEpoch != 1 {
+		t.Fatalf("message should be unlocked epoch-1: %+v", withNew)
+	}
+	if withNew[0].Plaintext != secret {
+		t.Errorf("plaintext = %q, want %q", withNew[0].Plaintext, secret)
+	}
+	// The (now-cleared) bootstrap DEK no longer opens it.
+	withBoot, _ := mb.ReadConversation(peer, map[int][32]byte{0: bootDEK})
+	if len(withBoot) == 1 && !withBoot[0].Locked {
+		t.Error("after re-seal, the bootstrap DEK must not open the message")
+	}
+}
+
+// TestHookRoutesGatedByEnableHooks verifies the hook/automation routes are only
+// registered when EnableHooks is true (localhost). On hosted (EnableHooks=false)
+// they must 404 — not just 403 — so the surface isn't reachable at all.
+func TestHookRoutesGatedByEnableHooks(t *testing.T) {
+	body := func() *bytes.Buffer {
+		return jsonBody(t, map[string]string{"hook_type": "post-publish", "script": "echo hi"})
+	}
+
+	// Hosted-style: hooks disabled → route not registered → 404.
+	s := newConfiguredServer(t)
+	s.EnableHooks = false
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/automations", body()))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("hooks disabled: expected 404 (route absent), got %d", w.Code)
+	}
+
+	// Localhost: hooks enabled → route registered → reaches handler (not 404).
+	s2 := newConfiguredServer(t)
+	s2.EnableHooks = true
+	w2 := httptest.NewRecorder()
+	s2.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPost, "/api/automations", body()))
+	if w2.Code == http.StatusNotFound {
+		t.Error("hooks enabled: route should be registered, got 404")
 	}
 }

@@ -2,13 +2,14 @@
 // HANDBOOK TRAIL MARKER — DS-to-stream thread (webapp stream surface)
 // =============================================================================
 // This file exposes the webapp's stream HTTP endpoints to the SPA, including
-// the cross-tenant comment-count stamping that backs Path B (on-demand
-// aggregation). The visibleHorizon strategy splits each rendered page into
-// "above the fold" (sync DS fetch, strict timeout) and "below the fold"
-// (fire-and-forget background fetch, populates short-lived local cache).
+// the comment-count stamping that backs Path B (on-demand aggregation).
+// populateCrossTenantCommentCounts batches every post on the rendered page
+// into one synchronous DS counts call (bounded by a strict timeout) so the
+// badge is deterministic each render, with a short-lived local cache to skip
+// the roundtrip across requests.
 //
 // Trail across files (DS-to-stream, aggregation):
-//   webapp surface — this file (stampCounts, visibleHorizon strategy)
+//   webapp surface — this file (populateCrossTenantCommentCounts)
 //   DS endpoint    — discovery-service/core/handlers/counts.ts (getCommentCounts)
 //
 // Companion to the continuous sync path:
@@ -49,14 +50,18 @@ import (
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
-// Cross-tenant comment-count stamping constants. The viewport horizon is
-// a positional heuristic — items[0:visibleHorizon] in the paginated page
-// are treated as "likely visible above the fold" and get a sync DS fetch
-// with a strict timeout; items past the horizon get a fire-and-forget
-// background fetch that populates the cache for the next render.
+// Comment-count stamping constants. The whole page's uncached counts are
+// fetched in ONE batched DS call (the counts endpoint accepts up to
+// streamCountBatchMax URLs per request) synchronously, so every post on the
+// page is stamped deterministically each render. A prior visibleHorizon
+// heuristic (sync the first N, background the rest) left below-the-fold posts
+// — and any post on a cold cache — showing 0 until a later render warmed the
+// cache, then dropping back to 0 when the TTL expired: the badge flipped
+// 0↔1↔0 across navigations. Overflow beyond the batch cap (only on an
+// explicit large `limit`) falls back to a background fill.
 const (
-	visibleHorizon           = 10
-	visibleCountFetchTimeout = 500 * time.Millisecond
+	streamCountBatchMax         = 50 // matches DS COMMENT_COUNTS_MAX_URLS
+	visibleCountFetchTimeout    = 500 * time.Millisecond
 	backgroundCountFetchTimeout = 5 * time.Second
 )
 
@@ -76,8 +81,8 @@ type streamItemResponse struct {
 	// reads these to render the full target post inline + the local
 	// comment body underneath. All omitempty so non-thread items
 	// don't carry empty fields.
-	TargetPostTitle             string `json:"target_post_title,omitempty"`
-	TargetPostBodyHTML          string `json:"target_post_body_html,omitempty"`
+	TargetPostTitle    string `json:"target_post_title,omitempty"`
+	TargetPostBodyHTML string `json:"target_post_body_html,omitempty"`
 	// TargetPostTitleRedundant flags posts whose body's first prose
 	// sentence already begins with the title text (rendered as
 	// **bold-prefixed** markdown is common). The stream's renderCommentThread
@@ -86,11 +91,16 @@ type streamItemResponse struct {
 	// render.TitleStartsFirstSentence on the body markdown after
 	// render.StripLeadingTitleHeading has dropped any matching leading
 	// ATX heading.
-	TargetPostTitleRedundant    bool   `json:"target_post_title_redundant,omitempty"`
-	TargetPostPublished         string `json:"target_post_published,omitempty"`
-	TargetPostPublishedHuman    string `json:"target_post_published_human,omitempty"`
-	TargetPostAuthorDomain      string `json:"target_post_author_domain,omitempty"`
-	CommentBodyHTML             string `json:"comment_body_html,omitempty"`
+	TargetPostTitleRedundant bool   `json:"target_post_title_redundant,omitempty"`
+	TargetPostPublished      string `json:"target_post_published,omitempty"`
+	TargetPostPublishedHuman string `json:"target_post_published_human,omitempty"`
+	TargetPostAuthorDomain   string `json:"target_post_author_domain,omitempty"`
+	// Avatar config for the PARENT POST's author. The activity-view comment-
+	// thread floats the post author's avatar in the post region (the comments
+	// view instead puts the avatar on the commenter, via author_avatar above).
+	// Cross-author only; hue fallback when the author has no custom avatar.
+	TargetPostAuthorAvatar *render.AvatarConfig `json:"target_post_author_avatar,omitempty"`
+	CommentBodyHTML        string               `json:"comment_body_html,omitempty"`
 
 	// BlessedComments populates only for type=posts items on own-handle
 	// scope when the post has blessed comments (with=comments narrows the
@@ -131,6 +141,17 @@ type streamItemResponse struct {
 	// mapping. Empty for cross-tenant items (the unpublish action doesn't
 	// apply to them).
 	SourcePath string `json:"source_path,omitempty"`
+
+	// AuthorAvatar carries the entry author's avatar config (the post author
+	// for posts, the commenter for comments) for CROSS-AUTHOR entries — the
+	// stream's renderPost / renderCommentThread build the floated 28px avatar
+	// from it. Omitted for own-author entries (identity suppressed, "I know
+	// who I am"). Populated by buildAuthorAvatars; a deterministic hue
+	// fallback is synthesized when the author has no custom avatar, so this
+	// is always present for cross-author items. cfg field names are
+	// snake_case (bg/fg/border/border_w/pattern/pattern_color) to match the
+	// JS buildAvatar consumer.
+	AuthorAvatar *render.AvatarConfig `json:"author_avatar,omitempty"`
 }
 
 // blessedCommentResponse is the JSON shape the stream emits per blessed
@@ -140,11 +161,43 @@ type streamItemResponse struct {
 // goldmark-rendered + bluemonday-sanitized (see render.LoadLocalCommentContent
 // — same trust chain as the focus entry's inline comments).
 type blessedCommentResponse struct {
-	URL            string `json:"url"`
-	AuthorName     string `json:"author_name"`
-	Published      string `json:"published,omitempty"`
-	PublishedHuman string `json:"published_human"`
-	ContentHTML    string `json:"content_html"`
+	URL            string               `json:"url"`
+	AuthorName     string               `json:"author_name"`
+	AuthorDomain   string               `json:"author_domain,omitempty"`
+	AuthorAvatar   *render.AvatarConfig `json:"author_avatar,omitempty"`
+	Published      string               `json:"published,omitempty"`
+	PublishedHuman string               `json:"published_human"`
+	ContentHTML    string               `json:"content_html"`
+}
+
+// commentAuthorAvatar resolves the avatar config for a comment author so the
+// read-focus card can render the same floated avatar the canonical per-post
+// page shows (render.loadBlessedCommentsForPost uses the identical fetch +
+// fallback). Cached in render's authorAvatarCache (6h), shared with the SSR
+// render path in this process, so a warmed canonical page means no extra
+// fetch here. Returns nil for an empty domain.
+func (s *Server) commentAuthorAvatar(domain string) *render.AvatarConfig {
+	if domain == "" {
+		return nil
+	}
+	cfg, ok := render.LoadOrFetchAuthorAvatar(domain)
+	if !ok || cfg.BG == "" {
+		cfg = render.FallbackAvatarConfig(domain)
+	}
+	return &cfg
+}
+
+// focusCommentResponse is the JSON shape GET /api/v1/stream/focus-comment
+// returns for a single post. Read-focus mode shows exactly ONE comment — the
+// most recent on the post, blessed or not — sourced from the DS latest-comment
+// endpoint with its body fetched from the commenter's origin. HasComment=false
+// means the post has no comments (or the lookup/fetch failed); the SPA opens
+// focus with no comment panel and drives the full thread to the origin site.
+// Comment reuses blessedCommentResponse so the SPA's buildCommentsPanel
+// consumes it unchanged.
+type focusCommentResponse struct {
+	HasComment bool                    `json:"has_comment"`
+	Comment    *blessedCommentResponse `json:"comment,omitempty"`
 }
 
 // commentThreadEnrichment carries the per-item enrichment data for
@@ -152,21 +205,33 @@ type blessedCommentResponse struct {
 // (the comment URL) to avoid extending the shared CachedFeedItem
 // struct with v4-stream-specific fields.
 type commentThreadEnrichment struct {
-	TargetPostTitle             string
-	TargetPostBodyHTML          string
-	TargetPostTitleRedundant    bool
-	TargetPostPublished         string
-	TargetPostPublishedHuman    string
-	TargetPostAuthorDomain      string
-	CommentBodyHTML             string
+	TargetPostTitle          string
+	TargetPostBodyHTML       string
+	TargetPostTitleRedundant bool
+	TargetPostPublished      string
+	TargetPostPublishedHuman string
+	TargetPostAuthorDomain   string
+	TargetPostAuthorAvatar   *render.AvatarConfig
+	CommentBodyHTML          string
 }
 
-func toStreamItemResponses(items []feed.CachedFeedItem, enrich map[string]commentThreadEnrichment, postComments map[string][]blessedCommentResponse, titleRedundant map[string]bool, sourcePaths map[string]string, postBodies map[string]string) []streamItemResponse {
+func toStreamItemResponses(items []feed.CachedFeedItem, enrich map[string]commentThreadEnrichment, postComments map[string][]blessedCommentResponse, titleRedundant map[string]bool, sourcePaths map[string]string, postBodies map[string]string, authorAvatars map[string]*render.AvatarConfig) []streamItemResponse {
 	out := make([]streamItemResponse, len(items))
 	for i, it := range items {
 		resp := streamItemResponse{
 			CachedFeedItem: it,
-			PublishedHuman: template.FormatHumanDateTime(it.Published),
+			// StripYear: the v4 stream drops the per-entry year (year-markers
+			// segment the stream) so the comment-count column sits closer to
+			// the left. JS renderers consume this already-stripped string.
+			PublishedHuman: template.StripYear(template.FormatHumanDateTime(it.Published)),
+		}
+		// Keyed by the pre-normalized it.URL (same convention as the maps
+		// above). Present only for cross-author items (own author skipped
+		// in buildAuthorAvatars).
+		if authorAvatars != nil {
+			if av := authorAvatars[it.URL]; av != nil {
+				resp.AuthorAvatar = av
+			}
 		}
 		if e, ok := enrich[it.URL]; ok {
 			resp.TargetPostTitle = e.TargetPostTitle
@@ -175,6 +240,7 @@ func toStreamItemResponses(items []feed.CachedFeedItem, enrich map[string]commen
 			resp.TargetPostPublished = e.TargetPostPublished
 			resp.TargetPostPublishedHuman = e.TargetPostPublishedHuman
 			resp.TargetPostAuthorDomain = e.TargetPostAuthorDomain
+			resp.TargetPostAuthorAvatar = e.TargetPostAuthorAvatar
 			resp.CommentBodyHTML = e.CommentBodyHTML
 		}
 		if cs, ok := postComments[it.URL]; ok && len(cs) > 0 {
@@ -204,6 +270,65 @@ func toStreamItemResponses(items []feed.CachedFeedItem, enrich map[string]commen
 		resp.URL = polisurl.NormalizeToHTML(resp.URL)
 		resp.TargetURL = polisurl.NormalizeToHTML(resp.TargetURL)
 		out[i] = resp
+	}
+	return out
+}
+
+// buildAuthorAvatars resolves the avatar config for every CROSS-AUTHOR entry
+// on the page (the post author for posts, the commenter for comments). Own-
+// author entries are skipped (identity suppressed). Each unique remote domain
+// is fetched once via render.LoadOrFetchAuthorAvatar (bounded to 5 concurrent);
+// a deterministic hue fallback is synthesized when the author has no custom
+// avatar, so cross-author items always get a config. Returns a map keyed by
+// the item URL (pre-NormalizeToHTML form, matching the other enrichment maps).
+func (s *Server) buildAuthorAvatars(items []feed.CachedFeedItem) map[string]*render.AvatarConfig {
+	siteDomain := extractDomainFromURL(s.GetBaseURL())
+
+	uniqueDomains := make(map[string]bool)
+	for _, it := range items {
+		if it.AuthorDomain == "" || it.AuthorDomain == siteDomain {
+			continue
+		}
+		uniqueDomains[it.AuthorDomain] = true
+	}
+	if len(uniqueDomains) == 0 {
+		return nil
+	}
+
+	type result struct {
+		domain string
+		cfg    render.AvatarConfig
+	}
+	results := make(chan result, len(uniqueDomains))
+	sem := make(chan struct{}, 5)
+	var wg sync.WaitGroup
+	for domain := range uniqueDomains {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(d string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			cfg, ok := render.LoadOrFetchAuthorAvatar(d)
+			if !ok || cfg.BG == "" {
+				cfg = render.FallbackAvatarConfig(d)
+			}
+			results <- result{domain: d, cfg: cfg}
+		}(domain)
+	}
+	wg.Wait()
+	close(results)
+
+	byDomain := make(map[string]render.AvatarConfig, len(uniqueDomains))
+	for r := range results {
+		byDomain[r.domain] = r.cfg
+	}
+
+	out := make(map[string]*render.AvatarConfig)
+	for _, it := range items {
+		if cfg, ok := byDomain[it.AuthorDomain]; ok {
+			c := cfg // copy so each pointer is independent
+			out[it.URL] = &c
+		}
 	}
 	return out
 }
@@ -286,10 +411,10 @@ var validStreamTimes = map[string]time.Duration{
 // writes landing in the same RFC3339 second) don't get dropped or
 // double-included.
 type streamCursor struct {
-	BeforePublished string `json:"before,omitempty"`    // newest-first: next page items published BEFORE this
-	BeforeID        string `json:"beforeId,omitempty"`  // tiebreaker for items at exactly BeforePublished
-	AfterPublished  string `json:"after,omitempty"`     // oldest-first: next page items published AFTER this
-	AfterID         string `json:"afterId,omitempty"`   // tiebreaker for items at exactly AfterPublished
+	BeforePublished string `json:"before,omitempty"`   // newest-first: next page items published BEFORE this
+	BeforeID        string `json:"beforeId,omitempty"` // tiebreaker for items at exactly BeforePublished
+	AfterPublished  string `json:"after,omitempty"`    // oldest-first: next page items published AFTER this
+	AfterID         string `json:"afterId,omitempty"`  // tiebreaker for items at exactly AfterPublished
 }
 
 func encodeStreamCursor(c streamCursor) string {
@@ -901,14 +1026,16 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 	// Take limit + compute next cursor
 	page, nextCursor := paginateStreamItems(items, limit, order)
 
-	// Cross-tenant comment-count stamping. Walks the paginated page,
-	// fetches DS counts for cross-tenant post items not already in the
-	// in-memory cache. Items above visibleHorizon block on the fetch
-	// with a strict timeout so the stream completes promptly; items
-	// below it kick off a fire-and-forget background goroutine that
-	// populates the cache for the next render. Own-post counts are
-	// already stamped above by populateCommentCountsAndOptionallyFilter.
-	if feedType == "post" || feedType == "" {
+	// Comment-count stamping. populateCrossTenantCommentCounts stamps the
+	// DS TOTAL (blessed + unblessed) onto post items — own and cross-tenant
+	// alike. That's the OWNER SPA lens (network aggregation). Canonical
+	// pages get the BLESSED-ONLY count already stamped by
+	// populateCommentCountsAndOptionallyFilter, matching what the tenant's
+	// own SSR shows — the tenant's curated lens. Gated on the surface=spa
+	// query param the owner SPA's stream.js sends (driven by body.is-owner;
+	// see the Layer-2 owner-gate comment in stream.css). Canonical pages
+	// omit the param and skip this stamping.
+	if (feedType == "post" || feedType == "") && r.URL.Query().Get("surface") == "spa" {
 		s.populateCrossTenantCommentCounts(r, page, myDomain)
 	}
 
@@ -921,10 +1048,13 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 	// and falls back to the cached excerpt when a local comment body
 	// isn't available. Empty map for non-comment types short-circuits
 	// the lookup in toStreamItemResponses.
-	var enrich map[string]commentThreadEnrichment
-	if feedType == "comment" {
-		enrich = s.buildCommentThreadEnrichments(page)
-	}
+	// Comment-thread enrichment (parent post title/body + comment body HTML)
+	// runs for ANY view that can surface comment items, not just the dedicated
+	// comments view — the "all"/activity stream renders comments as comment-
+	// thread entries too, and without this they showed "(untitled) / (post body
+	// unavailable)". buildCommentThreadEnrichments self-filters to comment items
+	// (TargetURL set), so it's an empty-map no-op on pure-post pages.
+	enrich := s.buildCommentThreadEnrichments(page)
 
 	// Build per-post blessed-comment enrichment for type=posts on own-
 	// handle scope. Mirror of buildCommentThreadEnrichments but inverted:
@@ -967,8 +1097,14 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 		postBodies = s.buildPostBodies(page, extractDomainFromURL(s.GetBaseURL()), sourcePaths)
 	}
 
+	// Per-entry author avatar config (cross-author only) for the stream's
+	// floated 28px avatar. Covers both posts (post author) and comments
+	// (commenter); the comments view shows the originating post by handle
+	// text, so only the commenter needs an avatar here.
+	authorAvatars := s.buildAuthorAvatars(page)
+
 	resp := map[string]interface{}{
-		"items": toStreamItemResponses(page, enrich, postComments, titleRedundant, sourcePaths, postBodies),
+		"items": toStreamItemResponses(page, enrich, postComments, titleRedundant, sourcePaths, postBodies, authorAvatars),
 	}
 	if nextCursor != "" {
 		resp["next_cursor"] = nextCursor
@@ -1015,10 +1151,10 @@ func (s *Server) handleStreamItemsDrafts(w http.ResponseWriter, sortBy string, l
 	// byline — the cards looked stripped compared to published
 	// posts (R20-10).
 	type draftItem struct {
-		ID             string `json:"id"`
-		Type           string `json:"type"`
-		Title          string `json:"title,omitempty"`
-		Excerpt        string `json:"excerpt,omitempty"`
+		ID      string `json:"id"`
+		Type    string `json:"type"`
+		Title   string `json:"title,omitempty"`
+		Excerpt string `json:"excerpt,omitempty"`
 		// R23 #9: ship the rendered HTML so the SPA stream can show
 		// the formatted body in place. Drafts have no canonical URL
 		// to lazy-fetch, so without this the renderer fell back to a
@@ -1149,9 +1285,9 @@ func (s *Server) handleStreamItemsDrafts(w http.ResponseWriter, sortBy string, l
 //   - my-network: union of outbound + inbound follows (local), enriched
 //     from the network feed cache.
 //   - all-polis:  DS site directory via buildAllPolisProfiles.
-//                 Accepts search + cursor for debounced search +
-//                 pagination. ErrListSitesNotDeployed degrades to
-//                 an empty stream (the SPA stays on the surface).
+//     Accepts search + cursor for debounced search +
+//     pagination. ErrListSitesNotDeployed degrades to
+//     an empty stream (the SPA stays on the surface).
 //
 // limit is honored. Cursor and search are passed through unchanged
 // (empty values are fine — the builder treats them as no-op).
@@ -1242,14 +1378,15 @@ func (s *Server) handleStreamItemsProfiles(w http.ResponseWriter, r *http.Reques
 //     encrypted index (DecryptIndexPreviews unwraps server-side).
 //
 // Auth posture (TODO — flagged for 6.k auth-aware nav work):
-//   This endpoint inherits the parent /api/v1/stream/items posture
-//   (no explicit auth check). On localhost the binary is owner-trust by
-//   construction. On hosted, session auth at the routing layer ensures
-//   only the tenant's authenticated session reaches their polis-server.
-//   DM previews are the most sensitive surface yet exposed via this
-//   endpoint, so the implicit-trust assumption is worth tightening
-//   alongside 6.k's broader auth-aware rewrite — likely a per-handler
-//   session check before any DM data is read.
+//
+//	This endpoint inherits the parent /api/v1/stream/items posture
+//	(no explicit auth check). On localhost the binary is owner-trust by
+//	construction. On hosted, session auth at the routing layer ensures
+//	only the tenant's authenticated session reaches their polis-server.
+//	DM previews are the most sensitive surface yet exposed via this
+//	endpoint, so the implicit-trust assumption is worth tightening
+//	alongside 6.k's broader auth-aware rewrite — likely a per-handler
+//	session check before any DM data is read.
 //
 // Items shape conforms to renderDM in shapes/v4/stream.js:
 //   - meta.type = "dm", meta.conversation_id (renderer dataset hook)
@@ -1267,27 +1404,23 @@ func (s *Server) handleStreamItemsProfiles(w http.ResponseWriter, r *http.Reques
 //     by limit alone for now). Cursor support can be added when a
 //     tenant's DM count makes pagination meaningful.
 func (s *Server) handleStreamItemsDM(w http.ResponseWriter, r *http.Request, _ streamCursor, limit int, order string, qualifier string) {
-	store, err := s.dmStore()
+	mb, self, _, err := s.dmMailbox()
 	if err != nil {
-		// No DM store configured (e.g., tenant without keys) → empty list,
+		// No DM mailbox configured (e.g., tenant without keys) → empty list,
 		// not an error — same shape as a tenant with zero DMs.
-		s.LogWarn("stream items dm: dmStore unavailable: %v", err)
+		s.LogWarn("stream items dm: dmMailbox unavailable: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"items": []interface{}{}})
 		return
 	}
 
-	idx, err := store.LoadIndex()
+	entries, err := mb.RebuildInbox()
 	if err != nil {
-		s.LogError("stream items dm: load index: %v", err)
+		s.LogError("stream items dm: rebuild inbox: %v", err)
 		writeStreamError(w, http.StatusInternalServerError, "failed to load DM index")
 		return
 	}
-	// Decrypt previews server-side (same call /api/dm/conversations
-	// uses). The previews are at-rest-encrypted on disk; decryption
-	// requires the owner's storage key which only this process holds.
-	store.DecryptIndexPreviews(idx)
 
 	type dmItem struct {
 		ID             string `json:"id"`
@@ -1304,30 +1437,29 @@ func (s *Server) handleStreamItemsDM(w http.ResponseWriter, r *http.Request, _ s
 		UnreadCount    int    `json:"unread_count,omitempty"`
 	}
 
-	out := make([]dmItem, 0, len(idx.Conversations))
-	for _, conv := range idx.Conversations {
+	out := make([]dmItem, 0, len(entries))
+	for _, e := range entries {
 		// qualifier=new → only unread.
-		if qualifier == "new" && conv.UnreadCount == 0 {
+		if qualifier == "new" && e.Unread == 0 {
 			continue
 		}
+		convID := dm.ComputeConversationID(self, e.Peer)
 		out = append(out, dmItem{
-			ID:             conv.ID,
+			ID:             convID,
 			Type:           "dm",
-			ConversationID: conv.ID,
-			SenderDomain:   conv.PeerDomain,
-			// SenderName falls back to PeerDomain — at this layer we
-			// don't have the peer's display name (would require an
-			// extra cross-tenant fetch). The renderDM byline shows
-			// both name + domain; matching them here keeps the
-			// listing legible without speculative network calls.
-			SenderName:     conv.PeerDomain,
-			Title:          conv.PeerDomain,
-			BodyText:       conv.LastPreview,
-			URL:            "/_/messages/" + conv.ID,
-			Published:      conv.LastMessageAt,
-			PublishedHuman: template.FormatHumanDateTime(conv.LastMessageAt),
-			Unread:         conv.UnreadCount > 0,
-			UnreadCount:    conv.UnreadCount,
+			ConversationID: convID,
+			SenderDomain:   e.Peer,
+			// SenderName falls back to the peer handle — at this layer we
+			// don't have the peer's display name. BodyText is empty: under
+			// end-to-end encryption there is no server-readable preview.
+			SenderName:     e.Peer,
+			Title:          e.Peer,
+			BodyText:       "",
+			URL:            "/_/messages/" + convID,
+			Published:      e.LastMessageAt,
+			PublishedHuman: template.FormatHumanDateTime(e.LastMessageAt),
+			Unread:         e.Unread > 0,
+			UnreadCount:    e.Unread,
 		})
 	}
 
@@ -1377,11 +1509,11 @@ func (s *Server) handleStreamItemsDMThread(w http.ResponseWriter, r *http.Reques
 		writeStreamError(w, http.StatusBadRequest, "thread scope requires a peer handle")
 		return
 	}
-	store, err := s.dmStore()
+	mb, _, deks, err := s.dmMailbox()
 	if err != nil {
-		// No DM store (tenant without keys) → empty thread, same shape
+		// No DM mailbox (tenant without keys) → empty thread, same shape
 		// as a conversation that doesn't exist yet.
-		s.LogWarn("stream items dm-thread: dmStore unavailable: %v", err)
+		s.LogWarn("stream items dm-thread: dmMailbox unavailable: %v", err)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"items": []interface{}{}})
@@ -1395,12 +1527,11 @@ func (s *Server) handleStreamItemsDMThread(w http.ResponseWriter, r *http.Reques
 	}
 	convID := dm.ComputeConversationID(myDomain, peerHandle)
 
-	conv, err := store.LoadConversation(convID)
+	stored, err := mb.ReadConversation(peerHandle, deks)
 	if err != nil {
-		// Conversation file not present yet → empty thread. Not an error;
-		// matches the "conversation auto-creates on first send" behavior
-		// the v3 composer relied on.
-		s.LogDebug("stream items dm-thread: LoadConversation(%s): %v", convID, err)
+		// Conversation not present yet → empty thread. Not an error; matches
+		// the "conversation auto-creates on first send" behavior.
+		s.LogDebug("stream items dm-thread: ReadConversation(%s): %v", peerHandle, err)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"items": []interface{}{}})
@@ -1415,36 +1546,54 @@ func (s *Server) handleStreamItemsDMThread(w http.ResponseWriter, r *http.Reques
 		SenderName     string `json:"sender_name"`
 		BodyText       string `json:"body_text,omitempty"`
 		IsMine         bool   `json:"is_mine,omitempty"`
+		Locked         bool   `json:"locked,omitempty"`
+		// Raw wire box for client-side unlock (phase 4.5). Present only when
+		// Locked: the SPA derives the epoch DEK from the user's password
+		// (PolisDMCrypto), opens the box in-browser, and replaces the locked
+		// placeholder with plaintext. Not secret — it's the encrypted box.
+		KeyEpoch       int    `json:"key_epoch,omitempty"`
+		Ciphertext     string `json:"ciphertext,omitempty"`
+		Nonce          string `json:"nonce,omitempty"`
+		BoxPub         string `json:"box_pub,omitempty"`
 		Published      string `json:"published"`
 		PublishedHuman string `json:"published_human,omitempty"`
 	}
 
-	out := make([]messageItem, 0, len(conv.Messages))
-	for i := range conv.Messages {
-		msg := &conv.Messages[i]
-		plaintext, derr := store.DecryptMessage(msg)
-		if derr != nil {
-			// One broken message shouldn't poison the whole thread —
-			// surface a placeholder so the user knows something is there.
-			s.LogWarn("stream items dm-thread: decrypt msg %s: %v", msg.ID, derr)
-			plaintext = "[unable to decrypt message]"
-		}
-		isMine := msg.From == myDomain
+	out := make([]messageItem, 0, len(stored))
+	for _, msg := range stored {
+		// "me" marks the owner's own outgoing copy; incoming carries the peer domain.
+		isMine := msg.Dir == dm.DirOut
+		senderDomain := msg.From
 		senderName := msg.From
 		if isMine {
+			senderDomain = myDomain
 			senderName = "you"
 		}
-		out = append(out, messageItem{
+		// For a locked (password-epoch) message the server can't read the body;
+		// it ships the raw box + key_epoch so the SPA can open it after the user
+		// unlocks that epoch. The placeholder is the fallback shown when the
+		// browser crypto stack isn't loaded.
+		body := msg.Plaintext
+		item := messageItem{
 			ID:             msg.ID,
 			Type:           "dm-message",
 			ConversationID: convID,
-			SenderDomain:   msg.From,
+			SenderDomain:   senderDomain,
 			SenderName:     senderName,
-			BodyText:       plaintext,
 			IsMine:         isMine,
-			Published:      msg.Timestamp,
-			PublishedHuman: template.FormatHumanDateTime(msg.Timestamp),
-		})
+			Locked:         msg.Locked,
+			Published:      msg.At,
+			PublishedHuman: template.FormatHumanDateTime(msg.At),
+		}
+		if msg.Locked {
+			body = "[locked — unlock with your password to read]"
+			item.KeyEpoch = msg.KeyEpoch
+			item.Ciphertext = msg.Ciphertext
+			item.Nonce = msg.Nonce
+			item.BoxPub = msg.BoxPub
+		}
+		item.BodyText = body
+		out = append(out, item)
 	}
 
 	// Most-recent-on-top per spec. order=oldest reverses for completeness
@@ -1841,7 +1990,7 @@ func (s *Server) loadOwnFollowsAsFeedItems(myDomain string) ([]feed.CachedFeedIt
 // of repeated comments by the same author on the same post.
 func dedupeCommentsByTargetPost(items []feed.CachedFeedItem) []feed.CachedFeedItem {
 	latestByTarget := make(map[string]int) // target_url → index of latest item
-	keepUnkeyed := []int{}                  // items without target_url, kept as-is
+	keepUnkeyed := []int{}                 // items without target_url, kept as-is
 	for i, it := range items {
 		if it.Type != "comment" || it.TargetURL == "" {
 			keepUnkeyed = append(keepUnkeyed, i)
@@ -1878,13 +2027,14 @@ func dedupeCommentsByTargetPost(items []feed.CachedFeedItem) []feed.CachedFeedIt
 // degraded entry without inline post body.
 func (s *Server) buildCommentThreadEnrichments(items []feed.CachedFeedItem) map[string]commentThreadEnrichment {
 	enrich := make(map[string]commentThreadEnrichment, len(items))
+	siteDomain := extractDomainFromURL(s.GetBaseURL())
 
 	// Collect unique target URLs that need fetching.
 	type itemInfo struct {
-		commentURL    string
-		commentMD     string // local comment body markdown (own comments only)
+		commentURL     string
+		commentMD      string // local comment body markdown (own comments only)
 		commentExcerpt string // cached excerpt fallback (remote comments)
-		targetURL     string
+		targetURL      string
 	}
 	var infos []itemInfo
 	uniqueTargets := make(map[string]bool)
@@ -1971,13 +2121,26 @@ func (s *Server) buildCommentThreadEnrichments(items []feed.CachedFeedItem) map[
 				commentHTML = rendered
 			}
 		}
+		// Parent-post author avatar (drives the activity-view post-region
+		// avatar). Cross-author only; hue fallback when the author has no
+		// custom avatar. LoadOrFetchAuthorAvatar caches by domain, so calling
+		// it per-comment is cheap even when several share a target.
+		var targetAvatar *render.AvatarConfig
+		if entry.Domain != "" && entry.Domain != siteDomain {
+			cfg, ok := render.LoadOrFetchAuthorAvatar(entry.Domain)
+			if !ok || cfg.BG == "" {
+				cfg = render.FallbackAvatarConfig(entry.Domain)
+			}
+			targetAvatar = &cfg
+		}
 		enrich[info.commentURL] = commentThreadEnrichment{
 			TargetPostTitle:          entry.Title,
 			TargetPostBodyHTML:       postHTML,
 			TargetPostTitleRedundant: titleRedundant,
 			TargetPostPublished:      entry.Published,
-			TargetPostPublishedHuman: template.FormatHumanDateTime(entry.Published),
+			TargetPostPublishedHuman: template.StripYear(template.FormatHumanDateTime(entry.Published)),
 			TargetPostAuthorDomain:   entry.Domain,
+			TargetPostAuthorAvatar:   targetAvatar,
 			CommentBodyHTML:          commentHTML,
 		}
 	}
@@ -2042,7 +2205,7 @@ func (s *Server) buildPostCommentEnrichments(items []feed.CachedFeedItem) map[st
 		}
 		rendered := make([]blessedCommentResponse, 0, len(blessed))
 		for _, b := range blessed {
-			html := render.LoadLocalCommentContent(s.DataDir, "content/pub.polis.core/comment", b.URL)
+			html := render.LoadLocalCommentContent(s.DataDir, b.URL)
 			authorName := extractDomainFromURL(b.URL)
 			// Display URL: mount-path .html so the link resolves to a
 			// browsable per-comment page (same convention as
@@ -2165,19 +2328,17 @@ func (s *Server) buildPostBodies(items []feed.CachedFeedItem, ownDomain string, 
 	return out
 }
 
-// readLocalCommentBody reads the local comment markdown body for a
-// comment whose mount-URL is `/comments/YYYYMMDD/slug.html`. Returns
-// the body markdown (frontmatter stripped) or empty string on failure.
+// readLocalCommentBody reads the local comment markdown body for a comment
+// URL. Tolerant of both the mount form (/comments/YYYYMMDD/slug.{md,html}) and
+// the canonical source form (/content/pub.polis.core/comment/…) so it keeps
+// working as the comment URL is canonicalized (Defect 1). Returns the body
+// markdown (frontmatter stripped) or "" on failure.
 func readLocalCommentBody(dataDir, commentURL string) string {
-	// Mount URL → source path. Mirror of loadOwnContentAsFeedItems'
-	// forward translation:
-	//   /comments/YYYYMMDD/slug.html → content/pub.polis.core/comment/YYYYMMDD/slug.md
-	if !strings.HasPrefix(commentURL, "/comments/") {
+	rel := polisurl.CommentURLToContentRel(commentURL)
+	if rel == "" {
 		return ""
 	}
-	rel := strings.TrimPrefix(commentURL, "/comments/")
-	rel = strings.TrimSuffix(rel, ".html") + ".md"
-	srcPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", rel)
+	srcPath := filepath.Join(dataDir, filepath.FromSlash(rel))
 	raw, err := os.ReadFile(srcPath)
 	if err != nil {
 		return ""
@@ -2213,11 +2374,33 @@ func (s *Server) populateCommentCountsAndOptionallyFilter(items []feed.CachedFee
 	}
 
 	// Build map: post-mount-URL → comment count. Mount URL matches the
-	// format loadOwnContentAsFeedItems emits ("/posts/.../slug.html"),
-	// so the lookup hits without flexible MatchesPostPath logic.
+	// format loadOwnContentAsFeedItems emits ("/posts/.../slug.html").
+	// pc.Post may be in any of three forms depending on which polis-cli
+	// version (or migration state) wrote blessed.json:
+	//   - absolute URL:  https://<domain>/content/pub.polis.core/post/<date>/<slug>.md
+	//   - absolute URL:  https://<domain>/posts/<date>/<slug>.md (mount form)
+	//   - source path:   content/pub.polis.core/post/<date>/<slug>.md
+	//   - mount path:    posts/<date>/<slug>.md
+	// Normalize all of them to "posts/<date>/<slug>" (the mount stem) before
+	// composing the .html URL — same approach as metadata.MatchesPostPath's
+	// extractPath helper, which the SSR initial render uses. Without this
+	// normalization the API path was producing keys like
+	// "/https://discover.polis.pub/posts/.../slug.html" for tenants whose
+	// blessed.json stored absolute URLs (e.g. discover), and every lookup
+	// against it.URL ("/posts/.../slug.html") missed → badge stuck at 0.
 	countByURL := make(map[string]int, len(bc.Comments))
 	for _, pc := range bc.Comments {
-		mountURL := "/" + strings.TrimSuffix(strings.Replace(pc.Post, "content/pub.polis.core/post/", "posts/", 1), ".md") + ".html"
+		stem := pc.Post
+		if i := strings.Index(stem, "/posts/"); i >= 0 {
+			stem = stem[i+1:] // "posts/<date>/<slug>.md"
+		} else if i := strings.Index(stem, "/post/"); i >= 0 {
+			stem = "posts/" + stem[i+len("/post/"):] // source path → mount
+		} else if strings.HasPrefix(stem, "content/pub.polis.core/post/") {
+			stem = strings.Replace(stem, "content/pub.polis.core/post/", "posts/", 1)
+		}
+		stem = strings.TrimSuffix(stem, ".md")
+		stem = strings.TrimSuffix(stem, ".html")
+		mountURL := "/" + stem + ".html"
 		countByURL[mountURL] = len(pc.Blessed)
 	}
 
@@ -2234,23 +2417,27 @@ func (s *Server) populateCommentCountsAndOptionallyFilter(items []feed.CachedFee
 	return out
 }
 
-// populateCrossTenantCommentCounts stamps CommentCount on cross-tenant
-// post items in the paginated page. Own-post counts have already been
-// stamped from blessed.json by populateCommentCountsAndOptionallyFilter.
+// populateCrossTenantCommentCounts stamps the TOTAL comment count (blessed +
+// unblessed, from DS) on ALL post items in the paginated page — own and
+// cross-tenant alike, so the badge means the same thing regardless of author.
+// Own posts are pre-stamped with their blessed.json count by
+// populateCommentCountsAndOptionallyFilter; that value remains as the fallback
+// when DS is unavailable (the DS total overwrites it on success).
 //
 // Behavior:
 //   - Cache hits stamp immediately (no DS roundtrip).
-//   - Cache misses among items[0:visibleHorizon] (above-the-fold) get a
-//     sync DS fetch with a strict timeout. The stream response waits up
-//     to visibleCountFetchTimeout for this fetch. On timeout/error those
-//     items stay at zero — fail-soft, the stream never blocks beyond the
-//     timeout budget.
-//   - Cache misses past visibleHorizon (below-the-fold) get a fire-and-
-//     forget goroutine that populates the cache for the NEXT render.
-//     The current response leaves those items at zero.
+//   - All cache misses on the page are batched into ONE synchronous DS call
+//     (capped at streamCountBatchMax) and stamped this render — deterministic
+//     regardless of a post's position or cache warmth. The stream response
+//     waits up to visibleCountFetchTimeout. On timeout/error own items keep
+//     their blessed.json fallback and cross-tenant items stay at zero —
+//     fail-soft, the stream never blocks beyond the budget.
+//   - Only overflow beyond the batch cap (rare; explicit large `limit`) is
+//     deferred to a fire-and-forget goroutine that warms the cache for the
+//     next render.
 //
-// Both fetches are wrapped in a per-URL-set singleflight so concurrent
-// stream requests for overlapping pages collapse to one DS call.
+// Fetches are wrapped in a per-URL-set singleflight so concurrent stream
+// requests for overlapping pages collapse to one DS call.
 //
 // All errors are logged via LogEvent and swallowed; the stream response
 // itself must never fail because of the count fetch. Items mutate
@@ -2260,91 +2447,106 @@ func (s *Server) populateCrossTenantCommentCounts(r *http.Request, page []feed.C
 		return
 	}
 
-	// Partition the page by viewport horizon. Cross-tenant gates: post
-	// type, foreign author, and absolute https URL (defensive against
-	// malformed cache rows that would never match what DS stored).
-	visibleMissing := make([]string, 0, visibleHorizon)
-	backgroundMissing := make([]string, 0, len(page))
-	seenVisible := make(map[string]struct{}, visibleHorizon)
-	seenBackground := make(map[string]struct{}, len(page))
+	// Collect every post's DS-count URL. Each post is queried against DS for
+	// its TOTAL comment count (blessed + unblessed) so the badge means the
+	// same thing for own and cross-tenant posts.
+	//   - Own posts carry a relative mount URL; absolutize it to the canonical
+	//     form DS indexed as in_reply_to. Their blessed.json-derived count
+	//     (pre-stamped by populateCommentCountsAndOptionallyFilter) remains as
+	//     the fallback when DS is unavailable.
+	//   - Cross-tenant posts must already carry an absolute https URL
+	//     (defensive against malformed cache rows that would never match DS).
+	// Items are stamped by DS-URL via stampTargets so own (relative-URL) items
+	// get the count keyed under their absolutized form. Cache hits stamp
+	// immediately; misses are batched into one synchronous DS call below.
+	missing := make([]string, 0, len(page))
+	seen := make(map[string]struct{}, len(page))
+	stampTargets := make(map[string][]int, len(page))
 
 	for i := range page {
 		it := &page[i]
-		if it.Type != "post" || it.AuthorDomain == myDomain || !strings.HasPrefix(it.URL, "https://") {
+		if it.Type != "post" {
 			continue
 		}
-		// Try cache first — both visible and background items benefit.
-		if cached, ok := s.getCommentCountCacheEntry(it.URL); ok {
+		dsURL := it.URL
+		if it.AuthorDomain == myDomain {
+			dsURL = s.absolutizeStreamURL(it.URL)
+		}
+		if !strings.HasPrefix(dsURL, "https://") {
+			continue
+		}
+		stampTargets[dsURL] = append(stampTargets[dsURL], i)
+		if cached, ok := s.getCommentCountCacheEntry(dsURL); ok {
 			it.CommentCount = cached
 			continue
 		}
-		if i < visibleHorizon {
-			if _, dup := seenVisible[it.URL]; !dup {
-				seenVisible[it.URL] = struct{}{}
-				visibleMissing = append(visibleMissing, it.URL)
-			}
-		} else {
-			if _, dup := seenBackground[it.URL]; !dup {
-				seenBackground[it.URL] = struct{}{}
-				backgroundMissing = append(backgroundMissing, it.URL)
-			}
+		if _, dup := seen[dsURL]; !dup {
+			seen[dsURL] = struct{}{}
+			missing = append(missing, dsURL)
 		}
 	}
 
-	// Sync fetch for visible cache misses. Blocks up to the visible
-	// timeout — the stream response cannot complete before this returns
-	// (or times out). The singleflight key is the sorted+joined URL set;
-	// concurrent stream requests asking for the same visible set share
-	// one DS roundtrip.
-	if len(visibleMissing) > 0 {
-		ctx, cancel := context.WithTimeout(r.Context(), visibleCountFetchTimeout)
-		client := s.NewDSClient(r)
-		counts, err := s.commentCountFlight.Do(flightKey(visibleMissing), func() (map[string]int, error) {
-			return client.FetchCommentCountsCtx(ctx, visibleMissing)
+	if len(missing) == 0 {
+		return
+	}
+
+	// Sync-fetch the whole page's uncached counts in ONE batched DS call
+	// (capped at streamCountBatchMax), so every post is stamped this render —
+	// no positional/cache-warmth dependence. Bounded by the strict timeout;
+	// on timeout/error items keep their pre-stamped value (own: blessed.json
+	// fallback; cross-tenant: 0) — fail-soft, the stream never blocks beyond
+	// the budget. Overflow beyond the cap (rare; large explicit `limit`) is
+	// filled in the background for the next render.
+	syncMissing := missing
+	var overflow []string
+	if len(syncMissing) > streamCountBatchMax {
+		overflow = syncMissing[streamCountBatchMax:]
+		syncMissing = syncMissing[:streamCountBatchMax]
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), visibleCountFetchTimeout)
+	client := s.NewDSClient(r)
+	counts, err := s.commentCountFlight.Do(flightKey(syncMissing), func() (map[string]int, error) {
+		return client.FetchCommentCountsCtx(ctx, syncMissing)
+	})
+	cancel()
+	if err != nil {
+		s.LogEvent("pub.polis.stream.counts_fetch_failed", map[string]interface{}{
+			"url_count": len(syncMissing),
+			"error":     err.Error(),
 		})
-		cancel()
-		if err != nil {
-			s.LogEvent("pub.polis.stream.counts_visible_failed", map[string]interface{}{
-				"url_count": len(visibleMissing),
-				"error":     err.Error(),
-			})
-		} else if len(counts) > 0 {
-			s.setCommentCountCacheEntries(counts)
-			// Stamp the page items now that the cache is populated.
-			for i := range page {
-				if i >= visibleHorizon {
-					break
-				}
-				if total, hit := counts[page[i].URL]; hit {
-					page[i].CommentCount = total
-				}
+	} else if len(counts) > 0 {
+		s.setCommentCountCacheEntries(counts)
+		// Stamp every page item mapped to a returned DS URL (own + cross-
+		// tenant), keyed under the same dsURL used for the query.
+		for dsURL, total := range counts {
+			for _, idx := range stampTargets[dsURL] {
+				page[idx].CommentCount = total
 			}
 		}
 	}
 
-	// Background fetch for non-visible cache misses. Fire-and-forget.
-	// Uses context.Background() (not r.Context()) because the goroutine
-	// must outlive the HTTP request that spawned it — when the handler
-	// returns and r.Context() cancels, this goroutine keeps running to
-	// populate the cache for the next render.
-	if len(backgroundMissing) > 0 {
-		urls := backgroundMissing // copy by reference; not mutated after
+	// Background fill for overflow beyond the batch cap. Fire-and-forget;
+	// uses context.Background() so the goroutine outlives the HTTP request
+	// and populates the cache for the next render.
+	if len(overflow) > 0 {
+		urls := overflow
 		bgClient := s.NewDSClient(nil)
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), backgroundCountFetchTimeout)
-			defer cancel()
-			counts, err := s.commentCountFlight.Do(flightKey(urls), func() (map[string]int, error) {
-				return bgClient.FetchCommentCountsCtx(ctx, urls)
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), backgroundCountFetchTimeout)
+			defer bgCancel()
+			bgCounts, bgErr := s.commentCountFlight.Do(flightKey(urls), func() (map[string]int, error) {
+				return bgClient.FetchCommentCountsCtx(bgCtx, urls)
 			})
-			if err != nil {
+			if bgErr != nil {
 				s.LogEvent("pub.polis.stream.counts_background_failed", map[string]interface{}{
 					"url_count": len(urls),
-					"error":     err.Error(),
+					"error":     bgErr.Error(),
 				})
 				return
 			}
-			if len(counts) > 0 {
-				s.setCommentCountCacheEntries(counts)
+			if len(bgCounts) > 0 {
+				s.setCommentCountCacheEntries(bgCounts)
 			}
 		}()
 	}
@@ -2360,6 +2562,321 @@ func flightKey(urls []string) string {
 	sorted := append([]string(nil), urls...)
 	sort.Strings(sorted)
 	return strings.Join(sorted, "\x00")
+}
+
+// absolutizeStreamURL converts an own-post relative mount URL
+// ("/posts/YYYYMMDD/slug.html") to the absolute canonical form the DS indexed
+// as a comment's in_reply_to (BaseURL + path). Cross-tenant items already carry
+// absolute https URLs and pass through unchanged. This is the URL-form bridge
+// that lets own posts hit the same DS comment data as cross-tenant posts —
+// both the count (Phase 5) and the latest-comment focus fetch rely on it.
+func (s *Server) absolutizeStreamURL(itemURL string) string {
+	if strings.HasPrefix(itemURL, "/") {
+		return s.GetBaseURL() + itemURL
+	}
+	return itemURL
+}
+
+// focusCommentCacheTTL mirrors commentCountCacheTTL — a short window that
+// amortizes repeat focus on the same post (and a quick exit→re-enter) without
+// the user noticing staleness. The comment body itself has its own 24h disk
+// cache via LoadOrFetchCommentHTML; this cache short-circuits the DS roundtrip.
+const focusCommentCacheTTL = 30 * time.Second
+
+// handleStreamFocusComment resolves the single most-recent comment for a post
+// (blessed or not) for the stream's read-focus mode. GET /api/v1/stream/focus-
+// comment?url=<postURL>. Fail-soft: any error or missing comment returns
+// {has_comment:false} with HTTP 200 so the focus UX never breaks.
+func (s *Server) handleStreamFocusComment(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	postURL := strings.TrimSpace(r.URL.Query().Get("url"))
+	if postURL == "" || s.DiscoveryURL == "" {
+		_ = json.NewEncoder(w).Encode(focusCommentResponse{HasComment: false})
+		return
+	}
+	// Absolutize own-post relative mount URLs to the form DS indexed as
+	// in_reply_to. Cross-tenant items already carry absolute https URLs.
+	postURL = s.absolutizeStreamURL(postURL)
+
+	// Short-TTL cache: repeat focus within the window skips DS + body fetch.
+	if resp, ok := s.getFocusCommentCacheEntry(postURL); ok {
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	start := time.Now()
+	myDomain := extractDomainFromURL(s.GetBaseURL())
+
+	// Singleflight the whole resolve (DS lookup + body render) so concurrent
+	// focus requests for the same post collapse to one DS roundtrip.
+	resp, _ := s.latestCommentFlight.Do(postURL, func() (focusCommentResponse, error) {
+		ctx, cancel := context.WithTimeout(r.Context(), visibleCountFetchTimeout)
+		client := s.NewDSClient(r)
+		latest, err := client.FetchLatestCommentsCtx(ctx, []string{postURL})
+		cancel()
+		if err != nil {
+			s.LogEvent("pub.polis.stream.focus_comment_failed", map[string]interface{}{
+				"url":   postURL,
+				"error": err.Error(),
+			})
+			return focusCommentResponse{HasComment: false}, nil
+		}
+		lc, ok := latest[postURL]
+		if !ok {
+			return focusCommentResponse{HasComment: false}, nil
+		}
+
+		// Body source: own comment → local disk (no network/SSRF); cross-
+		// tenant → fetch the commenter's origin (24h cached, SSRF-gated).
+		// An empty body still returns the comment header (author + date).
+		var contentHTML string
+		if lc.AuthorDomain != "" && lc.AuthorDomain == myDomain {
+			// Owner's OWN comment → its canonical content lives in the owner's
+			// public path (legitimate, not a foreign-content violation).
+			contentHTML = render.LoadOwnCommentContent(s.DataDir, lc.URL)
+		} else {
+			contentHTML, _ = render.LoadOrFetchCommentHTML(s.DataDir, lc.URL, 24*time.Hour)
+		}
+
+		// Display URL: mount-path .html so the link resolves to a browsable
+		// per-comment page (same convention as buildPostCommentEnrichments).
+		displayURL := lc.URL
+		if strings.HasSuffix(displayURL, ".md") {
+			displayURL = strings.TrimSuffix(displayURL, ".md") + ".html"
+		}
+		authorName := lc.AuthorDomain
+		if authorName == "" {
+			authorName = extractDomainFromURL(lc.URL)
+		}
+		return focusCommentResponse{
+			HasComment: true,
+			Comment: &blessedCommentResponse{
+				URL:          displayURL,
+				AuthorName:   authorName,
+				AuthorDomain: authorName,
+				AuthorAvatar: s.commentAuthorAvatar(lc.AuthorDomain),
+				Published:    lc.Published,
+				// Match the v4 stream meta-line date shape (StripYear +
+				// FormatHumanDateTime) so the read-focus comment card's date
+				// reads like every other v4 timestamp, not v3's "May 25, 2026".
+				PublishedHuman: template.StripYear(template.FormatHumanDateTime(lc.Published)),
+				ContentHTML:    contentHTML,
+			},
+		}, nil
+	})
+
+	// Fallback for the tenant's OWN posts: if the DS latest-comment lookup
+	// returned nothing, resolve from the LOCAL blessed-comments index — the
+	// same authoritative source the canonical per-post page renders from. A
+	// locally-blessed comment can be absent from the DS latest-comment result
+	// (not every blessed comment round-trips the DS the same way), which
+	// produced the "comment shows on the per-post page but not in read-focus"
+	// bug. Own-domain only — local has no blessed data for cross-tenant posts.
+	if !resp.HasComment {
+		if postDomain := extractDomainFromURL(postURL); postDomain != "" && postDomain == myDomain {
+			if local := s.localFocusComment(postURL); local.HasComment {
+				resp = local
+			}
+		}
+	}
+
+	s.setFocusCommentCacheEntry(postURL, resp)
+	s.LogEvent("pub.polis.stream.focus_comment", map[string]interface{}{
+		"url":         postURL,
+		"has_comment": resp.HasComment,
+		"duration_ms": time.Since(start).Milliseconds(),
+	})
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// streamBodyResponse is the JSON shape GET /api/v1/stream/body returns: the
+// full post body rendered to HTML for read-focus. HasBody=false means the
+// body couldn't be resolved (fetch failed / unpublished); the SPA leaves the
+// excerpt in place.
+type streamBodyResponse struct {
+	HasBody  bool   `json:"has_body"`
+	BodyHTML string `json:"body_html,omitempty"`
+}
+
+// handleStreamBody returns the full rendered body for ONE post so the SPA's
+// read-focus can show the whole post (not the truncated excerpt) for cross-
+// tenant entries. GET /api/v1/stream/body?url=<postURL>.
+//
+// Why a server-side proxy instead of a direct browser fetch: the owner SPA
+// ships a Content-Security-Policy with `connect-src 'self' https://esm.sh`,
+// so the browser can't fetch a followed tenant's origin directly even though
+// those origins serve Access-Control-Allow-Origin:* — CSP blocks the connect
+// before CORS is consulted. This same-origin endpoint is allowed by 'self';
+// it does the cross-origin read server-side (no CSP, no CORS), one post at a
+// time (only the post the user opened), with LoadOrFetchReplyContext's 24h
+// disk cache + SSRF gate. Fail-soft: any miss returns {has_body:false} at 200.
+func (s *Server) handleStreamBody(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	postURL := strings.TrimSpace(r.URL.Query().Get("url"))
+	if postURL == "" {
+		_ = json.NewEncoder(w).Encode(streamBodyResponse{HasBody: false})
+		return
+	}
+	postURL = s.absolutizeStreamURL(postURL)
+
+	start := time.Now()
+	// 24h disk cache + SSRF gate live inside LoadOrFetchReplyContext; the
+	// owner's own posts are same-origin (the SPA never proxies them — they
+	// ship body_html inline and are already expanded), so this path is
+	// effectively cross-tenant only.
+	entry, ok := render.LoadOrFetchReplyContext(s.DataDir, postURL, 24*time.Hour)
+	resp := streamBodyResponse{HasBody: false}
+	if ok && entry.BodyMD != "" {
+		// Strip the leading title heading (the entry already shows the title)
+		// then render the same goldmark + sanitizer pipeline buildPostBodies
+		// uses for own posts, so injected cross-tenant bodies match.
+		cleaned := render.StripLeadingTitleHeading(entry.BodyMD, entry.Title)
+		if html, err := render.MarkdownToHTML(cleaned); err == nil && strings.TrimSpace(html) != "" {
+			resp = streamBodyResponse{HasBody: true, BodyHTML: html}
+		}
+	}
+
+	s.LogEvent("pub.polis.stream.body", map[string]interface{}{
+		"url":         postURL,
+		"has_body":    resp.HasBody,
+		"duration_ms": time.Since(start).Milliseconds(),
+	})
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// localFocusComment resolves the latest BLESSED comment for one of the
+// tenant's OWN posts from the local blessed-comments index — the same source
+// render.loadBlessedCommentsForPost feeds the canonical per-post page. Returns
+// {has_comment:false} when the post has no blessed comments. The date uses the
+// v4 meta-line shape (StripYear + FormatHumanDateTime) to match the rest of the
+// stream; the body is the locally-stored, already-sanitized comment HTML (same
+// trust chain as the DS path's own-comment case). GetBlessedCommentsForPost's
+// MatchesPostPath tolerates the mount-URL / source-path / .html-.md variations,
+// so the absolutized post URL matches the stored post path directly.
+func (s *Server) localFocusComment(postURL string) focusCommentResponse {
+	blessed, err := metadata.GetBlessedCommentsForPost(s.DataDir, postURL)
+	if err != nil || len(blessed) == 0 {
+		return focusCommentResponse{HasComment: false}
+	}
+	// Read-focus shows exactly one comment — the most recently blessed.
+	// BlessedAt is an RFC3339-ish stamp, so a lexical compare orders it.
+	latest := blessed[0]
+	for _, b := range blessed[1:] {
+		if b.BlessedAt > latest.BlessedAt {
+			latest = b
+		}
+	}
+	// Display URL: mount-path .html so the link resolves to a browsable
+	// per-comment page (same convention as render.loadBlessedCommentsForPost).
+	displayURL := latest.URL
+	if strings.HasSuffix(displayURL, ".md") {
+		displayURL = strings.TrimSuffix(displayURL, ".md") + ".html"
+	}
+	authorDomain := extractDomainFromURL(latest.URL)
+	return focusCommentResponse{
+		HasComment: true,
+		Comment: &blessedCommentResponse{
+			URL:            displayURL,
+			AuthorName:     authorDomain,
+			AuthorDomain:   authorDomain,
+			AuthorAvatar:   s.commentAuthorAvatar(authorDomain),
+			Published:      latest.BlessedAt,
+			PublishedHuman: template.StripYear(template.FormatHumanDateTime(latest.BlessedAt)),
+			ContentHTML:    render.LoadLocalCommentContent(s.DataDir, latest.URL),
+		},
+	}
+}
+
+// focusCommentCacheEntry holds a resolved focus-comment response with expiry.
+type focusCommentCacheEntry struct {
+	resp      focusCommentResponse
+	expiresAt time.Time
+}
+
+// getFocusCommentCacheEntry returns the cached focus-comment response for a
+// post URL, or (zero, false) if expired or missing. Lazy expiry on read.
+func (s *Server) getFocusCommentCacheEntry(url string) (focusCommentResponse, bool) {
+	s.focusCommentCacheMu.Lock()
+	defer s.focusCommentCacheMu.Unlock()
+	if s.focusCommentCache == nil {
+		return focusCommentResponse{}, false
+	}
+	entry, ok := s.focusCommentCache[url]
+	if !ok || time.Now().After(entry.expiresAt) {
+		if ok {
+			delete(s.focusCommentCache, url)
+		}
+		return focusCommentResponse{}, false
+	}
+	return entry.resp, true
+}
+
+// setFocusCommentCacheEntry stores a resolved focus-comment response under a
+// short TTL. Both has-comment and no-comment results are cached so a post with
+// no comments doesn't re-hit DS on every focus.
+func (s *Server) setFocusCommentCacheEntry(url string, resp focusCommentResponse) {
+	s.focusCommentCacheMu.Lock()
+	defer s.focusCommentCacheMu.Unlock()
+	if s.focusCommentCache == nil {
+		s.focusCommentCache = make(map[string]*focusCommentCacheEntry)
+	}
+	s.focusCommentCache[url] = &focusCommentCacheEntry{
+		resp:      resp,
+		expiresAt: time.Now().Add(focusCommentCacheTTL),
+	}
+}
+
+// focusCommentSingleflight collapses concurrent focus-comment resolves for the
+// same post URL into one. Mirrors commentCountSingleflight (server.go) but
+// carries a focusCommentResponse.
+type focusCommentFlightCall struct {
+	wg  sync.WaitGroup
+	val focusCommentResponse
+	err error
+}
+
+type focusCommentSingleflight struct {
+	mu       sync.Mutex
+	inflight map[string]*focusCommentFlightCall
+}
+
+// Do executes fn() exactly once per key while one is in flight; concurrent
+// callers with the same key block and receive the same result.
+func (g *focusCommentSingleflight) Do(key string, fn func() (focusCommentResponse, error)) (focusCommentResponse, error) {
+	g.mu.Lock()
+	if g.inflight == nil {
+		g.inflight = make(map[string]*focusCommentFlightCall)
+	}
+	if c, present := g.inflight[key]; present {
+		g.mu.Unlock()
+		c.wg.Wait()
+		return c.val, c.err
+	}
+	c := &focusCommentFlightCall{}
+	c.wg.Add(1)
+	g.inflight[key] = c
+	g.mu.Unlock()
+
+	if fn != nil {
+		c.val, c.err = fn()
+	}
+
+	g.mu.Lock()
+	delete(g.inflight, key)
+	g.mu.Unlock()
+	c.wg.Done()
+
+	return c.val, c.err
 }
 
 // filterStreamItemsByTime drops items published before the cutoff. Items

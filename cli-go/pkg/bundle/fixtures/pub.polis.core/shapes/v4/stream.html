@@ -21,7 +21,7 @@
     unchanged. DO NOT rename this marker without coordinating a protocol
     change.
 
-    TOPBAR CONTEXT-SPLIT (step-05/5.d build-target lock-in):
+    TOPBAR CONTEXT-SPLIT:
     this static artifact ships a minimal topbar with three elements —
         polis wordmark on the LEFT (viewport-edge-justified)
         timeline-cap dot — small muted dot horizontally aligned with the
@@ -29,20 +29,18 @@
             topbar. Reads as a stop-marker that anchors the chrome to
             the content rail.
         sentence filter — absolute-positioned past the dot, anchored
-            via calc against the layout's right column. Build target:
-            see docs/design/v4/mockups/infinity-stream/02-unified-view-
-            after-step-5-pinned-dot.html.
-    Owner SPA's index.html (step 6) replaces the wordmark slot with an
+            via calc against the layout's right column.
+    Owner SPA's index.html replaces the wordmark slot with an
     icon row (avatar + feed/compose/comments/people/mentions); same
     filter, same dot, same DOM grammar.
 
-    TOPBAR PALETTE (step-05/5.d direction lock-in): tenant's theme,
+    TOPBAR PALETTE: tenant's theme,
     NOT SOLS-system-theme. The earlier convention had SOLS hardcoded
     here for "consistent polis branding regardless of tenant theme",
     but the design target settled on coherence — nav and content read
     as one page in the tenant's chosen theme. The hosted nav-widget
     that populates #polis-nav-root for logged-in viewers also adopts
-    the tenant theme (re-theming behavior removed in step 6.d).
+    the tenant theme.
     Theme tokens flow from the tenant's installed theme; topbar uses
     --topbar-bg / --topbar-border which themes set explicitly (or
     inherit reasonable fallbacks from --color-bg / --color-border).
@@ -67,12 +65,11 @@
     - {{widget_home}}, {{widget_handle}}, {{widget_host}}
                                   — hosted nav widget data attrs
 
-    LAYOUT (step-05/5.g): two-column grid — sticky .layout-left with the
+    LAYOUT: two-column grid — sticky .layout-left with the
     site-identity card, scrolling .layout-right with the .stream container,
     .stream-top-fade overlay, and the .bottom-fade overlay. Per-entry
-    meta uses .entry-meta-line (date+time left, comment-badge right). See
-    docs/design/v4/mockups/infinity-stream/02-unified-view-after-step-5-
-    pinned-dot.html for the build-target reference. Mobile collapses to
+    meta uses .entry-meta-line (date+time left, comment-badge right).
+    Mobile collapses to
     single-column at ≤900px (timeline bar + dots hide; bio card moves above
     the stream).
 -->
@@ -103,14 +100,13 @@
     <link rel="stylesheet" href="{{css_path}}">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
     <!-- No-JS fallback: the comment panel is JS-toggled (max-height:0
          default in stream.css). For visitors without JS — search engines
          past the SSR-only crawler set, hardened browsers, RSS-only readers
          — open the panel by default so blessed comments stay readable.
          Cascade wins by source order; placed after the regular
-         stylesheets so we don't need !important. (step-05/5.i Phase B
-         Q-PB3 disposition.) -->
+         stylesheets so we don't need !important. -->
     <noscript>
         <style>
             .entry-comments-panel {
@@ -158,7 +154,7 @@
     </nav>
 
     <!--
-        Two-column layout (step-05/5.g): sticky bio card on the left, scrolling
+        Two-column layout: sticky bio card on the left, scrolling
         stream entries on the right. Vertical timeline bar
         sits centered in the gap between columns (drawn via .layout::before
         in CSS); the timeline-cap dot in the topbar visually anchors that bar
@@ -198,8 +194,8 @@
                     <div class="site-bio">{{site_bio}}</div>
                     <button class="site-bio-toggle" type="button" aria-expanded="false" hidden>show more</button>
                 </div>
-                <!-- 2026-05-18 (post-deploy): follow widget moved from
-                     under stats to directly under the bio. The widget's
+                <!-- Follow widget sits directly under the bio (not
+                     under stats). The widget's
                      internal signup form (rendered into a shadow DOM,
                      hidden until user clicks Follow) carries 240px-wide
                      inputs that exceeded the 320px-wide sidebar column
@@ -217,10 +213,11 @@
                      modifier=by-date — the sentence filter at the top
                      updates and the stream re-fetches via applyFilter
                      (stream.js setupStatLinks wires the handler).
-                     06-profiles: "followers" / "following" used to map
+                     "followers" / "following" used to map
                      to type=follows, which has been removed from the
-                     grammar. Phase 3 will revive a public profiles
-                     surface (`all profiles from <this site> …`); until
+                     grammar. A future public profiles
+                     surface (`all profiles from <this site> …`) will
+                     revive them; until
                      then these stats render as non-interactive labels. -->
                 <div class="site-stats">
                     <!-- "N posts" must explicitly reset the scope back
@@ -304,34 +301,15 @@
                     <main> element; controllers select on `.entry.is-focused`.
                 -->
                 <article class="entry entry--post entry--commentable is-focused is-loaded is-expanded"
-                         data-polis-entry-type="post">
-                    <!-- Timeline dot doubles as the comment-add affordance
-                         (same pattern as siblings — see stream-post.html).
-                         Clicking it anchors to the reply widget below.
-                         Lives inside .entry-meta-line so its vertical
-                         center aligns with the timestamp by construction. -->
+                         data-polis-entry-type="post"
+                         data-polis-comment-count="{{comment_count}}">
+                    <!-- The timeline dot is NOT in the meta line — it moved to
+                         the body rail below (dot-anchor refactor) so it anchors
+                         to the post's first line, not the date. The comment
+                         indicator likewise moved BELOW the post (into the rail);
+                         the meta line is just the date now. -->
                     <div class="entry-meta-line">
-                        <a class="timeline-dot" href="#polis-widget" aria-label="Add a comment"></a>
                         <time class="entry-date-time" datetime="{{published}}">{{published_human}}</time>
-                        <!-- Comment-count badge — mirrors stream-post.html
-                             so the focus entry has the same right-side
-                             indicator siblings get. Always rendered (0
-                             included) so readers can glance the count. -->
-                        <span class="entry-meta-right">
-                            <a class="entry-comments-badge" href="#comments">
-                                <!-- SVG path matches stream.js's
-                                     buildCommentSVG exactly so SSR'd
-                                     entries and JS-paginated entries
-                                     render the same icon. Stroke/fill
-                                     come from .entry-comments-badge
-                                     svg in stream.css. -->
-                                <svg viewBox="0 0 24 24" aria-hidden="true">
-                                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>
-                                </svg>
-                                <span class="count">{{comment_count}}</span>
-                                <span class="add-plus" aria-hidden="true">+</span>
-                            </a>
-                        </span>
                     </div>
                     <!-- Focus title — sourced from frontmatter `title` so it
                          reliably appears even when the markdown body doesn't
@@ -343,30 +321,58 @@
                          expect that <main> to wrap body content only,
                          not metadata.
 
-                         Wrapped in <a class="entry-title-link"> 2026-04-29
+                         Wrapped in <a class="entry-title-link">
                          so clicking the focus title navigates to the
                          post's canonical URL — same as siblings. The
                          title-color hover treatment also flows through
                          the existing .entry-title-link:hover .entry-title
                          rule, so the focus shares the rest of the stream's
                          hover language without a one-off CSS rule. -->
-                    <a class="entry-title-link {{title_link_state}}" href="{{focus_path_url}}">
-                        <h1 class="entry-title">{{title}}</h1>
-                    </a>
-                    <main class="focus-content entry-body" data-polis-focus="true">
-                        <div class="content-body">
-                            {{content}}
-                        </div>
-                    </main>
-                    <!-- Long-post collapse toggle. CSS caps .content-body
-                         at ~1/2 viewport height; stream.js's
-                         setupPostBodyToggles measures overflow and only
-                         unhides this button when the body actually
-                         exceeds the cap. Sits OUTSIDE the .focus-content
-                         protocol marker so cross-tenant body extractors
-                         don't see it. -->
-                    <button class="post-body-toggle" type="button" aria-expanded="false" hidden>show more</button>
-                    <!-- Comment-READ panel for the focus (step-05/5.i Phase B).
+                    <!-- Body rail: the comment-add timeline dot, anchored to
+                         the post's first line (.entry-rail in stream.css). The
+                         rail wraps the title, the .focus-content marker, and the
+                         toggle — it sits AROUND the marker, not inside it, so
+                         cross-tenant body extractors (which select on
+                         [data-polis-focus]) are unaffected. .focus-content's 10px
+                         top padding equals --entry-body-pad-y, so the standard
+                         --stream-post-line-center anchor lands on the first line. -->
+                    <div class="entry-rail">
+                        <div class="timeline-dot" aria-hidden="true"></div>
+                        <a class="entry-title-link {{title_link_state}}" href="{{focus_path_url}}">
+                            <h1 class="entry-title">{{title}}</h1>
+                        </a>
+                        <main class="focus-content entry-body" data-polis-focus="true">
+                            <div class="content-body">
+                                {{content}}
+                            </div>
+                        </main>
+                        <!-- Long-post collapse toggle. CSS caps .content-body
+                             at ~1/2 viewport height; stream.js's
+                             setupPostBodyToggles measures overflow and only
+                             unhides this button when the body actually
+                             exceeds the cap. Sits OUTSIDE the .focus-content
+                             protocol marker so cross-tenant body extractors
+                             don't see it. -->
+                        <button class="post-body-toggle" type="button" aria-expanded="false" hidden>show more</button>
+                        <!-- Comment indicator BELOW the post body (last in the
+                             rail), left-aligned with the date / title / body and
+                             ABOVE the comments panel — mirrors the JS renderPost
+                             (where the focus comment panel inserts after the
+                             badge). Styled by .entry-rail > .entry-comments-badge.
+                             SVG matches stream.js's buildCommentSVG. -->
+                        <a class="entry-comments-badge" href="#comments">
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>
+                            </svg>
+                            <svg class="icon-add-comment" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/>
+                                <line x1="12" y1="7.5" x2="12" y2="12.5"/>
+                                <line x1="9.5" y1="10" x2="14.5" y2="10"/>
+                            </svg>
+                            <span class="count">{{comment_count}}</span>
+                        </a>
+                    </div>
+                    <!-- Comment-READ panel for the focus.
                          SSR'd inline so the panel is animation, not fetch.
                          Blessed comments rendered via the same iteration grammar
                          as v3 (snippets/blessed-comment.html). Default state:
@@ -381,10 +387,9 @@
 {{/blessed_comments}}
                     </div>
 
-                    <!-- Comment-WRITE CTA (step-06/6.j). Restores the
-                         interactive comment surface that v3 had via
-                         the theme:polis-widget partial include but
-                         step-05 dropped.
+                    <!-- Comment-WRITE CTA. Provides the
+                         interactive comment surface via the hosted
+                         widget.
                          The hosted widget (widget.js, served from
                          polis.pub/widget-X.Y.Z.js) hydrates this mount
                          on auth-aware page load:
@@ -436,7 +441,7 @@
             </div>
 
             <!-- The site-footer (border-top + "polis Yours, truly." mark)
-                 was dropped per UI-refinement review 2026-04-28 in favor of
+                 was dropped in favor of
                  a longer bottom-fade overlay that lets the page edge breathe.
                  Tenant-attribution + version are still emitted as the
                  page-bottom HTML comment. -->
