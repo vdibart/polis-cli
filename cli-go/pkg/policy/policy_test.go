@@ -207,7 +207,7 @@ func TestParse_LegacyEmitBlessingTranslation(t *testing.T) {
 
 // TestParse_TenantLayerRejection verifies type+verb combinations that are
 // not meaningful in tenant policy files are rejected with clear errors.
-// See docs/general/policy-grammar.md for the full validation matrix.
+// See docs/general/reference/policy-grammar.md for the full validation matrix.
 func TestParse_TenantLayerRejection(t *testing.T) {
 	rejected := []string{
 		// Comments have no acceptance layer — allow is meaningless.

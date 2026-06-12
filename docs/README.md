@@ -2,7 +2,7 @@
 
 Documentation is organized by component and audience. Each component directory has a README with an overview, quick start, and links to its documents.
 
-> **New here?** Start with [general/architecture.md](general/architecture.md) — the four-surface map that situates every other doc in this tree. For an LLM helping a human, or anyone arriving from a "Pull the thread" trail marker in source code, the canonical entry is [AGENTS.md](../AGENTS.md) at the repo root.
+> **New here?** Start with [general/concepts/architecture.md](general/concepts/architecture.md) — the four-surface map that situates every other doc in this tree. For an LLM helping a human, or anyone arriving from a "Pull the thread" trail marker in source code, the canonical entry is [AGENTS.md](../AGENTS.md) at the repo root.
 
 ## By Component
 
@@ -25,20 +25,20 @@ Documentation is organized by component and audience. Each component directory h
 | [CLI Command Reference](cli/user/command-reference.md) | cli | Complete command reference |
 | [Templating](cli/user/templating.md) | cli | Theme customization and template syntax |
 | [JSON Mode](cli/user/json-mode.md) | cli | Machine-readable `--json` output format |
-| [Glossary](general/glossary.md) | general | Polis-specific terminology |
+| [Glossary](general/reference/glossary.md) | general | Polis-specific terminology |
 
 ### For Developers
 
 | Document | Component | Description |
 |----------|-----------|-------------|
-| [Architecture Overview](general/architecture.md) | general | The four surfaces (CLI, webapp, polis.pub, DS) and how they fit together |
-| [Bundles](general/bundles.md) | general | The package container — namespaces, manifests, per-tenant install |
-| [Content Types](general/content-types.md) | general | Core types (post/comment/follow/blessing/tag/dm/theme), actions, lifecycle |
-| [Shapes](general/shapes.md) | general | Blog (v3) vs infinity stream (v4), the render pipeline |
-| [Themes](general/themes.md) | general | CSS-only presentation, variable contract, cross-theme compat |
-| [Infinity Stream](general/infinity-stream.md) | general | The single-screen `pub.polis.shapes.v4` experience — philosophy, three POVs, hydration flow |
-| [Content System](general/content-system.md) | general | Deep reference — filesystem layout, full `bundle.json` schema, event catalog |
-| [Security Model](general/security-model.md) | general | Crypto, identity, trust model, policies, threats |
+| [Architecture Overview](general/concepts/architecture.md) | general | The four surfaces (CLI, webapp, polis.pub, DS) and how they fit together |
+| [Bundles](general/concepts/bundles.md) | general | The package container — namespaces, manifests, per-tenant install |
+| [Content Types](general/concepts/content-types.md) | general | Core types (post/comment/follow/blessing/tag/dm/theme), actions, lifecycle |
+| [Shapes](general/concepts/shapes.md) | general | Blog (v3) vs infinity stream (v4), the render pipeline |
+| [Themes](general/concepts/themes.md) | general | CSS-only presentation, variable contract, cross-theme compat |
+| [Infinity Stream](general/concepts/infinity-stream.md) | general | The single-screen `pub.polis.shapes.v4` experience — philosophy, three POVs, hydration flow |
+| [Content System](general/concepts/content-system.md) | general | Deep reference — filesystem layout, full `bundle.json` schema, event catalog |
+| [Security Model](general/security/security-model.md) | general | Crypto, identity, trust model, policies, threats |
 | [CLI Packages](cli/developer/packages.md) | cli | Package structure, import rules, version propagation |
 | [Webapp Development](webapp/developer/development.md) | webapp | Handler patterns, testing, frontend architecture |
 | [API Reference](api/developer/reference.md) | api | REST API routes, examples, error codes |
@@ -60,5 +60,5 @@ Documentation is organized by component and audience. Each component directory h
 | Document | Component | Description |
 |----------|-----------|-------------|
 | [Vision](general/vision.md) | general | Why Polis exists — manifesto and experience principles |
-| [Security Policy](general/security.md) | general | Vulnerability reporting |
+| [Security Policy](general/security/SECURITY.md) | general | Vulnerability reporting |
 

@@ -43,6 +43,7 @@ type RenderContext struct {
 	URL            string
 	Version        string
 	SignatureShort string
+	PageTitle      string // <title> text: index → site title; post → "Title — site"
 
 	// Site variables
 	SiteURL     string
@@ -303,6 +304,7 @@ func (e *Engine) substituteVariables(template string, ctx *RenderContext) string
 		"url":             ctx.URL,
 		"version":         ctx.Version,
 		"signature_short": ctx.SignatureShort,
+		"page_title":      ctx.PageTitle,
 
 		// Site variables
 		"site_url":    ctx.SiteURL,

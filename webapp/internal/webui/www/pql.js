@@ -9,15 +9,15 @@
 //   grammar   — this file (pql.js): parse / compose / parseURL / composeURL
 //   consumer  — bundle-assets/pub.polis.core/shapes/v4/stream.js: applies filter
 //
-// One grammar, three parsers (all assert docs/general/pql-golden.jsonl):
+// One grammar, three parsers (all assert docs/general/reference/pql-golden.jsonl):
 //   JS — this file        Go — cli-go/pkg/pql        TS — discovery-service/core/pql.ts
 // The sentence is also a server endpoint: GET /pql/<sentence>
 //   webapp — webapp/internal/server/handlers_pql.go (JSON envelope + HTML shell)
 //   DS     — discovery-service/server/src/index.ts (public cross-tenant queries)
 //
 // Pull the thread:
-//   github.com/vdibart/polis-cli/blob/main/docs/general/pql.md          (spec)
-//   github.com/vdibart/polis-cli/blob/main/docs/general/infinity-stream.md (why)
+//   github.com/vdibart/polis-cli/blob/main/docs/general/reference/pql.md          (spec)
+//   github.com/vdibart/polis-cli/blob/main/docs/general/concepts/infinity-stream.md (why)
 //   github.com/vdibart/polis-cli/blob/main/docs/handbook/url-as-filter.md  (tour)
 //   github.com/vdibart/polis-cli/blob/main/AGENTS.md                    (map)
 // =============================================================================

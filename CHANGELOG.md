@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.66.0] - 2026-06-12
+
+A documentation-cleanup release, headlined by a reorganized `docs/general/` tree and an **owner-themed sentence filter** for the cross-visit nav. Also lands robustness fixes for DM key publication and comment/discovery registration.
+
+### Added
+
+- **[Nav] Owner-themed sentence filter.** When you visit another author's site, the nav widget now paints the sentence-filter control and its cap dot in the *visited author's* theme rather than your own, selected per (author, visitor) pairing. Sentence-filter and dot colors are decoupled into dedicated `--filter-*` theme tokens with `data-sf` polarity buckets, and every built-in theme ships matched light/dark filter palettes. A theme missing the selected bucket degrades gracefully to the visitor's palette.
+- **[Stream] "Posts with comments" at every scope.** The `with=comments` filter now works on the network, all-polis, and `@handle` surfaces (not just your own), resolving cross-tenant comment counts from the discovery service. Resolution is bounded by a cap, and any truncation of a pathologically large window is logged rather than silent.
+- **[Webapp] Cross-visit comment composer** in read-focus on canonical post pages.
+- **[CLI] `polis dm publish-key`.** Idempotent operator repair that re-publishes a site's DM messages key into `.well-known/polis` for a tenant whose `public_key_messages` was lost — without touching other well-known fields.
+- **[CLI] `polis unpublish --url <url>`.** Discovery-only retirement of a single registration by exact URL (with optional `--type`), for clearing superseded or duplicate discovery-service rows — e.g. a legacy mount-path registration left behind by a path migration — without reading or mutating any local file.
+
+### Changed
+
+- **[Docs] Reorganized `docs/general/`** into `concepts/`, `reference/`, and `security/` subfolders, and relocated the security policy to `docs/general/security/SECURITY.md`. Includes a staleness/accuracy pass across the shared docs and updated cross-links throughout the repo.
+
+### Fixed
+
+- **[DM] Profile edits no longer drop the published DM messages key.** Partial updates to an existing site's `.well-known/polis` (avatar, author name, etc.) now use a field-preserving write, so `public_key_messages` is retained. Previously a load → edit-one-field → save round-trip could erase it, leaving the tenant unable to receive DMs and tripping a Judge `wellknown_change` alert.
+- **[CLI] Comment registration uses the canonical content URL.** The Go CLI now registers comments under their canonical `content/...` path (matching posts and the bash CLI) instead of the `/comments/` mount path.
+
 ## [0.65.0] - 2026-06-08
 
 An extra-large release headlined by **end-to-end encrypted direct messages** and **PQL everywhere** — the polis query language now drives every read surface, including a public `/pql/<sentence>` endpoint with a versioned JSON API. Also ships a new **Stardust** theme, a substantial **stream read-focus** overhaul, and a blessed-comment cache that keeps cross-network comment counts stable.

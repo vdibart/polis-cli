@@ -14,7 +14,7 @@ Request blessing from a post author via the discovery service. When you publish 
 
 ### API key
 
-A `polis_`-prefixed Bearer token for authenticating with the Content Type API (`/v1/`). Generated via `polis api-key create`, stored as SHA-256 hashes in `.polis/api-keys.json`. Required for all write operations; read operations are public.
+A `polis_`-prefixed Bearer token for authenticating with the Content Type API (`/v1/`). Stored as a SHA-256 hash in `.polis/api-keys.json` (there is no generator command yet — keys are added by hand). Required for all write operations; read operations are public.
 
 **Related**: Content Type API, bundle
 
@@ -72,7 +72,7 @@ A category of content managed by a bundle (e.g., `pub.polis.post`, `pub.polis.co
 
 ### discovery service
 
-A coordination layer (Hono/Deno server on Fly.io) that enables interaction between polis sites. It receives beseech requests, verifies signatures, stores blessing status, indexes content metadata, and provides an event stream. It stores no content — just URLs and signatures.
+A coordination layer (a Hono/Deno server) that enables interaction between polis sites. It receives beseech requests, verifies signatures, stores blessing status, indexes content metadata, and provides an event stream. It stores no content — just URLs and signatures.
 
 **Related**: beseech, blessing, signature, event
 
@@ -210,7 +210,7 @@ A CSS-only presentation package scoped to a bundle and compatible with one or mo
 
 ### TUI
 
-*(Deprecated — use the [webapp](../webapp/user/user-manual.md) instead.)*
+*(Deprecated — use the [webapp](../../webapp/user/user-manual.md) instead.)*
 
 Terminal User Interface (`polis-tui`): a menu-driven, interactive dashboard for polis operations. Was replaced by the webapp in v0.46.0.
 

@@ -1,6 +1,6 @@
 # Themes
 
-> Part of the foundation set: [bundles](bundles.md), [content types](content-types.md), [shapes](shapes.md), **themes** (this doc). See [architecture.md](architecture.md) for the four-surface map. For the deep reference, see [content-system.md](content-system.md). For CSS-variable contracts and runtime resolution, see [`webapp/designer/theme-system.md`](../webapp/designer/theme-system.md).
+> Part of the foundation set: [bundles](bundles.md), [content types](content-types.md), [shapes](shapes.md), **themes** (this doc). See [architecture.md](architecture.md) for the four-surface map. For the deep reference, see [content-system.md](content-system.md). For CSS-variable contracts and runtime resolution, see [`webapp/designer/theme-system.md`](../../webapp/designer/theme-system.md).
 
 A **theme** is the *presentation layer* — the CSS (and optionally a small number of template overrides) that decides how a site **looks**. Themes sit on top of [shapes](shapes.md): the shape decides *what* gets rendered; the theme decides *how* it appears.
 
@@ -21,6 +21,7 @@ The `pub.polis.core` bundle ships these themes:
 | `especial-light` | Light | Warm fog, beige, dark gold accent | ✓ |
 | `turbo` | Dark | Retro computing — deep blue-black, neon cyan | ✓ |
 | `zane` | Dark | Editor/IDE palette — neutral gray, multi-color accents | ✓ |
+| `stardust` | Dark | Aladdin-Sane palette mapped onto the token contract — CSS-only, v4-only | ✓ |
 | `sols` | Dark | Violet and peach — the polis brand palette | **No — system only** |
 
 `sols` is the polis brand palette and is **reserved as the logged-out landing theme on `polis.pub`**. The webapp filters it out of the theme dropdown so that picking a personal theme always produces a visible shift from the system chrome.
@@ -75,7 +76,7 @@ The contract splits into two groups:
 --page-accent           /* links, actions, highlighted elements */
 ```
 
-For the full nav-system rationale (why nav colors are separate from page colors, why the dot is warm, why dark navs need to stay opaque), see [`webapp/designer/theme-system.md`](../webapp/designer/theme-system.md) and [`webapp/designer/navigation.md`](../webapp/designer/navigation.md).
+For the full nav-system rationale (why nav colors are separate from page colors, why the dot is warm, why dark navs need to stay opaque), see [`webapp/designer/theme-system.md`](../../webapp/designer/theme-system.md) and [`webapp/designer/navigation.md`](../../webapp/designer/navigation.md).
 
 ---
 
@@ -155,7 +156,7 @@ Custom themes participate in the same lifecycle as core themes: they ship in the
 
 - [shapes.md](shapes.md) — What themes sit *on top of*.
 - [bundles.md](bundles.md) — What themes ship *inside*.
-- [webapp/designer/theme-system.md](../webapp/designer/theme-system.md) — Runtime resolution, the cross-theme compat rationale, theme/page mapping.
-- [webapp/designer/navigation.md](../webapp/designer/navigation.md) — The nav anatomy themes color.
-- [cli/user/templating.md](../cli/user/templating.md) — Template syntax for theme overrides.
+- [webapp/designer/theme-system.md](../../webapp/designer/theme-system.md) — Runtime resolution, the cross-theme compat rationale, theme/page mapping.
+- [webapp/designer/navigation.md](../../webapp/designer/navigation.md) — The nav anatomy themes color.
+- [cli/user/templating.md](../../cli/user/templating.md) — Template syntax for theme overrides.
 - [content-system.md § SHAPE / BUNDLE / THEME](content-system.md#shape--bundle--theme) — Deep reference.

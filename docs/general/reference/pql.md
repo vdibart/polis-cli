@@ -1,6 +1,6 @@
 # PQL v0 — Polis Query Language
 
-> See also: [infinity-stream.md](infinity-stream.md) (the surface PQL drives) and [policy-grammar.md](policy-grammar.md) (the sibling grammar PQL is intentionally aligned with).
+> See also: [infinity-stream.md](../concepts/infinity-stream.md) (the surface PQL drives) and [policy-grammar.md](policy-grammar.md) (the sibling grammar PQL is intentionally aligned with).
 
 PQL is the sentence-filter grammar that drives every filter view in
 the v4 stream surface. The same sentence you see at the top of the
@@ -25,7 +25,7 @@ URL updates. There is no separate "filter state" hiding anywhere.
 That property — *the filter is a first-class citizen, in the URL,
 in human-readable form* — is what makes PQL more than a query
 syntax. It's how polis avoids the modal-nav trap (see
-[infinity-stream.md § Why a single screen](infinity-stream.md#why-a-single-screen)).
+[infinity-stream.md § Why a single screen](../concepts/infinity-stream.md#why-a-single-screen)).
 
 ## TL;DR
 
@@ -308,7 +308,7 @@ integrators:
 short shareable form. On the tenant webapp `items` are rendered content
 items; on the DS `items` are raw stream events (and there is no
 `tenant` field). Full developer reference:
-[`../ds/developer/pql-json-api.md`](../ds/developer/pql-json-api.md).
+[`../ds/developer/pql-json-api.md`](../../ds/developer/pql-json-api.md).
 
 ## Reserved tokens
 

@@ -157,7 +157,7 @@ Returns complete system information including site details, versions, configurat
       "title": "My Blog"
     },
     "versions": {
-      "cli": "0.29.0",
+      "cli": "0.65.0",
       "well_known_polis": "1.0",
       "following": "1.0",
       "blessed_comments": "1.0",
@@ -246,7 +246,7 @@ Note: Sensitive values like the API key show `api_key_set: true/false` instead o
     "title": "Hello World",
     "published": "2026-01-15T12:00:00Z",
     "current_version": "sha256:abc123...",
-    "generator": "polis-cli/0.16.0",
+    "generator": "polis-cli-go/0.65.0",
     "in_reply_to": null,
     "author": "alice@example.com",
     "signature": {

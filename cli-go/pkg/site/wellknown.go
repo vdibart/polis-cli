@@ -128,6 +128,43 @@ func SaveWellKnownRaw(siteDir string, raw map[string]interface{}) error {
 	return atomicfile.WriteFile(filepath.Join(dir, "polis"), data, 0644)
 }
 
+// SaveWellKnownPreserving writes the modeled fields of wk WITHOUT dropping any
+// field already on disk that the WellKnown struct does not model — most
+// importantly `public_key_messages` (the published DM messages key). It loads the
+// current file as a raw map, overlays the struct's fields onto it, and writes the
+// merged map back.
+//
+// Use this for any partial update of an EXISTING site's identity (avatar,
+// author_name, etc.). The plain SaveWellKnown serializes only the struct, so a
+// LoadWellKnown→mutate-one-field→SaveWellKnown round-trip silently erases
+// public_key_messages — which leaves the tenant unable to RECEIVE DMs and, after
+// the next Judge sweep, fires judge.alert.wellknown_change. (Identity-key
+// rotation is the one case this does NOT fix: the preserved block is signed by
+// the OLD key, so rotation must re-publish the block, not merely preserve it.)
+func SaveWellKnownPreserving(siteDir string, wk *WellKnown) error {
+	raw, err := LoadWellKnownRaw(siteDir)
+	if err != nil {
+		return err
+	}
+	if raw == nil {
+		raw = map[string]interface{}{}
+	}
+	// Marshal the struct to a map and overlay: modeled fields take the struct's
+	// (updated) value; unmodeled on-disk fields (public_key_messages, …) persist.
+	b, err := json.Marshal(wk)
+	if err != nil {
+		return err
+	}
+	var modeled map[string]interface{}
+	if err := json.Unmarshal(b, &modeled); err != nil {
+		return err
+	}
+	for k, v := range modeled {
+		raw[k] = v
+	}
+	return SaveWellKnownRaw(siteDir, raw)
+}
+
 // LegacyPrivateContentExists reports whether the tenant has any private state
 // at the pre-1f location (.polis/content/). Used by Patrol to flag tenants
 // needing the rename remediation in 1g.

@@ -444,3 +444,101 @@ func TestFlightKey(t *testing.T) {
 		t.Errorf("single-URL flightKey should be the URL itself, got %q", got)
 	}
 }
+
+// TestFilterStreamPostsWithComments_KeepsOnlyCommentedPosts is the core
+// regression for "all posts from my network with comments": network posts
+// carry CommentCount=0 from sync, so the filter must derive counts from DS
+// and drop the post with no comments while keeping the ones that have them.
+func TestFilterStreamPostsWithComments_KeepsOnlyCommentedPosts(t *testing.T) {
+	withComments := "https://other.example/posts/a.md"
+	noComments := "https://other.example/posts/b.md"
+	// DS omits zero-count URLs, so only the commented post appears.
+	ds, requests := makeFakeDS(t, map[string]int{withComments: 4}, 0)
+	defer ds.Close()
+
+	s := newCountsTestServer(t, ds)
+	items := []feed.CachedFeedItem{
+		crossTenantPost(withComments, "other.example"),
+		crossTenantPost(noComments, "other.example"),
+	}
+	r := httptest.NewRequest("GET", "/api/stream/items", nil)
+
+	out := s.filterStreamPostsWithComments(r, items, "test-site.polis.pub")
+
+	if len(out) != 1 {
+		t.Fatalf("expected 1 post (the commented one), got %d", len(out))
+	}
+	if out[0].URL != withComments {
+		t.Errorf("expected the commented post %q, got %q", withComments, out[0].URL)
+	}
+	if out[0].CommentCount != 4 {
+		t.Errorf("kept post should be stamped count=4, got %d", out[0].CommentCount)
+	}
+	if requests.Load() == 0 {
+		t.Error("expected at least one DS counts request")
+	}
+}
+
+// TestFilterStreamPostsWithComments_NonPostsPassThrough verifies the filter
+// only narrows post items; follow/announcement/comment items are untouched.
+func TestFilterStreamPostsWithComments_NonPostsPassThrough(t *testing.T) {
+	ds, _ := makeFakeDS(t, map[string]int{}, 0)
+	defer ds.Close()
+
+	s := newCountsTestServer(t, ds)
+	items := []feed.CachedFeedItem{
+		{Type: "follow", URL: "https://other.example/follow/x", AuthorDomain: "other.example", Published: "2026-05-20T10:00:00Z"},
+		{Type: "announcement", URL: "https://other.example/ann/y", AuthorDomain: "other.example", Published: "2026-05-20T10:00:00Z"},
+	}
+	r := httptest.NewRequest("GET", "/api/stream/items", nil)
+
+	out := s.filterStreamPostsWithComments(r, items, "test-site.polis.pub")
+	if len(out) != 2 {
+		t.Fatalf("non-post items must pass through; expected 2, got %d", len(out))
+	}
+}
+
+// TestFilterStreamPostsWithComments_DropsAllOnDSError verifies fail-soft:
+// when DS is unreachable, no post's count can be confirmed > 0, so the
+// with-comments filter drops them rather than showing "0 comments" posts
+// under a "with comments" view. The stream response itself never errors.
+func TestFilterStreamPostsWithComments_DropsAllOnDSError(t *testing.T) {
+	ds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ds.Close()
+
+	s := newCountsTestServer(t, ds)
+	items := []feed.CachedFeedItem{
+		crossTenantPost("https://other.example/posts/a.md", "other.example"),
+		crossTenantPost("https://other.example/posts/b.md", "other.example"),
+	}
+	r := httptest.NewRequest("GET", "/api/stream/items", nil)
+
+	out := s.filterStreamPostsWithComments(r, items, "test-site.polis.pub")
+	if len(out) != 0 {
+		t.Fatalf("on DS error every post is count-unknown and dropped; expected 0, got %d", len(out))
+	}
+}
+
+// TestFilterStreamPostsWithComments_UsesCountCache verifies a cache-warmed
+// count satisfies the filter without any DS roundtrip.
+func TestFilterStreamPostsWithComments_UsesCountCache(t *testing.T) {
+	cached := "https://other.example/posts/cached.md"
+	ds, requests := makeFakeDS(t, map[string]int{}, 0)
+	defer ds.Close()
+
+	s := newCountsTestServer(t, ds)
+	s.setCommentCountCacheEntries(map[string]int{cached: 7})
+
+	items := []feed.CachedFeedItem{crossTenantPost(cached, "other.example")}
+	r := httptest.NewRequest("GET", "/api/stream/items", nil)
+
+	out := s.filterStreamPostsWithComments(r, items, "test-site.polis.pub")
+	if len(out) != 1 || out[0].CommentCount != 7 {
+		t.Fatalf("expected 1 cached post with count=7, got %+v", out)
+	}
+	if requests.Load() != 0 {
+		t.Errorf("cache hit must skip DS; got %d requests", requests.Load())
+	}
+}

@@ -3,7 +3,7 @@
 > **This is the deep reference.** For the narrative introductions to each concept, start with:
 > [bundles.md](bundles.md) → [content-types.md](content-types.md) → [shapes.md](shapes.md) → [themes.md](themes.md), and place them in the larger picture via [architecture.md](architecture.md). This file documents the full schemas, validation rules, filesystem layout, and event catalog that the narrative docs reference.
 
-The polis content system organizes all site data around **bundles** -- namespaced packages that declare content types, events, storage layout, and handler dispatch. The initial bundle `pub.polis.core` ships with six content types: post, comment, follow, feed, dm, and tag. Third-party bundles extend the system with custom types without modifying the core protocol.
+The polis content system organizes all site data around **bundles** -- namespaced packages that declare content types, events, storage layout, and handler dispatch. The initial bundle `pub.polis.core` declares six content types: post, comment, follow, dm, tag, and theme. (A seventh data shape, `pub.polis.feed`, is a *derived* local cache — not a declared bundle type; see the note in the Content Types section.) Third-party bundles extend the system with custom types without modifying the core protocol.
 
 ---
 
@@ -591,10 +591,12 @@ user-selectable dropdown.
 
 ## Content Types
 
-The `pub.polis.core` bundle declares **seven** content types. Each has
-distinct storage patterns, actions, and lifecycle behavior. The seventh —
-`pub.polis.theme` — declares themes as content (see SHAPE/BUNDLE/THEME
-above); other types behave as documented below.
+The `pub.polis.core` bundle declares **six** content types — post, comment,
+follow, dm, tag, and theme. Each has distinct storage patterns, actions, and
+lifecycle behavior. `pub.polis.theme` declares themes as content (see
+SHAPE/BUNDLE/THEME above); other types behave as documented below. A seventh
+section, `pub.polis.feed`, documents the *derived* feed cache — which is **not**
+a declared bundle type (see the note in that section).
 
 ### `pub.polis.post`
 
@@ -726,7 +728,7 @@ Direct messages are private, end-to-end encrypted messages between polis instanc
 | `delete` | Bearer token | Delete a conversation locally. |
 | `retry` | Bearer token | Retry delivering unsent messages. |
 
-The `deliver` action is the key innovation: it accepts **signed-request auth** (not Bearer token) so remote instances can push messages without a pre-shared API key. See the [security model](security-model.md) for details on instance-to-instance signed request authentication.
+The `deliver` action is the key innovation: it accepts **signed-request auth** (not Bearer token) so remote instances can push messages without a pre-shared API key. See the [security model](../security/security-model.md) for details on instance-to-instance signed request authentication.
 
 **Events emitted:** None. DMs are private and do not register with the discovery service.
 

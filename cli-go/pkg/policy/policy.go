@@ -19,7 +19,7 @@ type Policy struct {
 // ParsedRule is the structured representation of a policy rule string.
 //
 // The Action field may be any of the six writable verbs in the grammar.
-// See docs/general/policy-grammar.md for the authoritative spec of which
+// See docs/general/reference/policy-grammar.md for the authoritative spec of which
 // verb + type + layer combinations are valid.
 type ParsedRule struct {
 	Action string // "allow", "deny", "emit", "omit", "bless", or "review"
@@ -84,7 +84,7 @@ func DefaultPaths(dataDir string) (privatePath, publicPath string) {
 // Public policies are published at policies/rules.jsonl and visible to the network.
 // They declare the site's public posture — how it engages with the network.
 //
-// The file uses v2 grammar (see docs/general/policy-grammar.md). Default rules:
+// The file uses v2 grammar (see docs/general/reference/policy-grammar.md). Default rules:
 //   - DMs accepted only from following (Layer 1 inbound)
 //   - DMs denied from everyone else (explicit deny before catch-all)
 //   - Self-comments auto-blessed (bless own content)

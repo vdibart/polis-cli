@@ -16,7 +16,7 @@ The dispatch engine routes every API request and CLI action through the responsi
 
 ## The core content types
 
-The `pub.polis.core` bundle declares seven content types: **public** ones published on the author's domain (posts and comments are signed and rendered to HTML; the follow list is published as plain JSON), **private** per-tenant state that is never published, and **derived** local caches.
+The `pub.polis.core` bundle declares six content types — **public** ones published on the author's domain (posts and comments are signed and rendered to HTML; the follow list is published as plain JSON) and **private** per-tenant state that is never published — plus a **derived** local cache (`pub.polis.feed`) that is built from network activity rather than declared as a bundle type. All seven appear in the table below; `pub.polis.feed` is the derived one.
 
 | Type | Public? | Storage | Purpose |
 |---|---|---|---|
@@ -87,10 +87,10 @@ A few action conventions worth knowing:
 | `list` | Return all records of this type. Always paginated by the underlying storage. | `pub.polis.post/list`, `pub.polis.tag/list` |
 | `get` | Return a single record. | `pub.polis.post/get`, `pub.polis.theme/get` |
 | `create` | Make a new record. For public types, this signs + registers with the DS as part of the same action. | `pub.polis.post/create`, `pub.polis.tag/apply` |
-| `delete` / `unpublish` | Remove the record. `unpublish` (posts/comments) is a *clean break* operation that severs DS state too. | `pub.polis.tag/delete`, [`polis unpublish`](../cli/user/command-reference.md#polis-unpublish-path) |
+| `delete` / `unpublish` | Remove the record. `unpublish` (posts/comments) is a *clean break* operation that severs DS state too. | `pub.polis.tag/delete`, [`polis unpublish`](../../cli/user/command-reference.md#polis-unpublish-path) |
 | Type-specific verbs | Each type adds its own: `bless`, `deny`, `revoke`, `send`, `deliver`, `mark_read`, `refresh`, `sync`, … | See `Actions()` in `cli-go/pkg/ops/builtin_core.go` |
 
-The currently-wired actions for the core bundle are listed in [`api/developer/dispatch-engine.md`](../api/developer/dispatch-engine.md). Routes that are declared but not yet wired return `unsupported_action` — they have HTTP routes but no handler logic yet.
+The currently-wired actions for the core bundle are listed in [`api/developer/dispatch-engine.md`](../../api/developer/dispatch-engine.md). Routes that are declared but not yet wired return `unsupported_action` — they have HTTP routes but no handler logic yet.
 
 ---
 
@@ -101,7 +101,7 @@ The `private: true` flag in a content type's bundle declaration means **the type
 - **Public types** (`post`, `comment`, `tag`, `theme`): `GET /v1/content/<type>` is unauthenticated; the records are signed and exposed at canonical URLs on the author's domain.
 - **Private types** (`follow`, `dm`, `feed`): every API operation requires `Authorization: Bearer <api-key>`. The records never leave the tenant directory — DMs are encrypted client-side; follow lists and feed caches are local-only.
 
-For DMs specifically, the `deliver` action uses **signed-request authentication** (Ed25519 signature over a canonical payload, plus `X-Polis-Domain` / `X-Polis-Timestamp` headers) so a remote site can drop an encrypted DM into your inbox without holding one of your API keys. See [`api/developer/reference.md` § Authentication](../api/developer/reference.md#authentication).
+For DMs specifically, the `deliver` action uses **signed-request authentication** (Ed25519 signature over a canonical payload, plus `X-Polis-Domain` / `X-Polis-Timestamp` headers) so a remote site can drop an encrypted DM into your inbox without holding one of your API keys. See [`api/developer/reference.md` § Authentication](../../api/developer/reference.md#authentication).
 
 ---
 
@@ -125,12 +125,12 @@ Custom types live in third-party bundles. Once a bundle declares a new type — 
 
 - gets the same REST routes as core types (`/v1/content/pub.alice.gardening.plot`, `/v1/content/pub.alice.gardening.plot/actions/<action>`),
 - can declare its own events and notification rules in `bundle.json`,
-- is governed by the same [policy grammar](policy-grammar.md) — operators and individual sites can allow/deny custom types just like core ones,
+- is governed by the same [policy grammar](../reference/policy-grammar.md) — operators and individual sites can allow/deny custom types just like core ones,
 - can ship its own shape templates (rendering) and theme overrides if it wants per-bundle UI.
 
 What polis *doesn't* try to enforce: the custom type's data shape, validation, or business logic. That's the bundle author's responsibility; the dispatch engine is content-agnostic.
 
-See [`api/developer/dispatch-engine.md` § Custom Bundles](../api/developer/dispatch-engine.md#custom-bundles).
+See [`api/developer/dispatch-engine.md` § Custom Bundles](../../api/developer/dispatch-engine.md#custom-bundles).
 
 ---
 
@@ -138,8 +138,8 @@ See [`api/developer/dispatch-engine.md` § Custom Bundles](../api/developer/disp
 
 - [bundles.md](bundles.md) — The container that *holds* content type declarations.
 - [shapes.md](shapes.md) — How public content types get rendered.
-- [policy-grammar.md](policy-grammar.md) — The grammar for governing content types at the site and DS layers.
+- [policy-grammar.md](../reference/policy-grammar.md) — The grammar for governing content types at the site and DS layers.
 - [content-system.md](content-system.md) — Deep reference: every core type's full spec, the complete event catalog, payload structures.
-- [api/developer/reference.md](../api/developer/reference.md) — REST endpoints for every wired action.
-- [api/developer/dispatch-engine.md](../api/developer/dispatch-engine.md) — How actions become handler invocations.
-- [security-model.md](security-model.md) — Signing, key continuity, threat analysis for content types.
+- [api/developer/reference.md](../../api/developer/reference.md) — REST endpoints for every wired action.
+- [api/developer/dispatch-engine.md](../../api/developer/dispatch-engine.md) — How actions become handler invocations.
+- [security-model.md](../security/security-model.md) — Signing, key continuity, threat analysis for content types.

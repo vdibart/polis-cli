@@ -1,8 +1,8 @@
 # The Infinity Stream
 
-> Builds on: [architecture.md](architecture.md), [shapes.md](shapes.md), [pql.md](pql.md). Implementation lives in the `pub.polis.shapes.v4` shape; see also [`webapp/designer/pages.md`](../webapp/designer/pages.md) for the page model and [`webapp/designer/navigation.md`](../webapp/designer/navigation.md) for the icon-row nav that drives it.
+> Builds on: [architecture.md](architecture.md), [shapes.md](shapes.md), [pql.md](../reference/pql.md). Implementation lives in the `pub.polis.shapes.v4` shape; see also [`webapp/designer/pages.md`](../../webapp/designer/pages.md) for the page model and [`webapp/designer/navigation.md`](../../webapp/designer/navigation.md) for the icon-row nav that drives it.
 
-The **infinity stream** is the single-screen, sentence-filtered view of a polis site. It's the shape `pub.polis.shapes.v4` and the experience that polis.pub leads with. Where the [blog shape](shapes.md) gives you per-post pages and per-tag archives, the infinity stream gives you one screen that becomes everything: your network's activity, your own posts, comments awaiting blessing, profiles you might follow, message threads, anything composable from [PQL](pql.md).
+The **infinity stream** is the single-screen, sentence-filtered view of a polis site. It's the shape `pub.polis.shapes.v4` and the experience that polis.pub leads with. Where the [blog shape](shapes.md) gives you per-post pages and per-tag archives, the infinity stream gives you one screen that becomes everything: your network's activity, your own posts, comments awaiting blessing, profiles you might follow, message threads, anything composable from [PQL](../reference/pql.md).
 
 This doc is mostly about the *why* — why a single stream-screen is the right primary surface for polis, what "infinity" means in this context, and how the same shape simultaneously serves three different viewpoints (owner, network member, public visitor).
 
@@ -28,7 +28,7 @@ The infinity stream replaced what was, in the v3 design, a modal nav: separate F
 
 **The single-screen alternative.** One stream, many filters. The icon row at the top of the topbar offers preset sentences for the common views; the sentence-filter widget at the center lets you compose any combination. The whole experience is one surface that adapts. There's nothing to "switch to" — the screen *becomes* what the sentence asks for.
 
-**What we kept.** A small number of static routes still exist (`/_/settings` for the settings panel; `/_/` for the default landing sentence). Everything else routes through `/_/pql/<sentence>`. The editor is also separate — it opens *over* the stream-screen rather than living as a sibling mode. See [pages.md](../webapp/designer/pages.md) for the full v4 routing model.
+**What we kept.** A small number of static routes still exist (`/_/settings` for the settings panel; `/_/` for the default landing sentence). Everything else routes through `/_/pql/<sentence>`. The editor is also separate — it opens *over* the stream-screen rather than living as a sibling mode. See [pages.md](../../webapp/designer/pages.md) for the full v4 routing model.
 
 ---
 
@@ -50,7 +50,7 @@ When you visit a polis site you don't own, you're still authenticated as yoursel
 
 ### POV 3 — Public visitor (not logged in)
 
-A reader who isn't logged in arrives at a polis site and lands on a **PQL URL**: the bare root `<handle>.polis.pub/` redirects a browser to `<handle>.polis.pub/pql/all+posts+by+date`. The public `/pql/<sentence>` endpoint serves the infinity-stream shell (and the same path returns the standardized JSON envelope to `Accept: application/json` callers — the developer API). On a tenant the `from`/`about` clause is optional and defaults to that tenant, so `/pql/all+comments+by+date` and `/pql/all+profiles+by+name` are the public comments and profiles views. The owner-extras layer is absent — filters that require live data (unread counts, badge dots, the avatar dropdown) don't appear, and owner-relative scopes (`from me`/`from my network`) are rejected for anonymous visitors (the [scope-resolution boundary](pql.md#scope-resolution-boundary-who-resolves-what)). Scroll behavior is type-dependent: on the posts view the address bar tracks the focused post's canonical URL (share/SEO); on comments/profiles it stays on the PQL filter URL.
+A reader who isn't logged in arrives at a polis site and lands on a **PQL URL**: the bare root `<handle>.polis.pub/` redirects a browser to `<handle>.polis.pub/pql/all+posts+by+date`. The public `/pql/<sentence>` endpoint serves the infinity-stream shell (and the same path returns the standardized JSON envelope to `Accept: application/json` callers — the developer API). On a tenant the `from`/`about` clause is optional and defaults to that tenant, so `/pql/all+comments+by+date` and `/pql/all+profiles+by+name` are the public comments and profiles views. The owner-extras layer is absent — filters that require live data (unread counts, badge dots, the avatar dropdown) don't appear, and owner-relative scopes (`from me`/`from my network`) are rejected for anonymous visitors (the [scope-resolution boundary](../reference/pql.md#scope-resolution-boundary-who-resolves-what)). Scroll behavior is type-dependent: on the posts view the address bar tracks the focused post's canonical URL (share/SEO); on comments/profiles it stays on the PQL filter URL.
 
 This is the layered model owner-extras.js documents at its head: **CSS converges, code diverges along file boundaries**. Every viewer gets the same stream layout and theme; the *behaviors* that require ownership context (editing, blessing, filtering with live counts) gate themselves on whether `owner-extras.js` loaded.
 
@@ -85,7 +85,7 @@ When the page loads:
 5. **Decorate** — On the owner SPA, `owner-extras.js` runs `afterRender` hooks per type: wiring bless/deny buttons on comments, edit affordances on owner posts, count refresh on icon-row dots, etc. On public pages this layer is absent — the content renders, but no owner-only affordances appear.
 6. **Listen** — `stream.js` subscribes to URL changes (so icon clicks and sentence-filter changes don't full-reload) and re-runs the fetch+render cycle.
 
-See [`webapp/developer/feed-architecture.md`](../webapp/developer/feed-architecture.md) for the cache and sync model behind the fetch step, and [`pql.md`](pql.md) for the sentence vocabulary the controller parses.
+See [`webapp/developer/feed-architecture.md`](../../webapp/developer/feed-architecture.md) for the cache and sync model behind the fetch step, and [`pql.md`](../reference/pql.md) for the sentence vocabulary the controller parses.
 
 ---
 
@@ -102,10 +102,10 @@ The single-screen model also makes a subtle promise: **you never leave context.*
 ## See also
 
 - [shapes.md](shapes.md) — Blog vs stream shapes as a binary architectural choice.
-- [pql.md](pql.md) — The sentence grammar the stream filter is built on.
+- [pql.md](../reference/pql.md) — The sentence grammar the stream filter is built on.
 - [architecture.md](architecture.md) — Where the stream sits within the four-surface model.
-- [webapp/designer/pages.md](../webapp/designer/pages.md) — The v4 routing model and surfaces.
-- [webapp/designer/navigation.md](../webapp/designer/navigation.md) — The icon-row anatomy and badge-dot system.
-- [webapp/designer/theme-system.md](../webapp/designer/theme-system.md) — How themes layer over the stream shape.
-- [webapp/developer/feed-architecture.md](../webapp/developer/feed-architecture.md) — Cache + sync architecture behind the stream.
+- [webapp/designer/pages.md](../../webapp/designer/pages.md) — The v4 routing model and surfaces.
+- [webapp/designer/navigation.md](../../webapp/designer/navigation.md) — The icon-row anatomy and badge-dot system.
+- [webapp/designer/theme-system.md](../../webapp/designer/theme-system.md) — How themes layer over the stream shape.
+- [webapp/developer/feed-architecture.md](../../webapp/developer/feed-architecture.md) — Cache + sync architecture behind the stream.
 - [snap-off-architecture.md](snap-off-architecture.md) — Why the stream is a *shape* (replaceable layer), not a baked-in feature.

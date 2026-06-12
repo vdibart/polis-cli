@@ -13,8 +13,8 @@
 //   consumer  — bundle-assets/pub.polis.core/shapes/v4/stream.js: hydration
 //
 // Pull the thread (concept docs):
-//   github.com/vdibart/polis-cli/blob/main/docs/general/pql.md
-//   github.com/vdibart/polis-cli/blob/main/docs/general/infinity-stream.md
+//   github.com/vdibart/polis-cli/blob/main/docs/general/reference/pql.md
+//   github.com/vdibart/polis-cli/blob/main/docs/general/concepts/infinity-stream.md
 //
 // Guided tour (curated walkthrough of this thread):
 //   github.com/vdibart/polis-cli/blob/main/docs/handbook/url-as-filter.md
@@ -832,7 +832,7 @@ const App = {
         // The URL string IS the active filter, not a tracker of it. /_/pql/<sentence>
         // gets parsed by pql.js, pushed back through history.pushState in its
         // canonical form, then handed to the v4 stream controller (stream.js) which
-        // re-renders the column. Concept doc: docs/general/pql.md.
+        // re-renders the column. Concept doc: docs/general/reference/pql.md.
         // ─────────────────────────────────────────────────────────────────────
         if (path && (path.indexOf('/pql/') === 0 || path.indexOf('pql/') === 0)) {
             return this._navigateToPQL(path, opts);
@@ -2183,7 +2183,7 @@ const App = {
     // show the recovery phrase once, and display the secured status. All
     // crypto runs in the browser (PolisDM) — the server never sees the
     // password, KEK, DEK, or recovery phrase. See dm.js / dm-crypto.js and
-    // docs/general/security-model.md.
+    // docs/general/security/security-model.md.
 
     // _fetchDMKeyring returns the browser-safe keyring view, or null when the
     // tenant has no keyring (un-provisioned) or DM crypto isn't available.

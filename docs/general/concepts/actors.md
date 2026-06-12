@@ -14,10 +14,11 @@ responsibility — they do not overlap, and they do not call each other. Their o
 structured events surfaced on monitors and dashboards where problems become visible.
 
 The philosophy is layered: **detect**, **measure**, **heal**, **reconcile**, **verify**,
-**reclaim**. Patrol walks the filesystem looking for trouble. Medic fixes what Patrol
-finds. Judge independently verifies trust across boundaries. Clerk measures drift between
-the tenant and the discovery service. Chaplain reconciles what Clerk surfaces. Reaper
-manages the lifecycle of abandoned accounts. Tailor brings self-hosted sites up to spec.
+**reclaim**, **keep house**. Patrol walks the filesystem looking for trouble. Medic fixes
+what Patrol finds. Judge independently verifies trust across boundaries. Clerk measures
+drift between the tenant and the discovery service. Chaplain reconciles what Clerk surfaces.
+Reaper manages the lifecycle of abandoned accounts. Rosie keeps each tenant's content
+caches faithful to reality. Tailor brings self-hosted sites up to spec.
 
 All actors except Tailor are hosted-only — they run inside the hosted service. Tailor is
 the only actor available to self-hosters, distributed as a standalone binary.
@@ -34,6 +35,7 @@ the only actor available to self-hosters, distributed as a standalone binary.
 | [Clerk](#clerk) | Daily | Hosted only | State parity measurement | `clerk.*` |
 | [Chaplain](#chaplain) | After Clerk | Hosted only | Cross-boundary reconciliation | `chaplain.*` |
 | [Reaper](#reaper) | Daily | Hosted only | Account lifecycle | `reaper.*` |
+| [Rosie](#rosie) | Daily | Hosted + Tailor offline | Content-cache custodianship | `rosie.*` |
 | [Tailor](#tailor) | Manual | Self-hosted | Site migration & upgrade | CLI output only |
 
 ---
@@ -50,6 +52,8 @@ Judge  ──verifies──▶  (independent trust audit, no downstream actor)
 Clerk  ──detects──▶  Chaplain  ──reconciles──▶  (tenant fixed)
 
 Reaper  ──manages──▶  (account lifecycle, independent of other actors)
+
+Rosie   ──reconciles──▶  (content caches kept faithful; periodic backstop to real-time sync)
 
 Tailor  ≈  Patrol + Medic for self-hosted sites (manual, CLI-only)
 ```
@@ -414,6 +418,73 @@ time is the bottleneck.
 
 ---
 
+## Rosie
+
+*The housekeeper (ref: the Jetsons) — keeps each tenant's content caches faithful and tidy.*
+
+| Attribute | Value |
+|-----------|-------|
+| Schedule | Daily, runs once on start |
+| Scope | Hosted goroutine + Tailor (offline GC) for self-hosters |
+| State directory | None — stateless; the target is recomputed each sweep from `blessed.json ∩ DS-status` |
+
+### What it does
+
+Per tenant, for each registered cache **kind** (today: blessed comments authored by another
+tenant), Rosie keeps the local cache faithful to reality:
+
+- **Reconcile** desired-vs-present. The desired set is `blessed.json ∩ DS-current-status`
+  (comments still granted, per the discovery service). Missing entries are re-fetched and
+  verified; entries whose blessing was withdrawn or denied are evicted; the rest are kept.
+- **Verify integrity** of each cached entry by re-checking the author's canonical artifact
+  against their **current** published key. A clean key rotation that re-signs verifies fine;
+  only a signature that fails the current key raises an integrity alert (possible tampering).
+- **Garbage-collect** structural orphans (a cached body with no readable provenance) and
+  stale per-scope feed caches.
+
+**Real-time vs. backstop.** The webapp's sync handlers do the real-time, event-driven
+ingest and eviction as blessings change. Rosie is the **periodic backstop** for drift —
+missed events, cursor loss, downtime. Both paths share one code path, so they cannot drift
+apart, and Rosie is idempotent: she never duplicates real-time work.
+
+**Durability, not eviction.** An unreachable author is *evidence for durability, never
+eviction*: a desired entry whose origin is down is kept. Eviction happens **only** when the
+discovery service positively reports the blessing withdrawn or denied. If the authoritative
+desired set can't be computed (DS down, or an anomalous response), Rosie does nothing for
+that tenant — she never evicts on uncertainty.
+
+### Events
+
+`source: "landlord"`, `rosie.*` namespace, correlated by a per-sweep `sweep_id`.
+
+| Event | When |
+|-------|------|
+| `rosie.sweep` | Every sweep (tenants, files checked, refetched, evicted, gc_removed, integrity_failures, duration) |
+| `rosie.refetch` | A kind had missing entries re-fetched |
+| `rosie.evict` | A kind had withdrawn/denied entries evicted |
+| `rosie.gc` | Orphan cache entries or stale feed caches removed |
+| `rosie.integrity_fail` | A cached signature no longer verifies against the author's current key — **possible tampering, HIGH** |
+| `rosie.error` | Reconcile error (DS down / safety valve), or no discovery URL configured |
+
+### Key design decisions
+
+- **Kind-agnostic.** Rosie never special-cases a cache type. Adding avatar/reply-context/feed
+  caches later means registering a descriptor, not editing Rosie.
+- **Anti-drift by construction.** The real-time sync path and Rosie's reconcile go through the
+  same generic cache operations, with a test asserting they converge.
+- **Stateless.** The target is recomputed each sweep; there is no baseline to corrupt.
+- **Reaper interaction (conservative default):** a reaped author's comments that are blessed
+  elsewhere **persist** in others' caches (durability — consistent with the time-capsule goal).
+  A reap emits no cache tombstone.
+
+### Self-hosted
+
+Self-hosters get the **offline** slice via `polis tailor apply`: orphaned blessed-cache bodies
+are removed. Full reconcile + integrity (which need DS access and network) run when the
+self-hosted webapp syncs; the standalone Rosie goroutine is hosted-only.
+
+---
+
 ## Tailor
 
 *The bespoke fitter — takes any polis site from any era and alters it to fit the current spec, one stitch at a time.*
@@ -594,6 +665,16 @@ Clerk surfaces drift:
 | Cancel pending blessings on reap | per-tenant | reap | (part of `reaper.reap`) | — |
 | DB cleanup: expired magic links / widget tokens / sessions / rate-limiter entries | global | daily | (part of `reaper.sweep`) | Aggregated counts in sweep summary |
 
+### Rosie — content-cache custodianship
+
+| Action | Scope | Trigger | Event | Notes |
+|---|---|---|---|---|
+| Re-fetch missing desired cache entries | per-tenant, per-kind | entry in `blessed.json ∩ DS-status` not present | `rosie.refetch` | Re-fetched + verified before caching |
+| Evict withdrawn/denied entries | per-tenant, per-kind | DS reports blessing withdrawn/denied | `rosie.evict` | Only eviction path; never on uncertainty |
+| Verify cached-entry integrity | per-tenant, per-kind | each present entry, daily | `rosie.integrity_fail` (HIGH) | Signature fails author's **current** key — possible tamper |
+| GC structural orphans + stale feed caches | per-tenant | orphaned body / stale scoped feed | `rosie.gc` | — |
+| Skip tenant on unresolvable desired set | per-tenant | DS down / anomalous response | `rosie.error` | Does nothing — durability over eviction |
+
 ### Tailor — self-hosted, manual
 
 Tailor's 25+ checks across 9 phases are documented in the [Tailor section](#tailor) above.
@@ -708,6 +789,17 @@ backend.
 | `reaper.reap` | handle, archive_size |
 | `reaper.reinstate` | handle |
 | `reaper.keys_stripped` | handle, archives_processed |
+
+### Rosie events
+
+| Event | Fields |
+|-------|--------|
+| `rosie.sweep` | sweep_id, tenants, cache_files_checked, refetched, evicted, gc_removed, integrity_failures, duration |
+| `rosie.refetch` | handle, kind, refetched, urls |
+| `rosie.evict` | handle, kind, evicted, urls |
+| `rosie.gc` | handle, removed, paths |
+| `rosie.integrity_fail` | handle, kind, url, detail |
+| `rosie.error` | handle, detail |
 
 ---
 

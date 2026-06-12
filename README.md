@@ -153,15 +153,15 @@ The bootstrap bash implementation (`cli-bash/polis`) is a single ~8500-line file
 | [Command Reference](docs/cli/user/command-reference.md) | Complete command reference |
 | [Templating](docs/cli/user/templating.md) | Theme customization and template syntax |
 | [JSON Mode](docs/cli/user/json-mode.md) | JSON output for scripting |
-| [API Reference](docs/api/user/reference.md) | Content Type REST API |
-| [Glossary](docs/general/glossary.md) | Polis-specific terminology |
+| [API Reference](docs/api/developer/reference.md) | Content Type REST API |
+| [Glossary](docs/general/reference/glossary.md) | Polis-specific terminology |
 
 ### For Developers
 
 | Document | Description |
 |----------|-------------|
-| [Content System](docs/general/content-system.md) | Bundles, content types, events, filesystem layout |
-| [Security Model](docs/general/security-model.md) | Cryptographic foundations, threat model, policies |
+| [Content System](docs/general/concepts/content-system.md) | Bundles, content types, events, filesystem layout |
+| [Security Model](docs/general/security/security-model.md) | Cryptographic foundations, threat model, policies |
 | [CLI Packages](docs/cli/developer/packages.md) | Package structure, import rules, version propagation |
 | [Webapp Development](docs/webapp/developer/development.md) | Handler patterns, testing, frontend architecture |
 | [Dispatch Engine](docs/api/developer/dispatch-engine.md) | API engine architecture and handler types |
@@ -172,7 +172,7 @@ The bootstrap bash implementation (`cli-bash/polis`) is a single ~8500-line file
 | Document | Description |
 |----------|-------------|
 | [Vision](docs/general/vision.md) | Why Polis exists — manifesto and experience principles |
-| [Security Policy](docs/general/security.md) | Reporting vulnerabilities |
+| [Security Policy](docs/general/security/SECURITY.md) | Reporting vulnerabilities |
 
 ---
 

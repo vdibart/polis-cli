@@ -9,8 +9,35 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
+	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"golang.org/x/term"
 )
+
+// handleDMPublishKey re-publishes the site's DM messages key (the keyring's
+// current epoch, identity-signed) into .well-known/polis. Idempotent operator
+// repair for a tenant whose published public_key_messages was lost — e.g. a
+// pre-fix profile edit that did a lossy typed SaveWellKnown. Uses the
+// field-preserving raw write, so other well-known fields (author_name, avatar,
+// custom strings) are untouched. No-op-safe to re-run.
+func handleDMPublishKey() {
+	dir := getDataDir()
+	privKey, err := loadPrivateKey(dir)
+	if err != nil {
+		exitError("cannot read identity private key: %v", err)
+	}
+	if err := site.PublishMessagesKey(dir, privKey); err != nil {
+		exitError("publish messages key failed: %v", err)
+	}
+	if jsonOutput {
+		outputJSON(map[string]interface{}{
+			"status":  "success",
+			"command": "dm publish-key",
+			"data":    map[string]interface{}{"data_dir": dir},
+		})
+		return
+	}
+	fmt.Println("[✓] Published DM messages key (current epoch) into .well-known/polis")
+}
 
 func handleDM(args []string) {
 	if len(args) < 1 {
@@ -45,6 +72,8 @@ func handleDM(args []string) {
 		handleDMConfig()
 	case "decrypt":
 		handleDMDecrypt(subArgs)
+	case "publish-key":
+		handleDMPublishKey()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown dm subcommand: %s\n", subcommand)
 		printDMUsage()
@@ -65,6 +94,7 @@ Subcommands:
   retry [conversation_id] Retry delivering unsent messages
   config                  Show DM acceptance policy
   decrypt [options]       Decrypt and print your messages from a local/exported site
+  publish-key             Re-publish your DM messages key into .well-known/polis (repair)
 
 Options for 'decrypt':
   --phrase                Unlock with your recovery phrase instead of your password

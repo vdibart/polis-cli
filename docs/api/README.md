@@ -10,7 +10,7 @@ This API covers **content type operations only**: publishing posts, managing com
 
 - **Read operations** (GET on content and bundles) are public — no auth required
 - **Write operations** require `Authorization: Bearer <api-key>`
-- API keys are generated via `polis api-key create` and stored as SHA-256 hashes
+- API keys are stored as SHA-256 hashes in `.polis/api-keys.json`. There is no generator command yet — you add a key by hand (see [developer/reference.md § Authentication](developer/reference.md#authentication))
 
 ## CORS
 
@@ -23,8 +23,9 @@ Request bodies are limited to 1MB.
 ## Quick Start
 
 ```bash
-# Generate an API key
-polis api-key create --name "my-script"
+# Create an API key by hand (no generator command yet — see developer/reference.md#authentication)
+KEY="polis_$(openssl rand -hex 16)"
+printf '%s' "$KEY" | sha256sum   # record this hash in .polis/api-keys.json
 
 # List posts (public)
 curl https://mysite.example.com/v1/content/post
@@ -45,5 +46,5 @@ curl -X POST https://mysite.example.com/v1/content/post \
 
 ## See Also
 
-- [docs/general/content-system.md](../general/content-system.md) — Content types, bundles, and events
+- [docs/general/concepts/content-system.md](../general/concepts/content-system.md) — Content types, bundles, and events
 - [docs/ds/developer/api-reference.md](../ds/developer/api-reference.md) — Discovery service API (separate from the content API)

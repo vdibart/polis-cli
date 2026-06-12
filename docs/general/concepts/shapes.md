@@ -44,7 +44,7 @@ Stream shape (`v4`) adds the JavaScript that drives the live filter:
 └── ...
 ```
 
-Templates use the Mustache-like syntax documented in [`cli/user/templating.md`](../cli/user/templating.md): `{{variable}}` substitution, `{{> snippet}}` partials, `{{#section}}…{{/section}}` blocks. The `default_css` field in the shape declaration tells the renderer which CSS file to load when the active theme doesn't ship its own.
+Templates use the Mustache-like syntax documented in [`cli/user/templating.md`](../../cli/user/templating.md): `{{variable}}` substitution, `{{> snippet}}` partials, `{{#section}}…{{/section}}` blocks. The `default_css` field in the shape declaration tells the renderer which CSS file to load when the active theme doesn't ship its own.
 
 ---
 
@@ -67,7 +67,7 @@ For sites running the *stream* shape (`v4`), rendering produces a single HTML pa
 3. Fetching matching content from the local API + the DS event stream.
 4. Rendering items into the `<main class="layout">` element.
 
-See [`pql.md`](pql.md) for how sentences compose, and [`webapp/developer/feed-architecture.md`](../webapp/developer/feed-architecture.md) for how the stream fetches data.
+See [`pql.md`](../reference/pql.md) for how sentences compose, and [`webapp/developer/feed-architecture.md`](../../webapp/developer/feed-architecture.md) for how the stream fetches data.
 
 ---
 
@@ -77,7 +77,7 @@ The blog and stream shapes embody different theories of how readers engage with 
 
 **Blog (`v3`):** A reader arrives at a *specific page* — a single post, an archive, a tag — and consumes content that's already been arranged for them. Navigation is between pages. Comments are inlined on the post they reply to. This is the model that ten thousand WordPress and Hugo sites have trained the web on.
 
-**Stream (`v4`):** A reader arrives at a *single screen* and re-shapes it with queries. The default landing is "activity from my network by date"; one click filters to "my posts," "comments to bless," "profiles." Every navigation gesture is a re-filter rather than a page load. This is the model polis.pub uses, because the value isn't *individual content* — it's *flow through content the network has authored*. See [infinity-stream.md](#) (planned doc, Phase 2.3) for the philosophy in full.
+**Stream (`v4`):** A reader arrives at a *single screen* and re-shapes it with queries. The default landing is "activity from my network by date"; one click filters to "my posts," "comments to bless," "profiles." Every navigation gesture is a re-filter rather than a page load. This is the model polis.pub uses, because the value isn't *individual content* — it's *flow through content the network has authored*. See [infinity-stream.md](infinity-stream.md) for the philosophy in full.
 
 Both shapes are first-class. A polis site picks one in `.polis/bundles/registry.json`; the choice is reversible and doesn't break signed content.
 
@@ -122,7 +122,7 @@ Themes built for one shape can declare compatibility with another by listing bot
 - [bundles.md](bundles.md) — Shapes are declared by, and shipped with, a bundle.
 - [themes.md](themes.md) — CSS-only presentation that sits on top of a shape.
 - [content-types.md](content-types.md) — What gets rendered (posts, comments) — independent of *how*.
-- [pql.md](pql.md) — The query language driving the v4 stream shape.
-- [cli/user/templating.md](../cli/user/templating.md) — Template syntax used inside shape templates.
-- [webapp/designer/theme-system.md](../webapp/designer/theme-system.md) — How shapes and themes resolve at runtime in the webapp.
+- [pql.md](../reference/pql.md) — The query language driving the v4 stream shape.
+- [cli/user/templating.md](../../cli/user/templating.md) — Template syntax used inside shape templates.
+- [webapp/designer/theme-system.md](../../webapp/designer/theme-system.md) — How shapes and themes resolve at runtime in the webapp.
 - [content-system.md § SHAPE / BUNDLE / THEME](content-system.md#shape--bundle--theme) — Deep reference.

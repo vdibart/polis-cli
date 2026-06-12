@@ -113,27 +113,20 @@ Welcome Screen (no site) → Init/Link Panel
 
 ### URL Routing (Deep-Linking)
 
-SPA deep-links use `/_/` path prefix:
+The SPA has only three route shapes: `/_/` (default stream), `/_/pql/<sentence>` (any
+PQL-filtered view — what every icon button and the sentence-filter widget load), and
+`/_/settings`. Any other `/_/…` path falls through to the default stream. The old v3 page
+routes (`/_/posts`, `/_/blessings`, `/_/social/*`, …) were retired.
 
-| URL | View |
-|-----|------|
-| `/_/posts` | Published posts |
-| `/_/posts/drafts` | Post drafts |
-| `/_/blessings` | Blessing requests |
-| `/_/social/feed` | Activity feed |
-| `/_/social/following` | Following list |
-| `/_/settings` | Settings |
+The authoritative routing reference is **`webapp/CLAUDE.md`** (§ SPA routes) — see it before
+changing route handling.
 
 ### CSS Design System
 
-```css
---bg-color: #262626          /* dark background */
---accent-color: #5fafaf      /* teal primary */
---salmon: #d97054            /* warm titles */
---preview-bg: #d8d2c8        /* parchment preview */
-```
-
-Monospace fonts: JetBrains Mono, Fira Code.
+The webapp uses a **dual-theme** (light/dark) system of semantic CSS custom properties
+defined on `[data-theme]`, not a fixed palette. Fonts: Inter (UI), Newsreader (serif
+content), JetBrains Mono (editor). The full variable contract and design system live in
+**`webapp/CLAUDE.md`** — treat it as authoritative rather than duplicating values here.
 
 ## Server Patterns
 

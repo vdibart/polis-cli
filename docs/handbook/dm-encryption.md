@@ -1,6 +1,6 @@
 # Tour: DM encryption
 
-> A guided tour of how a direct message gets encrypted, delivered from one polis instance to another, stored where its own server can't read it, and unlocked again in your browser. Source-of-truth concept docs live in [`../general/`](../general/) — chiefly [`dm-encryption.md`](../general/dm-encryption.md); this tour walks the source code with you. Map of all threads: [`../../AGENTS.md`](../../AGENTS.md).
+> A guided tour of how a direct message gets encrypted, delivered from one polis instance to another, stored where its own server can't read it, and unlocked again in your browser. Source-of-truth concept docs live in [`../general/`](../general/) — chiefly [`dm-encryption.md`](../general/security/dm-encryption.md); this tour walks the source code with you. Map of all threads: [`../../AGENTS.md`](../../AGENTS.md).
 
 ## The observation
 
@@ -285,7 +285,7 @@ The server is a **mailbox and a courier**, never a reader: it routes and stores 
 
 ## Pull the thread
 
-- **[`../general/dm-encryption.md`](../general/dm-encryption.md)** — the authoritative concept doc. Read [What this protects — and what it does not](../general/dm-encryption.md#what-this-protects) for the honest threat model (the bootstrap window, metadata, the served-JS trust assumption), [The bootstrap window](../general/dm-encryption.md#bootstrap-window), [Passwords and recovery](../general/dm-encryption.md#passwords-and-recovery), and [Browser cryptography (transparency disclosure)](../general/dm-encryption.md#browser-crypto).
+- **[`../general/security/dm-encryption.md`](../general/security/dm-encryption.md)** — the authoritative concept doc. Read [What this protects — and what it does not](../general/security/dm-encryption.md#what-this-protects) for the honest threat model (the bootstrap window, metadata, the served-JS trust assumption), [The bootstrap window](../general/security/dm-encryption.md#bootstrap-window), [Passwords and recovery](../general/security/dm-encryption.md#passwords-and-recovery), and [Browser cryptography (transparency disclosure)](../general/security/dm-encryption.md#browser-crypto).
 - **[`cli-go/pkg/dm/FORMAT.md`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/dm/FORMAT.md)** — the exact at-rest format: keyring.json, messages.jsonl, and the manual decryption recipe.
 - **[`cli-go/pkg/dm/PROTOCOL.md`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/dm/PROTOCOL.md)** — the wire protocol: key discovery, the message box, signed-request delivery, and the DM-numbered hardening requirements (DM-1 box_pub auth, DM-2 canonical binding, …).
 

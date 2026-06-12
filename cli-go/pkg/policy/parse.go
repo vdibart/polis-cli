@@ -24,7 +24,7 @@ func Parse(rule string) (*ParsedRule, error) {
 // Callers that need the original rule string (e.g. signature verification)
 // should preserve the raw string separately (see EvalResult.Rule).
 //
-// See docs/general/policy-grammar.md for the authoritative grammar spec.
+// See docs/general/reference/policy-grammar.md for the authoritative grammar spec.
 func ParseInMode(rule string, mode ParseMode) (*ParsedRule, error) {
 	tokens := strings.Fields(rule)
 	if len(tokens) < 4 {
@@ -104,7 +104,7 @@ func ParseInMode(rule string, mode ParseMode) (*ParsedRule, error) {
 }
 
 // validateLayer checks that a parsed rule's verb + type combination is
-// valid for the target layer. See docs/general/policy-grammar.md for
+// valid for the target layer. See docs/general/reference/policy-grammar.md for
 // the full matrix. Catch-all types ("all", "none") are permitted in
 // either mode with allow/deny for the defensive-terminal idiom.
 func validateLayer(r *ParsedRule, mode ParseMode) error {
@@ -125,7 +125,7 @@ func validateLayer(r *ParsedRule, mode ParseMode) error {
 }
 
 // validateTenantLayer enforces Layer 1 (inbound) + Layer 2 (outbound) verbs
-// for tenant policy files. See docs/general/policy-grammar.md.
+// for tenant policy files. See docs/general/reference/policy-grammar.md.
 func validateTenantLayer(r *ParsedRule) error {
 	switch r.Type {
 	case "pub.polis.dm":

@@ -63,6 +63,12 @@ const (
 	streamCountBatchMax         = 50 // matches DS COMMENT_COUNTS_MAX_URLS
 	visibleCountFetchTimeout    = 500 * time.Millisecond
 	backgroundCountFetchTimeout = 5 * time.Second
+	// streamCommentFilterMaxURLs bounds how many distinct post URLs the
+	// with=comments network filter resolves against DS in one request.
+	// Realistic 30-day network post volume sits well under this; the cap
+	// guards a pathological large window. Posts beyond it are conservatively
+	// dropped (count-unknown) and the truncation is logged, never silent.
+	streamCommentFilterMaxURLs = 200
 )
 
 // streamItemResponse wraps a CachedFeedItem with a server-formatted
@@ -789,16 +795,15 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 	isOwnSurface := (scopeKind == "handle" && scopeArg != "" && scopeArg == myDomain) ||
 		scopeKind == "my"
 
-	// with=comments is own-scope-only. Data source (blessed.json) only
-	// exists for the local tenant; cross-scope semantics aren't defined
-	// in this cut. (Previously also gated type=follows here; 06-profiles
-	// removed type=follows from the grammar — profiles dispatch above
-	// handles its own scope validation.)
-	if withParam == "comments" && !isOwnSurface {
-		writeStreamError(w, http.StatusBadRequest,
-			fmt.Sprintf("with=%s requires scope=@<this-tenant> or scope=me", withParam))
-		return
-	}
+	// with=comments ("posts that have comments") is supported at every
+	// scope. Own scope derives the count from the local blessed.json
+	// (populateCommentCountsAndOptionallyFilter, in the isOwnSurface branch
+	// below). Non-own scopes (my-network / all-polis / @other-handle) have
+	// no local count — the network feed cache leaves CommentCount=0 at sync
+	// time — so the filter resolves counts from DS in filterStreamPostsWith-
+	// Comments after the items are loaded (also below). (Previously this
+	// 400'd for any non-own scope; the DS comment-counts endpoint works for
+	// arbitrary post URLs, so the cross-tenant case is now answerable.)
 
 	var items []feed.CachedFeedItem
 	// sourcePaths is populated only for own-content (posts + comments).
@@ -956,6 +961,17 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 	// value should still post-filter.
 	if timeDelta > 0 && !isOwnSurface {
 		items = filterStreamItemsByTime(items, time.Now().Add(-timeDelta))
+	}
+
+	// with=comments on a non-own scope ("posts from my network that have
+	// comments"). Network/cross-tenant cache rows carry CommentCount=0 (the
+	// count isn't materialized at sync time), so derive it from DS and drop
+	// post items with no comments — BEFORE pagination, so the page the user
+	// sees IS the filtered set rather than a holey page of the unfiltered
+	// set. Own scope already filtered above via blessed.json. Run after the
+	// time filter so DS is queried for the smallest candidate set.
+	if withParam == "comments" && !isOwnSurface && (feedType == "post" || feedType == "") {
+		items = s.filterStreamPostsWithComments(r, items, myDomain)
 	}
 
 	// before_url → cursor convenience (step-05/5.c). When the controller
@@ -2550,6 +2566,128 @@ func (s *Server) populateCrossTenantCommentCounts(r *http.Request, page []feed.C
 			}
 		}()
 	}
+}
+
+// filterStreamPostsWithComments keeps only post items whose total comment
+// count (blessed + unblessed, per DS) is > 0, for the non-own scopes
+// (my-network / all-polis / @other-handle). Network/cross-tenant feed rows
+// carry CommentCount=0 from sync — the count isn't materialized there — so
+// it must be derived from the DS comment-counts endpoint, which works for
+// arbitrary post URLs. Own scope is filtered earlier from blessed.json
+// (populateCommentCountsAndOptionallyFilter); this is the cross-tenant twin.
+//
+// Counts are cache-first (sharing the in-memory cache the display-stamp pass
+// warms) and fail-soft: a post whose count can't be resolved (DS error, or
+// beyond the URL cap) stays unknown and is dropped — consistent with the
+// "0 comments" badge the renderer would otherwise show under a with-comments
+// filter. Non-post items pass through untouched. Kept posts are stamped with
+// the resolved count so the badge matches the filter.
+func (s *Server) filterStreamPostsWithComments(r *http.Request, items []feed.CachedFeedItem, myDomain string) []feed.CachedFeedItem {
+	if len(items) == 0 {
+		return items
+	}
+
+	// dsURLFor maps an item to the DS-canonical URL the counts endpoint
+	// indexes: cross-tenant rows are already absolute https; own rows (rare
+	// here — cross-scope strips self upstream, but defensive) get absolutized.
+	dsURLFor := func(it *feed.CachedFeedItem) string {
+		if it.AuthorDomain == myDomain {
+			return s.absolutizeStreamURL(it.URL)
+		}
+		return it.URL
+	}
+
+	// Pass 1: gather resolved counts (cache hits) and the uncached misses.
+	counts := make(map[string]int, len(items))
+	missing := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for i := range items {
+		it := &items[i]
+		if it.Type != "post" {
+			continue
+		}
+		dsURL := dsURLFor(it)
+		if !strings.HasPrefix(dsURL, "https://") {
+			continue
+		}
+		if cached, ok := s.getCommentCountCacheEntry(dsURL); ok {
+			counts[dsURL] = cached
+			continue
+		}
+		if _, dup := seen[dsURL]; !dup {
+			seen[dsURL] = struct{}{}
+			missing = append(missing, dsURL)
+		}
+	}
+
+	// Fetch the misses from DS, chunked at the per-request cap and bounded
+	// overall by streamCommentFilterMaxURLs. Chunks run concurrently under a
+	// single timeout so worst-case latency is ~one call, not N sequential.
+	truncated := 0
+	if len(missing) > streamCommentFilterMaxURLs {
+		truncated = len(missing) - streamCommentFilterMaxURLs
+		missing = missing[:streamCommentFilterMaxURLs]
+	}
+	if len(missing) > 0 && s.DiscoveryURL != "" {
+		ctx, cancel := context.WithTimeout(r.Context(), visibleCountFetchTimeout)
+		client := s.NewDSClient(r)
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		for start := 0; start < len(missing); start += streamCountBatchMax {
+			end := start + streamCountBatchMax
+			if end > len(missing) {
+				end = len(missing)
+			}
+			chunk := missing[start:end]
+			wg.Add(1)
+			go func(chunk []string) {
+				defer wg.Done()
+				res, err := client.FetchCommentCountsCtx(ctx, chunk)
+				if err != nil {
+					s.LogEvent("pub.polis.stream.counts_filter_fetch_failed", map[string]interface{}{
+						"url_count": len(chunk),
+						"error":     err.Error(),
+					})
+					return
+				}
+				mu.Lock()
+				for u, total := range res {
+					counts[u] = total
+				}
+				mu.Unlock()
+			}(chunk)
+		}
+		wg.Wait()
+		cancel()
+		// Warm the shared cache so the display-stamp pass and later renders
+		// hit. DS omits zero-count URLs, so only count>0 entries exist here.
+		s.setCommentCountCacheEntries(counts)
+	}
+
+	// Pass 2: keep posts with a resolved count > 0; drop the rest. Stamp the
+	// count so the badge matches the filter. Non-post items pass through.
+	filtered := items[:0]
+	for i := range items {
+		it := items[i]
+		if it.Type != "post" {
+			filtered = append(filtered, it)
+			continue
+		}
+		total := counts[dsURLFor(&it)]
+		if total <= 0 {
+			continue
+		}
+		it.CommentCount = total
+		filtered = append(filtered, it)
+	}
+
+	if truncated > 0 {
+		s.LogEvent("pub.polis.stream.counts_filter_truncated", map[string]interface{}{
+			"dropped_unresolved": truncated,
+			"cap":                streamCommentFilterMaxURLs,
+		})
+	}
+	return filtered
 }
 
 // flightKey builds a stable singleflight key from a set of URLs. Sorts

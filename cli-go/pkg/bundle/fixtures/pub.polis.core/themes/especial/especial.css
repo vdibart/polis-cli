@@ -48,6 +48,21 @@
     --color-accent-soft: var(--color-gold-soft);
     --color-accent-bg: rgba(212, 168, 24, 0.08);
 
+    /* Cross-visit filter palette buckets — see vice.css for the contract.
+       dark = light-text (for dark visitor bands); light = dark-text. */
+    --filter-dark-text: #c8c4b8;
+    --filter-dark-text-hover: #f0ece4;
+    --filter-dark-underline: color-mix(in srgb, #c8a014 55%, transparent);
+    --filter-dark-underline-hover: #c8a014;
+    --filter-dark-identity: #c8a014;
+    --filter-dark-dot: color-mix(in srgb, #c8a014 50%, transparent);
+    --filter-light-text: #1c1c2a;
+    --filter-light-text-hover: #0e0e16;
+    --filter-light-underline: color-mix(in srgb, #6e5600 55%, transparent);
+    --filter-light-underline-hover: #6e5600;
+    --filter-light-identity: #6e5600;
+    --filter-light-dot: color-mix(in srgb, #6e5600 50%, transparent);
+
     /* Typography */
     --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
     --font-display: 'Orbitron', var(--font-mono);

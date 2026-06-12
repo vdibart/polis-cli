@@ -1,6 +1,9 @@
 # Security Policy
 
-> **Scope:** This file documents the vulnerability reporting policy only. For the full threat model, cryptographic design (Ed25519 signing, DM encryption, key continuity / proto-TOFU), and per-actor responsibilities, see [`security-model.md`](security-model.md).
+> **Scope:** This file documents the vulnerability reporting policy only. For the deeper security docs, see:
+> - [`security-model.md`](security-model.md) — full threat model, cryptographic design (Ed25519 signing, key continuity / proto-TOFU), trust model, attack vectors
+> - [`dm-encryption.md`](dm-encryption.md) — direct-message encryption design
+> - [`registration-and-privacy.md`](registration-and-privacy.md) — discovery-service registration, hard delete, privacy guarantees
 
 ## Supported Versions
 

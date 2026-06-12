@@ -11,7 +11,7 @@ Polis has four main components:
 | `cli-go/` | Go | Active | Go CLI — core packages imported by the webapp |
 | `webapp/` | Go | Active | Local web interface for managing a Polis site |
 | `cli-bash/` | Bash | Frozen (v0.56.0) | Original CLI — functional but receives no new features |
-| Discovery Service | TypeScript | Active (closed for now) | Fly.io/Hono server for discovery coordination. Source not yet in this public repo; planned for open-source release. The [DS API reference](../ds/developer/api-reference.md) is the stable public contract. |
+| Discovery Service | TypeScript | Active (closed for now) | Hono server for discovery coordination. Source not yet in this public repo; planned for open-source release. The [DS API reference](../ds/developer/api-reference.md) is the stable public contract. |
 
 **Key dependency rule:** The Go CLI (`cli-go/pkg/`) owns all core packages. The webapp imports from the CLI, never the reverse.
 
@@ -87,7 +87,7 @@ Core packages live in `cli-go/pkg/` and are designed to be importable:
 - `pkg/discovery/` — Discovery service HTTP client
 - `pkg/metadata/` — Public index (JSONL) management
 
-See [cli-go/README.md](../cli-go/README.md) for the full package list and library usage examples.
+See [cli-go/README.md](../../cli-go/README.md) for the full package list and library usage examples.
 
 ### Version Propagation
 
@@ -137,7 +137,7 @@ go build -o polis-server ./cmd/server && ./polis-server
 - Add or update tests for every handler change
 - Check bash CLI parity when modifying behavior that both CLIs share
 
-See [webapp/CLAUDE.md](../webapp/CLAUDE.md) for detailed patterns, handler conventions, and frontend architecture.
+See [webapp/CLAUDE.md](../../webapp/CLAUDE.md) for detailed patterns, handler conventions, and frontend architecture.
 
 ### Key Files
 

@@ -1880,7 +1880,7 @@
     // into its section anchors so users can get the background behind each
     // caution (matches the doc-link convention already used by the hosted ToS
     // and landing-page FAQ — github blob URL, opens in a new tab).
-    var DM_DOC_URL = 'https://github.com/vdibart/polis-cli/blob/main/docs/general/dm-encryption.md';
+    var DM_DOC_URL = 'https://github.com/vdibart/polis-cli/blob/main/docs/general/security/dm-encryption.md';
 
     function showDMSetupBar() {
         var host = dmBannerHost();

@@ -15,7 +15,7 @@ A bundle is a namespaced unit that declares four kinds of things:
 | Declared in `bundle.json` | What it is | Doc |
 |---|---|---|
 | **Content types** | The data model — what records the bundle understands (e.g. `pub.polis.post`, `pub.polis.dm`). Each declares storage layout, actions, and a handler. | [content-types.md](content-types.md) |
-| **Handler declarations** | How the bundle's actions get executed: `builtin` (Go code in the CLI), `executable` (JSON stdin/stdout to a binary), or `http` (JSON POST to a URL). | [api/developer/dispatch-engine.md](../api/developer/dispatch-engine.md) |
+| **Handler declarations** | How the bundle's actions get executed: `builtin` (Go code in the CLI), `executable` (JSON stdin/stdout to a binary), or `http` (JSON POST to a URL). | [api/developer/dispatch-engine.md](../../api/developer/dispatch-engine.md) |
 | **Shapes** | Rendering approaches — the templates that turn content into HTML. The core bundle ships `pub.polis.shapes.v3` (blog) and `pub.polis.shapes.v4` (infinity stream). | [shapes.md](shapes.md) |
 | **Themes** | CSS-only presentation, scoped to the bundle and compatible with one or more of its shapes. | [themes.md](themes.md) |
 
@@ -139,7 +139,7 @@ A bundle declares **one** handler type that the dispatch engine uses for all its
 | `executable` | JSON stdin → external binary → JSON stdout. The engine spawns the binary per action. | Custom bundle implemented in any language as a local CLI. |
 | `http` | JSON POST → HTTP endpoint → JSON response. | Custom bundle whose logic lives on a remote server. |
 
-The contract is identical: every handler receives an `ActionRequest` (`{action, content_type, payload}`) and returns an `ActionResult` (`{status, data}`). See [`api/developer/dispatch-engine.md`](../api/developer/dispatch-engine.md) for the full handler protocol.
+The contract is identical: every handler receives an `ActionRequest` (`{action, content_type, payload}`) and returns an `ActionResult` (`{status, data}`). See [`api/developer/dispatch-engine.md`](../../api/developer/dispatch-engine.md) for the full handler protocol.
 
 ---
 
@@ -153,7 +153,7 @@ The contract is identical: every handler receives an `ActionRequest` (`{action, 
 4. Site visitors and other polis tools can introspect the bundle via `GET /v1/bundles` or `GET /v1/bundles/pub.alice.gardening`.
 5. The dispatch engine routes any incoming action for `pub.alice.gardening.plot/<action>` to the bundle's declared handler.
 
-Custom content types are governed by the same [policy grammar](policy-grammar.md) as core types — operators can `deny pub.alice.gardening.plot from all` at the DS, individual sites can `deny pub.alice.gardening.plot from <domain>`, and so on.
+Custom content types are governed by the same [policy grammar](../reference/policy-grammar.md) as core types — operators can `deny pub.alice.gardening.plot from all` at the DS, individual sites can `deny pub.alice.gardening.plot from <domain>`, and so on.
 
 ---
 
@@ -164,5 +164,5 @@ Custom content types are governed by the same [policy grammar](policy-grammar.md
 - [themes.md](themes.md) — How bundle rendering gets **styled**.
 - [content-system.md](content-system.md) — The deep reference: filesystem layout, full `bundle.json` schema, validation rules, complete event catalog.
 - [architecture.md](architecture.md) — The four surfaces (CLI, webapp, polis.pub, DS) bundles live within.
-- [api/developer/dispatch-engine.md](../api/developer/dispatch-engine.md) — How the dispatch engine routes actions to bundle handlers.
+- [api/developer/dispatch-engine.md](../../api/developer/dispatch-engine.md) — How the dispatch engine routes actions to bundle handlers.
 - [actors.md](actors.md) — Patrol/Medic, the actors that keep tenant bundle installs in sync with the embedded source of truth.

@@ -49,6 +49,57 @@
     --color-accent-soft: var(--color-pink-soft);
     --color-accent-bg: rgba(208, 104, 136, 0.08);
 
+    /* ════════════════════════════════════════════════════════════════════
+       SENTENCE-FILTER POLARITY BUCKETS — CANONICAL CONTRACT (read this when
+       authoring a new theme; every theme references "see vice.css").
+       ════════════════════════════════════════════════════════════════════
+       When an authenticated visitor browses a foreign tenant, the cross-visit
+       nav widget (webapp/internal/hosted/nav/nav.js) can paint the sentence
+       filter + cap dot in the SITE AUTHOR's theme instead of the visitor's.
+       The widget sets `data-sf` on `.polis-topbar`, and stream.css's
+       `.polis-topbar[data-sf="author-dark"|"author-light"]` rules read the
+       AUTHOR theme's bucket tokens below. The icons/band/handle stay the
+       visitor's — only the filter + dot adopt the author.
+
+       EVERY theme MUST define BOTH buckets (6 tokens each), regardless of its
+       own look, because a foreign visitor's band can be either polarity:
+         --filter-dark-*   → LIGHT text/accent — used when the VISITOR's band
+                             is DARK (the common case).
+         --filter-light-*  → DARK text/accent — used when the VISITOR's band
+                             is LIGHT (e.g. an especial-light visitor).
+       One of the two equals your theme's NATIVE filter look: dark-bodied
+       themes → the dark bucket is native; light-bodied themes (especial-light)
+       → the light bucket is native. The OTHER bucket is the inverted variant
+       you must still supply so your filter stays legible on the opposite band.
+
+       6 tokens per bucket: text, text-hover, underline, underline-hover,
+       identity (the site-domain slot), dot (the cap dot).
+
+       HARDCODE the colors as literal hex / color-mix with literal hex — do NOT
+       reference var(--color-accent) / var(--color-text-soft) / var(--color-text)
+       here: nav.js overrides those on the topbar per-visitor, which would drag
+       your bucket to the visitor's palette. (Theme-private tokens NOT touched by
+       nav.js — e.g. stardust's --color-tile/--color-gold — are safe to var().)
+
+       INVERTED-POLARITY THEMES (light body + dark topbar, or vice-versa — only
+       stardust today): ALSO set the base --filter-text/-underline/-identity/-dot
+       at :root so the native/anonymous filter is correct, since the shape's
+       default (from --color-text-soft) is tuned for the body, not the topbar.
+       See stardust.css.
+       ════════════════════════════════════════════════════════════════════ */
+    --filter-dark-text: #d0c4b8;
+    --filter-dark-text-hover: #f0e8e0;
+    --filter-dark-underline: color-mix(in srgb, #d06888 55%, transparent);
+    --filter-dark-underline-hover: #d06888;
+    --filter-dark-identity: #d06888;
+    --filter-dark-dot: color-mix(in srgb, #d06888 50%, transparent);
+    --filter-light-text: #2a2030;
+    --filter-light-text-hover: #15101c;
+    --filter-light-underline: color-mix(in srgb, #a83a60 55%, transparent);
+    --filter-light-underline-hover: #a83a60;
+    --filter-light-identity: #a83a60;
+    --filter-light-dot: color-mix(in srgb, #a83a60 50%, transparent);
+
     /* Typography */
     --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
     --font-display: 'Orbitron', var(--font-mono);

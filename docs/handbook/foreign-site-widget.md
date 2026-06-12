@@ -30,7 +30,7 @@ That something is the **serve-time nav injection**. And it's a different mechani
    │   │   <a class="polis-signin" href="https://polis.pub/">sign in</a>│  │
    │   │   ...                                                          │  │
    │   │   <div id="polis-widget" data-author="alice.polis.pub">  ◄─── 2│  │
-   │   │   <script src="https://polis.pub/widget-1.4.4.js"              │  │
+   │   │   <script src="https://polis.pub/widget-1.4.5.js"              │  │
    │   │           integrity="sha384-...">                              │  │
    │   │                                                                │  │
    │   └────────────────────────────────────────────────────────────────┘  │
@@ -89,7 +89,7 @@ The CSS in `stream.css` has a clever rule:
 
 This is the *handshake*. The static HTML is correct for anonymous visitors out of the box. The presence of children inside `#polis-nav-root` is the signal "switch to logged-in mode."
 
-### 1.b Serve time: the patch ([`webapp/internal/hosted/nav_inject.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/nav_inject.go))
+### 1.b Serve time: the patch ([`webapp/internal/hosted/hosted.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/hosted.go), `injectNavWidgetPlaceholder`)
 
 When `<you>.polis.pub` requests `alice.polis.pub/posts/2026/01/hello.html` *while logged in*, the hosted webapp's response path runs the page through `injectNavWidgetPlaceholder`:
 
@@ -178,7 +178,7 @@ The comment/follow widget's container and script tag are in the static template:
         integrity="{{widget_integrity}}" crossorigin="anonymous"></script>
 ```
 
-Every visitor — anonymous or logged-in — gets this script tag. Versioned URL (`/widget-1.4.4.js`), SRI integrity attribute pinning the bytes. If the bytes get tampered with mid-flight, the browser refuses to execute.
+Every visitor — anonymous or logged-in — gets this script tag. Versioned URL (`/widget-1.4.5.js`), SRI integrity attribute pinning the bytes. If the bytes get tampered with mid-flight, the browser refuses to execute.
 
 ### 2.b Embedded asset ([`webapp/internal/hosted/widget_embed.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/widget_embed.go))
 
@@ -197,7 +197,7 @@ func init() {
 }
 ```
 
-The widget JavaScript is embedded into the hosted binary at compile time and the SHA-384 integrity hash is computed once at init. When `polis.pub` serves `/widget-1.4.4.js`, it streams the embedded bytes. The template's `{{widget_integrity}}` variable resolves to the SRI string, so the browser will refuse to run anything that doesn't match.
+The widget JavaScript is embedded into the hosted binary at compile time and the SHA-384 integrity hash is computed once at init. When `polis.pub` serves `/widget-1.4.5.js`, it streams the embedded bytes. The template's `{{widget_integrity}}` variable resolves to the SRI string, so the browser will refuse to run anything that doesn't match.
 
 ### 2.c State machine ([`webapp/internal/hosted/widget/widget.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/widget/widget.js))
 
@@ -233,13 +233,13 @@ Both widget scripts are versioned at the URL level:
 // WidgetVersion is the single source of truth for the current polis widget version.
 // Update this constant when widget.js changes. Theme snippets reference it via
 // the {{widget_version}} template variable, so they never need manual version bumps.
-const WidgetVersion = "1.4.4"
+const WidgetVersion = "1.4.5"
 ```
 
 The render pipeline stamps `{{widget_version}}` into every emitted HTML page, so the `<script src="/widget-X.Y.Z.js">` always points at the version that was current at publish time. The hosted server's `serveWidgetJS` handles versioned requests:
 
 - Current version → serve embedded bytes with `Cache-Control: max-age=86400`.
-- Old version → `301 Moved Permanently` to the current version, with a `Cache-Control: max-age=3600` redirect cache.
+- Old version → `302 Found` to the current version, deliberately with `Cache-Control: no-store` — a `301`/cached redirect would let Cloudflare or the browser pin a redirect that goes stale on the next widget bump, so the redirect itself is never cached.
 
 So published HTML from a year ago still links to a working script — it just gets redirected to the current one. The SRI integrity attribute moves with the redirect because the template is re-rendered with the current `{{widget_integrity}}` whenever the page is regenerated. If you have an old un-re-rendered page from before a widget update, the SRI hash in its `<script>` tag won't match the new bytes, and the browser will refuse to execute — which is the right failure mode: better a broken widget than a tampered one.
 
@@ -249,9 +249,9 @@ So published HTML from a year ago still links to a working script — it just ge
 
 A few concept docs give you the philosophical context:
 
-- **[`../general/architecture.md`](../general/architecture.md)** — polis.pub-as-implementation vs polis-the-protocol. The injected widget is a polis.pub feature; the protocol doesn't require it. A self-hosted polis site can opt to use the same widget (pointing back at polis.pub) or roll its own.
-- **[`../general/snap-off-architecture.md`](../general/snap-off-architecture.md)** — The widget hosting is a snap-off layer. Different tenants can use different widget implementations; the contract is the placeholder + the `<script>` tag.
-- **[`../general/security-model.md`](../general/security-model.md)** — Why SRI matters here (CDN-compromise blast radius), why widget tokens are separate from session tokens, why cross-tenant cookies need `SameSite=Lax`.
+- **[`../general/concepts/architecture.md`](../general/concepts/architecture.md)** — polis.pub-as-implementation vs polis-the-protocol. The injected widget is a polis.pub feature; the protocol doesn't require it. A self-hosted polis site can opt to use the same widget (pointing back at polis.pub) or roll its own.
+- **[`../general/concepts/snap-off-architecture.md`](../general/concepts/snap-off-architecture.md)** — The widget hosting is a snap-off layer. Different tenants can use different widget implementations; the contract is the placeholder + the `<script>` tag.
+- **[`../general/security/security-model.md`](../general/security/security-model.md)** — Why SRI matters here (CDN-compromise blast radius), why widget tokens are separate from session tokens, why cross-tenant cookies need `SameSite=Lax`.
 - **[`../webapp/designer/navigation.md`](../webapp/designer/navigation.md)** — The nav anatomy the injected nav widget renders into. Same nav design as the owner SPA; different hydration path.
 - **[`../webapp/designer/theme-system.md`](../webapp/designer/theme-system.md)** — Cross-theme compatibility rules. Your nav (in your theme) sits on top of their content (in their theme). The widget code obeys these rules.
 

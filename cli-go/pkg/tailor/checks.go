@@ -1146,7 +1146,9 @@ func checkAvatarConfig(ctx *runContext) CheckResult {
 	}
 
 	wk.Avatar = site.GenerateDefaultAvatar()
-	if err := site.SaveWellKnown(ctx.siteDir, wk); err != nil {
+	// Preserving save so adding the default avatar doesn't drop public_key_messages
+	// (not modeled by the WellKnown struct) for a DM-provisioned self-hosted site.
+	if err := site.SaveWellKnownPreserving(ctx.siteDir, wk); err != nil {
 		return fail(name, fmt.Sprintf("Failed to save: %v", err), reason, actions)
 	}
 	return CheckResult{Name: name, Status: StatusFail, Message: "Generated default avatar config", Reason: reason, Actions: actions}

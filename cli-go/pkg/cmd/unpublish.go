@@ -20,18 +20,31 @@ import (
 func handleUnpublish(args []string) {
 	fs := flag.NewFlagSet("unpublish", flag.ExitOnError)
 	yes := fs.Bool("y", false, "Skip confirmation prompt")
+	urlFlag := fs.String("url", "", "Unpublish this exact discovery-service URL only; local files are NOT touched. For removing a stale or duplicate (type,url) registration row.")
+	typeFlag := fs.String("type", "", "Content type for --url (pub.polis.post | pub.polis.comment); inferred from the URL when omitted")
 	fs.Parse(args)
 
-	if fs.NArg() < 1 {
-		exitError("Usage: polis unpublish <path>\n  Example: polis unpublish content/pub.polis.core/post/20260201/my-post.md\n  Example: polis unpublish content/pub.polis.core/comment/20260201/comment-id.md")
-	}
-
-	contentPath := fs.Arg(0)
 	dir := getDataDir()
-
 	if !isPolisSite(dir) {
 		exitError("Not a polis site directory")
 	}
+
+	// Discovery-only unpublish of an explicit URL — does not read or mutate any
+	// local file. Use for superseded/duplicate DS rows (e.g. a legacy mount-path
+	// registration left behind by a path migration) where the local content and
+	// its canonical registration must stay intact.
+	if *urlFlag != "" {
+		if err := RunUnpublishURL(dir, *urlFlag, *typeFlag, *yes); err != nil {
+			exitError("%v", err)
+		}
+		return
+	}
+
+	if fs.NArg() < 1 {
+		exitError("Usage: polis unpublish <path>\n  Example: polis unpublish content/pub.polis.core/post/20260201/my-post.md\n  Example: polis unpublish content/pub.polis.core/comment/20260201/comment-id.md\n  Discovery-only: polis unpublish --url https://you.example/comments/20260201/x.md")
+	}
+
+	contentPath := fs.Arg(0)
 
 	if err := RunUnpublish(dir, contentPath, *yes); err != nil {
 		exitError("%v", err)
@@ -292,6 +305,86 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 		fmt.Printf("[i] Draft saved to: %s\n", filepath.Join(draftsDir, baseName))
 	}
 
+	return nil
+}
+
+// inferContentTypeFromURL guesses the DS content type from a content URL's path:
+// comment URLs contain ".../comment(s)/...", post URLs ".../post(s)/...".
+func inferContentTypeFromURL(u string) string {
+	switch {
+	case strings.Contains(u, "/comment"):
+		return "pub.polis.comment"
+	case strings.Contains(u, "/post"):
+		return "pub.polis.post"
+	default:
+		return ""
+	}
+}
+
+// RunUnpublishURL retires a single discovery-service registration by EXACT URL,
+// signed with the site's identity key. Unlike RunUnpublish it performs NO local
+// file changes — it does not strip frontmatter, delete the file, or rebuild the
+// index. Use it to drop a superseded or duplicate (type,url) row at the DS (e.g.
+// a legacy mount-path registration left by a path migration) while the local
+// content and its canonical registration stay intact.
+func RunUnpublishURL(dataDir, contentURL, contentType string, skipConfirm bool) error {
+	if contentType == "" {
+		contentType = inferContentTypeFromURL(contentURL)
+	}
+	if contentType != "pub.polis.post" && contentType != "pub.polis.comment" {
+		return fmt.Errorf("could not determine content type from URL; pass --type pub.polis.post|pub.polis.comment")
+	}
+	if polisurl.ExtractDomain(contentURL) == "" {
+		return fmt.Errorf("could not extract domain from URL: %s", contentURL)
+	}
+
+	if !skipConfirm && !jsonOutput {
+		fmt.Printf("Unpublish discovery registration for:\n  %s\n  (type: %s)\n\n", contentURL, contentType)
+		fmt.Println("This removes ONLY the discovery-service row. Local files are NOT touched.")
+		fmt.Print("Proceed? [y/N] ")
+		var response string
+		fmt.Scanln(&response)
+		if r := strings.TrimSpace(strings.ToLower(response)); r != "y" && r != "yes" {
+			if !jsonOutput {
+				fmt.Println("[i] Cancelled")
+			}
+			return nil
+		}
+	}
+
+	privKey, err := loadPrivateKey(dataDir)
+	if err != nil {
+		return fmt.Errorf("failed to load private key: %v", err)
+	}
+
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+	canonical := discovery.MakeContentUnpublishCanonicalJSON(contentType, contentURL, timestamp)
+	sig, err := signing.SignContent([]byte(canonical), privKey)
+	if err != nil {
+		return fmt.Errorf("failed to sign unpublish request: %v", err)
+	}
+
+	dsURL := os.Getenv("DISCOVERY_SERVICE_URL")
+	if dsURL == "" {
+		dsURL = "https://ds.polis.pub"
+	}
+	dsClient := discovery.NewClient(dsURL, os.Getenv("DISCOVERY_SERVICE_KEY"))
+	if err := dsClient.UnpublishContent(contentType, contentURL, timestamp, sig); err != nil {
+		return fmt.Errorf("DS unpublish failed: %v", err)
+	}
+
+	if jsonOutput {
+		outputJSON(map[string]interface{}{
+			"status":  "success",
+			"command": "unpublish",
+			"data": map[string]interface{}{
+				"type": contentType, "content_url": contentURL, "discovery_only": true,
+			},
+		})
+	} else {
+		fmt.Printf("[✓] Unpublished discovery registration: %s\n", contentURL)
+		fmt.Println("[i] Local files were not modified.")
+	}
 	return nil
 }
 

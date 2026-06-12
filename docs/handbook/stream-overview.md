@@ -1,6 +1,6 @@
 # Tour: How the infinity stream actually works
 
-> A higher-order tour. Knits together what's happening on the polis.pub stream-screen — the filter widget, the URL behavior, the live data appearing from across the network, the design choices behind it all. Points down into the two deep tours ([url-as-filter](url-as-filter.md), [ds-to-stream](ds-to-stream.md)) for the file-level walks, and out to the [PQL spec](../general/pql.md), the [infinity stream concept doc](../general/infinity-stream.md), and the [DS architecture](../ds/developer/stream-architecture.md) for the philosophy and protocol layers.
+> A higher-order tour. Knits together what's happening on the polis.pub stream-screen — the filter widget, the URL behavior, the live data appearing from across the network, the design choices behind it all. Points down into the two deep tours ([url-as-filter](url-as-filter.md), [ds-to-stream](ds-to-stream.md)) for the file-level walks, and out to the [PQL spec](../general/reference/pql.md), the [infinity stream concept doc](../general/concepts/infinity-stream.md), and the [DS architecture](../ds/developer/stream-architecture.md) for the philosophy and protocol layers.
 >
 > **Start here if** you've poked around polis.pub and want one explanation that ties together "the filter," "the stream," "the URL," and "the network." Then follow the spokes that interest you.
 >
@@ -52,7 +52,7 @@ The centered widget in the topbar is the single piece of UI that ties chrome and
 </div>
 ```
 
-It's a `role="group"` of dropdowns plus a typeahead — five interactive slots that together compose a [PQL sentence](../general/pql.md). The user clicks slot 2 ("activity") and picks "posts"; the widget updates the local sentence state, composes the new URL (`/_/pql/all+posts+from+my+network+by+date`), `replaceState`s history, and tells the stream controller `setFilter(state)` — which clears the visible items and re-fetches matching ones.
+It's a `role="group"` of dropdowns plus a typeahead — five interactive slots that together compose a [PQL sentence](../general/reference/pql.md). The user clicks slot 2 ("activity") and picks "posts"; the widget updates the local sentence state, composes the new URL (`/_/pql/all+posts+from+my+network+by+date`), `replaceState`s history, and tells the stream controller `setFilter(state)` — which clears the visible items and re-fetches matching ones.
 
 The icon row to the left is a *shortcut layer over the same widget*. Each icon is a **preset PQL sentence** that the widget would otherwise compose by hand. From [`owner-extras.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/owner-extras.js):
 
@@ -207,7 +207,7 @@ A few of the load-bearing claims:
 - **Decentralized data, centralized aggregation.** Every site holds its own content; the DS knows about URLs + signatures + events; cross-tenant aggregations like comment counts are computed at query time off an indexed column, not maintained as a counter. The DS is *coordinator*, not *host*.
 - **The shape is replaceable.** Sites that prefer per-post pages can stay on the blog shape (`pub.polis.shapes.v3`); the stream is one shape among possible others. The infinity stream is a *choice*, not a baked-in identity.
 
-For the full statement of these principles, **read the concept doc**: [`docs/general/infinity-stream.md`](../general/infinity-stream.md). It elaborates the *why* in a way this tour deliberately doesn't, because the tour is about how the code expresses the design — the concept doc is about the design itself.
+For the full statement of these principles, **read the concept doc**: [`docs/general/concepts/infinity-stream.md`](../general/concepts/infinity-stream.md). It elaborates the *why* in a way this tour deliberately doesn't, because the tour is about how the code expresses the design — the concept doc is about the design itself.
 
 ---
 
@@ -217,10 +217,10 @@ This overview points at three layers of deeper reading. Pick what matches your q
 
 ### Source-of-truth references (the "what")
 
-- [`../general/pql.md`](../general/pql.md) — Polis Query Language. The grammar (qualifier · type · "from" · scope · modifier), the URL encoding, the type-conditional rules, the sentence-filter widget's slot model. Authoritative spec.
-- [`../general/infinity-stream.md`](../general/infinity-stream.md) — The shape's design philosophy. What "infinity" means, why one screen, the three POVs the same shape serves (owner / network member / public visitor).
-- [`../general/shapes.md`](../general/shapes.md) — Blog vs stream as a binary architectural choice. What a shape ships. The theme-overrides-shape render lookup.
-- [`../general/content-types.md`](../general/content-types.md) — What the events in the stream actually *contain*. Each event maps to a content-type action; the same content-type model that powers publishing powers the feed.
+- [`../general/reference/pql.md`](../general/reference/pql.md) — Polis Query Language. The grammar (qualifier · type · "from" · scope · modifier), the URL encoding, the type-conditional rules, the sentence-filter widget's slot model. Authoritative spec.
+- [`../general/concepts/infinity-stream.md`](../general/concepts/infinity-stream.md) — The shape's design philosophy. What "infinity" means, why one screen, the three POVs the same shape serves (owner / network member / public visitor).
+- [`../general/concepts/shapes.md`](../general/concepts/shapes.md) — Blog vs stream as a binary architectural choice. What a shape ships. The theme-overrides-shape render lookup.
+- [`../general/concepts/content-types.md`](../general/concepts/content-types.md) — What the events in the stream actually *contain*. Each event maps to a content-type action; the same content-type model that powers publishing powers the feed.
 - [`../ds/developer/stream-architecture.md`](../ds/developer/stream-architecture.md) — DS event stream design: schemas, cursor semantics, event categories, the unified-endpoint filter composition.
 - [`../ds/developer/api-reference.md`](../ds/developer/api-reference.md) — Exact wire format for `/v1/stream`, `/v1/stream/unified`, `/v1/content/comments/counts`.
 
@@ -231,8 +231,8 @@ This overview points at three layers of deeper reading. Pick what matches your q
 
 ### Architectural context (the "where")
 
-- [`../general/architecture.md`](../general/architecture.md) — The four-surface map. Where the stream-screen sits inside the polis CLI / webapp / polis.pub / DS picture.
-- [`../general/snap-off-architecture.md`](../general/snap-off-architecture.md) — Why every layer of the stream is replaceable. The shape can swap. The DS can swap. The webapp can swap. The contracts hold.
+- [`../general/concepts/architecture.md`](../general/concepts/architecture.md) — The four-surface map. Where the stream-screen sits inside the polis CLI / webapp / polis.pub / DS picture.
+- [`../general/concepts/snap-off-architecture.md`](../general/concepts/snap-off-architecture.md) — Why every layer of the stream is replaceable. The shape can swap. The DS can swap. The webapp can swap. The contracts hold.
 
 ---
 
@@ -263,7 +263,7 @@ If you read this tour and the two child tours:
 
 If you want to go deeper:
 
-- The PQL spec: [`../general/pql.md`](../general/pql.md)
-- The infinity stream design: [`../general/infinity-stream.md`](../general/infinity-stream.md)
+- The PQL spec: [`../general/reference/pql.md`](../general/reference/pql.md)
+- The infinity stream design: [`../general/concepts/infinity-stream.md`](../general/concepts/infinity-stream.md)
 - The DS event stream architecture: [`../ds/developer/stream-architecture.md`](../ds/developer/stream-architecture.md)
 - The starter map of every thread: [`../../AGENTS.md`](../../AGENTS.md)

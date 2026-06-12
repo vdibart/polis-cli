@@ -5,7 +5,7 @@ incoming content and (in the future) outgoing event announcements. They
 replace hardcoded logic with user-configurable statements.
 
 **For the authoritative grammar spec — every verb, every layer, every
-edge case — see [`docs/general/policy-grammar.md`](../../general/policy-grammar.md).**
+edge case — see [`docs/general/reference/policy-grammar.md`](../../general/reference/policy-grammar.md).**
 This page is the user-facing guide. If anything here conflicts with the
 spec, the spec wins.
 
@@ -73,7 +73,7 @@ having any effect today.
 ### Verb + type validity (tenant files)
 
 Not every verb is valid with every type. The parser rejects invalid
-combinations. Full matrix in the [grammar spec](../../general/policy-grammar.md#verb-validity-matrix).
+combinations. Full matrix in the [grammar spec](../../general/reference/policy-grammar.md#verb-validity-matrix).
 
 | Rule form | Valid? | Why |
 |---|---|---|
@@ -256,7 +256,7 @@ Operators manage these via the admin API:
 accept `allow`/`deny` on `pub.polis.{post,comment,follow,site}` — which
 tenant files reject. They also accept `bless`/`review` on
 `pub.polis.comment` as fallback blessing policy. They do not accept
-`emit`/`omit`. See the [grammar spec](../../general/policy-grammar.md#layer-3-ds-operator-ingestion)
+`emit`/`omit`. See the [grammar spec](../../general/reference/policy-grammar.md#layer-3-ds-operator-ingestion)
 for the full operator matrix.
 
 When the DS uses its defaults instead of your policies for blessing

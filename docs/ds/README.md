@@ -72,5 +72,5 @@ deno task start
 
 ## See Also
 
-- [docs/general/content-system.md](../general/content-system.md) — Events and content types
-- [docs/general/security-model.md](../general/security-model.md) — Auth model, signature verification
+- [docs/general/concepts/content-system.md](../general/concepts/content-system.md) — Events and content types
+- [docs/general/security/security-model.md](../general/security/security-model.md) — Auth model, signature verification

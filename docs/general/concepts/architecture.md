@@ -35,9 +35,9 @@ Polis is a decentralized social system with **four primary surfaces**. Each surf
 - Developers building anything on top of polis primitives — the CLI is the source of truth for "how it works."
 
 **Key docs:**
-- [`cli/user/command-reference.md`](../cli/user/command-reference.md) — every command, every flag.
-- [`cli/developer/packages.md`](../cli/developer/packages.md) — the importable Go packages.
-- [`cli/user/json-mode.md`](../cli/user/json-mode.md) — machine-readable output.
+- [`cli/user/command-reference.md`](../../cli/user/command-reference.md) — every command, every flag.
+- [`cli/developer/packages.md`](../../cli/developer/packages.md) — the importable Go packages.
+- [`cli/user/json-mode.md`](../../cli/user/json-mode.md) — machine-readable output.
 
 ### 2. Webapp — the local UI
 
@@ -45,9 +45,9 @@ Polis is a decentralized social system with **four primary surfaces**. Each surf
 
 **What it owns:**
 - The single-tenant web UI: topbar + 640px centered column, icon row driving PQL preset routes, centered sentence-filter widget, editor, settings.
-- The v1 REST [Content Type API](../api/developer/reference.md) at `/v1/`.
+- The v1 REST [Content Type API](../../api/developer/reference.md) at `/v1/`.
 - The widget that gets embedded in rendered HTML — when you visit someone else's polis site, their static HTML loads the polis widget, which renders the viewer's nav over the foreign content.
-- Per-tenant request logging (`X-Request-Id` correlation, structured JSON events).
+- Per-tenant request logging (`X-Request-Id` correlation, structured events to an observability backend).
 
 **Who it serves:**
 - Humans who want a browser-first editing experience rather than a terminal.
@@ -57,27 +57,37 @@ Polis is a decentralized social system with **four primary surfaces**. Each surf
 **Imports from:** `cli-go/pkg/*`. The webapp never duplicates business logic — it wraps the CLI packages in HTTP and HTML.
 
 **Key docs:**
-- [`webapp/user/user-manual.md`](../webapp/user/user-manual.md) — what each page does for an end user.
-- [`webapp/developer/development.md`](../webapp/developer/development.md) — handler patterns, build commands, drift rules.
-- [`webapp/designer/*.md`](../webapp/designer/) — design system: theme variables, nav anatomy, page model.
+- [`webapp/user/user-manual.md`](../../webapp/user/user-manual.md) — what each page does for an end user.
+- [`webapp/developer/development.md`](../../webapp/developer/development.md) — handler patterns, build commands, drift rules.
+- [`webapp/designer/*.md`](../../webapp/designer/) — design system: theme variables, nav anatomy, page model.
 
 ### 3. polis.pub — the hosted platform
 
-**Where it lives:** `webapp/` (the same code as the local webapp) wrapped in a multi-tenant runtime. The hosted runtime itself is not in this repo; only the polis pieces it composes (`cli-go/pkg/*`, `webapp/*`) are open-sourced here.
+**Where it lives:** `webapp/` (same code as the local webapp) plus operational infrastructure. Production runs on a managed hosting platform, with Postgres for accounts and sessions and a persistent volume for tenant directories. The hosted runtime itself is not in this repo; only the polis pieces it composes (`cli-go/pkg/*`, `webapp/*`) are open-sourced here.
 
 **What it owns:**
-- Multi-tenant routing: every registered handle gets `<handle>.polis.pub` and a per-tenant data directory.
+- Multi-tenant routing: every registered handle gets `<handle>.polis.pub` and a tenant directory on the hosted data volume.
 - Account lifecycle: sign-up, handle claim, registration, key generation, unregistration (hard delete).
-- Background actors that keep tenants healthy. `pkg/tailor` (multi-version site diagnostic and auto-fixer) is open-source and useful to self-hosters as well; the rest of the multi-tenant operational toolchain stays in the hosted runtime.
+- The background actors that keep tenants healthy:
+  - **Clerk + Chaplain** — registration intake and follow-up.
+  - **Patrol + Medic** — detect and fix tenant drift.
+  - **Judge** — validate signatures and watch key continuity (proto-TOFU).
+  - **Reaper** — reclaim unused handles.
+  - **Tailor** — replay Patrol/Medic changes for audit / rollback.
+
+  Of these, `pkg/tailor` (multi-version site diagnostic and auto-fixer) is open-source and useful to self-hosters as well; the rest of the multi-tenant operational toolchain stays in the hosted runtime.
 - The canonical DS deployment at `ds.polis.pub`.
 
 **Who it serves:**
 - Users who want polis without running infrastructure themselves.
 - The default endpoint for the network's discovery and routing — though anyone can self-host an equivalent.
 
+**Key docs:**
+- [`actors.md`](actors.md) — the background actors that keep the hosted platform healthy.
+
 ### 4. Discovery Service (DS) — the coordination layer
 
-**Where it lives:** The DS source is currently operated as part of the hosted runtime and is not yet included in this public repo. The canonical deployment runs at `ds.polis.pub`. The public API contract is documented in [`ds/developer/api-reference.md`](../ds/developer/api-reference.md) and is the stable surface integrators and alternate implementations should target. An open-source release of the DS reference implementation is planned but not committed to a date.
+**Where it lives:** The DS source is currently operated as part of the hosted runtime and is not yet included in this public repo. The canonical deployment runs at `ds.polis.pub`. The public API contract is documented in [`ds/developer/api-reference.md`](../../ds/developer/api-reference.md) and is the stable surface integrators and alternate implementations should target. An open-source release of the DS reference implementation is planned but not committed to a date.
 
 **What it owns:**
 - Site registry (who's on the network, what their public key is, what bundles they ship).
@@ -93,10 +103,10 @@ Polis is a decentralized social system with **four primary surfaces**. Each surf
 - Network operators tuning rate limits, blocking abusive domains, or running their own DS.
 
 **Key docs:**
-- [`ds/developer/api-reference.md`](../ds/developer/api-reference.md) — every endpoint, every payload.
-- [`ds/developer/stream-architecture.md`](../ds/developer/stream-architecture.md) — the event stream protocol.
-- [`ds/admin/deployment.md`](../ds/admin/deployment.md) — running your own DS.
-- [`ds/admin/configuration.md`](../ds/admin/configuration.md) — env-var tuning reference.
+- [`ds/developer/api-reference.md`](../../ds/developer/api-reference.md) — every endpoint, every payload.
+- [`ds/developer/stream-architecture.md`](../../ds/developer/stream-architecture.md) — the event stream protocol.
+- [`ds/admin/deployment.md`](../../ds/admin/deployment.md) — running your own DS.
+- [`ds/admin/configuration.md`](../../ds/admin/configuration.md) — env-var tuning reference.
 
 ---
 
@@ -128,7 +138,7 @@ The four surfaces compose into one network. The CLI is the trust root; everythin
 
 **Coordination path:** When Alice comments on Bob's post, her CLI/webapp registers the comment, then sends a beseech request to the DS, which routes a `pub.polis.comment.beseeched` event to Bob's site. Bob's webapp polls the stream, sees the event, surfaces it on his `comment` icon with a badge dot. He grants or denies; that decision goes back through the DS as a relationship update; the DS emits a blessing event; Alice's site sees it on its next poll.
 
-**Multi-tenant path (polis.pub):** Each hosted tenant is a polis site running the same webapp code, isolated to its own per-tenant data directory. The hosted DS at `ds.polis.pub` is just a DS — there's nothing special about it from a polis site's perspective. A self-hosted site can point at `ds.polis.pub` or any other compatible DS.
+**Multi-tenant path (polis.pub):** Each hosted tenant is a polis site running the same webapp code, isolated to its own per-tenant directory on the hosted volume. The hosted DS at `ds.polis.pub` is just a DS — there's nothing special about it from a polis site's perspective. A self-hosted site can point at `ds.polis.pub` or any other compatible DS.
 
 ---
 
@@ -136,20 +146,20 @@ The four surfaces compose into one network. The CLI is the trust root; everythin
 
 | If you want to… | Start here |
 |---|---|
-| Publish a post from the terminal | [`cli/user/command-reference.md#polis-post`](../cli/user/command-reference.md) |
-| Use a browser instead | [`webapp/user/user-manual.md`](../webapp/user/user-manual.md) |
+| Publish a post from the terminal | [`cli/user/command-reference.md#polis-post`](../../cli/user/command-reference.md) |
+| Use a browser instead | [`webapp/user/user-manual.md`](../../webapp/user/user-manual.md) |
 | Understand bundles, content types, shapes, themes | [`content-system.md`](content-system.md) |
-| Customize a theme | [`webapp/designer/theme-system.md`](../webapp/designer/theme-system.md) + [`cli/user/templating.md`](../cli/user/templating.md) |
-| Write a policy rule | [`cli/user/policies.md`](../cli/user/policies.md) + [`policy-grammar.md`](policy-grammar.md) |
-| Filter the stream from the URL bar | [`pql.md`](pql.md) |
-| Sign up on polis.pub | Visit https://polis.pub |
-| Self-host polis | [`webapp/developer/development.md`](../webapp/developer/development.md) + [`ds/admin/deployment.md`](../ds/admin/deployment.md) |
-| Integrate via REST API | [`api/developer/reference.md`](../api/developer/reference.md) |
-| Operate a Discovery Service | [`ds/admin/configuration.md`](../ds/admin/configuration.md) + [`ds/admin/deployment.md`](../ds/admin/deployment.md) |
-| Verify someone else's content | [`security-model.md`](security-model.md) |
-| Understand identity, keys, trust | [`security-model.md`](security-model.md) |
-| Build a tool on top of polis primitives | [`cli/developer/packages.md`](../cli/developer/packages.md) + [`api/developer/reference.md`](../api/developer/reference.md) |
-| Run a custom content type | [`api/developer/dispatch-engine.md`](../api/developer/dispatch-engine.md) §"Custom Bundles" |
+| Customize a theme | [`webapp/designer/theme-system.md`](../../webapp/designer/theme-system.md) + [`cli/user/templating.md`](../../cli/user/templating.md) |
+| Write a policy rule | [`cli/user/policies.md`](../../cli/user/policies.md) + [`policy-grammar.md`](../reference/policy-grammar.md) |
+| Filter the stream from the URL bar | [`pql.md`](../reference/pql.md) |
+| Sign up on polis.pub | [`webapp/user/user-manual.md`](../../webapp/user/user-manual.md) |
+| Self-host polis | [`webapp/developer/development.md`](../../webapp/developer/development.md) + [`ds/admin/deployment.md`](../../ds/admin/deployment.md) |
+| Integrate via REST API | [`api/developer/reference.md`](../../api/developer/reference.md) |
+| Operate a Discovery Service | [`ds/admin/configuration.md`](../../ds/admin/configuration.md) + [`ds/admin/deployment.md`](../../ds/admin/deployment.md) |
+| Verify someone else's content | [`security-model.md`](../security/security-model.md) |
+| Understand identity, keys, trust | [`security-model.md`](../security/security-model.md) |
+| Build a tool on top of polis primitives | [`cli/developer/packages.md`](../../cli/developer/packages.md) + [`api/developer/reference.md`](../../api/developer/reference.md) |
+| Run a custom content type | [`api/developer/dispatch-engine.md`](../../api/developer/dispatch-engine.md) §"Custom Bundles" |
 
 ---
 
@@ -172,8 +182,8 @@ Because every interface is stable and signed content is portable, every layer of
 
 ## See also
 
-- [`vision.md`](vision.md) — Why polis exists and how it meets users.
+- [`vision.md`](../vision.md) — Why polis exists and how it meets users.
 - [`content-system.md`](content-system.md) — What polis sites are *made of* (bundles, content types, shapes, themes, events).
 - [`snap-off-architecture.md`](snap-off-architecture.md) — Why every layer is replaceable.
-- [`security-model.md`](security-model.md) — Cryptographic foundations, threat model, attack vectors.
-- [`glossary.md`](glossary.md) — Quick lookup for polis-specific terms.
+- [`security-model.md`](../security/security-model.md) — Cryptographic foundations, threat model, attack vectors.
+- [`glossary.md`](../reference/glossary.md) — Quick lookup for polis-specific terms.

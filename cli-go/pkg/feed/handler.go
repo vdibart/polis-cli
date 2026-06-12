@@ -14,7 +14,7 @@
 //
 // Pull the thread:
 //   github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md  (tour)
-//   github.com/vdibart/polis-cli/blob/main/docs/general/content-types.md
+//   github.com/vdibart/polis-cli/blob/main/docs/general/concepts/content-types.md
 //   github.com/vdibart/polis-cli/blob/main/AGENTS.md                      (map)
 // =============================================================================
 

@@ -60,5 +60,5 @@ cd cli-go && go test ./...
 ## See Also
 
 - [cli-go/README.md](../../cli-go/README.md) — Go CLI build instructions and library usage
-- [cli-bash/README.md](../../cli-bash/README.md) — Bash CLI architecture (feature-frozen)
-- [docs/general/content-system.md](../general/content-system.md) — Content types and filesystem layout
+- `cli-bash/polis` — Bash CLI (feature-frozen)
+- [docs/general/concepts/content-system.md](../general/concepts/content-system.md) — Content types and filesystem layout

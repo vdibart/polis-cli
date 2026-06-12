@@ -54,6 +54,23 @@
     --color-accent-soft: var(--color-gold-soft);
     --color-accent-bg: rgba(110, 86, 0, 0.08);
 
+    /* Cross-visit filter palette buckets — see vice.css for the contract.
+       especial-light is the lone LIGHT theme: its native filter IS the
+       light bucket (dark text); the dark bucket is the inverted (cream)
+       variant for dark visitor bands. */
+    --filter-dark-text: #f0ece4;
+    --filter-dark-text-hover: #ffffff;
+    --filter-dark-underline: color-mix(in srgb, #d8b028 55%, transparent);
+    --filter-dark-underline-hover: #d8b028;
+    --filter-dark-identity: #d8b028;
+    --filter-dark-dot: color-mix(in srgb, #d8b028 50%, transparent);
+    --filter-light-text: #3a3a48;
+    --filter-light-text-hover: #1c1c2a;
+    --filter-light-underline: color-mix(in srgb, #6e5600 55%, transparent);
+    --filter-light-underline-hover: #6e5600;
+    --filter-light-identity: #6e5600;
+    --filter-light-dot: color-mix(in srgb, #6e5600 50%, transparent);
+
     /* Typography */
     --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
     --font-display: 'Orbitron', var(--font-mono);

@@ -941,3 +941,59 @@ func TestWriteFavicon_OverwritesExisting(t *testing.T) {
 		t.Error("favicon should not contain old avatar color")
 	}
 }
+
+// TestSaveWellKnownPreserving_KeepsUnmodeledFields locks the fix for the
+// well-known data-loss class: a partial identity update (here, author_name) must
+// NOT erase public_key_messages, which the WellKnown struct does not model. The
+// negative control confirms the plain SaveWellKnown DOES drop it — the bug.
+func TestSaveWellKnownPreserving_KeepsUnmodeledFields(t *testing.T) {
+	dir := setupTestDir(t)
+
+	// Seed a well-known carrying a published DM messages key (unmodeled field).
+	seed := map[string]interface{}{
+		"version":     "polis-cli-go/0.63.0",
+		"public_key":  "ssh-ed25519 AAAAClocaltest polis-local",
+		"author_name": "old name",
+		"created":     "2026-01-01T00:00:00Z",
+		"public_key_messages": map[string]interface{}{
+			"current": map[string]interface{}{"epoch": 1, "key": "MESSAGESKEYB64", "sig": "SIGB64"},
+		},
+	}
+	if err := SaveWellKnownRaw(dir, seed); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Preserving update: change a modeled field, keep the unmodeled one.
+	wk, err := LoadWellKnown(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	wk.AuthorName = "new name"
+	if err := SaveWellKnownPreserving(dir, wk); err != nil {
+		t.Fatalf("preserving save: %v", err)
+	}
+
+	raw, err := LoadWellKnownRaw(dir)
+	if err != nil {
+		t.Fatalf("reload raw: %v", err)
+	}
+	if _, ok := raw["public_key_messages"]; !ok {
+		t.Fatal("SaveWellKnownPreserving dropped public_key_messages")
+	}
+	if raw["author_name"] != "new name" {
+		t.Errorf("author_name not updated: %v", raw["author_name"])
+	}
+	pkm := raw["public_key_messages"].(map[string]interface{})["current"].(map[string]interface{})
+	if pkm["key"] != "MESSAGESKEYB64" {
+		t.Errorf("messages key mangled: %v", pkm["key"])
+	}
+
+	// Negative control: the plain typed save IS lossy (documents the bug).
+	if err := SaveWellKnown(dir, wk); err != nil {
+		t.Fatalf("plain save: %v", err)
+	}
+	rawAfter, _ := LoadWellKnownRaw(dir)
+	if _, ok := rawAfter["public_key_messages"]; ok {
+		t.Fatal("expected plain SaveWellKnown to drop public_key_messages (the bug); it did not — test no longer guards the regression")
+	}
+}

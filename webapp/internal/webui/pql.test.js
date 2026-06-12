@@ -3,7 +3,7 @@
 //
 // Lives one level ABOVE www/ so `//go:embed www` does not ship or serve it.
 // Reads the SAME canonical corpus the Go and TS parsers assert against
-// (docs/general/pql-golden.jsonl), so a grammar drift in any one language
+// (docs/general/reference/pql-golden.jsonl), so a grammar drift in any one language
 // fails its golden test. Uses node's built-in test runner — no dependencies.
 
 'use strict';
@@ -20,7 +20,7 @@ const pqlSrc = fs.readFileSync(path.join(__dirname, 'www', 'pql.js'), 'utf8');
 const PQL = globalThis.window.PQL;
 
 // Repo root: webui → internal → webapp → root (3 up).
-const goldenPath = path.join(__dirname, '../../../docs/general/pql-golden.jsonl');
+const goldenPath = path.join(__dirname, '../../../docs/general/reference/pql-golden.jsonl');
 
 test('golden corpus parse + round-trip', () => {
     const lines = fs.readFileSync(goldenPath, 'utf8').split('\n');

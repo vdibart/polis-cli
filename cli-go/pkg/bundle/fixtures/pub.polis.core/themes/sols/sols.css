@@ -50,6 +50,24 @@
     --color-accent-soft: var(--color-pink-soft);
     --color-accent-bg: rgba(212, 130, 154, 0.08);
 
+    /* Cross-visit filter palette buckets — see vice.css for the contract.
+       sols is the reserved system/landing theme, but the welcome sites
+       (discover.polis.pub, polis.pub) run on it as a real author theme, so
+       it participates in the owner-themed filter. dark = light-text (for
+       dark visitor bands); light = dark-text. */
+    --filter-dark-text: #d4c8b8;
+    --filter-dark-text-hover: #f0e8dc;
+    --filter-dark-underline: color-mix(in srgb, #d4829a 55%, transparent);
+    --filter-dark-underline-hover: #d4829a;
+    --filter-dark-identity: #d4829a;
+    --filter-dark-dot: color-mix(in srgb, #d4829a 50%, transparent);
+    --filter-light-text: #2a2030;
+    --filter-light-text-hover: #15101c;
+    --filter-light-underline: color-mix(in srgb, #a06078 55%, transparent);
+    --filter-light-underline-hover: #a06078;
+    --filter-light-identity: #a06078;
+    --filter-light-dot: color-mix(in srgb, #a06078 50%, transparent);
+
     /* Timeline tokens — explicit overrides because --color-accent-soft is
        set to a solid pink (#e8a0b8) above, and stream.css's default
        cascade prefers --color-accent-soft over the alpha-mixed fallback.

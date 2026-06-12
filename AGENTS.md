@@ -4,7 +4,7 @@
 
 ## Polis, in one paragraph
 
-Polis is a decentralized social-networking protocol. Sites publish signed markdown on their own domains; the **Discovery Service (DS)** coordinates blessing, follow, and discovery; the **webapp** is a Go SPA that runs locally or as part of `polis.pub` for managed hosting; the **CLI** owns the canonical file format and is the source of truth for business logic. The protocol's *fixed* surface is small (Ed25519 over canonical content, `.well-known/polis`, the bundle namespace, the DS API, core content-type schemas); every other layer is replaceable. Read [`docs/general/architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/architecture.md) for the four-surface map before going deeper.
+Polis is a decentralized social-networking protocol. Sites publish signed markdown on their own domains; the **Discovery Service (DS)** coordinates blessing, follow, and discovery; the **webapp** is a Go SPA that runs locally or as part of `polis.pub` for managed hosting; the **CLI** owns the canonical file format and is the source of truth for business logic. The protocol's *fixed* surface is small (Ed25519 over canonical content, `.well-known/polis`, the bundle namespace, the DS API, core content-type schemas); every other layer is replaceable. Read [`docs/general/concepts/architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/architecture.md) for the four-surface map before going deeper.
 
 > **Scope of this repo.** The CLI, webapp, themes, bundles, and shared docs are open-source here. The Discovery Service source code is not yet included; integrators should treat [`docs/ds/developer/api-reference.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md) as the canonical DS surface. The hosted operational toolchain (judge, patrol, medic, etc.) is also out of scope; `tailor` is the only operational binary shipped publicly.
 
@@ -44,25 +44,25 @@ Concrete file-by-file paths for common builds. Each recipe is a sequence of file
 ### Set up a polis site locally
 
 1. Run `polis init` ([`cli-go/pkg/cmd/init.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/cmd/init.go))
-2. Understand what got written: [`docs/general/content-system.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/content-system.md) (filesystem layout)
-3. Pick a theme: [`docs/general/themes.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/themes.md)
+2. Understand what got written: [`docs/general/concepts/content-system.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/content-system.md) (filesystem layout)
+3. Pick a theme: [`docs/general/concepts/themes.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/themes.md)
 4. Publish your first post: `polis post foo.md` ([`cli-go/pkg/cmd/publish.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/cmd/publish.go))
 5. Register with the DS: `polis register` ([`cli-go/pkg/cmd/register.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/cmd/register.go))
 6. Run the webapp: `polis serve` ([`webapp/cmd/polis-full/main.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/cmd/polis-full/main.go))
 
 ### Build a custom content type
 
-1. Understand content types: [`docs/general/content-types.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/content-types.md)
-2. Understand bundles (the container): [`docs/general/bundles.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/bundles.md)
+1. Understand content types: [`docs/general/concepts/content-types.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/content-types.md)
+2. Understand bundles (the container): [`docs/general/concepts/bundles.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/bundles.md)
 3. See how a core type is wired: [`cli-go/pkg/ops/builtin_core.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/ops/builtin_core.go) (the dispatch engine)
 4. Read the dispatch engine architecture: [`docs/api/developer/dispatch-engine.md`](https://github.com/vdibart/polis-cli/blob/main/docs/api/developer/dispatch-engine.md)
 5. Author a new bundle's `bundle.json` declaring your type + a handler (`builtin` / `executable` / `http`)
-6. If your type produces public content, design its shape templates: [`docs/general/shapes.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/shapes.md)
+6. If your type produces public content, design its shape templates: [`docs/general/concepts/shapes.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/shapes.md)
 7. If it emits events, declare them; readers can subscribe via the DS event stream
 
 ### Self-host a Discovery Service
 
-1. Understand what the DS does: [`docs/general/architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/architecture.md) (Discovery Service section) + [`docs/ds/README.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/README.md)
+1. Understand what the DS does: [`docs/general/concepts/architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/architecture.md) (Discovery Service section) + [`docs/ds/README.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/README.md)
 2. Read the API contract: [`docs/ds/developer/api-reference.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md)
 3. Understand the storage interface: [`docs/ds/developer/storage-adapter.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/storage-adapter.md)
 4. Deploy the reference adapter: [`docs/ds/admin/deployment.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/admin/deployment.md)
@@ -71,16 +71,16 @@ Concrete file-by-file paths for common builds. Each recipe is a sequence of file
 
 ### Write a polis client in another language
 
-1. Read the protocol's fixed surface: [`docs/general/snap-off-architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/snap-off-architecture.md) (the "fixed protocol surface" section)
-2. Understand signing: [`docs/general/security-model.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/security-model.md) (Ed25519 over canonical content)
-3. Understand the file format: [`docs/general/content-system.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/content-system.md)
+1. Read the protocol's fixed surface: [`docs/general/concepts/snap-off-architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/snap-off-architecture.md) (the "fixed protocol surface" section)
+2. Understand signing: [`docs/general/security/security-model.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/security/security-model.md) (Ed25519 over canonical content)
+3. Understand the file format: [`docs/general/concepts/content-system.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/content-system.md)
 4. Reference the Go implementation: [`cli-go/pkg/signing/`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/signing/) (canonicalization), [`cli-go/pkg/publish/`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/publish/) (publish flow)
 5. Reference the bash implementation for an alternate take: [`cli-bash/bin/polis`](https://github.com/vdibart/polis-cli/blob/main/cli-bash/bin/polis)
 6. Stamp your client's generator string into every artifact you produce (e.g., `my-polis-client/0.1.0`)
 
 ### Snap off any layer
 
-1. Read [`docs/general/snap-off-architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/snap-off-architecture.md) (the layer-by-layer replaceability table)
+1. Read [`docs/general/concepts/snap-off-architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/snap-off-architecture.md) (the layer-by-layer replaceability table)
 2. Identify which layer you're replacing
 3. The doc names the public contract for each layer — that's what you build against
 4. Stay honest about your protocol version (`generator` field) and namespace (`pub.<yourname>.*`)
@@ -101,15 +101,15 @@ You are most useful to a human exploring polis when you:
 The single index. Everything else points back here.
 
 **[`docs/general/`](https://github.com/vdibart/polis-cli/blob/main/docs/general/) — concept docs (the philosophy)**
-- [`architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/architecture.md) — the four surfaces
-- [`bundles.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/bundles.md), [`content-types.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/content-types.md), [`shapes.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/shapes.md), [`themes.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/themes.md) — foundation concepts
-- [`infinity-stream.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/infinity-stream.md) — the polis.pub experience
-- [`snap-off-architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/snap-off-architecture.md) — layer-by-layer replaceability
-- [`pql.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/pql.md) — the query language driving the stream filter
-- [`security-model.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/security-model.md) — crypto, identity, trust, threats
-- [`policy-grammar.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/policy-grammar.md) — v2 policy grammar (Layer 1/2/3)
-- [`content-system.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/content-system.md) — deep reference (full schemas, event catalog)
-- [`glossary.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/glossary.md) — terminology
+- [`architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/architecture.md) — the four surfaces
+- [`bundles.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/bundles.md), [`content-types.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/content-types.md), [`shapes.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/shapes.md), [`themes.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/themes.md) — foundation concepts
+- [`infinity-stream.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/infinity-stream.md) — the polis.pub experience
+- [`snap-off-architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/snap-off-architecture.md) — layer-by-layer replaceability
+- [`pql.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/reference/pql.md) — the query language driving the stream filter
+- [`security-model.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/security/security-model.md) — crypto, identity, trust, threats
+- [`policy-grammar.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/reference/policy-grammar.md) — v2 policy grammar (Layer 1/2/3)
+- [`content-system.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/content-system.md) — deep reference (full schemas, event catalog)
+- [`glossary.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/reference/glossary.md) — terminology
 
 **[`docs/handbook/`](https://github.com/vdibart/polis-cli/blob/main/docs/handbook/) — guided tours (curated walk-throughs)**
 - [`stream-overview.md`](https://github.com/vdibart/polis-cli/blob/main/docs/handbook/stream-overview.md) — **start here for the stream-screen.** Meta-tour that ties URL-as-filter + DS-to-stream together with the sentence-filter widget and the infinity stream design; spokes lead into the deep tours and out to PQL + DS docs

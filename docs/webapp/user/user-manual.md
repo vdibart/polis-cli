@@ -1,6 +1,6 @@
 # Polis Webapp User Manual
 
-This guide covers the Polis webapp — a local web interface for managing your Polis site. If you use the command-line tool instead, see [USAGE.md](USAGE.md).
+This guide covers the Polis webapp — a local web interface for managing your Polis site. If you use the command-line tool instead, see [CLI Command Reference](../../cli/user/command-reference.md).
 
 There are two ways to run Polis:
 
@@ -182,21 +182,21 @@ All content is rendered in a 640px centered column below the top bar. The same c
 
 ### Deep-Linking
 
-The webapp supports bookmarkable URLs via the `/_/` path prefix. You can navigate directly to any view:
+The webapp is a single stream-screen, and the URL **is** the filter. There are only three kinds of route:
 
 | URL | View |
 |-----|------|
-| `/_/posts` | Published posts |
-| `/_/posts/drafts` | Draft posts |
-| `/_/comments` | My Comments |
-| `/_/comments/pending` | My Comments (pending tab) |
-| `/_/blessings` | Blessing Requests |
-| `/_/snippets` | About editor |
-| `/_/social/pulse` | Community Pulse |
-| `/_/social/conversations` | Conversations |
-| `/_/social/following` | Following |
-| `/_/social/followers` | Followers |
-| `/_/settings` | Settings |
+| `/_/` | The default stream (activity from your network, by date) |
+| `/_/pql/<sentence>` | The stream filtered by a PQL sentence — every icon button and the sentence-filter widget just load one of these |
+| `/_/settings` | Settings (the only non-stream surface) |
+
+Every view you used to reach by a dedicated page — posts, comments, blessings, following, messages — is now a PQL filter. For example:
+
+- `/_/pql/all+posts+from+me+by+date` — your posts
+- `/_/pql/all+comments+to+bless+from+my+network+by+date` — comments awaiting your blessing
+- `/_/pql/all+profiles+from+my+network+by+name` — people you follow
+
+Any other `/_/…` path falls through to the default stream. (The old v3 page routes — `/_/posts`, `/_/blessings`, `/_/social/*`, etc. — were retired.)
 
 ---
 
@@ -251,7 +251,7 @@ Your comment then appears in **My Comments > Pending** until the author blesses 
 
 ### Blessing Workflow
 
-> For CLI blessing commands, see the [CLI Command Reference](USAGE.md). For terminology, see the [Glossary](GLOSSARY.md).
+> For CLI blessing commands, see the [CLI Command Reference](../../cli/user/command-reference.md). For terminology, see the [Glossary](../../general/reference/glossary.md).
 
 When other authors comment on your posts, their blessing requests appear in **Blessing Requests**.
 
@@ -394,7 +394,7 @@ Your Ed25519 private key is read by the server process for signing but is never 
 - `.env` — site URL and discovery service credentials
 - Your data directory — treat it like any directory with private files
 
-For the full cryptographic model, key management details, and threat analysis, see [SECURITY-MODEL.md](SECURITY-MODEL.md).
+For the full cryptographic model, key management details, and threat analysis, see [Security Model](../../general/security/security-model.md).
 
 ---
 
@@ -480,7 +480,7 @@ The Settings page includes a **Troubleshooting** section with:
 
 ### Where Settings Come From
 
-> For the full configuration loading order (environment variables, `.env`, `.well-known/polis`, defaults), see [USAGE.md §Configuration](USAGE.md#configuration).
+> For the full configuration loading order (environment variables, `.env`, `.well-known/polis`, defaults), see [CLI Command Reference § Configuration](../../cli/user/command-reference.md#configuration).
 
 Settings are loaded from multiple places:
 

@@ -308,6 +308,6 @@ several type+verb combinations that looked valid but had no evaluator.
 ## See also
 
 - `docs/cli/user/policies.md` — user-facing policy reference
-- `docs/general/security-model.md` — overall security model
+- `docs/general/security/security-model.md` — overall security model
 - `cli-go/pkg/policy/` — Go parser + evaluator
 - `discovery-service/core/policy.ts` — TypeScript parser + evaluator

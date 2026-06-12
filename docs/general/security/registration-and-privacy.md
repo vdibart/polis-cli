@@ -97,7 +97,7 @@ export DISCOVERY_SERVICE_URL=https://your-ds.example.com
 export DISCOVERY_SERVICE_KEY=your-api-key  # optional
 ```
 
-See [DS Deployment Guide](../ds/admin/deployment.md) for setup instructions.
+See [DS Deployment Guide](../../ds/admin/deployment.md) for setup instructions.
 
 ## Technical Summary
 

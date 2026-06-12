@@ -10,16 +10,16 @@
 // positionally and produces a Filter the stream dispatcher consumes (its Scope
 // values are exactly what webapp parseStreamScope accepts).
 //
-// The canonical vocabulary lives in docs/general/pql-vocabulary.json; the
-// cross-language contract is docs/general/pql-golden.jsonl. All three parsers
+// The canonical vocabulary lives in docs/general/reference/pql-vocabulary.json; the
+// cross-language contract is docs/general/reference/pql-golden.jsonl. All three parsers
 // (JS/Go/TS) assert against that golden corpus so the grammar can never drift.
 // The tables below are a hand-mirror of the JSON — pql_test.go asserts they
 // match it, so editing the JSON without updating here fails the build.
 //
 // Trail across files (URL-as-filter):
 //
-//	spec      — docs/general/pql.md
-//	vocab     — docs/general/pql-vocabulary.json (canonical) + pql-golden.jsonl
+//	spec      — docs/general/reference/pql.md
+//	vocab     — docs/general/reference/pql-vocabulary.json (canonical) + pql-golden.jsonl
 //	JS parser — webapp/internal/webui/www/pql.js
 //	Go parser — this file
 //	TS parser — discovery-service/core/pql.ts
@@ -40,7 +40,7 @@
 //
 // Type-conditional rules are NOT enforced here — the parser is liberal; the
 // dispatcher (webapp/DS) narrows valid combinations per surface (e.g. the DS
-// rejects first-person scopes; see docs/general/pql.md).
+// rejects first-person scopes; see docs/general/reference/pql.md).
 package pql
 
 import (
@@ -59,7 +59,7 @@ type Filter struct {
 	Modifier  string // by-date|by-name|by-activity|with-comments|to-bless|"" (none)
 }
 
-// ── Vocabulary (hand-mirror of docs/general/pql-vocabulary.json) ──────────────
+// ── Vocabulary (hand-mirror of docs/general/reference/pql-vocabulary.json) ──────────────
 
 var qualifiers = map[string]bool{"all": true, "new": true}
 

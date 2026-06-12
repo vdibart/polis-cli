@@ -661,6 +661,20 @@ func (r *PageRenderer) renderStreamFile(focus template.PostData, siblingsAbove, 
 	}
 
 	isIndex := outPath == filepath.Join(r.config.DataDir, "index.html")
+
+	// Tab/<title>: the index represents the SITE — don't title it with the newest
+	// post (which is merely the index's focus); per-post pages title with the post.
+	if isIndex {
+		ctx.PageTitle = ctx.SiteTitle
+		if ctx.PageTitle == "" {
+			ctx.PageTitle = ctx.AuthorDomain
+		}
+	} else if ctx.SiteTitle != "" {
+		ctx.PageTitle = ctx.Title + " — " + ctx.SiteTitle
+	} else {
+		ctx.PageTitle = ctx.Title
+	}
+
 	var jsonLD string
 	if isIndex {
 		// Index gets a WebSite JSON-LD describing the tenant as a whole. The

@@ -408,7 +408,7 @@ Every piece of content in polis carries a cryptographic signature. The signature
 
 #### Posts
 
-Posts are signed during `polis post` (or `polis publish`). The signed content includes:
+Posts are signed during `polis post`. The signed content includes:
 
 - All frontmatter fields (title, published date, current-version hash, generator)
 - The full markdown body
@@ -642,7 +642,7 @@ Inactive rules (`"active": false`) are skipped during evaluation. This allows di
 | `at <domain>` | optional | Restrict match to a specific actor domain |
 | `on <target>` | optional | Restrict match to a specific target path |
 
-**Verbs are layered.** The six verbs are not interchangeable — each belongs to a specific *policy layer*, and the parser rejects combinations that don't fit the target layer. The authoritative spec of which verb + type combinations are valid in which layer lives in [`docs/general/policy-grammar.md`](./policy-grammar.md). The short form:
+**Verbs are layered.** The six verbs are not interchangeable — each belongs to a specific *policy layer*, and the parser rejects combinations that don't fit the target layer. The authoritative spec of which verb + type combinations are valid in which layer lives in [`docs/general/reference/policy-grammar.md`](../reference/policy-grammar.md). The short form:
 
 | Layer | Purpose | Verbs |
 |---|---|---|
@@ -655,7 +655,7 @@ Inactive rules (`"active": false`) are skipped during evaluation. This allows di
 - **Layer 2 / `emit`, `omit`**: parse and persist but have no evaluator today. Reserved for a future outbound-announcement-filter feature.
 - **Layer 3 / `allow`, `deny`**: lives in the DS `ds_operator_policies` table, not in tenant files. Gates whether announcements (`pub.polis.post`, `pub.polis.follow`, etc.) enter the DS stream.
 
-See [`docs/cli/user/policies.md`](../cli/user/policies.md) for the user-facing guide and [`docs/general/policy-grammar.md`](./policy-grammar.md) for the full verb-by-layer matrix and legacy-grammar notes.
+See [`docs/cli/user/policies.md`](../../cli/user/policies.md) for the user-facing guide and [`docs/general/reference/policy-grammar.md`](../reference/policy-grammar.md) for the full verb-by-layer matrix and legacy-grammar notes.
 
 ### Type Matching
 
@@ -876,7 +876,7 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 | Aspect | Detail |
 |--------|--------|
 | **Attack** | An attacker who controls the *served* `.well-known/polis` — full domain takeover, but also a rogue CDN edge, a static-host operator with filesystem write (GitHub Pages, Netlify, S3), or a domain reclaimed after expiry — replaces the published `public_key` with their own |
-| **Mitigation** | The `public_key` is the root of trust, so substitution does not retroactively forge history: previously signed content fails verification against the new key. For DS-registered sites the DS keeps a versioned key history and only accepts a rotation carrying a valid transition signature from the *old* key, so an attacker lacking the old private key cannot make the DS adopt their key. JUDGE alerts on unexpected key changes for hosted tenants (Section 8.10). |
+| **Mitigation** | The `public_key` is the root of trust, so substitution does not retroactively forge history: previously signed content fails verification against the new key. For DS-registered sites the DS keeps a versioned key history and only accepts a rotation carrying a valid transition signature from the *old* key (`discovery-service/core/handlers/keys.ts`), so an attacker lacking the old private key cannot make the DS adopt their key. JUDGE alerts on unexpected key changes for hosted tenants (Section 8.10). |
 | **Residual risk** | A client verifying content fetched directly from the origin trusts the freshly-fetched key — there is no general client-side TOFU pinning yet. Self-signing the identity file would *not* close this gap: the embedded proof would verify against the same (substituted) key the file declares. The mitigation direction is key pinning / trust-on-first-use, not file self-signing. |
 
 ### 7.4 Discovery Service Compromise
@@ -1126,28 +1126,28 @@ func EvaluateWithLog(policies []Policy, evt Event, ctx EvalContext) EvalResult
 
 | Aspect | Security Property |
 |--------|-------------------|
-| **Schedule** | Hourly background job on the hosted runtime |
+| **Schedule** | Hourly background job on hosted service (`judgeTick = 1 * time.Hour`) |
 | **HTTP content verification** | Fetches posts via loopback HTTP and verifies Ed25519 signatures + SHA-256 content hashes, testing the full serving pipeline end-to-end |
 | **DS attestation audit** | Verifies structural integrity of blessed comments index; full DS attestation signature verification against DS public key planned for future iteration |
-| **Key continuity monitoring** | Tracks each tenant's public key fingerprint over time; alerts on unexpected key changes (proto-TOFU) |
-| **Policy snapshot verification** | Snapshots policy file hashes; detects retroactive policy changes after blessings were granted |
+| **Key continuity monitoring** | Tracks each tenant's public key fingerprint over time; alerts on unexpected key changes (proto-TOFU). Baselines are kept per tenant in the Judge state directory |
+| **Policy snapshot verification** | Snapshots policy file hashes; detects retroactive policy changes after blessings were granted. Snapshots are kept per tenant in the Judge state directory |
 | **Index consistency** | Verifies `index.jsonl` entries match real signed files on disk; detects orphaned entries (indexed but missing), phantom files (on disk but not indexed), and hash mismatches |
 | **Cross-site comment verification** | Verifies blessed comment signatures against the claimed author's current public key (fetched from the author's `.well-known/polis` via HTTPS) |
-| **State persistence** | Baselines, snapshots, and monitoring state persist across restarts via the hosted runtime's storage layer |
-| **Observability** | All findings emitted as structured JSON events (`judge.sweep`, `judge.fail.*`, `judge.alert.*`, `judge.info.*`) to the hosted runtime's observability backend |
+| **State persistence** | Judge state survives restarts via a persistent volume |
+| **Observability** | All findings emitted as structured JSON events (`judge.sweep`, `judge.fail.*`, `judge.alert.*`, `judge.info.*`) to an observability backend for monitoring and alerting |
 | **Graceful degradation** | External HTTP failures (item 6) are skipped gracefully with 5-second timeouts; unreachable domains are cached to avoid retry storms |
 
 ### 8.11 Rate Limiting and Abuse Prevention
 
-Rate limiting is enforced at every network boundary, returning `429` with a `Retry-After` header when a bucket is exhausted. Client IPs are resolved from the trusted client-IP header set by the edge proxy rather than the spoofable left-most `X-Forwarded-For`, so limits cannot be evaded by forging forwarding headers.
+Rate limiting is enforced at every network boundary, returning `429` with a `Retry-After` header when a bucket is exhausted. Client IPs are resolved from the platform's trusted client-IP header rather than the spoofable left-most `X-Forwarded-For`, so limits cannot be evaded by forging forwarding headers.
 
-| Boundary | What is limited |
-|----------|-----------------|
-| **DS — per IP** | All query + write endpoints |
-| **DS — per domain** | Authenticated writes (site/content registration and unregistration, stream publish, key rotation) |
-| **Webapp — per IP** | Public content + structured-query endpoints |
-| **Hosted — per IP** | Signup / login / recover, plus per-email caps on recovery, export, and email change |
-| **DM — per sender + global** | Inbound DM delivery, with both per-sender and global caps (configurable) |
+| Boundary | Scope | Representative limits |
+|----------|-------|-----------------------|
+| **DS — per IP** | All query + write endpoints | content-query 600/hr, stream 1200/hr, relationship-query 600/hr, sites-check 300/hr, write-preauth 120/hr |
+| **DS — per domain** | Authenticated writes | site-register 5/hr, content-register 50/hr, content-unregister 20/hr, stream-publish 100/hr, key-rotate 5/hr |
+| **Webapp — per IP** | Public content + structured-query endpoints | 1000/hr |
+| **Hosted — per IP** | Signup / login / recover | 3/hr, plus per-email caps (recover 1/hr/email; export & email-change 1/10min) |
+| **DM — per sender + global** | Inbound DM delivery | 10/sender/hr, 100/hr global (configurable via `POLIS_DM_RATE_*`) |
 
 The DS per-domain limits are checked at the top of each handler — before any signature verification or outbound `.well-known/polis` fetch — so an attacker cannot force expensive crypto or network round-trips without first consuming budget. DM rate checks sit at layers 3 and 5 of the seven-layer receive pipeline (Section 7.14). Hosted per-IP and per-email maps are swept periodically (by Reaper) to bound memory growth.
 
@@ -1245,6 +1245,6 @@ Integration with hardware security modules (HSMs) or hardware keys:
 
 ## 12. Feedback Welcome
 
-If you find a security issue in polis, please report it responsibly. See the [security policy](security.md) for reporting instructions. Do not report security vulnerabilities through public GitHub issues.
+If you find a security issue in polis, please report it responsibly. See the [security policy](SECURITY.md) for reporting instructions. Do not report security vulnerabilities through public GitHub issues.
 
 For questions about the security model, architecture discussions, or suggestions for improvements, open a discussion or reach out to the maintainers.

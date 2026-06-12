@@ -2,7 +2,7 @@
 
 `GET /pql/<sentence>` is the PQL-native query endpoint. The **same
 grammar** drives the owner SPA, the public infinity stream, and this
-developer-facing JSON API — see [`../../general/pql.md`](../../general/pql.md)
+developer-facing JSON API — see [`../../general/reference/pql.md`](../../general/reference/pql.md)
 for the full grammar. This page is the contract for consuming it as JSON.
 
 There are two hosts:
@@ -89,7 +89,7 @@ curl -H 'Accept: application/json' \
 ## Scope-resolution boundary
 
 PQL is one grammar, but **where a scope resolves** differs by host (full
-rationale in [`../../general/pql.md`](../../general/pql.md#scope-resolution-boundary-who-resolves-what)):
+rationale in [`../../general/reference/pql.md`](../../general/reference/pql.md#scope-resolution-boundary-who-resolves-what)):
 
 - **Public scopes** — `all polis`, `<handle>`, `about <handle>`,
   `<handle>'s network` — resolve anywhere (tenant **and** DS).

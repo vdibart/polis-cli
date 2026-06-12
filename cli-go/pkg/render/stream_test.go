@@ -200,6 +200,53 @@ func TestRenderAll_StreamSmoke(t *testing.T) {
 	assertContains(t, alphaHTML, `href="../../base.css"`, "alpha base.css href")
 }
 
+// TestRenderAll_StreamTitleTags locks the page <title> contract: the INDEX is
+// titled by the SITE (not by its newest-post focus — regression: the tab read
+// the first post's text), while per-post pages are titled "Post — Site".
+func TestRenderAll_StreamTitleTags(t *testing.T) {
+	tempDir := t.TempDir()
+	setupStreamTestSite(t, tempDir) // site_title "V4 Test"
+	writeStreamPost(t, tempDir, "20260315", "alpha", "Alpha", "First body text.")
+	writeStreamPost(t, tempDir, "20260325", "charlie", "Charlie", "Third body text.")
+
+	r, err := NewPageRenderer(PageConfig{
+		DataDir:        tempDir,
+		BaseURL:        "https://example.com",
+		PostsSourceDir: "content/pub.polis.core/post",
+		PostsMountDir:  "posts",
+	})
+	if err != nil {
+		t.Fatalf("NewPageRenderer: %v", err)
+	}
+	if _, err := r.RenderAll(true); err != nil {
+		t.Fatalf("RenderAll: %v", err)
+	}
+
+	titleOf := func(html string) string {
+		const o, c = "<title>", "</title>"
+		i, j := strings.Index(html, o), strings.Index(html, c)
+		if i < 0 || j < 0 || j < i {
+			return ""
+		}
+		return html[i+len(o) : j]
+	}
+
+	// Index: titled by the site, NOT the newest post (Charlie).
+	idxTitle := titleOf(mustReadFile(t, filepath.Join(tempDir, "index.html")))
+	if idxTitle != "V4 Test" {
+		t.Errorf("index <title> = %q, want %q", idxTitle, "V4 Test")
+	}
+	if strings.Contains(idxTitle, "Charlie") {
+		t.Errorf("index <title> %q must not contain the newest-post title", idxTitle)
+	}
+
+	// Per-post: "Post — Site".
+	alphaTitle := titleOf(mustReadFile(t, filepath.Join(tempDir, "posts", "20260315", "alpha.html")))
+	if !strings.Contains(alphaTitle, "Alpha") || !strings.Contains(alphaTitle, "V4 Test") {
+		t.Errorf("alpha <title> = %q, want post title + site title", alphaTitle)
+	}
+}
+
 // TestRenderAll_StreamBlessedCommentsPanel locks in the step-05/5.i Phase B
 // comment-READ panel SSR contract:
 //   - The `.entry-comments-panel` div is rendered under the focus body

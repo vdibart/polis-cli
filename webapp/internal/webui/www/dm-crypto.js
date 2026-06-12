@@ -2,7 +2,7 @@
 //
 // All password-epoch key derivation and message decryption happen here, in the browser:
 // the server never sees the password, the KEK, or a password-epoch DEK (see
-// docs/general/security-model.md). Every primitive is byte-compatible with the Go side
+// docs/general/security/security-model.md). Every primitive is byte-compatible with the Go side
 // (cli-go/pkg/dm) so a blob wrapped on one unwraps on the other — conformance is pinned by
 // testdata/cross-impl-vectors.json (run vendor/conformance.mjs).
 //

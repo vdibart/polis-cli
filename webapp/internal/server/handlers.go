@@ -1300,10 +1300,21 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wk.PublicKey = newPubKey
-	if err := site.SaveWellKnown(s.DataDir, wk); err != nil {
+	// Preserving save so the public-key update doesn't drop public_key_messages.
+	if err := site.SaveWellKnownPreserving(s.DataDir, wk); err != nil {
 		s.LogError("Key rotation failed: saving .well-known/polis: %v", err)
 		http.Error(w, "Failed to update site identity", http.StatusInternalServerError)
 		return
+	}
+
+	// Re-sign + re-publish the DM messages key under the NEW identity key. The
+	// preserved block is still signed by the OLD key, which Judge would flag as
+	// forged (judge.alert.messages_key_forged); re-publishing re-signs it. Tenants
+	// without a keyring (pre-DM) have nothing to publish — skip silently.
+	if _, err := dm.LoadKeyring(dm.DMDir(s.DataDir)); err == nil {
+		if err := site.PublishMessagesKey(s.DataDir, newPrivPEM); err != nil {
+			s.LogError("Key rotation: failed to re-publish messages key under new identity: %v", err)
+		}
 	}
 
 	// Reload in-memory keys
@@ -2822,7 +2833,9 @@ func (s *Server) handleUpdateAvatar(w http.ResponseWriter, r *http.Request) {
 
 	wk.Avatar = req.Avatar
 
-	if err := site.SaveWellKnown(s.DataDir, wk); err != nil {
+	// Preserving save: a plain SaveWellKnown would drop public_key_messages (not
+	// modeled by the WellKnown struct), leaving the tenant unable to receive DMs.
+	if err := site.SaveWellKnownPreserving(s.DataDir, wk); err != nil {
 		s.LogError("failed to save .well-known/polis: %v", err)
 		http.Error(w, "Failed to save site config", http.StatusInternalServerError)
 		return
@@ -2873,7 +2886,9 @@ func (s *Server) handleUpdateAuthorName(w http.ResponseWriter, r *http.Request) 
 
 	wk.AuthorName = name
 
-	if err := site.SaveWellKnown(s.DataDir, wk); err != nil {
+	// Preserving save: a plain SaveWellKnown would drop public_key_messages (not
+	// modeled by the WellKnown struct), leaving the tenant unable to receive DMs.
+	if err := site.SaveWellKnownPreserving(s.DataDir, wk); err != nil {
 		s.LogError("failed to save .well-known/polis: %v", err)
 		http.Error(w, "Failed to save site config", http.StatusInternalServerError)
 		return

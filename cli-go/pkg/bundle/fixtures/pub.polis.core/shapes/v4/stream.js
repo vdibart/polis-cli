@@ -12,9 +12,9 @@
 //   consumer  — this file (stream.js): hydration + scroll-as-URL-mutation
 //
 // Pull the thread:
-//   github.com/vdibart/polis-cli/blob/main/docs/general/infinity-stream.md (why)
-//   github.com/vdibart/polis-cli/blob/main/docs/general/pql.md              (spec)
-//   github.com/vdibart/polis-cli/blob/main/docs/general/shapes.md           (v3 vs v4)
+//   github.com/vdibart/polis-cli/blob/main/docs/general/concepts/infinity-stream.md (why)
+//   github.com/vdibart/polis-cli/blob/main/docs/general/reference/pql.md              (spec)
+//   github.com/vdibart/polis-cli/blob/main/docs/general/concepts/shapes.md           (v3 vs v4)
 //   github.com/vdibart/polis-cli/blob/main/docs/handbook/url-as-filter.md   (tour)
 //   github.com/vdibart/polis-cli/blob/main/AGENTS.md                        (map)
 // =============================================================================
@@ -2127,7 +2127,20 @@
                 var p = entry.querySelector('.entry-comments-panel');
                 var target = p || entry;       // fall back to entry top if no panel
                 var r = target.getBoundingClientRect();
-                var ty = window.scrollY + r.top - COMMENTS_TOPBAR_OFFSET;
+                var entryRect = entry.getBoundingClientRect();
+                // Scroll the comment panel up to COMMENTS_TOPBAR_OFFSET — UNLESS
+                // the whole focus entry (post + now-open panel) already fits in
+                // the viewport below FOCUS_ENTRY_TOPBAR_OFFSET. For a SHORT post
+                // (e.g. a quip with no/few comments) the panel-scroll would push
+                // the post off the top of the screen (most visible on the newest
+                // post, which sits at page top with nothing above it). In that
+                // case anchor the ENTRY top instead, keeping the post on screen
+                // with its panel below.
+                var fits = entryRect.height <= (window.innerHeight - FOCUS_ENTRY_TOPBAR_OFFSET);
+                var ty = fits
+                    ? window.scrollY + entryRect.top - FOCUS_ENTRY_TOPBAR_OFFSET
+                    : window.scrollY + r.top - COMMENTS_TOPBAR_OFFSET;
+                if (ty < 0) ty = 0;
                 try {
                     window.scrollTo({ top: ty, behavior: 'smooth' });
                 } catch (e) {
@@ -4475,7 +4488,7 @@
     // filter state. The bundled shape is self-contained (it must work in the
     // public template without the webapp's pql.js), so the internal→token
     // mapping lives here — it MUST stay in sync with the canonical grammar
-    // (docs/general/pql-vocabulary.json). The server re-parses the sentence;
+    // (docs/general/reference/pql-vocabulary.json). The server re-parses the sentence;
     // transport-only params (time/surface/cursor/before_url/search) are appended
     // by the caller as query params. Replaces the legacy
     // /api/v1/stream/items?scope=&type= construction (PQL hard cutover).

@@ -59,7 +59,7 @@ The parser and composer. Two functions matter most:
 - **`PQL.parse(sentence)`** — Takes a sentence string ("all activity from my network") or a URL-encoded equivalent ("all+activity+from+my+network") and returns a filter-state object: `{ qualifier: "all", type: "activity", scope: "my-network", modifier: null }`.
 - **`PQL.compose(state)`** — The inverse. Takes a filter-state object and returns the canonical sentence string.
 
-The grammar itself is documented in [`pql.md`](../general/pql.md) — five positional slots (qualifier, type, "from", scope, modifier), with type-conditional rules that the dispatcher enforces. The parser is permissive: anything well-formed parses; downstream layers decide what's valid for each type.
+The grammar itself is documented in [`pql.md`](../general/reference/pql.md) — five positional slots (qualifier, type, "from", scope, modifier), with type-conditional rules that the dispatcher enforces. The parser is permissive: anything well-formed parses; downstream layers decide what's valid for each type.
 
 Two vocabularies live side by side in this file: the **PQL grammar tokens** (user-facing — what the URL contains: `messages`, `my network`, `by date`) and the **internal JS values** (what the controller speaks: `dms`, `my-network`, `by-date`). The parser maps between them at the URL boundary; nothing else has to know about either vocabulary.
 
@@ -115,17 +115,17 @@ Click an icon: producer → grammar → consumer. Scroll: consumer → URL → (
 
 Pull the thread further. Three concept docs answer different "why" questions:
 
-### [`docs/general/pql.md`](../general/pql.md) — the grammar's spec and rationale
+### [`docs/general/reference/pql.md`](../general/reference/pql.md) — the grammar's spec and rationale
 
-Why a *sentence* and not a query string? Because filter views are things you'd share with someone in a message-board recommendation: "look at *all comments from alice.polis.pub to bless* — it's wild." A sentence reads. A query string doesn't. PQL also intentionally aligns with [`policy-grammar.md`](../general/policy-grammar.md) — the same `qualifier type scope` shape that powers `allow|deny` rules — so a user fluent in one is fluent in both.
+Why a *sentence* and not a query string? Because filter views are things you'd share with someone in a message-board recommendation: "look at *all comments from alice.polis.pub to bless* — it's wild." A sentence reads. A query string doesn't. PQL also intentionally aligns with [`policy-grammar.md`](../general/reference/policy-grammar.md) — the same `qualifier type scope` shape that powers `allow|deny` rules — so a user fluent in one is fluent in both.
 
-### [`docs/general/infinity-stream.md`](../general/infinity-stream.md) — why a single screen
+### [`docs/general/concepts/infinity-stream.md`](../general/concepts/infinity-stream.md) — why a single screen
 
 Why does the URL go to all this trouble? Because the v4 stream surface is **one screen, many filters** — there is no "Feed page" or "Posts page" or "Messages page" anymore. The previous design had modal tabs; the URL didn't reflect them; switching meant clicking around. PQL turned the filter into a first-class URL-addressable object, which let polis collapse the modal tabs into a single re-filterable surface. Read this if you want to understand the *design pressure* that produced PQL in the first place.
 
-### [`docs/general/shapes.md`](../general/shapes.md) — the infinity stream is a *shape*
+### [`docs/general/concepts/shapes.md`](../general/concepts/shapes.md) — the infinity stream is a *shape*
 
-`stream.js` ships inside the `pub.polis.shapes.v4` shape — the **infinity stream shape**. A polis site running the older blog shape (`pub.polis.shapes.v3`) doesn't have any of this URL-as-filter machinery — it has per-post HTML pages. Shapes are swappable, per the [snap-off architecture](../general/snap-off-architecture.md). The whole URL-as-filter thread is a property of v4 specifically, not of polis as a protocol.
+`stream.js` ships inside the `pub.polis.shapes.v4` shape — the **infinity stream shape**. A polis site running the older blog shape (`pub.polis.shapes.v3`) doesn't have any of this URL-as-filter machinery — it has per-post HTML pages. Shapes are swappable, per the [snap-off architecture](../general/concepts/snap-off-architecture.md). The whole URL-as-filter thread is a property of v4 specifically, not of polis as a protocol.
 
 ## What you should now understand
 
@@ -133,16 +133,16 @@ If you followed the thread end-to-end:
 
 - The URL on polis.pub is meaningful — it's a sentence in a grammar (PQL).
 - The grammar is parseable both ways (sentence ↔ filter-state); the URL is the canonical form of "what view is on screen."
-- The grammar is now **one contract across three languages** — `pql.js` (browser), `cli-go/pkg/pql` (Go), `discovery-service/core/pql.ts` (TS) — all asserting the same `docs/general/pql-golden.jsonl` so they can't drift.
+- The grammar is now **one contract across three languages** — `pql.js` (browser), `cli-go/pkg/pql` (Go), `discovery-service/core/pql.ts` (TS) — all asserting the same `docs/general/reference/pql-golden.jsonl` so they can't drift.
 - The same sentence is also a **server endpoint**: `GET /pql/<sentence>` content-negotiates (JSON envelope for the SPA/devs, HTML infinity-stream for visitors), and the discovery service exposes its own `/pql/` for public cross-tenant queries. A bare tenant root (`<handle>.polis.pub/`) redirects a browser to `/pql/all+posts+by+date`.
 - This isn't a routing trick — it's the core architecture of the v4 stream-screen, which is itself a *shape* polis sites can opt into.
 - The same grammar that filters the stream is intentionally close to the grammar that writes policy rules. Polis is leaning into "sentence as primary abstraction" across multiple surfaces.
 
-See [`../general/pql.md`](../general/pql.md) for the grammar (incl. the `from`/`about` relations and the scope-resolution boundary) and [`../ds/developer/pql-json-api.md`](../ds/developer/pql-json-api.md) for the JSON API.
+See [`../general/reference/pql.md`](../general/reference/pql.md) for the grammar (incl. the `from`/`about` relations and the scope-resolution boundary) and [`../ds/developer/pql-json-api.md`](../ds/developer/pql-json-api.md) for the JSON API.
 
 If you want to go deeper:
 
 - The starter map of every thread: [`AGENTS.md`](../../AGENTS.md)
-- The four-surface architecture: [`../general/architecture.md`](../general/architecture.md)
-- Why every layer (including the stream shape) is replaceable: [`../general/snap-off-architecture.md`](../general/snap-off-architecture.md)
-- What lives under `/bundle-assets/`: [`../general/bundles.md`](../general/bundles.md)
+- The four-surface architecture: [`../general/concepts/architecture.md`](../general/concepts/architecture.md)
+- Why every layer (including the stream shape) is replaceable: [`../general/concepts/snap-off-architecture.md`](../general/concepts/snap-off-architecture.md)
+- What lives under `/bundle-assets/`: [`../general/concepts/bundles.md`](../general/concepts/bundles.md)

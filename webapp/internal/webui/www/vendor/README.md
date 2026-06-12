@@ -3,7 +3,7 @@
 These are the third-party libraries that sit in the **password path** for encrypted DMs.
 For password epochs, all key derivation and message decryption happen **in the browser** —
 the server never sees the password, the KEK, or a password-epoch DEK
-(see `docs/general/security-model.md`). These files implement that browser-side crypto.
+(see `docs/general/security/security-model.md`). These files implement that browser-side crypto.
 
 They are **vendored same-origin** (committed here, served by us, `//go:embed`-ed via
 `webapp/internal/webui/assets.go`), not loaded from a CDN. Pinning = the exact committed

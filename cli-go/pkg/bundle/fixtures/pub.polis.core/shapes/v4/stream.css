@@ -1052,7 +1052,11 @@ body.is-editor-focus .entry--editor::after {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--color-timeline-dot);
+    /* --filter-dot lets the cross-visit nav widget repaint the cap dot
+       independently of the content timeline dots (which keep
+       --color-timeline-dot). Falls back to --color-timeline-dot so
+       native/anon render is unchanged. */
+    background: var(--filter-dot, var(--color-timeline-dot));
     transition: opacity 0.15s ease;
 }
 /* Refresh affordance on hover/focus — the small dot fades and a
@@ -1087,7 +1091,11 @@ body.is-editor-focus .entry--editor::after {
     font-weight: 500;
     letter-spacing: 0.015em;
     line-height: 1.3;
-    color: var(--color-text-soft, #d4c8b8);
+    /* --filter-text decouples the filter's color from the body text token
+       so the cross-visit nav widget (and stardust's inverted topbar) can
+       repaint just the filter. Falls back to --color-text-soft → native
+       and anon render is byte-identical for themes that don't set it. */
+    color: var(--filter-text, var(--color-text-soft, #d4c8b8));
     display: inline-flex;
     align-items: baseline;
     flex-wrap: wrap;
@@ -1097,7 +1105,7 @@ body.is-editor-focus .entry--editor::after {
     padding: 6px 0;
 }
 .sentence-filter:hover {
-    color: var(--color-text, #f0e8dc);
+    color: var(--filter-text-hover, var(--color-text, #f0e8dc));
 }
 
 .sf-slot {
@@ -1133,12 +1141,39 @@ body.is-editor-focus .entry--editor::after {
 /* IDENTITY slot (scope locked to current tenant): non-interactive, but
    visually distinct — italic accent so it reads as identity, not a control. */
 .sf-slot--identity {
-    color: var(--color-tenant-id, var(--color-accent, var(--accent, #e8a060)));
+    color: var(--filter-identity, var(--color-tenant-id, var(--color-accent, var(--accent, #e8a060))));
     font-style: italic;
     cursor: default;
     user-select: text;
     font-weight: 500;
 }
+
+/* ── Cross-visit filter palette buckets ─────────────────────────────────
+   The cross-visit nav widget (nav.js) can paint the sentence filter + cap
+   dot in the SITE AUTHOR's theme instead of the visitor's, selected per
+   (author, visitor) pair. It sets data-sf on .polis-topbar to one of the
+   author theme's two polarity buckets; these rules read the author's
+   --filter-{dark,light}-* tokens (declared at :root in each theme CSS),
+   which the cascade resolves because the page IS the author's site.
+     data-sf="author-dark"  → light-text palette (for dark visitor bands)
+     data-sf="author-light" → dark-text palette  (for light visitor bands)
+   Absent data-sf = the "visitor" selection (nav.js sets inline --filter-*).
+   Higher specificity than the base rules above, so these win when set. */
+.polis-topbar[data-sf="author-dark"] .sentence-filter            { color: var(--filter-dark-text); }
+.polis-topbar[data-sf="author-dark"] .sentence-filter:hover      { color: var(--filter-dark-text-hover); }
+.polis-topbar[data-sf="author-dark"] .sf-slot--interactive       { text-decoration-color: var(--filter-dark-underline); }
+.polis-topbar[data-sf="author-dark"] .sf-slot--interactive:hover,
+.polis-topbar[data-sf="author-dark"] .sf-slot--interactive[aria-expanded="true"] { text-decoration-color: var(--filter-dark-underline-hover); }
+.polis-topbar[data-sf="author-dark"] .sf-slot--identity          { color: var(--filter-dark-identity); }
+.polis-topbar[data-sf="author-dark"] .pinned-dot::before         { background: var(--filter-dark-dot); }
+
+.polis-topbar[data-sf="author-light"] .sentence-filter           { color: var(--filter-light-text); }
+.polis-topbar[data-sf="author-light"] .sentence-filter:hover     { color: var(--filter-light-text-hover); }
+.polis-topbar[data-sf="author-light"] .sf-slot--interactive      { text-decoration-color: var(--filter-light-underline); }
+.polis-topbar[data-sf="author-light"] .sf-slot--interactive:hover,
+.polis-topbar[data-sf="author-light"] .sf-slot--interactive[aria-expanded="true"] { text-decoration-color: var(--filter-light-underline-hover); }
+.polis-topbar[data-sf="author-light"] .sf-slot--identity         { color: var(--filter-light-identity); }
+.polis-topbar[data-sf="author-light"] .pinned-dot::before        { background: var(--filter-light-dot); }
 
 /* Connectors ("from", "in") — same color as locked text, no styling. */
 .sf-connector {
@@ -3228,11 +3263,16 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
 }
 
 .entry--post .entry-content a,
-.entry--comment-thread .entry-content a {
+.entry--comment-thread .entry-content a,
+.focus-content .content-body a {
     /* Links read off --color-link so a theme can give them a SECONDARY
        hue distinct from its primary accent (timeline/headings), keeping
        a single accent from dominating the page. Falls back to the accent
-       when a theme doesn't set one, so existing themes are unchanged. */
+       when a theme doesn't set one, so existing themes are unchanged.
+       .focus-content .content-body covers the FOCUS post's body (the newest
+       post on index.html + the main post on every per-post page) — without
+       it those links fell back to default browser blue while siblings were
+       themed. */
     color: var(--color-link, var(--color-accent, var(--accent, #d8a060)));
     text-decoration: underline;
 }
@@ -3843,6 +3883,39 @@ body.is-search-active .entry--ghost-compose {
     font-style: italic;
     color: var(--color-text-muted, rgba(255, 255, 255, 0.45));
     font-size: 13px;
+}
+
+/* ── Provisional (pending-blessing) comment card ──
+   A .comment-attached card that has been optimistically rendered but is
+   NOT yet blessed/visible to others. The cross-visit composer (nav.js)
+   uses it to show a comment a visitor just submitted to a foreign post —
+   it lives on the visitor's home site and only renders here once the
+   author blesses it. Deliberately theme-agnostic (shared semantic tokens
+   only) and free of any cross-visit-specific assumptions, so the owner
+   SPA's optimistic insert can adopt the identical look by toggling the
+   same class + appending a .comment-provisional-note. */
+.comment-attached--provisional {
+    opacity: 0.85;
+    border-left-style: dashed;
+}
+.comment-attached--provisional .comment-provisional-note {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
+    font-style: italic;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
+}
+.comment-attached--provisional .comment-provisional-note::before {
+    content: "";
+    flex-shrink: 0;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--color-accent, var(--accent, #d8a060)) 70%, transparent);
 }
 
 /* ── Inline comment editor ──

@@ -46,6 +46,21 @@
     --color-accent: var(--color-teal);
     --color-accent-soft: var(--color-teal-soft);
     --color-accent-bg: rgba(95, 175, 175, 0.08);
+
+    /* Cross-visit filter palette buckets — see vice.css for the contract.
+       dark = light-text (for dark visitor bands); light = dark-text. */
+    --filter-dark-text: #d0d0d0;
+    --filter-dark-text-hover: #f0f0f0;
+    --filter-dark-underline: color-mix(in srgb, #5fafaf 55%, transparent);
+    --filter-dark-underline-hover: #5fafaf;
+    --filter-dark-identity: #5fafaf;
+    --filter-dark-dot: color-mix(in srgb, #5fafaf 50%, transparent);
+    --filter-light-text: #1f2626;
+    --filter-light-text-hover: #121616;
+    --filter-light-underline: color-mix(in srgb, #2e6e6e 55%, transparent);
+    --filter-light-underline-hover: #2e6e6e;
+    --filter-light-identity: #2e6e6e;
+    --filter-light-dot: color-mix(in srgb, #2e6e6e 50%, transparent);
     /* Secondary hue for links (stream.css content + bio links read this).
        Teal keeps links cool and distinct from the salmon used on titles/
        headings, so a single accent doesn't dominate. Mirrors the SPA

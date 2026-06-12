@@ -243,15 +243,15 @@ This is why polis.pub feels live without feeling expensive. The continuous data 
 
 Five concept docs deepen what you just walked:
 
-- **[`../general/architecture.md`](../general/architecture.md)** — Where the DS sits in the four-surface model, and what its contract is with sites. The DS is a *coordinator*, not a host; understanding why is the foundational piece.
-- **[`../general/infinity-stream.md`](../general/infinity-stream.md)** — The shape that this whole data flow exists to feed. The stream-screen is what's rendered; this tour is how it stays fresh.
-- **[`../general/content-types.md`](../general/content-types.md)** — What's actually *in* the stream events. Each event corresponds to a content-type action; the same content-type model that powers publishing on one side powers the feed on the other.
+- **[`../general/concepts/architecture.md`](../general/concepts/architecture.md)** — Where the DS sits in the four-surface model, and what its contract is with sites. The DS is a *coordinator*, not a host; understanding why is the foundational piece.
+- **[`../general/concepts/infinity-stream.md`](../general/concepts/infinity-stream.md)** — The shape that this whole data flow exists to feed. The stream-screen is what's rendered; this tour is how it stays fresh.
+- **[`../general/concepts/content-types.md`](../general/concepts/content-types.md)** — What's actually *in* the stream events. Each event corresponds to a content-type action; the same content-type model that powers publishing on one side powers the feed on the other.
 - **[`../ds/developer/stream-architecture.md`](../ds/developer/stream-architecture.md)** — The DS event stream's design in depth: schemas, cursor semantics, event categories, how the unified endpoint composes filters.
 - **[`../ds/developer/api-reference.md`](../ds/developer/api-reference.md)** — The exact wire format for every endpoint touched in this tour (`/v1/stream/unified`, `/v1/content/comments/counts`).
 
 And one architecture-of-concern doc:
 
-- **[`../general/snap-off-architecture.md`](../general/snap-off-architecture.md)** — The DS is a *replaceable layer*. The contract this tour describes — event stream + cursor pagination + counts aggregation — is the contract any DS implementation must speak. A self-hosted DS, a community DS, a regional DS all participate in the same flow you just walked.
+- **[`../general/concepts/snap-off-architecture.md`](../general/concepts/snap-off-architecture.md)** — The DS is a *replaceable layer*. The contract this tour describes — event stream + cursor pagination + counts aggregation — is the contract any DS implementation must speak. A self-hosted DS, a community DS, a regional DS all participate in the same flow you just walked.
 
 ## What you should now understand
 
@@ -267,5 +267,5 @@ If you want to go deeper:
 
 - The starter map of every thread: [`../../AGENTS.md`](../../AGENTS.md)
 - The stream's DOM/scroll/URL behaviors: [`url-as-filter.md`](url-as-filter.md)
-- The DS as a replaceable layer: [`../general/snap-off-architecture.md`](../general/snap-off-architecture.md)
+- The DS as a replaceable layer: [`../general/concepts/snap-off-architecture.md`](../general/concepts/snap-off-architecture.md)
 - The full DS REST surface: [`../ds/developer/api-reference.md`](../ds/developer/api-reference.md)

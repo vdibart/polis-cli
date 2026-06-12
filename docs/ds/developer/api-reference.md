@@ -695,7 +695,7 @@ List all operator policy rules.
 
 ### POST /v1/admin/policies
 
-Add a policy rule. The rule string uses the same v2 grammar as site policies; see `docs/general/policy-grammar.md`.
+Add a policy rule. The rule string uses the same v2 grammar as site policies; see `docs/general/reference/policy-grammar.md`.
 
 ```json
 // Request
@@ -784,7 +784,7 @@ Purge events matching filters. At least one filter is required.
 
 ### GET /health
 
-Health check. External requests get minimal info; internal requests (via Fly.io `Fly-Forwarded-Port` header) get diagnostics.
+Health check. External requests get minimal info; internal requests (identified by the platform's internal forwarding header) get diagnostics.
 
 ```json
 // External response 200

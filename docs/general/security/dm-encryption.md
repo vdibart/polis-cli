@@ -7,7 +7,9 @@ the mechanism can keep, it is a bug; file it.
 
 The companion specs are `cli-go/pkg/dm/FORMAT.md` (the at-rest crypto format, independently
 implementable) and `cli-go/pkg/dm/PROTOCOL.md` (the wire/delivery protocol). Where this doc
-and the code disagree, the code wins.
+and the code disagree, the code wins. For a guided walk through the actual source — how a
+message gets encrypted, delivered, stored, and unlocked — see the tour at
+[`../../handbook/dm-encryption.md`](../../handbook/dm-encryption.md).
 
 ---
 
@@ -366,14 +368,14 @@ Honesty about detection matters as much as honesty about the crypto:
 - **`public_key_messages`** — your space's per-epoch X25519 messages public key, published in
   `.well-known/polis` and signed by your identity key.
 
-See also the repository glossary at `docs/general/glossary.md`.
+See also the repository glossary at `docs/general/reference/glossary.md`.
 
 ---
 
 ## See also
 
-- `docs/general/security-model.md` — the system-wide security model (DM overview links here).
+- `docs/general/security/security-model.md` — the system-wide security model (DM overview links here).
 - `cli-go/pkg/dm/FORMAT.md` — the at-rest crypto/keyring format (independently implementable).
 - `cli-go/pkg/dm/PROTOCOL.md` — the wire/delivery protocol.
 - `docs/cli/user/command-reference.md` — `polis dm decrypt`, `polis serve` (offline read).
-- `docs/general/policy-grammar.md` — the `pub.polis.dm` acceptance policy (Layer 1).
+- `docs/general/reference/policy-grammar.md` — the `pub.polis.dm` acceptance policy (Layer 1).

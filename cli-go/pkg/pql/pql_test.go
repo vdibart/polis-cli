@@ -13,8 +13,8 @@ import (
 // `go test` runs with CWD = this package dir (cli-go/pkg/pql), so the repo
 // root is three levels up.
 const (
-	goldenPath = "../../../docs/general/pql-golden.jsonl"
-	vocabPath  = "../../../docs/general/pql-vocabulary.json"
+	goldenPath = "../../../docs/general/reference/pql-golden.jsonl"
+	vocabPath  = "../../../docs/general/reference/pql-vocabulary.json"
 )
 
 type goldenExpected struct {
@@ -34,7 +34,7 @@ type goldenLine struct {
 }
 
 // TestGoldenCorpus is the cross-language contract: the Go parser must agree
-// with the JS and TS parsers on every line of docs/general/pql-golden.jsonl.
+// with the JS and TS parsers on every line of docs/general/reference/pql-golden.jsonl.
 func TestGoldenCorpus(t *testing.T) {
 	f, err := os.Open(goldenPath)
 	if err != nil {
@@ -123,7 +123,7 @@ type vocabFile struct {
 }
 
 // TestVocabularyMatchesCanonical closes the drift loop: the hand-mirrored Go
-// tables must match docs/general/pql-vocabulary.json exactly. Editing the JSON
+// tables must match docs/general/reference/pql-vocabulary.json exactly. Editing the JSON
 // without updating pql.go (or vice-versa) fails here.
 func TestVocabularyMatchesCanonical(t *testing.T) {
 	data, err := os.ReadFile(vocabPath)

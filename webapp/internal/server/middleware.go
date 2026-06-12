@@ -334,7 +334,7 @@ func CSPAdminSPA(nonce string) string {
 	// Argon2id WASM (hash-wasm) that derives the DM message key in-browser. It permits WASM
 	// compilation ONLY — NOT JS eval()/new Function() — so it does not widen the
 	// script-injection surface, which stays gated by 'self'/nonce. Scoped to the logged-in
-	// admin app. See docs/general/security-model.md (DM crypto) + www/vendor/README.md.
+	// admin app. See docs/general/security/security-model.md (DM crypto) + www/vendor/README.md.
 	scriptSrc := scriptElem + " 'wasm-unsafe-eval'"
 	return strings.Join([]string{
 		"default-src 'self'",

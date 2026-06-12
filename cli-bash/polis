@@ -28,7 +28,7 @@ set -eo pipefail
 #   4. Hardcoded defaults
 
 # Fixed constants (never configurable - required for discovery)
-VERSION="0.65.0"
+VERSION="0.66.0"
 WELL_KNOWN_DIR=".well-known"
 WELL_KNOWN_FILE="polis"
 
@@ -3032,9 +3032,16 @@ _internal_beseech_from_file() {
         json_error "beseech" "INVALID_INPUT" "POLIS_CONTENT_REGISTER_ENDPOINT not set. Check your DISCOVERY_SERVICE_URL."
     fi
 
-    # Construct proper HTTPS comment URL
-    # Convert local file path to public URL
-    # Example: comments/my-comment.md -> https://yourdomain.com/comments/my-comment.md
+    # Construct the registered comment URL from the comment's CANONICAL source path.
+    # cmd_comment / cmd_republish pass the canonical content path
+    # (content/pub.polis.core/comment/YYYYMMDD/file.md), so this yields the canonical
+    # source URL, matching how posts register and how the Go CLI registers
+    # (polisurl.CommentContentURL) — NOT the /comments/ mount path. Registering the
+    # mount path was Defect 1 (Go side); the bash CLI was already correct because it
+    # beseeches the content path. Do not change $input_file to a mount path here.
+    # See plans/comment-registration-severe-bug.md (WS1·c).
+    # Example: content/pub.polis.core/comment/20260101/x.md ->
+    #          https://yourdomain.com/content/pub.polis.core/comment/20260101/x.md
     local comment_url="${base_url%/}/$input_file"
 
     # Build canonical JSON payload (WITHOUT signature field)

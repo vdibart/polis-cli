@@ -18,7 +18,7 @@ The Polis CLI enables authors to:
 
 The **Go CLI** is the recommended CLI for new users. It implements all commands listed below, ships as a single binary, and has **no external dependencies** (no jq, curl, OpenSSH, or pandoc required).
 
-- Primary command is `post` (the `publish` alias also works)
+- Primary command is `post`
 - Same `--json` flag for machine-readable output
 - Same directory structure and file formats
 - Download pre-built binaries from the releases page, or build from source: `cd cli-go && go build -o polis ./cmd/polis`
@@ -104,7 +104,7 @@ For a quick introduction, see the [README](../README.md). This guide covers deta
 
 ## Directory Structure
 
-> For a more detailed file structure reference including webapp-specific files, see [WEBAPP-USER-MANUAL.md §File Structure](WEBAPP-USER-MANUAL.md#file-structure).
+> For a more detailed file structure reference including webapp-specific files, see [Webapp User Manual § File Structure](../../webapp/user/user-manual.md#file-structure).
 
 After running `polis init`, your directory will contain:
 
@@ -525,7 +525,7 @@ polis version
 
 **Example output:**
 ```
-polis 0.22.0
+polis 0.65.0
 ```
 
 ### `polis about`
@@ -700,7 +700,7 @@ Polis ships with six themes (turbo, zane, sols, vice, especial, especial-light).
 - **Dashboard**: Open **Settings > Theme** and click a theme card. The site re-renders automatically.
 - **CLI**: Edit `metadata/manifest.json`, set `active_theme`, then run `polis render --force`.
 
-For theme customization, creating custom themes, template variables, and mustache syntax, see [TEMPLATING.md](TEMPLATING.md).
+For theme customization, creating custom themes, template variables, and mustache syntax, see [TEMPLATING.md](templating.md).
 
 #### Embedded Source
 
@@ -1550,13 +1550,13 @@ Always use `polis migrate <new-domain>` when changing domains - don't just edit 
 
 ## Terminal User Interface (polis-tui)
 
-> **Deprecated** — The TUI is deprecated as of v0.46.0. Use the [webapp](WEBAPP-USER-MANUAL.md) instead for an interactive interface.
+> **Deprecated** — The TUI is deprecated as of v0.46.0. Use the [webapp](../../webapp/user/user-manual.md) instead for an interactive interface.
 
 ## Upgrading
 
-**Go CLI / self-hosters:** use **Tailor** to bring an existing site up to the current spec — `tailor --apply` runs in one pass for any historical layout, defaults to a dry-run diagnosis, and writes a timestamped backup before changing anything. See [actors.md](../../general/actors.md#tailor). (Tailor migrates *site data and layout*; it does not download binaries — the Go CLI ships as a single binary you replace directly.)
+**Go CLI / self-hosters:** use **Tailor** to bring an existing site up to the current spec — `tailor --apply` runs in one pass for any historical layout, defaults to a dry-run diagnosis, and writes a timestamped backup before changing anything. See [actors.md](../../general/concepts/actors.md#tailor). (Tailor migrates *site data and layout*; it does not download binaries — the Go CLI ships as a single binary you replace directly.)
 
-**Bash CLI:** `polis-upgrade` is the bash-specific tool for both site migrations and binary self-update (downloading updated `polis`/`polis-tui` binaries). Run `polis-upgrade --help` for the full set of options.
+**Bash CLI:** `polis-upgrade` is the bash-specific tool for both site migrations and binary self-update (downloading updated `polis`/`polis-tui` binaries). Run `polis-upgrade --help` for usage.
 
 ## Shell Completion
 
@@ -1628,7 +1628,7 @@ Run `polis rebuild` to regenerate `public.jsonl` from published files.
 ## Next Steps
 
 - Deploy your content to GitHub Pages, Netlify, or any static host
-- Read [security-model.md](../../general/security-model.md) for the full cryptographic model and threat analysis
+- Read [security-model.md](../../general/security/security-model.md) for the full cryptographic model and threat analysis
 - Customize your site with [templating.md](templating.md)
 - Try the [webapp](../../webapp/user/user-manual.md) for a visual interface
 
@@ -1638,4 +1638,4 @@ For issues, questions, or feature requests, please file an issue in the GitHub r
 
 ## License
 
-AGPL-3.0 - See [LICENSE](../LICENSE)
+AGPL-3.0 - See [LICENSE](../../../LICENSE)

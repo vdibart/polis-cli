@@ -45,6 +45,43 @@
     --color-accent-soft: var(--color-bolt-soft);
     --color-accent-bg: rgba(28, 111, 129, 0.10);
 
+    /* ── Sentence filter + cap-dot palette ─────────────────────────────
+       stardust is the ONLY theme with an inverted body/topbar polarity:
+       a LIGHT cream body but a DARK green topbar. The filter sits on the
+       topbar, so it must be cream/gold — but --color-text-soft (espresso,
+       #544d42) is tuned for the light body and reads dark-invisible on the
+       green. So stardust sets the shape's --filter-* tokens directly here
+       (every other theme inherits them from --color-text-soft + accent and
+       needs no override). This replaces the old
+       `.polis-topbar:not(:has(.pn-nav)) .sentence-filter {…}` rules — going
+       through the token means the cross-visit nav widget can repaint the
+       filter per-visitor via the cascade (no :has() gate needed). */
+    --filter-text: var(--color-tile);          /* cream on the green band */
+    --filter-text-hover: #ffffff;
+    --filter-underline: var(--color-tile);     /* cream underline, gold on hover */
+    --filter-underline-hover: var(--color-gold);
+    --filter-identity: var(--color-gold-light);/* brass identity slot */
+    --filter-dot: var(--color-gold-light);     /* brass cap dot */
+
+    /* Cross-visit filter palette buckets — see vice.css for the contract.
+       dark bucket = stardust's native cream/gold (its green band is dark).
+       light bucket = dark text + dimmed gold for light visitor bands.
+       Light-bucket text/hover are hardcoded (not var(--color-text-soft) /
+       var(--color-text)) because nav.js overrides those tokens per-visitor
+       on the topbar; the bucket must keep stardust's own values. */
+    --filter-dark-text: var(--color-tile);
+    --filter-dark-text-hover: #ffffff;
+    --filter-dark-underline: var(--color-tile);
+    --filter-dark-underline-hover: var(--color-gold);
+    --filter-dark-identity: var(--color-gold-light);
+    --filter-dark-dot: var(--color-gold-light);
+    --filter-light-text: #544d42;
+    --filter-light-text-hover: #2b2620;
+    --filter-light-underline: color-mix(in srgb, #9a7322 55%, transparent);
+    --filter-light-underline-hover: #9a7322;
+    --filter-light-identity: #9a7322;
+    --filter-light-dot: color-mix(in srgb, #9a7322 50%, transparent);
+
     /* Timeline: gold thread + red dots, set DIRECTLY (accent alone can't give a
        gold bar AND red dots; the shape would otherwise derive both from accent). */
     --color-timeline-bar: rgba(194, 146, 47, 0.42);
@@ -68,31 +105,39 @@
 
 /* ── Topbar: metallic verdigris-green band, gold trim ──────────── */
 /* Flat green — the gold's radial sheen didn't read on the green, so it's dropped.
-   Colour/border only; geometry (height/padding/position) stays the shape's. */
+   Colour/border only; geometry (height/padding/position) stays the shape's.
+   MUST go through --topbar-bg / --topbar-border (set at :root above), NOT
+   --color-nav-bg / --color-gold directly: the cross-visit nav widget repaints a
+   foreign visitor's topbar by overriding --topbar-bg/--topbar-border on the
+   element (nav.js renderNav). A hard-coded background/border here would beat that
+   override (theme CSS loads after the shape), stranding the bar in why's green
+   while the visitor's icons paint in their own theme — low-contrast, "off". The
+   :root tokens keep the static stardust render byte-identical (green + full gold,
+   no shape color-mix), so this is colour-neutral for the public page. */
 .polis-topbar {
-    background: var(--color-nav-bg);
-    border-bottom: 1px solid var(--color-gold);
+    background: var(--topbar-bg);
+    border-bottom: 1px solid var(--topbar-border);
 }
-/* Nav chrome reads cream on the dark green (wordmark FONT untouched = Newsreader). */
+/* Nav chrome reads cream on the dark green (wordmark FONT untouched = Newsreader).
+   Only why's OWN chrome (.polis-wordmark, the logged-out .polis-signin) is forced
+   cream. .polis-handle-label is deliberately NOT listed: it only appears when the
+   cross-visit nav widget repurposes .polis-signin for a foreign visitor, and it
+   must carry the VISITOR's theme — the shape paints it via --color-text-muted /
+   --color-text, which nav.js overrides per-visitor on the topbar. Forcing it cream
+   here would strand a visitor's handle in why's palette, unlike every other host
+   theme (which never overrides it). */
 .polis-wordmark { color: var(--color-tile); }
 .polis-wordmark:hover { color: #fff; }
-.polis-signin,
-.polis-handle-label { color: var(--color-tile); }
-.polis-signin:hover,
-.polis-handle-label:hover { color: #fff; }
+.polis-signin { color: var(--color-tile); }
+.polis-signin:hover { color: #fff; }
 
-/* ── Sentence filter on the green nav ──────────────────────────── */
-/* Cream text; cream interactive underline (gold on hover); brass identity slot.
-   Colour only — the filter's position/size is the shape's. */
-.sentence-filter { color: var(--color-tile); }
-.sentence-filter:hover { color: #fff; }
-.sf-slot--interactive { text-decoration-color: var(--color-tile); }
-.sf-slot--interactive:hover { text-decoration-color: var(--color-gold); }
-.sf-slot--identity { color: var(--color-gold-light); }
-
-/* ── Timeline end-cap dot (in the topbar): brass ───────────────── */
-/* Ties the cap of the gold thread to the trim + brass identity slot. */
-.pinned-dot::before { background: var(--color-gold-light); }
+/* ── Sentence filter + cap-dot ─────────────────────────────────────────
+   Cream text, cream→gold underline, brass identity slot + cap dot — all now
+   driven by the --filter-* / --filter-dark-* / --filter-light-* tokens set at
+   :root above (no rules needed here). The old
+   `.polis-topbar:not(:has(.pn-nav)) .sentence-filter {…}` overrides were
+   removed: routing through the tokens lets the cross-visit nav widget repaint
+   the filter per-visitor via the cascade, so the :has() gate is unnecessary. */
 
 /* ── Timeline thread: gold, fading at the ends ─────────────────── */
 /* Background (colour) only; .layout::before position is the shape's. */
@@ -146,9 +191,15 @@
 
 /* ── Quip (titleless post): large italic serif, narrow column ──── */
 /* The shape marks a quip's title .is-redundant (hidden); style the adjacent
-   body. NOT .quip-line — that class does not exist in the live shape. */
+   body. Two body structures: SIBLING quips put the body in .entry-content right
+   after the title-link; the FOCUS post (newest on index / main post per page)
+   wraps it in <main class="focus-content"> .content-body — the title-link's
+   adjacent sibling there is .focus-content, not .entry-content, so it needs its
+   own selector. NOT .quip-line — that class does not exist in the live shape. */
 .entry--post .entry-title-link.is-redundant + .entry-content,
-.entry--post .entry-title-link.is-redundant + .entry-content p {
+.entry--post .entry-title-link.is-redundant + .entry-content p,
+.entry--post .entry-title-link.is-redundant + .focus-content .content-body,
+.entry--post .entry-title-link.is-redundant + .focus-content .content-body p {
     font-family: var(--font-serif);
     font-style: italic;
     font-weight: 500;
@@ -157,7 +208,8 @@
     color: var(--color-text);
 }
 /* Narrower measure than headlined bodies (matches the mockup's ~38ch quip). */
-.entry--post .entry-title-link.is-redundant + .entry-content {
+.entry--post .entry-title-link.is-redundant + .entry-content,
+.entry--post .entry-title-link.is-redundant + .focus-content .content-body {
     max-width: 38ch;
 }
 .entry.is-focus-mode .entry-title-link.is-redundant + .entry-content,
@@ -202,9 +254,13 @@
 .layout-left .site-attr em { font-style: italic; }
 
 /* ── Avatar: bolt-in-disc, theme-CSS only (no .well-known pattern) ─ */
-/* White disc + petrol-teal bolt as a background data-URI; blank the initial. */
-.site-avatar {
-    background: #ffffff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 56 56'%3E%3Ccircle cx='28' cy='28' r='28' fill='%23ffffff'/%3E%3Cpath d='M21 7 L39 7 L29 25 L36 25 L20 51 L25 29 L16 29 Z' fill='%231c6f81'/%3E%3C/svg%3E") center / cover no-repeat;
-    color: transparent;
-    font-size: 0;
+/* The shape renders the avatar as <span class="avatar-initial"
+   style="background-color:#…;color:#…">V</span> INSIDE .site-avatar — a generated
+   default disc + initial. The bolt + transparent text therefore go on the SPAN
+   with !important, to beat that INLINE style (inline otherwise wins over theme
+   CSS). White disc + petrol-teal bolt as a background data-URI. */
+.site-avatar,
+.site-avatar .avatar-initial {
+    background: #ffffff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 56 56'%3E%3Ccircle cx='28' cy='28' r='28' fill='%23ffffff'/%3E%3Cpath d='M21 7 L39 7 L29 25 L36 25 L20 51 L25 29 L16 29 Z' fill='%231c6f81'/%3E%3C/svg%3E") center / cover no-repeat !important;
+    color: transparent !important;
 }

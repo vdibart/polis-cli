@@ -60,4 +60,4 @@ the same openness it takes to see what polis is for.
 
 *The mechanics behind blessing — the rules that decide what gets blessed, queued
 for review, or declined — live in [policy-grammar.md](policy-grammar.md). The
-wider case for polis is in [vision.md](vision.md).*
+wider case for polis is in [vision.md](../vision.md).*

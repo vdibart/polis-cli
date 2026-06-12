@@ -106,3 +106,40 @@ func TestPublishMessagesKey_ResignsUnderNewIdentity(t *testing.T) {
 		t.Error("re-signed block must NOT verify under the old identity key")
 	}
 }
+
+// TestPublishMessagesKey_PreservesOtherFields guards the Option-A repair path:
+// re-publishing the messages key must NOT disturb other well-known fields —
+// notably a custom author_name (mayoinmotion's Acoorn identifier string). It
+// uses the field-preserving raw write, so the repair restores DMs without
+// touching the operator's intentional site-name edit.
+func TestPublishMessagesKey_PreservesOtherFields(t *testing.T) {
+	siteDir := t.TempDir()
+	privPEM, pubSSH, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const acoorn = "mayoinmotion (X:115.73440a760bf_Y:188.aa0b7a427df)"
+	if err := SaveWellKnownRaw(siteDir, map[string]interface{}{
+		"public_key":  string(pubSSH),
+		"author_name": acoorn,
+		"site_title":  "Polis Lounge",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ProvisionAndPublishMessagesKey(siteDir, privPEM); err != nil {
+		t.Fatalf("provision+publish: %v", err)
+	}
+	raw, err := LoadWellKnownRaw(siteDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["public_key_messages"]; !ok {
+		t.Fatal("publish did not add public_key_messages")
+	}
+	if raw["author_name"] != acoorn {
+		t.Errorf("author_name (Acoorn string) was disturbed by republish: %v", raw["author_name"])
+	}
+	if raw["site_title"] != "Polis Lounge" {
+		t.Errorf("site_title disturbed: %v", raw["site_title"])
+	}
+}

@@ -13,9 +13,10 @@ This API covers **content type operations only**. Site settings, theme switching
 ## Quick Start
 
 ```bash
-# Generate an API key
-polis api-key create --name "my-script"
-# => polis_abc123...
+# Create an API key by hand (no generator command yet — see Authentication below)
+KEY="polis_$(openssl rand -hex 16)"
+printf '%s' "$KEY" | sha256sum   # record this hash in .polis/api-keys.json
+echo "$KEY"                       # use this value as the Bearer token
 
 # List posts (public, no auth needed)
 curl https://mysite.example.com/v1/content/post
@@ -38,7 +39,24 @@ Read operations (GET) on content and bundles are public. All write operations re
 Authorization: Bearer <api-key>
 ```
 
-API keys are generated via `polis api-key create` and stored as SHA-256 hashes in `.polis/api-keys.json`. Keys are prefixed with `polis_`.
+There is no key-generation command yet. An API key is any `polis_`-prefixed token whose **SHA-256 hash** you record in `.polis/api-keys.json`; the server hashes the presented Bearer token and compares against the stored hashes. Create one by hand:
+
+```bash
+KEY="polis_$(openssl rand -hex 16)"
+HASH=$(printf '%s' "$KEY" | sha256sum | cut -d' ' -f1)
+```
+
+Then add an entry to `.polis/api-keys.json` (create the file if it doesn't exist):
+
+```json
+{
+  "keys": [
+    { "id": "k1", "name": "my-script", "key_hash": "<HASH>", "created_at": "2026-06-11T00:00:00Z" }
+  ]
+}
+```
+
+Use the plaintext `$KEY` as the Bearer token — only its hash is stored, never the key itself.
 
 | Operation | Auth Required |
 |-----------|---------------|

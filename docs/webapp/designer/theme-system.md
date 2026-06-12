@@ -33,7 +33,7 @@ Individual themes provide only CSS and optional per-template overrides:
 
 The render pipeline resolves each template: theme dir → shape dir → error. Changing a template in the shape immediately updates all CSS-only themes. The active shape and active theme are recorded in `.polis/bundles/registry.json` (private per-tenant config).
 
-> Pre-bundle-refactor sites used a shared `themes/_base/` directory for the canonical HTML. Patrol/Medic migrate this into the bundle's shape automatically; see `docs/general/content-system.md` SHAPE/BUNDLE/THEME for the full model.
+> Pre-bundle-refactor sites used a shared `themes/_base/` directory for the canonical HTML. Patrol/Medic migrate this into the bundle's shape automatically; see `docs/general/concepts/content-system.md` SHAPE/BUNDLE/THEME for the full model.
 
 ## Available Themes
 
@@ -103,6 +103,45 @@ Every theme must define these CSS variables for the nav bar to function:
 --page-border: rgba(255,255,255,0.06);
 --page-accent: #d06888;
 ```
+
+### Sentence-filter polarity buckets (v4 stream theme CSS)
+
+The v4 stream shape lets the cross-visit nav widget paint the **sentence filter
++ cap dot** in the visited **site author's** theme (not the visitor's), selected
+per (author, visitor) pair. To support this, every theme CSS
+(`themes/<name>/<name>.css`) MUST declare two filter palettes at `:root`:
+
+```css
+/* LIGHT text/accent — used when the VISITOR's band is DARK */
+--filter-dark-text, --filter-dark-text-hover,
+--filter-dark-underline, --filter-dark-underline-hover,
+--filter-dark-identity, --filter-dark-dot
+/* DARK text/accent — used when the VISITOR's band is LIGHT */
+--filter-light-text, --filter-light-text-hover,
+--filter-light-underline, --filter-light-underline-hover,
+--filter-light-identity, --filter-light-dot
+```
+
+Rules of thumb (full contract in the banner comment at the top of
+`themes/vice/vice.css`):
+- **Define both buckets** regardless of your theme's own look — a foreign
+  visitor's band can be either polarity. One bucket matches your native filter;
+  the other is the inverted variant.
+- **Hardcode the colors** (literal hex / `color-mix` with literal hex). Do *not*
+  use `var(--color-accent)` / `var(--color-text-soft)` here — nav.js overrides
+  those on the topbar per-visitor and would drag your bucket to the visitor's
+  palette.
+- **Inverted-polarity themes** (light body + dark topbar, or vice-versa — only
+  `stardust` today) must ALSO set the base `--filter-text/-underline/-identity/-dot`
+  at `:root`, because the shape's default (derived from `--color-text-soft`) is
+  tuned for the body, not the topbar. See `themes/stardust/stardust.css`.
+
+The selection matrix (which palette each pairing uses, default = author bucket
+matching the visitor's band, fallback = visitor) lives as `SF_SELECTION` in the
+hosted nav script (`nav.js`). If a theme omits the selected bucket, nav.js
+detects the missing token and falls back to the visitor's theme (so a missing
+bucket degrades gracefully rather than rendering a broken color) — but you should
+still define both buckets so author-themed selection works for your theme.
 
 ## Cross-Theme Compatibility
 
