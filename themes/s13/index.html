@@ -1,0 +1,53 @@
+<!--
+    Polis Theme: S13 - Homepage Template
+
+    Snippets loaded by this template:
+    - theme:about        - About section (theme: snippets/about.html)
+    - theme:post-item    - Post list item (theme: snippets/post-item.html)
+    - theme:comment-item - Comment list item (theme: snippets/comment-item.html)
+
+    To override a theme snippet, create a global snippet with the same name
+    and change the "theme:" prefix to use the global version instead.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{site_title}}</title>
+    <meta name="description" content="{{site_title}} - A polis site">
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <main class="home-main">
+        <section class="home-intro">
+            <div class="container">
+                <h1 class="home-title">{{site_title}}</h1>
+                <p class="home-subtitle">A chronological Polis blog. Latest posts are always on top.</p>
+            </div>
+        </section>
+
+        <!-- Recent Posts -->
+        <section class="recent-posts">
+        <div class="container">
+            <h2 class="section-title">Latest Posts</h2>
+            <div class="post-list">
+{{#posts}}
+                {{> theme:post-item}}
+{{/posts}}
+            </div>
+        </div>
+        </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="site-footer">
+        <a href="https://github.com/vdibart/polis-cli" class="footer-logo">POLIS<span class="footer-tagline">View project on GitHub</span></a>
+    </footer>
+
+    <script src="s13.js"></script>
+</body>
+</html>
