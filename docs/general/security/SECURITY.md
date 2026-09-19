@@ -1,16 +1,14 @@
 # Security Policy
 
 > **Scope:** This file documents the vulnerability reporting policy only. For the deeper security docs, see:
-> - [`security-model.md`](security-model.md) — full threat model, cryptographic design (Ed25519 signing, key continuity / proto-TOFU), trust model, attack vectors
-> - [`dm-encryption.md`](dm-encryption.md) — direct-message encryption design
-> - [`registration-and-privacy.md`](registration-and-privacy.md) — discovery-service registration, hard delete, privacy guarantees
+> - [`security-model.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/security/security-model.md) — full threat model, cryptographic design (Ed25519 signing, key continuity / proto-TOFU), trust model, attack vectors
+> - [`dm-encryption.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/security/dm-encryption.md) — direct-message encryption design
+> - [`registration-and-privacy.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/security/registration-and-privacy.md) — discovery-service registration, what unregistering removes, privacy guarantees
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.50.x+ | :white_check_mark: |
-| < 0.50  | :x:                |
+Security fixes are made in the **latest release only**. There are no maintenance branches, so a fix reaches
+you by upgrading. Earlier releases are not patched.
 
 ## Reporting a Vulnerability
 
@@ -37,11 +35,19 @@ Include the following in your report:
 
 ### Scope
 
-This security policy applies to:
+This security policy applies to the polis project, meaning the code in this repository:
 - The Go CLI (`cli-go/cmd/polis/`)
-- The Bash CLI (`cli-bash/bin/polis`)
+- The Bash CLI (`cli-bash/`)
 - The webapp (`webapp/`)
 - Associated configuration and metadata files
+
+It also applies to two services operated alongside the project:
+- **polis.pub**, the hosted service. ⚠️ **polis.pub is not the polis project or this repository.** It is a service that runs
+  polis for people who do not want to host it themselves, and the code that operates it is not in this repository.
+- **The discovery service** that polis.pub operates. Its source is not in this repository either.
+
+For these two services you cannot point at code, so describe the behaviour you observed: the request, the response, and
+why it is a vulnerability.
 
 ### Out of Scope
 
@@ -51,9 +57,9 @@ This security policy applies to:
 
 ## Security Best Practices for Users
 
-1. **Verify downloads**: Always verify the SHA256 checksum after downloading
+1. **Verify downloads**: Each release publishes a `checksums.txt` of SHA-256 sums for its archives. Download it beside the archive and check:
    ```bash
-   sha256sum -c polis.sha256
+   sha256sum -c --ignore-missing checksums.txt
    ```
 
 2. **Protect your keys**: Your Ed25519 private key in `.polis/keys/` should never be shared

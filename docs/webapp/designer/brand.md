@@ -1,23 +1,24 @@
 # Brand Identity
 
+*For* [Contributors](../../README.md#contributing-to-polis) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [Webapp](../README.md)
+
 ## Logo / Wordmark
 
-The polis logo is the word "polis" set in **Newsreader italic** at weight 500-600. It is not a graphic mark — the typography *is* the brand.
+The polis logo is the word "polis" set in **Newsreader italic** at weight 550. It is not a graphic mark — the typography *is* the brand.
 
 | Context | Size | Weight | Notes |
 |---------|------|--------|-------|
-| System topbar (logged out) | 20px | 500 | Centered in viewport, brightest text color |
-| Icon nav bar (logged in) | 20px | 600 | Centered in viewport, `--nav-icon-active` color |
-| Footer | 20px | 500 | Left-aligned, paired with tagline |
+| polis.pub landing topbar (logged out) | 24px | 550 | Left edge of the topbar, main text color at 90% opacity |
+| Public site topbar (a tenant's stream shape) | 24px | 550 | Left edge; hidden once a logged-in visitor's nav widget fills the bar |
+| Owner webapp (logged in) | — | — | No wordmark: the avatar and icon row take its place |
 
 **Rules:**
 - Always italic, always Newsreader
-- Always centered horizontally in the full viewport (not the content column)
 - Never paired with a graphic icon or symbol
-- The wordmark is branding, not navigation. Clicking it scrolls to top of the current page. It does not navigate between pages.
+- The wordmark is branding, not navigation. On the landing page it links to the top of the page.
 - No notification indicator dot on the wordmark
 
-**Tagline:** "the space we share" — used in the landing page hero and footer. Set in Newsreader italic, smaller size, muted color.
+**Tagline:** "yours, truly" — pinned in the landing topbar (Newsreader italic, 23px, pink), and closing the landing hero headline: *"Your story. Your community. Yours, truly."*
 
 ## Typography
 
@@ -25,14 +26,14 @@ Three font families, each with a distinct role:
 
 ### Newsreader (serif)
 - **Role:** Content, headings, brand expression
-- **Usage:** Post titles, excerpts, hero headlines, the "polis" wordmark, bio text, tagline
+- **Usage:** Post titles, excerpts, the "polis" wordmark, bio text, tagline. (The landing page's headlines are set in an italic Georgia serif stack.)
 - **Character:** Literary, warm, editorial. Says "this is a place for writing."
 - **Weights:** 400 (body), 500 (headings), 600 (wordmark)
 - **Always italic** for the wordmark and hero headlines. Regular for content body.
 
 ### Inter (UI sans-serif)
 - **Role:** Interface elements, navigation, labels, metadata
-- **Usage:** Nav tooltips, section labels, timestamps, stats, buttons, form inputs, stream action lines ("marina published...")
+- **Usage:** Nav tooltips, section labels, timestamps, stats, buttons, form inputs, stream action lines ("marina published...") — in the webapp and stream. The landing page uses the system sans-serif stack instead.
 - **Character:** Clean, functional, disappears. The UI should feel like it's not there.
 - **Weights:** 400 (body), 500 (labels/links), 600 (buttons/counts), 700 (avatar initials)
 
@@ -43,10 +44,9 @@ Three font families, each with a distinct role:
 - **Weight:** 400 only
 
 ### Sizing Scale
-- Hero headline: 48px (Newsreader italic)
-- Section headline: 32px (Newsreader)
-- Post title (in stream): 16px (Newsreader, weight 500)
-- Post title (on site page): 18px (Newsreader, weight 500)
+- Landing hero headline: fluid, 2.7rem–4.6rem (italic serif)
+- Landing section headline: fluid, 1.9rem–2.7rem (italic serif)
+- Post title (stream entry): 18px, 16px under 600px wide (Newsreader, weight 500)
 - Body text (landing page): 17-19px (Newsreader)
 - UI text: 14px (Inter)
 - Labels/meta: 11-13px (Inter)
@@ -54,31 +54,32 @@ Three font families, each with a distinct role:
 
 ## System Color Palette (SOLS)
 
-SOLS is the system theme — what you see when logged out. It is the brand palette. It is **not** available as a personal theme (see [theme-system.md](theme-system.md) for why).
+SOLS is the system theme — what you see when logged out. It is the brand palette. It is **not** available as a personal theme (see [Themes](../../general/concepts/themes.md#what-ships-today) for why).
+
+The values below are the landing page's own tokens (`:root` in `webapp/internal/hosted/landing.go`). ⚠️ The `sols` theme file in the core bundle (`themes/sols/sols.css`) shares the peach, pink and cream family but not every value — its page background, for instance, is `#1a1525`.
 
 ### Backgrounds
 | Token | Value | Usage |
 |-------|-------|-------|
-| bg | `#211c35` | Page background (landing-hybrid uses this) |
-| bg-alt | `#1a1525` | Slight variation |
-| bg-raised | `#2a2440` | Form inputs, elevated surfaces |
-| bg-card | `#2e2848` | Cards, panels, steps |
+| bg | `#211c35` | Page background |
+| bg-raised | `#2a2340` | Form inputs, elevated surfaces |
+| bg-subtle | `#332c4a` | Cards, subtle panels |
 
 ### Text
 | Token | Value | Usage |
 |-------|-------|-------|
-| text | `#f0e8dc` | Primary text (warm cream) |
-| text-dim | `#a89e90` | Secondary text, subtitles |
-| text-muted | `#7a7068` | Tertiary text, timestamps, meta |
+| text | `#f2ebe0` | Primary text (warm cream) |
+| text-dim | `#c4b4a2` | Secondary text, subtitles |
+| text-muted | `#a49684` | Tertiary text, timestamps, meta |
 
 ### Accents
 | Token | Value | Usage |
 |-------|-------|-------|
-| peach | `#e8a060` | Primary accent — headlines, CTAs, links, site card handles |
-| peach-hover | `#f0b070` | Hover state for peach elements |
-| pink | `#d4829a` | Secondary accent — section labels, target authors, blessing step labels |
-| violet-line | `#3d3558` | Borders, dividers, separator lines |
-| green | `#6fcf7c` | Live activity indicator dot |
+| peach | `#e8a060` | Primary accent — CTAs, links, "Join" |
+| peach-soft | `#f0c090` | Softer peach |
+| pink | `#d4829a` | Secondary accent — the topbar tagline, labels |
+| border | `rgba(212,130,154,0.15)` | Borders, dividers |
+| green | `#a0d0a0` | Success messages, the "free" indicator dot |
 
 ### Alert
 | Token | Value | Usage |
@@ -102,7 +103,7 @@ Polis communication is **confident, direct, and literary**. Not corporate, not s
 - Explain what polis isn't — show what it is
 
 **Examples:**
-- Good: "The space we share."
+- Good: "Your story. Your community. Yours, truly."
 - Good: "Your words, your domain, your key, owned by you."
 - Bad: "The decentralized social platform that puts you in control!"
 - Bad: "Unlike other platforms, we don't..."

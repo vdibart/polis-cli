@@ -3,8 +3,7 @@
 // Phase 1 implements only the "blessed" kind: a verified local copy of a
 // blessed comment authored by ANOTHER tenant, kept so the post author can
 // display it without re-fetching on every render and WITHOUT polluting their
-// canonical content tree. See plans/comment-registration-severe-bug.md
-// (Defect 3): the old code wrote the foreign comment byte-for-byte into the
+// canonical content tree. The old code wrote the foreign comment byte-for-byte into the
 // blesser's content/pub.polis.core/comment/ tree, where it masqueraded as the
 // blesser's own content and was served from the wrong domain.
 //
@@ -14,11 +13,9 @@
 //	<dataDir>/.polis/ds/<dsDomain>/pub.polis.core/cache/blessed/<authorDomain>/<date>/<id>.md.meta.json
 //
 // The mirror is NEVER added to index.jsonl and NEVER registered with the DS.
-// The generic, kind-agnostic cache contract (descriptor/registry) that lets
-// Rosie manage many cache kinds uniformly is deferred — see
-// plans/rosie-cache-custodian-design.md. This package is the concrete blessed
-// cache it will later generalize (the sidecar here is a forward-compatible
-// subset of that schema, so generalizing is additive).
+// The kind-agnostic contract (descriptor/registry, contract.go) generalizes
+// this concrete cache; the blessed kind is registered through it
+// (blessed_descriptor.go), which lifts BlessedSidecar into its Sidecar.
 package cache
 
 import (
@@ -35,8 +32,7 @@ import (
 // BlessedSidecar is the provenance metadata written alongside each cached
 // blessed comment. fetched_at/verified_at are recorded EXPLICITLY (never
 // inferred from mtime, which is fragile across tar restore/export, rsync, and
-// backup). Fields are a forward-compatible subset of the future generic cache
-// schema (plans/rosie-cache-custodian-design.md).
+// backup). blessed_descriptor.go lifts it into the generic Sidecar (contract.go).
 type BlessedSidecar struct {
 	Kind               string `json:"kind"`                 // always "blessed"
 	SourceURL          string `json:"source_url"`           // the comment's canonical URL (the dereferenceable artifact)

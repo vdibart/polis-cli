@@ -1,8 +1,6 @@
 package tailor
 
 import (
-	"bufio"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,9 +17,11 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
+	"github.com/vdibart/polis-cli/cli-go/pkg/index"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/sitecheck"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 )
 
@@ -84,25 +84,24 @@ func checkWellKnownVersion(ctx *runContext) CheckResult {
 // in .well-known/polis. Idempotent — no-op when only `author_name` is present.
 // Must run before content-aware F9 (which flags an empty author_name).
 //
-// Mirror of patrol.checkAuthorFieldStale + site.MigrateAuthorField. Sibling
-// to checkWellKnownLegacyConfig but kept separate because it's a value
-// migration, not a key removal.
+// Reads through sitecheck.LegacyAuthorField, which Patrol's checkAuthorFieldStale
+// also reads; the repair is site.MigrateAuthorField. ⚠️ The rules differ on
+// purpose: Patrol reports the key whenever present, this migrates only a string
+// `author` with no `author_name`. Sibling to checkWellKnownLegacyConfig but kept
+// separate because it's a value migration, not a key removal.
 func checkAuthorFieldMigration(ctx *runContext) CheckResult {
 	const name = "author-field-migration"
 	const reason = "CLI renamed the .well-known/polis `author` field to `author_name` for consistency with content-type field naming"
 
-	wkPath := filepath.Join(ctx.siteDir, ".well-known", "polis")
-	data, err := os.ReadFile(wkPath)
-	if err != nil {
+	la := sitecheck.LegacyAuthorField(ctx.siteDir)
+	if la.ReadErr != nil {
 		return skip(name, "cannot read .well-known/polis", reason)
 	}
-	var raw map[string]interface{}
-	if err := json.Unmarshal(data, &raw); err != nil {
+	if la.ParseErr != nil {
 		return skip(name, "cannot parse .well-known/polis", reason)
 	}
-	author, hasAuthor := raw["author"].(string)
-	_, hasAuthorName := raw["author_name"].(string)
-	if !hasAuthor || hasAuthorName {
+	author := la.Author
+	if !la.AuthorIsString || la.AuthorNameIsString {
 		return pass(name, "author_name already in use (or no author field)")
 	}
 	action := Action{Op: "migrate", Path: ".well-known/polis",
@@ -515,21 +514,41 @@ func checkPathSeparators(ctx *runContext) CheckResult {
 
 // ── Phase 5: Derived data rebuild ───────────────────────────────────
 
-// checkIndexRebuild rebuilds content/pub.polis.core/index.jsonl from post frontmatter.
+// checkIndexRebuild regenerates the content index — by DELEGATING to
+// pkg/index, which is the one implementation of it.
+//
+// ⛔ It used to carry a complete second rebuilder: its own walk of post/, its
+// own entry struct (a THIRD one), and its own whole-file write. Because it
+// compared whole-file content against a posts-only rebuild, any site with
+// blessed comments mismatched FOREVER — Tailor reported "Content index needs
+// rebuild" on every cycle, permanently, and would have truncated the comments
+// if it had ever acted. That is the duplication epic 20's D9 forbade.
+//
+// ⚠️ Check id, message shapes and Action payloads are unchanged on purpose:
+// Patrol baselines and operator tooling read them.
 func checkIndexRebuild(ctx *runContext) CheckResult {
 	const name = "index-rebuild"
 	const reason = "The content index must reference current paths — rebuilding from post frontmatter ensures consistency after layout migration"
 
-	postsDir := filepath.Join(ctx.siteDir, "content", "pub.polis.core", "post")
-	indexPath := filepath.Join(ctx.siteDir, "content", "pub.polis.core", "index.jsonl")
+	indexPath := index.IndexPath(ctx.siteDir)
+	indexRel := relPath(ctx.siteDir, indexPath)
 
 	// Also check for old index location
 	oldIndexPath := filepath.Join(ctx.siteDir, "metadata", "public.jsonl")
 
-	if !dirExists(postsDir) {
-		// No posts directory yet — ensure empty index exists
+	_, plan, planErr := index.PlanContentIndex(ctx.siteDir, nil)
+	if planErr != nil {
+		return skip(name, fmt.Sprintf("cannot plan content index: %v", planErr), reason)
+	}
+
+	// ⛔ Decided by what there is to INDEX, not by whether a posts directory
+	// exists. This used to early-return on a missing post/ dir, so a site that
+	// had only tags or attestations — the operator site is one — never had
+	// them indexed and never self-healed (Signet epic 37 D2).
+	if plan.Total == 0 && !fileExists(oldIndexPath) {
+		// Nothing to index yet — ensure empty index exists
 		if !fileExists(indexPath) {
-			actions := []Action{{Op: "create", Path: "content/pub.polis.core/index.jsonl", Detail: "empty index"}}
+			actions := []Action{{Op: "create", Path: indexRel, Detail: "empty index"}}
 			if ctx.dryRun {
 				return fail(name, "Missing content index", reason, actions)
 			}
@@ -537,75 +556,11 @@ func checkIndexRebuild(ctx *runContext) CheckResult {
 			os.WriteFile(indexPath, []byte{}, 0644)
 			return CheckResult{Name: name, Status: StatusFail, Message: "Created empty content index", Reason: reason, Actions: actions}
 		}
-		return pass(name, "Content index exists (no posts to index)")
-	}
-
-	// Walk posts directory and build entries
-	type indexEntry struct {
-		Type           string `json:"type"`
-		Path           string `json:"path"`
-		Title          string `json:"title"`
-		Published      string `json:"published"`
-		CurrentVersion string `json:"current_version"`
-	}
-
-	var entries []indexEntry
-	filepath.Walk(postsDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			if info != nil && info.IsDir() && info.Name() == ".versions" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(info.Name(), ".md") {
-			return nil
-		}
-
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-
-		fm := parseFrontmatter(string(content))
-		rel := relPath(ctx.siteDir, path)
-
-		entry := indexEntry{
-			Type:           "post",
-			Path:           rel,
-			Title:          fm["title"],
-			Published:      fm["published"],
-			CurrentVersion: fm["current-version"],
-		}
-
-		// If current-version is missing, compute hash from body
-		if entry.CurrentVersion == "" {
-			body := stripFrontmatter(string(content))
-			hash := sha256.Sum256([]byte(canonicalizeContent(body)))
-			entry.CurrentVersion = fmt.Sprintf("sha256:%x", hash)
-		}
-
-		entries = append(entries, entry)
-		return nil
-	})
-
-	// Sort by published date (newest first)
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Published > entries[j].Published
-	})
-
-	// Build JSONL content
-	var lines []string
-	for _, entry := range entries {
-		data, _ := json.Marshal(entry)
-		lines = append(lines, string(data))
-	}
-	newContent := strings.Join(lines, "\n")
-	if len(lines) > 0 {
-		newContent += "\n"
+		return pass(name, "Content index exists (nothing to index)")
 	}
 
 	var actions []Action
-	needsRebuild := false
+	needsRebuild := plan.Changed
 
 	// Check if old index exists at legacy location
 	if fileExists(oldIndexPath) {
@@ -616,25 +571,21 @@ func checkIndexRebuild(ctx *runContext) CheckResult {
 		needsRebuild = true
 	}
 
-	// Check if current index matches
-	existingData, _ := os.ReadFile(indexPath)
-	if string(existingData) != newContent {
-		needsRebuild = true
-	}
-
 	if !needsRebuild && fileExists(indexPath) {
-		return pass(name, fmt.Sprintf("Content index up to date (%d entries)", len(entries)))
+		return pass(name, fmt.Sprintf("Content index up to date (%d entries)", plan.Total))
 	}
 
-	actions = append(actions, Action{Op: "create", Path: "content/pub.polis.core/index.jsonl", Detail: fmt.Sprintf("%d entries", len(entries))})
+	actions = append(actions, Action{Op: "create", Path: indexRel, Detail: fmt.Sprintf("%d entries", plan.Total)})
 
 	if ctx.dryRun {
-		return fail(name, fmt.Sprintf("Content index needs rebuild (%d posts)", len(entries)), reason, actions)
+		return fail(name, fmt.Sprintf("Content index needs rebuild (%d posts)", plan.Rebuilt[index.EntryTypePost]), reason, actions)
 	}
 
-	os.MkdirAll(filepath.Dir(indexPath), 0755)
-	os.WriteFile(indexPath, []byte(newContent), 0644)
-	return CheckResult{Name: name, Status: StatusFail, Message: fmt.Sprintf("Rebuilt content index with %d entries", len(entries)), Reason: reason, Actions: actions}
+	result, err := index.RebuildContentIndex(ctx.siteDir, nil)
+	if err != nil {
+		return fail(name, fmt.Sprintf("Failed to rebuild content index: %v", err), reason, actions)
+	}
+	return CheckResult{Name: name, Status: StatusFail, Message: fmt.Sprintf("Rebuilt content index with %d entries", result.Total), Reason: reason, Actions: actions}
 }
 
 // ── Phase 5.5: Re-render site ───────────────────────────────────────
@@ -1146,9 +1097,9 @@ func checkAvatarConfig(ctx *runContext) CheckResult {
 	}
 
 	wk.Avatar = site.GenerateDefaultAvatar()
-	// Preserving save so adding the default avatar doesn't drop public_key_messages
-	// (not modeled by the WellKnown struct) for a DM-provisioned self-hosted site.
-	if err := site.SaveWellKnownPreserving(ctx.siteDir, wk); err != nil {
+	// SaveWellKnown is lossless: public_key_messages and every other member the
+	// struct does not model ride through in wk.Extra.
+	if err := site.SaveWellKnown(ctx.siteDir, wk); err != nil {
 		return fail(name, fmt.Sprintf("Failed to save: %v", err), reason, actions)
 	}
 	return CheckResult{Name: name, Status: StatusFail, Message: "Generated default avatar config", Reason: reason, Actions: actions}
@@ -1211,12 +1162,11 @@ func checkDMDirectories(ctx *runContext) CheckResult {
 	const name = "dm-directories"
 	const reason = "DM conversations are stored in .polis/bundles/pub.polis.core/dm/conversations/ with restricted permissions"
 
-	convPath := filepath.Join(ctx.siteDir, ".polis", "bundles", "pub.polis.core", "dm", "conversations")
+	convPath := sitecheck.DMConversationsDir(ctx.siteDir)
 
-	if dirExists(convPath) {
+	if info, err := sitecheck.DMConversations(ctx.siteDir); err == nil && info.IsDir() {
 		// Check permissions
-		info, err := os.Stat(convPath)
-		if err == nil && info.Mode().Perm() != 0700 {
+		if info.Mode().Perm() != 0700 {
 			actions := []Action{{Op: "update", Path: ".polis/bundles/pub.polis.core/dm/conversations", Detail: fmt.Sprintf("chmod %o → 0700", info.Mode().Perm())}}
 			if ctx.dryRun {
 				return fail(name, fmt.Sprintf("DM directory has unsafe permissions: %o", info.Mode().Perm()), reason, actions)
@@ -1251,9 +1201,9 @@ func checkDMDirectories(ctx *runContext) CheckResult {
 //  1. R21-1 (DM policy auto-remediation gap). Legacy tenants missing
 //     the DM `allow` rule in private rules.jsonl: their file won't
 //     match DefaultPrivatePolicyContent() so this converge overwrites,
-//     restoring the rule. Hosted Medic still needs explicit wiring for
-//     the same case (see operational-hardening.md R21-1) — that's a
-//     parallel fix on the hosted side.
+//     restoring the rule. Hosted, the same case needs no heal: Patrol's
+//     DM-policy check accepts the rules in either the public or the
+//     private file, and the public default carries them.
 //
 //  2. Policy v1 → v2 silent upgrade (commit 26acb46b). v1 files differ
 //     from the v2 canonical content so this same converge upgrades.
@@ -1270,21 +1220,14 @@ func checkPolicyContentConverge(ctx *runContext) CheckResult {
 	privPath := filepath.Join(ctx.siteDir, ".polis", "policies", "rules.jsonl")
 	pubPath := filepath.Join(ctx.siteDir, "policies", "rules.jsonl")
 
-	var drifted []string
+	drifted := sitecheck.PolicyContentDrift(ctx.siteDir)
 	var actions []Action
-
-	if privData, err := os.ReadFile(privPath); err == nil {
-		if strings.TrimSpace(string(privData)) != strings.TrimSpace(policy.DefaultPrivatePolicyContent()) {
-			drifted = append(drifted, "private")
-			actions = append(actions, Action{Op: "update", Path: ".polis/policies/rules.jsonl", Detail: "converge to canonical template"})
+	for _, d := range drifted {
+		rel := "policies/rules.jsonl"
+		if d == "private" {
+			rel = ".polis/policies/rules.jsonl"
 		}
-	}
-
-	if pubData, err := os.ReadFile(pubPath); err == nil {
-		if strings.TrimSpace(string(pubData)) != strings.TrimSpace(policy.DefaultPublicPolicyContent()) {
-			drifted = append(drifted, "public")
-			actions = append(actions, Action{Op: "update", Path: "policies/rules.jsonl", Detail: "converge to canonical template"})
-		}
+		actions = append(actions, Action{Op: "update", Path: rel, Detail: "converge to canonical template"})
 	}
 
 	if len(drifted) == 0 {
@@ -1316,22 +1259,18 @@ func checkWebappViewMode(ctx *runContext) CheckResult {
 	const name = "webapp-view-mode"
 	const reason = "The view_mode webapp config key is deprecated — the webapp now uses a unified layout"
 
-	configPath := filepath.Join(ctx.siteDir, ".polis", "webapp", "config.json")
+	configPath := sitecheck.WebappConfigPath(ctx.siteDir)
 	if !fileExists(configPath) {
 		return pass(name, "No webapp config file")
 	}
 
-	data, err := os.ReadFile(configPath)
-	if err != nil {
+	state, obj := sitecheck.WebappViewMode(ctx.siteDir)
+	switch state {
+	case sitecheck.ViewModeUnreadable:
 		return pass(name, "Cannot read webapp config")
-	}
-
-	var obj map[string]interface{}
-	if err := json.Unmarshal(data, &obj); err != nil {
+	case sitecheck.ViewModeUnparseable:
 		return pass(name, "Cannot parse webapp config")
-	}
-
-	if _, exists := obj["view_mode"]; !exists {
+	case sitecheck.ViewModeAbsent:
 		return pass(name, "No deprecated view_mode key")
 	}
 
@@ -1375,17 +1314,6 @@ func appendPolicyRule(path, ruleLine string) error {
 	return err
 }
 
-// checkBlessedCacheGC is the self-hoster equivalent of the hosted Rosie actor's
-// GC pass: it removes structurally-orphaned blessed-comment cache entries — a
-// cached body with no readable .meta.json provenance sidecar, which is unsafe
-// to display and regenerable by a later sync.
-//
-// SCOPE: this is the OFFLINE slice of Rosie a self-hoster can run without a live
-// discovery client. The full custodian work — reconcile (desired-vs-present:
-// re-fetch missing, evict withdrawn/denied) and integrity re-verification —
-// needs DS access + network and runs in the hosted Rosie goroutine
-// (webapp/internal/hosted/rosie.go) or whenever the self-hosted webapp syncs.
-// See plans/rosie-cache-custodian-design.md (WS-R2: "Tailor-integrated check").
 // checkForeignContentInPublicPath enforces the core principle that no content
 // authored by ANOTHER tenant may live in this site's PUBLIC paths. It walks the
 // public comment + post SOURCE trees (content/pub.polis.core/{comment,post}) for
@@ -1393,58 +1321,40 @@ func appendPolicyRule(path, ruleLine string) error {
 // Defect-3 copies the old blessing flow left behind — backs each up (Apply mode)
 // and removes it, plus its rendered mount sibling ({comments,posts}/…html). This
 // is the self-hoster equivalent of Medic's foreign-content quarantine; the
-// isolated blessed-comment cache (+ Rosie/render read-through) is the only place
+// isolated blessed-comment cache (+ cache-upkeep/render read-through) is the only place
 // a foreign comment may live. The owner's OWN content (author == site domain) is
-// canonical and left untouched.
+// canonical and left untouched. The walk and the author read are
+// sitecheck.ForeignContent, which Patrol's foreign-content sensor also calls.
 func checkForeignContentInPublicPath(ctx *runContext) CheckResult {
 	name := "foreign-content-in-public-path"
-	reason := "no content authored by another tenant may live in a public path; the isolated blessed-comment cache is its only home (comment-registration-severe-bug / rosie-cache-custodian)"
+	reason := "no content authored by another tenant may live in a public path; the isolated blessed-comment cache is its only home"
 
 	owner := tailorSiteDomain(ctx.baseURL)
 	if owner == "" {
 		return pass(name, "site domain unknown — skipped")
 	}
 
+	mounts := map[string]string{"comment": "comments", "post": "posts"}
 	var actions []Action
-	for _, ct := range []struct{ sub, mount string }{{"comment", "comments"}, {"post", "posts"}} {
-		root := filepath.Join(ctx.siteDir, "content", "pub.polis.core", ct.sub)
-		srcPrefix := "content/pub.polis.core/" + ct.sub + "/"
-		filepath.WalkDir(root, func(path string, d os.DirEntry, werr error) error {
-			if werr != nil {
-				return nil
-			}
-			if d.IsDir() {
-				if path != root && strings.HasPrefix(d.Name(), ".") {
-					return filepath.SkipDir // .versions/, etc.
-				}
-				return nil
-			}
-			if !strings.HasSuffix(d.Name(), ".md") {
-				return nil
-			}
-			author := tailorFrontmatterAuthor(path)
-			if author == "" || author == owner {
-				return nil // owner's own content (or unknowable) — leave it
-			}
-			rel, _ := filepath.Rel(ctx.siteDir, path)
-			rel = filepath.ToSlash(rel)
-			if !ctx.dryRun {
-				backupFile(ctx.siteDir, ctx.backupDir, rel)
-				os.Remove(path)
-			}
-			actions = append(actions, Action{Op: "remove", Path: rel, Detail: fmt.Sprintf("foreign content in public path (author=%s)", author)})
+	for _, f := range sitecheck.ForeignContent(ctx.siteDir, owner, "comment", "post") {
+		srcPrefix := "content/pub.polis.core/" + f.Type + "/"
+		rel := filepath.ToSlash(f.Path)
+		author := f.Author
+		if !ctx.dryRun {
+			backupFile(ctx.siteDir, ctx.backupDir, rel)
+			os.Remove(filepath.Join(ctx.siteDir, f.Path))
+		}
+		actions = append(actions, Action{Op: "remove", Path: rel, Detail: fmt.Sprintf("foreign content in public path (author=%s)", author)})
 
-			// Rendered mount sibling (no frontmatter to scan) — remove by association.
-			mountRel := ct.mount + "/" + strings.TrimSuffix(strings.TrimPrefix(rel, srcPrefix), ".md") + ".html"
-			if _, e := os.Stat(filepath.Join(ctx.siteDir, mountRel)); e == nil {
-				if !ctx.dryRun {
-					backupFile(ctx.siteDir, ctx.backupDir, mountRel)
-					os.Remove(filepath.Join(ctx.siteDir, mountRel))
-				}
-				actions = append(actions, Action{Op: "remove", Path: mountRel, Detail: fmt.Sprintf("foreign content in public path, rendered mount (author=%s)", author)})
+		// Rendered mount sibling (no frontmatter to scan) — remove by association.
+		mountRel := mounts[f.Type] + "/" + strings.TrimSuffix(strings.TrimPrefix(rel, srcPrefix), ".md") + ".html"
+		if _, e := os.Stat(filepath.Join(ctx.siteDir, mountRel)); e == nil {
+			if !ctx.dryRun {
+				backupFile(ctx.siteDir, ctx.backupDir, mountRel)
+				os.Remove(filepath.Join(ctx.siteDir, mountRel))
 			}
-			return nil
-		})
+			actions = append(actions, Action{Op: "remove", Path: mountRel, Detail: fmt.Sprintf("foreign content in public path, rendered mount (author=%s)", author)})
+		}
 	}
 
 	if len(actions) == 0 {
@@ -1466,39 +1376,21 @@ func tailorSiteDomain(baseURL string) string {
 	return s
 }
 
-// tailorFrontmatterAuthor reads the YAML frontmatter `author` field of a markdown
-// file (mirrors clerk/patrol's local extractors — kept local to keep the actors
-// independent). Returns "" when not found.
-func tailorFrontmatterAuthor(path string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	inFM := false
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "---" {
-			if inFM {
-				return "" // end of frontmatter, author not found
-			}
-			inFM = true
-			continue
-		}
-		if !inFM {
-			continue
-		}
-		if strings.HasPrefix(line, "author:") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "author:"))
-		}
-	}
-	return ""
-}
-
+// checkBlessedCacheGC is the self-hoster equivalent of the hosted cache
+// upkeep's GC pass (Medic's; Rosie's until epic 21.8): it removes
+// structurally-orphaned blessed-comment cache entries — a
+// cached body with no readable .meta.json provenance sidecar, which is unsafe
+// to display and regenerable by a later sync.
+//
+// SCOPE: this is the OFFLINE slice of the upkeep a self-hoster can run without a live
+// discovery client. The full custodian work — reconcile (desired-vs-present:
+// re-fetch missing, evict withdrawn/denied) and integrity re-verification —
+// needs DS access + network and runs in hosted Medic's daily cache upkeep
+// (webapp/internal/hosted/medic_cache.go) or whenever the self-hosted webapp
+// syncs.
 func checkBlessedCacheGC(ctx *runContext) CheckResult {
 	name := "blessed-cache-gc"
-	reason := "an orphan blessed-comment cache body (no provenance sidecar) is unsafe to display and regenerable; Rosie GCs them (rosie-cache-custodian)"
+	reason := "an orphan blessed-comment cache body (no provenance sidecar) is unsafe to display and regenerable; the hosted cache upkeep GCs them"
 
 	dsDir := filepath.Join(ctx.siteDir, ".polis", "ds")
 	entries, err := os.ReadDir(dsDir)
@@ -1554,34 +1446,22 @@ func checkStaleScopedFeed(ctx *runContext) CheckResult {
 	name := "stale-scoped-feed"
 	reason := "followers/me feed scopes collapsed to runtime filters; separate cache files are obsolete"
 
-	dsDir := filepath.Join(ctx.siteDir, ".polis", "ds")
-	entries, err := os.ReadDir(dsDir)
+	files, err := sitecheck.StaleScopedFeedFiles(ctx.siteDir)
 	if err != nil {
 		return CheckResult{Name: name, Status: StatusPass, Message: "no DS directory"}
 	}
 
-	deprecated := []string{"followers", "me"}
 	var actions []Action
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+	for _, p := range files {
+		relPath, _ := filepath.Rel(ctx.siteDir, p)
+		if !ctx.dryRun {
+			os.Remove(p)
 		}
-		stateDir := filepath.Join(dsDir, entry.Name(), "pub.polis.core", "state")
-		for _, scope := range deprecated {
-			fname := "pub.polis.feed." + scope + ".jsonl"
-			p := filepath.Join(stateDir, fname)
-			if _, err := os.Stat(p); err == nil {
-				relPath, _ := filepath.Rel(ctx.siteDir, p)
-				if !ctx.dryRun {
-					os.Remove(p)
-				}
-				actions = append(actions, Action{
-					Op:     "remove",
-					Path:   relPath,
-					Detail: "deprecated scoped feed cache",
-				})
-			}
-		}
+		actions = append(actions, Action{
+			Op:     "remove",
+			Path:   relPath,
+			Detail: "deprecated scoped feed cache",
+		})
 	}
 
 	if len(actions) == 0 {
@@ -1603,39 +1483,17 @@ func checkStaleFeedViewedAt(ctx *runContext) CheckResult {
 	name := "stale-feed-viewed-at"
 	reason := "pub.polis.feed.viewed_at cursor replaced by position-based pub.polis.feed.viewed"
 
-	dsDir := filepath.Join(ctx.siteDir, ".polis", "ds")
-	entries, err := os.ReadDir(dsDir)
+	files, err := sitecheck.StaleFeedViewedAtFiles(ctx.siteDir)
 	if err != nil {
 		return CheckResult{Name: name, Status: StatusPass, Message: "no DS directory"}
 	}
 
 	var actions []Action
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		cursorsPath := filepath.Join(dsDir, entry.Name(), "pub.polis.core", "state", "cursors.json")
-		data, err := os.ReadFile(cursorsPath)
-		if err != nil {
-			continue
-		}
-		var raw map[string]interface{}
-		if json.Unmarshal(data, &raw) != nil {
-			continue
-		}
-		cursors, ok := raw["cursors"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if _, has := cursors["pub.polis.feed.viewed_at"]; !has {
-			continue
-		}
+	for _, f := range files {
+		cursorsPath := f.Path
 		relPath, _ := filepath.Rel(ctx.siteDir, cursorsPath)
 		if !ctx.dryRun {
-			delete(cursors, "pub.polis.feed.viewed_at")
-			if out, err := json.MarshalIndent(raw, "", "  "); err == nil {
-				os.WriteFile(cursorsPath, append(out, '\n'), 0644)
-			}
+			removeViewedAtCursor(cursorsPath)
 		}
 		actions = append(actions, Action{
 			Op:     "remove_key",
@@ -1653,6 +1511,27 @@ func checkStaleFeedViewedAt(ctx *runContext) CheckResult {
 		Reason:  reason,
 		Message: fmt.Sprintf("removed pub.polis.feed.viewed_at from %d cursors file(s)", len(actions)),
 		Actions: actions,
+	}
+}
+
+// removeViewedAtCursor deletes pub.polis.feed.viewed_at from a cursors.json
+// that sitecheck.StaleFeedViewedAtFiles found carrying it, rewriting the rest.
+func removeViewedAtCursor(cursorsPath string) {
+	data, err := os.ReadFile(cursorsPath)
+	if err != nil {
+		return
+	}
+	var raw map[string]interface{}
+	if json.Unmarshal(data, &raw) != nil {
+		return
+	}
+	cursors, ok := raw["cursors"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	delete(cursors, "pub.polis.feed.viewed_at")
+	if out, err := json.MarshalIndent(raw, "", "  "); err == nil {
+		os.WriteFile(cursorsPath, append(out, '\n'), 0644)
 	}
 }
 
@@ -1720,6 +1599,70 @@ func checkLegacyFeedScaffolding(ctx *runContext) CheckResult {
 	}
 }
 
+// unpublishedEmits is close-out E1-R2's named migration, the twin of
+// medic.UnpublishedEmits: the event each of two core types gains in a site's
+// bundle.json. The discovery service emits both and the core bundle declared
+// neither.
+//
+// ⛔ Two named strings on two named types, and nothing else. Per-field drift is
+// flagged, never repaired (F8), because a general repair would overwrite a
+// site's own edits; this only ever ADDS these strings, so it cannot. Do not
+// widen it. It is correct against today's defaults too: adding an emit keeps a
+// site a superset of them.
+var unpublishedEmits = map[string]string{
+	"pub.polis.post":    "pub.polis.post.unpublished",
+	"pub.polis.comment": "pub.polis.comment.unpublished",
+}
+
+// checkUnpublishedEmitsMigration adds unpublishedEmits to bundle.json where
+// absent. Idempotent; a type the site does not declare is left to
+// checkBundleDeclarations, which provisions whole types.
+func checkUnpublishedEmitsMigration(ctx *runContext) CheckResult {
+	const name = "unpublished-emits-migration"
+	const reason = "the discovery service emits pub.polis.post.unpublished and pub.polis.comment.unpublished; the core bundle now declares them, and a named migration adds them to existing sites before the defaults change"
+
+	path := filepath.Join(ctx.siteDir, "content", "pub.polis.core", "bundle.json")
+	b, err := bundle.LoadBundle(path)
+	if err != nil {
+		return skip(name, fmt.Sprintf("cannot load bundle.json: %v", err), reason)
+	}
+	var added []string
+	for _, typeName := range []string{"pub.polis.post", "pub.polis.comment"} {
+		ct, ok := b.Types[typeName]
+		if !ok {
+			continue
+		}
+		event := unpublishedEmits[typeName]
+		has := false
+		for _, e := range ct.Emits {
+			if e == event {
+				has = true
+				break
+			}
+		}
+		if has {
+			continue
+		}
+		ct.Emits = append(ct.Emits, event)
+		b.Types[typeName] = ct
+		added = append(added, event)
+	}
+	if len(added) == 0 {
+		return pass(name, "unpublished events already declared")
+	}
+	action := Action{Op: "update", Path: "content/pub.polis.core/bundle.json",
+		Detail: "declare " + strings.Join(added, ", ")}
+	if !ctx.dryRun {
+		if err := backupFile(ctx.siteDir, ctx.backupDir, filepath.Join("content", "pub.polis.core", "bundle.json")); err != nil {
+			return fail(name, fmt.Sprintf("backup bundle.json: %v", err), reason, []Action{action})
+		}
+		if err := bundle.SaveBundle(path, b); err != nil {
+			return fail(name, fmt.Sprintf("save bundle.json: %v", err), reason, []Action{action})
+		}
+	}
+	return fail(name, "declared "+strings.Join(added, ", "), reason, []Action{action})
+}
+
 // checkStudio13RenameMigration detects self-hosted tenants still pointing at
 // the pre-rename studio13 theme FQN and rewrites active_theme to
 // pub.polis.themes.studio13-nk. Mirror of medic.healRegistryIntegrity's
@@ -1775,25 +1718,13 @@ func checkStudio13RenameMigration(ctx *runContext) CheckResult {
 	}
 }
 
-// canonicalizeContent normalizes content for hashing.
-func canonicalizeContent(content string) string {
-	content = strings.TrimLeft(content, "\n")
-	lines := strings.Split(content, "\n")
-	for i := range lines {
-		lines[i] = strings.TrimRight(lines[i], " \t")
-	}
-	for len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	return strings.Join(lines, "\n") + "\n"
-}
-
 // checkOrphanedThemeDirs reaps theme directories installed at
 // .polis/bundles/pub.polis.core/themes/<name>/ that don't appear in the
 // tenant's registry (installed_bundles[].theme_versions).
 //
-// Mirror of medic.healOrphanedThemeDirs + patrol.checkOrphanedThemeDirs for
-// self-hosted tenants. Registry is the authoritative "what SHOULD be
+// The predicate is sitecheck.OrphanedThemeDirs, which Patrol's
+// checkOrphanedThemeDirs also calls; medic.healOrphanedThemeDirs is the hosted
+// repair (it quarantines where this removes). Registry is the authoritative "what SHOULD be
 // installed" state; disk-level drift is either leftover from prior bundle
 // versions (e.g. themes/studio13/ after step-02/2.0 renamed to studio13-nk)
 // or operator-introduced junk.
@@ -1804,38 +1735,15 @@ func checkOrphanedThemeDirs(ctx *runContext) CheckResult {
 	name := "orphaned-theme-dirs"
 	reason := "installed theme directories that don't appear in registry.installed_bundles[].theme_versions indicate drift from prior bundle versions or operator-introduced state"
 
-	themesDir := filepath.Join(ctx.siteDir, ".polis", "bundles", "pub.polis.core", "themes")
-	entries, err := os.ReadDir(themesDir)
-	if err != nil {
+	themesDir := sitecheck.ThemesDir(ctx.siteDir)
+	orphans, skipped := sitecheck.OrphanedThemeDirs(ctx.siteDir)
+	switch skipped {
+	case sitecheck.OrphanNoThemesDir:
 		return pass(name, "no themes directory")
-	}
-
-	reg, err := bundle.LoadRegistry(ctx.siteDir)
-	if err != nil || reg == nil {
+	case sitecheck.OrphanRegistryUnreadable:
 		return pass(name, "registry unreadable; deferred to registry-integrity check")
-	}
-
-	declared := make(map[string]bool)
-	for _, ib := range reg.InstalledBundles {
-		if ib.Name != "pub.polis.core" {
-			continue
-		}
-		for tname := range ib.ThemeVersions {
-			declared[tname] = true
-		}
-	}
-	if len(declared) == 0 {
+	case sitecheck.OrphanNoDeclaredThemes:
 		return pass(name, "registry has no theme_versions for pub.polis.core")
-	}
-
-	var orphans []string
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		if !declared[e.Name()] {
-			orphans = append(orphans, e.Name())
-		}
 	}
 	if len(orphans) == 0 {
 		return pass(name, "no orphan theme dirs")
@@ -1876,7 +1784,7 @@ func checkOrphanedThemeDirs(ctx *runContext) CheckResult {
 // ── Phase 4.5: step-01 bundle/registry/theme refactor migrations ─────────
 //
 // Mirrors the hosted Patrol+Medic pair for the SHAPE/BUNDLE/THEME refactor.
-// Five independent migrations; the ordering below matches medic.go:464-538,
+// Five independent migrations; the ordering below matches medic.HealTenant's,
 // which is "install first (smallest blast radius), then path/registry
 // migrations, destructive theme cleanup last." All five must run before
 // Phase 5 (index rebuild + render) because Phase 5 reads the new paths.
@@ -1886,7 +1794,7 @@ func checkOrphanedThemeDirs(ctx *runContext) CheckResult {
 // Version-gated via BundleRegistry.NeedsRefresh: a no-op when the on-disk
 // payload matches what the binary ships.
 //
-// Mirror of patrol.checkBundleReferencePayload + medic.go:474-484.
+// Mirror of patrol.checkBundleReferencePayload + medic.HealTenant's reference-payload block.
 func checkBundleReferencePayload(ctx *runContext) CheckResult {
 	const name = "bundle-reference-payload"
 	const reason = "step-01 (SHAPE/BUNDLE/THEME refactor) — the reference payload (shapes + themes) ships embedded in the binary and is installed per-tenant at .polis/bundles/pub.polis.core/; version-gated refresh on each upgrade"
@@ -1921,7 +1829,7 @@ func checkBundleReferencePayload(ctx *runContext) CheckResult {
 // subtree (errors instead of silently overlaying), so a partial migration
 // surfaces here rather than corrupting state.
 //
-// Mirror of patrol.checkLegacyContentPath + medic.go:487-497.
+// Mirror of patrol.checkLegacyContentPath + medic.HealTenant's legacy-content-path block.
 func checkLegacyContentPath(ctx *runContext) CheckResult {
 	const name = "legacy-content-path"
 	const reason = "step-01 (SHAPE/BUNDLE/THEME refactor) — private bundle state moved from .polis/content/<bundle>/ to .polis/bundles/<bundle>/"
@@ -1954,7 +1862,7 @@ func checkLegacyContentPath(ctx *runContext) CheckResult {
 // .polis/bundles/registry.json (with FQN qualification). The migration is
 // raw-map based to preserve any unknown-to-struct fields in well-known.
 //
-// Mirror of patrol.checkRegistryMigration + medic.go:500-510.
+// Mirror of patrol.checkRegistryMigration + medic.HealTenant's registry-migration block.
 func checkRegistryMigration(ctx *runContext) CheckResult {
 	const name = "registry-migration"
 	const reason = "step-01 (SHAPE/BUNDLE/THEME refactor) — active_theme moved from .well-known/polis to .polis/bundles/registry.json (with FQN qualification, e.g. vice → pub.polis.themes.vice)"
@@ -1971,7 +1879,7 @@ func checkRegistryMigration(ctx *runContext) CheckResult {
 	if ctx.dryRun {
 		return fail(name, ".well-known/polis has active_theme; should migrate to registry.json", reason, []Action{action})
 	}
-	if err := bundle.MigrateActiveThemeToRegistry(ctx.siteDir); err != nil {
+	if err := site.MigrateActiveThemeToRegistry(ctx.siteDir); err != nil {
 		return fail(name, fmt.Sprintf("MigrateActiveThemeToRegistry failed: %v", err), reason, []Action{action})
 	}
 	return CheckResult{
@@ -1988,7 +1896,7 @@ func checkRegistryMigration(ctx *runContext) CheckResult {
 // home is .polis/bundles/pub.polis.core/themes/, populated by
 // checkBundleReferencePayload above.
 //
-// Mirror of patrol.checkLegacyThemeLocations + medic.go:513-523.
+// Mirror of patrol.checkLegacyThemeLocations + medic.HealTenant's legacy-theme block.
 func checkLegacyThemeLocations(ctx *runContext) CheckResult {
 	const name = "legacy-theme-locations"
 	const reason = "step-01 (SHAPE/BUNDLE/THEME refactor) — themes now live at .polis/bundles/<bundle>/themes/; the legacy site/themes/ and .polis/themes/ trees are stripped on upgrade (forced-upgrade policy)"
@@ -2021,7 +1929,7 @@ func checkLegacyThemeLocations(ctx *runContext) CheckResult {
 // (installed_bundles[].active). Cleanup C1+C4: listing-is-activation; the
 // field was always true, never read, and removed from the struct.
 //
-// Mirror of patrol.checkBundleActiveFields + medic.go:528-538.
+// Mirror of patrol.checkBundleActiveFields + medic.HealTenant's bundle-active-fields block.
 func checkBundleActiveFields(ctx *runContext) CheckResult {
 	const name = "bundle-active-fields"
 	const reason = "step-01 cleanup C1+C4 — the legacy 'active' boolean on bundles was always true and unread; removed from the struct, must be stripped from existing tenant files"
@@ -2195,18 +2103,17 @@ func checkV3LegacyArchives(ctx *runContext) CheckResult {
 // bundle.EnsureReferencePayload is content-idempotent (writes only on
 // byte-mismatch), so the heal is a no-op when content already matches.
 //
-// Mirror of patrol.checkReferencePayloadIntegrity (`patrol.go:2109`) +
-// medic.go HealTenant reference-payload-integrity block.
+// The predicate is sitecheck.ReferencePayloadDrift, shared with Patrol's
+// checkReferencePayloadIntegrity; medic.HealTenant's F1 block is the hosted repair.
 func checkReferencePayloadIntegrity(ctx *runContext) CheckResult {
 	const name = "reference-payload-integrity"
 	const reason = "F1 content-aware integrity — even when version stamps match, on-disk fixtures can drift from the embedded reference payload via hand-edits or partial writes; reinstall is content-idempotent so safe to run unconditionally"
 
-	bundleDir := filepath.Join(ctx.siteDir, ".polis", "bundles", "pub.polis.core")
-	if _, err := os.Stat(bundleDir); os.IsNotExist(err) {
+	mismatches, installed, err := sitecheck.ReferencePayloadDrift(ctx.siteDir)
+	if !installed {
 		// checkBundleReferencePayload handles the not-installed case.
 		return pass(name, "bundle not installed (deferred to bundle-reference-payload check)")
 	}
-	mismatches, err := bundle.CompareReferencePayload(ctx.siteDir, "pub.polis.core")
 	if err != nil {
 		return skip(name, fmt.Sprintf("compare reference payload: %v", err), reason)
 	}
@@ -2252,48 +2159,45 @@ func checkReferencePayloadIntegrity(ctx *runContext) CheckResult {
 //  7. active_theme empty → SelectRandomTheme.
 //  8. active_shape variants of 4/5/6 → normalize or reset to v4.
 //
-// Mirror of patrol.checkRegistryIntegrity + medic.healRegistryIntegrity
-// (`medic.go:764-917`).
+// The predicate is sitecheck.ReadRegistryState, shared with Patrol's
+// checkRegistryIntegrity; medic.healRegistryIntegrity is the hosted repair.
 func checkRegistryIntegrity(ctx *runContext) CheckResult {
 	const name = "registry-integrity"
 	const reason = "F2 content-aware integrity — registry.json drives render dispatch, active theme selection, and bundle resync; even small corruptions cascade into render-time errors"
 
-	raw, err := bundle.LoadRegistryRaw(ctx.siteDir)
-	if err != nil {
+	st := sitecheck.ReadRegistryState(ctx.siteDir)
+	if st.Err != nil {
 		action := Action{Op: "flag", Path: ".polis/bundles/registry.json",
 			Detail: "registry.json malformed; operator intervention required (Tailor will not overwrite a hand-edited registry)"}
-		return fail(name, fmt.Sprintf("registry.json malformed: %v", err), reason, []Action{action})
+		return fail(name, fmt.Sprintf("registry.json malformed: %v", st.Err), reason, []Action{action})
 	}
-	if raw == nil {
+	if st.Raw == nil {
 		// Absent registry — checkBundleReferencePayload handles install.
 		return pass(name, "no registry (deferred to bundle-reference-payload check)")
 	}
 	// Schema version checks.
-	if sv, ok := raw["schema_version"].(float64); ok {
-		if math.Trunc(sv) != sv {
-			action := Action{Op: "flag", Path: ".polis/bundles/registry.json",
-				Detail: fmt.Sprintf("schema_version=%v non-integer; suspected hand-edit corruption", sv)}
-			return fail(name, fmt.Sprintf("schema_version=%v is not an integer", sv), reason, []Action{action})
-		}
-		if int(sv) > bundle.CurrentRegistrySchemaVersion {
-			action := Action{Op: "flag", Path: ".polis/bundles/registry.json",
-				Detail: fmt.Sprintf("schema_version=%d exceeds supported max=%d; binary upgrade required", int(sv), bundle.CurrentRegistrySchemaVersion)}
-			return fail(name, fmt.Sprintf("schema_version=%d exceeds supported max=%d", int(sv), bundle.CurrentRegistrySchemaVersion), reason, []Action{action})
-		}
+	if sv := st.SchemaVersion; st.SchemaNotInteger {
+		action := Action{Op: "flag", Path: ".polis/bundles/registry.json",
+			Detail: fmt.Sprintf("schema_version=%v non-integer; suspected hand-edit corruption", sv)}
+		return fail(name, fmt.Sprintf("schema_version=%v is not an integer", sv), reason, []Action{action})
+	}
+	if sv := st.SchemaVersion; st.SchemaTooNew {
+		action := Action{Op: "flag", Path: ".polis/bundles/registry.json",
+			Detail: fmt.Sprintf("schema_version=%d exceeds supported max=%d; binary upgrade required", int(sv), bundle.CurrentRegistrySchemaVersion)}
+		return fail(name, fmt.Sprintf("schema_version=%d exceeds supported max=%d", int(sv), bundle.CurrentRegistrySchemaVersion), reason, []Action{action})
 	}
 	defaults := bundle.DefaultCoreBundle()
-	at, _ := raw["active_theme"].(string)
-	as, _ := raw["active_shape"].(string)
+	at, as := st.ActiveTheme, st.ActiveShape
 
 	// Defer the studio13 special case — it's handled by checkStudio13RenameMigration.
 	if at == "pub.polis.themes.studio13" && (as == "pub.polis.shapes.v3" || as == "") {
 		return pass(name, "registry on pre-rename studio13/v3 — deferred to studio13-rename-migration check")
 	}
 
-	// active_theme: unparseable FQN, dangling FQN, or empty.
+	// active_theme: unparseable FQN, dangling FQN, or empty. ⚠️ Empty is judged
+	// here, before the shape; Patrol judges it after.
 	if at != "" {
-		fqn, err := bundle.ParseFQN(at)
-		if err != nil {
+		if st.ThemeIssue == sitecheck.FQNUnparseable {
 			// Unparseable. Try normalize-if-bare-name in defaults.
 			if bundle.IsBareName(at) {
 				if _, ok := defaults.Themes[at]; ok {
@@ -2323,7 +2227,7 @@ func checkRegistryIntegrity(ctx *runContext) CheckResult {
 				Message: "reset active_theme to a random valid theme (was unparseable)",
 				Actions: []Action{action}}
 		}
-		if _, ok := defaults.Themes[fqn.Name]; !ok {
+		if st.ThemeIssue == sitecheck.FQNUndeclared {
 			// Valid FQN but dangling (not declared in bundle).
 			action := Action{Op: "update", Path: ".polis/bundles/registry.json",
 				Detail: fmt.Sprintf("active_theme %q not declared in bundle; reset to a random valid theme", at)}
@@ -2354,8 +2258,7 @@ func checkRegistryIntegrity(ctx *runContext) CheckResult {
 
 	// active_shape: unparseable FQN, dangling FQN.
 	if as != "" {
-		fqn, err := bundle.ParseFQN(as)
-		if err != nil {
+		if st.ShapeIssue == sitecheck.FQNUnparseable {
 			if bundle.IsBareName(as) {
 				if _, ok := defaults.Shapes[as]; ok {
 					action := Action{Op: "update", Path: ".polis/bundles/registry.json",
@@ -2383,7 +2286,7 @@ func checkRegistryIntegrity(ctx *runContext) CheckResult {
 				Message: "reset active_shape to v4 default (was unparseable)",
 				Actions: []Action{action}}
 		}
-		if _, ok := defaults.Shapes[fqn.Name]; !ok {
+		if st.ShapeIssue == sitecheck.FQNUndeclared {
 			action := Action{Op: "update", Path: ".polis/bundles/registry.json",
 				Detail: fmt.Sprintf("active_shape %q not declared in bundle; reset to v4 default", as)}
 			if ctx.dryRun {
@@ -2410,25 +2313,23 @@ func checkRegistryIntegrity(ctx *runContext) CheckResult {
 // well-known may be tampered). Tailor surfaces the divergence; the
 // self-hoster decides.
 //
-// Mirror of patrol.checkKeyConsistency (`patrol.go:2207`).
+// The predicate is sitecheck.KeyConsistency, shared with Patrol's checkKeyConsistency.
 func checkKeyConsistency(ctx *runContext) CheckResult {
 	const name = "key-consistency"
 	const reason = "F3 content-aware integrity — divergence between .polis/keys/id_ed25519.pub and .well-known/polis.public_key silently breaks signature verification; the resolution is operator-trust-dependent and not auto-remediable"
 
-	pubKeyPath := filepath.Join(ctx.siteDir, ".polis", "keys", "id_ed25519.pub")
-	pubKeyData, err := os.ReadFile(pubKeyPath)
-	if err != nil {
+	st := sitecheck.KeyConsistency(ctx.siteDir)
+	if err := st.KeyErr; err != nil {
 		if os.IsNotExist(err) {
 			return fail(name, "public key file missing at .polis/keys/id_ed25519.pub", reason,
 				[]Action{{Op: "flag", Path: ".polis/keys/id_ed25519.pub", Detail: "missing public key file"}})
 		}
 		return skip(name, fmt.Sprintf("cannot read .polis/keys/id_ed25519.pub: %v", err), reason)
 	}
-	wk, err := site.LoadWellKnown(ctx.siteDir)
-	if err != nil {
-		return skip(name, fmt.Sprintf("cannot load .well-known/polis: %v", err), reason)
+	if st.WellKnownErr != nil {
+		return skip(name, fmt.Sprintf("cannot load .well-known/polis: %v", st.WellKnownErr), reason)
 	}
-	if strings.TrimSpace(string(pubKeyData)) == strings.TrimSpace(wk.PublicKey) {
+	if st.Match {
 		return pass(name, "public key matches between .polis/keys/ and .well-known/polis")
 	}
 	action := Action{
@@ -2448,8 +2349,9 @@ func checkKeyConsistency(ctx *runContext) CheckResult {
 // public_key, missing bundles list, etc.) are left to checkWellKnownBundles
 // and site.Validate.
 //
-// Mirror of patrol.checkWellKnownFields (F4+F9 portions, `patrol.go:1645-1662`)
-// + medic.healWellKnownFields + medic.rewriteCoreBundlePath.
+// The F4 predicate and its wording are sitecheck.BundlePathProblems, shared with
+// Patrol's checkWellKnownFields; medic.healWellKnownFields +
+// medic.rewriteCoreBundlePath are the hosted repair.
 func checkBundlePathIntegrity(ctx *runContext) CheckResult {
 	const name = "bundle-path-integrity"
 	const reason = "F4 content-aware integrity — every declared bundle's path must point at a readable bundle.json; pub.polis.core is repairable to a canonical path, non-core bundles need operator review. F9 — empty author_name breaks identity for rendered pages"
@@ -2461,22 +2363,11 @@ func checkBundlePathIntegrity(ctx *runContext) CheckResult {
 
 	const canonicalCorePath = "content/pub.polis.core/bundle.json"
 
-	// F4: per-bundle path validation.
-	for bname, entry := range wk.Bundles {
-		problem := ""
-		if entry.Path == "" {
-			problem = fmt.Sprintf("bundle %s has empty path", bname)
-		} else if _, err := os.Stat(filepath.Join(ctx.siteDir, entry.Path)); err != nil {
-			if os.IsNotExist(err) {
-				problem = fmt.Sprintf("bundle %s path %q missing on disk", bname, entry.Path)
-			} else {
-				problem = fmt.Sprintf("bundle %s path %q: %v", bname, entry.Path, err)
-			}
-		}
-		if problem == "" {
-			continue
-		}
-		if bname == "pub.polis.core" {
+	// F4: per-bundle path validation — the first problem, worded as Patrol words
+	// it (BundlePathProblem.String).
+	if problems := sitecheck.BundlePathProblems(ctx.siteDir, wk); len(problems) > 0 {
+		problem := problems[0].String()
+		if problems[0].Bundle == "pub.polis.core" {
 			action := Action{
 				Op:     "update",
 				Path:   ".well-known/polis",
@@ -2535,7 +2426,8 @@ func checkBundlePathIntegrity(ctx *runContext) CheckResult {
 // MergeDefaults; this check extends coverage to Shapes and Themes,
 // plus F8 deep-field comparison.
 //
-// Mirror of patrol.checkBundleDeclarations (`patrol.go:1015-1076`).
+// The predicates are sitecheck.MissingDeclarations and sitecheck.TypeFieldDrift,
+// shared with Patrol's checkBundleDeclarations.
 func checkBundleDeclarations(ctx *runContext) CheckResult {
 	const name = "bundle-declarations"
 	const reason = "F5+F8 content-aware integrity — bundle.json declares types/shapes/themes; missing declarations are auto-merged from defaults, per-field drift on existing types is flagged for operator review"
@@ -2547,22 +2439,7 @@ func checkBundleDeclarations(ctx *runContext) CheckResult {
 	}
 	defaults := bundle.DefaultCoreBundle()
 
-	var missing []string
-	for tname := range defaults.Types {
-		if _, ok := b.Types[tname]; !ok {
-			missing = append(missing, "type:"+tname)
-		}
-	}
-	for sname := range defaults.Shapes {
-		if _, ok := b.Shapes[sname]; !ok {
-			missing = append(missing, "shape:"+sname)
-		}
-	}
-	for tname := range defaults.Themes {
-		if _, ok := b.Themes[tname]; !ok {
-			missing = append(missing, "theme:"+tname)
-		}
-	}
+	missing := sitecheck.MissingDeclarations(b)
 	if len(missing) > 0 {
 		sort.Strings(missing)
 		action := Action{Op: "update", Path: "content/pub.polis.core/bundle.json",
@@ -2581,37 +2458,17 @@ func checkBundleDeclarations(ctx *runContext) CheckResult {
 		// additional issues beyond just-missing declarations)
 	}
 
-	// F8: per-type field drift.
+	// F8: per-type field drift — one line per missing emit, where Patrol writes
+	// one per type.
 	var drift []string
-	for tname, want := range defaults.Types {
-		got, ok := b.Types[tname]
-		if !ok {
+	for _, d := range sitecheck.TypeFieldDrift(b) {
+		if d.Field == "emits" {
+			for _, e := range d.MissingEmits {
+				drift = append(drift, fmt.Sprintf("type %s: missing emit %q (want superset of defaults)", d.Type, e))
+			}
 			continue
 		}
-		if got.Dir != want.Dir {
-			drift = append(drift, fmt.Sprintf("type %s: dir mismatch (got %q, want %q)", tname, got.Dir, want.Dir))
-		}
-		if got.Mount != want.Mount {
-			drift = append(drift, fmt.Sprintf("type %s: mount mismatch (got %q, want %q)", tname, got.Mount, want.Mount))
-		}
-		if want.Storage != nil {
-			gotPattern := ""
-			if got.Storage != nil {
-				gotPattern = got.Storage.Pattern
-			}
-			if got.Storage == nil || got.Storage.Pattern != want.Storage.Pattern {
-				drift = append(drift, fmt.Sprintf("type %s: storage.pattern mismatch (got %q, want %q)", tname, gotPattern, want.Storage.Pattern))
-			}
-		}
-		wantSet := make(map[string]bool, len(got.Emits))
-		for _, e := range got.Emits {
-			wantSet[e] = true
-		}
-		for _, e := range want.Emits {
-			if !wantSet[e] {
-				drift = append(drift, fmt.Sprintf("type %s: missing emit %q (want superset of defaults)", tname, e))
-			}
-		}
+		drift = append(drift, fmt.Sprintf("type %s: %s mismatch (got %q, want %q)", d.Type, d.Field, d.Got, d.Want))
 	}
 	if len(drift) > 0 {
 		sort.Strings(drift)
@@ -2634,55 +2491,38 @@ func checkBundleDeclarations(ctx *runContext) CheckResult {
 // index is the existing checkIndexRebuild pass; this is a structural
 // sanity check on whatever's currently on disk.
 //
-// Mirror of patrol.checkIndexJSONL (`patrol.go:1093-1137`).
+// The predicate is sitecheck.IndexEntryProblems, shared with Patrol's
+// checkIndexJSONL (which reports only the first problem).
 func checkIndexEntries(ctx *runContext) CheckResult {
 	const name = "index-entries"
 	const reason = "F6 content-aware integrity — each line in index.jsonl must be parseable JSON with non-empty type/path/published/current_version; published RFC3339; current_version sha256:-prefixed"
 
-	path := filepath.Join(ctx.siteDir, "content", "pub.polis.core", "index.jsonl")
-	f, err := os.Open(path)
-	if os.IsNotExist(err) {
+	// Resolved through the bundle pointer — a site that moved its bundle still
+	// gets its index checked.
+	// A line may run to 1 MiB here; Patrol keeps bufio's 64 KiB (recorded on
+	// sitecheck.IndexEntryProblems, not aligned).
+	scan := sitecheck.IndexEntryProblems(index.IndexPath(ctx.siteDir), 1024*1024)
+	if os.IsNotExist(scan.OpenErr) {
 		return pass(name, "no index.jsonl")
 	}
-	if err != nil {
-		return skip(name, fmt.Sprintf("cannot open index.jsonl: %v", err), reason)
+	if scan.OpenErr != nil {
+		return skip(name, fmt.Sprintf("cannot open index.jsonl: %v", scan.OpenErr), reason)
 	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	lineNum := 0
+	if scan.ScanErr != nil {
+		return skip(name, fmt.Sprintf("scan index.jsonl: %v", scan.ScanErr), reason)
+	}
 	var problems []string
-	for scanner.Scan() {
-		lineNum++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+	for _, p := range scan.Problems {
+		switch p.Kind {
+		case sitecheck.IndexInvalidJSON:
+			problems = append(problems, fmt.Sprintf("line %d: invalid JSON (%v)", p.Line, p.Err))
+		case sitecheck.IndexMissingField:
+			problems = append(problems, fmt.Sprintf("line %d: missing required field %q", p.Line, p.Field))
+		case sitecheck.IndexBadVersion:
+			problems = append(problems, fmt.Sprintf("line %d: current_version %q does not start with sha256:", p.Line, p.Value))
+		case sitecheck.IndexBadPublished:
+			problems = append(problems, fmt.Sprintf("line %d: published %q not RFC3339", p.Line, p.Value))
 		}
-		var entry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			problems = append(problems, fmt.Sprintf("line %d: invalid JSON (%v)", lineNum, err))
-			continue
-		}
-		for _, req := range []string{"type", "path", "published", "current_version"} {
-			s, _ := entry[req].(string)
-			if s == "" {
-				problems = append(problems, fmt.Sprintf("line %d: missing required field %q", lineNum, req))
-			}
-		}
-		cv, _ := entry["current_version"].(string)
-		if cv != "" && !strings.HasPrefix(cv, "sha256:") {
-			problems = append(problems, fmt.Sprintf("line %d: current_version %q does not start with sha256:", lineNum, cv))
-		}
-		published, _ := entry["published"].(string)
-		if published != "" {
-			if _, err := time.Parse(time.RFC3339, published); err != nil {
-				problems = append(problems, fmt.Sprintf("line %d: published %q not RFC3339", lineNum, published))
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return skip(name, fmt.Sprintf("scan index.jsonl: %v", err), reason)
 	}
 	if len(problems) == 0 {
 		return pass(name, "all index entries valid")
@@ -2700,8 +2540,9 @@ func checkIndexEntries(ctx *runContext) CheckResult {
 // blessed.json and following.json against the actual shipped on-disk
 // schema. Flag-only — rebuilding these files is the operator's call.
 //
-// Mirror of patrol.checkBlessedJSON + checkFollowingJSON
-// (`patrol.go:1139-1230`). Note: the planning doc hinted at
+// The predicates are sitecheck.BlessedStructure and sitecheck.FollowingStructure,
+// shared with Patrol's checkBlessedJSON + checkFollowingJSON (which report only
+// the first problem). Note: the planning doc hinted at
 // `url/blessed_at` for both, but the shipped on-disk format wraps
 // blessed entries in per-post groupings (post + blessed[]).
 func checkBlessedFollowingStructure(ctx *runContext) CheckResult {
@@ -2736,53 +2577,34 @@ func checkBlessedFollowingStructure(ctx *runContext) CheckResult {
 	return fail(name, strings.Join(problems, "; "), reason, []Action{action})
 }
 
+// validateBlessedJSON renders every sitecheck.BlessedStructure problem in
+// Tailor's wording. ⚠️ A missing post/blessed is single-quoted here and
+// double-quoted in following.json's — as it always was.
 func validateBlessedJSON(data []byte) []string {
-	var raw map[string]interface{}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return []string{fmt.Sprintf("blessed.json: invalid JSON (%v)", err)}
+	var out []string
+	for _, p := range sitecheck.BlessedStructure(data) {
+		var msg string
+		switch p.Kind {
+		case sitecheck.StructInvalidJSON:
+			msg = fmt.Sprintf("invalid JSON (%v)", p.Err)
+		case sitecheck.StructMissingList:
+			msg = "missing required field 'comments'"
+		case sitecheck.StructListNotArray:
+			msg = "'comments' is not an array"
+		case sitecheck.StructItemNotObject:
+			msg = fmt.Sprintf("comments[%d] is not an object", p.Index)
+		case sitecheck.StructItemMissing:
+			msg = fmt.Sprintf("comments[%d] missing '%s'", p.Index, p.Field)
+		case sitecheck.StructEntriesNotArray:
+			msg = fmt.Sprintf("comments[%d].blessed is not an array", p.Index)
+		case sitecheck.StructEntryNotObject:
+			msg = fmt.Sprintf("comments[%d].blessed[%d] is not an object", p.Index, p.Entry)
+		case sitecheck.StructEntryMissing:
+			msg = fmt.Sprintf("comments[%d].blessed[%d] missing %q", p.Index, p.Entry, p.Field)
+		}
+		out = append(out, "blessed.json: "+msg)
 	}
-	commentsRaw, ok := raw["comments"]
-	if !ok {
-		return []string{"blessed.json: missing required field 'comments'"}
-	}
-	arr, ok := commentsRaw.([]interface{})
-	if !ok {
-		return []string{"blessed.json: 'comments' is not an array"}
-	}
-	var problems []string
-	for i, elem := range arr {
-		grp, ok := elem.(map[string]interface{})
-		if !ok {
-			problems = append(problems, fmt.Sprintf("blessed.json: comments[%d] is not an object", i))
-			continue
-		}
-		if s, _ := grp["post"].(string); s == "" {
-			problems = append(problems, fmt.Sprintf("blessed.json: comments[%d] missing 'post'", i))
-		}
-		blessedRaw, ok := grp["blessed"]
-		if !ok {
-			problems = append(problems, fmt.Sprintf("blessed.json: comments[%d] missing 'blessed'", i))
-			continue
-		}
-		blessed, ok := blessedRaw.([]interface{})
-		if !ok {
-			problems = append(problems, fmt.Sprintf("blessed.json: comments[%d].blessed is not an array", i))
-			continue
-		}
-		for j, b := range blessed {
-			bm, ok := b.(map[string]interface{})
-			if !ok {
-				problems = append(problems, fmt.Sprintf("blessed.json: comments[%d].blessed[%d] is not an object", i, j))
-				continue
-			}
-			for _, req := range []string{"url", "blessed_at"} {
-				if s, _ := bm[req].(string); s == "" {
-					problems = append(problems, fmt.Sprintf("blessed.json: comments[%d].blessed[%d] missing %q", i, j, req))
-				}
-			}
-		}
-	}
-	return problems
+	return out
 }
 
 // ── Phase 6.7: Tailor-only self-heal ─────────────────────────────────────
@@ -2932,31 +2754,25 @@ func checkRegistryFQNSanity(ctx *runContext) CheckResult {
 	return fail(name, strings.Join(issues, "; "), reason, []Action{action})
 }
 
+// validateFollowingJSON renders every sitecheck.FollowingStructure problem in
+// Tailor's wording.
 func validateFollowingJSON(data []byte) []string {
-	var raw map[string]interface{}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return []string{fmt.Sprintf("following.json: invalid JSON (%v)", err)}
-	}
-	followingRaw, ok := raw["following"]
-	if !ok {
-		return []string{"following.json: missing required field 'following'"}
-	}
-	arr, ok := followingRaw.([]interface{})
-	if !ok {
-		return []string{"following.json: 'following' is not an array"}
-	}
-	var problems []string
-	for i, elem := range arr {
-		em, ok := elem.(map[string]interface{})
-		if !ok {
-			problems = append(problems, fmt.Sprintf("following.json: following[%d] is not an object", i))
-			continue
+	var out []string
+	for _, p := range sitecheck.FollowingStructure(data) {
+		var msg string
+		switch p.Kind {
+		case sitecheck.StructInvalidJSON:
+			msg = fmt.Sprintf("invalid JSON (%v)", p.Err)
+		case sitecheck.StructMissingList:
+			msg = "missing required field 'following'"
+		case sitecheck.StructListNotArray:
+			msg = "'following' is not an array"
+		case sitecheck.StructItemNotObject:
+			msg = fmt.Sprintf("following[%d] is not an object", p.Index)
+		case sitecheck.StructItemMissing:
+			msg = fmt.Sprintf("following[%d] missing %q", p.Index, p.Field)
 		}
-		for _, req := range []string{"url", "added_at"} {
-			if s, _ := em[req].(string); s == "" {
-				problems = append(problems, fmt.Sprintf("following.json: following[%d] missing %q", i, req))
-			}
-		}
+		out = append(out, "following.json: "+msg)
 	}
-	return problems
+	return out
 }

@@ -52,9 +52,9 @@ type RenderContext struct {
 	BaseCSSPath string
 	HomePath    string
 	FaviconPath string
-	AuthorName string
-	AuthorURL  string
-	Year       string
+	AuthorName  string
+	AuthorURL   string
+	Year        string
 
 	// Counts
 	BlessedCount int
@@ -116,16 +116,28 @@ type RenderContext struct {
 	//   ISOPublished  — RFC 3339 timestamp; from frontmatter `published`.
 	//   ISOModified   — RFC 3339 timestamp; from frontmatter `updated` if
 	//                   present, else equals ISOPublished.
+	// Licence surfaces, both pre-rendered HTML so an unstated licence is the
+	// empty string and renders nothing at all (the avatar_html / json_ld
+	// convention). Terms are frozen per work, so these describe THAT post's
+	// terms and not the site's current ones.
+	//   LicenseHead   — <link rel="license"> + the AIPREF <meta>, for <head>.
+	//   LicenseNotice — the human-readable per-post terms line, shown on the
+	//                   post itself. One of the three human surfaces; the
+	//                   other two are the site terms page and the versioned
+	//                   profile explanation.
+	LicenseHead   string
+	LicenseNotice string
+
 	OGTitle       string // ctx.Title pre-attribute-escaped for og:/twitter:title
 	OGDescription string
 	OGImageURL    string
 	JSONLD        string
 	ISOPublished  string
 	ISOModified   string
-	WidgetHome     string // data-home for hosted nav widget
-	WidgetHandle   string // data-handle for hosted nav widget
-	WidgetHost     string // data-host for hosted nav widget
-	SiteDomain     string // site domain (alias surface for stream templates)
+	WidgetHome    string // data-home for hosted nav widget
+	WidgetHandle  string // data-handle for hosted nav widget
+	WidgetHost    string // data-host for hosted nav widget
+	SiteDomain    string // site domain (alias surface for stream templates)
 	// FocusPathURL is the focus post's path-form canonical URL
 	// (e.g. "/posts/20260429/foo.html"). Used by the stream's focus-
 	// title link wrapper — clicking the focus title or body navigates
@@ -307,19 +319,19 @@ func (e *Engine) substituteVariables(template string, ctx *RenderContext) string
 		"page_title":      ctx.PageTitle,
 
 		// Site variables
-		"site_url":    ctx.SiteURL,
-		"site_title":  ctx.SiteTitle,
+		"site_url":      ctx.SiteURL,
+		"site_title":    ctx.SiteTitle,
 		"css_path":      ctx.CSSPath,
 		"base_css_path": ctx.BaseCSSPath,
 		"home_path":     ctx.HomePath,
 		"favicon_path":  ctx.FaviconPath,
-		"author_name": ctx.AuthorName,
-		"author_url":  ctx.AuthorURL,
-		"year":        ctx.Year,
+		"author_name":   ctx.AuthorName,
+		"author_url":    ctx.AuthorURL,
+		"year":          ctx.Year,
 
 		// Counts
-		"blessed_count":  fmt.Sprintf("%d", ctx.BlessedCount),
-		"comment_count":  fmt.Sprintf("%d", ctx.CommentCount),
+		"blessed_count": fmt.Sprintf("%d", ctx.BlessedCount),
+		"comment_count": fmt.Sprintf("%d", ctx.CommentCount),
 		// Mirror sections.go's per-iteration comment_count_class /
 		// comment_count_display vars at the top-level scope so v4's
 		// focus-entry badge in stream.html can hide-when-empty using
@@ -332,12 +344,12 @@ func (e *Engine) substituteVariables(template string, ctx *RenderContext) string
 		// <a class="entry-title-link {{title_link_state}}"> wrapper.
 		// "is-redundant" hides the chrome when the body already leads
 		// with the title text (see RenderContext.TitleLinkState).
-		"title_link_state":      ctx.TitleLinkState,
-		"post_count":     fmt.Sprintf("%d", ctx.PostCount),
-		"posts_count":    fmt.Sprintf("%d", ctx.PostCount), // stream uses "posts_count" plural in .site-stats
-		"following_count": fmt.Sprintf("%d", ctx.FollowingCount),
-		"followers_count": fmt.Sprintf("%d", ctx.FollowersCount),
-		"site_bio":        ctx.SiteBio,
+		"title_link_state": ctx.TitleLinkState,
+		"post_count":       fmt.Sprintf("%d", ctx.PostCount),
+		"posts_count":      fmt.Sprintf("%d", ctx.PostCount), // stream uses "posts_count" plural in .site-stats
+		"following_count":  fmt.Sprintf("%d", ctx.FollowingCount),
+		"followers_count":  fmt.Sprintf("%d", ctx.FollowersCount),
+		"site_bio":         ctx.SiteBio,
 
 		// Pre-rendered HTML fragments
 		"view_all_posts": ctx.ViewAllPostsLink,
@@ -349,23 +361,25 @@ func (e *Engine) substituteVariables(template string, ctx *RenderContext) string
 		"widget_version": ctx.WidgetVersion,
 
 		// stream shape variables
-		"canonical_url":             ctx.CanonicalURL,
-		"focus_path_url":            ctx.FocusPathURL,
-		"layout_right_state_class":  ctx.LayoutRightStateClass,
-		"controller_url":            ctx.ControllerURL,
-		"stream_shape_version":      ctx.StreamShapeVersion,
+		"canonical_url":            ctx.CanonicalURL,
+		"focus_path_url":           ctx.FocusPathURL,
+		"layout_right_state_class": ctx.LayoutRightStateClass,
+		"controller_url":           ctx.ControllerURL,
+		"stream_shape_version":     ctx.StreamShapeVersion,
 		// v4 metadata head-block (step-03/3.d). Empty for blog callers — v3
 		// templates don't substitute these names.
 		"og_title":       ctx.OGTitle,
 		"og_description": ctx.OGDescription,
 		"og_image_url":   ctx.OGImageURL,
 		"json_ld":        ctx.JSONLD,
+		"license_head":   ctx.LicenseHead,
+		"license_notice": ctx.LicenseNotice,
 		"iso_published":  ctx.ISOPublished,
 		"iso_modified":   ctx.ISOModified,
-		"widget_home":      ctx.WidgetHome,
-		"widget_handle":    ctx.WidgetHandle,
-		"widget_host":      ctx.WidgetHost,
-		"site_domain":      ctx.SiteDomain,
+		"widget_home":    ctx.WidgetHome,
+		"widget_handle":  ctx.WidgetHandle,
+		"widget_host":    ctx.WidgetHost,
+		"site_domain":    ctx.SiteDomain,
 
 		// Tag variables
 		"tag_name":     ctx.TagName,

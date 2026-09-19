@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -323,6 +324,12 @@ func (s sortedMap) MarshalJSON() ([]byte, error) {
 // posture: require attestation when verification is requested; the
 // caller is responsible for not calling this for legacy/non-
 // autoblessed records.
+//
+// ⚠️ HISTORICAL (Signet epic 45 D6): a discovery service no longer decides a
+// blessing, so nothing produces a new autobless attestation. This verifier
+// stays, unchanged, because every event that carries one is still on the
+// stream and must keep verifying. Never delete a verifier because nothing new
+// produces its input.
 func VerifyAutoblessAttestation(
 	cache *DSKeyCache,
 	commentURL, targetURL, policyRule, policySource, dsKeyID, attestation string,
@@ -367,6 +374,55 @@ func VerifyAutoblessAttestation(
 	}
 	if !valid {
 		return fmt.Errorf("autobless attestation verification failed after key refresh — discarding")
+	}
+	return nil
+}
+
+// ErrDSKeyUnavailable marks a failure to obtain the DS key an attestation must
+// be checked against. ⛔ A caller reports it as NOT CHECKED, never as invalid:
+// the attestation was not examined, and an unreachable DS says nothing about it.
+var ErrDSKeyUnavailable = errors.New("discovery service key unavailable")
+
+// VerifyRegistrationAttestation verifies a site's registration service
+// attestation: the DS's signature over the register canonical for domain, made
+// with the DS key keyID (the site-check response's attestation_key_id).
+//
+// ⭐ The consumer pattern is VerifyAutoblessAttestation's — rebuild the
+// canonical, fetch the DS key, verify — with the key fetched BY ID (SIGNET epic
+// 32), so an attestation made before a DS key rotation still verifies. An empty
+// keyID (a registration older than key ids) falls back to the DS's current key.
+//
+// A nil error means the attestation verifies. An error wrapping
+// ErrDSKeyUnavailable means it could not be checked; any other error means it
+// does not verify.
+func VerifyRegistrationAttestation(hc *http.Client, dsURL, domain string, registrationVersion int, keyID, attestation, requestID string) error {
+	if attestation == "" {
+		return fmt.Errorf("registration attestation is required but missing")
+	}
+	if registrationVersion == 0 {
+		registrationVersion = 1
+	}
+	canonical, err := SiteRegistrationCanonicalJSON(registrationVersion, domain)
+	if err != nil {
+		return fmt.Errorf("registration canonical: %w", err)
+	}
+
+	var pubKey string
+	if keyID != "" {
+		pubKey, err = FetchDSPublicKey(hc, dsURL, keyID, requestID)
+	} else {
+		pubKey, _, err = NewDSKeyCacheWithHTTP(dsURL, 0, hc).GetKey()
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrDSKeyUnavailable, err)
+	}
+
+	valid, verr := signing.VerifySignature(canonical, []byte(pubKey), attestation)
+	if verr != nil {
+		return fmt.Errorf("does not verify against DS key %q for %s: %v", keyID, domain, verr)
+	}
+	if !valid {
+		return fmt.Errorf("does not verify against DS key %q for %s", keyID, domain)
 	}
 	return nil
 }

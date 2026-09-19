@@ -606,7 +606,7 @@ func TestStreamItems_CORSAndOptions(t *testing.T) {
 	// GET should set CORS *
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/items?type=posts&time=24h", nil)
 	w := httptest.NewRecorder()
-	publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamItems)(w, req)
+	publicContentMiddleware(sharedPublicContentLimiter, false, s.handleStreamItems)(w, req)
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Errorf("GET CORS: expected '*', got %q", got)
 	}
@@ -615,7 +615,7 @@ func TestStreamItems_CORSAndOptions(t *testing.T) {
 	preflightLimiter := newPublicContentLimiter(publicContentRateLimit, publicContentRateWindow)
 	req = httptest.NewRequest(http.MethodOptions, "/api/v1/stream/items", nil)
 	w = httptest.NewRecorder()
-	publicContentMiddleware(preflightLimiter, s.handleStreamItems)(w, req)
+	publicContentMiddleware(preflightLimiter, false, s.handleStreamItems)(w, req)
 	if w.Code != http.StatusNoContent {
 		t.Errorf("OPTIONS: expected 204, got %d", w.Code)
 	}
@@ -636,7 +636,7 @@ func TestStreamItems_RateLimitTriggers429(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/items?type=posts&time=24h", nil)
 		req.RemoteAddr = "203.0.113.42:54321"
 		w := httptest.NewRecorder()
-		publicContentMiddleware(tinyLimiter, s.handleStreamItems)(w, req)
+		publicContentMiddleware(tinyLimiter, false, s.handleStreamItems)(w, req)
 		if w.Code != http.StatusOK {
 			t.Fatalf("request %d under cap: expected 200, got %d", i+1, w.Code)
 		}
@@ -646,7 +646,7 @@ func TestStreamItems_RateLimitTriggers429(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/items?type=posts&time=24h", nil)
 	req.RemoteAddr = "203.0.113.42:54321"
 	w := httptest.NewRecorder()
-	publicContentMiddleware(tinyLimiter, s.handleStreamItems)(w, req)
+	publicContentMiddleware(tinyLimiter, false, s.handleStreamItems)(w, req)
 	if w.Code != http.StatusTooManyRequests {
 		t.Errorf("third request: expected 429, got %d", w.Code)
 	}
@@ -658,7 +658,7 @@ func TestStreamItems_RateLimitTriggers429(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/stream/items?type=posts&time=24h", nil)
 	req.RemoteAddr = "198.51.100.7:54321"
 	w = httptest.NewRecorder()
-	publicContentMiddleware(tinyLimiter, s.handleStreamItems)(w, req)
+	publicContentMiddleware(tinyLimiter, false, s.handleStreamItems)(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("different IP: expected 200, got %d", w.Code)
 	}
@@ -668,7 +668,6 @@ func TestStreamItems_RateLimitTriggers429(t *testing.T) {
 // items_fetched observability event. Each call to handleStreamItems
 // should produce exactly one event (success OR error), carrying the
 // parsed filter params, the response shape, and the final status code.
-// Closes plans/v4-deploy-readiness.md §3.
 func TestStreamItems_EmitsItemsFetchedEvent(t *testing.T) {
 	s := newConfiguredServer(t)
 	now := time.Now().UTC()
@@ -2619,5 +2618,42 @@ func TestHandleStreamItemsDMThread_LockedShipsBox(t *testing.T) {
 	}
 	if it.BodyText == secret {
 		t.Error("server must NOT expose plaintext for a locked message")
+	}
+}
+
+// TestDedupeActivityCommentsAgainstPosts verifies the activity-view dedup:
+// a comment whose target post is also present (follow both author + commenter)
+// is dropped, the post entry is kept, and a comment whose target post is NOT
+// present (follow only the commenter) survives.
+func TestDedupeActivityCommentsAgainstPosts(t *testing.T) {
+	presentPost := "https://discover.polis.pub/posts/mirror.html"
+	absentPost := "https://nobody.polis.pub/posts/x.html"
+	items := []feed.CachedFeedItem{
+		{Type: "post", URL: presentPost, AuthorDomain: "discover.polis.pub"},
+		{Type: "comment", URL: "https://scott.polis.pub/comments/great.html", TargetURL: presentPost, AuthorDomain: "scott.polis.pub"},
+		{Type: "comment", URL: "https://scott.polis.pub/comments/orphan.html", TargetURL: absentPost, AuthorDomain: "scott.polis.pub"},
+	}
+
+	out := dedupeActivityCommentsAgainstPosts(items)
+
+	if len(out) != 2 {
+		t.Fatalf("expected 2 items (post + orphan comment), got %d", len(out))
+	}
+	var hasPost, hasOrphan, hasRedundant bool
+	for _, it := range out {
+		switch {
+		case it.Type == "post":
+			hasPost = true
+		case it.Type == "comment" && it.TargetURL == absentPost:
+			hasOrphan = true
+		case it.Type == "comment" && it.TargetURL == presentPost:
+			hasRedundant = true
+		}
+	}
+	if hasRedundant {
+		t.Error("comment whose target post is present should have been dropped")
+	}
+	if !hasPost || !hasOrphan {
+		t.Errorf("post and orphan comment should survive; hasPost=%v hasOrphan=%v", hasPost, hasOrphan)
 	}
 }

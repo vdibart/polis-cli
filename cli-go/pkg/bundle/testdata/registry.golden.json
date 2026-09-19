@@ -1,0 +1,87 @@
+{
+  "schema_version": 2,
+  "active_theme": "",
+  "active_shape": "pub.polis.shapes.v4",
+  "installed_bundles": [
+    {
+      "name": "pub.polis.core",
+      "path": ".polis/bundles/pub.polis.core",
+      "shape_versions": {
+        "v3": "1.0.0",
+        "v4": "1.8.65"
+      },
+      "theme_versions": {
+        "_shared": "1.2.0",
+        "especial": "1.1.0",
+        "especial-light": "1.1.0",
+        "sols": "1.1.0",
+        "stardust": "1.0.0",
+        "studio13": "1.0.0",
+        "studio13-nk": "1.0.1",
+        "turbo": "1.1.0",
+        "vice": "1.1.0",
+        "zane": "1.1.0"
+      }
+    }
+  ],
+  "notifications": [
+    {
+      "id": "new-post",
+      "on": "pub.polis.post.published",
+      "relevance": "followed_author",
+      "template": "{{actor}} published a new post",
+      "icon": "pencil"
+    },
+    {
+      "id": "updated-post",
+      "on": "pub.polis.post.republished",
+      "relevance": "followed_author",
+      "template": "{{actor}} updated a post",
+      "icon": "pencil",
+      "enabled": false
+    },
+    {
+      "id": "new-comment",
+      "on": "pub.polis.comment.published",
+      "relevance": "target_domain",
+      "template": "{{actor}} commented on {{post_name}}",
+      "icon": "comment"
+    },
+    {
+      "id": "blessing-requested",
+      "on": "pub.polis.comment.blessing.requested",
+      "relevance": "target_domain",
+      "template": "{{actor}} requested a blessing on {{post_name}}",
+      "icon": "prayer"
+    },
+    {
+      "id": "blessing-granted",
+      "on": "pub.polis.comment.blessing.granted",
+      "relevance": "source_domain",
+      "template": "{{actor}} blessed your comment",
+      "icon": "check"
+    },
+    {
+      "id": "blessing-denied",
+      "on": "pub.polis.comment.blessing.denied",
+      "relevance": "source_domain",
+      "template": "{{actor}} denied your comment",
+      "icon": "x"
+    },
+    {
+      "id": "new-follower",
+      "on": "pub.polis.follow.announced",
+      "relevance": "target_domain",
+      "template": "{{actor}} started following you",
+      "icon": "follow",
+      "batch": "24h"
+    },
+    {
+      "id": "lost-follower",
+      "on": "pub.polis.follow.removed",
+      "relevance": "target_domain",
+      "template": "{{actor}} unfollowed you",
+      "icon": "unfollow"
+    }
+  ]
+}

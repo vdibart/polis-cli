@@ -1,0 +1,528 @@
+{
+  "diagnose": [
+    {
+      "name": "wellknown-version",
+      "status": "pass",
+      "message": "Version already in generator format: \"polis-cli-go/dev\"",
+      "reason": ""
+    },
+    {
+      "name": "author-field-migration",
+      "status": "pass",
+      "message": "author_name already in use (or no author field)",
+      "reason": ""
+    },
+    {
+      "name": "wellknown-legacy-config",
+      "status": "pass",
+      "message": "No legacy config sections found",
+      "reason": ""
+    },
+    {
+      "name": "wellknown-bundles",
+      "status": "pass",
+      "message": "Bundles registry present",
+      "reason": ""
+    },
+    {
+      "name": "avatar-config",
+      "status": "pass",
+      "message": "Avatar config present",
+      "reason": ""
+    },
+    {
+      "name": "bundle-json",
+      "status": "pass",
+      "message": "bundle.json present and up to date",
+      "reason": ""
+    },
+    {
+      "name": "layout-posts",
+      "status": "pass",
+      "message": "No posts/ directory found",
+      "reason": ""
+    },
+    {
+      "name": "layout-comments",
+      "status": "pass",
+      "message": "No comments to migrate",
+      "reason": ""
+    },
+    {
+      "name": "layout-following",
+      "status": "pass",
+      "message": "following.json already in new location",
+      "reason": ""
+    },
+    {
+      "name": "layout-blessed",
+      "status": "pass",
+      "message": "blessed.json already in new location",
+      "reason": ""
+    },
+    {
+      "name": "path-separators",
+      "status": "pass",
+      "message": "No backslash path separators found",
+      "reason": ""
+    },
+    {
+      "name": "bundle-reference-payload",
+      "status": "pass",
+      "message": "reference payload up to date",
+      "reason": ""
+    },
+    {
+      "name": "legacy-content-path",
+      "status": "pass",
+      "message": "no legacy .polis/content/ tree",
+      "reason": ""
+    },
+    {
+      "name": "registry-migration",
+      "status": "pass",
+      "message": "active_theme already migrated out of .well-known/polis",
+      "reason": ""
+    },
+    {
+      "name": "legacy-theme-locations",
+      "status": "pass",
+      "message": "no legacy theme locations",
+      "reason": ""
+    },
+    {
+      "name": "bundle-active-fields",
+      "status": "pass",
+      "message": "no legacy 'active' field present",
+      "reason": ""
+    },
+    {
+      "name": "notification-rules-migration",
+      "status": "pass",
+      "message": "no per-content-type notification rules in bundle.json",
+      "reason": ""
+    },
+    {
+      "name": "active-shape-upgrade",
+      "status": "pass",
+      "message": "active_shape is \"pub.polis.shapes.v4\"; not on v3 (nothing to upgrade)",
+      "reason": ""
+    },
+    {
+      "name": "v3-legacy-archives",
+      "status": "pass",
+      "message": "no stale v3 archive files (or tenant not on v4)",
+      "reason": ""
+    },
+    {
+      "name": "index-rebuild",
+      "status": "pass",
+      "message": "Content index exists (nothing to index)",
+      "reason": ""
+    },
+    {
+      "name": "render-site",
+      "status": "pass",
+      "message": "No posts to render",
+      "reason": ""
+    },
+    {
+      "name": "policies-public",
+      "status": "pass",
+      "message": "Public policy file exists",
+      "reason": ""
+    },
+    {
+      "name": "policies-private",
+      "status": "pass",
+      "message": "Private policy file exists",
+      "reason": ""
+    },
+    {
+      "name": "policy-content-converge",
+      "status": "fail",
+      "message": "Policy content drift: public",
+      "reason": "Policy files must match the canonical templates for consistent behavior",
+      "actions": [
+        {
+          "op": "update",
+          "path": "policies/rules.jsonl",
+          "detail": "converge to canonical template"
+        }
+      ]
+    },
+    {
+      "name": "tag-directory",
+      "status": "pass",
+      "message": "Tag directory present",
+      "reason": ""
+    },
+    {
+      "name": "storage-salt",
+      "status": "pass",
+      "message": "Storage salt present",
+      "reason": ""
+    },
+    {
+      "name": "dm-directories",
+      "status": "pass",
+      "message": "DM directories present with correct permissions",
+      "reason": ""
+    },
+    {
+      "name": "dm-keyring",
+      "status": "pass",
+      "message": "DM keyring present",
+      "reason": ""
+    },
+    {
+      "name": "theme-consolidation",
+      "status": "pass",
+      "message": "no themes directory",
+      "reason": ""
+    },
+    {
+      "name": "webapp-config",
+      "status": "pass",
+      "message": "No legacy webapp config to migrate",
+      "reason": ""
+    },
+    {
+      "name": "webapp-view-mode",
+      "status": "pass",
+      "message": "No deprecated view_mode key",
+      "reason": ""
+    },
+    {
+      "name": "reference-payload-integrity",
+      "status": "pass",
+      "message": "reference payload matches embedded fixtures byte-for-byte",
+      "reason": ""
+    },
+    {
+      "name": "registry-integrity",
+      "status": "pass",
+      "message": "registry integrity OK",
+      "reason": ""
+    },
+    {
+      "name": "key-consistency",
+      "status": "pass",
+      "message": "public key matches between .polis/keys/ and .well-known/polis",
+      "reason": ""
+    },
+    {
+      "name": "bundle-path-integrity",
+      "status": "pass",
+      "message": "bundle paths readable and author_name set",
+      "reason": ""
+    },
+    {
+      "name": "unpublished-emits-migration",
+      "status": "pass",
+      "message": "unpublished events already declared",
+      "reason": ""
+    },
+    {
+      "name": "bundle-declarations",
+      "status": "pass",
+      "message": "bundle declarations complete and match defaults",
+      "reason": ""
+    },
+    {
+      "name": "index-entries",
+      "status": "pass",
+      "message": "all index entries valid",
+      "reason": ""
+    },
+    {
+      "name": "blessed-following-structure",
+      "status": "pass",
+      "message": "blessed.json + following.json structure OK (or absent)",
+      "reason": ""
+    },
+    {
+      "name": "active-theme-unset",
+      "status": "pass",
+      "message": "active_theme set: vice",
+      "reason": ""
+    },
+    {
+      "name": "registry-schema-version",
+      "status": "pass",
+      "message": "schema_version=2 matches binary's supported version",
+      "reason": ""
+    },
+    {
+      "name": "registry-fqn-sanity",
+      "status": "pass",
+      "message": "FQN fields parse cleanly",
+      "reason": ""
+    },
+    {
+      "name": "manifest-obsolete",
+      "status": "pass",
+      "message": "No obsolete manifest.json found",
+      "reason": ""
+    },
+    {
+      "name": "empty-metadata-dir",
+      "status": "pass",
+      "message": "No metadata/ directory found",
+      "reason": ""
+    },
+    {
+      "name": "foreign-content-in-public-path",
+      "status": "pass",
+      "message": "site domain unknown — skipped",
+      "reason": ""
+    },
+    {
+      "name": "blessed-cache-gc",
+      "status": "pass",
+      "message": "no DS directory",
+      "reason": ""
+    },
+    {
+      "name": "stale-scoped-feed",
+      "status": "pass",
+      "message": "no DS directory",
+      "reason": ""
+    },
+    {
+      "name": "stale-feed-viewed-at",
+      "status": "pass",
+      "message": "no DS directory",
+      "reason": ""
+    },
+    {
+      "name": "legacy-feed-scaffolding",
+      "status": "pass",
+      "message": "no legacy pub.polis.feed scaffolding",
+      "reason": ""
+    },
+    {
+      "name": "orphaned-theme-dirs",
+      "status": "pass",
+      "message": "no orphan theme dirs",
+      "reason": ""
+    },
+    {
+      "name": "studio13-rename-migration",
+      "status": "pass",
+      "message": "active_theme is not pre-rename studio13",
+      "reason": ""
+    },
+    {
+      "name": "cli-update",
+      "status": "fail",
+      "message": "Would download polis-full vdev for $GOOS/$GOARCH",
+      "reason": "Your site is now at vdev format — the latest CLI ensures full compatibility",
+      "actions": [
+        {
+          "op": "create",
+          "path": ".polis/bin/polis-full-$GOOS-$GOARCH",
+          "detail": "download polis-full vdev for $GOOS/$GOARCH"
+        }
+      ]
+    }
+  ],
+  "dry_run": [
+    {
+      "name": "author-field-migration",
+      "status": "pass",
+      "message": "author_name already in use (or no author field)",
+      "reason": ""
+    },
+    {
+      "name": "policy-content-converge",
+      "status": "fail",
+      "message": "Policy content drift: public",
+      "reason": "Policy files must match the canonical templates for consistent behavior",
+      "actions": [
+        {
+          "op": "update",
+          "path": "policies/rules.jsonl",
+          "detail": "converge to canonical template"
+        }
+      ]
+    },
+    {
+      "name": "dm-directories",
+      "status": "pass",
+      "message": "DM directories present with correct permissions",
+      "reason": ""
+    },
+    {
+      "name": "webapp-view-mode",
+      "status": "pass",
+      "message": "No deprecated view_mode key",
+      "reason": ""
+    },
+    {
+      "name": "reference-payload-integrity",
+      "status": "pass",
+      "message": "reference payload matches embedded fixtures byte-for-byte",
+      "reason": ""
+    },
+    {
+      "name": "registry-integrity",
+      "status": "pass",
+      "message": "registry integrity OK",
+      "reason": ""
+    },
+    {
+      "name": "key-consistency",
+      "status": "pass",
+      "message": "public key matches between .polis/keys/ and .well-known/polis",
+      "reason": ""
+    },
+    {
+      "name": "bundle-path-integrity",
+      "status": "pass",
+      "message": "bundle paths readable and author_name set",
+      "reason": ""
+    },
+    {
+      "name": "bundle-declarations",
+      "status": "pass",
+      "message": "bundle declarations complete and match defaults",
+      "reason": ""
+    },
+    {
+      "name": "index-entries",
+      "status": "pass",
+      "message": "all index entries valid",
+      "reason": ""
+    },
+    {
+      "name": "blessed-following-structure",
+      "status": "pass",
+      "message": "blessed.json + following.json structure OK (or absent)",
+      "reason": ""
+    },
+    {
+      "name": "foreign-content-in-public-path",
+      "status": "pass",
+      "message": "no foreign content in public paths",
+      "reason": ""
+    },
+    {
+      "name": "stale-scoped-feed",
+      "status": "pass",
+      "message": "no DS directory",
+      "reason": ""
+    },
+    {
+      "name": "stale-feed-viewed-at",
+      "status": "pass",
+      "message": "no DS directory",
+      "reason": ""
+    },
+    {
+      "name": "orphaned-theme-dirs",
+      "status": "pass",
+      "message": "no orphan theme dirs",
+      "reason": ""
+    }
+  ],
+  "apply": [
+    {
+      "name": "author-field-migration",
+      "status": "pass",
+      "message": "author_name already in use (or no author field)",
+      "reason": ""
+    },
+    {
+      "name": "policy-content-converge",
+      "status": "fail",
+      "message": "Converged policy files: public",
+      "reason": "Policy files must match the canonical templates for consistent behavior",
+      "actions": [
+        {
+          "op": "update",
+          "path": "policies/rules.jsonl",
+          "detail": "converge to canonical template"
+        }
+      ]
+    },
+    {
+      "name": "dm-directories",
+      "status": "pass",
+      "message": "DM directories present with correct permissions",
+      "reason": ""
+    },
+    {
+      "name": "webapp-view-mode",
+      "status": "pass",
+      "message": "No deprecated view_mode key",
+      "reason": ""
+    },
+    {
+      "name": "reference-payload-integrity",
+      "status": "pass",
+      "message": "reference payload matches embedded fixtures byte-for-byte",
+      "reason": ""
+    },
+    {
+      "name": "registry-integrity",
+      "status": "pass",
+      "message": "registry integrity OK",
+      "reason": ""
+    },
+    {
+      "name": "key-consistency",
+      "status": "pass",
+      "message": "public key matches between .polis/keys/ and .well-known/polis",
+      "reason": ""
+    },
+    {
+      "name": "bundle-path-integrity",
+      "status": "pass",
+      "message": "bundle paths readable and author_name set",
+      "reason": ""
+    },
+    {
+      "name": "bundle-declarations",
+      "status": "pass",
+      "message": "bundle declarations complete and match defaults",
+      "reason": ""
+    },
+    {
+      "name": "index-entries",
+      "status": "pass",
+      "message": "all index entries valid",
+      "reason": ""
+    },
+    {
+      "name": "blessed-following-structure",
+      "status": "pass",
+      "message": "blessed.json + following.json structure OK (or absent)",
+      "reason": ""
+    },
+    {
+      "name": "foreign-content-in-public-path",
+      "status": "pass",
+      "message": "no foreign content in public paths",
+      "reason": ""
+    },
+    {
+      "name": "stale-scoped-feed",
+      "status": "pass",
+      "message": "no DS directory",
+      "reason": ""
+    },
+    {
+      "name": "stale-feed-viewed-at",
+      "status": "pass",
+      "message": "no DS directory",
+      "reason": ""
+    },
+    {
+      "name": "orphaned-theme-dirs",
+      "status": "pass",
+      "message": "no orphan theme dirs",
+      "reason": ""
+    }
+  ]
+}

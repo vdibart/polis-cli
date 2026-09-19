@@ -209,4 +209,3 @@ func bytesEqual(a, b []byte) bool {
 	}
 	return true
 }
-

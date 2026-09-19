@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/sitecheck"
 	"github.com/vdibart/polis-cli/cli-go/pkg/verify"
 )
 
@@ -19,7 +20,9 @@ func handlePreview(args []string) {
 		exitError("URL must use HTTPS (e.g., https://example.com/posts/hello.md)")
 	}
 
-	result, err := verify.VerifyContent(contentURL)
+	// The witnessed form: preview is a person asking about one artifact, which is
+	// exactly where the witness axis belongs (SIGNET epic 32 D8).
+	result, err := verify.VerifyContentWitnessed(contentURL, requestID)
 	if err != nil {
 		exitError("Failed to preview: %v", err)
 	}
@@ -39,6 +42,7 @@ func handlePreview(args []string) {
 				"author":            result.Author,
 				"signature":         result.Signature,
 				"hash":              result.Hash,
+				"witness":           result.Witness,
 				"validation_issues": result.ValidationIssues,
 				"body":              result.Body,
 			},
@@ -70,7 +74,14 @@ func handlePreview(args []string) {
 		// Signature status
 		switch result.Signature.Status {
 		case "valid":
-			fmt.Println("[✓] Signature verified")
+			if k := result.Signature.Key; k != nil && k.Source == sitecheck.KeyRetired {
+				// SIGNET epic 31 D4: a retired-key pass is a weaker claim and must
+				// not print the same line as a current-key one.
+				fmt.Println("[✓] Signature verified — against a RETIRED key, not the site's current key")
+				fmt.Printf("    %s\n", k.Describe())
+			} else {
+				fmt.Println("[✓] Signature verified")
+			}
 		case "invalid":
 			fmt.Fprintf(os.Stderr, "[x] Signature INVALID - content may have been tampered with\n")
 		case "missing":
@@ -87,6 +98,24 @@ func handlePreview(args []string) {
 			fmt.Fprintf(os.Stderr, "[x] Content hash MISMATCH - content may have been modified\n")
 		default:
 			fmt.Println("[?] Could not verify hash")
+		}
+
+		// Witness (SIGNET epic 32) — a third axis, and never a failure: an
+		// unwitnessed artifact is a weaker claim, not a broken one.
+		if w := result.Witness; w != nil {
+			switch w.State {
+			case sitecheck.WitnessStateInvalid:
+				fmt.Fprintf(os.Stderr, "[x] %s\n", w.Describe())
+			case sitecheck.WitnessWitnessed:
+				fmt.Println("[✓] " + w.Describe())
+			case sitecheck.WitnessUnverifiable:
+				fmt.Println("[?] " + w.Describe())
+			default:
+				fmt.Println("[i] " + w.Describe())
+			}
+			if note := w.ContradictsClaimedTime(result.Signature.Key); note != "" {
+				fmt.Fprintf(os.Stderr, "[!] The witness and the claimed signing time disagree: %s\n", note)
+			}
 		}
 
 		// Validation issues

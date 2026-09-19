@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/version"
@@ -40,15 +41,6 @@ type PublishResult struct {
 	Version   string `json:"version"`
 	Signature string `json:"signature"`
 	URL       string `json:"url,omitempty"`
-}
-
-// PostMeta contains metadata for a published post (for index)
-type PostMeta struct {
-	Type           string `json:"type"`
-	Path           string `json:"path"`
-	Title          string `json:"title"`
-	Published      string `json:"published"`
-	CurrentVersion string `json:"current_version"`
 }
 
 // ManifestData contains the manifest.json structure
@@ -171,7 +163,11 @@ func HashContent(content []byte) string {
 }
 
 // buildFrontmatter creates the YAML frontmatter for a post with an explicit generator string.
-func buildFrontmatter(title, hash, timestamp, signature, generator string) string {
+//
+// licenseYAML is the materialised `license:` block (already newline-prefixed)
+// or "" — and it MUST be the same string that went into the unsigned
+// frontmatter used as the signing base. See licenseFrontmatter.
+func buildFrontmatter(title, hash, timestamp, signature, generator, licenseYAML string) string {
 	// Note: signature is base64-encoded, single line for YAML
 	return fmt.Sprintf(`---
 title: %s
@@ -179,7 +175,7 @@ published: %s
 generator: %s
 current-version: sha256:%s
 version-history:
-  - sha256:%s (%s)
+  - sha256:%s (%s)%s
 signature: %s
 ---`,
 		escapeYAMLString(title),
@@ -188,12 +184,18 @@ signature: %s
 		hash,
 		hash,
 		timestamp,
+		licenseYAML,
 		signature,
 	)
 }
 
-// escapeYAMLString escapes a string for safe YAML inclusion.
-// Matches the bash CLI behavior: only quote when necessary.
+// escapeYAMLString escapes a string for safe YAML inclusion: only quote when
+// necessary.
+//
+// ⛔ It does NOT match the bash CLI, whatever this comment said before the
+// Signet close-out. Bash interpolates `title: $title` raw and has no escaper at
+// all, which is the whole reason UnquoteYAMLString below carries a warning about
+// foreign content.
 func escapeYAMLString(s string) string {
 	// In YAML, single quotes (apostrophes) are fine in unquoted strings.
 	// Only quote when truly necessary:
@@ -225,6 +227,53 @@ func escapeYAMLString(s string) string {
 		// Escape double quotes and wrap in double quotes
 		escaped := strings.ReplaceAll(s, "\"", "\\\"")
 		return fmt.Sprintf("\"%s\"", escaped)
+	}
+	return s
+}
+
+// UnquoteYAMLString is the exact inverse of escapeYAMLString: it returns the
+// value a frontmatter field HOLDS, given the bytes a flat frontmatter parse
+// read off the line.
+//
+// ⛔ Anything that puts a frontmatter title back into prose must call this.
+// `ParseFrontmatter` returns the line verbatim, quoting included, and a title
+// needs quoting far more often than it looks: the rule fires on ": ", a
+// trailing ":", a newline, a quote, edge whitespace or a leading YAML sigil, so
+// every `Re: <slug>` and every `Foo: Bar` is stored quoted. Prepending the raw
+// value to a draft body re-publishes it as the title, and the quoting then
+// compounds on every cycle — `Foo: Bar` → `"Foo: Bar"` → `"\"Foo: Bar\""` —
+// while the leading-heading strip stops matching and stacks a heading each time
+// (close-out R3-1).
+//
+// ⛔ IT UNDOES THIS PACKAGE'S WRITER, AND NOTHING ELSE. Only the double-quoted
+// wrapper and the `\"` escape, because those are the only things
+// escapeYAMLString produces. A tolerant YAML reader is a DIFFERENT JOB and a
+// wrong fit here: the first version of this function also unwrapped `'…'` and
+// collapsed `\\`, and since the escaper leaves apostrophes bare and never
+// escapes a backslash, it silently rewrote the author's own characters —
+// `'Foo'` → `Foo` — which renamed the post on the next publish (close-out
+// R4-1). `TestUnquoteIsTheExactInverseOfEscape` holds the pairing as a
+// property; a comment could not.
+//
+// ⭐ `render.yamlUnquote` is the tolerant reader, and IDENTICAL to that first
+// version. It is correct where it lives, because it parses frontmatter anyone
+// may have written. ⛔ These two must not be merged or made to share a lineage
+// again: one asks *"what did OUR writer store?"*, the other *"what might this
+// file mean?"*, and the answers differ exactly where it matters.
+//
+// ⚠️ It is NOT a no-op on foreign content. The bash CLI writes titles raw, so a
+// bash post titled `"The Great Gatsby"` is stored byte-for-byte as a Go post
+// titled `The Great Gatsby`, and this reads the quotes off.
+//
+// ⚠️ The `generator:` field does name the writer (`polis-cli/` vs
+// `polis-cli-go/`) — deliberately not used here, because it records the LAST
+// writer, so a bash-published file that any Go path has since rewritten would
+// claim to be ours and be read the wrong way round. Guessing from the bytes is
+// not better than the small, documented loss.
+// See TestAForeignWritersQuotesAreReadAsOurEscaping.
+func UnquoteYAMLString(s string) string {
+	if len(s) >= 2 && strings.HasPrefix(s, `"`) && strings.HasSuffix(s, `"`) {
+		return strings.ReplaceAll(s[1:len(s)-1], `\"`, `"`)
 	}
 	return s
 }
@@ -271,6 +320,20 @@ func PublishPost(dataDir, markdown, filename string, privateKey []byte, dsCfg ..
 	// Get timestamp
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 
+	// Materialise the licence ONCE. The same string is spliced into the
+	// unsigned frontmatter below and into buildFrontmatter's output; they
+	// differ only by the signature line, which is what the signing base removes to
+	// recover the signed bytes.
+	_, _, baseURLForLicense := resolveDiscoveryConfig(cfgForGen)
+	authoredProfile := ""
+	if cfgForGen != nil {
+		authoredProfile = cfgForGen.LicenseProfile
+	}
+	licenseYAML, _, err := licenseFrontmatter(dataDir, authoredProfile, baseURLForLicense)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve licence terms: %w", err)
+	}
+
 	// Build content to sign (frontmatter without signature + content)
 	unsignedFrontmatter := fmt.Sprintf(`---
 title: %s
@@ -278,7 +341,7 @@ published: %s
 generator: %s
 current-version: sha256:%s
 version-history:
-  - sha256:%s (%s)
+  - sha256:%s (%s)%s
 ---`,
 		escapeYAMLString(title),
 		timestamp,
@@ -286,6 +349,7 @@ version-history:
 		hash,
 		hash,
 		timestamp,
+		licenseYAML,
 	)
 
 	// Build full unsigned content, then canonicalize the whole thing for signing
@@ -303,7 +367,7 @@ version-history:
 	sigBase64 := extractSignatureBase64(signature)
 
 	// Build final frontmatter with signature
-	finalFrontmatter := buildFrontmatter(title, hash, timestamp, sigBase64, gen)
+	finalFrontmatter := buildFrontmatter(title, hash, timestamp, sigBase64, gen, licenseYAML)
 
 	// Build final content
 	finalContent := finalFrontmatter + "\n\n" + canonicalBody
@@ -329,7 +393,7 @@ version-history:
 		// Log but don't fail - version history is nice to have
 		fmt.Printf("[warning] Failed to initialize version history: %v\n", err)
 	}
-	meta := &PostMeta{
+	meta := &metadata.IndexEntry{
 		Type:           "post",
 		Path:           relativePath,
 		Title:          title,
@@ -407,9 +471,15 @@ func extractSignatureBase64(sig string) string {
 	return strings.Join(base64Lines, "")
 }
 
-// AppendToIndex appends a post entry to public.jsonl.
+// AppendToIndex appends a post entry to index.jsonl.
 // Delegates to metadata.AppendPostToIndex for deduplication support.
-func AppendToIndex(dataDir string, meta *PostMeta) error {
+//
+// ⚠️ The entry type is metadata.IndexEntry and there is deliberately no local
+// one. A struct that models a SUBSET of an index line is a struct that will
+// eventually be used to rewrite one, and rewriting through a subset drops
+// every field it does not know about — which is exactly what UpdateIndexEntry
+// was doing to `license` and `in_reply_to` before Signet epic 25.
+func AppendToIndex(dataDir string, meta *metadata.IndexEntry) error {
 	return metadata.AppendPostToIndex(dataDir, meta.Path, meta.Title, meta.Published, meta.CurrentVersion)
 }
 
@@ -557,6 +627,20 @@ func RepublishPost(dataDir, postPath, markdown string, privateKey []byte, dsCfg 
 		versionHistoryYAML += fmt.Sprintf("\n  - %s", v)
 	}
 
+	// Re-materialise the licence. Republishing with new terms creates a NEW
+	// version carrying those terms; copies already made keep the old ones,
+	// provably. Terms are not retroactive, and that is honest rather than a
+	// limitation — the old signature still verifies over the old terms.
+	_, _, baseURLForLicense := resolveDiscoveryConfig(cfgForGen)
+	authoredProfile := ""
+	if cfgForGen != nil {
+		authoredProfile = cfgForGen.LicenseProfile
+	}
+	licenseYAML, _, err := licenseFrontmatter(dataDir, authoredProfile, baseURLForLicense)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve licence terms: %w", err)
+	}
+
 	// Build content to sign (frontmatter without signature + content)
 	unsignedFrontmatter := fmt.Sprintf(`---
 title: %s
@@ -564,7 +648,7 @@ published: %s
 updated: %s
 generator: %s
 current-version: sha256:%s
-version-history:%s
+version-history:%s%s
 ---`,
 		escapeYAMLString(title),
 		originalPublished,
@@ -572,6 +656,7 @@ version-history:%s
 		gen,
 		hash,
 		versionHistoryYAML,
+		licenseYAML,
 	)
 
 	// Build full unsigned content, then canonicalize the whole thing for signing
@@ -595,7 +680,7 @@ published: %s
 updated: %s
 generator: %s
 current-version: sha256:%s
-version-history:%s
+version-history:%s%s
 signature: %s
 ---`,
 		escapeYAMLString(title),
@@ -604,6 +689,7 @@ signature: %s
 		gen,
 		hash,
 		versionHistoryYAML,
+		licenseYAML,
 		sigBase64,
 	)
 
@@ -665,27 +751,43 @@ func UpdateIndexEntry(dataDir, postPath, newTitle, newVersion string) error {
 	lines := strings.Split(string(data), "\n")
 	found := false
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
+	// ⛔ Every line but the matched one is written back AS ITS ORIGINAL BYTES,
+	// parsed or not: the index is unsigned, and what this build does not
+	// understand is not its to rewrite. The matched line keeps its unmodelled
+	// members through metadata.IndexEntry.Extra.
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
 		}
 
-		var entry PostMeta
+		// ⚠️ Decoded as metadata.IndexEntry, NOT PostMeta. PostMeta models
+		// only type/path/title/published/current_version, so re-marshalling a
+		// matched line through it silently dropped the entry's `license` and
+		// (for a comment) its `in_reply_to` — republishing a work quietly
+		// erased the terms the index published for it. A line is only ever
+		// re-marshalled through a struct that models every field it can carry.
+		var entry metadata.IndexEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			newLines = append(newLines, line)
+			newLines = append(newLines, raw)
 			continue
 		}
 
 		if entry.Path == postPath {
-			// Update this entry
 			entry.Title = newTitle
 			entry.CurrentVersion = newVersion
+			// Refresh the terms from the SIGNED FILE, which republish has just
+			// rewritten. The index's licence block is a projection of the
+			// work's frontmatter, so it follows the bytes rather than lagging
+			// them.
+			if raw, rErr := os.ReadFile(filepath.Join(dataDir, entry.Path)); rErr == nil {
+				entry.License = license.ParseBlock(string(raw))
+			}
 			updated, _ := json.Marshal(entry)
 			newLines = append(newLines, string(updated))
 			found = true
 		} else {
-			newLines = append(newLines, line)
+			newLines = append(newLines, raw)
 		}
 	}
 

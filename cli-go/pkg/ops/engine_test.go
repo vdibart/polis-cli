@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	followingpkg "github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/resolve"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 )
@@ -342,6 +343,97 @@ func TestListFollowingWithEntries(t *testing.T) {
 	if count != 2 {
 		t.Errorf("expected count 2, got %d", count)
 	}
+
+	// SIGNET epic 02: this fixture is hand-written JSON with no signature —
+	// i.e. exactly a pre-signing follow file. It must report "unsigned", and
+	// the entries must come back in full regardless.
+	sig := result.Data["signature"].(map[string]any)
+	if sig["status"] != "unsigned" {
+		t.Errorf("signature status = %v, want %q", sig["status"], "unsigned")
+	}
+}
+
+// TestListFollowingReportsSignature covers the three states a caller has to
+// tell apart, and asserts the roster is returned in EVERY one of them. The
+// signature is a fact travelling with the answer, never a gate on it (Law 2 /
+// D4) — withholding someone's follow list over a signature would cut them off
+// from their own network.
+func TestListFollowingReportsSignature(t *testing.T) {
+	sample := func() *followingpkg.FollowingFile {
+		return &followingpkg.FollowingFile{
+			Version: "polis-cli-go/test",
+			Following: []followingpkg.FollowingEntry{
+				{URL: "https://alice.example.com", AddedAt: "2026-01-01T00:00:00Z"},
+			},
+		}
+	}
+
+	list := func(t *testing.T, engine *Engine) map[string]any {
+		t.Helper()
+		result, err := engine.Dispatch(context.Background(), ActionRequest{
+			Action:      "list",
+			ContentType: "pub.polis.follow",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entries := result.Data["following"].([]map[string]any); len(entries) != 1 {
+			t.Errorf("the roster must be returned whatever the signature says; got %d entries", len(entries))
+		}
+		return result.Data["signature"].(map[string]any)
+	}
+
+	t.Run("signed", func(t *testing.T) {
+		engine, siteDir := newTestEngine(t)
+		privKey, err := os.ReadFile(filepath.Join(siteDir, ".polis/keys/id_ed25519"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := followingpkg.SaveSigned(followingpkg.DefaultPath(siteDir), sample(), privKey); err != nil {
+			t.Fatal(err)
+		}
+		if got := list(t, engine)["status"]; got != "valid" {
+			t.Errorf("status = %v, want %q", got, "valid")
+		}
+	})
+
+	t.Run("unsigned", func(t *testing.T) {
+		engine, siteDir := newTestEngine(t)
+		if err := followingpkg.Save(followingpkg.DefaultPath(siteDir), sample()); err != nil {
+			t.Fatal(err)
+		}
+		got := list(t, engine)["status"]
+		if got != "unsigned" {
+			t.Errorf("status = %v, want %q", got, "unsigned")
+		}
+		if got == "invalid" {
+			t.Error("unsigned must never surface as invalid")
+		}
+	})
+
+	t.Run("tampered", func(t *testing.T) {
+		engine, siteDir := newTestEngine(t)
+		privKey, err := os.ReadFile(filepath.Join(siteDir, ".polis/keys/id_ed25519"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := followingpkg.DefaultPath(siteDir)
+		if err := followingpkg.SaveSigned(path, sample(), privKey); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := os.ReadFile(path)
+		tampered := strings.Replace(string(raw), "alice.example.com", "mallory.example.com", 1)
+		if err := os.WriteFile(path, []byte(tampered), 0644); err != nil {
+			t.Fatal(err)
+		}
+		sig := list(t, engine)
+		if sig["status"] != "invalid" {
+			t.Errorf("status = %v, want %q", sig["status"], "invalid")
+		}
+		if sig["message"] == nil {
+			t.Error("an invalid signature should carry an explanation")
+		}
+	})
 }
 
 func TestWriteRequiresPrivateKey(t *testing.T) {
@@ -567,7 +659,7 @@ func TestBuiltinCoreHandlerActions(t *testing.T) {
 		contains    string
 	}{
 		{"pub.polis.post", false, "create"},
-		{"pub.polis.comment", false, "bless"},
+		{"pub.polis.comment", false, "update"},
 		{"pub.polis.follow", false, "list"},
 		{"pub.unknown", true, ""},
 	}

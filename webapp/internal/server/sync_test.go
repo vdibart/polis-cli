@@ -89,7 +89,6 @@ func TestGenerateBackgroundRequestID_Uniqueness(t *testing.T) {
 	}
 }
 
-
 // ============================================================================
 // cursorGreater Tests (defined in server.go but used heavily in sync.go)
 // ============================================================================
@@ -367,14 +366,14 @@ func TestFeedSyncHandler_EventTypes(t *testing.T) {
 	h := &feedSyncHandler{}
 	types := h.EventTypes()
 	expected := map[string]bool{
-		"pub.polis.post.published":              true,
-		"pub.polis.post.republished":            true,
-		"pub.polis.comment.published":           true,
-		"pub.polis.comment.republished":         true,
-		"pub.polis.comment.blessing.granted":    true,
-		"pub.polis.comment.blessing.requested":  true,
-		"pub.polis.follow.announced":            true,
-		"pub.polis.site.registered":             true,
+		"pub.polis.post.published":             true,
+		"pub.polis.post.republished":           true,
+		"pub.polis.comment.published":          true,
+		"pub.polis.comment.republished":        true,
+		"pub.polis.comment.blessing.granted":   true,
+		"pub.polis.comment.blessing.requested": true,
+		"pub.polis.follow.announced":           true,
+		"pub.polis.site.registered":            true,
 	}
 	if len(types) != len(expected) {
 		t.Errorf("expected %d event types, got %d", len(expected), len(types))
@@ -886,7 +885,6 @@ func TestFollowSyncHandler_Process_MultipleFolowers(t *testing.T) {
 	}
 }
 
-
 // ============================================================================
 // broadcastCounts on zero-event sync
 // ============================================================================
@@ -1034,11 +1032,11 @@ func TestExcerptFetchIndices(t *testing.T) {
 		{
 			name: "mixed — only matching items returned",
 			items: []feed.CachedFeedItem{
-				{Type: "post", URL: "https://a.pub/p.md"},                          // index 0 — match
-				{Type: "post", URL: "https://b.pub/p.md", Excerpt: "has it"},       // index 1 — has excerpt
-				{Type: "follow", URL: "https://c.pub/wk"},                          // index 2 — wrong type
-				{Type: "comment", URL: "https://d.pub/c.md"},                       // index 3 — match
-				{Type: "post", URL: "http://e.pub/p.md"},                           // index 4 — http
+				{Type: "post", URL: "https://a.pub/p.md"},                    // index 0 — match
+				{Type: "post", URL: "https://b.pub/p.md", Excerpt: "has it"}, // index 1 — has excerpt
+				{Type: "follow", URL: "https://c.pub/wk"},                    // index 2 — wrong type
+				{Type: "comment", URL: "https://d.pub/c.md"},                 // index 3 — match
+				{Type: "post", URL: "http://e.pub/p.md"},                     // index 4 — http
 			},
 			want: []int{0, 3},
 		},

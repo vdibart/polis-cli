@@ -29,7 +29,7 @@ set -euo pipefail
 # ============================================================================
 
 UPGRADE_VERSION="0.1.0"
-GITHUB_REPO="vdibart/polis"
+GITHUB_REPO="vdibart/polis-cli"
 GITHUB_RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPO}"
 
 # Colors
@@ -675,7 +675,7 @@ main() {
     fi
 
     local install_path="${POLIS_PATH:-${SITE_DIR}/${binary_name}}"
-    local download_url="${GITHUB_RAW_BASE}/v${TO_VERSION}/cli/bin/${binary_name}"
+    local download_url="${GITHUB_RAW_BASE}/v${TO_VERSION}/cli-bash/${binary_name}"
 
     echo -e "Download updated ${COMPONENT} (v${TO_VERSION}) to ${DIM}${install_path}${NC}?"
     if confirm "Proceed?"; then

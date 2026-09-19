@@ -33,7 +33,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vdibart/polis-cli/cli-go/pkg/blessing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/cache"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
@@ -87,6 +86,11 @@ func (s *Server) runUnifiedSync() SyncResult {
 	if myDomain == "" {
 		return result
 	}
+
+	// SIGNET epic 11 D13: when Rosie has become live since her last pass, decide
+	// the requests the cursor already passed over. Before the stream query, in
+	// the same serialised cycle as every other decision this server makes.
+	s.rosieCatchUp()
 
 	syncID := generateSyncID()
 	syncStart := time.Now()
@@ -154,6 +158,15 @@ func (s *Server) runUnifiedSync() SyncResult {
 	// Advance unified cursor
 	if newCursor != "" {
 		_ = store.SetCursor("pub.polis.sync", newCursor)
+		// Feed-content high-water mark: advance ONLY when this cycle actually
+		// added feed items. Your own posts are synced (so pub.polis.sync moves)
+		// but the feed handler filters them out, so NewFeedItems stays 0 for an
+		// own-post-only cycle. The gateway "new" dot keys off this cursor (not
+		// pub.polis.sync), so publishing your own post no longer lights it with
+		// nothing new to show.
+		if result.NewFeedItems > 0 {
+			_ = store.SetCursor("pub.polis.feed.content", newCursor)
+		}
 	}
 
 	// Single RenderSite if any files changed
@@ -461,28 +474,13 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 	privPath, pubPath := policy.DefaultPaths(s.DataDir)
 	policies, _ := policy.LoadPolicies(privPath, pubPath)
 
-	if len(policies) > 0 && s.PrivateKey != nil {
-		// Build eval context
-		followedDomains := make(map[string]bool)
-		followingPath := following.DefaultPath(s.DataDir)
-		if fl, err := following.Load(followingPath); err == nil {
-			for _, entry := range fl.All() {
-				if d := discovery.ExtractDomainFromURL(entry.URL); d != "" {
-					followedDomains[d] = true
-				}
-			}
-		}
-		var followerState stream.FollowerState
-		_ = store.LoadState("pub.polis.follow", &followerState)
-		followerDomains := make(map[string]bool, len(followerState.Followers))
-		for _, f := range followerState.Followers {
-			followerDomains[f] = true
-		}
-		ctx := policy.EvalContext{
-			MyDomain:         myDomain,
-			FollowingDomains: followedDomains,
-			FollowerDomains:  followerDomains,
-		}
+	// ⛔ SIGNET EPIC 11 D10: an auto-decision needs Rosie's live grant, on every
+	// server. No grant — or the hosted operator switch off — means no
+	// auto-decision: the request stays for the owner. There is no unmarked path.
+	live := s.rosieLiveGrant()
+
+	if len(policies) > 0 && s.PrivateKey != nil && live.Valid() {
+		ctx := s.blessingEvalContext(store, myDomain)
 
 		// Read-only: fetches blessing-requested event details. See
 		// NewReadDSClient comment in server.go for why this is gated
@@ -506,65 +504,16 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 				continue
 			}
 
-			pEvt := policy.Event{
-				Type:         evt.Type,
-				ActorDomain:  evt.Actor,
-				TargetDomain: targetDomain,
-				TargetPath:   inReplyTo,
-			}
-
-			evalResult := policy.EvaluateWithLog(policies, pEvt, ctx)
-			if !evalResult.Matched {
-				continue // no match -> manual review
-			}
-
-			// Unified decision event — fires for every matched blessing
-			// evaluation so Axiom can aggregate decision distributions
-			// (how often policies bless / review / deny). Action-specific
-			// events (auto_grant / auto_deny / review_queued) fire below
-			// inside the switch for the specific outcome taken.
-			s.LogEvent("pub.polis.policy.decision", map[string]interface{}{
-				"decision":     string(evalResult.Decision),
-				"content_type": pEvt.Type,
-				"actor_domain": evt.Actor,
-				"rule_matched": evalResult.Rule,
-				"layer":        "tenant-inbound",
-			})
-
-			switch evalResult.Decision {
-			case policy.Bless, policy.Allow, policy.Emit:
-				// Auto-grant (Bless is the new grammar; Allow/Emit retained for legacy)
-				commentVersion, _ := evt.Payload["comment_version"].(string)
-				_, err := blessing.GrantByVersion(s.DataDir, commentVersion, commentURL, inReplyTo, client, hc, s.PrivateKey)
-				if err != nil {
-					s.LogWarn("policy auto-grant failed for %s: %v", commentURL, err)
-				} else {
-					s.LogEvent("pub.polis.comment.blessing.auto_grant", map[string]interface{}{
-						"comment_url": commentURL,
-						"actor":       evt.Actor,
-						"policy_rule": evalResult.Rule,
-					})
-				}
-			case policy.Review:
-				// Explicit pending — leave for human review, no action.
-				s.LogEvent("pub.polis.policy.review_queued", map[string]interface{}{
-					"comment_url": commentURL,
-					"actor":       evt.Actor,
-					"policy_rule": evalResult.Rule,
-				})
-			case policy.Deny:
-				// Auto-deny
-				_, err := blessing.Deny(commentURL, inReplyTo, client, s.PrivateKey)
-				if err != nil {
-					s.LogWarn("policy auto-deny failed for %s: %v", commentURL, err)
-				} else {
-					s.LogEvent("pub.polis.comment.blessing.auto_deny", map[string]interface{}{
-						"comment_url": commentURL,
-						"actor":       evt.Actor,
-						"policy_rule": evalResult.Rule,
-					})
-				}
-			}
+			commentVersion, _ := evt.Payload["comment_version"].(string)
+			rootPost, _ := evt.Payload["root_post"].(string)
+			s.rosieEvaluate(live, policies, ctx, rosieRequest{
+				CommentURL:     commentURL,
+				CommentVersion: commentVersion,
+				InReplyTo:      inReplyTo,
+				RootPost:       rootPost,
+				TargetDomain:   targetDomain,
+				Actor:          evt.Actor,
+			}, client, hc)
 		}
 	}
 
@@ -574,27 +523,45 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 	for _, evt := range events {
 		// EVICTION (WS3·d): a post-author revoke/deny, or a comment author's
 		// unpublish, removes our cached mirror + drops it from blessed.json so it
-		// stops rendering. We act only on comments we actually cached (FindBlessed
-		// gates it). This honors a signed revocation — a 404 / unreachable author
-		// alone never evicts (the cache exists precisely to survive that).
+		// stops rendering. This honors a signed revocation — a 404 / unreachable
+		// author alone never evicts (the cache exists precisely to survive that).
+		//
+		// ⚠️ The two halves are gated SEPARATELY (Signet epic 45, review of E2):
+		// the cache evicts only what we cached, but the blessed.json entry goes
+		// whether or not the comment was ever cached. blessed.json is what Rosie
+		// reads for `thread-blessed`; an entry left behind by a failed fetch would
+		// keep its author thread-blessed after the blessing was withdrawn.
 		if evt.Type == "pub.polis.comment.blessing.denied" || evt.Type == "pub.polis.comment.unpublished" {
 			cu := firstNonEmptyString(evt.Payload, "comment_url", "source_url", "url")
 			if cu == "" {
 				continue
 			}
-			if _, _, ok := cache.FindBlessed(s.DataDir, cu); !ok {
+			_, _, cached := cache.FindBlessed(s.DataDir, cu)
+			listed := blessedListHas(s.DataDir, cu)
+			if !cached && !listed {
 				continue
 			}
-			// Evict through the SAME generic op Rosie's Reconcile uses (WS-R1
-			// anti-drift) — the blessed descriptor evicts across DS scopes.
-			evStore := cache.Store{DataDir: s.DataDir, DSDomain: extractDomainFromURL(s.DiscoveryURL)}
-			evDesc := cache.NewBlessedDescriptor(cache.DescriptorConfig{})
-			_ = cache.Evict(evStore, evDesc, cu)
-			if err := metadata.RemoveBlessedComment(s.DataDir, cu); err != nil {
-				s.LogWarn("blessing sync: evict %s: failed to update blessed.json: %v", cu, err)
+			if cached {
+				// Evict through the SAME generic op Rosie's Reconcile uses (WS-R1
+				// anti-drift) — the blessed descriptor evicts across DS scopes.
+				evStore := cache.Store{DataDir: s.DataDir, DSDomain: extractDomainFromURL(s.DiscoveryURL)}
+				evDesc := cache.NewBlessedDescriptor(cache.DescriptorConfig{})
+				_ = cache.Evict(evStore, evDesc, cu)
+			}
+			if listed {
+				// SIGNED (epic 21.2): this is the owner's instance, holding the
+				// owner's key. The unsigned remove cleared the list's signature,
+				// so the first withdrawal un-signed a list the author had signed.
+				if err := metadata.RemoveBlessedCommentSigned(s.DataDir, cu, s.PrivateKey); err != nil {
+					s.LogWarn("blessing sync: evict %s: failed to update blessed.json: %v", cu, err)
+				}
 			}
 			filesChanged = true
-			s.LogEvent("pub.polis.comment.blessing.evict", map[string]interface{}{"comment_url": cu})
+			s.LogEvent("pub.polis.comment.blessing.evict", map[string]interface{}{
+				"comment_url": cu,
+				"cached":      cached,
+				"listed":      listed,
+			})
 			continue
 		}
 
@@ -621,9 +588,10 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 			continue
 		}
 
-		// Update blessed-comments.json index
+		// Update blessed-comments.json index — SIGNED with the owner's key, for
+		// the same reason as the eviction above (epic 21.2).
 		postPath := extractPostPathFromURL(inReplyTo)
-		if err := metadata.AddBlessedComment(s.DataDir, postPath, metadata.BlessedComment{URL: commentURL}); err != nil {
+		if err := metadata.AddBlessedCommentSigned(s.DataDir, postPath, metadata.BlessedComment{URL: commentURL}, s.PrivateKey); err != nil {
 			s.LogWarn("blessing sync: failed to update blessed-comments for %s: %v", commentURL, err)
 		}
 

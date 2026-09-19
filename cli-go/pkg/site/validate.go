@@ -262,4 +262,3 @@ func validateWellKnown(path string) (*WellKnown, *ValidationError) {
 
 	return &wk, nil
 }
-

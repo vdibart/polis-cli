@@ -27,7 +27,7 @@ var defaultTransport = &http.Transport{
 	MaxIdleConns:          200,
 	MaxIdleConnsPerHost:   20,
 	IdleConnTimeout:       90 * time.Second,
-	TLSHandshakeTimeout:  5 * time.Second,
+	TLSHandshakeTimeout:   5 * time.Second,
 	ExpectContinueTimeout: 1 * time.Second,
 	TLSClientConfig: &tls.Config{
 		MinVersion: tls.VersionTLS12,

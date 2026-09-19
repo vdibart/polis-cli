@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
@@ -191,4 +192,48 @@ func (m *Manager) writeAll(entries []StateEntry) error {
 	}
 
 	return atomicfile.WriteFile(m.stateFile, buf.Bytes(), 0600)
+}
+
+// ClearAll empties every discovery domain's notification state file and returns
+// the number of entries removed.
+//
+// ⚠️ This is a DELETE, not a rebuild. It lived under `polis rebuild
+// --notifications` for historical reasons and reconstructs nothing — nothing
+// anywhere can put those entries back. Signet epic 25 D5 moved the verb to
+// `polis notifications clear` and left the old flag accepted as a deprecated
+// alias.
+//
+// Mode stays 0600: this is `.polis/` state, not served content.
+func ClearAll(dataDir string) (int, error) {
+	count := 0
+
+	dsDir := filepath.Join(dataDir, ".polis", "ds")
+	entries, err := os.ReadDir(dsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		statePath := StateFile(dataDir, entry.Name())
+		data, err := os.ReadFile(statePath)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.TrimSpace(line) != "" {
+				count++
+			}
+		}
+		if err := atomicfile.WriteFile(statePath, []byte{}, 0600); err != nil {
+			return count, err
+		}
+	}
+
+	return count, nil
 }

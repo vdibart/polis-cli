@@ -30,7 +30,7 @@ import (
 //
 // (The wire-format shape name remains "pub.polis.shapes.v4" / map key "v4"
 // for backwards compatibility with installed tenants.)
-const StreamShapeVersion = "1.8.52"
+const StreamShapeVersion = "1.8.65"
 
 // Bundle represents a bundle.json declaration.
 type Bundle struct {
@@ -43,6 +43,8 @@ type Bundle struct {
 	Shapes      map[string]*Shape      `json:"shapes,omitempty"`
 	Themes      map[string]*Theme      `json:"themes,omitempty"`
 	Artifacts   []string               `json:"artifacts,omitempty"`
+	// Extra: members this build does not model, kept on save (extra.go).
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // Shape declares a rendering approach: a set of templates and supporting
@@ -54,6 +56,8 @@ type Shape struct {
 	Entry      map[string]string `json:"entry"`
 	Partials   []string          `json:"partials,omitempty"`
 	DefaultCSS string            `json:"default_css,omitempty"`
+	// Extra: members this build does not model, kept on save (extra.go).
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // Theme declares a CSS-only presentation layer compatible with one or more
@@ -71,6 +75,8 @@ type Theme struct {
 	CSS              string   `json:"css"`
 	DisplayName      string   `json:"display_name,omitempty"`
 	CompatibleShapes []string `json:"compatible_shapes,omitempty"`
+	// Extra: members this build does not model, kept on save (extra.go).
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // Handler declares how the system invokes this bundle.
@@ -78,11 +84,15 @@ type Handler struct {
 	Type string `json:"type"` // "builtin", "executable", "http"
 	Path string `json:"path,omitempty"`
 	URL  string `json:"url,omitempty"`
+	// Extra: members this build does not model, kept on save (extra.go).
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // DSConfig holds discovery service integration settings.
 type DSConfig struct {
 	SubscribesTo []string `json:"subscribes_to,omitempty"`
+	// Extra: members this build does not model, kept on save (extra.go).
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // ContentType declares a single content type within a bundle.
@@ -106,13 +116,17 @@ type ContentType struct {
 	Emits         []string           `json:"emits,omitempty"`
 	Notifications []NotificationRule `json:"notifications,omitempty"`
 	Private       bool               `json:"private,omitempty"`
+	// Extra: members this build does not model, kept on save (extra.go).
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // StorageConfig controls how content files are organized on disk.
 type StorageConfig struct {
-	Pattern    string `json:"pattern"`              // "dated" or "flat"
+	Pattern    string `json:"pattern"`               // "dated" or "flat"
 	DateFormat string `json:"date_format,omitempty"` // e.g. "YYYYMMDD"
 	Versions   bool   `json:"versions,omitempty"`
+	// Extra: members this build does not model, kept on save (extra.go).
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // NotificationRule declares when and how to notify users about events.
@@ -124,6 +138,8 @@ type NotificationRule struct {
 	Icon      string `json:"icon,omitempty"`
 	Enabled   *bool  `json:"enabled,omitempty"` // nil = true (default enabled)
 	Batch     string `json:"batch,omitempty"`
+	// Extra: members this build does not model, kept on save (extra.go).
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // IsEnabled returns whether this notification rule is active.
@@ -426,9 +442,7 @@ func (b *Bundle) SourceToMountPath(path string) string {
 //
 // This backs the mount→content ".md" alias. Comments were historically
 // mis-registered with the discovery service at the mount URL
-// (/comments/<…>.md) instead of the canonical content/<…>.md — see the
-// comment-infra remediation (plans/comment-registration-severe-bug.md,
-// Defect 1). Those DS URLs are signature-bound + the (type,url) upsert key, so
+// (/comments/<…>.md) instead of the canonical content/<…>.md. Those DS URLs are signature-bound + the (type,url) upsert key, so
 // they cannot be edited; this mapping lets the mount URL resolve to the real
 // signed artifact. It is a permanent compatibility shim, not a data migration.
 func (b *Bundle) MountToSourcePath(path string) string {
@@ -561,13 +575,32 @@ func DefaultCoreBundle() *Bundle {
 		Description: "Core polis content types",
 		Handler:     Handler{Type: "builtin"},
 		DS:          &DSConfig{SubscribesTo: []string{"pub.polis.*"}},
+
+		// ⛔ ADDING AN EMIT TO AN EXISTING TYPE IS A FLEET MIGRATION, NOT AN
+		// EDIT. Patrol and Tailor compare a tenant's bundle.json against these
+		// defaults as a superset test (`want ⊆ got`), MergeDefaults only adds
+		// whole missing TYPES, and both remediations FLAG per-field drift
+		// rather than repairing it — deliberately, to protect tenant edits. So
+		// a new name here puts every existing tenant into drift that no cycle
+		// heals. Removing one is free, which is why close-out E1 dropped the
+		// five events nothing emitted. `pub.polis.post.unpublished` /
+		// `pub.polis.comment.unpublished` were ADDED (E1-R2) only behind a
+		// named migration — medic.UnpublishedEmits and Tailor's
+		// checkUnpublishedEmitsMigration — shipped a deploy EARLIER, so every
+		// tenant carried them before these defaults asked for them. The next
+		// addition needs the same: migration first, declaration after.
+		// TestDefaultsDeclareNoEventMigratedTenantsLack holds this.
 		Types: map[string]ContentType{
 			"pub.polis.post": {
 				Dir:      "post",
 				Mount:    "/posts",
 				Renderer: "html",
 				Storage:  &StorageConfig{Pattern: "dated", DateFormat: "YYYYMMDD", Versions: true},
-				Emits:    []string{"pub.polis.post.published", "pub.polis.post.republished", "pub.polis.post.removed"},
+				// ⚠️ Every name here is a claim that this software emits that
+				// event. `pub.polis.post.removed` was not: unpublishing emits
+				// `pub.polis.post.unpublished`, from the DS — declared behind
+				// the E1-R2 migration (see the rollout note above).
+				Emits: []string{"pub.polis.post.published", "pub.polis.post.republished", "pub.polis.post.unpublished"},
 			},
 			"pub.polis.comment": {
 				Dir:      "comment",
@@ -575,7 +608,7 @@ func DefaultCoreBundle() *Bundle {
 				Renderer: "html",
 				Storage:  &StorageConfig{Pattern: "dated", DateFormat: "YYYYMMDD", Versions: false},
 				Emits: []string{
-					"pub.polis.comment.published", "pub.polis.comment.republished",
+					"pub.polis.comment.published", "pub.polis.comment.republished", "pub.polis.comment.unpublished",
 					"pub.polis.comment.blessing.requested", "pub.polis.comment.blessing.granted", "pub.polis.comment.blessing.denied",
 				},
 			},
@@ -596,6 +629,95 @@ func DefaultCoreBundle() *Bundle {
 				Storage: &StorageConfig{Pattern: "flat"},
 				Emits:   []string{"pub.polis.tag.applied", "pub.polis.tag.removed"},
 			},
+			"pub.polis.attestation": {
+				// A signed claim one party makes about someone or something
+				// else. It shares pub.polis.tag's ENVELOPE and none of its
+				// concept: a tag is a category an author puts on their own
+				// reading, an attestation is other-directed and happens at a
+				// moment. Same serialisation, different noun — which is why
+				// this is a sibling type rather than a widening of tag.
+				//
+				// Declaring it is the whole migration. Medic's MergeDefaults
+				// carries it into every existing tenant's bundle.json and
+				// Tailor does the same for self-hosters, so no migration
+				// script is needed or wanted.
+				//
+				// ⚠️ Patrol deep-compares Dir, Mount, Storage.Pattern and
+				// Emits against these values on every sweep, so a difference
+				// here is permanent drift on every tenant. Singular dir,
+				// plural mount, matching tag→/tags and post→/posts.
+				//
+				// `pub.polis.attestation.withdrawn` is produced by the DS when
+				// a registered record carries attestation.PredicateWithdrawal
+				// (discovery-service/core/handlers/content.ts). Withdrawal is a
+				// signed record ADDED, never a file deleted — a 404 must never
+				// read as a retraction. ⚠️ Unlike this pair, the license and
+				// theme events below are declared and never emitted.
+				Dir:     "attestation",
+				Mount:   "/attestations",
+				Storage: &StorageConfig{Pattern: "flat"},
+				Emits:   []string{"pub.polis.attestation.issued", "pub.polis.attestation.withdrawn"},
+			},
+			"pub.polis.actor": {
+				// An OPERATOR's signed registry of the system actors it runs —
+				// each entry naming the actor's domain, whose authority it
+				// exercises, and the actions the operator EXPECTS it to
+				// perform.
+				//
+				// ⛔ EXPECTED, NEVER ALLOWED. This is not an allow-list and
+				// nothing enforces it. The operator holds the actor's key by
+				// definition, so a published list is a norm whose violation is
+				// OBSERVABLE, not one the protocol blocks. The remedy is
+				// social — remediation, apology, reputation.
+				//
+				// ⛔ NO `Private` FLAG, AND THAT IS THE WHOLE POINT. The
+				// closest STRUCTURAL precedent is pub.polis.follow — a
+				// singular type name, one file that is a LIST, per-item
+				// events — and follow ships `Private: true`. Copying it here
+				// would put the registry behind auth, which silently destroys
+				// the only property it has: that a STRANGER can fetch it and
+				// check a claim without our infrastructure. Structurally
+				// follow; publicly license.
+				//
+				// ⛔ It is NOT operator-only. A self-hoster running their own
+				// actors IS an operator and publishes their own registry —
+				// which is what keeps the registry check identical
+				// self-hosted, with no hosted-only special case. Declared for
+				// everyone, present on some: exactly pub.polis.license, where
+				// a tenant with no terms simply has no license.json.
+				//
+				// ⚠️ Dir and Mount are user-configurable, which is why
+				// discovery is by the `actor_registry` pointer in
+				// .well-known/polis and never by this path.
+				Dir:     "actor",
+				Mount:   "/actors",
+				Storage: &StorageConfig{Pattern: "flat"},
+				Emits: []string{
+					"pub.polis.actor.registered", "pub.polis.actor.reregistered", "pub.polis.actor.withdrawn",
+				},
+			},
+			"pub.polis.license": {
+				// A site's OUTBOUND terms: what third parties may do with work
+				// this author made. Deliberately not adjacent to policies/,
+				// which is the INBOUND grammar (who may comment on me) — the
+				// two share a noun and nothing else, and putting them side by
+				// side invites exactly that conflation.
+				//
+				// Declaring it a content type means dispatch, the v1 API,
+				// Patrol inventory, Medic heal, and the rendered terms page all
+				// come free — the terms page falls out of `mount` rather than
+				// needing its own renderer.
+				//
+				// ⚠️ Dir and Mount are user-configurable, which is why
+				// discovery is by the `license` pointer in .well-known/polis
+				// and never by this path.
+				Dir:   "license",
+				Mount: "/license",
+				// No Emits. Stating or withdrawing terms writes a signed file
+				// and a local log line; nothing goes on the network, so there
+				// is no event to declare. `pub.polis.license.stated` and
+				// `.withdrawn` were declared here and emitted by nothing.
+			},
 			"pub.polis.theme": {
 				// Singular Dir matches the convention of other content types
 				// (post, comment, follow, dm, tag). PrivateDir would yield
@@ -603,7 +725,9 @@ func DefaultCoreBundle() *Bundle {
 				// suffix, so "theme" → "themes" — matches ThemeDir output).
 				Dir:     "theme",
 				Storage: &StorageConfig{Pattern: "flat"},
-				Emits:   []string{"pub.polis.theme.installed", "pub.polis.theme.removed"},
+				// No Emits. Installing or switching a theme is local, and
+				// `pub.polis.theme.installed` / `.removed` were declared here
+				// and emitted by nothing.
 			},
 		},
 		Shapes: map[string]*Shape{
@@ -652,11 +776,13 @@ func DefaultCoreBundle() *Bundle {
 				Name:    "v4",
 				Version: StreamShapeVersion,
 				Entry: map[string]string{
-					"stream":  "stream.html",
-					"post":    "stream-post.html",
-					"comment": "stream-comment.html",
-					"profile": "stream-profile.html",
-					"mention": "stream-mention.html",
+					// stream-post.html is the only live entry template (included
+					// via {{> stream-post}} for the SSR focus/sibling posts).
+					// Comment/profile/mention/dm entries render client-side in
+					// stream.js; their SSR templates were dead scaffolding and
+					// were removed.
+					"stream": "stream.html",
+					"post":   "stream-post.html",
 				},
 				Partials: []string{
 					"snippets/sentence-filter.html",
@@ -673,7 +799,7 @@ func DefaultCoreBundle() *Bundle {
 			// not user-selectable (theme.isValidTheme excludes it).
 			"_shared": {
 				Name:             "_shared",
-				Version:          "1.1.0",
+				Version:          "1.2.0",
 				CSS:              "base.css",
 				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4"},
 			},

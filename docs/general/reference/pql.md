@@ -1,5 +1,7 @@
 # PQL v0 — Polis Query Language
 
+*For* [Developers](../../README.md#building-on-polis) — *About* [Content](../README.md#content) — *Kind* [Spec](../../README.md#kinds-of-page) — *Code* [`cli-go/pkg/pql`](../../../cli-go/pkg/pql) — *See also* [concept](../concepts/infinity-stream.md) · [reference](../../ds/developer/pql-json-api.md)
+
 > See also: [infinity-stream.md](../concepts/infinity-stream.md) (the surface PQL drives) and [policy-grammar.md](policy-grammar.md) (the sibling grammar PQL is intentionally aligned with).
 
 PQL is the sentence-filter grammar that drives every filter view in
@@ -153,7 +155,7 @@ the dispatcher (server + UI) narrows valid combinations per type:
   in conversation view since there's no meaningful sort choice.
 - Type-conditional scope dropdown: pinned `↩ my mutuals` (returns
   to inbox) + the 10 most-recently-active conversations as a
-  fast-switcher (see `docs/design/v4/mockups/07-messages.html`).
+  fast-switcher.
 
 ### `type=drafts`
 - Personal-lock: forces `scope=me` (drafts are local to the owner)
@@ -206,9 +208,9 @@ The topbar's centered widget is a UI surface for composing PQL sentences without
 
 ```
    ┌──────────────────────────────────────────────────────────────────────┐
-   │  [all]  [activity]  from  [my network]  [by date]   [site search…]   │
-   │  ^      ^                  ^             ^           ^                │
-   │  │      │                  │             │           └ handle search  │
+   │  [all]  [activity]  from  [my network]  [by date]                    │
+   │  ^      ^                  ^             ^                            │
+   │  │      │                  │             │                            │
    │  │      │                  │             └ modifier slot              │
    │  │      │                  └ scope slot                               │
    │  │      └ type slot                                                   │
@@ -221,11 +223,11 @@ The topbar's centered widget is a UI surface for composing PQL sentences without
 1. Update the local widget state.
 2. Compose the new sentence (`qualifier type "from" scope [modifier]`).
 3. `replaceState` the new URL (`/_/pql/<sentence>`).
-4. Notify the stream controller (`window.PolisStream.setFilter(state)`), which re-runs the fetch + render cycle.
+4. Notify the stream controller (`window.PolisStream.setFilterType` / `setFilterScope` / `setFilterModifier` / `setFilterQualifier`), which re-runs the fetch + render cycle.
 
 **Type-conditional slot visibility.** When `type=messages` is selected on a thread view, the modifier slot hides (no meaningful sort choice). When `type=drafts` is selected, the scope slot locks to `me`. When `type=activity` is selected, the modifier slot disappears. The widget enforces what the [type-conditional rules](#type-conditional-rules) document — every UI affordance maps directly to a vocabulary rule.
 
-**Site-typeahead.** The last slot is free-form: type a polis handle (`alice.polis.pub`) and the widget swaps scope to that handle, producing `… from alice.polis.pub …`. Typeahead suggestions come from the user's follow list, recent visits, and (future) DS search.
+**Site-typeahead.** For `type=messages`, the scope dropdown offers a `site` entry that opens a handle typeahead: pick a polis handle (`alice.polis.pub`) and the scope becomes that handle, producing `… from alice.polis.pub …`. For every other type the entry is hidden, because a handle typed there is not yet wired to a server-side filter; a handle scope still works when typed into the URL.
 
 **Icon-row presets vs widget composition.** Clicking an icon button (gateway, paragraph, comment, people, envelope) loads a *preset* PQL sentence — fast common views. Composing in the widget is the *general case* — anything the grammar allows. Both produce URLs that look the same; nothing about a preset path is privileged.
 
@@ -314,10 +316,10 @@ items; on the DS `items` are raw stream events (and there is no
 
 These exist in the grammar but are currently not surfaced in the UI:
 
-- **`new` qualifier** — reserved. The dropdown only ships `all`
-  pending a revisit of R22 #12 (read-state tracking proved unreliable
-  enough that filtering on it produced confusing results, so the
-  `new` option was withdrawn).
+- **`new` qualifier** — reserved. The dropdown only ships `all`:
+  read-state tracking proved unreliable enough that filtering on it
+  produced confusing results, so the `new` option was withdrawn until
+  that is revisited.
 
 ## Removed tokens
 
@@ -326,7 +328,7 @@ These were once valid PQL but are no longer:
 - **`follows` type** — removed by the 06-profiles work. "Follows" was
   a verb pretending to be a noun. The replacement: follow events
   surface inside `type=activity` as terse single-line entries
-  ("vdibart.polis.pub followed cyrus.polis.pub"); profile management
+  ("alice.polis.pub followed bob.polis.pub"); profile management
   uses `type=profiles`. Old URLs like `/_/pql/all+follows+from+me+by+name`
   parse to "unknown type" and fall back to the default filter.
 
@@ -387,12 +389,17 @@ tests enforce agreement.
 
 PQL is intentionally aligned with [`policy-grammar.md`](policy-grammar.md) (the inbound-rule grammar — same `qualifier type scope` shape). A user fluent in one is fluent in both. That alignment isn't decoration; it's a bet that *sentence-as-filter* and *sentence-as-rule* converge as polis matures.
 
+### Already shipped
+
+Two extensions this page once listed as future work are live:
+
+- **Cross-network queries.** The discovery service serves `GET /pql/<sentence>` with the same vocabulary, returning raw stream events as JSON (public scopes only — see [Scope-resolution boundary](#scope-resolution-boundary-who-resolves-what)). A reader without a polis site of their own can query it.
+- **Public-surface PQL.** Every tenant serves `/pql/<sentence>` to anonymous visitors, with the relation+scope clause defaulting to the tenant (see [Tenant-relative PQL](#tenant-relative-pql-the-from-clause-is-optional-on-a-tenant)).
+
 ### Near-term extensions
 
-- **Cross-network queries.** `ds.polis.pub/?pql=…` accepting the same vocabulary for cross-tenant queries. The grammar is host-agnostic; only the dispatcher differs. A reader without a polis site of their own could compose a PQL sentence against a DS and get JSON back.
-- **Public-surface PQL.** Per-tenant pages (`https://alice.polis.pub/`) could surface a PQL filter widget with a constrained vocabulary — no owner-only types like `drafts`, scope locked to the tenant. A reader visiting Alice's site sees "all activity from alice.polis.pub" by default and can narrow to "all comments from alice.polis.pub by date" with one slot change.
-- **CLI integration.** `polis stream "<sentence>"` runs a PQL sentence against the local feed cache and prints results. The CLI parser would share the vocabulary listed here.
-- **New vocabulary.** Adding `by popularity`, `to review`, `with images`, `with attachments`, `from my topic <tag>`, etc. is intentionally cheap — modifiers are keyword-led, so each new term is one row in `pql.js`'s lookup tables and one row in this doc.
+- **CLI integration.** A command that runs a PQL sentence against the local feed cache and prints results. The Go parser the CLI would use (`cli-go/pkg/pql`) already exists; no command does yet.
+- **New vocabulary.** Adding `by popularity`, `to review`, `with images`, `with attachments`, `from my topic <tag>`, etc. is intentionally cheap — modifiers are keyword-led, so each new term is one entry in [`pql-vocabulary.json`](pql-vocabulary.json), a golden line, and one row in this doc.
 - **Read-state revisited.** The `new` qualifier is currently locked off; future work re-enabling unread-tracking would surface it again. Same for "trending" / "popular" qualifiers that depend on cross-tenant signals only the DS can compute.
 
 ### Architectural ambitions
@@ -402,7 +409,7 @@ PQL is intentionally aligned with [`policy-grammar.md`](policy-grammar.md) (the 
 - **Saved sentences.** A user marking a sentence as a favorite — "all comments from my network to bless" — gets a personalized icon-row preset. The plumbing is already there; the UX is the gap.
 - **Composed sentences.** Future grammar growth might allow `and` / `or` between scopes ("from my network or from alice.polis.pub"). The parser is positional today; intersecting/uniting scopes requires a small grammar extension.
 
-When PQL grows beyond the owner SPA, this doc is the authoritative spec — the JS parser, a future Go parser, a future bash CLI parser should all agree on the vocabulary documented here. The grammar is the contract.
+This doc is the authoritative spec — the JS, Go and TypeScript parsers, and any future one, agree on the vocabulary documented here. The grammar is the contract.
 
 ## Pointer
 
@@ -418,8 +425,7 @@ Endpoints: tenant `GET /pql/<sentence>`
 `GET /pql/:sentence` (`discovery-service/server/src/index.ts` →
 `pqlToStreamQueryFilters` in `core/handlers/stream.ts`).
 
-`plans/todo.md`'s GRAMMAR section is a one-line pointer to this
-doc — that's the canonical place to look. Prior to chunk B (v3
-SPA route cleanup), the grammar was duplicated in `plans/todo.md`
-and drifted from the implementation in five distinct ways. This
-doc is the resolution.
+This doc is the one place the grammar is written in prose. It was
+once duplicated in internal notes, and the copy drifted from the
+implementation in five distinct ways; the machine-readable vocabulary
+and the shared golden corpus exist so that cannot recur.

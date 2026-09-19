@@ -6,8 +6,6 @@
 
 Polis is a decentralized social-networking protocol. Sites publish signed markdown on their own domains; the **Discovery Service (DS)** coordinates blessing, follow, and discovery; the **webapp** is a Go SPA that runs locally or as part of `polis.pub` for managed hosting; the **CLI** owns the canonical file format and is the source of truth for business logic. The protocol's *fixed* surface is small (Ed25519 over canonical content, `.well-known/polis`, the bundle namespace, the DS API, core content-type schemas); every other layer is replaceable. Read [`docs/general/concepts/architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/architecture.md) for the four-surface map before going deeper.
 
-> **Scope of this repo.** The CLI, webapp, themes, bundles, and shared docs are open-source here. The Discovery Service source code is not yet included; integrators should treat [`docs/ds/developer/api-reference.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md) as the canonical DS surface. The hosted operational toolchain (judge, patrol, medic, etc.) is also out of scope; `tailor` is the only operational binary shipped publicly.
-
 ## How this handbook works
 
 The publicly-served source code of polis.pub is part of the documentation. When you view-source on `polis.pub` or `<handle>.polis.pub`, the JavaScript, HTML, CSS, and rendered markup you see carry **trail markers** — header comments naming what each file implements and pointing to relevant docs.
@@ -29,11 +27,13 @@ The starter slate. Each entry: what observation starts the thread, which files c
 | Thread | Starts at | Marker files | Tour |
 |---|---|---|---|
 | **URL-as-filter** | URL changes when you click an icon or scroll | [`app.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/app.js), [`pql.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/pql.js), [`stream.js`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js) | [`docs/handbook/url-as-filter.md`](https://github.com/vdibart/polis-cli/blob/main/docs/handbook/url-as-filter.md) |
-| **DS to stream** | New items from sites you don't host appear in your stream; cross-tenant comment counts decorate them | [`sync.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/sync.go), [`feed/handler.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/feed/handler.go), [`stream/store.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/stream/store.go), [`handlers_stream.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/handlers_stream.go) (DS-side handlers are not in this repo — see [`docs/ds/developer/api-reference.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md) for the API contract) | [`docs/handbook/ds-to-stream.md`](https://github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md) |
+| **PQL (one grammar, three parsers)** | Same filter grammar in JS, Go, and TS; all assert one golden corpus so it can't drift. `/pql/<sentence>` data+public endpoint on the webapp and DS | [`pql.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/pql.js), [`cli-go/pkg/pql/pql.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/pql/pql.go), `discovery-service/core/pql.ts`, [`handlers_pql.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/handlers_pql.go) — canonical [`pql-vocabulary.json`](https://github.com/vdibart/polis-cli/blob/main/docs/general/reference/pql-vocabulary.json) + [`pql-golden.jsonl`](https://github.com/vdibart/polis-cli/blob/main/docs/general/reference/pql-golden.jsonl) | [`docs/general/reference/pql.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/reference/pql.md), [`docs/ds/developer/pql-json-api.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/pql-json-api.md) |
+| **DS to stream** | New items from sites you don't host appear in your stream; cross-tenant comment counts decorate them | [`sync.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/sync.go), [`feed/handler.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/feed/handler.go), [`stream/store.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/stream/store.go), `stream.ts`, `counts.ts`, [`handlers_stream.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/handlers_stream.go) | [`docs/handbook/ds-to-stream.md`](https://github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md) |
 | **Identity anchor** | `.well-known/polis` on any site, or a signed post's frontmatter | `cli-go/pkg/site/`, well-known writers in `webapp/internal/server/` | (marker only) |
-| **Blessing flow** | A green check next to a comment from `bob@elsewhere` on `alice.polis.pub` | `cli-go/pkg/blessing/`, the comment template in the active shape (DS-side relationship handlers are not in this repo — see [`docs/ds/developer/api-reference.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md)) | (marker only) |
+| **Blessing flow** | A green check next to a comment from `bob@elsewhere` on `alice.polis.pub` | `cli-go/pkg/blessing/`, the comment template in the active shape (the DS side is not in this repository; its contract is [`docs/ds/developer/api-reference.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md)) | (marker only) |
 | **Bundle assets** | `/bundle-assets/pub.polis.core/shapes/v4/stream.css` in any page source | `cli-go/pkg/bundle/`, `webapp/internal/server/` bundle handler, the embedded fixture under `cli-go/pkg/bundle/fixtures/` | (marker only) |
-| **Foreign-site widget** | The icon nav that appears (and autohides) on `alice.polis.pub` when you're logged in; the comment/follow widget that sits below posts | [`nav_inject.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/nav_inject.go), [`nav.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/nav/nav.js), [`widget.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/widget/widget.js), [`widget_embed.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/hosted/widget_embed.go), [`page.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/render/page.go) `WidgetVersion` | [`docs/handbook/foreign-site-widget.md`](https://github.com/vdibart/polis-cli/blob/main/docs/handbook/foreign-site-widget.md) |
+| **Foreign-site widget** | The icon nav that appears (and autohides) on `alice.polis.pub` when you're logged in; the comment/follow widget that sits below posts | `nav_inject.go`, `nav.js`, `widget.js`, `widget_embed.go`, [`page.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/render/page.go) `WidgetVersion` | [`docs/handbook/foreign-site-widget.md`](https://github.com/vdibart/polis-cli/blob/main/docs/handbook/foreign-site-widget.md) |
+| **DM encryption** | You set a password and your own server can still deliver and store your messages but can no longer read them; a message reaches the recipient with no central broker | [`keyring.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/dm/keyring.go), [`epoch.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/dm/epoch.go), [`send.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/dm/send.go), [`receive.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/dm/receive.go), [`mailbox.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/dm/mailbox.go), [`dm.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/dm.js), [`router.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/api/router.go) | [`docs/handbook/dm-encryption.md`](https://github.com/vdibart/polis-cli/blob/main/docs/handbook/dm-encryption.md) |
 
 Threads marked "marker only" today have header comments in the named files but no curated MD walkthrough. They become tours when a thread is requested often enough that the trail markers leave readers wanting more.
 
@@ -60,14 +60,16 @@ Concrete file-by-file paths for common builds. Each recipe is a sequence of file
 6. If your type produces public content, design its shape templates: [`docs/general/concepts/shapes.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/shapes.md)
 7. If it emits events, declare them; readers can subscribe via the DS event stream
 
-### Self-host a Discovery Service
+### Work with a Discovery Service
+
+The Discovery Service's source is not in this repository (it is closed for now), so this is a recipe for building against one,
+not for deploying one.
 
 1. Understand what the DS does: [`docs/general/concepts/architecture.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/architecture.md) (Discovery Service section) + [`docs/ds/README.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/README.md)
-2. Read the API contract: [`docs/ds/developer/api-reference.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md)
-3. Understand the storage interface: [`docs/ds/developer/storage-adapter.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/storage-adapter.md)
-4. Deploy the reference adapter: [`docs/ds/admin/deployment.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/admin/deployment.md)
-5. Tune it for your scale: [`docs/ds/admin/configuration.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/admin/configuration.md)
-6. Point your sites at it via `DISCOVERY_SERVICE_URL`
+2. Read the API contract, the stable public surface: [`docs/ds/developer/api-reference.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md)
+3. Understand what registering tells it, and what leaving removes: [`docs/general/security/registration-and-privacy.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/security/registration-and-privacy.md)
+4. See what a deployment consists of, and what an operator can tune: [`docs/ds/admin/deployment.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/admin/deployment.md) · [`docs/ds/admin/configuration.md`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/admin/configuration.md)
+5. Point your sites at a DS via `DISCOVERY_SERVICE_URL`
 
 ### Write a polis client in another language
 
@@ -75,7 +77,7 @@ Concrete file-by-file paths for common builds. Each recipe is a sequence of file
 2. Understand signing: [`docs/general/security/security-model.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/security/security-model.md) (Ed25519 over canonical content)
 3. Understand the file format: [`docs/general/concepts/content-system.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/content-system.md)
 4. Reference the Go implementation: [`cli-go/pkg/signing/`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/signing/) (canonicalization), [`cli-go/pkg/publish/`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/publish/) (publish flow)
-5. Reference the bash implementation for an alternate take: [`cli-bash/bin/polis`](https://github.com/vdibart/polis-cli/blob/main/cli-bash/bin/polis)
+5. Reference the bash implementation for an alternate take: the `polis` script in [`cli-bash/`](https://github.com/vdibart/polis-cli/tree/main/cli-bash)
 6. Stamp your client's generator string into every artifact you produce (e.g., `my-polis-client/0.1.0`)
 
 ### Snap off any layer
@@ -116,11 +118,12 @@ The single index. Everything else points back here.
 - [`url-as-filter.md`](https://github.com/vdibart/polis-cli/blob/main/docs/handbook/url-as-filter.md) — pulling the URL-as-filter thread
 - [`ds-to-stream.md`](https://github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md) — how DS events become the stream you see; continuous sync + cross-tenant aggregation
 - [`foreign-site-widget.md`](https://github.com/vdibart/polis-cli/blob/main/docs/handbook/foreign-site-widget.md) — the injected nav widget on logged-in-visitor pages; the comment/follow widget on every page
+- [`dm-encryption.md`](https://github.com/vdibart/polis-cli/blob/main/docs/handbook/dm-encryption.md) — how a DM is encrypted, delivered server-to-server with no broker, stored as ciphertext its own server can't read, and unlocked in the browser; the epoch keyring and the bootstrap window
 
 **[`docs/cli/`](https://github.com/vdibart/polis-cli/blob/main/docs/cli/), [`docs/webapp/`](https://github.com/vdibart/polis-cli/blob/main/docs/webapp/), [`docs/api/`](https://github.com/vdibart/polis-cli/blob/main/docs/api/), [`docs/ds/`](https://github.com/vdibart/polis-cli/blob/main/docs/ds/) — per-component docs (user / developer / designer / admin)**
 
 ## See also
 
 - [`README.md`](https://github.com/vdibart/polis-cli/blob/main/README.md) — the conventional repo entry (high-level intro for browsers landing on the GitHub page)
-- [`CLAUDE.md`](https://github.com/vdibart/polis-cli/blob/main/CLAUDE.md) — Claude Code project config (build commands, env vars, codebase rules); complementary to this file
-- [`webapp/CLAUDE.md`](https://github.com/vdibart/polis-cli/blob/main/webapp/CLAUDE.md) — webapp-specific development guide
+- [`docs/general/contributing.md`](https://github.com/vdibart/polis-cli/blob/main/docs/general/contributing.md) — build commands, repository layout and conventions; complementary to this file
+- [`docs/webapp/developer/development.md`](https://github.com/vdibart/polis-cli/blob/main/docs/webapp/developer/development.md) — webapp-specific development guide

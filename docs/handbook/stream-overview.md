@@ -1,14 +1,16 @@
 # Tour: How the infinity stream actually works
 
+*For* [Contributors](../README.md#contributing-to-polis) — *Kind* [Tour](../README.md#kinds-of-page) — *See also* [concept](../general/concepts/infinity-stream.md)
+
 > A higher-order tour. Knits together what's happening on the polis.pub stream-screen — the filter widget, the URL behavior, the live data appearing from across the network, the design choices behind it all. Points down into the two deep tours ([url-as-filter](url-as-filter.md), [ds-to-stream](ds-to-stream.md)) for the file-level walks, and out to the [PQL spec](../general/reference/pql.md), the [infinity stream concept doc](../general/concepts/infinity-stream.md), and the [DS architecture](../ds/developer/stream-architecture.md) for the philosophy and protocol layers.
 >
-> **Start here if** you've poked around polis.pub and want one explanation that ties together "the filter," "the stream," "the URL," and "the network." Then follow the spokes that interest you.
+> **Scope note.** The Discovery Service source is not in the public repository. The DS-side files named here (`stream.ts`, `counts.ts`) describe behaviour that the [DS API reference](../ds/developer/api-reference.md) and the [stream architecture doc](../ds/developer/stream-architecture.md) specify in full. The webapp and CLI files named here are in this repository.
 >
-> **Scope note.** The Discovery Service source is not part of this public repo. DS-side file references in this tour (`stream.ts`, `counts.ts`) describe behavior that is also fully specified in the [DS API reference](../ds/developer/api-reference.md) and [stream architecture doc](../ds/developer/stream-architecture.md). Webapp- and CLI-side files referenced here are in this repo and clickable.
+> **Start here if** you've poked around polis.pub and want one explanation that ties together "the filter," "the stream," "the URL," and "the network." Then follow the spokes that interest you.
 
 ## What you see, in one paragraph
 
-You open `<you>.polis.pub`. A topbar runs across the top: avatar on the left, then six little icons (gateway, paragraph, comment, people, envelope, edit), then a centered widget with several dropdowns spelling out a sentence like **all activity from my network by date**, then your handle on the right. Below the topbar, a 640px-wide column shows a stream of items — your posts mixed with posts and comments from people you follow, dated, scrollable, no pagination. Click the **paragraph** icon: the sentence becomes **all posts from me by date** and the column re-fills with just your posts. Click into the sentence and change "my network" to "all polis": the column re-fills with the wider network. Scroll: the URL changes as different posts become the focused one. Wait 30 seconds: new items appear from people who just published. Each item from another tenant carries a comment-count badge that reflects what's on *their* site, not yours.
+You open `<you>.polis.pub`. A topbar runs across the top: avatar on the left, then six little icons (gateway, paragraph, comment, people, envelope, edit), then a centered widget with several dropdowns spelling out a sentence like **all activity from my network**, then your handle on the right. Below the topbar, a 640px-wide column shows a stream of items — your posts mixed with posts and comments from people you follow, dated, scrollable, no pagination. Click the **paragraph** icon: the sentence becomes **all posts from me by date** and the column re-fills with just your posts. Click into the sentence and change "my network" to "all polis": the column re-fills with the wider network. Scroll: the URL changes as different posts become the focused one. Wait 30 seconds: new items appear from people who just published. Each item from another tenant carries a comment-count badge that reflects what's on *their* site, not yours.
 
 Every one of those behaviors is a piece of the same composed surface. This tour walks the composition.
 
@@ -42,30 +44,46 @@ The four layers are independent in the codebase — they live in different files
 
 ## The sentence-filter widget — chrome meets filter
 
-The centered widget in the topbar is the single piece of UI that ties chrome and filter together. From [`index.html`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/index.html) (line ~305):
+The centered widget in the topbar is the single piece of UI that ties chrome and filter together. From [`index.html`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/index.html) (search `polis-topbar-filter`; slot contents abridged):
 
 ```html
 <div class="polis-topbar-filter" id="polis-topbar-filter">
     <div class="sentence-filter" role="group" aria-label="Stream filter">
-        <!-- qualifier slot · type slot · "from" · scope slot · modifier slot · site-typeahead -->
+        <span class="sf-slot sf-slot--locked" data-filter-slot="qualifier" data-filter-locked="true">all</span>
+        <span class="sf-slot sf-slot--interactive" data-filter-slot="type" ...>posts</span>
+        <span class="sf-connector" data-mobile-hide="true">from</span>
+        <span class="sf-slot sf-slot--interactive" data-filter-slot="scope" ...>...</span>
+        <span class="sf-slot sf-slot--interactive sf-slot--modifier" data-filter-slot="modifier" ...>...</span>
+        <input type="text" class="sf-site-typeahead" data-filter-slot="site-typeahead" ... hidden>
     </div>
 </div>
 ```
 
-It's a `role="group"` of dropdowns plus a typeahead — five interactive slots that together compose a [PQL sentence](../general/reference/pql.md). The user clicks slot 2 ("activity") and picks "posts"; the widget updates the local sentence state, composes the new URL (`/_/pql/all+posts+from+my+network+by+date`), `replaceState`s history, and tells the stream controller `setFilter(state)` — which clears the visible items and re-fetches matching ones.
+It's a `role="group"` of slots — a locked qualifier, three dropdowns (type, scope, modifier) and a site typeahead — that together compose a [PQL sentence](../general/reference/pql.md). The user clicks slot 2 ("activity") and picks "posts"; the widget updates the local sentence state, composes the new URL (`/_/pql/all+posts+from+my+network+by+date`), `replaceState`s history, and tells the stream controller `setFilter(state)` — which clears the visible items and re-fetches matching ones.
 
 The icon row to the left is a *shortcut layer over the same widget*. Each icon is a **preset PQL sentence** that the widget would otherwise compose by hand. From [`owner-extras.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/owner-extras.js):
 
 ```javascript
-// step-06/6.e: icon-row preset definitions.
-// the topbar (avatar | gateway | paragraph | comment | people | envelope | edit)
-{
-  gateway:   { filter: { type: 'activity',  scope: 'my-network', modifier: null      } },
-  paragraph: { filter: { type: 'posts',     scope: 'me',         modifier: 'by-date' } },
-  comment:   { filter: { type: 'comments',  scope: 'all-polis',  modifier: 'to-bless'} },
-  // ...
-}
+// abridged: each preset also carries a `display` block of slot labels
+var ICON_PRESETS = {
+    gateway: {
+        label: 'all activity from my network',
+        filter: { qualifier: 'all', type: 'activity', scope: 'my-network', modifier: 'by-date' },
+    },
+    paragraph: {
+        label: 'all posts from me by date',
+        filter: { qualifier: 'all', type: 'posts', scope: 'me', modifier: 'by-date' },
+    },
+    comment: {
+        label: 'all comments from all polis to bless',
+        filter: { qualifier: 'all', type: 'comments', scope: 'all-polis', modifier: 'to-bless' },
+    },
+    // people:   all profiles from my network by name
+    // envelope: all messages from my mutuals by date
+};
 ```
+
+(`activity` has no modifier slot, so the gateway sentence displays without one; the preset still carries `by-date` because the controller forces it on a type change.) The `edit` icon is not a preset — it opens the inline editor card.
 
 Clicking an icon is **shorthand for "set the sentence to this and re-fire."** Both gestures — icon click and slot edit — produce the same PQL sentence, push the same URL, run the same fetch+render. The widget is the canonical compose surface; the icon row is a presets layer.
 
@@ -86,7 +104,7 @@ A filter is only useful if there's content to filter against. The stream-screen'
       ▼
    webapp sync loop (every ~30s while a tab is open)
       │
-      │  fan-out: feed / follow / blessing / notification handlers
+      │  fan-out: feed / follow / comment-status / blessing handlers
       ▼
    .polis/ds/<discovery-domain>/pub.polis.core/state/pub.polis.feed.jsonl
       │
@@ -99,7 +117,7 @@ When the user changes the filter, the controller re-fetches *from the local cach
 
 A second, complementary data path runs alongside: **cross-tenant aggregation queries**. When posts from other tenants are in a rendered page, the webapp's stream handler asks the DS "how many comments does each of these have across the network?" via `POST /v1/content/comments/counts`. The whole page's uncached counts go in **one batched fetch** (up to 50 URLs) per render, so every post is stamped deterministically — an earlier "visible-horizon" heuristic that synced the first 10 and backgrounded the rest was removed because it made badges flicker `0↔1↔0`. The badge numbers on cross-tenant items come from these aggregation queries — they don't fit the cursor-paginated event model because they're aggregations, not events.
 
-For the file-by-file walk of both data paths, **dive into the [DS-to-stream tour](ds-to-stream.md)**. It walks the webapp sync loop ([`sync.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/sync.go)), the DS stream endpoint ([`stream.ts`](https://github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/stream.ts)), the feed transformer ([`feed/handler.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/feed/handler.go)), the local cache ([`stream/store.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/stream/store.go)), the DS counts endpoint ([`counts.ts`](https://github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/counts.ts)), and the webapp's stream HTTP handlers ([`handlers_stream.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/handlers_stream.go)).
+For the file-by-file walk of both data paths, **dive into the [DS-to-stream tour](ds-to-stream.md)**. It walks the webapp sync loop ([`sync.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/sync.go)), the DS stream endpoint (`stream.ts`), the feed transformer ([`feed/handler.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/feed/handler.go)), the local cache ([`stream/store.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/stream/store.go)), the DS counts endpoint (`counts.ts`), and the webapp's stream HTTP handlers ([`handlers_stream.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/handlers_stream.go)).
 
 ---
 
@@ -108,7 +126,7 @@ For the file-by-file walk of both data paths, **dive into the [DS-to-stream tour
 The stream-screen renders **a single mixed list**:
 
 - The items come from the **local cache** (filled by Path A of the DS-to-stream thread).
-- The cross-tenant decorations (comment counts, blessing counts) come from **on-demand DS queries** (Path B of the DS-to-stream thread).
+- The cross-tenant decoration (the comment count) comes from **on-demand DS queries** (Path B of the DS-to-stream thread).
 - The filter that decides *which* items appear comes from the **URL** (URL-as-filter thread).
 - The chrome that lets the user change the filter — the icon row and the sentence-filter widget — sits in the topbar (also URL-as-filter thread, on its UI side).
 
@@ -243,7 +261,7 @@ If you want to do something concrete that touches both threads, the canonical ex
 1. Decide the sentence — say, **all comments from my mutuals by date** (a "what my close circle is saying" view).
 2. Pick an icon (or design one).
 3. Add the preset to `owner-extras.js` `ICON_PRESETS` (the gateway/paragraph/comment/etc. table). Its `filter` field is a PQL filter-state object; the widget's `setFilter` API consumes it directly.
-4. Add the icon to `index.html`'s icon-row (with an `id="nav-btn-<name>"` and an SVG icon).
+4. Add the icon to `index.html`'s icon-row (with an `id="nav-btn-<name>"` and an SVG icon). The icon's SVG geometry has three copies — the desktop row, the mobile drawer in the same file, and `ICONS` in `webapp/internal/hosted/nav/nav.js` for the cross-site widget — and `TestNavIconsMatchAcrossSurfaces` fails if they drift.
 5. If the new sentence requires a vocabulary token that doesn't exist yet (e.g., a new `scope` value), add it to `pql.js`'s lookup tables.
 6. If the new sentence needs server-side filter support (a new comparison the local cache or the DS doesn't know about), extend the feed handler or the DS query.
 

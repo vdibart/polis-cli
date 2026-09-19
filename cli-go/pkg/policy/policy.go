@@ -58,9 +58,15 @@ const (
 
 // EvalContext provides runtime context for source matching.
 type EvalContext struct {
-	MyDomain         string          // the local site's domain
+	MyDomain         string // the local site's domain
 	FollowingDomains map[string]bool
 	FollowerDomains  map[string]bool
+	// ThreadBlessedDomains holds the (lowercase) domains with a comment the site
+	// owner has already blessed on the thread being evaluated (Signet epic 45
+	// D4). It is per request: the caller builds it for one thread from the
+	// owner's own blessing list. Nil means no thread, and `thread-blessed`
+	// matches nobody.
+	ThreadBlessedDomains map[string]bool
 }
 
 // Event describes an incoming event to evaluate against policies.

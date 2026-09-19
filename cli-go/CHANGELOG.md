@@ -5,6 +5,42 @@ All notable changes to the Go CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.68.0]
+
+The root `CHANGELOG.md` records 0.63.0 through 0.66.0 and gives the upgrade notes for this release in full.
+
+### Added
+
+- **`polis license [reserved|open|none]`**, `polis init --license` and `polis post --license`: signed terms of use, stamped into each new post's signed frontmatter and rendered into `robots.txt`, `rsl.xml`, page metadata and a terms page. Never stated on your behalf.
+- **Key history:** `.well-known/polis` carries a signed `public_key_history` chain; rotation appends to it, and verification resolves retired keys from it.
+- **`polis did`**: prints or regenerates `.well-known/did.json`, which `polis init` now publishes when `POLIS_BASE_URL` is set (otherwise `polis did --write`).
+- **Interactive `polis init` asks whether to switch Rosie on**, with nothing pre-selected; she takes effect only while the web app runs.
+- **Signed `following.json` and `blessed.json`.**
+- **`polis attest issue|list|show|verify|withdraw|register`**, and **`polis actor register|withdraw|list|verify|announce|declare-operator`** (including `polis actor verify --custody <domain>`).
+- **Witnesses** stored on the site (`content/witness/witnesses.json`) and reported by `validate` and `preview`.
+- **`polis validate <record-url>`** (an attestation, a licence, a tag, a follow file or a blessing list; for an actor registry, `polis actor verify`), **`polis site set author-name|avatar`**, **`polis site rewrite-unsigned`**, **`polis notifications clear`**, **`polis rebuild --tags` / `--attestations`**.
+- **[Webapp] Settings → Terms of use and Settings → Rosie.** Rosie applies your own blessing rules under a grant you issue, verifies each comment first, and marks her acts inside the signed bytes.
+- **[Webapp]** `polis-server` serves `robots.txt`, `rsl.xml`, licence pages and `.well-known/*` from the site, with CORS on them, and sends `Content-Usage` / `Link` response headers derived from the site's terms.
+
+### Changed
+
+- **Auto-blessing is your software's, under a grant.** The discovery service blesses nothing for anyone. An upgraded self-hosted web app has no default grant and blesses nothing automatically until you switch Rosie on; she decides only while the web app (`polis-full serve` or `polis-server`) runs.
+- **`polis validate`** runs every documented check family; unrecognised signed fields read as `unknown`, never `invalid`.
+- **Unsigned files keep fields they do not model; signed files carrying unmodelled fields are refused rather than rewritten.**
+- **Rendering follows CommonMark soft breaks.**
+- **`blessing requests --json`** uses the standard envelope; **`rotate-key --json`** reports `ds_rotation: skipped` when nothing was sent, drops `old_key_backed_up` and `old_key_path`, and adds `key_history_epoch`, `did_published` and `did_removed`.
+- **`polis rebuild`** preserves an existing `blessed.json` and rebuilds every index entry type together.
+
+### Removed
+
+- **`polis rotate-key --delete-old-key`**, and the `id_ed25519.old` backup it deleted.
+
+### Fixed
+
+- `republish` on bundle-layout sites; `blessing grant <version>`; `blessing sync`; re-signing an unpublished comment; titles containing `:`; body lines starting `signature:`; `clone` dropping fields and comments, and writing outside its folder; rate limits reported as parse errors.
+- **[Webapp]** Bless, Deny and Unpublish in the stream; follows not announced; unsanitised HTML from `/api/remote/post`; stream duplicates, thread collapse and permalink focus.
+- **[Security]** The local web app now accepts only same-origin requests addressed to localhost; a page you visited could otherwise change your site or read its files. A self-hosted server takes the client IP for its rate limits from the connection, not from headers the client sets. Self-hosted DM rate limits now hold for the life of the server; they were reset on every delivery.
+
 ## [0.62.0]
 
 ### Added

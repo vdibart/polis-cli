@@ -42,9 +42,37 @@ type UnfollowResult struct {
 // comments from the newly followed author — matching the previous hardcoded behavior.
 // FollowConfig holds optional configuration for follow/unfollow operations.
 // If nil or fields are empty, falls back to package-level globals (deprecated).
+//
+// In a multi-tenant process (the hosted webapp serves every tenant from one
+// process) the package-level globals are last-writer-wins across tenants, so
+// they CANNOT be trusted per-request. Callers in that environment MUST pass a
+// fully-populated FollowConfig — DataDir, DiscoveryURL, DiscoveryKey AND
+// BaseURL — so the follow.announced/removed stream events carry the correct
+// actor and pass the registration check under the right domain. Omitting
+// BaseURL/DiscoveryKey strands the announce (the bug fixed for interactive
+// follows: see webapp handleFollowing / handleWidgetFollow).
 type FollowConfig struct {
 	DataDir      string
 	DiscoveryURL string
+	DiscoveryKey string
+	BaseURL      string
+}
+
+// streamConfig builds a per-tenant *stream.DiscoveryConfig from the optional
+// FollowConfig so stream.PublishEvent never falls back to the (multi-tenant-
+// unsafe) package globals. Returns nil when no config was supplied, which keeps
+// single-tenant CLI callers on the global path.
+func streamConfig(cfg []*FollowConfig) *stream.DiscoveryConfig {
+	if len(cfg) == 0 || cfg[0] == nil {
+		return nil
+	}
+	c := cfg[0]
+	return &stream.DiscoveryConfig{
+		DiscoveryURL: c.DiscoveryURL,
+		DiscoveryKey: c.DiscoveryKey,
+		BaseURL:      c.BaseURL,
+		DataDir:      c.DataDir,
+	}
 }
 
 func FollowWithBlessing(followingPath string, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy, cfg ...*FollowConfig) (*FollowResult, error) {
@@ -76,7 +104,9 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 		entry.AuthorName = remoteWK.Author
 	}
 
-	if err := Save(followingPath, f); err != nil {
+	// SIGNET epic 02: sign after enrichment, so the signature covers the bytes
+	// that actually land on disk.
+	if err := SaveSigned(followingPath, f, privKey); err != nil {
 		return nil, err
 	}
 
@@ -147,10 +177,13 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 			}
 		}
 
-		// Emit follow event to discovery stream (DS write — non-fatal)
+		// Emit follow event to discovery stream (DS write — non-fatal).
+		// Pass the per-tenant config so the announce uses this tenant's
+		// BaseURL/DataDir instead of the shared package globals (which are
+		// corrupted across tenants in the hosted process).
 		stream.PublishEvent("pub.polis.follow.announced", map[string]interface{}{
 			"target_domain": discovery.ExtractDomainFromURL(authorURL),
-		}, privKey)
+		}, privKey, streamConfig(cfg))
 	} else {
 		stream.LogSuppressedEmit("pub.polis.follow.announced", "not_registered_locally",
 			"",
@@ -180,7 +213,8 @@ func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient 
 
 	result.WasFollowing = f.Remove(authorURL)
 
-	if err := Save(followingPath, f); err != nil {
+	// SIGNET epic 02: unfollowing is authorship too — re-sign over the new roster.
+	if err := SaveSigned(followingPath, f, privKey); err != nil {
 		return nil, err
 	}
 
@@ -235,10 +269,12 @@ func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient 
 			}
 		}
 
-		// Emit unfollow event to discovery stream (DS write — non-fatal)
+		// Emit unfollow event to discovery stream (DS write — non-fatal).
+		// Per-tenant config (see FollowWithBlessing) keeps the announce off the
+		// shared package globals.
 		stream.PublishEvent("pub.polis.follow.removed", map[string]interface{}{
 			"target_domain": discovery.ExtractDomainFromURL(authorURL),
-		}, privKey)
+		}, privKey, streamConfig(cfg))
 	} else if !registered {
 		stream.LogSuppressedEmit("pub.polis.follow.removed", "not_registered_locally",
 			"",

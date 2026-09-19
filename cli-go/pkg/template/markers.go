@@ -30,4 +30,3 @@ func WrapWithMarkers(content, path, source string) string {
 	// Wrap the content
 	return fmt.Sprintf("%s\n%s\n%s\n%s", startMarker, boundarySpan, content, endMarker)
 }
-

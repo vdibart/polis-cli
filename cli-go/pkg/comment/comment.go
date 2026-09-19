@@ -14,6 +14,7 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
+	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
@@ -143,14 +144,7 @@ func SaveDraft(dataDir string, draft *CommentDraft) error {
 	}
 
 	// Save as markdown with simple frontmatter
-	content := fmt.Sprintf(`---
-in_reply_to: %s
-root_post: %s
-created_at: %s
-updated_at: %s
----
-
-%s`, draft.InReplyTo, draft.RootPost, draft.CreatedAt, draft.UpdatedAt, draft.Content)
+	content := DraftContent(draft)
 
 	draftPath := filepath.Join(draftsDir, draft.ID+".md")
 	if err := os.WriteFile(draftPath, []byte(content), 0644); err != nil {
@@ -248,7 +242,8 @@ func SignComment(dataDir string, draft *CommentDraft, authorIdentity, siteURL st
 	// Canonical source-path URL (content/pub.polis.core/comment/...), matching
 	// where PublishComment writes the signed .md — so the comment self-declares
 	// the same URL it is registered + served at. Comments historically used the
-	// /comments/ mount path (Defect 1, plans/comment-registration-severe-bug.md).
+	// /comments/ mount path, which reaches the .md only through a permanent 301;
+	// the registered URL is signature-bound and the DS's upsert key.
 	commentURL := polisurl.CommentContentURL(siteURL, dateDir, commentID)
 
 	// Generate title (from first heading or auto-generate)
@@ -274,8 +269,22 @@ func SignComment(dataDir string, draft *CommentDraft, authorIdentity, siteURL st
 		rootPost = draft.InReplyTo
 	}
 
+	// A comment carries the COMMENTER's terms, because a comment is the
+	// commenter's content on the commenter's domain. That falls out of the
+	// architecture; there is no special case here beyond reading this site's
+	// own licence rather than the post author's.
+	licenseYAML, err := commentLicenseFrontmatter(dataDir, siteURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve licence terms: %w", err)
+	}
+
 	// Build CLI-compatible frontmatter (without signature first)
 	// CLI format uses nested in-reply-to with url and root-post
+	//
+	// ⚠️ licenseYAML is spliced into BOTH this and the final frontmatter below.
+	// The two differ only by the `author:` and `signature:` lines, which are
+	// exactly what signing.MarkdownSigningBase deletes to recover the signed bytes. Build the
+	// block once or signatures break silently.
 	unsignedFrontmatter := fmt.Sprintf(`---
 title: %s
 type: comment
@@ -286,7 +295,7 @@ in-reply-to:
   root-post: %s
 current-version: sha256:%s
 version-history:
-  - sha256:%s (%s)
+  - sha256:%s (%s)%s
 ---`,
 		escapeYAMLTitle(title),
 		timestampStr,
@@ -296,6 +305,7 @@ version-history:
 		hash,
 		hash,
 		timestampStr,
+		licenseYAML,
 	)
 
 	// Canonicalize full content for signing (matches CLI behavior)
@@ -323,7 +333,7 @@ in-reply-to:
   root-post: %s
 current-version: sha256:%s
 version-history:
-  - sha256:%s (%s)
+  - sha256:%s (%s)%s
 signature: %s
 ---`,
 		escapeYAMLTitle(title),
@@ -335,6 +345,7 @@ signature: %s
 		hash,
 		hash,
 		timestampStr,
+		licenseYAML,
 		sigBase64,
 	)
 
@@ -1004,8 +1015,13 @@ func extractSlugFromURL(url string) string {
 	return strings.TrimSuffix(filename, ".md")
 }
 
-// escapeYAMLTitle escapes a title for YAML frontmatter (CLI-compatible).
-// Only quotes when truly necessary (contains colons, newlines, or special chars).
+// escapeYAMLTitle escapes a title for YAML frontmatter: only quotes when truly
+// necessary (colons, newlines, special chars).
+//
+// ⛔ "CLI-compatible" used to stand here and was wrong: bash writes titles raw.
+// What this MUST stay compatible with is publish.escapeYAMLString — the rules
+// are identical and unquoteYAMLTitle relies on that. TestTheTwoEscapersAgree
+// holds it; do not change one without the other.
 func escapeYAMLTitle(s string) string {
 	needsQuoting := false
 	if strings.HasPrefix(s, " ") || strings.HasSuffix(s, " ") {
@@ -1029,6 +1045,92 @@ func escapeYAMLTitle(s string) string {
 		return fmt.Sprintf("\"%s\"", escaped)
 	}
 	return s
+}
+
+// ReplyFields returns the target and thread root a comment file declares,
+// reading the signed nested `in-reply-to:` block and falling back to the flat
+// draft fields. Both are read from the frontmatter block only.
+func ReplyFields(content string) (inReplyTo, rootPost string) {
+	inReplyTo, rootPost = ParseNestedInReplyTo(content)
+	if inReplyTo == "" || rootPost == "" {
+		fm := ParseFrontmatter(content)
+		if inReplyTo == "" {
+			inReplyTo = fm["in_reply_to"]
+		}
+		if rootPost == "" {
+			rootPost = fm["root_post"]
+		}
+	}
+	if rootPost == "" {
+		rootPost = inReplyTo
+	}
+	return inReplyTo, rootPost
+}
+
+// UnpublishedDraftContent builds the draft an unpublished comment returns to.
+//
+// ⛔ It must be the format SaveDraft writes and LoadDraft reads, because the
+// only thing a returned draft is FOR is being signed again. Until close-out E2
+// the reply fields were written as an HTML comment that nothing read (and, for
+// a signed comment, were never even found: the nested block is invisible to a
+// flat frontmatter parse), so `polis comment sign` refused every unpublished
+// comment with "in_reply_to is required" while the dialog promised a republish.
+//
+// Everything published is dropped: signature, version and history. A republish
+// is a fresh publication, not a restoration.
+//
+// published is the comment file's full text, title its raw frontmatter title,
+// and body the frontmatter-stripped body — with whatever heading it carries.
+//
+// ⛔ The unquote and the heading strip belong HERE, in the one builder, and in
+// this order. A comment's frontmatter title is YAML-quoted and its body heading
+// is not (`escapeYAMLTitle` quotes anything containing ": ", and every
+// auto-generated title is `Re: <slug>`), so a caller that stripped with the raw
+// title matched nothing and this function then prepended a second identical
+// heading — one more per publish → unpublish cycle (close-out R2-1).
+func UnpublishedDraftContent(published, title, body string) string {
+	inReplyTo, rootPost := ReplyFields(published)
+	fm := ParseFrontmatter(published)
+
+	title = unquoteYAMLTitle(title)
+	body = render.StripLeadingTitleHeading(body, title)
+
+	createdAt := fm["published"]
+	if createdAt == "" {
+		createdAt = time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	}
+	draft := &CommentDraft{
+		InReplyTo: inReplyTo,
+		RootPost:  rootPost,
+		CreatedAt: createdAt,
+		UpdatedAt: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+		Content:   "# " + title + "\n\n" + body,
+	}
+	return DraftContent(draft)
+}
+
+// DraftContent renders a draft file's text. SaveDraft writes exactly this.
+func DraftContent(draft *CommentDraft) string {
+	return fmt.Sprintf(`---
+in_reply_to: %s
+root_post: %s
+created_at: %s
+updated_at: %s
+---
+
+%s`, draft.InReplyTo, draft.RootPost, draft.CreatedAt, draft.UpdatedAt, draft.Content)
+}
+
+// unquoteYAMLTitle reverses escapeYAMLTitle, so a title that needed quoting in
+// frontmatter does not come back with the quotes as part of the title.
+//
+// ⭐ One implementation, shared with the post branches of both unpublish paths:
+// escapeYAMLTitle and publish.escapeYAMLString apply the same rule, so their
+// inverse is the same function (close-out R3-1). ⛔ That equivalence is the
+// whole basis for sharing an inverse, so TestTheTwoEscapersAgree pins it — a
+// comment would let one escaper drift while this stayed green.
+func unquoteYAMLTitle(s string) string {
+	return publish.UnquoteYAMLString(strings.TrimSpace(s))
 }
 
 // ensureUniqueCommentID checks for comment ID collisions across all status directories.
@@ -1088,7 +1190,21 @@ func extractPostPath(url string) string {
 //	  url: https://...
 //	  root-post: https://...
 func ParseNestedInReplyTo(content string) (url, rootPost string) {
-	lines := strings.Split(content, "\n")
+	// ⚠️ Anchored to the FRONTMATTER BLOCK, and the key matches at column 0 —
+	// the same rule the signing base follows (docs/signet/spec/signing-base.md,
+	// §4.2). A document-wide scan
+	// read a BODY line beginning `in-reply-to:` as the comment's target, so a
+	// comment about replying could name someone else's post.
+	trimmedContent := strings.TrimSpace(content)
+	if !strings.HasPrefix(trimmedContent, "---") {
+		return "", ""
+	}
+	matches := frontmatterParseRe.FindStringSubmatch(trimmedContent)
+	if len(matches) < 2 {
+		return "", ""
+	}
+
+	lines := strings.Split(matches[1], "\n")
 	inReplyToSection := false
 
 	for _, line := range lines {

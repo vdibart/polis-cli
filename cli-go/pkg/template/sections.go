@@ -424,9 +424,9 @@ func (e *Engine) renderSiblingsList(content string, ctx *RenderContext, depth in
 			// Stream-post.html threads this onto the comment-badge anchor;
 			// stream.css hides .entry-comments-badge.is-empty so no-comment
 			// posts don't render a "0" badge.
-			"comment_count_class":   commentCountClass(post.CommentCount),
-			"is_above_focus":        aboveClass,
-			"title_link_state":      post.TitleLinkState,
+			"comment_count_class": commentCountClass(post.CommentCount),
+			"is_above_focus":      aboveClass,
+			"title_link_state":    post.TitleLinkState,
 		})
 
 		builder.WriteString(rendered)

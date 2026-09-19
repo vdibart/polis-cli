@@ -155,8 +155,8 @@ func TestInit_BundleJsonIsValid(t *testing.T) {
 	}
 
 	types, _ := raw["types"].(map[string]interface{})
-	if len(types) != 6 {
-		t.Errorf("types count = %d, want 6", len(types))
+	if len(types) != 9 {
+		t.Errorf("types count = %d, want 9", len(types))
 	}
 }
 

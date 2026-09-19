@@ -37,6 +37,10 @@ type HookConfig struct {
 	PostPublish   string `json:"post-publish,omitempty"`
 	PostRepublish string `json:"post-republish,omitempty"`
 	PostComment   string `json:"post-comment,omitempty"`
+
+	// Extra holds members this build does not model — a hook another build
+	// knows — so saving the webapp config keeps them (extra.go).
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // HookPayload contains data passed to hook scripts.
@@ -130,7 +134,7 @@ func RunHook(siteDir string, config *HookConfig, payload *HookPayload) (*HookRes
 
 	cmd := exec.CommandContext(ctx, hookPath)
 	cmd.Env = env
-	cmd.Dir = siteDir // Run in site directory
+	cmd.Dir = siteDir               // Run in site directory
 	cmd.WaitDelay = 3 * time.Second // Force-close pipes if child processes linger after timeout
 
 	// Pass JSON payload to stdin

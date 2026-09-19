@@ -1,0 +1,36 @@
+{
+  "created": "2026-01-01T00:00:00Z",
+  "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGoldenRotationKeyGoldenRotationKeyGold polis@golden",
+  "public_key_history": {
+    "current": {
+      "epoch": 1,
+      "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGoldenRotationKeyGoldenRotationKeyGold polis@golden",
+      "valid_from": "2026-09-18T12:00:00.123Z",
+      "transition_sig": "-----BEGIN SSH SIGNATURE-----\nR09MREVO\n-----END SSH SIGNATURE-----\n",
+      "witnesses": [
+        {
+          "action": "key-rotation",
+          "domain": "golden.example",
+          "old_key": "old",
+          "new_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGoldenRotationKeyGoldenRotationKeyGold polis@golden",
+          "timestamp": "2026-09-18T12:00:00.123Z",
+          "transition_sig": "-----BEGIN SSH SIGNATURE-----\nR09MREVO\n-----END SSH SIGNATURE-----\n",
+          "ds": "https://ds.example",
+          "ds_key_id": "k1",
+          "witnessed_at": "2026-09-18T12:00:01.000Z",
+          "signature": "c2ln"
+        }
+      ]
+    },
+    "history": [
+      {
+        "epoch": 0,
+        "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMinimalTestKeyXXXXXXXXXXXXXXXXXX polis-local",
+        "valid_from": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-09-18T12:00:00.123Z",
+        "transition_sig": null
+      }
+    ]
+  },
+  "version": "0.1.0"
+}

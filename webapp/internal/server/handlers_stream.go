@@ -522,8 +522,7 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 	// scope/time_window/order/sort/with), the response shape
 	// (item_count, has_cursor, next_cursor), the outcome (status,
 	// duration_ms), and the request_id for cross-boundary correlation.
-	// Closes the §3 gap in plans/v4-deploy-readiness.md: prior to this
-	// emit, handleStreamItems was responsible for every filter-driven
+	// Prior to this emit, handleStreamItems was responsible for every filter-driven
 	// fetch in the v4 SPA and had zero structured event coverage.
 	//
 	// itemCount + nextCursorSet are populated by the success path before
@@ -1038,6 +1037,15 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 
 	// Apply cursor pagination — published-timestamp-anchored
 	items = applyStreamCursor(items, cursor, order)
+
+	// Activity view (mixed posts + comments): drop comment items whose target
+	// post is also present as a post entry, so a post you follow the author of
+	// AND that someone you follow commented on doesn't render twice. Runs after
+	// cursor/time filtering, before the page is cut, so the visible page is the
+	// deduped set.
+	if feedType == "" {
+		items = dedupeActivityCommentsAgainstPosts(items)
+	}
 
 	// Take limit + compute next cursor
 	page, nextCursor := paginateStreamItems(items, limit, order)
@@ -2030,6 +2038,40 @@ func dedupeCommentsByTargetPost(items []feed.CachedFeedItem) []feed.CachedFeedIt
 	return out
 }
 
+// dedupeActivityCommentsAgainstPosts drops comment items whose target post is
+// ALSO present as a post item in the same result set — the "you follow both the
+// post author and the commenter" case. The activity feed carries the post (via
+// the author you follow) and the comment (via the commenter you follow) as two
+// items, and renderCommentThread redraws the whole post under the comment — so
+// the post appears twice. Keep the post entry (its count badge already reflects
+// the comment) and drop the redundant comment item. Comment items whose target
+// post is NOT present (you follow only the commenter) are kept — that comment-
+// thread is the sole surface of the activity and collapses to post+badge
+// client-side via renderCommentThread's postFocus branch.
+//
+// Activity view only (feedType==""): type=comment has its own
+// dedupeCommentsByTargetPost, and type=post carries no comment items.
+func dedupeActivityCommentsAgainstPosts(items []feed.CachedFeedItem) []feed.CachedFeedItem {
+	postURLs := make(map[string]bool, len(items))
+	for _, it := range items {
+		if it.Type == "post" {
+			postURLs[polisurl.NormalizeToHTML(it.URL)] = true
+		}
+	}
+	if len(postURLs) == 0 {
+		return items
+	}
+	out := items[:0]
+	for _, it := range items {
+		if it.Type == "comment" && it.TargetURL != "" &&
+			postURLs[polisurl.NormalizeToHTML(it.TargetURL)] {
+			continue // redundant — the post entry already represents this
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
 // buildCommentThreadEnrichments returns a per-comment enrichment map for
 // the stream's `type=comments` thread view. For each comment item on
 // the page, this fetches the target post's title/published/body from the
@@ -2481,12 +2523,25 @@ func (s *Server) populateCrossTenantCommentCounts(r *http.Request, page []feed.C
 
 	for i := range page {
 		it := &page[i]
-		if it.Type != "post" {
+		var dsURL string
+		switch {
+		case it.Type == "post":
+			dsURL = it.URL
+			if it.AuthorDomain == myDomain {
+				dsURL = s.absolutizeStreamURL(it.URL)
+			}
+		case it.Type == "comment" && it.TargetURL != "":
+			// A comment-thread item that surfaces in a non-comments view (the
+			// commenter is followed but the post author may not be) renders
+			// collapsed — post + count badge. Stamp it with the PARENT post's
+			// total count, keyed by TargetURL (the parent post URL, already
+			// normalized to HTML); absolutize own-targeted relative URLs.
+			dsURL = it.TargetURL
+			if !strings.HasPrefix(dsURL, "https://") {
+				dsURL = s.absolutizeStreamURL(dsURL)
+			}
+		default:
 			continue
-		}
-		dsURL := it.URL
-		if it.AuthorDomain == myDomain {
-			dsURL = s.absolutizeStreamURL(it.URL)
 		}
 		if !strings.HasPrefix(dsURL, "https://") {
 			continue

@@ -28,7 +28,7 @@ func TestCheckSiteRegistration_Registered(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"is_registered":        true,
 			"domain":               "alice.com",
-			"created_at":        "2026-01-15T10:30:00Z",
+			"created_at":           "2026-01-15T10:30:00Z",
 			"registry_url":         "https://registry.polis.pub/alice.com",
 			"registration_version": 1,
 		})
@@ -151,10 +151,10 @@ func TestRegisterSite_Success(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":       true,
-			"domain":        "alice.com",
-			"registry_url":  "https://registry.polis.pub/alice.com",
-			"created_at": "2026-01-15T10:30:00Z",
+			"success":      true,
+			"domain":       "alice.com",
+			"registry_url": "https://registry.polis.pub/alice.com",
+			"created_at":   "2026-01-15T10:30:00Z",
 		})
 	}))
 	defer server.Close()
@@ -934,7 +934,7 @@ func TestRotateKey_Success(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-api-key")
-	err := client.RotateKey(KeyRotationRequest{
+	witness, err := client.RotateKey(KeyRotationRequest{
 		Domain:        "alice.polis.pub",
 		OldKey:        "ssh-ed25519 AAA",
 		NewKey:        "ssh-ed25519 BBB",
@@ -943,6 +943,29 @@ func TestRotateKey_Success(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
+	}
+	// A DS that does not witness still rotates successfully (epic 32 D1).
+	if witness != nil {
+		t.Fatalf("Expected no witness from a DS that issued none, got %+v", witness)
+	}
+}
+
+func TestRotateKey_ReturnsTheDSWitness(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":true,"key_id":8,"witness":{"action":"key-rotation","domain":"alice.polis.pub","old_key":"ssh-ed25519 AAA","new_key":"ssh-ed25519 BBB","timestamp":"2026-02-25T12:00:00Z","transition_sig":"fake-signature","ds":"https://ds.polis.pub","ds_key_id":"ds-primary","witnessed_at":"2026-02-25T12:00:01.234Z","signature":"sig"}}`))
+	}))
+	defer server.Close()
+
+	witness, err := NewClient(server.URL, "").RotateKey(KeyRotationRequest{
+		Domain: "alice.polis.pub", OldKey: "ssh-ed25519 AAA", NewKey: "ssh-ed25519 BBB",
+		TransitionSig: "fake-signature", Timestamp: "2026-02-25T12:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if witness == nil || witness.Action != WitnessActionKeyRotation || witness.WitnessedAt != "2026-02-25T12:00:01.234Z" {
+		t.Fatalf("expected the rotation witness to be returned verbatim, got %+v", witness)
 	}
 }
 
@@ -955,7 +978,7 @@ func TestRotateKey_DSRejects(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-api-key")
-	err := client.RotateKey(KeyRotationRequest{
+	_, err := client.RotateKey(KeyRotationRequest{
 		Domain:        "alice.polis.pub",
 		OldKey:        "ssh-ed25519 WRONG",
 		NewKey:        "ssh-ed25519 BBB",

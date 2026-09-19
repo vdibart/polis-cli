@@ -28,7 +28,7 @@ set -eo pipefail
 #   4. Hardcoded defaults
 
 # Fixed constants (never configurable - required for discovery)
-VERSION="0.66.0"
+VERSION="0.68.0"
 WELL_KNOWN_DIR=".well-known"
 WELL_KNOWN_FILE="polis"
 
@@ -368,16 +368,38 @@ cmd_init() {
 
     # Create .well-known/polis metadata file (v2: identity + bundle registry)
     local wellknown_json
+    local created_ts
+    created_ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     wellknown_json=$(jq -n \
         --arg version "polis-cli/$VERSION" \
         --arg author_name "$(git config user.name || echo 'Unknown')" \
         --arg public_key "$PUBKEY" \
-        --arg created "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+        --arg created "$created_ts" \
         '{
             version: $version,
             author_name: $author_name,
             public_key: $public_key,
             created: $created,
+            # The genesis entry of this site key history.
+            #
+            # A site that publishes only its CURRENT key stops being able to
+            # verify its own past the moment it rotates. So the chain starts
+            # here, at epoch 0, and every rotation appends to it.
+            #
+            # valid_from is the `created` field above, so the genesis entry says
+            # nothing the document is not already saying. transition_sig is null
+            # because nothing preceded this key; that is the honest value, not a
+            # placeholder. An empty history[] is a meaningful state, not a
+            # missing field.
+            public_key_history: {
+                current: {
+                    epoch: 0,
+                    key: $public_key,
+                    valid_from: $created,
+                    transition_sig: null
+                },
+                history: []
+            },
             bundles: {
                 "pub.polis.core": {
                     active: true,
@@ -588,6 +610,25 @@ extract_frontmatter_field() {
     awk -v field="$field:" '/^---$/{if(++count==2) exit} count==1 && $0 ~ "^"field{sub("^"field" *", ""); print; exit}' "$file"
 }
 
+# Detect a top-level `license:` key in a file's frontmatter.
+# Returns 0 (true) when one is present.
+#
+# WHY THIS EXISTS: this CLI rebuilds frontmatter from a fixed template on
+# republish (see cmd_republish), carrying title/published/generator/
+# current-version/version-history and nothing else. A licensed post republished
+# here would therefore have its `license:` block DROPPED and be re-signed
+# without it. The post would still verify, so nothing would look wrong — the
+# author's signed statement of terms would simply be gone.
+#
+# Silent loss of a signed statement of intent is the worst failure this can
+# have, so republish refuses instead. This CLI is not taught to preserve the
+# block: the Go CLI owns licence support, and a half-preserving bash
+# implementation would be a second source of truth for signed terms.
+frontmatter_has_license() {
+    local file="$1"
+    awk '/^---$/{if(++count==2) exit} count==1 && /^license:/{found=1} END{exit !found}' "$file"
+}
+
 # Validate .well-known/polis exists and is valid JSON
 # Returns 0 if valid, 1 if invalid/missing
 # Prints error message on failure
@@ -659,6 +700,54 @@ extract_title() {
 # This ensures consistent signing/hashing regardless of editor or transfer differences
 # Result always ends with exactly one newline
 # IMPORTANT: Must match webapp (publish.go) and validator (parser.js) behavior
+# Print the leading YAML frontmatter block of a document, fences included.
+# Prints nothing when there is no leading `---`. An unterminated block extends to
+# the end of the document, matching the Go implementation's boundary rule.
+extract_frontmatter_block() {
+    printf '%s\n' "$1" | awk '
+        NR == 1 { if ($0 != "---") exit; print; next }
+        { print }
+        $0 == "---" { exit }
+    '
+}
+
+# Print the document with every top-level occurrence of `<key>:` removed FROM
+# THE FRONTMATTER BLOCK ONLY. Body lines are never touched, and an indented
+# `<key>:` is a child of the key above it and is kept.
+#
+# This is the markdown signing base's strip step — see docs/signet/spec/signing-base.md §4.1.
+strip_frontmatter_key() {
+    printf '%s\n' "$1" | awk -v key="$2" '
+        BEGIN { pfx = key ":"; n = length(pfx); infm = 0 }
+        NR == 1 { if ($0 == "---") infm = 1; print; next }
+        infm && $0 == "---" { infm = 0; print; next }
+        infm && substr($0, 1, n) == pfx { next }
+        { print }
+    '
+}
+
+# Print "comment" or "post": which markdown signing base a document was signed
+# under. Mirrors signing.MarkdownObjectTypeFor — a comment is `type: comment`
+# OR any `in-reply-to:` key, read from the FRONTMATTER BLOCK ONLY and by
+# structural position (an indented line is a child, never a field).
+# Spec: docs/signet/spec/signing-base.md §4.
+markdown_object_type() {
+    extract_frontmatter_block "$1" | awk '
+        NR == 1 { next }
+        $0 == "---" { exit }
+        /^[ \t]/ { next }
+        {
+            i = index($0, ":")
+            if (i <= 1) next
+            key = substr($0, 1, i - 1); val = substr($0, i + 1)
+            gsub(/^[ \t]+|[ \t]+$/, "", key); gsub(/^[ \t]+|[ \t]+$/, "", val)
+            if (key == "type") type = val
+            if (key == "in-reply-to") irt = 1
+        }
+        END { print ((type == "comment" || irt) ? "comment" : "post") }
+    '
+}
+
 canonicalize_content() {
     local content="$1"
     local trimmed
@@ -1188,7 +1277,7 @@ fetch_root_post_for_comment() {
     # Query the blessing relationship for this comment (source_url = comment URL)
     local response=$(curl -s --max-time 10 \
         --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
-        "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=polis.blessing&source_url=${encoded_url}" 2>/dev/null)
+        "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&source_url=${encoded_url}" 2>/dev/null)
 
     if [ -z "$response" ]; then
         return 1
@@ -1254,9 +1343,26 @@ update_domain_in_following() {
     fi
 
     local temp_file="${FOLLOWING_INDEX}.tmp"
+    # SIGNET: drop any signature. following.json is signed by the Go CLI and the
+    # webapp, and jq's "|=" preserves every top-level key it wasn't told about —
+    # so without this, editing the roster here would leave the OLD signature
+    # sitting over NEW content. That file loads and does not verify, which is a
+    # HIGH-severity alert for a human to chase over an edit that was completely
+    # legitimate.
+    #
+    # Degrading to UNSIGNED is the honest outcome and reports OK: unsigned is a
+    # fact, not a defect. Bash does not sign this file (it has no signing path
+    # for it), so removing the stale claim is the whole of what it can correctly
+    # do. The user's next follow/unfollow via the Go CLI or the webapp re-signs.
+    #
+    # Stamp .version for the same reason, in the other direction: it names who
+    # last WROTE the file. Leaving a Go-written generator string on a file bash
+    # just edited is the same false claim as E4, mirrored — so bash records
+    # itself, as "polis-cli/$VERSION".
     jq --arg old "https://$old_domain" \
        --arg new "https://$new_domain" \
-       '.following |= map(if .url | startswith($old) then .url = ($new + (.url | ltrimstr($old))) else . end)' \
+       --arg gen "polis-cli/$VERSION" \
+       '.following |= map(if .url | startswith($old) then .url = ($new + (.url | ltrimstr($old))) else . end) | del(.signature) | .version = $gen' \
        "$FOLLOWING_INDEX" > "$temp_file" 2>/dev/null
 
     if [ $? -eq 0 ]; then
@@ -1280,9 +1386,15 @@ update_domain_in_blessed_comments() {
 
     local temp_file="${BLESSED_COMMENTS}.tmp"
     # Update both post URLs and blessed comment URLs
+    # del(.signature): rewriting URLs changes signed content.
+    # ⚠️ This filter also targets `.posts`, and blessed.json has no such key —
+    # it is `.comments[].blessed[]`. jq errors on null, the exit check below
+    # discards the temp file, and the rename never happens, so this function has
+    # silently done nothing for its whole life. Left as found; see the epic-14
+    # escalation rather than fixing it blind.
     jq --arg old "https://$old_domain" \
        --arg new "https://$new_domain" \
-       '.posts |= map(
+       'del(.signature) | .posts |= map(
            (if .url | startswith($old) then .url = ($new + (.url | ltrimstr($old))) else . end) |
            .blessed |= map(if .url | startswith($old) then .url = ($new + (.url | ltrimstr($old))) else . end)
        )' \
@@ -1363,7 +1475,7 @@ _fetch_pending_relationships() {
 
     curl -s \
         --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
-        "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=polis.blessing&actor=${domain}&status=pending"
+        "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&actor=${domain}&status=pending"
 }
 
 # Fetch comment content records for a domain (for version lookup)
@@ -1373,7 +1485,7 @@ _fetch_comment_records_for_domain() {
 
     curl -s \
         --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
-        "${POLIS_CONTENT_QUERY_ENDPOINT}?type=polis.comment&actor=${domain}"
+        "${POLIS_CONTENT_QUERY_ENDPOINT}?type=pub.polis.comment&actor=${domain}"
 }
 
 # Resolve short hash to full comment_version
@@ -1538,12 +1650,24 @@ update_blessed_comments_json() {
 
     local temp_file="${blessed_file}.tmp"
 
-    # Use jq to update JSON
+    # Use jq to update JSON.
+    #
+    # SIGNET epic 14 — del(.signature) is LOAD-BEARING, not tidying. jq's `|=`
+    # PRESERVES every top-level key it was not told about, so without this the
+    # old signature survives over new content and the file goes from `valid` to
+    # `invalid` — a HIGH alert a human has to chase. Dropping to `unsigned`
+    # degrades to a FACT and costs nobody anything. Same fix epic 02 applied to
+    # following.json's four bash filters, and the same reason: for a signature,
+    # KEEPING is the dangerous direction.
+    #
+    # ⚠️ Bash does not sign this file. It writes it unsigned; the author's next
+    # bless through the Go CLI or the webapp re-signs it.
     jq --arg post "$in_reply_to" \
        --arg url "$comment_url" \
        --arg version "$comment_version" \
        --arg timestamp "$blessed_at" \
        '
+       del(.signature) |
        .comments |= (
          if any(.[]; .post == $post) then
            map(if .post == $post then
@@ -1589,10 +1713,13 @@ remove_from_blessed_comments_json() {
 
     local temp_file="${blessed_file}.tmp"
 
-    # Use jq to remove the comment from blessed array
+    # Use jq to remove the comment from blessed array.
+    # del(.signature): see update_blessed_comments_json — an unbless changes the
+    # content, so a carried-over signature would manufacture an `invalid`.
     jq --arg post "$in_reply_to" \
        --arg url "$comment_url" \
        '
+       del(.signature) |
        .comments |= map(
          if .post == $post then
            .blessed |= map(select(.url != $url))
@@ -1664,7 +1791,7 @@ fetch_comments_by_author() {
     fi
 
     # Build query params for relationship-query
-    local query_params="type=polis.blessing&actor=${user_domain}"
+    local query_params="type=pub.polis.comment.blessing&actor=${user_domain}"
     if [ -n "$status_filter" ]; then
         # Map legacy status names to unified API
         case "$status_filter" in
@@ -1765,8 +1892,13 @@ verify_remote_signature() {
     local public_key="$2"
     local author_identity="$3"
 
-    # Extract signature from frontmatter (signature: only appears in frontmatter)
-    local signature=$(echo "$content" | grep '^signature:' | sed 's/^signature: *//')
+    # Extract signature from frontmatter.
+    #
+    # ⚠️ Anchored to the frontmatter block, not to the whole document. A BODY
+    # line may legitimately begin `signature:` — a post documenting this format,
+    # a quoted frontmatter block, a YAML fence — and taking the first match
+    # anywhere would read a body line as the signature.
+    local signature=$(extract_frontmatter_block "$content" | grep '^signature:' | head -1 | sed 's/^signature: *//')
 
     if [ -z "$signature" ]; then
         return 1
@@ -1786,10 +1918,25 @@ verify_remote_signature() {
     echo "$signature" >> "$temp_sig"
     echo "-----END SSH SIGNATURE-----" >> "$temp_sig"
 
-    # Reconstruct the content without signature field and canonicalize
-    # Canonicalization ensures consistent verification regardless of whitespace differences
+    # Reconstruct the signing base and canonicalize.
+    #
+    # ⛔ THE STRIP IS ANCHORED TO THE FRONTMATTER BLOCK. Until 2026-09-04 this
+    # was `sed '/^signature:/d'` over the whole document, so a body line
+    # beginning `signature:` was dropped from the reconstruction — the bytes then
+    # differed from what was signed and AUTHENTIC CONTENT FAILED VERIFICATION,
+    # reported to the user as possible tampering. Same defect, same fix, as
+    # signing.MarkdownSigningBase in the Go CLI.
+    # Spec: docs/signet/spec/signing-base.md §4.
+    #
+    # ⛔ THE STRIPPED FIELDS DEPEND ON THE OBJECT TYPE. A comment's `author:` is
+    # written after signing, so it is outside the signed bytes too. Until
+    # 2026-09-17 only `signature:` was stripped, and EVERY AUTHENTIC COMMENT was
+    # reported as tampered. The table is signing.unsignedFrontmatterFields.
     local base_content
-    base_content=$(echo "$content" | sed '/^signature:/d')
+    base_content=$(strip_frontmatter_key "$content" 'signature')
+    if [ "$(markdown_object_type "$content")" = "comment" ]; then
+        base_content=$(strip_frontmatter_key "$base_content" 'author')
+    fi
 
     # Canonicalize the content before verification
     canonicalize_content "$base_content" > "$temp_content"
@@ -1823,10 +1970,27 @@ add_to_following_json() {
 
     local temp_file="${following_file}.tmp"
 
+    # SIGNET: drop any signature. following.json is signed by the Go CLI and the
+    # webapp, and jq's "|=" preserves every top-level key it wasn't told about —
+    # so without this, editing the roster here would leave the OLD signature
+    # sitting over NEW content. That file loads and does not verify, which is a
+    # HIGH-severity alert for a human to chase over an edit that was completely
+    # legitimate.
+    #
+    # Degrading to UNSIGNED is the honest outcome and reports OK: unsigned is a
+    # fact, not a defect. Bash does not sign this file (it has no signing path
+    # for it), so removing the stale claim is the whole of what it can correctly
+    # do. The user's next follow/unfollow via the Go CLI or the webapp re-signs.
+    #
+    # Stamp .version for the same reason, in the other direction: it names who
+    # last WROTE the file. Leaving a Go-written generator string on a file bash
+    # just edited is the same false claim as E4, mirrored — so bash records
+    # itself, as "polis-cli/$VERSION".
     # Use jq to add author to following list (unique by URL)
     jq --arg url "$author_url" \
        --arg ts "$timestamp" \
-       '.following |= (. + [{url: $url, followed_at: $ts}] | unique_by(.url))' \
+       --arg gen "polis-cli/$VERSION" \
+       '.following |= (. + [{url: $url, followed_at: $ts}] | unique_by(.url)) | del(.signature) | .version = $gen' \
        "$following_file" > "$temp_file"
 
     # Atomic replace
@@ -1851,9 +2015,26 @@ remove_from_following_json() {
 
     local temp_file="${following_file}.tmp"
 
+    # SIGNET: drop any signature. following.json is signed by the Go CLI and the
+    # webapp, and jq's "|=" preserves every top-level key it wasn't told about —
+    # so without this, editing the roster here would leave the OLD signature
+    # sitting over NEW content. That file loads and does not verify, which is a
+    # HIGH-severity alert for a human to chase over an edit that was completely
+    # legitimate.
+    #
+    # Degrading to UNSIGNED is the honest outcome and reports OK: unsigned is a
+    # fact, not a defect. Bash does not sign this file (it has no signing path
+    # for it), so removing the stale claim is the whole of what it can correctly
+    # do. The user's next follow/unfollow via the Go CLI or the webapp re-signs.
+    #
+    # Stamp .version for the same reason, in the other direction: it names who
+    # last WROTE the file. Leaving a Go-written generator string on a file bash
+    # just edited is the same false claim as E4, mirrored — so bash records
+    # itself, as "polis-cli/$VERSION".
     # Use jq to remove author from following list
     jq --arg url "$author_url" \
-       '.following |= map(select(.url != $url))' \
+       --arg gen "polis-cli/$VERSION" \
+       '.following |= map(select(.url != $url)) | del(.signature) | .version = $gen' \
        "$following_file" > "$temp_file"
 
     # Atomic replace
@@ -2126,6 +2307,49 @@ extract_domain_for_clone() {
 # Download a single file from remote server to local directory
 # Args: $1=server_url, $2=target_dir, $3=file_path
 # Returns: 0 on success, 1 on failure
+# Is a source-supplied relative path safe to write under the clone folder?
+# Rejects absolute paths, any ".." component, and paths that would leave the
+# folder through a symlink already inside it. Mirrors the Go clone's safeDest.
+# Args: $1=target_dir (must exist), $2=relative path
+clone_path_is_safe() {
+    local target_dir="$1"
+    local rel="$2"
+
+    [ -n "$rel" ] || return 1
+    case "$rel" in
+        /*) return 1 ;;
+    esac
+
+    local parts part
+    IFS='/' read -ra parts <<< "$rel"
+    for part in "${parts[@]}"; do
+        [ "$part" = ".." ] && return 1
+    done
+
+    # Where the write LANDS: resolve the deepest part that already exists, so a
+    # symlink inside the target cannot lead out of it.
+    local real_target
+    real_target=$(cd -P "$target_dir" 2>/dev/null && pwd) || return 1
+
+    local existing="$target_dir/$rel"
+    while [ ! -e "$existing" ] && [ ! -L "$existing" ]; do
+        existing=$(dirname "$existing")
+    done
+    if [ -L "$existing" ] && [ ! -d "$existing" ]; then
+        return 1  # a symlinked or dangling file: writing follows it somewhere unknown
+    fi
+    if [ ! -d "$existing" ]; then
+        existing=$(dirname "$existing")
+    fi
+
+    local real_existing
+    real_existing=$(cd -P "$existing" 2>/dev/null && pwd) || return 1
+    case "$real_existing/" in
+        "$real_target"/*) return 0 ;;
+    esac
+    return 1
+}
+
 clone_single_file() {
     local server_url="$1"
     local target_dir="$2"
@@ -2133,6 +2357,13 @@ clone_single_file() {
 
     local remote_url="${server_url}/${file_path}"
     local local_path="${target_dir}/${file_path}"
+
+    # ⛔ file_path is the SOURCE SITE's bytes (an index entry). A hostile index
+    # listing "../../.bashrc" would otherwise write outside the clone folder.
+    if ! clone_path_is_safe "$target_dir" "$file_path"; then
+        warn_human "Refused (would write outside the clone folder): $file_path"
+        return 1
+    fi
 
     # Create directory structure
     mkdir -p "$(dirname "$local_path")"
@@ -2246,12 +2477,25 @@ rebuild_blessed_comments_full() {
         error "Could not determine domain from POLIS_BASE_URL"
     fi
 
-    info "Rebuilding blessed-comments.json from discovery service..."
+    # R24-2 / SIGNET epic 14 — blessed.json is AUTHORED, not a projection of DS
+    # state, and the DS does not store the version pin that records WHICH
+    # version of a comment was blessed. Rebuilding from the DS silently erased
+    # that pin for every entry, and with it the "edited since blessing" signal.
+    # So an existing file is preserved; the DS is consulted only to recover one
+    # that is missing entirely. Matches cli-go/pkg/index/rebuild.go.
+    if [ -f "$BLESSED_COMMENTS" ]; then
+        local kept
+        kept=$(jq '[.comments[].blessed[]] | length' "$BLESSED_COMMENTS" 2>/dev/null || echo "0")
+        success "Preserved blessed-comments.json ($kept blessed comment(s)) — it is authored, not derived from the discovery service"
+        return
+    fi
+
+    info "Recovering blessed-comments.json from discovery service..."
 
     # Fetch all granted blessing relationships for our domain
     local response=$(curl -s \
         --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
-        "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=polis.blessing&actor=${domain}&status=granted" 2>/dev/null)
+        "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&actor=${domain}&status=granted" 2>/dev/null)
 
     # Initialize fresh blessed-comments.json
     jq -n --arg v "$VERSION" '{version: $v, comments: []}' > "$BLESSED_COMMENTS"
@@ -2259,7 +2503,7 @@ rebuild_blessed_comments_full() {
     # Check if response is valid JSON with records
     local record_count=$(echo "$response" | jq -r '.count // 0' 2>/dev/null)
     if [ -z "$record_count" ] || [ "$record_count" = "0" ] || [ "$record_count" = "null" ]; then
-        success "Rebuilt blessed-comments.json (0 blessed comments)"
+        success "Recovered blessed-comments.json (0 blessed comments)"
         return
     fi
 
@@ -2283,7 +2527,10 @@ rebuild_blessed_comments_full() {
         added_count=$((added_count + 1))
     done < <(echo "$response" | jq -c '.records[]' 2>/dev/null)
 
-    success "Rebuilt blessed-comments.json ($added_count blessed comments)"
+    # ⚠️ Recovered entries carry an EMPTY version pin (the "" argument above):
+    # the DS never had it, and inventing one from the comment's current version
+    # would claim the author blessed whatever it says today.
+    success "Recovered blessed-comments.json ($added_count blessed comment(s), no version pins — the DS does not store them)"
 }
 
 sync_blessed_comments() {
@@ -2297,7 +2544,7 @@ sync_blessed_comments() {
     # Fetch all granted blessing relationships for our domain
     local response=$(curl -s \
         --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
-        "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=polis.blessing&actor=${domain}&status=granted" 2>/dev/null)
+        "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&actor=${domain}&status=granted" 2>/dev/null)
 
     # Check if response is valid JSON with records
     local record_count=$(echo "$response" | jq -r '.count // 0' 2>/dev/null)
@@ -2348,7 +2595,7 @@ get_comment_id_by_url() {
     # Use content-check to verify the comment exists
     local response=$(curl -s \
         --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
-        "${POLIS_CONTENT_CHECK_ENDPOINT}?type=polis.comment&url=${encoded_url}")
+        "${POLIS_CONTENT_CHECK_ENDPOINT}?type=pub.polis.comment&url=${encoded_url}")
 
     # Check if we got a valid response with exists=true
     local exists=$(echo "$response" | jq -r '.exists // false' 2>/dev/null)
@@ -2449,12 +2696,29 @@ rebuild_index() {
         error "jq not found. Please install jq: sudo apt-get install jq (or brew install jq on macOS)"
     fi
 
+    # ⛔ Carry through every line this function does not produce (Signet epic 37
+    # D3, R24-12). It regenerates posts and comments only; tags and attestations
+    # are indexed by the Go CLI, and truncating the file used to un-publish them
+    # — silently, on every rebuild and every rotate-key. A line we cannot parse
+    # is kept too: discarding what we do not understand is the destructive choice.
+    local preserved
+    preserved=$(mktemp) || error "Could not create a temporary file for the index rebuild"
+    if [ -s "$PUBLIC_INDEX" ]; then
+        if ! jq -R -r '(try fromjson catch null) as $o
+                | if ($o | type) == "object" and ($o.type == "post" or $o.type == "comment")
+                  then empty else . end' "$PUBLIC_INDEX" > "$preserved"; then
+            rm -f "$preserved"
+            error "Could not read $PUBLIC_INDEX — refusing to rebuild over lines that would be lost"
+        fi
+    fi
+
     # Truncate the index file
     > "$PUBLIC_INDEX"
 
     # Counters
     local post_count=0
     local comment_count=0
+    local preserved_count=0
 
     # Helper function to process a file and append JSONL entry
     process_file() {
@@ -2537,8 +2801,13 @@ rebuild_index() {
         done < <(find "$COMMENTS_DIR" -name "*.md" -type f -print0 | sort -z)
     fi
 
-    local total_count=$((post_count + comment_count))
-    success_human "Rebuilt public.jsonl ($total_count entries: $post_count posts, $comment_count comments)"
+    # Put back what was carried through (blank lines dropped).
+    preserved_count=$(grep -c -v '^[[:space:]]*$' "$preserved" 2>/dev/null) || preserved_count=0
+    grep -v '^[[:space:]]*$' "$preserved" >> "$PUBLIC_INDEX" || true
+    rm -f "$preserved"
+
+    local total_count=$((post_count + comment_count + preserved_count))
+    success_human "Rebuilt public.jsonl ($total_count entries: $post_count posts, $comment_count comments, $preserved_count other entries preserved)"
 }
 
 # Generate manifest.json from public.jsonl
@@ -2749,17 +3018,76 @@ signature: $signature
     return 0
 }
 
-# Update .well-known/polis with new public key
+# Update .well-known/polis: the new public_key AND the appended key-history
+# entry, in ONE jq expression.
+#
+# This is the bash equivalent of site.RecordKeyRotation in the Go CLI, and it is
+# deliberately one write for the same reason: a site whose public_key moves
+# without its public_key_history moving is a site that publishes a key its own
+# history never learned about, and every artifact signed under that key becomes
+# unverifiable against the history. There are three rotation paths (this one,
+# the Go CLI, the webapp) and all three append.
+#
+# Args: $1 = new public key, $2 = transition signature, $3 = rotation timestamp
+#
+# ⚠️ $3 is stored VERBATIM as valid_from. It is the exact string the old key
+# just signed in the canonical rotation message, and the chain is verified by
+# rebuilding those bytes. Reformatting it — normalising the zone, dropping the
+# Z, rounding a fraction — breaks every transition signature in the chain.
+#
+# If the site publishes no history yet (a site created before this shipped, or
+# by an older client), genesis is synthesised from the key being retired and the
+# site's own `created`, so a rotation never produces a chain that starts in the
+# middle.
 update_wellknown_pubkey() {
-    local new_pubkey=$(cat "$KEYS_DIR/id_ed25519.pub")
+    local new_pubkey="$1"
+    local transition_sig="$2"
+    local timestamp="$3"
 
     if [ ! -f "$WELL_KNOWN_DIR/polis" ]; then
         return 1
     fi
+    if [ -z "$new_pubkey" ] || [ -z "$transition_sig" ] || [ -z "$timestamp" ]; then
+        return 1
+    fi
 
-    # Update public_key field using jq
-    local temp_file=$(mktemp)
-    jq --arg key "$new_pubkey" '.public_key = $key' "$WELL_KNOWN_DIR/polis" > "$temp_file"
+    local temp_file
+    temp_file=$(mktemp)
+    jq --arg key "$new_pubkey" \
+       --arg sig "$transition_sig" \
+       --arg ts "$timestamp" \
+       '
+       # The chain as it stands, synthesising genesis from the retiring key if
+       # the site has never published one.
+       (.public_key_history // {
+           current: {
+               epoch: 0,
+               key: .public_key,
+               valid_from: .created,
+               transition_sig: null
+           },
+           history: []
+       }) as $chain
+       | .public_key = $key
+       | .public_key_history = {
+           current: {
+               epoch: ($chain.current.epoch + 1),
+               key: $key,
+               valid_from: $ts,
+               transition_sig: $sig
+           },
+           # Oldest first: history[last] is the key `current` succeeded.
+           history: ($chain.history + [$chain.current + {valid_until: $ts}])
+       }
+       ' "$WELL_KNOWN_DIR/polis" > "$temp_file" 2>/dev/null || { rm -f "$temp_file"; return 1; }
+
+    # jq emits nothing on a hard failure; refuse to install an empty identity
+    # document over a good one.
+    if [ ! -s "$temp_file" ]; then
+        rm -f "$temp_file"
+        return 1
+    fi
+
     mv "$temp_file" "$WELL_KNOWN_DIR/polis"
 
     return 0
@@ -3037,9 +3365,8 @@ _internal_beseech_from_file() {
     # (content/pub.polis.core/comment/YYYYMMDD/file.md), so this yields the canonical
     # source URL, matching how posts register and how the Go CLI registers
     # (polisurl.CommentContentURL) — NOT the /comments/ mount path. Registering the
-    # mount path was Defect 1 (Go side); the bash CLI was already correct because it
+    # mount path was a Go-side bug; the bash CLI was already correct because it
     # beseeches the content path. Do not change $input_file to a mount path here.
-    # See plans/comment-registration-severe-bug.md (WS1·c).
     # Example: content/pub.polis.core/comment/20260101/x.md ->
     #          https://yourdomain.com/content/pub.polis.core/comment/20260101/x.md
     local comment_url="${base_url%/}/$input_file"
@@ -3145,7 +3472,10 @@ _internal_beseech_from_file() {
             local blessed_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
             if [ "$response_status" = "granted" ]; then
-                # Auto-blessed! Update blessed-comments.json
+                # Already blessed. Since Signet epic 45 the discovery service never
+                # decides a blessing: a new comment is always pending, so "granted"
+                # here means the post author blessed this comment earlier and it was
+                # re-registered. (auto_blessed stays in the JSON for compatibility.)
                 update_blessed_comments_json "$comment_url" "$version" "$reply_url" "$blessed_at"
 
                 if [ "$JSON_MODE" = true ]; then
@@ -3153,7 +3483,7 @@ _internal_beseech_from_file() {
                         --arg url "$comment_url" \
                         --arg version "$version" \
                         --arg reply_to "$reply_url" \
-                        --arg msg "Comment automatically blessed" \
+                        --arg msg "Comment already blessed by the post author" \
                         --arg status "granted" \
                         --argjson auto_blessed "true" \
                         '{
@@ -3173,9 +3503,8 @@ _internal_beseech_from_file() {
                         json_success "beseech" "$result"
                     fi
                 else
-                    success "Comment automatically blessed!"
+                    success "Comment already blessed by the post author."
                     echo ""
-                    info "The post author follows you, so your comment was auto-approved."
                     info "Added to blessed-comments.json"
                 fi
             else
@@ -3746,13 +4075,10 @@ cmd_preview() {
     # Use actual_url for the rest of the function
     content_url="$actual_url"
 
-    # Auto-detect content type (post vs comment)
-    local content_type="post"
-    if echo "$content" | grep -q '^type: *comment'; then
-        content_type="comment"
-    elif echo "$content" | grep -q '^in-reply-to:'; then
-        content_type="comment"
-    fi
+    # Auto-detect content type (post vs comment) — from the frontmatter block
+    # only, by the same rule the verifier uses, so a body line cannot flip it.
+    local content_type
+    content_type=$(markdown_object_type "$content")
 
     info_human "Detected content type: $content_type"
 
@@ -3953,6 +4279,15 @@ cmd_republish() {
     # Check if file has frontmatter (already published)
     if ! has_frontmatter "$input_file"; then
         json_error "republish" "INVALID_STATE" "File not published yet (no frontmatter). Use 'polis post' for new files."
+    fi
+
+    # REFUSE to republish a post carrying licence terms. This CLI would rebuild
+    # the frontmatter without them and re-sign, destroying a signed statement of
+    # the author's terms while leaving a post that still verifies. Failing here
+    # turns silent data loss into an inconvenience with an obvious next step.
+    if frontmatter_has_license "$input_file"; then
+        json_error "republish" "UNSUPPORTED_CONTENT" \
+            "This post carries licence terms, which this CLI cannot preserve. Republishing here would drop them and re-sign without them — the post would still verify, but your stated terms would be gone. Use the Go CLI: polis republish $input_file"
     fi
 
     info_human "Republishing $input_file..."
@@ -4509,8 +4844,25 @@ update_last_checked() {
 
     local temp_file="${FOLLOWING_INDEX}.tmp"
 
+    # SIGNET: drop any signature. following.json is signed by the Go CLI and the
+    # webapp, and jq's "|=" preserves every top-level key it wasn't told about —
+    # so without this, editing the roster here would leave the OLD signature
+    # sitting over NEW content. That file loads and does not verify, which is a
+    # HIGH-severity alert for a human to chase over an edit that was completely
+    # legitimate.
+    #
+    # Degrading to UNSIGNED is the honest outcome and reports OK: unsigned is a
+    # fact, not a defect. Bash does not sign this file (it has no signing path
+    # for it), so removing the stale claim is the whole of what it can correctly
+    # do. The user's next follow/unfollow via the Go CLI or the webapp re-signs.
+    #
+    # Stamp .version for the same reason, in the other direction: it names who
+    # last WROTE the file. Leaving a Go-written generator string on a file bash
+    # just edited is the same false claim as E4, mirrored — so bash records
+    # itself, as "polis-cli/$VERSION".
     jq --arg url "$author_url" --arg ts "$timestamp" \
-        '.following |= map(if .url == $url then .last_checked = $ts else . end)' \
+        --arg gen "polis-cli/$VERSION" \
+        '.following |= map(if .url == $url then .last_checked = $ts else . end) | del(.signature) | .version = $gen' \
         "$FOLLOWING_INDEX" > "$temp_file"
 
     mv "$temp_file" "$FOLLOWING_INDEX"
@@ -4703,7 +5055,7 @@ cmd_about() {
                     }
                 },
                 project: {
-                    repository: "https://github.com/vdibart/polis",
+                    repository: "https://github.com/vdibart/polis-cli",
                     license: "AGPL-3.0"
                 }
             }')
@@ -4787,26 +5139,21 @@ cmd_about() {
 
         # PROJECT
         echo -e "${CYAN}PROJECT${NC}"
-        echo "  Repository:   https://github.com/vdibart/polis"
+        echo "  Repository:   https://github.com/vdibart/polis-cli"
         echo "  License:      AGPL-3.0"
         echo ""
     fi
 }
 
-# Command: polis rotate-key [--delete-old-key]
-# Generate new keypair and re-sign all posts and comments
+# Command: polis rotate-key
+# Generate a new keypair, hand authority over to it with a signed transition,
+# and append the handover to the site's own published key history.
 cmd_rotate_key() {
-    local delete_old=false
-
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --delete-old-key)
-                delete_old=true
-                shift
-                ;;
             *)
-                json_error "rotate-key" "INVALID_INPUT" "Unknown option: $1. Usage: polis rotate-key [--delete-old-key]"
+                json_error "rotate-key" "INVALID_INPUT" "Unknown option: $1. Usage: polis rotate-key"
                 ;;
         esac
     done
@@ -4875,6 +5222,9 @@ cmd_rotate_key() {
     success_human "Signed transition message"
 
     # 3. Notify DS of key rotation BEFORE local key swap (strict ordering)
+    #    ds_rotation reports what happened: "success" or "skipped". Never
+    #    "failed" — a failed notification exits before any key changes.
+    local ds_rotation="skipped"
     if is_registered_locally; then
         info_human ""
         info_human "Notifying discovery service of key rotation..."
@@ -4897,31 +5247,77 @@ cmd_rotate_key() {
         ds_status=$(echo "$ds_response" | tail -n 1)
         ds_response=$(echo "$ds_response" | sed '$d')
 
-        if [ "$ds_status" -ge 400 ] 2>/dev/null; then
+        # Anything but a 2xx is a failure — including "000", curl's status
+        # when the service was never reached, which `-ge 400` used to let
+        # through as an acknowledgement.
+        if ! [[ "$ds_status" =~ ^2[0-9][0-9]$ ]]; then
             json_error "rotate-key" "DS_ROTATION_FAILED" "Discovery service rejected key rotation (HTTP $ds_status): $ds_response"
         fi
+        ds_rotation="success"
         success_human "Discovery service acknowledged key rotation"
     else
         info_human ""
         info_human "DS notification skipped: site not registered with discovery service"
     fi
 
-    # 4. Backup old keys
-    mv "$KEYS_DIR/id_ed25519" "$KEYS_DIR/id_ed25519.old"
-    mv "$KEYS_DIR/id_ed25519.pub" "$KEYS_DIR/id_ed25519.old.pub"
-
-    # 5. Install new key
-    mv "$KEYS_DIR/id_ed25519.new" "$KEYS_DIR/id_ed25519"
-    mv "$KEYS_DIR/id_ed25519.new.pub" "$KEYS_DIR/id_ed25519.pub"
+    # 4. Install the new key. No .old backup is made, and --delete-old-key is
+    #    gone with it.
+    #
+    #    The single fixed .old path was a poor substitute for a chain: rotate
+    #    twice and the second rotation overwrote the first backup, so the earlier
+    #    key was simply gone. The published key history replaces it — it records
+    #    every key this site has held, in its PUBLIC form, which is what a
+    #    verifier needs. A spare copy of a retired PRIVATE key was never what made
+    #    old signatures checkable; it was only a liability.
+    #
+    #    Existing .old files are left where they are. They stop being made; they
+    #    are not cleaned up.
+    mv -f "$KEYS_DIR/id_ed25519.new" "$KEYS_DIR/id_ed25519"
+    mv -f "$KEYS_DIR/id_ed25519.new.pub" "$KEYS_DIR/id_ed25519.pub"
+    chmod 600 "$KEYS_DIR/id_ed25519"
+    chmod 644 "$KEYS_DIR/id_ed25519.pub"
     success_human "Installed new keypair"
 
-    # 6. Update .well-known/polis
+    # 5. Update .well-known/polis — public_key and the appended history entry.
     info_human ""
     info_human "Updating .well-known/polis..."
-    if update_wellknown_pubkey; then
+    if update_wellknown_pubkey "$new_pubkey" "$transition_sig" "$timestamp"; then
         success_human "Updated public key in .well-known/polis"
+        success_human "Appended the handover to public_key_history — every signature made under the old key stays verifiable from this site alone"
     else
-        warn_human "Failed to update .well-known/polis"
+        # This is not cosmetic. The private key has already been replaced, so a
+        # failure here leaves a site publishing a key it no longer signs with and
+        # a history that never learned about the new one.
+        json_error "rotate-key" "WELLKNOWN_UPDATE_FAILED" "Rotation completed but .well-known/polis could not be updated. The site now signs with the new key while publishing the old one. Fix $WELL_KNOWN_DIR/polis before publishing anything."
+    fi
+
+    # 6. Remove .well-known/did.json — the key it states is now retired.
+    #
+    # DELETE, never block. Rotation is a SECURITY operation: a user rotating a
+    # compromised key must not be stopped by a derived artifact. So the
+    # rotation succeeds, the artifact that just became false is removed, and we
+    # say so.
+    #
+    # A STALE DID document is worse than an absent one. It answers 200 with a
+    # key the site has retired and a resolver cannot tell the difference;
+    # an absent one fails honestly.
+    #
+    # ⚠️ Since SIGNET epic 16 a polis DID document DOES carry key history — the
+    # retired key stays in verificationMethod and drops out of assertionMethod —
+    # so a correct post-rotation document is now buildable. This CLI still
+    # removes rather than rebuilds, because it has never written did.json and
+    # projecting a JWK from an OpenSSH key in bash is not a parity fix worth
+    # making. Removing stays correct: the document is DERIVED, recomputable from
+    # the site's key and host at any moment, so nothing is lost. (The same
+    # property that lets the hosted sweep publish it for every tenant unasked.)
+    # So it removes the false file and points at the command that rebuilds it.
+    # Recorded in docs/cli/implementation-parity.md.
+    local did_document_status="absent"
+    if [ -f "$WELL_KNOWN_DIR/did.json" ]; then
+        rm -f "$WELL_KNOWN_DIR/did.json"
+        did_document_status="deleted"
+        info_human ""
+        warn_human "Removed $WELL_KNOWN_DIR/did.json — it stated the old key"
     fi
 
     # 7. Rebuild index
@@ -4930,43 +5326,35 @@ cmd_rotate_key() {
     cmd_rebuild --posts > /dev/null 2>&1
     success_human "Rebuilt public.jsonl index"
 
-    # 8. Handle old key
-    local old_key_status
-    if [ "$delete_old" = true ]; then
-        rm -f "$KEYS_DIR/id_ed25519.old" "$KEYS_DIR/id_ed25519.old.pub"
-        old_key_status="deleted"
-        info_human ""
-        info_human "Deleted old keypair"
-    else
-        old_key_status="archived"
-        info_human ""
-        info_human "Old keypair archived at $KEYS_DIR/id_ed25519.old"
-    fi
-
     # Get new key fingerprint
     local new_fingerprint=$(ssh-keygen -lf "$KEYS_DIR/id_ed25519.pub" 2>/dev/null | awk '{print $2}')
 
     # Output results
     info_human ""
     if [ "$JSON_MODE" = true ]; then
+        # `old_key` is gone from this payload along with the .old file it
+        # described; key_history_epoch is what replaces it.
+        local key_epoch
+        key_epoch=$(jq -r '.public_key_history.current.epoch // 0' "$WELL_KNOWN_DIR/polis" 2>/dev/null || echo 0)
         local result=$(jq -n \
-            --arg old_key_status "$old_key_status" \
             --arg fingerprint "$new_fingerprint" \
-            --arg ds_rotation "success" \
+            --arg ds_rotation "$ds_rotation" \
+            --arg did_document "$did_document_status" \
+            --argjson key_history_epoch "${key_epoch:-0}" \
             '{
-                old_key: $old_key_status,
                 new_key_fingerprint: $fingerprint,
-                ds_rotation: $ds_rotation
+                key_history_epoch: $key_history_epoch,
+                ds_rotation: $ds_rotation,
+                did_document: $did_document
             }')
         json_success "rotate-key" "$result"
     else
         success "Key rotation complete!"
         info "  New key fingerprint: $new_fingerprint"
-        info "  Old content remains verifiable via key history"
-        if [ "$old_key_status" = "archived" ]; then
-            info "  Old key: archived at $KEYS_DIR/id_ed25519.old"
-        else
-            info "  Old key: deleted"
+        info "  Old content remains verifiable via the published key history"
+        if [ "$did_document_status" = "deleted" ]; then
+            info "  DID document: removed (it stated the old key)"
+            info "    Run 'polis did --write' to republish it with the new one"
         fi
         info ""
         info "  Deploy the updated .well-known/polis file"
@@ -5132,11 +5520,11 @@ cmd_blessing_requests() {
         json_error "blessing-requests" "INVALID_STATE" "Polis not initialized. Run 'polis init' first."
     fi
 
-    # Sync blessed comments first (catches auto-blessed comments from server)
+    # Sync blessed comments first (catches comments blessed elsewhere, e.g. by the web app)
     if [ -n "$POLIS_BASE_URL" ]; then
         local synced=$(sync_blessed_comments)
         if [ "$synced" -gt 0 ]; then
-            info_human "Synced $synced auto-blessed comment(s) to blessed-comments.json"
+            info_human "Synced $synced blessed comment(s) to blessed-comments.json"
         fi
     fi
 
@@ -5146,10 +5534,15 @@ cmd_blessing_requests() {
 
     info_human "Fetching pending blessing requests for ${author}..."
 
-    # Fetch pending relationships via unified relationship-query
+    # Fetch pending relationships via unified relationship-query.
+    # NOTE: deliberately NOT filtered by actor=. On a blessing relationship the
+    # actor is the commenter (set at row creation and preserved by the DS
+    # upsert's DO UPDATE), so actor=$domain returns our OUTGOING requests.
+    # Incoming requests are those whose target_url — the post being commented on
+    # — is ours. Filtered client-side below, matching the Go CLI.
     local response=$(curl -s \
         --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
-        "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=polis.blessing&actor=${domain}&status=pending")
+        "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&status=pending")
 
     if [ $? -ne 0 ]; then
         json_error "blessing-requests" "API_ERROR" "Failed to connect to discovery service. Check your internet connection and DISCOVERY_SERVICE_URL."
@@ -5165,6 +5558,27 @@ cmd_blessing_requests() {
     if [ -n "$error_msg" ]; then
         json_error "blessing-requests" "API_ERROR" "API error: $error_msg"
     fi
+
+    # Keep only INCOMING requests: those whose target_url host is our domain.
+    # Mirrors domainMatches() in cli-go/pkg/blessing/requests.go — host compared
+    # case-insensitively with any port stripped. Count is recomputed here so it
+    # reflects the filtered set rather than the DS-wide total.
+    response=$(echo "$response" | jq -c --arg domain "$domain" '
+        .records = [
+            (.records // [])[]
+            | select(
+                ((.target_url // "")
+                    | sub("^[a-zA-Z][a-zA-Z0-9+.-]*://"; "")
+                    | split("/")[0]
+                    | split("?")[0]
+                    | split("#")[0]
+                    | split(":")[0]
+                    | ascii_downcase
+                ) == ($domain | ascii_downcase)
+            )
+        ]
+        | .count = (.records | length)
+    ' 2>/dev/null)
 
     # Enrich relationship records with version data from content-query
     # This is needed for hash display in the table and for grant/deny operations
@@ -5183,17 +5597,35 @@ cmd_blessing_requests() {
         )
     ' 2>/dev/null)
 
-    # In JSON mode, return the enriched response
+    # In JSON mode, map the DS relationship records onto the documented item
+    # shape. Field derivation mirrors IncomingRequest in
+    # cli-go/pkg/blessing/requests.go: comment_url<-source_url,
+    # in_reply_to<-target_url, author<-actor, comment_version<-metadata. The
+    # merged content-query version is kept as a fallback because the Go CLI
+    # reads metadata.comment_version alone and it can be absent.
+    # root_post and timestamp are always "" — Go declares but never assigns
+    # them, and bash matches that rather than inventing new drift.
     if [ "$JSON_MODE" = true ]; then
-        local records=$(echo "$enriched_response" | jq -c '.records // []')
-        local count=$(echo "$enriched_response" | jq -r '.count // 0')
+        local requests=$(echo "$enriched_response" | jq -c '
+            [ (.records // [])[] | {
+                id: ((.id // "") | tostring),
+                comment_url: (.source_url // ""),
+                comment_version: ((.metadata.comment_version // .version) // ""),
+                in_reply_to: (.target_url // ""),
+                root_post: "",
+                author: ((.actor // .author) // ""),
+                timestamp: "",
+                created_at: (.created_at // "")
+            } ]' 2>/dev/null)
+        [ -n "$requests" ] || requests="[]"
+        local count=$(echo "$requests" | jq -r 'length')
 
         local result=$(jq -n \
             --argjson count "$count" \
-            --argjson records "$records" \
+            --argjson requests "$requests" \
             '{
                 count: $count,
-                records: $records
+                requests: $requests
             }')
         json_success "blessing-requests" "$result"
     else
@@ -5595,7 +6027,7 @@ cmd_follow() {
             echo "All these comments will be blessed."
         else
             echo "No unblessed comments found from this author."
-            echo "Future comments from this author will be automatically blessed."
+            echo "Future comments from this author are decided by your site's rules."
         fi
         echo ""
     fi
@@ -5722,14 +6154,14 @@ cmd_unfollow() {
     fi
 
     # Get blessed comment URLs from this author
-    # Check both local blessed-comments.json AND server (for unsynced auto-blessed)
+    # Check both local blessed-comments.json AND server (for blessings not yet synced)
     info_human "Finding blessed comments from $author_url..."
 
     # 1. Get local blessed URLs
     local local_blessed_urls=$(get_blessed_comment_urls_by_author "$author_url")
     local local_urls_list=$(echo "$local_blessed_urls" | jq -r '.[]' 2>/dev/null || echo "")
 
-    # 2. Also fetch from server (catches unsynced auto-blessed comments)
+    # 2. Also fetch from server (catches blessings not yet synced)
     local author_identity=""
     local server_urls_list=""
     author_identity=$(fetch_author_identity_from_wellknown "$author_url" 2>/dev/null) || true
@@ -5792,7 +6224,7 @@ cmd_unfollow() {
             local encoded_url=$(jq -rn --arg url "$comment_url" '$url | @uri')
             local rel_response=$(curl -s \
                 --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
-                "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=polis.blessing&source_url=${encoded_url}" 2>/dev/null)
+                "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&source_url=${encoded_url}" 2>/dev/null)
 
             local target_url=$(echo "$rel_response" | jq -r '.records[0].target_url // empty' 2>/dev/null)
 
@@ -6686,7 +7118,7 @@ cmd_notifications_list() {
         if [ -n "$domain" ]; then
             local blessing_response=$(curl -s --max-time 30 \
                 --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
-                "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=polis.blessing&actor=${domain}&status=pending" 2>/dev/null)
+                "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&actor=${domain}&status=pending" 2>/dev/null)
 
             if [ -n "$blessing_response" ]; then
                 pending_count=$(echo "$blessing_response" | jq -r '.count // 0' 2>/dev/null)
@@ -7398,6 +7830,47 @@ tag_canonical_json() {
     jq -c '{tag, targets, created, updated, generator}' "$file"
 }
 
+# Members of a tag file this CLI does not model, named the way the Go CLI names
+# them ("colour", "targets[0].note"), sorted, comma-separated. Empty when none.
+# Matches case-insensitively, as Go's JSON decoding does.
+tag_file_unrecognised_fields() {
+    jq -r '
+      def known($k; $set): ($k | ascii_downcase) as $l | any($set[]; . == $l);
+      ( [ keys_unsorted[]
+          | select(known(.; ["tag","targets","created","updated","generator","current_version","signature"]) | not) ]
+        + ( if (.targets | type) == "array" then
+              [ .targets | to_entries[] | .key as $i
+                | (.value | if type == "object" then keys_unsorted[] else empty end)
+                | select(known(.; ["uri","added"]) | not)
+                | "targets[\($i)].\(.)" ]
+            else [] end ) )
+      | sort | join(", ")' "$1" 2>/dev/null
+}
+
+# Refuse to modify a tag file carrying members this CLI does not model.
+#
+# SIGNET: the signature covers only {tag, targets, created, updated, generator}.
+# Editing with jq keeps an unknown member, and signing afterwards would put the
+# user's key on a file carrying content the signature does not cover. The Go CLI
+# refuses the same file with the same rule; the way past is its explicit
+# `polis site rewrite-unsigned`, which rewrites the file without the member and
+# UNSIGNED. Call BEFORE any edit, so a refusal leaves the file untouched.
+refuse_unreadable_tag_file() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    local fields
+    fields=$(tag_file_unrecognised_fields "$file")
+    [ -n "$fields" ] || return 0
+    local noun="fields"
+    case "$fields" in *,*) ;; *) noun="a field" ;; esac
+    local msg="refusing to rewrite tag file at $file: it was written by a newer polis and carries $noun this version does not understand ($fields). Signing it would put your key on content the signature does not cover. Upgrade polis to modify it — or, to rewrite it WITHOUT them and UNSIGNED, run \`polis site rewrite-unsigned $file\` (Go CLI)"
+    if [ "$JSON_MODE" = true ]; then
+        json_error "tag" "UNRECOGNISED_FIELDS" "$msg"
+        exit 1
+    fi
+    error "$msg"
+}
+
 # Sign a tag file and write it back
 sign_tag_file() {
     local file="$1"
@@ -7613,6 +8086,8 @@ cmd_tag_apply() {
             return 0
         fi
 
+        refuse_unreadable_tag_file "$file"
+
         # Add target to existing tag
         jq --arg uri "$target_uri" --arg added "$now" --arg updated "$now" --arg gen "polis-cli/$VERSION" \
             '.targets += [{"uri": $uri, "added": $added}] | .updated = $updated | .generator = $gen' \
@@ -7676,6 +8151,8 @@ cmd_tag_remove() {
 
     local now
     now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    refuse_unreadable_tag_file "$file"
 
     # Remove target
     jq --arg uri "$target_uri" --arg updated "$now" --arg gen "polis-cli/$VERSION" \
@@ -9020,10 +9497,10 @@ main() {
             echo "  polis blessing grant <hash>     Grant a blessing request by content hash"
             echo "  polis blessing deny <hash>      Deny a blessing request by content hash"
             echo "  polis blessing beseech <hash>   Re-request blessing by content hash"
-            echo "  polis blessing sync             Sync auto-blessed comments from discovery service"
+            echo "  polis blessing sync             Sync blessed comments from discovery service"
             echo ""
             echo "Commands related to following or unfollowing an author:"
-            echo "  polis follow <author-url>       Follow an author (auto-bless their comments)"
+            echo "  polis follow <author-url>       Follow an author (bless their waiting comments)"
             echo "  polis unfollow <author-url>     Unfollow an author"
             echo ""
             echo "Commands related to content discovery:"
@@ -9065,7 +9542,7 @@ main() {
             echo "  polis index                     View index (JSONL; use --json for grouped)"
             echo "  polis version                   Print CLI version"
             echo "  polis about                     Show site, versions, config, keys, discovery info"
-            echo "  polis rotate-key [--delete-old-key]"
+            echo "  polis rotate-key"
             echo "                                  Generate new keypair and re-sign all content"
             echo ""
             echo "Polis includes support for stdin:"

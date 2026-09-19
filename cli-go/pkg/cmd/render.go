@@ -138,9 +138,9 @@ func findCLIThemesDir() string {
 	if err == nil {
 		execDir := filepath.Dir(execPath)
 		candidates := []string{
-			filepath.Join(execDir, "..", "..", "cli-bash", "themes"),     // From cli-go/cmd/polis
-			filepath.Join(execDir, "..", "themes"),                       // From cli-go/cmd
-			filepath.Join(execDir, "themes"),                             // Same dir
+			filepath.Join(execDir, "..", "..", "cli-bash", "themes"), // From cli-go/cmd/polis
+			filepath.Join(execDir, "..", "themes"),                   // From cli-go/cmd
+			filepath.Join(execDir, "themes"),                         // Same dir
 		}
 		for _, path := range candidates {
 			if _, err := os.Stat(path); err == nil {

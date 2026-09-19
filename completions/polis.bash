@@ -19,7 +19,7 @@ _polis_completion() {
     # Subcommands for specific commands
     local blessing_subcommands="beseech deny grant requests sync"
     local dm_subcommands="list read send retry config"
-    local notifications_subcommands="list"
+    local notifications_subcommands="list clear"
     local tag_subcommands="list show apply remove delete"
 
     # Options for specific commands
@@ -27,7 +27,7 @@ _polis_completion() {
     local follow_opts="--announce --json"
     local unfollow_opts="--announce --json"
     local render_opts="--force --init-templates --json"
-    local rebuild_opts="--posts --comments --notifications --all --json"
+    local rebuild_opts="--posts --comments --tags --attestations --all --json"
     local init_opts="--site-title --register --posts-dir --comments-dir --keys-dir --snippets-dir --versions-dir --themes-dir --json"
     local unregister_opts="--force --json"
     local clone_opts="--full --diff --json"

@@ -35,6 +35,53 @@ type Storage interface {
 // callers pass nil.
 type PostProcessFunc func(content []byte, r *http.Request) []byte
 
+// rootFiles are files served at the tenant root by EXACT NAME, mapped to the
+// content type each one's specification requires.
+//
+// The permission is a path because the requirement is a path. robots.txt is
+// fixed at exactly /robots.txt by its spec, so allowing ".txt" in the
+// extension switch below would grant strictly more than is being asked for —
+// every .txt anywhere in a tenant's public tree, including ones they never
+// meant to publish. Naming the file keeps each future addition
+// (ads.txt, humans.txt, .well-known/security.txt) a deliberate decision.
+//
+// robots.txt was written to disk correctly and refused here from the licence
+// epic until 2026-08-28: the AIPREF content-usage rule and the RSL License:
+// directive — the licence's only surfaces a static self-hoster can publish —
+// reached nobody, while Cloudflare's managed robots.txt filled the gap
+// plausibly enough that nothing looked broken.
+var rootFiles = map[string]string{
+	"robots.txt": "text/plain; charset=utf-8",
+}
+
+// crossOriginRootFiles are root files other origins read by name: the licence
+// surfaces a browser-side reader fetches beside .well-known/polis. Named for
+// the same reason rootFiles is — a root .xml is not public-by-protocol just
+// because rsl.xml is.
+var crossOriginRootFiles = map[string]bool{
+	"robots.txt": true,
+	"rsl.xml":    true,
+}
+
+// allowsCrossOrigin reports whether clean (a cleaned, slash-less path) is
+// readable from any origin. ⚠️ Every return path that writes a body must ask
+// it: .well-known/polis and robots.txt leave through early returns, and both
+// went out without the header while did.json had it (epic 09 E4).
+func allowsCrossOrigin(clean string) bool {
+	return strings.HasPrefix(clean, "content/") ||
+		strings.HasPrefix(clean, ".well-known") ||
+		strings.HasPrefix(clean, "posts/") ||
+		strings.HasPrefix(clean, "comments/") ||
+		crossOriginRootFiles[clean]
+}
+
+func setCrossOrigin(w http.ResponseWriter, clean string) {
+	if allowsCrossOrigin(clean) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	}
+}
+
 // ServeTenantPublic serves rendered public content for a tenant.
 //
 // URL → file mapping:
@@ -42,12 +89,13 @@ type PostProcessFunc func(content []byte, r *http.Request) []byte
 //   - /path/to/post  → path/to/post.html (extensionless → .html)
 //   - /styles.css    → styles.css
 //   - /posts/x.md    → raw markdown (for programmability)
+//   - /robots.txt   → served by exact name (see rootFiles)
 //   - /.well-known/* → allowed (protocol requirement)
 //   - /.polis/*      → blocked (private data)
 //   - paths with ..  → blocked (traversal)
 //
-// CORS: posts/, comments/, content/, .well-known/ get
-// Access-Control-Allow-Origin: *. The lazy-fetch path on the stream
+// CORS: posts/, comments/, content/, .well-known/, and the root robots.txt
+// and rsl.xml get Access-Control-Allow-Origin: * (see allowsCrossOrigin). The lazy-fetch path on the stream
 // (cli-go/pkg/bundle/.../shapes/v4/stream.js) depends on this for
 // cross-origin reads of rendered HTML.
 //
@@ -100,13 +148,7 @@ func ServeTenantPublic(
 	// file would be wasted I/O.
 	if r.Method == http.MethodOptions {
 		w.Header().Set("Allow", "GET, OPTIONS")
-		if strings.HasPrefix(clean, "content/") ||
-			strings.HasPrefix(clean, ".well-known") ||
-			strings.HasPrefix(clean, "posts/") ||
-			strings.HasPrefix(clean, "comments/") {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		}
+		setCrossOrigin(w, clean)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -130,8 +172,7 @@ func ServeTenantPublic(
 	// its canonical content/ path — unconditionally, even when a legacy
 	// duplicate .md physically exists at the mount (pre-split artifact; the
 	// canonical copy is the one under content/). This (a) heals comments
-	// mis-registered with the discovery service at the mount URL (comment-infra
-	// remediation, plans/comment-registration-severe-bug.md, Defect 1: those DS
+	// mis-registered with the discovery service at the mount URL (those DS
 	// URLs are signature-bound + the (type,url) upsert key, so this is a
 	// PERMANENT compatibility shim), and (b) canonicalizes onto a single source
 	// of truth. Programmability is preserved — a client swapping .html→.md still
@@ -145,6 +186,20 @@ func ServeTenantPublic(
 				return
 			}
 		}
+	}
+
+	// Spec-mandated root files, by exact name (see rootFiles).
+	if ctype, ok := rootFiles[clean]; ok {
+		data, err := storage.ReadPublicFile(handle, clean)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", ctype)
+		w.Header().Set("Cache-Control", "no-cache")
+		setCrossOrigin(w, clean)
+		w.Write(data)
+		return
 	}
 
 	// Determine extension and resolve file path
@@ -173,6 +228,7 @@ func ServeTenantPublic(
 				if strings.HasPrefix(clean, ".well-known") {
 					w.Header().Set("Content-Type", "application/json; charset=utf-8")
 				}
+				setCrossOrigin(w, clean)
 				w.Write(data)
 				return
 			}
@@ -232,13 +288,11 @@ func ServeTenantPublic(
 	// extends the requirement to /posts/ and /comments/ (rendered HTML
 	// mounts that cross-origin readers fetch to extract focus body via
 	// the <main class="focus-content"> protocol marker per D-PROXY).
-	if strings.HasPrefix(clean, "content/") ||
-		strings.HasPrefix(clean, ".well-known") ||
-		strings.HasPrefix(clean, "posts/") ||
-		strings.HasPrefix(clean, "comments/") {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	}
+	setCrossOrigin(w, clean)
+
+	// Licence headers, derived from the bytes being served so they can never
+	// disagree with the document they are attached to.
+	setLicenseHeaders(w, ext, data)
 
 	// Cache-Control:
 	//   - Rendered .html: short browser TTL (5 min) so the v4 stream's

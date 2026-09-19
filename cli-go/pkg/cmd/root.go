@@ -11,10 +11,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/actor"
+	"github.com/vdibart/polis-cli/cli-go/pkg/attestation"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/index"
+	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
@@ -111,6 +114,17 @@ func Execute(args []string) {
 	index.Version = Version
 	site.Version = Version
 	tag.Version = Version
+	attestation.Version = Version
+	// E2 (epic 03): pkg/license has a GetGenerator() that IS read into the
+	// SIGNED licence document, and had no assigner here — so every licence
+	// published since epic 01 says "polis-cli-go/dev" inside its signature.
+	// The mirror of pkg/following's bug, which had assigners and no reader.
+	license.Version = Version
+	// pkg/actor's GetGenerator() is read into the SIGNED actor registry, so an
+	// absent assigner here would freeze `generator` at "polis-cli-go/dev"
+	// inside the signature — the exact bug E2 above records. The registry test
+	// asserts the resulting VALUE, not just that the field exists.
+	actor.Version = Version
 
 	// Load .env file (does not override existing env vars, matches bash CLI)
 	loadEnv()
@@ -183,7 +197,8 @@ func Execute(args []string) {
 	defer func() {
 		switch command {
 		case "post", "republish", "comment", "follow", "unfollow", "discover",
-			"blessing", "register", "unregister", "dm", "clone", "rotate-key", "tag":
+			"blessing", "register", "unregister", "dm", "clone", "rotate-key", "tag",
+			"license", "attest", "actor":
 			logCLIAction(command, map[string]interface{}{
 				"args_count": len(cmdArgs),
 			})
@@ -237,6 +252,16 @@ func Execute(args []string) {
 		handleDM(cmdArgs)
 	case "tag":
 		handleTag(cmdArgs)
+	case "attest":
+		handleAttest(cmdArgs)
+	case "actor":
+		handleActor(cmdArgs)
+	case "license":
+		handleLicense(cmdArgs)
+	case "did":
+		handleDID(cmdArgs)
+	case "site":
+		handleSite(cmdArgs)
 	case "serve":
 		handleServe(cmdArgs)
 	case "version", "--version", "-v":
@@ -272,7 +297,10 @@ Global Flags:
 
 Commands related to creating or viewing content:
   polis post <file>               Create a new post
-  polis comment <file> [url]      Create a comment on a post
+  polis comment draft <url>       Create a comment draft replying to <url>
+  polis comment sign <id>         Sign a draft comment
+  polis comment list [status]     List comments (drafts, pending, blessed, denied)
+  polis comment sync              Check pending comments against the discovery service
   polis republish <file>          Update an already-published file
   polis preview <url>             Preview a post or comment with signature verification
   polis extract <file> <hash>     Reconstruct a specific version of a file
@@ -282,26 +310,29 @@ Commands related to requesting, reviewing, or granting blessings:
   polis blessing grant <hash>     Grant a blessing request by content hash
   polis blessing deny <hash>      Deny a blessing request by content hash
   polis blessing beseech <hash>   Re-request blessing by content hash
-  polis blessing sync             Sync auto-blessed comments from discovery service
+  polis blessing sync             Sync blessed comments from discovery service
 
 Commands related to following or unfollowing an author:
-  polis follow <author-url>       Follow an author (auto-bless their comments)
+  polis follow <author-url>       Follow an author (bless their waiting comments)
   polis unfollow <author-url>     Unfollow an author
 
 Commands related to content discovery:
   polis discover                  Check followed authors for new content
   polis discover --author <url>   Check a specific author
-  polis discover --since <date>   Show items since date
 
 Commands related to notifications:
   polis notifications             List unread notifications
   polis notifications list        List notifications (--type <types>)
+  polis notifications clear       Delete local notification state
 
 Commands related to direct messages:
   polis dm list                   List DM conversations
   polis dm read <conv_id>         Read messages in a conversation
   polis dm send <url> <message>   Send a DM to a recipient
   polis dm retry [conv_id]        Retry delivering unsent messages
+
+Commands related to your terms:
+  polis license                    Show or set the terms your work is offered under
 
 Commands related to tagging content:
   polis tag list                   List all tags
@@ -310,37 +341,65 @@ Commands related to tagging content:
   polis tag remove <name> <uri>    Remove a target from a tag
   polis tag delete <name>          Delete an entire tag
 
+Commands related to signed claims about others' work and identities:
+  polis attest issue              Issue an attestation (--predicate, --subject)
+  polis attest list               List attestations this site has issued
+  polis attest show <id>          Show one attestation
+  polis attest verify [id]        Verify issued attestations
+  polis attest withdraw <id>      Retract a claim you issued (adds a record, deletes nothing)
+
+Commands for an operator that runs system actors:
+  polis actor register <domain>   Add or update an actor in this operator's registry
+  polis actor withdraw <domain>   Remove an actor, and say so permanently
+  polis actor list                Show the registry
+  polis actor verify              Check the registry signature and countersignatures
+
 Commands related to site administration:
   polis register                  Register site with discovery service
   polis unregister [--force]      Unregister site
   polis render [--force]          Render markdown to HTML
+  polis validate                  Check this site: signatures, index, policies, keys, bundle
+  polis validate <path>           Check a directory — your own site, or a clone
+  polis validate <url>            Check a site, or one artifact, over the network
 
 Commands related to cloning remote polis sites:
-  polis clone <url> [dir]         Clone a public polis site
-  polis clone <url> --full        Re-download all content
-  polis clone <url> --diff        Only download new/changed content
+  polis clone <url> [dir]         Copy someone else's site locally to read offline
+  polis clone --full <url>        Re-download all content
+  polis clone --diff <url>        Only download new/changed content
 
 Commands related to local configuration:
   polis init [options]            Initialize Polis directory structure
     --site-title <title>          Site display name
-    --keys-dir <path>             Custom keys directory (default: .polis/keys)
-    --posts-dir <path>            Custom posts directory (default: posts)
-    --comments-dir <path>         Custom comments directory (default: comments)
-    --snippets-dir <path>         Custom snippets directory (default: snippets)
-    --versions-dir <path>         Custom versions directory (default: .versions)
-  polis rebuild --posts|--comments|--notifications|--all
-                                  Rebuild indexes and reset state
+    --author <name>               Author name (default: git config user.name)
+    --email <address>             Email address (optional, private by default)
+    --theme <name>                Initial theme
+    --license <reserved|open|none>
+                                  Terms for your posts (omit to be asked)
+  polis rebuild --posts|--comments|--tags|--attestations|--all
+                                  Rebuild the content index. Each flag rebuilds
+                                  only that type's entries and leaves the rest
+                                  of index.jsonl untouched. --comments also
+                                  reconciles blessed.json.
   polis index                     View index
   polis version                   Print CLI version
   polis about                     Show site, versions, config info
   polis unpublish <path>          Remove a published post
   polis rotate-key                Generate new keypair and rotate discovery key
+  polis did [--write] [--host H]  Show this site's did:web identifier and document
+  polis site set author-name <name>
+                                  Set the display name in .well-known/polis
+  polis site set avatar [--bg C --fg C --border C --border-w N --pattern P --pattern-color C | --clear]
+                                  Set the avatar in .well-known/polis
+  polis site rewrite-unsigned <path>
+                                  Rewrite a signed file a newer polis wrote,
+                                  dropping what this version cannot read and
+                                  leaving it UNSIGNED
   polis serve [-d|--data-dir PATH] Start local web server (bundled binary only)
 
 Examples:
   polis init
   polis post my-post.md
-  polis comment my-comment.md https://example.com/posts/hello.md
+  polis comment draft https://example.com/posts/hello.md
   polis preview https://example.com/posts/hello.md
   polis blessing requests
   polis discover

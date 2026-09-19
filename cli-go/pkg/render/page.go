@@ -19,6 +19,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/cache"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
+	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/template"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
@@ -32,11 +33,11 @@ import (
 // one entry, and write back — last writer wins, and the others'
 // fresh entries are lost.
 //
-// Closes R19-1 (operational-hardening.md). The mutex is NOT held
+// The mutex is NOT held
 // across the outbound HTTP fetch — only the cache load + write
 // halves. The fetch itself is lock-free; R19-3 (singleflight, below)
 // closes the duplicate-fetch race for same-URL callers separately.
-// R19-1's invariant: every entry that gets written stays in the
+// The invariant: every entry that gets written stays in the
 // cache.
 var replyCacheMu sync.Mutex
 
@@ -156,14 +157,26 @@ func replyNegativeCachePut(url string) {
 // strips raw HTML comments before this stage anyway.
 var htmlCommentRE = regexp.MustCompile(`(?s)<!--.*?-->`)
 
-// StripHTMLComments removes all HTML comments from rendered output. Idempotent.
-// Safe to call on any string; non-HTML content with no `<!--` substring is
-// returned unchanged after the regex's fast path.
+// StripHTMLComments removes HTML comments from rendered output for payload
+// savings. Idempotent. Safe to call on any string; non-HTML content with no
+// `<!--` substring is returned unchanged after the regex's fast path.
+//
+// EXCEPTION — developer trail markers: comments that open with the "keep" bang
+// `<!--!` are preserved (the same convention minifiers use for license blocks).
+// This lets the public stream template ship a small developer-facing trail
+// marker into view-source — pointing inspectors at the codebase + docs — while
+// every other layout comment (the ~70% payload) is still stripped. Keep
+// preserved markers compact: they ship on every public page.
 func StripHTMLComments(s string) string {
 	if !strings.Contains(s, "<!--") {
 		return s
 	}
-	return htmlCommentRE.ReplaceAllString(s, "")
+	return htmlCommentRE.ReplaceAllStringFunc(s, func(m string) string {
+		if strings.HasPrefix(m, "<!--!") {
+			return m
+		}
+		return ""
+	})
 }
 
 // DefaultHTTPClient is an optional shared HTTP client for outbound requests
@@ -364,6 +377,13 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 		ctx.Version = fm["version"]
 	}
 	ctx.SignatureShort = template.TruncateSignature(fm["signature"], 16)
+
+	// The work's own frozen terms, read back out of its frontmatter. Both
+	// surfaces are empty strings when the work states none, so an unlicensed
+	// site renders exactly as it did before.
+	workTerms := license.ParseBlock(string(content))
+	ctx.LicenseHead = license.HeadHTML(workTerms)
+	ctx.LicenseNotice = licenseNoticeHTML(workTerms)
 
 	// Site info — CSS/Home paths computed from mount path (shallower than source)
 	ctx.SiteURL = r.config.BaseURL
@@ -873,6 +893,13 @@ func (r *PageRenderer) RenderAll(force bool) (*RenderStats, error) {
 		return nil, fmt.Errorf("failed to render tags: %w", err)
 	}
 	stats.TagsRendered = tagsRendered
+
+	// Licence surfaces: the terms page, the profile explanation, robots.txt,
+	// and rsl.xml — all generated from the signed licence. No-op for a site
+	// that has stated no terms.
+	if err := r.RenderLicenseSurfaces(); err != nil {
+		return nil, fmt.Errorf("failed to render licence surfaces: %w", err)
+	}
 
 	// Persist reply context cache if it was populated during comment rendering
 	if r.replyCache != nil && len(r.replyCache) > 0 {

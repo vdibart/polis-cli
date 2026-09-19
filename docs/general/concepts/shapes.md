@@ -1,5 +1,7 @@
 # Shapes
 
+*For* [Developers](../../README.md#building-on-polis) — *About* [Content](../README.md#content) — *Kind* [Concept](../../README.md#kinds-of-page) — *See also* [reference](content-system.md) · no spec yet · no recipe yet
+
 > Part of the foundation set: [bundles](bundles.md), [content types](content-types.md), **shapes** (this doc), [themes](themes.md). See [architecture.md](architecture.md) for the four-surface map. For the deep reference, see [content-system.md](content-system.md).
 
 A **shape** is a *rendering approach* — the set of HTML templates (and optionally client-side scripts) that turns a polis site's signed content into a user-facing surface. Shapes are declared by [bundles](bundles.md); themes (CSS only) sit on top of shapes; together they decide what a polis site *looks and behaves like*.
@@ -41,7 +43,10 @@ Stream shape (`v4`) adds the JavaScript that drives the live filter:
 ├── stream.html             # the single page
 ├── stream.css              # shape-level CSS (themes layer on top)
 ├── stream.js               # client-side stream controller (PQL routing, hydration)
-└── ...
+├── stream-post.html        # a post, server-rendered as the focus entry or a sibling
+└── snippets/
+    ├── sentence-filter.html
+    └── ...
 ```
 
 Templates use the Mustache-like syntax documented in [`cli/user/templating.md`](../../cli/user/templating.md): `{{variable}}` substitution, `{{> snippet}}` partials, `{{#section}}…{{/section}}` blocks. The `default_css` field in the shape declaration tells the renderer which CSS file to load when the active theme doesn't ship its own.
@@ -58,14 +63,14 @@ When a site is rendered (locally via `polis render`, or on-the-fly via the webap
    3. error               ─►  if neither has the template, error out
 ```
 
-This is the **theme-overrides-shape** pattern: a theme can choose to ship its own `post.html` (the `studio13` theme does this) when it needs structural changes that go beyond CSS. Most themes don't — they ship only CSS and inherit every template from the shape. Changing a template in the shape immediately updates every CSS-only theme.
+This is the **theme-overrides-shape** pattern: a theme can choose to ship its own `post.html` (`studio13-nk` does this for the blog shape: it ships its own `index.html`, `post.html` and `posts.html`) when it needs structural changes that go beyond CSS. Most themes don't — they ship only CSS and inherit every template from the shape. Changing a template in the shape immediately updates every CSS-only theme.
 
 For sites running the *stream* shape (`v4`), rendering produces a single HTML page (`stream.html`) that loads `stream.js`. The script hydrates the stream-screen by:
 
-1. Reading the URL — `/_/`, `/_/settings`, or `/_/pql/<sentence>`.
+1. Reading the URL — the site root, a post's permalink, or `/pql/<sentence>` (the owner's app uses `/_/`, `/_/settings` and `/_/pql/<sentence>`).
 2. Resolving the sentence (or default landing PQL) into a filter.
-3. Fetching matching content from the local API + the DS event stream.
-4. Rendering items into the `<main class="layout">` element.
+3. Fetching matching entries as JSON from the site's own `/pql/` endpoint.
+4. Rendering them into the stream's layout around the server-rendered focus post.
 
 See [`pql.md`](../reference/pql.md) for how sentences compose, and [`webapp/developer/feed-architecture.md`](../../webapp/developer/feed-architecture.md) for how the stream fetches data.
 
@@ -91,9 +96,9 @@ Like the active theme, the active shape is **private per-tenant config**:
 // .polis/bundles/registry.json
 {
   "active_theme": "pub.polis.themes.vice",
-  "active_shape": "pub.polis.shapes.v3",
+  "active_shape": "pub.polis.shapes.v4",
   "installed_bundles": [
-    { "name": "pub.polis.core", "path": ".polis/bundles/pub.polis.core", "active": true }
+    { "name": "pub.polis.core", "path": ".polis/bundles/pub.polis.core", "shape_versions": { "...": "..." }, "theme_versions": { "...": "..." } }
   ]
 }
 ```
@@ -104,7 +109,7 @@ Switching shapes is a single field change followed by a re-render. There's no mi
 
 ## Custom shapes
 
-(Architectural — no third-party shapes ship today.)
+⚠️ **Not implemented.** polis loads only the core bundle embedded in its binary; nothing reads a third-party bundle today. The rest of this section describes the intended design, not something you can do.
 
 A bundle can declare additional shapes by adding entries under `shapes` in its `bundle.json`. A custom shape:
 
@@ -124,5 +129,4 @@ Themes built for one shape can declare compatibility with another by listing bot
 - [content-types.md](content-types.md) — What gets rendered (posts, comments) — independent of *how*.
 - [pql.md](../reference/pql.md) — The query language driving the v4 stream shape.
 - [cli/user/templating.md](../../cli/user/templating.md) — Template syntax used inside shape templates.
-- [webapp/designer/theme-system.md](../../webapp/designer/theme-system.md) — How shapes and themes resolve at runtime in the webapp.
 - [content-system.md § SHAPE / BUNDLE / THEME](content-system.md#shape--bundle--theme) — Deep reference.

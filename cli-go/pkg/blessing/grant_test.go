@@ -265,3 +265,63 @@ func TestGrant_LocalMetadataFailureDoesNotBlockGrant(t *testing.T) {
 		t.Error("result.Success = false")
 	}
 }
+
+// TestGrantSignsTheBlessingList — SIGNET epic 14. Granting a blessing is the
+// author's own act, so the list it writes must verify against the site's
+// published identity key. The assertion is on the resulting STATUS, not on the
+// presence of a signature field: a signature stamped in the wrong order writes
+// cleanly and verifies nowhere.
+func TestGrantSignsTheBlessingList(t *testing.T) {
+	siteDir := t.TempDir()
+	privPEM, pubSSH, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair: %v", err)
+	}
+
+	// The published key is the one a third party would fetch, so it is the one
+	// VerifyBlessedSite checks against.
+	wkDir := filepath.Join(siteDir, ".well-known")
+	if err := os.MkdirAll(wkDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	wk, _ := json.Marshal(map[string]string{"public_key": string(pubSSH)})
+	if err := os.WriteFile(filepath.Join(wkDir, "polis"), wk, 0644); err != nil {
+		t.Fatalf("write .well-known/polis: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+	}))
+	defer server.Close()
+	client := &discovery.Client{BaseURL: server.URL, HTTPClient: server.Client()}
+
+	grant := func(commentURL string) {
+		t.Helper()
+		_, err := Grant(siteDir, &IncomingRequest{
+			CommentURL:     commentURL,
+			CommentVersion: "sha256:" + commentURL,
+			InReplyTo:      "https://bob.com/posts/20260127/hello.md",
+		}, client, nil, privPEM)
+		if err != nil {
+			t.Fatalf("Grant(%s): %v", commentURL, err)
+		}
+	}
+
+	// Twice: the second grant must re-sign over the CHANGED list, not leave the
+	// first signature covering bytes that no longer exist.
+	grant("https://alice.com/comments/one.md")
+	if status, err := metadata.VerifyBlessedSite(siteDir); status != metadata.StatusValid {
+		t.Fatalf("after one grant: status = %q (%v), want %q", status, err, metadata.StatusValid)
+	}
+	grant("https://carol.com/comments/two.md")
+	if status, err := metadata.VerifyBlessedSite(siteDir); status != metadata.StatusValid {
+		t.Errorf("after two grants: status = %q (%v), want %q", status, err, metadata.StatusValid)
+	}
+}
+
+// NOTE: there is deliberately no "keyless Grant" test here. Grant cannot reach
+// the local write without a key — UpdateRelationship signs its DS payload first
+// and fails at "failed to decode PEM block". The unsigned-degradation rule is
+// covered where it is reachable, in pkg/metadata's
+// TestSignedPathWithEmptyKeyFallsThroughToUnsigned.

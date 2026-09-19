@@ -17,6 +17,8 @@ Polis helps you publish, follow, and have conversations — without losing contr
 
 - **Move hosts anytime.** Everything is flat files. Switch from GitHub Pages to Netlify to a VPS — your content, keys, and followers come with you.
 
+- **Your terms, signed; your history, provable.** State the terms your work may be used under, including whether AI may train on it, as a signed licence your site publishes where crawlers look. Your site keeps a signed history of its keys, so posts you signed years ago still verify after you rotate a key.
+
 - **No algorithms, no fees, no lock-in.** No engagement metrics, no 10% platform cut, no terms of service that change under your feet.
 
 ---
@@ -34,19 +36,38 @@ Polis helps you publish, follow, and have conversations — without losing contr
 ## See it
 
 ```bash
+$ export POLIS_BASE_URL="https://yourdomain.com"
 $ polis init
-[✓] Generated Ed25519 keypair
-[✓] Created .well-known/polis
-[✓] Ready to publish
+Your posts can carry terms describing how others may use them.
+
+  1. Reserved  (recommended)
+  2. Open
+  3. Unstated
+  …
+Press enter to state nothing for now.
+
+Choice: 1
+
+Rosie, your helper
+  …
+Switch Rosie on? Type yes or no (press enter to leave her off): no
+[✓] Initialized polis site at: /home/you/my-site
+[i] Public key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
+[i] DID: did:web:yourdomain.com
+[✓] Licence: pub.polis.license.reserved/1
+[i] Rosie: off. Comments will wait for you to approve them yourself.
+    Switch her on whenever you like in the web app (`polis-full serve` or `polis-server`): Settings → Rosie.
 
 $ polis post essay.md
-[i] Content hash: sha256:a3b5c7d9...
-[i] Signing with Ed25519 key...
-[✓] Published: posts/2026/01/essay.md
+[✓] Moved original file into posts/
+Published: content/pub.polis.core/post/20260920/essay.md
+Title: Essay
+Version: sha256:b2a1809836f3...
 
 $ polis follow https://alice.dev
-[✓] Following alice.dev
-[i] 12 posts, 3 with comments
+
+[✓] Successfully followed https://alice.dev
+  - Added to following.json
 ```
 
 ---
@@ -57,8 +78,8 @@ $ polis follow https://alice.dev
 curl -fsSL https://raw.githubusercontent.com/vdibart/polis-cli/main/scripts/install.sh | bash
 
 mkdir my-site && cd my-site
-polis init
 export POLIS_BASE_URL="https://yourdomain.com"
+polis init
 
 echo "# Hello World" > hello.md
 polis post hello.md
@@ -98,10 +119,10 @@ Four binaries are available on [GitHub Releases](https://github.com/vdibart/poli
 
 | Binary | What you get | Size |
 |--------|-------------|------|
-| **`polis`** (recommended) | CLI | ~9 MB |
-| `polis-full` | CLI + local web UI | ~12 MB |
-| `polis-server` | Web UI only | ~11 MB |
-| `tailor` | Site migration & health tool for self-hosters | ~10 MB |
+| **`polis`** (recommended) | CLI | ~10 MB |
+| `polis-full` | CLI + local web UI | ~13 MB |
+| `polis-server` | Web UI only | ~12 MB |
+| `tailor` | Site migration & health tool for self-hosters | ~9 MB |
 
 ### Build from source
 
@@ -123,7 +144,7 @@ cd polis-cli && make all
 
 ## The bash CLI as specification
 
-The bootstrap bash implementation (`cli-bash/polis`) is a single ~8500-line file that implements the complete Polis protocol with minimal dependencies (bash, jq, curl, ssh). It serves as a readable, executable specification — purpose-built for developers and LLMs to reference when porting Polis to other languages. Not deprecated, not legacy: a spec you can run.
+The bash CLI (`cli-bash/polis`) is the feature-frozen original implementation (~9,500 lines of bash); see [implementation parity](docs/cli/implementation-parity.md) for what it lacks. It needs only bash, jq, curl and ssh. It serves as a readable, executable specification — purpose-built for developers and LLMs to reference when porting Polis to other languages. Not deprecated, not legacy: a spec you can run.
 
 ---
 
@@ -142,9 +163,17 @@ The bootstrap bash implementation (`cli-bash/polis`) is a single ~8500-line file
 └──────────────────────────────────────────────┘
 ```
 
+The discovery service's source is not in this repository. Its public contract is the [DS API reference](docs/ds/developer/api-reference.md). polis.pub's discovery service accepts up to 2,000 new content records per domain in any rolling 30 days; updates to records it already holds do not count.
+
 ---
 
 ## Documentation
+
+**Start at [docs/README.md](docs/README.md)**: it routes you by what you are here to do. Also:
+
+- [Trust, provenance and terms](docs/signet/README.md): signed terms of use, key history, attestations and how to verify a site
+- [Reading paths](docs/paths/): guided routes through the docs, for security review and for building on polis
+- [How polis.pub is run](docs/ops/README.md): the design of the hosted service and its background actors
 
 ### For Users
 

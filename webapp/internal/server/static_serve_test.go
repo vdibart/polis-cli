@@ -236,8 +236,7 @@ func TestDataDirStorage_SourceRedirectHTML(t *testing.T) {
 // TestDataDirStorage_MountMdAliasRedirect ensures a mount-path .md request
 // (e.g. /comments/<date>/<id>.md or /posts/<date>/<id>.md) 301-redirects to
 // the canonical content source path. This is the alias that heals comments
-// mis-registered with the discovery service at the mount URL (comment-infra
-// remediation, plans/comment-registration-severe-bug.md, Defect 1): the signed
+// mis-registered with the discovery service at the mount URL: the signed
 // .md lives under content/, never at the mount, so the historical
 // /comments/<…>.md DS URLs must resolve via this redirect.
 func TestDataDirStorage_MountMdAliasRedirect(t *testing.T) {

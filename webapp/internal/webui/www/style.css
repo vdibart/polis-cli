@@ -19,7 +19,12 @@
 
     /* Layout — shared across themes */
     --sidebar-width: 220px;
-    --header-height: 50px;
+    /* Single source of truth for topbar height is the v4 shape's
+       --topbar-height (stream.css :root), which the SPA also loads. Alias it
+       here so every --header-height consumer stays in lockstep with the shape
+       automatically — no more manual two-place sync. The 64px fallback only
+       applies if stream.css is somehow absent. */
+    --header-height: var(--topbar-height, 64px);
     --content-w: 720px;
     --radius: 10px;
     --radius-sm: 6px;
@@ -238,7 +243,7 @@ body {
 
 /* ── Icon Nav Bar (unified UI) ── */
 .icon-nav {
-    height: 50px;
+    height: var(--header-height);
     display: flex;
     align-items: center;
     padding: 0 16px;
@@ -294,22 +299,21 @@ body {
 .nav-icon-btn:hover svg rect {
     stroke: var(--nav-icon-hover, #e0e0e0);
 }
-/* Write-anchor (+) hover pulls --network-color (the theme's
-   complementary token) instead of the generic nav-icon-hover, so the
-   "new thing" action is the only nav icon that swaps color on hover
-   in a distinct hue — visually paired with the ghost-compose row in
-   the stream which uses the same token. Falls back to nav-icon-hover
-   for any theme that doesn't define --network-color. Stroke bumped
-   from 1.6 → 2.0 on hover so the + reads at similar saturation to
-   the ghost glyph; thinner strokes were perceptibly more muted on
-   the lighter hover-bg rectangle even though the hex was identical. */
+/* Write-anchor — the circled "+" (⊕). Both the circle and the plus use the
+   uniform 1.6 nav-icon stroke, matching David Alcorn's even-weight drawing
+   and the timeline compose disc's ⊕ motif (filled there, outline here).
+   Hover pulls --network-color (the theme's complementary token) instead of
+   the generic nav-icon-hover, so the "new thing" action is the only nav icon
+   that swaps color on hover in a distinct hue — visually paired with the
+   ghost-compose row in the stream, which uses the same token. Falls back to
+   nav-icon-hover when a theme has no network-color. Only the COLOR shifts;
+   the whole glyph (circle + plus) recolors together so the ⊕ stays coherent. */
 #nav-btn-edit:hover {
     color: var(--network-color, var(--nav-icon-hover, var(--text-primary, #e0e0e0)));
 }
 #nav-btn-edit:hover svg line,
-#nav-btn-edit:hover svg path {
+#nav-btn-edit:hover svg circle {
     stroke: var(--network-color, var(--nav-icon-hover, #e0e0e0));
-    stroke-width: 2;
 }
 .nav-icon-btn.active svg line,
 .nav-icon-btn.active svg path,
@@ -389,7 +393,7 @@ body {
     body.is-owner .polis-topbar {
         flex-direction: row !important;
         align-items: center !important;
-        min-height: var(--topbar-height, 50px) !important;
+        min-height: var(--topbar-height, 64px) !important;
         padding: 0 12px !important;
         gap: 6px;
     }
@@ -406,7 +410,7 @@ body {
     body.nav-menu-open .nav-mobile-drawer {
         display: block;
         position: absolute;
-        top: var(--topbar-height, 50px);
+        top: var(--topbar-height, 64px);
         left: 0;
         right: 0;
         background: var(--nav-bg, var(--bar-bg, #1a1525));
@@ -481,7 +485,7 @@ body {
 .nav-sep {
     width: 1px; height: 20px;
     background: var(--nav-border, var(--border));
-    margin: 0 4px; flex-shrink: 0;
+    margin: 0 10px; flex-shrink: 0;   /* extra air around section dividers */
 }
 
 /* Notification dots */
@@ -954,7 +958,7 @@ button.success:hover {
 #dashboard-screen {
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 50px);
+    height: calc(100vh - var(--header-height));
 }
 
 /* Top Header */
@@ -1947,7 +1951,7 @@ button.success:hover {
 #editor-screen {
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 50px);
+    height: calc(100vh - var(--header-height));
     background: var(--bg);
 }
 
@@ -2452,7 +2456,7 @@ button.success:hover {
 #comment-screen {
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 50px);
+    height: calc(100vh - var(--header-height));
     background: var(--bg-color);
 }
 
@@ -5418,7 +5422,7 @@ a.activity-event:hover {
 #about-screen {
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 50px);
+    height: calc(100vh - var(--header-height));
     background: var(--bg-color);
 }
 #about-screen header {
@@ -7569,7 +7573,7 @@ a.activity-event:hover {
    content column). Empty/zero-height when no banner applies. */
 .dm-banner-host {
     position: sticky;
-    top: var(--header-height, 50px);
+    top: var(--header-height, 64px);
     /* Must sit below the nav's stacking context (see the compound rule
        below): the avatar dropdown drops out of the nav INTO this banner's
        vertical band, and if the banner won the stacking it would paint over
@@ -7762,3 +7766,48 @@ a.activity-event:hover {
     line-height: 1.4;
 }
 .composer-warning.hidden { display: none; }
+
+/* ── Terms of use (Settings) ────────────────────────────────────────────
+   The site's signed licence, shown so the user can see what their posts
+   actually carry. Two states: terms stated, or an invitation to choose.
+   Neither reads as an error — a site that has stated nothing is not
+   misconfigured, and nagging about it would be pressuring a choice. */
+.license-current {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.license-current-summary {
+    line-height: 1.5;
+}
+
+.license-current-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    align-items: baseline;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.license-current-meta code {
+    font-size: 0.78rem;
+}
+
+.license-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+/* Non-retroactivity is the property people otherwise discover far too
+   late — when they tighten their terms and find their archive unchanged.
+   It sits under the controls rather than in a tooltip for that reason. */
+.license-nonretro {
+    font-size: 0.8rem;
+    line-height: 1.55;
+    color: var(--text-muted);
+    padding-left: 10px;
+    border-left: 2px solid var(--border-color);
+}

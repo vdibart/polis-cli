@@ -1,5 +1,7 @@
 # Discovery Stream Architecture
 
+*For* [Developers](../../README.md#building-on-polis) · [Reviewers](../../README.md#reviewing-the-security-and-identity-design) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [Discovery service](../README.md) — *See also* [reference](api-reference.md) · [tour](../../handbook/ds-to-stream.md)
+
 Polis solved content ownership: files, signatures, static hosting. Your posts live on
 your domain. Nobody can take them down or alter them.
 
@@ -45,10 +47,14 @@ Seven principles governed every decision in this system.
 
 ### 1. Stream is the only source of truth for social signals
 
-There are no server-side follower tables, friend graphs, or activity feeds. The events
-table has exactly six columns: `id`, `type`, `created_at`, `actor`, `signature`, `payload`.
+There are no server-side follower tables, friend graphs, or activity feeds. An event is
+`id`, `type`, `created_at`, `actor`, `signature` and `payload`, plus three provenance facts
+recorded when it was accepted (`signed_by`, `principal`, `authority` — see the
+[API reference](api-reference.md)).
 Everything else—follower counts, activity timelines, notification badges—is computed
-client-side from the raw event sequence.
+client-side from the raw event sequence. (The service's one follow read,
+`GET /v1/relationships/followed`, is computed from the same events at query time; it keeps no
+table.)
 
 This is a feature, not a limitation. If the server maintained a follower count, it would
 be the server's assertion about your followers. With client-side projection, your follower
@@ -75,10 +81,28 @@ write to the events table directly.
 
 Primary operations always succeed regardless of stream health. If the events table is
 down, your post still publishes. If the stream publish call fails, your follow is still
-recorded locally. Stream emission is wrapped in catch blocks and logged as warnings.
+recorded locally. Side-effect emission is wrapped in catch blocks and logged; a failed
+insert never fails the operation that caused it.
 
 This is non-negotiable. The stream is a social convenience, not a dependency. Every
 polis feature that works today continues to work if the stream disappears.
+
+**What a failed insert does instead.** The write is already recorded, the response is the
+usual `2xx`, and the event is simply missing from the stream — clients cannot tell, and
+must not read a successful write as a promise that an event exists. The DS logs it as
+`db` / `event_insert_failed` at error level, carrying the actor, the event type and the
+cause; that log line is the only signal, so an operator alert matches on it. Until the
+2026-09 close-out it was not even that: the storage adapter caught the error and returned
+`null`, so a schema mismatch could have dropped every event on the network in silence.
+
+⛔ **Do not "improve" this into a failed request.** The primary write and the event are
+not in one transaction, so a `500` would report failure for work that was done. For
+`POST /v1/sites/keys/rotate` that is unrepairable: both rotation clients discard the
+newly generated private key when the DS errors, so the DS's witnessed chain would name a
+key the site can never sign with, every retry is `409`, and a key-history chain is
+append-only and is never rebuilt. A lost announcement can be re-announced; that cannot be
+undone. Putting the write and its event in one transaction is the real fix, and is
+tracked separately.
 
 ### 4. Signed everything
 
@@ -94,13 +118,14 @@ the way back to the actor's `/.well-known/polis` public key.
 ### 5. Operator sovereignty
 
 Each discovery service operator sets their own moderation policy. The architecture provides
-mechanisms—domain blocking, type blocking, allowlist/blocklist modes, event purging—but
-prescribes no policy. One operator may run a permissive stream open to all registered sites.
-Another may maintain a strict allowlist. Both are valid deployments of the same protocol.
+mechanisms—policy rules that allow or deny events by type and actor domain, and event
+purging—but prescribes no policy. One operator may run a permissive stream open to all
+registered sites. Another may allow only approved event types. Both are valid deployments of
+the same protocol.
 
-What operators *cannot* do: block core `pub.polis.*` event types (they're essential to
-protocol operation), or modify event content after insertion (events are immutable once
-written).
+What operators *cannot* do: modify event content after insertion (events are immutable once
+written). ⚠️ An operator **can** deny any event type, `pub.polis.*` included — nothing is
+exempt, so a policy that denies a core type breaks that part of the protocol for its users.
 
 ### 6. Client-side projections
 
@@ -122,8 +147,9 @@ the server doesn't know what you're tracking.
 
 Core event types live under the `pub.polis.*` namespace. Third-party types use reverse-domain
 namespacing (`com.bookclub.recommendation`, `org.writers.prompt`) and pass through the
-stream untouched. No registration or permission required—if your site is registered and
-your signature is valid, you can publish events with any non-`pub.polis.*` type.
+stream untouched. No registration of the type or permission required—if your site is
+registered, your signature is valid and the operator's policy does not deny it, you can
+publish events with any non-`pub.polis.*` type.
 
 ---
 
@@ -158,23 +184,31 @@ verification. The `payload` is type-specific data.
 | `pub.polis.post.published` | `POST /v1/content` (new post) | Author domain | url, version, title |
 | `pub.polis.post.republished` | `POST /v1/content` (update post) | Author domain | url, version, title |
 | `pub.polis.post.unpublished` | `POST /v1/content/unpublish` (post) | Author domain | url, type |
-| `pub.polis.comment.unpublished` | `POST /v1/content/unpublish` (comment) | Commenter domain | url, type, in_reply_to, root_post |
+| `pub.polis.comment.unpublished` | `POST /v1/content/unpublish` (comment) | Commenter domain | url, type, in_reply_to, root_post, target_domain, source_domain |
 | `pub.polis.comment.published` | `POST /v1/content` (new comment) | Commenter domain | url, version, in_reply_to, root_post, target_domain, source_domain |
 | `pub.polis.comment.republished` | `POST /v1/content` (update comment) | Commenter domain | url, version, in_reply_to, root_post, target_domain, source_domain |
 | `pub.polis.comment.blessing.requested` | `POST /v1/content` (beseech) | Commenter domain | comment_url, in_reply_to, root_post, target_domain, source_domain |
-| `pub.polis.comment.blessing.granted` | `POST /v1/relationships`, auto-bless | Post author domain | source_url, target_url, action, target_domain, source_domain |
-| `pub.polis.comment.blessing.denied` | `POST /v1/relationships` | Post author domain | source_url, target_url, action, target_domain, source_domain |
-| `pub.polis.follow.announced` | `POST /v1/stream` (client) | Follower domain | target_domain |
-| `pub.polis.follow.removed` | `POST /v1/stream` (client) | Unfollower domain | target_domain |
-| `pub.polis.tag.applied` | `POST /v1/content` (tag) | Author domain | tag, target |
-| `pub.polis.tag.removed` | `POST /v1/content/unregister` (tags only) | Author domain | tag, target |
+| `pub.polis.comment.blessing.granted` | `POST /v1/relationships` | Post author domain | source_url, target_url, action, target_domain, source_domain (+ agent, grant, grant_state, witness) |
+| `pub.polis.comment.blessing.denied` | `POST /v1/relationships` | Post author domain | source_url, target_url, action, target_domain, source_domain (+ agent, grant, grant_state, witness) |
+| `pub.polis.attestation.issued` | `POST /v1/content` (attestation) | Issuer domain | url, version, predicate, subject, subject_type |
+| `pub.polis.attestation.withdrawn` | `POST /v1/content` (a withdrawal attestation) | Issuer domain | url, version, predicate, subject, subject_type |
+| `pub.polis.follow.announced` | `POST /v1/stream` (client) | Follower domain | client-defined; carries target_domain |
+| `pub.polis.follow.removed` | `POST /v1/stream` (client) | Unfollower domain | client-defined; carries target_domain |
+| `pub.polis.actor.registered` · `.reregistered` · `.withdrawn` | `POST /v1/stream` (client) | Operator domain | client-defined; the subject is `target_domain` |
+| `pub.polis.tag.applied` | `POST /v1/content` (tag) | Author domain | url, tag, target |
+| `pub.polis.tag.removed` | `POST /v1/content/unregister` (tags only) | Author domain | url, tag, target |
 | `pub.polis.site.registered` | `POST /v1/sites` (new) | Site domain | domain, registry_url |
 | `pub.polis.site.reregistered` | `POST /v1/sites` (existing) | Site domain | domain, registry_url |
 | `pub.polis.site.key_rotated` | `POST /v1/sites/keys/rotate` | Site domain | old_key_id, new_key_id |
 
-**Auto-bless payloads** include additional fields: `auto_blessed`, `bless_reason`,
-`policy_rule`, `policy_source`, `blessed_by`, `ds_attestation`, `ds_key_id`,
-`source_domain`, `target_domain` (and conditionally `fallback_reason`).
+**Blessing decisions.** The DS emits `granted` / `denied` only for a decision the post author signed.
+A user agent's decision also carries `agent`, `grant` and `grant_state` (a fact about the cited grant,
+never a verdict), and every decision carries the DS's `witness` when the DS witnesses.
+
+**Historical auto-bless payloads.** Events from before the DS stopped deciding blessings carry
+`auto_blessed`, `bless_reason`, `policy_rule`, `policy_source`, `blessed_by`, `ds_attestation`,
+`ds_key_id`, `source_domain`, `target_domain` (and conditionally `fallback_reason`). Their
+`ds_attestation` still verifies against the DS key; nothing emits one now.
 
 ### Canonical Signing
 
@@ -308,16 +342,20 @@ Projection state lives on disk, namespaced by discovery service domain and bundl
 └── ds.polis.pub/
     └── pub.polis.core/
         ├── config/                        # User preferences (survives resets)
-        │   ├── notifications.json         # Notification rules, muted domains
-        │   └── feed.json                  # Staleness, max items, max age
+        │   ├── feed.json                  # Staleness, max items, max age
+        │   └── verification.json          # Signature-verification settings
         └── state/                         # Computed/derived (safely deletable)
             ├── cursors.json               # Per-projection cursor positions
             ├── pub.polis.follow.json       # Materialized follower set
-            ├── pub.polis.blessing.json     # Blessings state
+            ├── pub.polis.comment.blessing.json # Blessings state
             ├── pub.polis.notification.jsonl # Notification entries
+            ├── verification.json           # Verification failures across sync cycles
             ├── pub.polis.feed.jsonl         # Feed items (network scope)
             └── pub.polis.feed.global.jsonl  # Feed items (global scope, separate data source)
 ```
+
+Notification rules are not here: they live in the site's bundle registry
+(`.polis/bundles/registry.json`).
 
 Note: `followers` and `me` feed scopes are runtime-filtered over the network cache,
 not materialized as separate files. Only `global` gets its own file because it contains
@@ -354,6 +392,7 @@ Projection-specific. The follow projection stores:
 ```json
 {
   "followers": ["alice.com", "bob.com"],
+  "followed_at": {"alice.com": "2026-02-01T10:00:00Z", "bob.com": "2026-02-03T08:30:00Z"},
   "count": 2
 }
 ```
@@ -370,34 +409,31 @@ without requiring centralized approval.
 
 | Layer | Mechanism | Enforced by |
 |-------|-----------|-------------|
-| 1. Registration gate | Actor must be registered with discovery service | `POST /v1/stream`, emitEvent |
+| 1. Registration gate | Actor must be registered with discovery service | `POST /v1/stream` and the Service mutation handlers |
 | 2. Signature verification | Ed25519 signature over canonical payload | `POST /v1/stream` |
-| 3. Namespace restriction | `pub.polis.*` types restricted to server-side emission | `POST /v1/stream` validation |
+| 3. Namespace restriction | `pub.polis.*` types restricted to server-side emission, except follow and actor-registry events | `POST /v1/stream` validation |
 | 4. Rate limiting | 100 events/hour/actor | `POST /v1/stream` |
 | 5. Payload constraints | JSON object, < 8KB serialized | `POST /v1/stream` validation |
-| 6. Operator controls | Domain/type blocking, mode switching, event purging | Admin handlers |
+| 6. Operator controls | Allow/deny policy rules, event purging | Admin handlers; every emission |
 | 7. Community reporting | (Deferred—designed but not yet implemented) | — |
 | 8. Client-side filtering | Clients can ignore any event type or actor | Client code |
 
 ### Operator Controls
 
-Operators have six control surfaces:
+Operators have three control surfaces:
 
-- **Block a domain** — all events from that actor are rejected (scope: stream only or full)
-- **Block an event type** — all events of that type are rejected
-- **Set stream mode** — blocklist (default: everything allowed, exceptions blocked) or
-  allowlist (default: everything blocked, exceptions allowed)
+- **Policy rules** — `allow` / `deny` rules over event type and actor domain, evaluated in
+  order, first match wins (e.g. `deny all from all at spam.example.com`). A denied event is
+  not recorded, whether it came from a Service mutation or `POST /v1/stream`. Blocking a
+  domain is a convenience that writes exactly that rule. See the
+  [configuration guide](../admin/configuration.md#admin-api).
 - **Purge events** — hard-delete events by actor, type, or time range
-- **View current blocks** — inspect the current enforcement state
-- **Public policy statements** — operators publish per-content-type policies at
-  `/policies/rules.jsonl`, declaring what they allow/deny and under what conditions
-  (e.g. `allow pub.polis.comment from all`, `emit pub.polis.comment.blessing from following`).
-  Clients and other services can fetch these to understand the operator's stance before
-  interacting.
+- **Public policy statements** — the rules are published at `/policies/rules.jsonl`
+  (e.g. `allow pub.polis.comment from all`), so clients and other services can see the
+  operator's stance before interacting.
 
 What operators *cannot* do:
 
-- Block core `pub.polis.*` event types—they're essential to protocol operation
 - Modify event content after insertion—events are immutable
 - Forge signatures—events carry the original actor's signature
 
@@ -420,8 +456,8 @@ projecting them locally.
 
 ### Your follower count is a verifiable computation
 
-Bob opens his webapp. The follower count handler queries the stream for `pub.polis.follow.*`
-events, filters for those targeting `bob.com`, and materializes the current follower set.
+Bob opens his webapp. The follower count handler queries the stream for
+`pub.polis.follow.announced` and `pub.polis.follow.removed` events, filters for those targeting `bob.com`, and materializes the current follower set.
 The count is the length of that set.
 
 Bob can replay from cursor 0 and arrive at the same number. He can inspect every event
@@ -439,7 +475,8 @@ the operator, no protocol changes.
 ### Different operators, different policies
 
 Community A runs a permissive discovery service: any registered site can publish any
-event type. Community B runs a strict service: allowlist mode, only approved event types.
+event type. Community B runs a strict service: its policy allows approved event types and
+denies everything else.
 Both use the same protocol, the same client software, the same event format. The operator
 policy is the only difference.
 
@@ -475,7 +512,7 @@ Client                    Discovery Service              Events Table
   |  POST /v1/content            |                           |
   |  {url, version, sig, ...}    |                           |
   |----------------------------->|                           |
-  |                              |  UPSERT posts_metadata    |
+  |                              |  UPSERT content_metadata  |
   |                              |-------------------------->|
   |                              |                           |
   |                              |  INSERT event             |
@@ -487,6 +524,11 @@ Client                    Discovery Service              Events Table
   |<-----------------------------|                           |
 ```
 
+`(fire-and-forget)` is literal: if that INSERT fails, the `201` is sent anyway and the
+event never exists. The DS logs `db` / `event_insert_failed` (actor, type, cause) and that
+is the whole remedy — see [Fire-and-forget](#3-fire-and-forget) for why it must not become
+a failed request.
+
 ### Explicit Emission (Follow)
 
 ```
@@ -496,8 +538,8 @@ Client                    POST /v1/stream              Events Table
   |  {type, actor, payload, sig} |                           |
   |----------------------------->|                           |
   |                              |  Verify registration      |
+  |                              |  Check operator policy    |
   |                              |  Verify signature         |
-  |                              |  Check blocks             |
   |                              |  Check rate limit         |
   |                              |                           |
   |                              |  INSERT event             |
@@ -518,7 +560,7 @@ Client                    Stream (GET /v1/stream)      Local Disk
   |  cursor = "4500"             |                           |
   |                              |                           |
   |  GET /v1/stream?since=4500   |                           |
-  |  &type=pub.polis.follow.*    |                           |
+  |  &type=pub.polis.follow.announced,pub.polis.follow.removed
   |----------------------------->|                           |
   |                              |                           |
   |  {events: [...], cursor: "4521"}                         |

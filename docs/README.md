@@ -1,64 +1,135 @@
 # Polis Documentation
 
-Documentation is organized by component and audience. Each component directory has a README with an overview, quick start, and links to its documents.
+Polis is a way to publish on your own domain, sign what you write, and follow, comment and vouch across sites, with nothing in
+the middle that can quietly rewrite who said what. These pages explain how it works, how to use it, how to build on it, and where
+its design stops.
 
-> **New here?** Start with [general/concepts/architecture.md](general/concepts/architecture.md) — the four-surface map that situates every other doc in this tree. For an LLM helping a human, or anyone arriving from a "Pull the thread" trail marker in source code, the canonical entry is [AGENTS.md](../AGENTS.md) at the repo root.
+**Pick the door that describes you.** Each one is an ordered reading list: start at the top.
+
+> **New here?** [The architecture overview](general/concepts/architecture.md) is the four-surface map that situates every other
+> page, and [the vision](general/vision.md) says why polis exists. An LLM helping a human, or anyone arriving from a
+> *"Pull the thread"* trail marker in source code, can start at [AGENTS.md](../AGENTS.md) at the repository root.
+
+## Writing on polis
+
+*You publish, in a browser or at the command line.*
+
+| Page | What it is for |
+|---|---|
+| [User manual](webapp/user/user-manual.md) | **start here in a browser**: everything the web interface does |
+| [Themes](general/guides/themes.md) | switch your site's theme, or write your own CSS-only one |
+| [Set your terms](signet/guides/set-your-terms.md) | say how others may use your work |
+| [Policy and licence](general/concepts/policy-and-licence.md) | who may reach you, against what may be done with your work: two different things |
+| [Who holds your key](general/security/who-holds-your-key.md) | on polis.pub or on your own machine: what each means, what you can check, and how to take your key back |
+| [Known issues](general/security/known-issues.md) | what is imperfect, in plain language |
+| [Direct-message encryption](general/security/dm-encryption.md) | what it protects, and what it does not |
+| [Registration and privacy](general/security/registration-and-privacy.md) | what the discovery service learns about you, and what leaving removes |
+| [Command reference](cli/user/command-reference.md) | **start here at the command line**: every CLI command |
+| [Policies](cli/user/policies.md) | who may comment on you, and what you accept |
+| [Check a site](signet/guides/verify-content.md) · [Make a claim](signet/guides/attest.md) · [Who blessed this?](signet/guides/who-blessed-this.md) | the signed layer, used by hand |
+| [Implementation parity](cli/implementation-parity.md) | which CLI you need: where the Go and bash CLIs differ |
+| [Glossary](general/reference/glossary.md) | polis's words |
+
+## Building on polis
+
+*You are writing software that reads, writes or verifies polis, or a second implementation of it.*
+
+| Page | What it is for |
+|---|---|
+| [The graph](signet/concepts/graph.md) | **start here**: identities, records, and the signed edges between them |
+| [Recipe book](signet/recipes/README.md) | tasks, each run end to end by the test suite |
+| [Content API](api/developer/reference.md) · [Site API](api/developer/site-api.md) | the webapp's REST surfaces |
+| [Discovery service API](ds/developer/api-reference.md) · [PQL](general/reference/pql.md) · [PQL over HTTP](ds/developer/pql-json-api.md) | querying the network |
+| [Stream architecture](ds/developer/stream-architecture.md) · [Unpublish lifecycle](ds/developer/unpublish-lifecycle.md) | how events and retractions travel |
+| [JSON mode](cli/user/json-mode.md) | scripting the CLI |
+| [Content types](general/concepts/content-types.md) · [Bundles](general/concepts/bundles.md) · [Shapes](general/concepts/shapes.md) · [Themes](general/concepts/themes.md) · [Templating](cli/user/templating.md) | the content model and its presentation; [writing a theme](general/guides/themes.md) |
+| [Direct-message format](../cli-go/pkg/dm/FORMAT.md) · [delivery protocol](../cli-go/pkg/dm/PROTOCOL.md) | the bytes of an encrypted direct message, at rest and between sites |
+| [Infinity stream](general/concepts/infinity-stream.md) | the single-screen view polis.pub is built around |
+| [Snap-off architecture](general/concepts/snap-off-architecture.md) | replacing any layer |
+| **A second implementation:** [Signet specifications](signet/README.md) · [Signing base](signet/spec/signing-base.md) · [Policy grammar](general/reference/policy-grammar.md) · [Content system](general/concepts/content-system.md) | precise enough to implement |
+
+## Reviewing the security and identity design
+
+*You assess designs like this for a living, and want the threat model, the trust assumptions and the limits.*
+
+| Page | What it is for |
+|---|---|
+| [How polis thinks about identity and trust](signet/overview.md) | **start here**: the design on one page, including what it has not solved |
+| [Security model](general/security/security-model.md) | the threat model and attack analysis |
+| [Known issues](general/security/known-issues.md) | including what a signature does not prove |
+| [Identity](signet/concepts/identity.md) · [Verification](signet/concepts/verification.md) · [Projection](signet/concepts/projection.md) · [Assertions](signet/concepts/assertions.md) · [Trust](signet/concepts/trust.md) · [Delegation](signet/concepts/delegation.md) | the concepts |
+| [Policy and licence](general/concepts/policy-and-licence.md) | inbound rules against outbound terms, and who applies each |
+| [Key history](signet/spec/key-history.md) · [Custody](signet/spec/custody.md) · [Delegation](signet/spec/delegation.md) · [Witnesses](signet/spec/witness.md) · [did:web](signet/spec/did-web.md) · [Signing base](signet/spec/signing-base.md) | each states what it does **not** claim |
+| [The actors](general/concepts/actors.md) | what runs on a hosted service besides you, and what each may do |
+| [Who holds your key](general/security/who-holds-your-key.md) | custody, as the person whose key it is sees it |
+| [Direct-message encryption](general/security/dm-encryption.md), with its [format](../cli-go/pkg/dm/FORMAT.md) and [protocol](../cli-go/pkg/dm/PROTOCOL.md) · [Registration and privacy](general/security/registration-and-privacy.md) | confidentiality, and what the discovery service learns |
+| [Check it yourself](signet/recipes/05-verify-a-site.md) · [Verify a follow file by hand](signet/recipes/14-verify-signed-edges.md) | a site you do not own, trusting nothing |
+| [Report a vulnerability](general/security/SECURITY.md) | |
+
+## Running polis
+
+*You run polis for other people, or want to know how polis.pub is run. This is how the service is designed. The hosted service's
+and the discovery service's source is not public, so operational procedure is not documented here.*
+
+| Page | What it is for |
+|---|---|
+| [How polis.pub is run](ops/README.md) | **start here** |
+| [The operator's manual](ops/admin/operator-guide.md) | custody, the authority rule, and what an operator takes on |
+| [The actors](general/concepts/actors.md) | the background jobs, by design |
+| [The hosted service](ops/admin/hosted-service.md) | its architecture and a tenant's lifecycle |
+| [Discovery service deployment](ds/admin/deployment.md) · [configuration](ds/admin/configuration.md) | what a deployment consists of, and what an operator can tune |
+| [What Judge could not verify](signet/guides/network-health.md) | reading a hosted fleet's health from outside |
+
+## Contributing to polis
+
+*You are changing polis itself.*
+
+| Page | What it is for |
+|---|---|
+| [Contributing](general/contributing.md) | **start here**: setup and conventions |
+| [Handbook](handbook/README.md) | guided tours of the source, reached from trail markers in the code |
+| [CLI packages](cli/developer/packages.md) · [Webapp development](webapp/developer/development.md) · [Feed architecture](webapp/developer/feed-architecture.md) · [Dispatch engine](api/developer/dispatch-engine.md) | the codebase |
+| [Brand](webapp/designer/brand.md) · [Navigation](webapp/designer/navigation.md) · [Pages](webapp/designer/pages.md) | the design system |
+
+## Reading paths
+
+Some questions cut across the whole system. These pages string the relevant documents together, in order.
+
+- [Security](paths/security.md): from the threat model to checking a site yourself
+- [Trust, provenance and terms](paths/trust-provenance-and-terms.md): what is signed, what is computed, and why the difference matters
+- [Building on polis](paths/building-on-polis.md): from the architecture to a second implementation
+
+## Kinds of page
+
+| Kind | Answers | Where |
+|---|---|---|
+| **Concept** | why it is this way | `signet/concepts/`, `general/concepts/`, indexed [by what it is about](general/README.md) |
+| **Spec** | exactly what, precisely enough to implement | `signet/spec/`, `general/reference/` |
+| **Guide** | how to do something, in prose | `signet/guides/`, `general/guides/`, each component's `user/` |
+| **Recipe** | how to do something, as commands a test runs | `signet/recipes/` |
+| **Reference** | look it up | each component: `cli/`, `webapp/`, `api/`, `ds/`, `ops/` |
+| **Tour** | how the source does it | `handbook/` |
+
+Every page opens with one line under its title saying who it is for, what kind of page it is, and what to read next. A
+**See also** entry reading *no spec yet* or *no recipe yet* marks a page that does not exist yet.
+
+## How these docs are kept true
+
+Documentation is checked against the code before each release. Two kinds of page are checked on **every** test run: every
+**recipe**'s commands are executed, and every **specification**'s worked examples are compared byte for byte with the
+implementation. Every link between these pages, and every page path cited from the code, is checked on every test run too.
+If a page is wrong, that is a bug: open an issue, or [report it privately](general/security/SECURITY.md) if it is a security
+matter.
 
 ## By Component
 
 | Component | Description | README |
 |-----------|-------------|--------|
-| [general/](general/) | Protocol specs, project governance, reference | [general/README.md](general/README.md) |
-| [handbook/](handbook/) | Museum tours — curated walk-throughs of polis source code | [handbook/README.md](handbook/README.md) |
-| [cli/](cli/) | CLI tool (Go + Bash implementations) | [cli/README.md](cli/README.md) |
+| [general/](general/) | Concepts and reference that span every component, indexed by what they are about | [general/README.md](general/README.md) |
+| [signet/](signet/) | **Signet**: the identity-layer specification suite | [signet/README.md](signet/README.md) |
+| [handbook/](handbook/) | Guided tours of polis source code | [handbook/README.md](handbook/README.md) |
+| [cli/](cli/) | CLI tool (Go and bash implementations) | [cli/README.md](cli/README.md) |
 | [webapp/](webapp/) | Local web interface (Go SPA) | [webapp/README.md](webapp/README.md) |
 | [api/](api/) | Content Type REST API (`/v1/`) | [api/README.md](api/README.md) |
 | [ds/](ds/) | Discovery Service (coordination layer) | [ds/README.md](ds/README.md) |
-
-## By Audience
-
-### For Users
-
-| Document | Component | Description |
-|----------|-----------|-------------|
-| [Webapp User Manual](webapp/user/user-manual.md) | webapp | How to use the local web interface |
-| [CLI Command Reference](cli/user/command-reference.md) | cli | Complete command reference |
-| [Templating](cli/user/templating.md) | cli | Theme customization and template syntax |
-| [JSON Mode](cli/user/json-mode.md) | cli | Machine-readable `--json` output format |
-| [Glossary](general/reference/glossary.md) | general | Polis-specific terminology |
-
-### For Developers
-
-| Document | Component | Description |
-|----------|-----------|-------------|
-| [Architecture Overview](general/concepts/architecture.md) | general | The four surfaces (CLI, webapp, polis.pub, DS) and how they fit together |
-| [Bundles](general/concepts/bundles.md) | general | The package container — namespaces, manifests, per-tenant install |
-| [Content Types](general/concepts/content-types.md) | general | Core types (post/comment/follow/blessing/tag/dm/theme), actions, lifecycle |
-| [Shapes](general/concepts/shapes.md) | general | Blog (v3) vs infinity stream (v4), the render pipeline |
-| [Themes](general/concepts/themes.md) | general | CSS-only presentation, variable contract, cross-theme compat |
-| [Infinity Stream](general/concepts/infinity-stream.md) | general | The single-screen `pub.polis.shapes.v4` experience — philosophy, three POVs, hydration flow |
-| [Content System](general/concepts/content-system.md) | general | Deep reference — filesystem layout, full `bundle.json` schema, event catalog |
-| [Security Model](general/security/security-model.md) | general | Crypto, identity, trust model, policies, threats |
-| [CLI Packages](cli/developer/packages.md) | cli | Package structure, import rules, version propagation |
-| [Webapp Development](webapp/developer/development.md) | webapp | Handler patterns, testing, frontend architecture |
-| [API Reference](api/developer/reference.md) | api | REST API routes, examples, error codes |
-| [Dispatch Engine](api/developer/dispatch-engine.md) | api | Engine architecture, handler types |
-| [DS API Reference](ds/developer/api-reference.md) | ds | Discovery service REST API (20+ endpoints) |
-| [Stream Architecture](ds/developer/stream-architecture.md) | ds | Event stream design and protocol |
-| [Storage Adapter](ds/developer/storage-adapter.md) | ds | Custom storage adapter interface |
-| [Contributing](general/contributing.md) | general | Development setup and contribution guidelines |
-
-### For Operators
-
-| Document | Component | Description |
-|----------|-----------|-------------|
-| [DS Deployment](ds/admin/deployment.md) | ds | Deploy on Fly.io, Docker, or bare Deno |
-| [DS Configuration](ds/admin/configuration.md) | ds | Admin API (policy-based) and ~28 tuning parameters |
-
-### For Everyone
-
-| Document | Component | Description |
-|----------|-----------|-------------|
-| [Vision](general/vision.md) | general | Why Polis exists — manifesto and experience principles |
-| [Security Policy](general/security/SECURITY.md) | general | Vulnerability reporting |
-
+| [ops/](ops/) | How polis.pub is run | [ops/README.md](ops/README.md) |

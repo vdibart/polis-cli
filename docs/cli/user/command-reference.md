@@ -1,6 +1,8 @@
 # Polis CLI - Complete Usage Guide
 
-> **Note:** This is the Bash CLI command reference. The Bash CLI is feature-frozen (release version tracks the Go CLI in `cli-go/version.txt`). The **Go CLI** has identical commands, ships as a single binary with no external dependencies, and is the recommended choice for new users. For the webapp (local web interface), see [../../webapp/user/user-manual.md](../../webapp/user/user-manual.md).
+*For* [Writers](../../README.md#writing-on-polis) · [Developers](../../README.md#building-on-polis) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [CLI](../README.md) — *Code* [`cli-go/pkg/cmd`](../../../cli-go/pkg/cmd)
+
+> **Note:** This reference covers both CLIs. The **Go CLI** is the recommended choice: it ships as a single binary and has every command below. The **Bash CLI** is feature-frozen (its release version tracks the Go CLI's), has a subset of the commands, and differs in a few shared ones — each section says where. The full record of divergence is [implementation-parity.md](../implementation-parity.md). For the webapp (local web interface), see [../../webapp/user/user-manual.md](../../webapp/user/user-manual.md).
 
 Command-line tool for managing decentralized social content with cryptographic signing and version control.
 
@@ -8,7 +10,7 @@ Command-line tool for managing decentralized social content with cryptographic s
 
 The Polis CLI enables authors to:
 - Create and sign posts and comments using Ed25519 cryptography
-- Manage content with git-based version history
+- Keep a version history of every published file (`.versions/`), independent of git
 - Publish content as static files with frontmatter metadata
 - Render markdown to static HTML with customizable templates
 - Request blessings from discovery services for authenticated comment discovery
@@ -16,14 +18,14 @@ The Polis CLI enables authors to:
 
 ## Go CLI
 
-The **Go CLI** is the recommended CLI for new users. It implements all commands listed below, ships as a single binary, and has **no external dependencies** (no jq, curl, OpenSSH, or pandoc required).
+The **Go CLI** is the recommended CLI for new users. It implements all commands listed below, ships as a single binary, and needs no jq, curl, OpenSSH or pandoc. (Version history still calls the system
+`diff` and `patch`, `cli-go/pkg/version/history.go`; `polis serve` is in the bundled `polis-full` binary only.)
 
-- Primary command is `post`
-- Same `--json` flag for machine-readable output
-- Same directory structure and file formats
+- Same `--json` flag for machine-readable output (the JSON shapes are not always the same as bash's — see [json-mode.md](json-mode.md))
+- Same directory structure and file formats — a site written by one CLI is readable and writable by the other
 - Download pre-built binaries from the releases page, or build from source: `cd cli-go && go build -o polis ./cmd/polis`
 
-The command reference below applies to both CLIs — the commands, flags, and behavior are identical.
+⚠️ **The two CLIs do not have the same commands.** `actor`, `attest`, `did`, `dm`, `license`, `serve`, `site` and `validate` are Go only. Among the shared commands, `comment`, `init`, `post` (reading from stdin), `index --json`, `notifications`, `render`, `unregister` and `discover --since` differ; each section below says how.
 
 ## Installation (Bash CLI)
 
@@ -53,11 +55,11 @@ brew install pandoc  # Optional: for polis render
 ### Install Polis CLI
 
 ```bash
-# Option 1: Add to PATH (quick start)
-export PATH="/path/to/polis-cli/bin:$PATH"
+# Option 1: Add the directory holding the polis script to PATH (quick start)
+export PATH="/path/to/dir-containing-polis:$PATH"
 
 # Option 2: Create symlink
-sudo ln -s /path/to/polis-cli/bin/polis /usr/local/bin/polis
+sudo ln -s /path/to/polis /usr/local/bin/polis
 
 # Verify installation
 polis --help
@@ -68,17 +70,14 @@ polis --help
 For production use, copy the CLI tools directly into your content repository. This keeps your site self-contained—CLI versions are locked to your content, and everything deploys together.
 
 ```bash
-# Clone polis-cli
-git clone https://github.com/vdibart/polis-cli.git
-
 # Create your content repository
 mkdir my-site && cd my-site
 git init
 
-# Copy CLI tools and themes
-cp ../polis-cli/bin/polis ./bin/
-cp ../polis-cli/bin/polis-upgrade ./bin/
-cp -r ../polis-cli/themes ./themes/
+# Copy the CLI script (and, optionally, the upgrade script) into it
+mkdir -p bin
+cp /path/to/polis ./bin/
+cp /path/to/polis-upgrade ./bin/
 
 # Initialize your site
 ./bin/polis init
@@ -88,9 +87,9 @@ cp -r ../polis-cli/themes ./themes/
 ```
 
 **What to copy:**
-- `bin/polis` — Main CLI
-- `bin/polis-upgrade` — Upgrade script (optional)
-- `themes/` — Theme templates (required for `polis init` and `polis render`)
+- `polis` — Main CLI
+- `polis-upgrade` — Upgrade script (optional)
+- a `themes/` directory **beside the `polis` script**, if you want `init` to install themes from it — bash `init` copies themes from `<script dir>/themes` into `.polis/bundles/pub.polis.core/themes/` and warns if there is none
 
 **Why this approach:**
 - Your site is fully self-contained
@@ -110,44 +109,47 @@ After running `polis init`, your directory will contain:
 
 ```
 .
-├── .polis/
-│   ├── keys/
-│   │   ├── id_ed25519       # Private signing key (keep secret!)
-│   │   └── id_ed25519.pub   # Public verification key
-│   └── themes/              # Installed themes
-│       ├── turbo/           # Retro computing theme
-│       │   ├── index.html
-│       │   ├── post.html
-│       │   ├── comment.html
-│       │   ├── comment-inline.html
-│       │   ├── turbo.css
-│       │   └── snippets/
-│       ├── zane/            # Neutral dark theme
-│       └── sols/            # Nine Sols inspired theme
-├── metadata/                 # Metadata files
-│   ├── public.jsonl         # Content index (JSONL format)
-│   ├── blessed-comments.json # Index of approved comments
-│   ├── manifest.json        # Site metadata (active_theme)
-│   └── following.json       # Following list
-├── posts/                    # Your posts
-│   └── 20260106/            # Date-stamped directory (YYYYMMDD)
-│       ├── .versions/       # Version history for posts in this directory
-│       │   └── my-post.md
-│       ├── my-post.md
-│       └── my-post.html     # Generated by polis render
-├── comments/                 # Your comments
-│   └── 20260106/            # Date-stamped directory (YYYYMMDD)
-│       ├── .versions/       # Version history for comments in this directory
-│       │   └── reply.md
-│       ├── reply.md
-│       └── reply.html       # Generated by polis render
-├── snippets/                 # Global snippets (override theme snippets)
-│   └── about.md             # Custom about section
-├── styles.css               # Active theme's stylesheet (copied on render)
-├── index.html               # Site index (generated by polis render)
-└── .well-known/
-    └── polis                # Public metadata (author, public key, site_title)
+├── .well-known/
+│   └── polis                    # Public identity: public key, key history, site title, bundle pointer
+├── content/
+│   └── pub.polis.core/          # The core bundle's signed source
+│       ├── bundle.json          # Declares each content type's directory and public mount
+│       ├── index.jsonl          # Content index (one JSON entry per line)
+│       ├── post/
+│       │   └── 20260106/        # Date-stamped directory (YYYYMMDD)
+│       │       ├── .versions/   # Version history for posts in this directory
+│       │       │   └── my-post.md
+│       │       └── my-post.md   # The signed post
+│       ├── comment/
+│       │   ├── blessed.json     # Comments you have blessed on your posts
+│       │   └── 20260106/reply.md
+│       ├── follow/
+│       │   └── following.json   # Authors you follow
+│       ├── tag/                 # Tag files
+│       └── license/             # Your signed terms, once you state some
+├── posts/                       # Rendered HTML (the public mount), generated by polis render
+│   └── 20260106/my-post.html
+├── site/
+│   └── snippets/                # Global snippets (override theme snippets)
+│       └── about.md
+├── policies/rules.jsonl         # Public inbound policy (DMs, comments)
+├── index.html                   # Site index (generated by polis render)
+├── styles.css                   # Active theme's stylesheet (written on render)
+└── .polis/                      # Private — never published (init adds it to .gitignore)
+    ├── keys/
+    │   ├── id_ed25519           # Private signing key (keep secret!)
+    │   └── id_ed25519.pub       # Public verification key
+    ├── policies/rules.jsonl     # Private inbound policy (empty by default)
+    └── bundles/
+        ├── registry.json        # Active theme and shape
+        └── pub.polis.core/
+            ├── shapes/          # Page templates (v3, v4)
+            ├── themes/          # Installed themes
+            ├── posts/drafts/
+            └── comments/        # drafts/, pending/, denied/
 ```
+
+Content directories and public mounts come from `content/pub.polis.core/bundle.json`, not from fixed paths. (Output of `polis init` plus one `polis post` and `polis render`, Go CLI.)
 
 ## Commands
 
@@ -158,53 +160,78 @@ Initialize a new Polis directory with keys and metadata.
 ```bash
 polis init
 polis init --site-title "My Awesome Blog"
-polis init --site-title "My Blog" --register
+polis init --site-title "My Blog" --license reserved     # Go CLI
 ```
 
-**Options:**
-- `--site-title <title>` - Set a custom site title for branding (optional)
-- `--register` - Auto-register with discovery service after init (requires `POLIS_BASE_URL` and discovery service credentials)
-- `--posts-dir <dir>` - Custom posts directory (default: `posts`)
-- `--comments-dir <dir>` - Custom comments directory (default: `comments`)
-- `--keys-dir <dir>` - Custom keys directory (default: `.polis/keys`)
-- `--themes-dir <dir>` - Custom themes directory (default: `.polis/themes`)
+Registering with the discovery service is a separate step, once the site is deployed: [`polis register`](#polis-register).
 
-**Creates:**
+**Options (Go CLI):**
+- `--site-title <title>` - Set a custom site title for branding (optional)
+- `--author <name>` - Author name
+- `--email <address>` - Email address (optional)
+- `--theme <name>` - Initial theme (default: one is picked at random)
+- `--license reserved|open|none` - State terms without being asked (see [`polis license`](#polis-license))
+
+**Options (Bash CLI):** `--site-title`, plus path overrides for the files it creates — `--keys-dir`, `--posts-dir`,
+`--comments-dir`, `--snippets-dir`, `--themes-dir`, `--versions-dir`, `--public-index`, `--blessed-comments`,
+`--following-index`. The Go CLI accepts none of the path overrides.
+
+**Creates** (Go CLI; bash creates the same layout):
 - `.polis/keys/` - Ed25519 keypair for signing
-- `.polis/themes/` - Installed themes (turbo, zane, sols)
-- `posts/`, `comments/` - Content directories
-- `metadata/` - Metadata directory
-- `.well-known/polis` - Public metadata file (includes a default avatar)
-- `metadata/public.jsonl` - Content index (JSONL format)
-- `metadata/blessed-comments.json` - Blessed comments index
-- `metadata/following.json` - Following list
-- `metadata/manifest.json` - Site metadata (includes `active_theme` if set)
+- `.polis/bundles/` - the bundle registry (active theme and shape) and the installed shapes and themes
+- `content/pub.polis.core/` - the bundle declaration, `index.jsonl`, `comment/blessed.json`, `follow/following.json`
+- `.well-known/polis` - Public identity document (includes a default avatar and the genesis entry of your key history)
+- `policies/rules.jsonl` - Default inbound policy
+- `site/snippets/about.md` - An example snippet
+- `.gitignore` - keeps `.polis/` and `.env*` out of git
+
+**Terms (Go CLI, interactive only):** `polis init` also asks which terms your posts are offered under.
+Nothing is pre-selected: pressing enter states no terms and prints how to state some later. A
+non-interactive run with no `--license` states nothing. See [`polis license`](#polis-license).
+
+**Rosie (Go CLI, interactive only):**
+In an interactive terminal, `polis init` describes Rosie — the helper who approves or turns away comments
+using your own rules — and asks whether to switch her on. **Nothing is pre-selected**: only `yes` (or `y`)
+switches her on; pressing enter leaves her off. Switched on, `init` writes your own record of her
+(`basis: user-signed`) on your site, which needs `POLIS_BASE_URL` set; without it, `init` says to switch her
+on later in the web app. Rosie works only while the web app runs (`polis serve`); a site you only manage
+from the command line has no Rosie. A non-interactive or `--json` run asks nothing and states nothing, so
+`--json` output is unchanged. There is no command to switch her afterwards: use **Settings → Rosie**.
+The bash CLI does not ask ([parity](../implementation-parity.md)).
 
 **Default Avatar:**
 A default avatar is automatically generated during init with a random background color and white foreground. The avatar displays as a circle with the first letter of your handle. You can customize or remove it later via the webapp settings page (Randomize/Save/Reset buttons).
 
 ### `polis post <file>`
 
-Sign and publish a post or comment with frontmatter metadata.
+Sign and publish a new post from a markdown file.
 
 ```bash
-polis post posts/my-post.md
-polis post comments/my-comment.md
+polis post my-post.md
+polis post --filename hello my-post.md        # Go CLI: choose the published filename
+polis post --license open my-post.md          # Go CLI: terms for this post only
 ```
+
+⚠️ **Go CLI: flags go before the file.** The Go CLI stops reading flags at the first argument that is not
+one, so `polis post my-post.md --filename hello` publishes under the default name and ignores the flag.
 
 **What it does:**
-1. Generates SHA-256 hash of content
-2. Signs content with Ed25519 private key
-3. Adds frontmatter with metadata (version, author, signature)
-4. Appends entry to `public.jsonl` index
-5. Creates `.versions` file for version history
+1. Computes the SHA-256 hash of the canonicalized body (`current-version`)
+2. Writes the frontmatter (title, published, generator, version history, and your terms if you state any) and signs it with your Ed25519 key
+3. Writes the signed file to `content/pub.polis.core/post/YYYYMMDD/` and removes the original file
+4. Starts its version history in the directory's `.versions/`
+5. Appends an entry to `content/pub.polis.core/index.jsonl`
+6. Registers the post with the discovery service, when one is configured
 
-**Example output:**
+**Example output (Go CLI):**
 ```
-[i] Content hash: sha256:a3b5c7d9...
-[i] Signing content with Ed25519 key...
-[✓] Created canonical file: posts/20260106/my-post.md
+[✓] Moved original file into posts/
+Published: content/pub.polis.core/post/20260106/hello.md
+Title: Hello
+Version: sha256:282b4e19...
 ```
+
+Comments are not published with `post` — see [`polis comment`](#polis-comment).
 
 ### `polis republish <file>`
 
@@ -212,42 +239,42 @@ Republish an existing file with updated content (creates new version).
 
 ```bash
 # Edit your published file
-vim posts/20260106/my-post.md
+vim content/pub.polis.core/post/20260106/my-post.md
 
 # Republish with new version
-polis republish posts/20260106/my-post.md
+polis republish content/pub.polis.core/post/20260106/my-post.md
+polis republish posts/20260106/my-post.md      # Go CLI also accepts the public mount form
 ```
 
 **What it does:**
-1. Generates diff between old and new content
-2. Appends diff to `.versions` file
-3. Updates frontmatter with new version hash
-4. Re-signs content with new signature
-5. Rebuilds `public.jsonl` index (prevents duplicates)
+1. Generates a diff between the old and new body
+2. Appends it to the `.versions` file
+3. Updates the frontmatter with the new version hash and version history
+4. Re-signs the file
+5. Updates the file's entry in `index.jsonl` (no duplicate entry)
 
 **Version history:**
-- Stored in `.versions/` subdirectory alongside content files
-- Example: `posts/20260106/my-post.md` → `posts/20260106/.versions/my-post.md`
-- Directory name configurable via `POLIS_VERSIONS_DIR_NAME` (default: `.versions`)
-- Uses unified diff format (compatible with `diff`/`patch` tools)
-- Enables version reconstruction
+- Stored in a `.versions/` subdirectory beside the content file
+- Example: `content/pub.polis.core/post/20260106/my-post.md` → `content/pub.polis.core/post/20260106/.versions/my-post.md`
+- Bash reads the directory name from `VERSIONS_DIR_NAME` (default: `.versions`); the Go CLI always uses `.versions`
+- Diffs are unified diff format (compatible with `diff`/`patch` tools); the Go CLI runs the system `diff` to make them
 
 ### Snippets
 
-Snippets are reusable content fragments for templates. Unlike posts and comments, snippets don't require signing - just place plain `.md` or `.html` files in the `snippets/` directory.
+Snippets are reusable content fragments for templates. Unlike posts and comments, snippets don't require signing - just place plain `.md` or `.html` files in the `site/snippets/` directory.
 
 ```bash
 # Create a snippet - just write a file
-echo "Hi, I'm Vincent." > snippets/about.md
+echo "Hi, I'm Alice." > site/snippets/about.md
 
 # Use nested directories for organization
-mkdir -p snippets/homepage
-echo "<footer>© 2026</footer>" > snippets/homepage/footer.html
+mkdir -p site/snippets/homepage
+echo "<footer>© 2026</footer>" > site/snippets/homepage/footer.html
 ```
 
 **Snippets vs Themes:**
-- **Snippets** are content fragments stored in `snippets/` (global) or theme directories
-- **Themes** are complete styling packages stored in `.polis/themes/`
+- **Snippets** are content fragments stored in `site/snippets/` (global) or theme directories
+- **Themes** are complete styling packages installed in `.polis/bundles/pub.polis.core/themes/`
 - Snippets can be included in templates using `{{> path/to/snippet}}`
 - Snippet lookup order: **global snippets first, then theme snippets** (author overrides theme)
 
@@ -258,18 +285,20 @@ echo "<footer>© 2026</footer>" > snippets/homepage/footer.html
 - `{{> about.md}}` or `{{> about.html}}` - Load specific file extension
 
 **File formats:**
-- `.md` files are processed through pandoc (markdown → HTML)
+- `.md` files are converted to HTML (by pandoc in the Bash CLI; built in to the Go CLI)
 - `.html` files are used as-is
 
-**Example snippet (`snippets/about.md`):**
+**Example snippet (`site/snippets/about.md`):**
 ```markdown
-Hi, I'm Vincent. I build things with code and think deeply about
+Hi, I'm Alice. I build things with code and think deeply about
 how technology shapes human connection.
 ```
 
 **Note:** Snippets don't need frontmatter - just the content. If you have existing snippets with frontmatter from older versions, they'll continue to work (frontmatter is stripped during render).
 
 ### Publishing from stdin
+
+> **Bash CLI only.** The Go CLI reads a file and has no `-` form and no `--title`.
 
 You can pipe content directly to `polis post` and `polis comment` without creating temporary files:
 
@@ -323,29 +352,45 @@ echo "Content" | polis comment - https://bob.com/post.md --title "My Reply"
 echo "# Test" | polis --json post - --filename test.md | jq
 ```
 
-### `polis comment <url> [file]`
+### `polis comment`
 
-Create a comment in reply to a post or another comment (nested threads).
+Create a comment in reply to a post or another comment (nested threads). ⚠️ **The two CLIs have different
+`comment` commands.**
+
+**Bash CLI — `polis comment <file> [reply-to-url]`:**
 
 ```bash
-# Reply to a post
-polis comment https://alice.example.com/posts/20260106/hello.md
+# Reply to a post (the file is your reply, without frontmatter)
+polis comment my-reply.md https://alice.example.com/posts/20260106/hello.md
 
 # Reply to another comment (nested thread)
-polis comment https://bob.example.com/comments/20260105/reply.md my-reply.md
+polis comment my-reply.md https://bob.example.com/comments/20260105/reply.md
 
-# From file
-polis comment https://bob.example.com/posts/intro.md my-reply.md
+# The URL can also be given with --reply-to; with neither, you are asked for it
+polis comment my-reply.md --reply-to https://alice.example.com/posts/20260106/hello.md
 ```
 
-**What it does:**
-1. Creates comment file in `comments/YYYYMMDD/`
-2. Adds `in_reply_to` frontmatter (with `url` and `root-post` fields)
-3. Signs and publishes comment
-4. Appends entry to `public.jsonl` index
-5. Automatically requests blessing from discovery service
+What it does:
+1. Adds `in-reply-to` frontmatter (with `url` and `root-post` fields)
+2. Signs the comment and writes it to `content/pub.polis.core/comment/YYYYMMDD/`
+3. Registers it with the discovery service and requests a blessing from the post's author
 
-**Nested threads:** When replying to a comment (instead of a post), the CLI automatically detects this and fetches the original post URL (`root-post`) from the discovery service.
+**Nested threads:** When replying to a comment (instead of a post), bash detects this and fetches the original post URL (`root-post`) from the discovery service.
+
+**Go CLI — `polis comment draft | sign | list | sync`:**
+
+```bash
+polis comment draft https://alice.example.com/posts/20260106/hello.md
+# Created draft: <id>  — write your reply in .polis/bundles/pub.polis.core/comments/drafts/<id>.md
+polis comment sign <id>          # sign the draft; it moves to comments/pending/
+polis comment list [drafts|pending|blessed|denied]
+polis comment sync               # check the blessing status of pending comments and file them accordingly
+```
+
+⚠️ **`comment sync` checks status; it does not register a comment with the discovery service or request a
+blessing**, and no other Go CLI command does either (`polis blessing beseech` points back at `comment sync`).
+A comment drafted and signed with the Go CLI reaches the post's author only through the web app, which
+publishes, registers and requests the blessing in one step.
 
 **Frontmatter structure:**
 ```yaml
@@ -372,7 +417,31 @@ polis --json preview https://alice.com/posts/hello.md
 **What it shows:**
 - Frontmatter metadata (displayed dimmed/greyed)
 - Signature verification status (valid/invalid/missing)
+- **Which key verified it** — if the site has rotated its key, a post signed before the rotation is
+  checked against the key the site's published key history says was current at the post's
+  `published:` time, and the output says so:
+  ```
+  [✓] Signature verified — against a RETIRED key, not the site's current key
+      verified against a RETIRED key (epoch 0, current … → …), … CLAIMED signing time … — not against
+      the key the site publishes now. The signing time is the artifact's own claim and nothing here checks it.
+  ```
+  The site's current key is always tried first. See [key-history §4](../../signet/spec/key-history.md).
 - Content hash verification (valid/mismatch)
+- **Whether a discovery service witnessed it** — read from the site's published witness set, with the
+  witness's signature checked against the key its discovery service publishes:
+  ```
+  [✓] witnessed: a discovery service countersigned these bytes at 2026-09-13T12:00:01.500Z, so they existed by then …
+  [i] unwitnessed: no discovery service countersignature covers these bytes. The artifact still verifies …
+  [?] a witness is published for these bytes but could not be checked — …
+  ```
+  ⛔ **None of these is a failure.** An unwitnessed post is a weaker claim, not a broken one, and a
+  discovery service that cannot be reached leaves the witness unchecked. **One thing is:** a witness
+  the site publishes for these bytes that does **not** verify prints
+  `[x] INVALID WITNESS: …` — the site is claiming testimony it does not have, and `polis validate`
+  fails `content.witnesses` for it. If a post verified only
+  against a **retired** key and its earliest witness is later than that key's retirement, a `[!]` line
+  says the witness and the claimed signing time disagree. See
+  [witness](../../signet/spec/witness.md).
 - For comments: the in-reply-to URL
 - The content body
 
@@ -385,36 +454,85 @@ polis --json preview https://alice.com/posts/hello.md
 
 ### `polis rebuild`
 
-Rebuild local indexes and reset state. Automatically regenerates `manifest.json` after any rebuild.
+Regenerate the **content index** (`content/pub.polis.core/index.jsonl`) from the
+signed content on disk.
 
 ```bash
-# Rebuild posts/comments index
+# Rebuild the post entries
 polis rebuild --posts
 
-# Rebuild blessed comments index
+# Rebuild the comment entries and reconcile the blessing list
 polis rebuild --comments
 
-# Reset notification files
-polis rebuild --notifications
+# Rebuild the tag / attestation entries
+polis rebuild --tags
+polis rebuild --attestations
 
-# Rebuild everything
+# Rebuild every content type
 polis rebuild --all
 ```
 
 **Flags (combinable):**
-- `--posts` - Rebuild `public.jsonl` from posts and comments on disk
-- `--comments` - Rebuild `blessed-comments.json` from discovery service
-- `--notifications` - Reset notification files (`.polis/notifications.jsonl`, `.polis/notifications-manifest.json`)
-- `--all` - All of the above
 
-**Note:** `manifest.json` is automatically regenerated after any rebuild operation.
+- `--posts` — rebuild the `post` entries
+- `--comments` — **two jobs under one flag:** rebuild the `comment` entries of `index.jsonl` from your
+  comment files, **and** reconcile `blessed.json` (preserved when readable, recovered only when missing —
+  see below). They are different files with different rules; they share the flag because both are "comments"
+- `--tags` — rebuild the `tag` entries
+- `--attestations` — rebuild the `attestation` entries
+- `--all` — every content type above
+
+⭐ **A partial flag touches only its own type's lines.** `index.jsonl` carries
+entries for every content type your site publishes, and they arrive by different
+routes — a post is appended when you publish it, a comment when you bless it, a tag
+or attestation whenever you write one. So
+`--posts` replaces the post lines and leaves every other line **byte-identical**,
+including types this CLI does not recognise. The result says so:
+
+```
+[✓] Rebuild complete!
+  Content index: 31 entries
+    rebuilt: 8 post
+    preserved: 23 comment
+```
+
+⚠️ **`--comments` will not rebuild `blessed.json` from the discovery service.**
+That file is authored by you, not derived: the DS records *which* comment you
+blessed and never *which version*, so rebuilding from it would silently erase the
+version pin and with it the "edited since blessing" signal. If the file exists it
+is preserved untouched — signature and all. The DS is consulted **only to recover
+a file that is missing entirely**, and entries recovered that way carry no version
+pin because there was none to fetch. A file that exists but cannot be parsed is
+refused rather than overwritten; move it aside if you really want a fresh one.
+
+**What a rebuild will and will not touch:**
+
+| Regenerated | Preserved |
+|---|---|
+| the entries of the types you named | every other line of `index.jsonl`, byte for byte |
+| | `blessed.json` whenever it is readable |
+| | your content — rebuild never writes a post, comment, tag or attestation |
+
+A file the rebuild walks but cannot index — a post with no `published`, a tag
+with no `current_version` — is skipped and **counted**, not dropped in silence:
+
+```
+    skipped: 1 post
+```
+
+#### `--notifications` (deprecated)
+
+`polis rebuild --notifications` still works and prints a pointer. It never
+rebuilt anything: it *deletes* your local notification state, and nothing
+anywhere can put it back. The verb is now
+[`polis notifications clear`](#polis-notifications-clear).
+
+⚠️ It is **no longer part of `--all`**, for the same reason.
 
 **Use when:**
-- Index is corrupted or out of sync
-- You manually edited published files
-- You restored from backup
-- Notification state is corrupted
-- CLI version was upgraded (clears "metadata files need update" warning)
+- The index is out of sync with what is on disk
+- You manually edited or restored published files
+- Tailor (the self-hosted repair tool, see [Upgrading](#upgrading)) reports `index-rebuild`
 
 ### `polis index [--json]`
 
@@ -424,11 +542,8 @@ View the content index in JSONL or JSON format (read-only, outputs to stdout).
 # View as JSONL (default)
 polis index
 
-# View as JSON (grouped by type)
+# View as JSON
 polis index --json
-
-# Pipe to jq for pretty printing
-polis index --json | jq
 
 # Count posts
 polis index | grep -c '"type":"post"'
@@ -436,14 +551,18 @@ polis index | grep -c '"type":"post"'
 # View recent 10 entries
 polis index | tail -10 | jq
 
-# Extract all post titles
+# Extract all post titles (Go CLI)
+polis index --json | jq -r '.data.entries[] | select(.type == "post") | .title'
+
+# Extract all post titles (Bash CLI)
 polis index --json | jq -r '.posts[].title'
 ```
 
 **What it does:**
-- Reads `metadata/public.jsonl`
-- Default: outputs raw JSONL (one entry per line)
-- `--json` flag: converts to grouped JSON format for readability
+- Reads `content/pub.polis.core/index.jsonl` (the Go CLI finds it through the bundle declaration)
+- Default: outputs JSONL (one entry per line)
+- `--json`: the Go CLI wraps every entry in `{"status", "command", "data": {"entries", "count", "skipped", "skipped_lines"}}`; the Bash CLI groups entries into `{"version", "posts", "comments"}` and drops entries of any other type
+- A line that is not a JSON object is left out and **reported** by the Go CLI (`skipped` and `skipped_lines`, or a warning on stderr), never dropped in silence. The Bash CLI prints the file as-is without `--json`, and with `--json` fails on the whole file (a `jq` parse error, non-zero exit)
 - Read-only operation - never modifies the index file
 
 **Use cases:**
@@ -457,63 +576,33 @@ Reconstruct a specific version of a file from version history.
 
 ```bash
 # Get specific version
-polis extract posts/20260106/my-post.md sha256:abc123...
+polis extract content/pub.polis.core/post/20260106/my-post.md sha256:abc123...
 
 # Output to file
-polis extract posts/20260106/my-post.md sha256:abc123... > old-version.md
+polis extract content/pub.polis.core/post/20260106/my-post.md sha256:abc123... > old-version.md
 ```
+
+⚠️ **Known defect (Go CLI):** when a file is edited in place and then republished, the Go CLI records an
+empty diff for the new version, so extracting an *intermediate* version returns later text. The first
+version and the current version extract correctly.
 
 ### Starting Fresh
 
 To completely reset your Polis installation and start over, move or remove the following files/directories, then run `polis init`:
 
 - `.polis/` - Configuration and signing keys
-- `.well-known/` - Public metadata
-- `posts/` - Published posts
-- `comments/` - Published comments
-- `metadata/` - Index and blessing data
+- `.well-known/` - Public identity
+- `content/` - Signed posts, comments, index, follow file and blessing list
+- `posts/`, `comments/` - Rendered HTML
+- `policies/`, `site/` - Policy and snippets
 
 **Example:**
 ```bash
-rm -rf .polis .well-known posts comments metadata
+rm -rf .polis .well-known content posts comments policies site
 polis init
 ```
 
 **Note:** This will generate new signing keys. If you want to keep your identity, back up `.polis/keys/` before removing.
-
-### `polis migrate <new-domain>`
-
-Migrate all content to a new domain. This command handles the complete migration process including re-signing files and updating the discovery service database.
-
-```bash
-polis migrate newdomain.com
-```
-
-**What it does:**
-1. Auto-detects current domain from published files
-2. Updates `canonical_url` in all posts and comments
-3. Updates `in_reply_to` and `root_post` URLs (only for own content)
-4. Re-signs all files with new URLs
-5. Updates `metadata/blessed-comments.json`
-6. Updates `.well-known/polis` endpoints
-7. Rebuilds `metadata/public.jsonl` index
-8. Updates discovery service database (preserves blessing status)
-9. Stages all changes in git
-
-**Example output:**
-```
-[✓] Migration complete!
-    Old domain: olddomain.com → New domain: newdomain.com
-    Posts: 3, Comments: 5, Database rows: 5
-```
-
-**JSON mode:** See [json-mode.md](json-mode.md) for response format.
-
-**Important notes:**
-- Domain should not include protocol (use `example.com`, not `https://example.com`)
-- Comments you made on others' posts will have their `in_reply_to`/`root_post` preserved (pointing to the other author's domain)
-- The discovery service database update requires `DISCOVERY_SERVICE_URL` and `DISCOVERY_SERVICE_KEY` to be configured
-- If database update fails, local migration still succeeds - you can re-beseech comments later
 
 ### `polis version`
 
@@ -525,35 +614,48 @@ polis version
 
 **Example output:**
 ```
-polis 0.65.0
+polis <version>
 ```
 
 ### `polis about`
 
-Display complete system information including site details, versions, configuration, keys, discovery status, and project links.
+Display site details, the CLI version, the public key, discovery registration status, and directory paths.
 
 ```bash
 polis about
 polis --json about
 ```
 
-**Example output:**
+**Example output (Go CLI):**
 ```
-Polis - Decentralized Social Networking
-────────────────────────────────────────
-SITE        https://example.com (My Blog)
-CLI         0.29.0
-KEYS        initialized (SHA256:abc123...)
-DISCOVERY   registered
+[i] Polis CLI version: <version>
+
+=== Site Information ===
+  Author: alice
+  Created: 2026-01-06T12:00:00Z
+  Site Title: My Blog
+  Base URL: https://alice.example.com
+  Theme: zane
+  Posts: 3
+  Comments: 1
+  Following: 2
+
+=== Public Key ===
+  ssh-ed25519 AAAAC3Nza...
+
+=== Discovery Service ===
+  URL: https://ds.polis.pub
+  Status: registered
+  Registered: 2026-01-06T12:05:00Z
+
+=== Directories ===
+  ...
 ```
 
-Displays site details, versions, configuration paths, key status, and discovery registration.
-
-**Registration status values:**
-- **registered** - Site is registered with the discovery service
-- **not registered** - Site is not publicly listed (run `polis register` to join the directory)
-- **discovery not configured** - `DISCOVERY_SERVICE_URL` or `DISCOVERY_SERVICE_KEY` not set
-- **check failed** - Could not reach the discovery service
+**Registration status (Go CLI):** `registered`, or `not registered` — which is also what a failed check
+reports. With `POLIS_BASE_URL` unset, no check is made and the status is blank. The Bash CLI lays the
+output out differently (SITE, VERSIONS, NOTIFICATIONS, CONFIGURATION sections) and includes metadata file
+versions.
 
 **JSON mode:** Returns structured data with all sections. See [json-mode.md](json-mode.md) for the full JSON response format.
 
@@ -566,9 +668,9 @@ polis register
 ```
 
 **Features:**
-- **Idempotent** - Running on an already-registered site shows current status
-- **Attestation verification** - Verifies the discovery service's signature on your registration
-- **Automatic metadata** - Pulls email and author name from `.well-known/polis` if available
+- **Idempotent** (Bash CLI) - Running on an already-registered site shows current status
+- **Attestation verification** (Bash CLI) - Verifies the discovery service's signature on your registration
+- **Automatic metadata** - Sends the author name from `.well-known/polis` if set; your email is never sent
 
 **Example output (new registration):**
 ```
@@ -596,26 +698,36 @@ Registration Details:
   (Server signature verified against locally reconstructed payload)
 ```
 
+The example output above is the Bash CLI's. The Go CLI prints `Site registered: <domain>` and `Registry URL: …`,
+and also reconciles your follows to the discovery service.
+
 **Requirements:**
-- `DISCOVERY_SERVICE_URL` and `DISCOVERY_SERVICE_KEY` must be set
-- `POLIS_BASE_URL` must be set (domain is extracted from this)
+- `POLIS_BASE_URL` must be set (domain is extracted from this); `DISCOVERY_SERVICE_URL` defaults to `https://ds.polis.pub`
 - Your `.well-known/polis` must be accessible via HTTPS
 
 **JSON mode:** Returns registration details including `service_attestation` for verification.
 
 ### `polis unregister [--force]`
 
-Unregister your site from the discovery service. This performs a **hard delete** (privacy promise) - all registration data is permanently removed.
+Unregister your site from the discovery service. The service removes your site's registration record, and
+with it the key history it holds for your domain. ⚠️ **Records of your content, your relationships and your
+stream events are not deleted** by unregistering.
+
+⚠️ **Today this fails for a site that has published content:** the service cannot remove the key history while
+content records refer to it, and returns a server error. Nothing is removed and the site stays registered (the
+local marker is kept, because the CLI removes it only after the service confirms).
 
 ```bash
-# Interactive confirmation required
+# Bash CLI: interactive confirmation required
 polis unregister
 
-# Skip confirmation (for scripting)
+# Bash CLI: skip confirmation (for scripting)
 polis unregister --force
 ```
 
-**Warning displayed:**
+⚠️ **The Go CLI asks for no confirmation** and has no `--force` flag: `polis unregister` unregisters immediately.
+
+**Warning displayed (Bash CLI):**
 ```
 WARNING: Unregistering will remove your site from the public directory.
 
@@ -628,16 +740,16 @@ Are you sure you want to unregister example.com? (type 'yes' to confirm)
 ```
 
 **Effects of unregistering:**
-- Your site is removed from the public directory
-- Your content is no longer discoverable through the network
-- Other authors cannot interact with your posts via the discovery service
+- Your site's registration record (and the key history the service holds for it) is deleted — ⚠️ currently only for a site that has published no content
+- Write operations (publish, comment, bless, follow announcements) are blocked until you register again
+- The service's records of your content, relationships and stream events remain
 - You can rejoin anytime with `polis register`
 
 **JSON mode:** Skips interactive confirmation automatically.
 
-### `polis render [--force] [--no-markers]`
+### `polis render [--force]`
 
-Render markdown posts and comments to static HTML files using pandoc.
+Render your signed posts and comments to static HTML using the active shape and theme.
 
 ```bash
 # Render all posts and comments (skips up-to-date files)
@@ -646,93 +758,65 @@ polis render
 # Force re-render all files
 polis render --force
 
-# Render without snippet markers (for production/clean HTML)
+# Bash CLI: render without snippet markers
 polis render --no-markers
 ```
 
 **What it does:**
-1. On first render, automatically selects a theme from available themes
-2. Converts all markdown files in `posts/` and `comments/` to HTML
-3. Uses pandoc for markdown-to-HTML conversion
-4. Applies theme templates with metadata substitution
-5. Embeds blessed comments directly in post HTML files
-6. Copies theme CSS to `styles.css` at site root
-7. Generates an `index.html` listing all posts
-8. Skips files where HTML is newer than markdown (unless `--force`)
-9. **Note:** Remote blessed comments are cached. If a comment author updates their comment, use `--force` to fetch the latest content.
+1. On first render, if no theme is active, selects one at random from the installed themes
+2. Converts each post and comment to HTML — with pandoc in the Bash CLI, built in to the Go CLI (which also refreshes the installed shapes and themes first)
+3. Applies the active shape's templates and the active theme's CSS
+4. Writes each page under the type's public mount (`posts/YYYYMMDD/my-post.html`, `comments/YYYYMMDD/reply.html`)
+5. Writes `styles.css` and `index.html` at the site root (the v4 stream shape also writes its scripts and a sitemap)
+6. Skips files whose HTML is newer than the source (unless `--force`)
 
-**Requires:** pandoc (install with `apt install pandoc` or `brew install pandoc`)
+**Requires (Bash CLI only):** pandoc (install with `apt install pandoc` or `brew install pandoc`)
 
-**Generated files:**
-- `posts/YYYYMMDD/my-post.html` - Rendered post with embedded blessed comments
-- `comments/YYYYMMDD/my-comment.html` - Rendered comment
-- `index.html` - Site index listing all posts
-
-**Example output:**
+**Example output (Go CLI):**
 ```
-=== Render Configuration ===
-[i] POLIS_BASE_URL: https://example.com
-[i] Posts dir: posts
-[i] Comments dir: comments
-[i] Blessed comments: 2 post(s) with blessed comments
-
-=== Rendering Posts ===
-Processing: posts/20260106/hello.md
-  -> Rendered: posts/20260106/hello.html
-
-=== Rendering Comments ===
-Processing: comments/20260106/reply.md
-  -> Rendered: comments/20260106/reply.html
-
-=== Generating Index ===
-Generated: index.html
-
-[✓] Rendering complete!
-[i]   Posts rendered: 1 (skipped: 0)
-[i]   Comments rendered: 1 (skipped: 0)
-[i]   Index: index.html
+Rendered 1 posts, 0 comments
+Generated index.html
 ```
 
 #### Themes
 
-Polis ships with six themes (turbo, zane, sols, vice, especial, especial-light). On first render, a theme is randomly selected. To change themes:
+Polis installs its themes into `.polis/bundles/pub.polis.core/themes/`; the list, including the two reserved for
+polis's own pages, is in [Themes → What ships today](../../general/concepts/themes.md#what-ships-today). To change themes:
 
-- **Dashboard**: Open **Settings > Theme** and click a theme card. The site re-renders automatically.
-- **CLI**: Edit `metadata/manifest.json`, set `active_theme`, then run `polis render --force`.
+- **Webapp**: Open **Settings**, choose a theme from the **Site Theme** dropdown and click **Change Theme**. The site re-renders.
+- **CLI**: set `active_theme` in `.polis/bundles/registry.json` to the fully-qualified name (for example `pub.polis.themes.vice`), then run `polis render --force`. The Go CLI's `polis init --theme <name>` sets it at creation.
 
-For theme customization, creating custom themes, template variables, and mustache syntax, see [TEMPLATING.md](templating.md).
+⚠️ A theme picked at random by the CLI may be one of the reserved two.
 
-#### Embedded Source
+For template syntax, variables and snippets, see [templating.md](templating.md).
 
-Each rendered HTML file includes the original markdown source and frontmatter in an HTML comment at the end of the file:
+#### Embedded Source (Bash CLI)
+
+Each HTML file the Bash CLI renders ends with the source's frontmatter in an HTML comment:
 
 ```html
 <!--
 === POLIS SOURCE ===
-Source: posts/20260106/hello.md
+Source: https://alice.example.com/posts/20260106/hello.html
 title: Hello World
 published: 2026-01-06T12:00:00Z
-current-version: abc123...
-signature: AAAAB3NzaC1...
----
-This is my first post!
+current-version: sha256:abc123...
+signature: U1NIU0lH...
 === END POLIS SOURCE ===
 -->
 ```
 
-This enables:
-- Verification that the HTML matches the signed source
-- Extraction of original markdown from rendered HTML
-- Debugging template issues by comparing source to output
+Only the frontmatter is included, not the body. To verify a post, fetch its signed source under
+`content/` — see [Signature Verification](#signature-verification).
 
-#### Snippet Markers
+#### Snippet Markers (Bash CLI)
 
-By default, `polis render` injects hidden markers around snippet content to enable in-browser snippet editing in the webapp. Each snippet inclusion (`{{> snippet-name}}`) is wrapped with:
+By default, bash `polis render` injects hidden markers around snippet content to enable in-browser snippet editing in the webapp. Each snippet inclusion (`{{> snippet-name}}`) is wrapped with:
 
 ```html
-<!-- POLIS-SNIPPET-START: global:snippet-name path=snippets/snippet-name.html -->
+<!-- POLIS-SNIPPET-START: global:snippet-name path=snippet-name -->
 <span class="polis-snippet-boundary" data-snippet="global:snippet-name"
-      data-path="snippets/snippet-name.html" data-source="global" hidden></span>
+      data-path="snippet-name" data-source="global" hidden></span>
 <!-- actual snippet content -->
 <!-- POLIS-SNIPPET-END: global:snippet-name -->
 ```
@@ -740,8 +824,8 @@ By default, `polis render` injects hidden markers around snippet content to enab
 **Marker behavior:**
 - The hidden `<span>` provides a DOM anchor for JavaScript without affecting layout
 - `data-snippet` contains the snippet identifier (source:name format)
-- `data-path` contains the file path for API calls
-- `data-source` indicates "global" (from `snippets/`) or "theme" (from theme)
+- `data-path` contains the snippet path as written in the template, without its `global:`/`theme:` prefix
+- `data-source` indicates "global" (from `site/snippets/`) or "theme" (from theme)
 - Nested snippets each get their own markers, creating a hierarchy
 
 **Disabling markers:**
@@ -765,97 +849,110 @@ Parent command for blessing-related operations. Must be followed by a subcommand
 
 #### `polis blessing requests`
 
-List pending blessing requests for your posts.
+List pending blessing requests for your posts. Each request is identified by the comment's version hash
+(`sha256:…`), which is the argument `grant` and `deny` take.
 
 ```bash
 polis blessing requests
 ```
 
-**Example output:**
+**Example output (Go CLI):**
 ```
-ID    Author              Post                    Status
-42    bob@example.com     /posts/hello.md         pending
-73    carol@example.com   /posts/hello.md         pending
+Pending blessing requests (1):
+
+  Version: sha256:9f2a...
+  Author: bob.example.com
+  Reply to: https://alice.example.com/posts/20260106/hello.md
+  Comment URL: https://bob.example.com/comments/20260106/reply.md
 ```
+
+The Bash CLI prints the same requests as a table, and runs `blessing sync` first.
 
 #### `polis blessing grant <hash>`
 
-Approve a pending blessing request by content hash.
+Approve a pending blessing request by the comment's version hash.
 
 ```bash
-polis blessing grant abc123-def456
+polis blessing grant sha256:9f2a...
 ```
 
+The Go CLI also accepts the comment's URL in place of the hash (the Bash CLI accepts a short hash).
+
 **What it does:**
-1. Updates discovery service status to "blessed"
-2. Adds entry to `metadata/blessed-comments.json`
+1. Finds the pending request, which carries the comment URL and the post it replies to, then updates the discovery service's record of it to granted
+2. Adds the comment to `content/pub.polis.core/comment/blessed.json`, signed with your key
 3. Comment becomes visible to your audience
 
 #### `polis blessing deny <hash>`
 
-Reject a pending blessing request by content hash.
+Reject a pending blessing request by the comment's version hash.
 
 ```bash
-polis blessing deny abc123-def456
+polis blessing deny sha256:9f2a...
 ```
 
 **What it does:**
-1. Updates discovery service status to "denied"
+1. Updates the discovery service's record of the request to denied
 2. Comment remains on author's site but won't be amplified
 
 #### `polis blessing beseech <hash>`
 
-Re-request blessing for a comment by content hash (retry after changes).
+Re-request blessing for a comment you wrote, by its version hash (retry after changes).
 
 ```bash
-polis blessing beseech abc123-def456
+polis blessing beseech sha256:9f2a...
 ```
 
 **Use when:**
 - Original request failed
 - You updated the comment and want to re-request
 
+⚠️ **Bash CLI only in practice.** The Go CLI checks that the discovery service knows the comment and then
+prints a pointer to `polis comment sync`, which does not re-request a blessing (see [`polis comment`](#polis-comment)).
+
 #### `polis blessing sync`
 
-Synchronize auto-blessed comments from the discovery service to your local `blessed-comments.json`.
+Copy blessings recorded at the discovery service for your posts into your local `blessed.json`.
 
 ```bash
 polis blessing sync
 ```
 
 **What it does:**
-1. Fetches all blessed comments for your posts from discovery service
-2. Compares with local `metadata/blessed-comments.json`
-3. Adds any missing entries (e.g., comments auto-blessed while you were offline)
+1. Fetches the blessed comments on your posts from the discovery service
+2. Compares them with `content/pub.polis.core/comment/blessed.json`
+3. Adds any missing entries (e.g., comments blessed from another device while you were offline)
 
 **When to use:**
 - After being offline for a while
-- To ensure local file matches discovery service
-- Automatically called when running `polis blessing requests`
+- To ensure the local file matches the discovery service
 
 **Example output:**
 ```
-[i] Syncing blessed comments from discovery service...
 [✓] Synced 3 comment(s) to blessed-comments.json
 ```
 
 ### `polis follow <author-url>`
 
-Follow an author to auto-bless their future comments on your posts.
+Follow an author. Their comments waiting on your posts are blessed now, and the default rules bless their future ones.
 
 ```bash
 polis follow https://alice.example.com
 ```
 
 **What it does:**
-1. Adds author to `metadata/following.json`
-2. Auto-blesses any existing pending comments from this author
-3. Future comments from this author are automatically blessed
+1. Blesses this author's comments on your posts that are pending or were denied (your own act, signed with your key)
+2. Adds the author to `content/pub.polis.core/follow/following.json`, signed with your key
+3. Future comments from this author match `bless pub.polis.comment from following` — decided by your own site when Rosie runs there (the web app); a CLI-only site decides nothing automatically
+
+The Bash CLI also announces the follow to the discovery service (`pub.polis.follow.announced`), so the author
+can see it; the Go CLI's `follow` does not announce. Following from the web app does.
 
 **Example output:**
 ```
-[OK] Following alice.example.com
-[OK] 3 existing comments auto-blessed
+[✓] Successfully followed https://alice.example.com
+  - Added to following.json
+  - Blessed 3 comment(s)
 ```
 
 ### `polis unfollow <author-url>`
@@ -867,129 +964,74 @@ polis unfollow https://alice.example.com
 ```
 
 **What it does:**
-1. Removes author from `metadata/following.json`
-2. Removes all blessed comments from this author (nuclear option)
+1. Denies every comment from this author that you had blessed, at the discovery service (nuclear option)
+2. Removes the author from `content/pub.polis.core/follow/following.json`
 
 **Warning:** This is a destructive action - all previously blessed comments from this author will be hidden.
 
 ### `polis notifications`
 
-View and manage notifications about activity on your site and from authors you follow.
+List notifications about activity on your site and from authors you follow, along with blessing requests
+waiting on your posts.
 
 ```bash
 # List unread notifications (default)
 polis notifications
 
-# List all notifications
-polis notifications list
+# Include notifications already read
+polis notifications list --all
 
-# Show specific types
-polis notifications list --type new_follower,version_available
+# Bash CLI: show only some types
+polis notifications list --type version_pending
 
 # JSON output
 polis --json notifications
 ```
 
-**Notification types:**
-- `version_available` - A new CLI version is available
-- `version_pending` - You upgraded but metadata files need update (run `polis rebuild`)
-- `new_follower` - Someone you don't follow started following you
-- `new_post` - An author you follow published a new post
-- `blessing_changed` - Your comment was blessed or unblessed
+The two CLIs keep notifications in different places. The Go CLI (and the web app) reads the state it
+syncs from the discovery service, `.polis/ds/<discovery-domain>/pub.polis.core/state/pub.polis.notification.jsonl`;
+which events become notifications is set by the `notifications` rules in `.polis/bundles/registry.json`
+(new posts from authors you follow, comments and blessing requests on your posts, blessings of your
+comments, new and lost followers). The Bash CLI reads `.polis/notifications.jsonl`, where the only
+notification it records itself is `version_pending` (the CLI was upgraded and metadata files need `polis rebuild`). Marking notifications
+read happens in the web app; neither CLI has a command for it.
 
-#### `polis notifications read <id>`
+#### `polis notifications clear`
 
-Mark a notification as read (removes it from the list).
+> **Go CLI only.**
 
-```bash
-polis notifications read notif_1737388800_abc123
-
-# Mark all as read
-polis notifications read --all
-```
-
-#### `polis notifications dismiss <id>`
-
-Dismiss a notification without marking as read.
+Delete this site's local notification state.
 
 ```bash
-polis notifications dismiss notif_1737388800_abc123
-
-# Dismiss old notifications
-polis notifications dismiss --older-than 30d
+polis notifications clear
 ```
 
-#### `polis notifications sync`
+⚠️ **This is a delete and nothing can undo it.** No source anywhere holds a copy
+of your read/unread state, so there is nothing to restore it from. It used to
+live under `polis rebuild --notifications`, which is why that flag still works
+and points here.
 
-Sync notifications from the discovery service.
+### When a comment is blessed without you
 
-```bash
-# Fetch new notifications
-polis notifications sync
-
-# Reset watermark and do full re-sync
-polis notifications sync --reset
-```
-
-#### `polis notifications config`
-
-Configure notification preferences.
-
-```bash
-# Show current config
-polis notifications config
-
-# Set poll interval
-polis notifications config --poll-interval 30m
-
-# Enable/disable notification types
-polis notifications config --enable new_post
-polis notifications config --disable version_available
-
-# Mute notifications from specific domain
-polis notifications config --mute spam.com
-polis notifications config --unmute spam.com
-```
-
-**Local storage:**
-- `.polis/notifications.jsonl` - Notification log (one per line)
-- `.polis/notifications-manifest.json` - Preferences and sync state
-
-### `polis follow --announce`
-
-When following or unfollowing an author, you can optionally announce this to the discovery service:
-
-```bash
-# Follow and announce (others can discover you follow alice)
-polis follow https://alice.com --announce
-
-# Unfollow and announce
-polis unfollow https://alice.com --announce
-```
-
-**Privacy note:** Without `--announce`, follow/unfollow is local-only. With `--announce`, your follow action is recorded in the discovery service (opt-in).
-
-### Auto-Blessing
-
-Comments can be automatically blessed (no manual approval required) in two scenarios:
+Registering a comment never blesses it: the discovery service records the request as pending. Comments are blessed automatically only by **your own site**, applying your rules, when Rosie is switched on there (the web app — localhost, `serve`, or polis.pub). A CLI-only site has no Rosie, so every request waits for `polis blessing grant`. With the default rules, three scenarios bless automatically — your own comments on your own posts (`bless pub.polis.comment from self`), and these two:
 
 **1. Global Trust (Following)**
-When you follow an author, ALL their future comments on ANY of your posts are auto-blessed.
+When you follow an author, ALL their future comments on ANY of your posts are blessed.
 
 ```bash
-# Follow Alice - all her comments on your posts are now auto-blessed
+# Follow Alice - her comments on your posts are now blessed by your site
 polis follow https://alice.example.com
 ```
 
 **2. Thread-Specific Trust**
-When you manually bless a comment from an author, their future comments *on the same post* are auto-blessed. This allows trust to be scoped to specific conversations.
+When you have blessed a comment from an author, their future comments *on the same post* are blessed. Your site answers this from its own `blessed.json`, keyed by the thread's root post. This allows trust to be scoped to specific conversations.
 
 ```
 Example:
 1. Bob comments on your "Intro to Polis" post
-2. You bless Bob's comment (polis blessing grant 123)
-3. Bob comments again on "Intro to Polis" → auto-blessed!
-4. Bob comments on your "Advanced Polis" post → NOT auto-blessed (different post)
+2. You bless Bob's comment (polis blessing grant sha256:…)
+3. Bob comments again on "Intro to Polis" → blessed by your site
+4. Bob comments on your "Advanced Polis" post → NOT blessed (different post)
 ```
 
 **Precedence:** Global trust (following) takes priority. If you follow someone, thread-specific trust is irrelevant - they're trusted everywhere.
@@ -1012,8 +1054,9 @@ polis dm <subcommand> [options]
 | `read` | `polis dm read <conversation_id>` | Read messages in a conversation (marks as read) |
 | `send` | `polis dm send <recipient_url> <message>` | Send a DM to a recipient |
 | `retry` | `polis dm retry [conversation_id]` | Retry delivering unsent messages |
-| `config` | `polis dm config` | Show DM acceptance policy from rules.jsonl |
+| `config` | `polis dm config` | Show the DM rules in your public and private policy files |
 | `decrypt` | `polis dm decrypt [--phrase] [--conversation <id>] [--json]` | Decrypt and print your messages from a local or exported site |
+| `publish-key` | `polis dm publish-key` | Re-publish your DM messages key into `.well-known/polis` (repair) |
 
 **Examples:**
 
@@ -1045,13 +1088,11 @@ polis dm decrypt --conversation f8e7d6c5b4a3f2e1 --json
 
 **Decrypting an export (`polis dm decrypt`):** point it at an unzipped `.polis` export (or a local site) to print your message plaintext. Bootstrap-epoch messages (received before you set a message password) open with no prompt — the server-held key travels in the export. Password-epoch messages prompt for your **password** (or, with `--phrase`, your **recovery phrase**); the secret is read without echo, used only for the local unwrap, and never stored or transmitted. All decryption runs locally with the same crypto as the browser. The friendlier read path is to run `polis serve` in the export and read in the web UI — see [`polis serve`](#polis-serve-options) below. The on-disk format is documented in `cli-go/pkg/dm/FORMAT.md`.
 
-**Policy:** DM acceptance is controlled via policy rules in `.polis/policies/rules.jsonl`. By default, `allow pub.polis.dm from following` + `deny pub.polis.dm from all` restricts DMs to followed domains. The policy system also supports `emit`/`omit` verbs for blessing and notification control, and `self`/`thread-blessed` sources. See `docs/cli/user/policies.md` for the full grammar and common recipes. Use `polis dm config` to view current rules.
+**Policy:** DM acceptance is controlled by policy rules — the public `policies/rules.jsonl` and the private `.polis/policies/rules.jsonl`. By default, `allow pub.polis.dm from following` + `deny pub.polis.dm from all` (in the public file) restricts DMs to followed domains. See [policies.md](policies.md) for common recipes and the [policy grammar](../../general/reference/policy-grammar.md) for every verb and source. Use `polis dm config` to view current rules.
 
 All subcommands support `--json` for machine-readable output.
 
 ### `polis tag`
-
-> **Go CLI only.** Tag commands are not available in the Bash CLI.
 
 Manage tags on content. Tags are lightweight labels you apply to posts and feed items for personal organization.
 
@@ -1063,7 +1104,7 @@ polis tag <subcommand> [options]
 
 | Subcommand | Usage | Description |
 |------------|-------|-------------|
-| `list` | `polis tag list [--tag <name>] [--target <url>]` | List tags, optionally filtered by tag name or target URL |
+| `list` | `polis tag list` | List your tags, with how many targets each has |
 | `show` | `polis tag show <name>` | Show all content tagged with a specific tag |
 | `apply` | `polis tag apply <name> <target-url>` | Apply a tag to a target URL |
 | `remove` | `polis tag remove <name> <target-url>` | Remove a tag from a target URL |
@@ -1090,17 +1131,25 @@ polis tag delete old-topic
 
 All subcommands support `--json` for machine-readable output.
 
+`apply`, `remove` and `delete` also bring the tag's line in `index.jsonl` up to date, so anyone
+reading your index can find the tag without you running `polis rebuild`. ⚠️ **The Bash CLI's tag commands
+do not** — a tag changed with bash keeps a stale index line until a Go CLI write or `polis rebuild --tags`.
+
 ### `polis clone <url> [target-dir]`
 
-Clone a remote polis site to a local directory. Useful for archiving someone's content, reading offline, or operating on a snapshot of a site you don't own.
+Copy someone else's live polis site to a local folder, to **read and analyse it offline** — for example
+with [`polis validate ./alice`](#polis-validate). ⚠️ **A clone is not a way to serve their content or
+settings as your own.** It carries no keys and no policies, and it is not your site.
 
 **Usage:**
 ```bash
 polis clone https://alice.polis.pub               # target dir derived from domain
 polis clone https://alice.polis.pub ./alice       # explicit target dir
-polis clone https://alice.polis.pub --full        # re-download all content
-polis clone https://alice.polis.pub --diff        # only download changes (default after first clone)
+polis clone --full https://alice.polis.pub        # re-download all content
+polis clone --diff https://alice.polis.pub        # only download changes (default after first clone)
 ```
+
+⚠️ **Go CLI: flags go before the URL.** After the URL, `--full` is read as the target directory.
 
 **Flags:**
 - `--full` — re-download all content, ignore cached state
@@ -1108,30 +1157,555 @@ polis clone https://alice.polis.pub --diff        # only download changes (defau
 
 If neither flag is given the clone package decides based on whether a clone-state file exists in the target.
 
+**What a clone contains.** The site's identity document, stored as the exact bytes it published;
+every bundle declaration it names, at the path it names; posts and comments from its index; the
+follow file and the blessing list; the signed licence document if the site points at one; and
+`.well-known/did.json` if it publishes one. **Content directories come from the site's own bundle
+declaration**, so a site that moved a directory clones correctly rather than appearing empty.
+
+It fetches the **canonical** path (`content/…/post/…/slug.md`), never the rendered mount (`/posts/…`).
+The canonical path holds the signed source; the mount serves a projection of it, and what you verify
+is the source.
+
+**What a clone cannot contain, and says so.** `pub.polis.tag` and `pub.polis.attestation` records are
+flat files, found only through the source's `index.jsonl` — HTTP does not list directories. A clone
+collects every one the index lists. When the index lists none of a type, the clone reports that type
+under *"Not collected"* rather than omitting it silently: an index is only as fresh as the site's last
+write or heal, so **no entries means nothing indexed, never nothing exists**, and a later
+[`polis validate`](#polis-validate) must not look like it found nothing wrong with artifacts nobody
+fetched. To check one you know the address of, use `polis validate <url>`.
+
+**A clone never carries `.polis/`** — no private key, no salt, no keyring. So a clone is a real site
+directory with genuinely reduced visibility, and `polis validate ./alice` reports the owner-only
+checks as NOT CHECKED rather than passed.
+
+**A clone never writes outside its folder.** Every path it writes comes from the source site — index
+entries, bundle declarations, the licence pointer — so each is checked first. An absolute path, a path
+that climbs out (`../`), or one that would leave through a symlink already inside the folder is skipped
+and reported (*"Refused"*, or `rejected_paths` in JSON mode); the rest of the clone continues.
+
 ### `polis rotate-key`
 
-Rotate your site's Ed25519 signing key. Generates a fresh keypair, publishes the new public key, records the rotation in your key history at the DS, and updates `.well-known/polis`. Existing signed content remains verifiable via the key history.
+Rotate your site's Ed25519 signing key. Generates a fresh keypair, signs a handover with the **old**
+key, tells the discovery service, publishes the new key in `.well-known/polis` — and **appends the
+handover to your site's own key history**, so what you signed under the old key stays verifiable from
+your site alone (with two exceptions, below).
 
 **Usage:**
 ```bash
-polis rotate-key                       # rotate; keep old private key archived
-polis rotate-key --delete-old-key      # rotate and securely delete the old private key
+polis rotate-key
+```
+
+⭐ **This is why rotating is safe.** Your site publishes `public_key_history` beside `public_key`:
+every key you have held, when it was current, and the signature the previous key made handing
+authority to the next. Anyone can walk that chain from your current key back to your first one, resolve
+a post you signed two years ago to the key that was current when you signed it, and verify it — **with
+no service to ask.** The same walk resolves an attestation by its `asserted` time and a tag file or
+licence by its `updated` time. ⚠️ **The exceptions are your follow file and your blessing list:** they
+carry no signing time, so they verify against the current key only, and read as not verifying until your
+next follow/unfollow or blessing decision re-signs them.
+
+Nothing to do to enable it. `polis init` writes the first entry; each rotation appends one.
+
+**No old key is kept, and there is no `--delete-old-key`.**
+
+Earlier versions moved the retired private key to `id_ed25519.old` and offered a flag to skip that.
+Both are gone. The single fixed filename was a poor substitute for a chain — rotate twice and the
+second rotation overwrote the first backup, so your earliest key was simply gone. The published
+history replaces it, and it keeps the **public** halves, which is what a verifier actually needs. A
+spare copy of a retired private key was never what made old signatures checkable; it was only
+something to lose. ⚠️ An `.old` file already on disk is left alone; nothing deletes it for you, and
+nothing new is written.
+
+**Effect on your DID document:** `.well-known/did.json` now carries every key you have held — retired
+keys stay in `verificationMethod` so a resolver can still verify what they signed, and drop out of
+`assertionMethod`, which names only the key that speaks for you now. The Go CLI and the webapp
+republish it automatically. The bash CLI **removes** it and tells you to run `polis did --write`,
+because it has never written that file. Either way the rotation itself always succeeds: rotating a
+compromised key is a security operation and is never blocked by a derived file. A **stale** document is
+worse than an absent one — it answers `200` with a key you no longer hold, and a resolver cannot tell.
+
+**Check it afterwards:**
+```bash
+polis validate                              # verifies the chain from your directory
+polis validate https://yoursite.example     # verifies it the way a stranger would
+```
+
+**Your old posts keep verifying.** After a rotation, `polis validate` and `polis preview` check a
+post first against your new key and then, if that fails, against the key your published history
+says was current at the post's `published:` time — and they say when that is what happened
+(*"1 of them against a RETIRED key, at a claimed signing time"*). ⚠️ From a **directory**, this needs
+your `.well-known/did.json`, because the handover signatures are made over your domain and nothing
+else in the directory states it; without one, `polis validate` reports the old posts as not verifying
+and says why. `polis validate https://yoursite.example` has no such gap.
+
+**The rotation is witnessed.** When your site is registered, the discovery service countersigns the
+rotation and `rotate-key` records that countersignature inside your new key-history entry. `polis
+validate` then verifies it (`identity.key_history_witness`), which dates the rotation independently of
+anything your site says about itself. No witness — an unregistered site, or a discovery service that
+issued none — is a weaker claim, never an error.
+
+⚠️ A witness cannot show a rotation that was **left out** of the chain, so `polis validate` still says
+it did not compare your chain against the discovery service's own record. That comparison runs in the
+hosted fleet sweep, and there is no self-hosted equivalent. Saying so is deliberate: a clean report
+that silently skipped it would claim more than it checked.
+
+Must be run from a polis site directory. Full format:
+[`docs/signet/spec/key-history.md`](../../signet/spec/key-history.md).
+
+### `polis license`
+
+State, change, or withdraw the terms under which your posts may be used. Terms are **signed with your
+key** and **materialised into each post's frontmatter at publish time**, so they travel with the work
+when it is quoted, mirrored, or scraped — unlike `robots.txt`, which stays behind on the server.
+
+With no argument it reports the current terms without changing anything.
+
+**Usage:**
+```bash
+polis license                          # show the terms this site currently states
+polis license reserved                 # the recommendation (see below)
+polis license open                     # anyone may use the work for anything
+polis license none                     # withdraw: publish no terms from here on
+```
+
+**Profiles:**
+
+| Profile | Machine values | Means |
+|---------|----------------|-------|
+| `reserved` | `train-ai=n search=y ai-input=n attribution=required` | Read and quote freely with a link back. Search engines may index your work and send people to it. AI training and answer-engine summaries require asking. |
+| `open` | `train-ai=y search=y ai-input=y` | Anyone may use your work for anything, including AI training. |
+| `none` (`unstated`) | — | Publish no terms. Readers fall back to their own assumptions. |
+
+A profile is a **name for a selection** from other people's vocabularies — IETF AIPREF for the
+preference layer (`train-ai`, `search`), RSL for the licence-terms layer (`ai-input`, `attribution`).
+Polis writes no licence text of its own.
+
+⚠️ **Terms are not retroactive.** Posts already published keep the terms they were signed with —
+stating or withdrawing terms applies from here on. Nothing rewrites your archive, and nothing should:
+re-signing old work would assert you said something at a time you did not.
+
+**Absent is a defined state, not a gap.** A site that states nothing has *not said* — which is
+different from permitting or denying. Stating nothing is a legitimate choice, and it is where every
+site starts: `polis init` **asks** but pre-selects nothing, so pressing enter states no terms and
+tells you how to state some later. A non-interactive `polis init` with no `--license` states nothing,
+and a site created by hosted signup on polis.pub states nothing until its author chooses.
+
+After stating terms, run `polis render` to regenerate `robots.txt`, `rsl.xml`, and your public terms
+page from the signed source. Those surfaces are always **generated** from `license.json` and never
+authored beside it.
+
+**`polis license none` cleans up after itself.** Withdrawing removes the signed licence, the pointer
+to it, *and* the surfaces generated from it — `robots.txt`, `rsl.xml`, and the terms page. Afterwards
+your site is indistinguishable from one that never stated terms, which is the point: an empty
+`robots.txt` would be a statement of its own, and a terms page left standing would go on asserting
+terms you no longer state. No re-render is needed. Anything of your own in the terms directory is left
+alone.
+
+**JSON mode:** `polis --json license` and `polis --json license <profile>` both emit the resulting
+terms — see [JSON Mode](json-mode.md#polis-license).
+
+Must be run from a polis site directory. Stating terms needs your private key; `POLIS_BASE_URL`
+supplies the `terms` and `contact` URLs written into the licence.
+
+**Related:** [Set your terms](../../signet/guides/set-your-terms.md) (guide) ·
+[the licence spec](../../signet/spec/license.md) (format and wire surfaces)
+
+### `polis attest`
+
+Make a signed claim about **someone else's** work or identity. Everything else polis signs is about
+your own content; this is the one that points outward — *on this date, I asserted this about that.*
+
+One claim, one file, one signature, published at a permanent URL that anyone can fetch and check
+against your published key. Issuing or withdrawing also adds the record to your `index.jsonl`, which
+is how someone who does not already know a record's URL can ask your site what it has attested.
+
+**Usage:**
+```bash
+polis attest <subcommand> [options]
+```
+
+**Subcommands:**
+
+| Subcommand | Syntax | Description |
+|------------|--------|-------------|
+| `issue` | `polis attest issue --predicate <p> --subject <id> [options]` | Issue a new attestation |
+| `list` | `polis attest list` | List attestations this site has issued, oldest first |
+| `show` | `polis attest show <id>` | Show one attestation and its signature status |
+| `verify` | `polis attest verify [id]` | Verify issued attestations against the site's published key |
+| `withdraw` | `polis attest withdraw <id>` | Retract a claim you issued. **Writes a new record and deletes nothing** — the withdrawn claim stays published and still verifies |
+| `register` | `polis attest register <id>` | Announce a record this site **already issued** to the discovery service — one written without it (`polis actor register`'s disclosures), or whose registration at issue time was skipped. **Refuses, and says why**, when no discovery service is configured, the site is not registered with it, the record's issuer is another site, or its signature does not verify. Safe to repeat |
+
+**`issue` options:**
+
+| Flag | Description |
+|------|-------------|
+| `--predicate <p>` | What is being asserted. **Fully qualified**, always — `pub.polis.attestation.same-as`, not `same-as` |
+| `--subject <id>` | What the claim is about — an `https` URL |
+| `--subject-type <t>` | `uri` (a work) or `identity` (a party). Default: `uri` |
+| `--subject-version <h>` | Pin a `uri` subject to exact bytes: `sha256:` + 64 hex |
+| `--payload k=v` | Predicate-specific detail. Repeatable; values are strings; only the first `=` separates |
+| `--asserted <ts>` | RFC 3339 with a `Z`. Default: now |
+
+**Reserved predicates:**
+
+| Predicate | Subject | What it says |
+|-----------|---------|--------------|
+| `pub.polis.attestation.same-as` | identity | this identity and that one are the same party |
+| `pub.polis.attestation.integrity` | identity | an integrity **observation** — ⛔ the finding is in the payload: `result` (`verified` \| `not-verified`), `vantage` and `observed` are **required**, and `issue` refuses the record without them. A reader that cannot read the payload must not interpret it. See [the spec, §4.1](../../signet/spec/attestation.md#41-integrity-is-an-observation-and-its-result-lives-in-the-payload) |
+| `pub.polis.attestation.correction` | uri + pin | this specific version of this work is corrected |
+| `pub.polis.attestation.used-under-terms` | uri | I used this work, under these terms, on this date |
+| `pub.polis.attestation.agent-disclosure` | identity | this identity is an automated agent, operated by X, scoped to Y |
+| `pub.polis.attestation.endorsement` | identity | I vouch for this party |
+| `pub.polis.attestation.withdrawal` | uri + pin | the record at this URL is retracted by its issuer — ⛔ **issued only by `polis attest withdraw`**; `issue` refuses it |
+| `pub.polis.attestation.custody` | identity | an **operator** declares it holds this site's identity key — payload `holds=identity-key` and `attribution=as-tenant\|co-signed` required. See [custody §12](../../signet/spec/custody.md) |
+| `pub.polis.attestation.custody-grant` | identity | a site grants custody of its key to an operator — payload `scope=custodial` and `basis=hosting-terms\|user-signed` required (example under [`polis actor`](#polis-actor)) |
+| `pub.polis.attestation.grant` | identity (your own site) | you grant a user agent the behaviours it names — payload `agent`, `provider`, `behaviours` (e.g. `rosie/1`) and `basis` required; `issue` refuses a grant about any other site. See [delegation](../../signet/spec/delegation.md) |
+
+The list is **reserved, not a registry.** A predicate of your own — `com.yourdomain.reviewed` — is
+issued, published and verified exactly like the reserved ones, and readers that do not recognise it
+must still verify and display it. The one exception on the write side is `withdrawal`: `issue`
+refuses it, because only `withdraw` checks that the claim is yours and not already withdrawn.
+
+**Examples:**
+```bash
+# vouch for someone
+polis attest issue --predicate pub.polis.attestation.endorsement \
+  --subject https://maya.example --subject-type identity
+
+# a correction pinned to exact bytes, so an edit cannot move it
+polis attest issue --predicate pub.polis.attestation.correction \
+  --subject https://site.example/posts/20260901-claim.md \
+  --subject-version sha256:9f2a... \
+  --payload "note=the figure cited was revised by the source"
+
+polis attest list
+polis attest show 20260828T235009Z-f0be117c4e29310d
+polis attest verify
+polis attest withdraw 20260828T140200Z-3f2a9c1d4e5b6a70
+```
+
+⚠️ **Pin anything you claim about a mutable work.** Without `--subject-version` your claim is about a
+URL, and the URL's contents can change under it. With one, the claim is permanently scoped to the
+bytes you actually saw — and the pin is inside your signature, so it cannot be repointed.
+
+**`verify` reports four states**, and they are different facts: `valid`, `unsigned` (there is no
+signature — a fact, not a problem), `invalid` (there is one and it does not verify — worth chasing),
+and `unknown` (it could not be checked). The command exits non-zero **only** for `invalid`.
+A record signed before a key rotation is checked against the key your site's published history says
+was current at its `asserted` time; when a retired key verified it, `verify` and `show` say so (`retired`
+and `signature_key` in `--json`).
+
+⚠️ **There is no `delete`.** Withdrawing a claim is a signed record saying so, never a file deletion —
+a `404` read as a retraction would make every outage, moved site and lapsed domain read as one too,
+and the evidence would be gone.
+
+**JSON mode:** every subcommand supports `--json` — see [JSON Mode](json-mode.md#polis-attest-issue).
+
+Must be run from a polis site directory. Needs your private key, and `POLIS_BASE_URL`, which supplies
+the `issuer` — a claim has to say who made it.
+
+**Related:** [Make a claim about someone else's work](../../signet/guides/attest.md) (guide) ·
+[the attestation spec](../../signet/spec/attestation.md) (wire format)
+
+### `polis actor`
+
+**For an operator that runs system actors.** Most sites never need this.
+
+Software that acts on the network — a verifier, a cache custodian, a repair process — needs an
+identity of its own, or it borrows a tenant's and the network cannot tell the difference. `polis
+actor` publishes the operator's signed list of the actors it runs: which domains are ours, whose
+authority each exercises, and what we **expect** each to do.
+
+⛔ **EXPECTED, NEVER ALLOWED.** This is not an allow-list and nothing enforces it — the operator holds
+its actors' keys, so no published list can stop one doing anything. What it buys is that **anyone can
+notice** when an actor does something outside it. The remedy is social.
+
+⭐ **A self-hoster running their own actors is an operator**, and everything here works the same for
+them — ⚠️ **except becoming one.** `polis actor register` only updates a site that is already an
+operator; it does not turn a site into one. Setting up a new operator is not available from this
+command for now.
+
+**Usage:**
+```bash
+polis actor <subcommand> [options]
+```
+
+**Subcommands** — run from the **operator's** site:
+
+| Subcommand | Syntax | Description |
+|------------|--------|-------------|
+| `register` | `polis actor register <domain> --authority <a>` | Add or update an actor **on a site that is already an operator**. Writes the registry, records a permanent disclosure, and announces it. ⚠️ **On any other site it does nothing, and says why** |
+| `withdraw` | `polis actor withdraw <domain>` | Remove an actor. **Issues a withdrawal record** — a removal without one reads as drift forever |
+| `list` | `polis actor list` | Show the registry |
+| `verify` | `polis actor verify [--tenants-dir <d>]` | Check the registry's signature, and each entry's countersignature |
+| `announce` | `polis actor announce <domain>` | Publish `pub.polis.actor.registered` for an actor **already** in the registry, and nothing else. Refuses unless the registry verifies against this site's key and the pointer is published |
+
+Run from an **actor's** site:
+
+| Subcommand | Syntax | Description |
+|------------|--------|-------------|
+| `declare-operator` | `polis actor declare-operator <domain>` | Name the operator accountable for this actor |
+
+Run from **anywhere** — no site, no key, nothing but HTTPS:
+
+| Subcommand | Syntax | Description |
+|------------|--------|-------------|
+| `verify` | `polis actor verify <action-url-or-file> [--operator <domain>]` | **The stranger's check** ([`custody.md` §7](../../signet/spec/custody.md#7--how-a-stranger-checks--with-nothing-but-curl-and-a-signature-verifier)). Given one signed attestation: does it verify against its signer's key, does the operator list the signer, did the actor countersign its entry, and is the action among its expected actions |
+
+⛔ **Three different findings, never one verdict.** A **lookalike** — the operator does not list the
+signer; conclusive. An invalid **countersignature** — the operator changed the entry after the actor
+agreed to it. A **deviation** — a listed actor did something off its list; ⚠️ **information, not a
+blocked operation**, because nothing enforces the registry. An absent countersignature is a weaker
+claim and is not a finding, and neither is a fetch that failed.
+
+`--operator <domain>` asks that operator instead of the one the signer claims — which is how a
+lookalike that simply claims nobody is caught. A signer that publishes its own registry is checked
+against it. The action may be a URL **or a file**: a record that was never published is still signed.
+Only `pub.polis.attestation` records are accepted today. Exits `1` when there is any finding.
+
+| Subcommand | Syntax | Description |
+|------------|--------|-------------|
+| `verify --custody` | `polis actor verify --custody <domain> [--operator <domain>] [--ds <url>]` | **A site's own check of custody** ([`custody.md` §12.5](../../signet/spec/custody.md#125--how-the-tenant-checks--and-what-is-honestly-independent)) — run it from your own machine. *What does this helper do?* — the operator's signed declarations about the site, verified against the operator's key. *What did I allow?* — the site's custody grants, verified against its own key, withdrawals followed. *Who did this?* — the site's events at a discovery service, with who signed each and under what authority, as the service recorded them; those signed with the site's key split into **by you** and **by an agent under a grant** (the agent marker, each act listed with the grant it cites) |
+
+`--operator` names the operator whose declarations to read; without it, the operator the site's newest
+standing grant names is used, and with neither, no declaration is read. `--ds` defaults to
+`DISCOVERY_SERVICE_URL`, else `https://ds.polis.pub`. ⚠️ **It verifies records, not events:** the event
+list is the discovery service's own recording, and the service holds only recent events. The only
+findings are declarations or grants whose signatures do not verify — a missing declaration, a withdrawn
+grant or an unreachable service are notes. Exits `1` when there is any finding.
+
+⛔ **It makes custody visible; it does not reduce it.** An operator can withhold records from this
+check but cannot forge one that passes.
+
+To **grant** custody of your own key, or withdraw a grant, use `polis attest`:
+
+```bash
+polis attest issue --predicate pub.polis.attestation.custody-grant \
+  --subject https://polis.polis.pub --subject-type identity \
+  --payload scope=custodial --payload basis=user-signed
+polis attest withdraw <id>
+```
+
+Withdrawing adds a signed withdrawal and writes a `withdrawn_by` pointer onto the grant; it deletes
+nothing.
+
+**`register` options:**
+
+| Flag | Description |
+|------|-------------|
+| `--authority <a>` | **Required.** `operator` — the actor acts on the operator's own authority. `user` — it exercises a tenant's, and may do so only under that tenant's grant |
+| `--expects <type>` | A fully-qualified action type expected of this actor. Repeatable. **Descriptive, never permissive** |
+| `--countersign-with <dir>` | The actor's own site directory. Its key countersigns the entry, and its `operator` pointer is written |
+| `--no-attest` | Skip the permanent disclosure record |
+| `--no-announce` | Skip the network announcement |
+
+**One command, three artifacts** — the same fact at three lifetimes:
+
+| Artifact | Lifetime | Job |
+|---|---|---|
+| The registry **file** | current state | *what is true now* — one fetch |
+| An **`agent-disclosure` attestation** per actor | **permanent** | *what was claimed, and when* |
+| A **`pub.polis.actor.registered`** stream event | ~90 days | **delivery** — it tells people who were not looking |
+
+⛔ **The event is not authoritative.** It carries a pointer, not the facts. It says *"go look"*; the
+file says what is true.
+
+**The countersignature is the interesting part.** An entry the actor has countersigned says *"and the
+actor agrees to this scope"*, and ⭐ **the operator cannot then widen it unilaterally** — widening
+breaks the countersignature until the actor re-signs. Narrowing and removal need no consent, because
+you must always be able to disown a broken actor.
+
+**Examples:**
+```bash
+# From the operator's site
+polis actor register judge.polis.pub --authority operator   --expects pub.polis.attestation.integrity   --countersign-with /data/tenants/judge
+
+polis actor list
+polis actor verify --tenants-dir /data/tenants
+polis actor withdraw judge.polis.pub
+
+# Announcement LAST: register without it, verify the file live, then announce.
+# Re-running register instead would write a second permanent disclosure record
+# and announce "reregistered" where the first announcement means "registered".
+polis actor register judge.polis.pub --authority operator --no-announce
+polis actor announce judge.polis.pub
+
+# From the actor's own site, when it lives elsewhere
+polis actor declare-operator polis.polis.pub
+```
+
+⚠️ **An entry names a DOMAIN, not a key.** Domains survive rotation; keys do not. The actor's own
+`.well-known/polis` carries its current key.
+
+⚠️ **`declare-operator` writes a CLAIM, not a fact.** A site can name any operator it likes; what
+makes it mean something is that operator's registry listing the domain back.
+
+**JSON mode:** every subcommand supports `--json`.
+
+Must be run from a polis site directory. Needs the site's private key and `POLIS_BASE_URL`, which
+supplies the `operator` origin a verifier fetches.
+
+**Related:** [an operator's actors, and what it says about them](../../signet/spec/custody.md)
+(spec) · [the actor roster](../../general/concepts/actors.md)
+
+### `polis did`
+
+Show the site's `did:web` identifier and DID Document. Polis publishes the site's public key twice —
+as an OpenSSH line in `.well-known/polis`, and as a W3C DID Document at `.well-known/did.json` — so a
+polis site is also a resolvable `did:web` identity that anyone can look up or issue a credential to.
+
+The document is written automatically by `polis init` and refreshed by `polis rotate-key` — which
+also adds any retired keys to `verificationMethod` while leaving `assertionMethod` naming only the
+current one; this
+command exists to read it, and to repair it.
+
+**Usage:**
+```bash
+polis did                              # print the DID, its URL, and the document
+polis did --write                      # (re)generate .well-known/did.json
+polis did --host alice.example         # override the host (default: from POLIS_BASE_URL)
 ```
 
 **Flags:**
-- `--delete-old-key` — securely delete the old private key after rotation (irreversible)
+- `--write` — write the document to `.well-known/did.json`
+- `--host <host>` — canonical host to build the DID from; defaults to the host in `POLIS_BASE_URL`
 
-Must be run from a polis site directory.
+The `On disk` line reports whether the published document still matches the site's current key. A
+stale document is the one failure a resolver cannot see — it answers `200` with a key the site has
+retired — so if it says *missing or stale*, run `polis did --write`.
+
+Requires a canonical host: set `POLIS_BASE_URL` or pass `--host`. Must be run from a polis site
+directory.
 
 ### `polis validate`
 
-Run the local validation suite over your site: signed content integrity, index consistency, policy file parseability, key/handle alignment, and bundle registry health. Mirrors the checks Patrol/Medic run server-side for hosted sites.
+⚠️ **Go CLI only.** The bash CLI has no `validate` command.
 
-**Usage:**
+Check a polis site — yours or anyone's — across five families: **signed content integrity**, **index
+consistency**, **policy file parseability**, **key/handle alignment** and **bundle registry health**.
+Every check is the same code the hosted actors (Patrol, Medic, Judge) run on the fleet, not a
+reimplementation that agrees with them.
+
+**Two forms, and neither one writes anything:**
+
 ```bash
-polis validate
-polis validate --json
+polis validate                                  # this directory
+polis validate ./alice                          # any directory — including a clone
+polis validate https://alice.example            # a whole site, over the network
+polis validate https://alice.example/content/pub.polis.core/post/20260101/hello.md
+polis validate https://alice.example/content/pub.polis.core/attestation/20260115T100000Z-3f2a9c1d4e5b6a70.json
+polis validate --json https://alice.example
 ```
+
+The shape of the argument selects the form: a path (or nothing) checks a directory, a URL fetches.
+A URL that addresses one artifact checks just that artifact — two fetches, the artifact and the
+site's `.well-known/polis` for its key, with the key cached per domain so many artifacts on one site
+still cost one key fetch.
+
+The artifact may be either signing family. A **post or comment** is checked against the key of the
+site that served it. A **JSON record** — an attestation, tag file, follow file, blessing list or
+licence — is checked by its own package's predicate against the key of the site that **signed** it:
+an attestation's `issuer`, otherwise the host that served it. An actor registry is not one of them;
+check it with [`polis actor verify`](#polis-actor). Where the record carries a `current_version` that this command can recompute (attestations
+and tag files), `content.hash` checks it.
+
+**A record signed before a key rotation still verifies.** Like a post, a JSON record is checked
+against the signing site's current key first, then against the key the site's published history says
+was current at the record's **claimed** signing time — an attestation's `asserted`, a tag file's or a
+licence's `updated` — and the output says when a retired key did it. ⚠️ A **follow file** and a
+**blessing list** carry no signing time, so no retired key can be selected for them: they verify
+against the current key only, and for a site that has rotated, one signed before the rotation reads
+as not verifying and the output says why. (Rewriting either file re-signs it with the current key.)
+
+**It never clones.** Cloning is [`polis clone`](#polis-clone-url-target-dir)'s job, and the two
+compose:
+
+```bash
+polis clone https://alice.example ./alice
+polis validate ./alice
+```
+
+**Every check reports one of four outcomes — and NOT CHECKED is the point.**
+
+| | |
+|---|---|
+| **passed** ✓ | the check ran and found nothing wrong |
+| **failed** ✗ | the check ran and found something wrong |
+| **warning** ! | the check ran and found something about the site's **surroundings** — see below |
+| **NOT CHECKED** – | the check did not run, and the output says why |
+
+A clean result means *"I checked and it was fine"* — never *"I did not check."* What can be checked
+depends on **what is there**, not on which form you used: your own site has `.polis/`, so key
+permissions and private policies can be examined; a clone or a remote site does not, so those come
+back NOT CHECKED with the reason spelled out. Validating a clone can never look identical to
+validating your own site.
+
+**Unsigned is not a failure.** Most artifacts on most sites carry no signature, and absence of terms
+means terms were never stated. Only *present-and-failing* is a finding — but a passing check still
+tells you how many artifacts were unsigned, because *"12 verified"* and *"12 verified, 3 unsigned"*
+are different facts.
+
+**Index consistency covers every entry type the index carries** — posts, comments, tags and
+attestations, each hashed by its own rule. A clean result names what it checked, and an entry of a
+type with no rule is reported as not checked rather than skipped. **A line of `index.jsonl` that does
+not parse is a failure naming its line number**, in both forms — never skipped, so a half-garbage index
+cannot read as clean over the half that parses. Likewise a tag or attestation file that does not parse
+fails `content.tags` / `content.attestations`, by name.
+
+**The two forms mean the same thing by the same check name.** A directory and a URL run the same
+checks over the same site, and a check both can run gives the same verdict — `go test` compares
+them on every build. What only one form can see is said in the other:
+
+| Only a directory | Only a URL |
+|---|---|
+| **phantoms** — a file on disk the index does not list (HTTP does not list directories) | **what the edge serves** — `content.license_robots`, `content.license_rsl` |
+| key files, key permissions, private policies, the bundle registry | |
+
+Those come back NOT CHECKED in the form that cannot see them, with the reason — never passed.
+
+A **site-wide** URL run verifies the **attestations and tag files the site's index lists**, each
+against the key of the site that signed it, and says how many it could not check (a listed record
+that does not serve, or whose issuer's key could not be read). It can only find what the index lists:
+an index is only as fresh as the site's last write or heal, so a count of zero means *nothing
+indexed*, never *nothing exists*.
+
+A file that is **not there** is NOT CHECKED, not passed: a site with no `following.json` or
+`blessed.json` has nothing wrong with it, and nothing was verified either.
+
+#### Does the public surface still say what you said?
+
+A URL run additionally fetches your **public** `robots.txt` and `rsl.xml` and compares them to your
+**signed** licence. This is the one question nothing else can answer: the hosted Judge fetches over
+loopback, upstream of any CDN, so an intermediary that rewrites `robots.txt` on the public wire is
+invisible to it. `polis validate <url>` is the only form that sees what the world sees.
+
+It reports three things, and the middle one is not what most people expect:
+
+1. **Presence** — your own generated section is in the served file, intact.
+2. **Precedence** — ⚠️ *not* whether your section is present, but whether it is **consulted**. Under
+   RFC 9309 a crawler obeys the group whose `User-agent` match is most specific. A third party adding
+   `User-agent: GPTBot` / `Disallow: /` does not sit alongside your `User-agent: *` group; it
+   **replaces** it for that agent. Your directives can be in the file and never read.
+3. **Direction** — which way a third party moved your terms, judged against what you **signed**, not
+   against the file's own text.
+
+⭐ **A note about a restrictive intermediary is NOT a problem to fix.** Many hosts (Cloudflare among
+them) inject a managed block that blocks AI crawlers. If you reserved your terms, that block moves
+them the same way you did: it is reported in full, as a **passed** check whose detail says *"Aligned,
+and NOT a problem to fix."* You do not need to do anything, and there is nothing to escalate.
+
+The same block against a site whose terms are **open** is a **warning** — the edge is refusing what
+you granted. So is any third-party directive that **grants what your licence refuses**, which is the
+serious direction: somebody answering a licence question on your behalf.
+
+⛔ **Warnings never fail the run and polis repairs nothing here.** A managed `robots.txt` usually
+belongs to your host, not to you, and polis will not tell you what your terms should be. This is a
+report.
+
+**Exit status:** `0` when nothing checked was found wrong, `1` when something failed or the run could
+not start. Neither NOT CHECKED nor a warning affects the exit status — one is an honest gap, the other
+is a fact about your surroundings. Only **failed** is a defect in the site.
 
 ### `polis discover`
 
@@ -1146,24 +1720,49 @@ polis discover --json
 
 **Flags:**
 - `--author <url>` — limit discovery to one specific author
+- `--since <date>` — **Bash CLI only**: show items since a date instead of since the last check
 
-Requires `DISCOVERY_SERVICE_URL` to be configured. Reads `following.json` to determine who to query.
+Uses `DISCOVERY_SERVICE_URL` (default `https://ds.polis.pub`). Reads `following.json` to determine who to query.
 
 ### `polis unpublish <path>`
 
-Unpublish a post or comment — a *clean break* operation that severs all ties between the published identity and the content. Differs from `unregister` (which removes the whole site) and from deleting the file (which leaves DS state behind).
+Unpublish a post or comment — a *clean break* operation that severs all ties between the published identity and the content. Differs from `unregister` (which removes the site's registration) and from deleting the file (which leaves DS state behind).
 
 **Usage:**
 ```bash
 polis unpublish content/pub.polis.core/post/20260201/my-post.md
 polis unpublish content/pub.polis.core/comment/20260201/comment-id.md
-polis unpublish <path> -y                            # skip confirmation
+polis unpublish -y <path>                            # Go CLI: skip confirmation
+polis unpublish --url <discovery-service-url>        # Go CLI: remove one discovery-service registration only
 ```
 
-**Flags:**
+**Flags (Go CLI; flags go before the path):**
 - `-y` — skip the confirmation prompt
+- `--url <url>` — unpublish that exact URL at the discovery service and touch no local file — for a stale or duplicate registration
+- `--type pub.polis.post|pub.polis.comment` — the content type for `--url`, when it cannot be inferred from the URL
 
 **Semantics:** Post unpublish cascades blessing state in the DS (blessed → orphaned, pending → denied). Comment unpublish resets the comment's blessing to `pending`. Republishing later is treated as a brand-new publication — orphaned blessings are NOT restored. See [Unpublish Lifecycle](../../ds/developer/unpublish-lifecycle.md) for full state transition rules.
+
+### `polis site`
+
+> **Go CLI only.**
+
+Edit your site's identity document, and recover a signed file a newer polis wrote.
+
+```bash
+polis site set author-name "Alice Example"
+polis site set avatar --bg '#8766aa' --fg '#ffffff' --pattern rings
+polis site set avatar --clear
+polis site rewrite-unsigned content/pub.polis.core/follow/following.json
+```
+
+- `site set author-name` and `site set avatar` change `.well-known/polis` and keep every other member of it
+  (avatar flags: `--bg`, `--fg`, `--border`, `--border-w 0-3`, `--pattern none|rings|cross|grid|dots|stripes|diamond|halves`,
+  `--pattern-color`, `--clear`).
+- `site rewrite-unsigned <path>` is the escape hatch for a signed file carrying a field this version of polis
+  does not recognise. Every command that would rewrite such a file refuses rather than drop the field and re-sign.
+  This one rewrites it, drops what it cannot read, and leaves the file **unsigned** — it never signs. See
+  [signing base §6.2](../../signet/spec/signing-base.md).
 
 ### `polis serve [options]`
 
@@ -1196,75 +1795,103 @@ See the [Webapp User Manual](../../webapp/user/user-manual.md) for full usage. W
 
 ## File Frontmatter
 
-Published files include YAML frontmatter with metadata:
+Published files carry YAML frontmatter. A post, as the Go CLI writes it (captured from `polis post` and
+`polis republish` in a fresh site):
 
 ```yaml
 ---
-canonical_url: https://alice.example.com/posts/20260106/hello.md
-version: sha256:a3b5c7d9e1f2...
-author: alice@example.com
-published: 2026-01-15T12:00:00Z
-signature: -----BEGIN SSH SIGNATURE-----
-U1NIU0lHAAAAAQA...
------END SSH SIGNATURE-----
-in_reply_to: https://bob.example.com/posts/intro.md  # Comments only
-in_reply_to_version: sha256:xyz789...                # Comments only
+title: Hello
+published: 2026-09-16T17:25:59Z
+updated: 2026-09-16T17:26:05Z            # only after a republish
+generator: polis-cli-go/0.67.0
+current-version: sha256:82acffe7...
+version-history:
+  - sha256:37386c0a... (2026-09-16T17:25:59Z)
+  - sha256:82acffe7... (2026-09-16T17:26:05Z)
+signature: U1NIU0lHAAAAAQAAADMAAAALc3No...
 ---
 
-# Your Content Here
+# Hello
 
-The actual post or comment content follows the frontmatter.
+The post body follows the frontmatter.
 ```
+
+A `license:` block sits before `signature:` when the site states terms (see [`polis license`](#polis-license)).
+A comment adds `type: comment`, a nested `in-reply-to` block and, written after signing, `author`:
+
+```yaml
+in-reply-to:
+  url: https://bob.example.com/content/pub.polis.core/post/20260105/intro.md   # immediate parent
+  root-post: https://bob.example.com/content/pub.polis.core/post/20260105/intro.md
+```
+
+- **There is no URL field on a post.** Its canonical URL is `POLIS_BASE_URL` + its path.
+- `signature` is stored **unarmored** (bare base64 of an SSHSIG); see [Signature Verification](#signature-verification).
+- Which of these fields the signature covers is defined, per type, by the
+  [signing-base spec](../../signet/spec/signing-base.md) — not by this page.
 
 ## Version History
 
-Polis uses diff-based version storage. The `.versions` file format uses standard unified diff format, making it compatible with Unix `diff` and `patch` utilities for manual inspection or reconstruction.
+Every published file has a sibling history file at `.versions/<filename>` in the same directory, created
+by the **first** `polis post` and appended to by each `polis republish`. The first version is stored in
+full; each later one as a unified diff of the body against its parent. `polis extract` reconstructs any
+version from it.
 
-**Example `.versions` file:**
+**Example** (captured from a post published once and republished once):
 ```
-== Version 1 ==
-Version: sha256:abc123...
-Date: 2026-01-15T12:00:00Z
+# VERSION_FILE_FORMAT=1.0
+# CANONICAL_FILE=content/pub.polis.core/post/20260916/hello.md
+# CURRENT_HASH=sha256:82acffe7...
 
-Full content of version 1...
+[VERSION sha256:37386c0a...]
+TIMESTAMP=2026-09-16T17:25:59Z
+PARENT=none
+FULL_CONTENT_START
+# Hello
 
-== Version 2 ==
-Version: sha256:def456...
-Date: 2026-01-20T15:30:00Z
-Previous: sha256:abc123...
+First body.
+FULL_CONTENT_END
 
---- old
-+++ new
-@@ -5,7 +5,7 @@
--This is the old line
-+This is the updated line
+[VERSION sha256:82acffe7...]
+TIMESTAMP=2026-09-16T17:26:05Z
+PARENT=sha256:37386c0a...
+DIFF_START
+…unified diff…
+DIFF_END
 ```
+
+⚠️ **Known defect (Go CLI):** when the published file is edited in place and then republished, the Go CLI
+writes an **empty** diff (the example above came out with nothing between `DIFF_START` and `DIFF_END`), so
+an intermediate version cannot be reconstructed. See [`polis extract`](#polis-extract-file-version-hash).
+
+The bash CLI names the history directory from `VERSIONS_DIR_NAME` (default `.versions`); the Go CLI always
+uses `.versions`.
 
 ## Configuration
 
-Polis CLI uses a layered configuration system with the following precedence (highest to lowest):
-
-1. **Environment variables** - For CI/CD and temporary overrides
-2. **`.env` file** - For developer/deployment settings
-3. **`.well-known/polis`** - For user-specific directory customization
-4. **Built-in defaults** - Always available as fallback
+Both CLIs read settings from **environment variables**, filled in from a **`.env` file** for any variable
+not already set, then fall back to **built-in defaults**. Directory layout is fixed by the bundle convention
+(`content/pub.polis.core/…`); `.well-known/polis` no longer carries a `config` section, and nothing reads one.
 
 ### Environment Variables
 
 ```bash
-# Required for blessing commands
+# Your site's URL — needed by publishing, blessing, following, rendering and anything that names your domain
 export POLIS_BASE_URL="https://yourdomain.com"
 
-# Discovery service (optional - has default)
+# Discovery service (optional — defaults to https://ds.polis.pub)
 export DISCOVERY_SERVICE_URL="https://ds.polis.pub"
 
-# API authentication (required for blessing operations)
+# Optional bearer token sent to the discovery service when set; requests are authenticated by your signature
 export DISCOVERY_SERVICE_KEY="your-api-key"
+```
 
-# Optional directory overrides
+**Bash CLI only** — directory overrides, read at startup by the bash `polis` script; the Go CLI ignores them:
+
+```bash
 export KEYS_DIR=".polis/keys"
-export POSTS_DIR="posts"
-export COMMENTS_DIR="comments"
+export POSTS_DIR="content/pub.polis.core/post"
+export COMMENTS_DIR="content/pub.polis.core/comment"
 export VERSIONS_DIR_NAME=".versions"
 ```
 
@@ -1272,20 +1899,20 @@ Add to `~/.bashrc` or `~/.zshrc` for persistence.
 
 ### Using a `.env` File
 
-The CLI looks for `.env` in this order:
-1. Current working directory (`.env`) - for per-site configuration
-2. Home directory (`~/.polis/.env`) - for shared configuration across sites
-
-Create a `.env` file in your site directory or in `~/.polis/`:
+Both CLIs load **one** `.env` file, never overriding a variable already set in the environment:
+1. `.env` in the current working directory, if present — per-site configuration
+2. otherwise `~/.polis/.env` — shared across sites
 
 ```bash
 # Per-site config (in your polis site directory)
-cp .env.example .env
+echo 'POLIS_BASE_URL=https://alice.example.com' > .env
 
-# Or shared config (for DISCOVERY_SERVICE_KEY etc.)
+# Or shared config
 mkdir -p ~/.polis
-cp .env.example ~/.polis/.env
+echo 'DISCOVERY_SERVICE_URL=https://ds.polis.pub' > ~/.polis/.env
 ```
+
+The bash CLI's `init` also writes a `.env.example` template; the Go CLI does not.
 
 Example `.env`:
 ```bash
@@ -1293,7 +1920,8 @@ POLIS_BASE_URL=https://alice.example.com
 DISCOVERY_SERVICE_KEY=eyJhbGciOiJI...
 ```
 
-**Security Note:** Never commit `.env` files containing secrets. The `.env.example` file is safe to commit as a template.
+**Security Note:** Never commit `.env` files containing secrets. The `.gitignore` that `polis init` writes
+ignores `.env*` — including the bash CLI's `.env.example` — and all of `.polis/`.
 
 ### Site Title
 
@@ -1303,63 +1931,45 @@ Set a custom site title for branding in rendered HTML and comment attribution:
 polis init --site-title "My Awesome Blog"
 ```
 
-The site title is stored in `.well-known/polis` and used:
+The site title is stored as `site_title` in `.well-known/polis` and used:
 - In HTML page titles and headers (`{{site_title}}` template variable)
 - When displaying your comments on other people's posts
 - In `polis about` output
 
-If not set, the domain from `POLIS_BASE_URL` is used as a fallback.
+If `--site-title` is omitted, the Go CLI's `init` uses the author name (`cli-go/pkg/site/init.go`); the bash
+CLI writes no `site_title`.
 
-### Custom Directory Paths
+### Directory Paths
 
-You can customize directory paths during initialization:
-
-```bash
-polis init --posts-dir articles --comments-dir replies
-polis init --site-title "My Blog" --posts-dir articles
-```
-
-Or edit the `config` section in `.well-known/polis` after initialization:
-
-```json
-{
-  "version": "0.2.0",
-  "config": {
-    "directories": {
-      "keys": ".polis/keys",
-      "posts": "articles",
-      "comments": "replies",
-      "versions": ".versions"
-    },
-    "files": {
-      "public_index": "metadata/public.jsonl",
-      "blessed_comments": "metadata/blessed-comments.json",
-      "following_index": "metadata/following.json"
-    }
-  }
-}
-```
+Directory paths are **fixed** by the bundle convention: content lives under `content/pub.polis.core/`
+(`post/`, `comment/`, `follow/`, `index.jsonl`), keys under `.polis/keys/`. `.well-known/polis` has no
+`config` section any more, and neither CLI reads one. ⚠️ The bash CLI's `init --posts-dir` / `--comments-dir`
+/ `--keys-dir` / `--versions-dir` flags and its directory environment variables still change where it
+writes, but nothing else — the Go CLI, the web app, the hosted service, validation — looks anywhere but the
+fixed paths, so a site initialised with them is not portable.
 
 ## JSON Mode
 
-All commands support `--json` for machine-readable output:
+Commands support `--json` for machine-readable output. The response shapes differ between the CLIs:
 
 ```bash
-polis --json post my-post.md | jq -r '.data.content_hash'
+polis --json post my-post.md | jq -r '.version'             # Go CLI
+polis --json post my-post.md | jq -r '.data.content_hash'   # Bash CLI
 ```
 
-See [json-mode.md](json-mode.md) for response schemas, error codes, and scripting examples.
+See [json-mode.md](json-mode.md) for response schemas, errors, and scripting examples.
 
 ## Publishing Workflow
 
 ### 1. Write Content
 ```bash
-vim posts/my-thoughts.md
+vim my-thoughts.md
 ```
 
 ### 2. Publish Locally
 ```bash
-polis post posts/my-thoughts.md
+polis post my-thoughts.md
+# signs it and moves it to content/pub.polis.core/post/<YYYYMMDD>/my-thoughts.md
 ```
 
 ### 3. Commit to Git
@@ -1373,109 +1983,136 @@ git commit -m "Add: my-thoughts.md"
 git push origin main
 ```
 
-### 5. Request Blessing (if commenting)
-```bash
-# Note: polis comment and polis republish automatically request blessings
-# You rarely need to run this manually - only for edge cases (see docs)
+### 5. Blessings (if commenting)
 
-# If you do need to retry a blessing request:
-polis blessing requests           # View pending requests
-polis blessing beseech <hash>     # Retry request by hash
+With the bash CLI, `polis comment` sends the blessing request. With the Go CLI it does not — see
+[`polis comment`](#polis-comment). To look after requests on **your own** posts:
+
+```bash
+polis blessing requests           # pending requests on your posts
+polis blessing grant <version>    # bless one (the comment's sha256:… version hash)
+polis blessing deny <version>
 ```
 
 ## Common Use Cases
 
 ### Creating a Blog Post
+
+Write `why-decentralization-matters.md` in your editor, then:
+
 ```bash
-cat > posts/why-decentralization-matters.md << 'EOF'
-# Why Decentralization Matters
-
-Centralized platforms have too much control...
-EOF
-
-polis post posts/why-decentralization-matters.md
-git add . && git commit -m "New post: decentralization"
-git push
+polis post why-decentralization-matters.md
 ```
+
+Commit and deploy the site as in the workflow above.
 
 ### Replying to Someone's Post
+
+**Bash CLI** — write the reply to a file, then sign it and send the blessing request in one step:
+
 ```bash
-polis comment https://alice.com/posts/20260106/hot-take.md
-
-# Interactive editor opens - write your reply
-
-# After saving, blessing request is automatically sent
-# Your comment will be pending until the post author blesses it
+polis comment my-reply.md https://alice.example.com/content/pub.polis.core/post/20260106/hot-take.md
 ```
+
+**Go CLI** — draft, write, sign:
+
+```bash
+polis comment draft https://alice.example.com/content/pub.polis.core/post/20260106/hot-take.md
+# edit the draft file it names, then:
+polis comment sign <id>
+```
+
+Either way no editor is opened for you, and the comment stays pending until the post's author blesses it.
 
 ### Updating a Post
 ```bash
-# Edit the canonical file directly
-vim posts/20260106/my-post.md
+# Edit the published file directly
+vim content/pub.polis.core/post/20260106/my-post.md
 
-# Republish with new version
-polis republish posts/20260106/my-post.md
-
-git add . && git commit -m "Update: my-post.md"
-git push
+# Republish as a new version
+polis republish content/pub.polis.core/post/20260106/my-post.md
 ```
 
 ### Viewing Version History
 ```bash
-# List all versions in .versions file
-cat posts/20260106/.versions/my-post.md
+# Every version of the file
+cat content/pub.polis.core/post/20260106/.versions/my-post.md
 
-# Reconstruct specific version
-polis extract posts/20260106/my-post.md sha256:abc123...
+# Reconstruct a specific version
+polis extract content/pub.polis.core/post/20260106/my-post.md sha256:abc123...
 ```
 
 ## Security Notes
 
 ### Private Key Protection
 - **Never commit `.polis/keys/id_ed25519`** (private key)
-- Add to `.gitignore`: `.polis/keys/id_ed25519`
-- Public key (`.polis/keys/id_ed25519.pub`) is safe to share
+- The `.gitignore` that `polis init` writes already ignores all of `.polis/`; keep it that way
+- Public key (`.polis/keys/id_ed25519.pub`) is safe to share — it is published in `.well-known/polis`
 
 ### Signature Verification
-Anyone can verify your content signatures:
+
+Anyone can verify a published post with stock OpenSSH — no polis software required.
+**The commands below were run end-to-end against a live post on 2026-09-16.**
+
+> ⛔ **`ssh-keygen -Y verify -f` takes an `allowed_signers` FILE, not a bare public
+> key.** Passing the key directly fails with a bare `Could not verify signature.`,
+> which reads like a bad signature and is not. This page carried that broken form
+> until 2026-09-08; so did `polis.pub/llms.txt`, where an external reviewer hit it.
+>
+> ⛔ **The `signature:` in frontmatter is stored UNARMORED.** `ssh-keygen` will not
+> parse it until the PEM header and footer are put back — otherwise it reports
+> `Couldn't parse signature: missing header`.
 
 ```bash
-# Extract public key from .well-known/polis
-curl https://alice.com/.well-known/polis | jq -r .public_key > alice.pub
+POST=https://vdibart.polis.pub/content/pub.polis.core/post/20260828/this-post-carries-its-own-terms.md
+SITE=https://vdibart.polis.pub
+curl -sS "$POST" -o post.md
 
-# Verify signature (manual process - automated tool coming)
-ssh-keygen -Y verify -f alice.pub -I alice@example.com -n file \
-  -s signature.sig < content.txt
+# 1. allowed_signers — principal, key type, key. NOT the raw .public_key line.
+curl -sS "$SITE/.well-known/polis" \
+  | jq -r '"polis " + .public_key' | cut -d' ' -f1-3 > allowed_signers
+
+# 2. re-armor the bare base64 signature into an SSHSIG PEM
+sed -n 's/^signature: //p' post.md | fold -w 70 \
+  | sed '1i -----BEGIN SSH SIGNATURE-----' \
+  | sed '$a -----END SSH SIGNATURE-----' > sig.pem
+
+# 3. the signing base: drop the TOP-LEVEL `signature:` line from the frontmatter
+#    block only, then canonicalize. A `signature:` line in the BODY is signed.
+awk 'NR==1&&$0=="---"{fm=1;print;next} fm&&$0=="---"{fm=0;print;next}
+     fm&&/^signature:/{next} {print}' post.md | sed 's/[ \t]*$//' > raw.txt
+printf '%s\n' "$(cat raw.txt)" > base.txt
+
+ssh-keygen -Y verify -f allowed_signers -I polis -n file -s sig.pem < base.txt
+# Good "file" signature for polis with ED25519 key SHA256:HpxqLj3Mq0Fh/hstf7L0+375HsrEQuo0Xx3UpzAb6uQ
 ```
+
+**Isolate a failure before blaming the signature.** `current-version` is the SHA-256
+of the canonicalized *body*, and checking it needs no cryptography at all:
+
+```bash
+sed '1,/^---$/d' post.md | sed 's/[ \t]*$//' | sed '/./,$!d' > body.raw
+printf '%s\n' "$(cat body.raw)" | sha256sum
+grep '^current-version:' post.md
+```
+
+If those disagree, your canonicalization is wrong and step 3 would have failed for
+that reason rather than because the signature is bad.
 
 ### File Content Integrity
 
-Each published file (`.md`) - **both posts and comments** - contains two integrity fields in its frontmatter:
+Each published file (`.md`) — **both posts and comments** — carries two integrity fields in its frontmatter:
 
-**`current-version` (Content Hash)**
+- **`current-version`** is `sha256:` + the SHA-256 of the canonicalized **body alone** — not the frontmatter.
+  (Checked on a fresh post: hashing the body after the closing `---` reproduces it exactly; the recipe is under
+  [Signature Verification](#signature-verification).)
+- **`signature`** is an Ed25519 SSH signature over the canonicalized frontmatter **and** body, minus the
+  fields written after signing: `signature` itself for a post, and `signature` and `author` for a comment.
+  So `title`, `published`, `current-version`, `license`, `in-reply-to` and the body are all covered.
 
-The SHA-256 hash of the **entire file content** (frontmatter + body), canonicalized:
-
-```
-current-version: sha256:a1b2c3d4e5f6...
-```
-
-**Canonicalization** ensures consistent hashing:
-- Trailing whitespace removed from each line
-- Trailing empty lines removed
-- Exactly one newline at the end
-
-**`signature` (Cryptographic Signature)**
-
-The Ed25519 signature is computed over the **entire file content minus the signature field itself**, canonicalized:
-
-```
-signature: AAAAB3NzaC1lZDI1NTE5...
-```
-
-This means the signature covers:
-- All frontmatter fields (title, published, type, current-version, in-reply-to, etc.)
-- The entire body content
+⛔ The exact bytes — canonicalization, which lines are stripped and how — are specified in the
+[signing-base spec](../../signet/spec/signing-base.md) §4, and nowhere else. Build a verifier from that
+page, not from this summary.
 
 ### What Happens If You Edit Without Republishing
 
@@ -1484,20 +2121,20 @@ If you manually edit a published post or comment and deploy without running `pol
 | Change Made | Hash Valid? | Signature Valid? | Consequence |
 |-------------|-------------|------------------|-------------|
 | Edit body text | ❌ No | ❌ No | Verification fails |
-| Edit title | ❌ No | ❌ No | Verification fails |
-| Edit published date | ❌ No | ❌ No | Verification fails |
-| Edit current-version | ❌ No | ❌ No | Verification fails |
-| Edit any frontmatter | ❌ No | ❌ No | Verification fails |
-| Trailing whitespace only | ✅ Maybe* | ✅ Maybe* | May pass due to canonicalization |
+| Edit `title`, `published` or any other signed frontmatter | ✅ Yes (the hash covers the body only) | ❌ No | Verification fails |
+| Edit `current-version` | ❌ No | ❌ No | Verification fails |
+| Trailing whitespace on a line, or trailing blank lines | ✅ Yes | ✅ Yes | Canonicalization removes them before hashing and signing |
 
-*Canonicalization normalizes trailing whitespace, so minor whitespace changes may not break verification.
+(Checked on a fresh post: editing only `title:` leaves the content hash intact and makes `polis validate`
+report `content.posts … signature does not verify`.)
 
 **Practical consequences of editing without republishing:**
 
-1. **`polis preview <url>`** shows: "Signature: FAILED"
-2. **Other polis users** see the content as tampered/unverified
+1. **`polis preview <url>`** prints `[x] Signature INVALID - content may have been tampered with`, and for a
+   body edit also `[x] Content hash MISMATCH`
+2. **Other polis users** see the content as unverified
 3. **New blessing requests** may fail verification
-4. **Version history** becomes inconsistent (hash doesn't match content)
+4. **Version history** becomes inconsistent (the current hash no longer matches the content)
 
 **Safe fields to change:** None. Any edit to a published `.md` file requires `polis republish` to:
 - Recompute the content hash
@@ -1509,44 +2146,23 @@ If you manually edit a published post or comment and deploy without running `pol
 - Theme/template files
 - Configuration files
 
-### What Happens If You Change POLIS_BASE_URL Without Migrating
+### What Happens If You Change POLIS_BASE_URL
 
-The canonical URL of your content is **not stored in the file itself** - it's derived from `POLIS_BASE_URL + file_path`. This means:
+⚠️ **Neither CLI has a command for moving a site to a new domain.** There is no `polis migrate`.
 
-**What's in the frontmatter:**
-```yaml
-# Posts - NO URL field
-title: My Post
-published: 2026-01-26T12:00:00Z
-current-version: sha256:...
-signature: ...
-
-# Comments - in-reply-to points to PARENT's URL, not yours
-in-reply-to:
-  url: https://other-person.com/posts/their-post.md
-  root-post: https://other-person.com/posts/their-post.md
-```
-
-**If you change `POLIS_BASE_URL` without running `polis migrate`:**
+A post's canonical URL is **not stored in the file** — it is `POLIS_BASE_URL` + the file's path, and
+`index.jsonl` and `blessed.json` record paths, not URLs. So after a change:
 
 | What | Status | Why |
 |------|--------|-----|
-| Your signatures | ✅ Valid | URL not in signed content |
-| Your content hashes | ✅ Valid | URL not in file content |
-| Discovery service records | ❌ Broken | Still indexed by old URLs |
-| Others' links to your posts | ❌ Broken | Point to old domain |
-| Others' `in-reply-to` fields | ❌ Broken | Their comments reference your old URLs |
-| Your `blessed-comments.json` | ❌ Broken | Post URLs use old domain |
+| Signatures and content hashes on your posts | ✅ Still valid | no URL of your own is inside them |
+| Rendered HTML, `sitemap.xml`, `.well-known/did.json` | ⚠️ Stale | they name the old host — run `polis render` and `polis did --write` |
+| Your key history, if you have ever rotated | ❌ Does not verify under the new domain | each handover signature is made over the domain (`site.VerifyChain`) |
+| Discovery service records | ❌ Stale | registered under the old domain |
+| Other people's links, and their comments' `in-reply-to` | ❌ Broken | they point at the old URLs, inside *their* signatures |
 
-**Bottom line:** Cryptographically valid, but operationally broken.
-
-**Why `polis migrate` exists:**
-1. Updates discovery service URL indexes
-2. Creates signed migration announcement for others to verify
-3. Proves key continuity (same private key controls both domains)
-4. Allows followers to update their local references
-
-Always use `polis migrate <new-domain>` when changing domains - don't just edit `POLIS_BASE_URL`.
+**Bottom line:** your content stays cryptographically valid, but the network still knows you by the old
+domain, and nothing in polis moves it for you.
 
 ## Terminal User Interface (polis-tui)
 
@@ -1601,9 +2217,15 @@ autoload -Uz compinit && compinit
 
 ### What's Completed
 
-- All 24 polis commands (init, post, comment, etc.)
-- Subcommands for `blessing` and `migrations`
-- Global `--json` flag
+- 25 top-level commands (`about` … `version`)
+- Subcommands for `blessing`, `dm`, `notifications` and `tag`
+- Per-command flags, and the global `--json` flag
+
+⚠️ **The completion scripts lag the CLI** (`completions/polis.bash`, `completions/polis.zsh`). They do not
+offer `actor`, `attest`, `did`, `license` or `site`, nor `dm decrypt` / `dm publish-key`; and they still
+offer flags neither CLI accepts — `follow`/`unfollow --announce`, `rotate-key --delete-old-key`,
+`init --register` — plus bash-only flags (`init --posts-dir` and friends, `discover --since`,
+`unregister --force`) that the Go CLI rejects or ignores.
 
 ## Troubleshooting
 
@@ -1614,22 +2236,23 @@ Install OpenSSH client (see Installation section above).
 Install jq JSON processor (see Installation section above).
 
 ### "pandoc is required for rendering"
-Install pandoc to use `polis render`: `apt install pandoc` (Linux) or `brew install pandoc` (macOS). Pandoc is only required for the render command.
+Bash CLI only. Install pandoc to use `polis render`: `apt install pandoc` (Linux) or `brew install pandoc` (macOS). The Go CLI renders without it.
 
 ### "No such file: .polis/keys/id_ed25519"
 Run `polis init` to create keys and directory structure.
 
 ### "Index file is corrupted or missing"
-Run `polis rebuild` to regenerate `public.jsonl` from published files.
+Run `polis rebuild --all` to regenerate `index.jsonl` from the published files on disk.
 
 ### Version history missing
-`.versions` files are created on first `polis republish` - they don't exist for initial `polis post`.
+A `.versions/<filename>` history is created by the first `polis post` and extended by each `polis republish`.
+If one is missing, the file was not published through polis, or its history was deleted.
 
 ## Next Steps
 
 - Deploy your content to GitHub Pages, Netlify, or any static host
 - Read [security-model.md](../../general/security/security-model.md) for the full cryptographic model and threat analysis
-- Customize your site with [templating.md](templating.md)
+- Template syntax for themes: [templating.md](templating.md)
 - Try the [webapp](../../webapp/user/user-manual.md) for a visual interface
 
 ## Support
@@ -1638,4 +2261,4 @@ For issues, questions, or feature requests, please file an issue in the GitHub r
 
 ## License
 
-AGPL-3.0 - See [LICENSE](../../../LICENSE)
+AGPL-3.0 — see [LICENSE](../../../LICENSE) at the repository root.

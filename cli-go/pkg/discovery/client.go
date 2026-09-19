@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,54 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 )
+
+// ErrRateLimited is returned (wrapped) when the discovery service rejects a
+// request with 429 Too Many Requests or 503 Service Unavailable. Callers can
+// errors.Is(err, ErrRateLimited) to back off instead of hot-looping — Chaplain's
+// repair loop relies on this to abort a sweep once the DS pushes back, rather
+// than hammering through hundreds of rejected registrations.
+var ErrRateLimited = errors.New("discovery: rate limited")
+
+// dsErrorMessage extracts a human-readable message from a DS error response,
+// tolerating BOTH shapes the server emits: {"error":"msg"} (business-logic
+// failures) and {"error":{"code":"...","message":"..."}} (middleware / rate-limit
+// failures), plus the flat {"error":"msg","code":"..."} variant. Returns "" when
+// there's no recognizable error field. Centralizing this means a status-bearing
+// error response is never misread as a parse failure (the bug that masked the
+// 429s behind the re-registration flood).
+func dsErrorMessage(body []byte) string {
+	var probe struct {
+		Error json.RawMessage `json:"error"`
+		Code  string          `json:"code"`
+	}
+	if json.Unmarshal(body, &probe) != nil || len(probe.Error) == 0 {
+		return ""
+	}
+	// String form: {"error":"msg"} (optionally with a sibling top-level code).
+	var s string
+	if json.Unmarshal(probe.Error, &s) == nil {
+		if probe.Code != "" {
+			return probe.Code + ": " + s
+		}
+		return s
+	}
+	// Object form: {"error":{"code":"...","message":"..."}}.
+	var obj struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(probe.Error, &obj) == nil {
+		switch {
+		case obj.Code != "" && obj.Message != "":
+			return obj.Code + ": " + obj.Message
+		case obj.Message != "":
+			return obj.Message
+		default:
+			return obj.Code
+		}
+	}
+	return ""
+}
 
 // maxDSResponseSize is the maximum response body size for DS API responses (5MB).
 const maxDSResponseSize = 5 * 1024 * 1024
@@ -55,10 +104,10 @@ type Client struct {
 	Domain        string // optional: for signed GET requests
 	PrivateKeyPEM []byte // optional: for signed GET requests
 	HTTPClient    *http.Client
-	DSKeyCache    *DSKeyCache // optional: for DS response verification
-	RequestID     string      // optional: propagated as X-Request-Id for cross-boundary tracing
+	DSKeyCache    *DSKeyCache                                                   // optional: for DS response verification
+	RequestID     string                                                        // optional: propagated as X-Request-Id for cross-boundary tracing
 	Logger        func(method, path string, durationMs int64, requestID string) // optional: DS roundtrip timing
-	CreatedAfter  string      // optional: ISO 8601 timestamp floor for stream queries
+	CreatedAfter  string                                                        // optional: ISO 8601 timestamp floor for stream queries
 }
 
 // NewClient creates a new discovery service client (unauthenticated GET requests).
@@ -211,6 +260,11 @@ type ContentRegisterResponse struct {
 	Status             string `json:"status"` // "created" or "updated"
 	RelationshipStatus string `json:"relationship_status,omitempty"`
 	Error              string `json:"error,omitempty"`
+
+	// Witness is the DS's countersignature over this registration (SIGNET epic
+	// 32), or nil when the DS did not witness. The caller publishes it with
+	// site.RecordWitness; nil is never a failure.
+	Witness *Witness `json:"witness,omitempty"`
 }
 
 // ContentUnregisterRequest is the request to unregister content.
@@ -284,7 +338,30 @@ type RelationshipUpdateRequest struct {
 	TargetURL string `json:"target_url"`
 	Action    string `json:"action"` // "grant" or "deny"
 	Timestamp string `json:"timestamp"`
+	// Agent and Grant carry the agent marker (Signet epic 11) — absent unless a
+	// user agent made the decision. See relationshipCanonicalPayload.
+	Agent     string `json:"agent,omitempty"`
+	Grant     string `json:"grant,omitempty"`
 	Signature string `json:"signature"`
+}
+
+// AgentMarker names the user agent that made an act and the grant it acted
+// under (Signet epic 11). Both fields travel INSIDE the signed bytes; outside
+// them the trace would be strippable and decorative.
+//
+// The zero value means "the user acted herself" and changes nothing on the wire.
+type AgentMarker struct {
+	Agent string
+	Grant string
+}
+
+func (m AgentMarker) empty() bool { return m.Agent == "" && m.Grant == "" }
+
+func (m AgentMarker) check() error {
+	if (m.Agent == "") != (m.Grant == "") {
+		return fmt.Errorf("an agent marker needs both agent and grant, got agent=%q grant=%q", m.Agent, m.Grant)
+	}
+	return nil
 }
 
 // RelationshipRecord represents a relationship from the discovery service.
@@ -358,16 +435,26 @@ func (c *Client) RegisterContent(req *ContentRegisterRequest) (*ContentRegisterR
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
+	// Check status BEFORE unmarshaling into the success shape. DS error bodies
+	// come in two shapes ({"error":"msg"} and {"error":{"code","message"}});
+	// blindly unmarshaling an object-shaped error into ContentRegisterResponse
+	// (Error is a string) fails and surfaced as "failed to parse response",
+	// masking the real cause — and, for 429s, skipping any backoff. Extract the
+	// message tolerantly and mark rate-limit responses as retryable.
+	if resp.StatusCode >= 400 {
+		msg := dsErrorMessage(respBody)
+		if msg == "" {
+			msg = strings.TrimSpace(string(respBody))
+		}
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			return nil, fmt.Errorf("%w (status %d): %s", ErrRateLimited, resp.StatusCode, msg)
+		}
+		return nil, fmt.Errorf("content registration failed (status %d): %s", resp.StatusCode, msg)
+	}
+
 	var result ContentRegisterResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		if result.Error != "" {
-			return &result, fmt.Errorf("content registration failed: %s", result.Error)
-		}
-		return &result, fmt.Errorf("content registration failed with status %d", resp.StatusCode)
 	}
 
 	return &result, nil
@@ -550,6 +637,73 @@ func (c *Client) QueryContent(contentType string, filters map[string]string) (*C
 	}
 
 	return &result, nil
+}
+
+// FollowedTargetsResponse is the response from GET /v1/relationships/followed.
+// Targets is the distinct set of target domains the actor currently follows,
+// as the DS computes it across the hot ds_events table AND ds_events_archive.
+type FollowedTargetsResponse struct {
+	Targets     []string `json:"targets"`
+	DSSignature string   `json:"ds_signature,omitempty"`
+	DSKeyID     string   `json:"ds_key_id,omitempty"`
+}
+
+// FollowedTargets returns the set of target domains `domain` currently follows,
+// computed by the DS across ds_events + ds_events_archive so follows whose
+// announce aged past the retention window still count.
+//
+// This is the durable, archive-complete follow analog of RegisteredContentURLs:
+// Clerk counts it for follow parity and Chaplain diffs it against following.json,
+// so neither drifts as follow announce events age out of the retention-pruned
+// hot event table. Both callers MUST use this single primitive (never the raw
+// pub.polis.follow.announced stream) — replaying the stream undercounts every
+// follow once its announce ages out, producing permanent false drift and a
+// Chaplain re-announce loop.
+func (c *Client) FollowedTargets(domain string) ([]string, error) {
+	params := url.Values{}
+	params.Set("actor", domain)
+	endpoint := c.BaseURL + "/v1/relationships/followed?" + params.Encode()
+
+	httpReq, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	if err := c.addAuthHeaders(httpReq); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.doWithTiming(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("followed-targets query failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result FollowedTargetsResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if len(result.Targets) > maxDSResponseRecords {
+		return nil, fmt.Errorf("DS response exceeds record limit: %d > %d", len(result.Targets), maxDSResponseRecords)
+	}
+
+	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
+		return nil, fmt.Errorf("followed-targets query: %w", err)
+	}
+
+	return result.Targets, nil
 }
 
 // CommentCountsRequest is the payload for POST /v1/content/comments/counts.
@@ -757,6 +911,20 @@ func (c *Client) FetchLatestCommentsCtx(ctx context.Context, urls []string) (map
 // server clock to defeat replay; captured grant signatures can no
 // longer be re-submitted later to revert a deny back to granted.
 func (c *Client) UpdateRelationship(relType, sourceURL, targetURL, action string, privateKey []byte) error {
+	return c.UpdateRelationshipMarked(relType, sourceURL, targetURL, action, AgentMarker{}, privateKey)
+}
+
+// UpdateRelationshipMarked is UpdateRelationship for an act a user agent made:
+// the marker is appended to the signed canonical payload and to the request.
+//
+// ⚠️ A DISCOVERY SERVICE THAT PREDATES THE MARKER REJECTS A MARKED REQUEST (401):
+// it rebuilds the signed bytes from the five fixed fields. That is why hosted
+// sends none until POLIS_ROSIE is switched on, after the DS that understands
+// the marker is deployed (epic 45).
+func (c *Client) UpdateRelationshipMarked(relType, sourceURL, targetURL, action string, marker AgentMarker, privateKey []byte) error {
+	if err := marker.check(); err != nil {
+		return err
+	}
 	endpoint := c.BaseURL + "/v1/relationships"
 
 	timestamp := time.Now().UTC().Format(time.RFC3339)
@@ -769,6 +937,8 @@ func (c *Client) UpdateRelationship(relType, sourceURL, targetURL, action string
 		TargetURL: targetURL,
 		Action:    action,
 		Timestamp: timestamp,
+		Agent:     marker.Agent,
+		Grant:     marker.Grant,
 	}
 	canonicalJSON, err := marshalCanonical(canonicalPayload)
 	if err != nil {
@@ -787,6 +957,8 @@ func (c *Client) UpdateRelationship(relType, sourceURL, targetURL, action string
 		TargetURL: targetURL,
 		Action:    action,
 		Timestamp: timestamp,
+		Agent:     marker.Agent,
+		Grant:     marker.Grant,
 		Signature: signature,
 	}
 
@@ -890,12 +1062,18 @@ type contentCanonicalPayload struct {
 //
 // R20-C-F2 (2026-05-18): timestamp added for replay defense. DS
 // rejects timestamps further than ±5min from server clock.
+//
+// Signet epic 11: `agent` and `grant` follow `timestamp`, ⛔ OMITTED WHEN EMPTY,
+// so every request a user makes herself signs exactly the five-field bytes it
+// always did. The DS side of the marker is epic 45's.
 type relationshipCanonicalPayload struct {
 	Type      string `json:"type"`
 	SourceURL string `json:"source_url"`
 	TargetURL string `json:"target_url"`
 	Action    string `json:"action"`
 	Timestamp string `json:"timestamp"`
+	Agent     string `json:"agent,omitempty"`
+	Grant     string `json:"grant,omitempty"`
 }
 
 // MakeContentCanonicalJSON creates canonical JSON for content registration signing.
@@ -974,13 +1152,13 @@ type SiteListOptions struct {
 // Since we don't actually use either field, we let Go ignore them
 // rather than introduce a json.Number / string-tolerant decoder.
 type SiteListEntry struct {
-	Domain                string `json:"domain"`
-	RegistryURL           string `json:"registry_url"`
-	AuthorName            string `json:"author_name,omitempty"`
-	Description           string `json:"description,omitempty"`
-	CreatedAt             string `json:"created_at,omitempty"`
-	UpdatedAt             string `json:"updated_at,omitempty"`
-	LastActiveAt          string `json:"last_active_at,omitempty"`
+	Domain       string `json:"domain"`
+	RegistryURL  string `json:"registry_url"`
+	AuthorName   string `json:"author_name,omitempty"`
+	Description  string `json:"description,omitempty"`
+	CreatedAt    string `json:"created_at,omitempty"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
+	LastActiveAt string `json:"last_active_at,omitempty"`
 	// Actor's most-recent active post; all three are empty when the
 	// actor has no posts yet.
 	RecentPostURL         string `json:"recent_post_url,omitempty"`
@@ -1028,6 +1206,15 @@ type siteRegistrationPayload struct {
 	Action    string `json:"action"`
 	Domain    string `json:"domain"`
 	Timestamp string `json:"timestamp,omitempty"`
+}
+
+// SiteRegistrationCanonicalJSON is the register canonical: the bytes the site
+// signs to register, and the SAME bytes the DS signs back as the registration's
+// service attestation (discovery-service/core/handlers/sites.ts signs the
+// canonical it just verified). Built from the struct RegisterSite signs, so a
+// verifier cannot rebuild different bytes than the owner signed.
+func SiteRegistrationCanonicalJSON(version int, domain string) ([]byte, error) {
+	return marshalCanonical(siteRegistrationPayload{Version: version, Action: "register", Domain: domain})
 }
 
 // siteRegisterRequest is the full request payload for the sites-register endpoint.
@@ -1339,7 +1526,6 @@ func unmarshalJSONBField(raw json.RawMessage) map[string]interface{} {
 	return result
 }
 
-
 // verifyResponse verifies the DS envelope signature on a query response.
 // It extracts the data fields (everything except ds_signature and ds_key_id),
 // builds canonical JSON, and verifies the signature.
@@ -1376,6 +1562,15 @@ type StreamEvent struct {
 	Actor     string                 `json:"actor"`
 	Signature string                 `json:"signature"`
 	Payload   map[string]interface{} `json:"payload"`
+
+	// SIGNET epic 17 — who signed, on whose behalf, under what authority, as
+	// the discovery service recorded them at ingestion. EMPTY on an event stored
+	// before it recorded them: empty means "not recorded", never "self".
+	SignedBy  string `json:"signed_by,omitempty"`
+	Principal string `json:"principal,omitempty"`
+	// Authority is self | a custody grant URL | none | withdrawn | unknown.
+	// ⛔ `none` is "no grant found", never "unauthorised".
+	Authority string `json:"authority,omitempty"`
 }
 
 // UnmarshalJSON handles DS responses where payload may arrive as a
@@ -1388,6 +1583,9 @@ func (e *StreamEvent) UnmarshalJSON(data []byte) error {
 		Actor     string          `json:"actor"`
 		Signature string          `json:"signature"`
 		Payload   json.RawMessage `json:"payload"`
+		SignedBy  string          `json:"signed_by"`
+		Principal string          `json:"principal"`
+		Authority string          `json:"authority"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -1398,6 +1596,9 @@ func (e *StreamEvent) UnmarshalJSON(data []byte) error {
 	e.Timestamp = raw.Timestamp
 	e.Actor = raw.Actor
 	e.Signature = raw.Signature
+	e.SignedBy = raw.SignedBy
+	e.Principal = raw.Principal
+	e.Authority = raw.Authority
 
 	e.Payload = unmarshalJSONBField(raw.Payload)
 
@@ -1811,18 +2012,107 @@ func MakeKeyRotationCanonicalJSON(domain, oldKey, newKey, timestamp string) ([]b
 	})
 }
 
+// KeyHistoryEntry is one key the DS has witnessed a domain holding.
+//
+// ⭐ CreatedAt IS NOT A DUPLICATE OF ValidFrom, and the difference is the point.
+// ValidFrom comes from the rotating client and sits inside the transition
+// signature; CreatedAt is stamped by the DS and cannot be chosen by the site.
+// The gap between them is the evidence against a backdated chain.
+type KeyHistoryEntry struct {
+	PublicKey     string `json:"public_key"`
+	ValidFrom     string `json:"valid_from"`
+	ValidUntil    string `json:"valid_until"`
+	TransitionSig string `json:"transition_sig"`
+	CreatedAt     string `json:"created_at"`
+}
+
+// KeyHistoryResponse is the reply from GET /v1/sites/keys/history.
+type KeyHistoryResponse struct {
+	Domain string            `json:"domain"`
+	Keys   []KeyHistoryEntry `json:"keys"`
+
+	DSSignature string `json:"ds_signature,omitempty"`
+	DSKeyID     string `json:"ds_key_id,omitempty"`
+}
+
+// KeyHistory fetches the key history the DS has WITNESSED for a domain,
+// oldest first.
+//
+// ⛔ THE DS IS A WITNESS HERE, NEVER A GATE. Nothing in polis asks this endpoint
+// for permission: a site publishes its own chain in .well-known/polis and that
+// chain verifies on its own. This is what lets a reader FALSIFY the published
+// one — catching the two things a self-signed chain structurally cannot show,
+// an entry quietly omitted and a chain quietly backdated. Treat a disagreement
+// as something to report, never as authority to rewrite a site's history.
+//
+// A domain the DS has never seen returns an empty list and no error. "I
+// witnessed nothing" is an answer, and it is not the same as a failure to ask.
+func (c *Client) KeyHistory(domain string) (*KeyHistoryResponse, error) {
+	endpoint := fmt.Sprintf("%s/v1/sites/keys/history?domain=%s", c.BaseURL, url.QueryEscape(domain))
+
+	httpReq, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	if c.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doWithTiming(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result KeyHistoryResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if err := c.verifyResponse(respBody, result.DSSignature, result.DSKeyID); err != nil {
+		return nil, fmt.Errorf("key history: %w", err)
+	}
+	return &result, nil
+}
+
+// PublicKeys returns just the keys, oldest first — the sequence a parity check
+// compares against a site's published chain.
+func (r *KeyHistoryResponse) PublicKeys() []string {
+	if r == nil {
+		return nil
+	}
+	out := make([]string, 0, len(r.Keys))
+	for _, k := range r.Keys {
+		out = append(out, k.PublicKey)
+	}
+	return out
+}
+
 // RotateKey sends a key rotation request to the discovery service.
-func (c *Client) RotateKey(req KeyRotationRequest) error {
+//
+// It returns the DS's countersignature over the rotation when the DS issued one
+// (SIGNET epic 32), for the caller to carry in the new key-history entry via
+// site.RecordKeyRotation. A nil witness with a nil error is a successful,
+// unwitnessed rotation — never a failure.
+func (c *Client) RotateKey(req KeyRotationRequest) (*Witness, error) {
 	endpoint := c.BaseURL + "/v1/sites/keys/rotate"
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -1832,16 +2122,24 @@ func (c *Client) RotateKey(req KeyRotationRequest) error {
 
 	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
-		return fmt.Errorf("key rotation failed with status %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("key rotation failed with status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return nil
+	// The rotation already happened; a response we cannot parse costs the
+	// witness, not the rotation.
+	var result struct {
+		Witness *Witness `json:"witness"`
+	}
+	if json.Unmarshal(respBody, &result) != nil {
+		return nil, nil
+	}
+	return result.Witness, nil
 }
 
 // ============================================================================

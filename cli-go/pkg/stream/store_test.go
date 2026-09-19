@@ -224,10 +224,10 @@ func TestDeprecatedCursorKeyCleanup(t *testing.T) {
 		Cursors: map[string]CursorEntry{
 			"pub.polis.sync":           {Position: "500", LastUpdated: "2026-04-01T00:00:00Z"},
 			"pub.polis.feed":           {Position: "500", LastUpdated: "2026-04-01T00:00:00Z"},
-			"pub.polis.feed.followers":  {Position: "300", LastUpdated: "2026-03-01T00:00:00Z"},
-			"pub.polis.feed.me":         {Position: "400", LastUpdated: "2026-03-15T00:00:00Z"},
-			"pub.polis.feed.viewed_at":  {Position: "2026-04-01T12:00:00Z", LastUpdated: "2026-04-01T00:00:00Z"},
-			"pub.polis.feed.global":     {Position: "450", LastUpdated: "2026-03-20T00:00:00Z"},
+			"pub.polis.feed.followers": {Position: "300", LastUpdated: "2026-03-01T00:00:00Z"},
+			"pub.polis.feed.me":        {Position: "400", LastUpdated: "2026-03-15T00:00:00Z"},
+			"pub.polis.feed.viewed_at": {Position: "2026-04-01T12:00:00Z", LastUpdated: "2026-04-01T00:00:00Z"},
+			"pub.polis.feed.global":    {Position: "450", LastUpdated: "2026-03-20T00:00:00Z"},
 		},
 	}
 	data, _ := json.MarshalIndent(cf, "", "  ")

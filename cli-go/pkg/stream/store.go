@@ -148,9 +148,9 @@ var cursorKeyMigrations = map[string]string{
 
 // deprecatedCursorKeys are cursor keys that should be removed on load.
 var deprecatedCursorKeys = []string{
-	"pub.polis.feed.followers",  // replaced by runtime filtering over network cache
-	"pub.polis.feed.me",         // replaced by runtime filtering over network cache
-	"pub.polis.feed.viewed_at",  // replaced by position-based pub.polis.feed.viewed
+	"pub.polis.feed.followers", // replaced by runtime filtering over network cache
+	"pub.polis.feed.me",        // replaced by runtime filtering over network cache
+	"pub.polis.feed.viewed_at", // replaced by position-based pub.polis.feed.viewed
 }
 
 func (s *Store) loadCursors() (*CursorsFile, error) {

@@ -157,7 +157,7 @@ func TestRemoteIP_PrefersFlyClientIPOverXFF(t *testing.T) {
 	req.Header.Set("X-Forwarded-For", "attacker.spoofed, 198.51.100.7")
 	req.Header.Set("Fly-Client-IP", "203.0.113.42")
 
-	if got := remoteIP(req); got != "203.0.113.42" {
+	if got := remoteIP(req, true); got != "203.0.113.42" {
 		t.Errorf("remoteIP with Fly-Client-IP present = %q, want 203.0.113.42", got)
 	}
 }
@@ -171,7 +171,7 @@ func TestRemoteIP_ReadsRightmostXFF(t *testing.T) {
 	req.RemoteAddr = "10.0.0.1:1234"
 	req.Header.Set("X-Forwarded-For", "attacker.spoofed, 198.51.100.7")
 
-	if got := remoteIP(req); got != "198.51.100.7" {
+	if got := remoteIP(req, true); got != "198.51.100.7" {
 		t.Errorf("remoteIP rightmost-XFF = %q, want 198.51.100.7", got)
 	}
 }
@@ -183,7 +183,7 @@ func TestRemoteIP_SingleXFFEntry(t *testing.T) {
 	req.RemoteAddr = "10.0.0.1:1234"
 	req.Header.Set("X-Forwarded-For", "203.0.113.99")
 
-	if got := remoteIP(req); got != "203.0.113.99" {
+	if got := remoteIP(req, true); got != "203.0.113.99" {
 		t.Errorf("remoteIP single-XFF = %q, want 203.0.113.99", got)
 	}
 }
@@ -194,7 +194,7 @@ func TestRemoteIP_NoXFFFallsBackToRemoteAddr(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "192.0.2.50:9999"
 
-	if got := remoteIP(req); got != "192.0.2.50" {
+	if got := remoteIP(req, true); got != "192.0.2.50" {
 		t.Errorf("remoteIP no-XFF = %q, want 192.0.2.50", got)
 	}
 }

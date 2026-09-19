@@ -1,5 +1,7 @@
 # CLI Package Structure
 
+*For* [Contributors](../../README.md#contributing-to-polis) · [Developers](../../README.md#building-on-polis) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [CLI](../README.md) — *Code* [`cli-go/pkg`](../../../cli-go/pkg)
+
 The Go CLI (`cli-go/`) provides importable packages used by both the CLI binary and the webapp.
 
 ## Package Hierarchy
@@ -16,9 +18,13 @@ All core packages live in `cli-go/pkg/`. Grouped by concern:
 | `comment/` | Comment management (sign, beseech, pending/denied state) |
 | `blessing/` | Blessing workflow (requests, grant, deny, beseech, sync) |
 | `tag/` | Tag content type (apply, remove, sign, sync to DS) |
+| `attestation/` | Signed claims, `pub.polis.attestation` — issue, withdraw, verify, DS registration. Using them rather than changing them: [the recipe book](../../signet/recipes/README.md) |
+| `license/` | The signed outbound licence, `pub.polis.license`, and the surfaces generated from it |
+| `did/` | Projects the site's identity key (and its retired keys) into a `did:web` document |
+| `actor/` | An operator's actor registry — sign, countersign, the actors' local `Guard`, and the stranger's check `CheckAction` behind `polis actor verify <action>` |
 | `dm/` | Direct message encryption, storage, send/receive pipeline |
-| `metadata/` | Public index management (`public.jsonl`) |
-| `index/` | Index rebuilding |
+| `metadata/` | Content index entry type + append/update/remove (`index.jsonl`) |
+| `index/` | Rebuilding the content index — **the one implementation**; `polis rebuild` and Tailor's `index-rebuild` both call it |
 | `version/` | Version history parsing/reconstruction |
 | **Discovery / remote** | |
 | `discovery/` | HTTP client for discovery service endpoints |
@@ -29,7 +35,7 @@ All core packages live in `cli-go/pkg/`. Grouped by concern:
 | `remote/` | HTTP fetching for remote polis sites |
 | `verify/` | Remote content signature/hash verification |
 | `clone/` | Remote site cloning |
-| `migrate/` | Domain migration |
+| `cache/` | Isolated, non-canonical local mirrors of foreign content (the verified copy of a blessed comment) |
 | `httppool/` | Shared outbound HTTP client / pooling |
 | `resolve/` | URL → canonical handle/site resolution |
 | **Rendering / bundles** | |
@@ -38,23 +44,63 @@ All core packages live in `cli-go/pkg/`. Grouped by concern:
 | `theme/` | Theme template loading |
 | `snippet/` | Snippet file management |
 | `bundle/` | Bundle loading, registry, fixture install (`pub.polis.core`) |
+| `pql/` | PQL sentence parsing and composition (the Go sibling of the JS parser) |
 | `sitemap/` | Sitemap generation |
 | **Site state** | |
-| `site/` | Site validation, initialization, `.well-known/polis` |
+| `site/` | Site initialization, `.well-known/polis`, key history |
+| `sitecheck/` | The integrity predicates behind `polis validate` — the same code Patrol and Judge run |
 | `hooks/` | Post-action automation |
 | `policy/` | Policy rule loading and evaluation |
-| `policycheck/` | Policy evaluation engine (verb-by-type matrix, layered eval) |
+| `policycheck/` | Remote policy evaluation — composes `policy`, `remote` and `following` to check another site's policy |
 | `url/` | URL normalization |
 | `atomicfile/` | Atomic file writes (write-temp-then-rename) |
 | **API / dispatch** | |
 | `ops/` | Content-type dispatch engine (wraps packages for API) |
 | **Background actors** (used by webapp's `polis-server` / `polis-full`) | |
-| `patrol/` | Patrol — detect issues with tenant sites |
-| `medic/` | Medic — fix issues Patrol surfaces |
-| `judge/` | Judge — validate signatures, key continuity (proto-TOFU) |
-| `clerk/` | Clerk — pre-registration intake |
-| `chaplain/` | Chaplain — post-registration follow-up |
-| `tailor/` | Tailor — replay Patrol/Medic changes |
+| `patrol/` | Patrol — local integrity checks on tenant sites (keys, permissions, signatures, hashes) |
+| `medic/` | Medic — safe, reversible fixes for what Patrol finds |
+| `judge/` | Judge — cross-boundary verification (what a site publishes vs. what the discovery service witnessed) |
+| `clerk/` | Clerk — state-parity measurement between a tenant's files and the discovery service's event log |
+| `chaplain/` | Chaplain — reconciliation repairs for what Clerk measures |
+| `agent/` | Rosie as the user's agent — grants, the in-signature marker, and her decisions |
+| `cache/upkeep/` | The cache-upkeep sweep Medic runs daily on hosted — reconcile, re-verify and garbage-collect local caches (was `rosie/`) |
+| `tailor/` | Tailor — diagnoses and auto-fixes a self-hosted site to bring it up to the current spec |
+
+### `index/` — the contributor seam
+
+`index.jsonl` is a projection with **many sources**: `publish` appends a post,
+blessing a comment appends a comment, and a rebuild regenerates from the content
+on disk. So the rebuild does not own the file — it composes it.
+
+```go
+// contributors.go
+func Contributors() []Contributor {
+    return []Contributor{
+        {EntryTypePost, "pub.polis.post", "--posts", postEntries},
+        {EntryTypeComment, "pub.polis.comment", "--comments", commentEntries},
+        {EntryTypeTag, "pub.polis.tag", "--tags", tagEntries},
+        {EntryTypeAttestation, attestation.TypeName, "--attestations", attestationEntries},
+    }
+}
+```
+
+`PlanContentIndex(siteDir, only)` computes the composed file without writing;
+`RebuildContentIndex(siteDir, only)` writes it. `only` names the entry types to
+regenerate — everything else is re-emitted **from its original bytes**, so no
+field is lost to a struct that does not model it.
+
+**Adding a content type to the index** is one struct literal plus a function
+returning `[]metadata.IndexEntry`. ⚠️ It is deliberately a **list of functions**,
+not a registry: no registration side effects, no lookup table, no interface with
+one implementation. If it starts to look like a plugin framework, it has gone a
+level too high.
+
+⛔ **Never write `index.jsonl` from anywhere else.** The rule the package exists
+to keep: *a projection may have many sources, and any regenerator that knows one
+source must not own the whole file.* Two implementations of this file is exactly
+how `polis rebuild` once published an index the site's own integrity checker
+rejected. The entry schema is specified in
+[`docs/general/concepts/content-system.md`](../../general/concepts/content-system.md).
 
 ## Import Rules
 
@@ -78,7 +124,7 @@ var Version = "dev"
 func GetGenerator() string { return "polis-cli-go/" + Version }
 ```
 
-The CLI entry point (`cmd/root.go`) propagates the version to the 7 packages that write generator strings into files:
+The CLI entry point (`cmd/root.go`) propagates the version to the 11 packages that write generator strings into files:
 
 ```go
 func Execute(version string) {
@@ -89,10 +135,18 @@ func Execute(version string) {
     index.Version = version
     site.Version = version
     tag.Version = version
+    attestation.Version = version
+    dm.Version = version
+    license.Version = version
+    actor.Version = version
 }
 ```
 
 Metadata files use the generator format (`polis-cli-go/X.Y.Z`) instead of the bare version. The bash CLI uses `polis-cli/$VERSION` format.
+
+⚠️ **Wiring is only half of it.** A package whose `GetGenerator()` is never read writes nothing, and a
+package that is read but never assigned writes `polis-cli-go/dev` — inside the signature, for a signed
+type. Check both ends when adding one.
 
 > Other packages (e.g. `tailor`) declare a `var Version = "dev"` but do not currently receive a propagated value from `Execute()` — they don't write generator strings to user-visible files today. If a new package starts emitting a generator marker, wire it into the list above.
 
@@ -110,17 +164,17 @@ The Go CLI packages can be imported by external programs:
 
 ```go
 import (
+    "os"
+
     "github.com/vdibart/polis-cli/cli-go/pkg/publish"
-    "github.com/vdibart/polis-cli/cli-go/pkg/signing"
 )
 
-// Publish a post programmatically
-result, err := publish.Publish(publish.Options{
-    DataDir:  "/path/to/site",
-    File:     "content.md",
-    Key:      privateKey,
-    BaseURL:  "https://mysite.com",
-})
+// Publish a post programmatically. privateKey is the PEM bytes of
+// .polis/keys/id_ed25519; the optional *publish.DiscoveryConfig registers
+// the post with a discovery service.
+privateKey, _ := os.ReadFile("/path/to/site/.polis/keys/id_ed25519")
+result, err := publish.PublishPost("/path/to/site", markdown, "", privateKey)
+// result.Path, result.Version, result.Signature
 ```
 
 ## Building
@@ -150,8 +204,8 @@ The CLI uses consistent output prefixes:
 | `[x]` | Error |
 | `[!]` | Warning |
 
-With `--json`, all output follows:
-```json
-{"status": "success", "command": "<name>", "data": {...}}
-{"status": "error", "command": "<name>", "error": {"code": "...", "message": "..."}}
-```
+With `--json`, most commands wrap their result as `{"status": "success", "command": "<name>", "data": {...}}`,
+but not all: `post`, `republish`, `comment`, `render`, `register`, `unregister`, `blessing grant` and
+`blessing deny` print a flat object, `validate` prints its report, and every failure prints
+`{"success": false, "error": "<message>"}` (from `exitError` in `cmd/root.go`). See
+[`json-mode.md`](../user/json-mode.md#response-shapes).

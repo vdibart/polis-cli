@@ -10,6 +10,7 @@
 #   - Tag delete removes file
 #   - Tag name normalization
 #   - JSON output mode
+#   - A tag file carrying a member this CLI does not model is refused, untouched
 
 # Test: List with no tags
 test_tag_list_empty() {
@@ -188,6 +189,54 @@ test_tag_normalize() {
     return 0
 }
 
+# Test: a tag file a newer polis wrote is refused on apply and on remove —
+# signing it would cover a file whose content the signature does not.
+test_tag_refuses_unrecognised_fields() {
+    setup_test_env "tag_refuses_unrecognised"
+    trap teardown_test_env EXIT
+
+    "$POLIS_BIN" init > /dev/null 2>&1
+    "$POLIS_BIN" tag apply rust "https://example.com/a" > /dev/null 2>&1
+    local file="content/pub.polis.core/tag/rust.json"
+    assert_file_exists "$file" || return 1
+
+    jq '.colour = "#ff0000" | .targets[0].note = "n"' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    local before
+    before=$(sha256sum "$file" | awk '{print $1}')
+
+    local result exit_code
+    result=$("$POLIS_BIN" tag apply rust "https://example.com/b" 2>&1)
+    exit_code=$?
+    if [ "$exit_code" -eq 0 ]; then
+        log_error "tag apply signed a file carrying unrecognised members"
+        return 1
+    fi
+    case "$result" in
+        *"colour, targets[0].note"*"rewrite-unsigned"*) ;;
+        *) log_error "refusal must name the members and the way past, got: $result"; return 1 ;;
+    esac
+
+    result=$("$POLIS_BIN" --json tag remove rust "https://example.com/a" 2>&1)
+    exit_code=$?
+    if [ "$exit_code" -eq 0 ]; then
+        log_error "tag remove signed a file carrying unrecognised members"
+        return 1
+    fi
+    if ! echo "$result" | grep -q UNRECOGNISED_FIELDS; then
+        log_error "JSON refusal missing UNRECOGNISED_FIELDS code: $result"
+        return 1
+    fi
+
+    local after
+    after=$(sha256sum "$file" | awk '{print $1}')
+    if [ "$before" != "$after" ]; then
+        log_error "a refused write changed the tag file"
+        return 1
+    fi
+
+    return 0
+}
+
 # Run tests
 run_test "Tag List Empty" test_tag_list_empty
 run_test "Tag Apply" test_tag_apply
@@ -196,3 +245,4 @@ run_test "Tag Apply Duplicate" test_tag_apply_duplicate
 run_test "Tag Remove" test_tag_remove
 run_test "Tag Delete" test_tag_delete
 run_test "Tag Normalize" test_tag_normalize
+run_test "Tag Refuses Unrecognised Fields" test_tag_refuses_unrecognised_fields

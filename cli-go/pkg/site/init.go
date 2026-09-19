@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	"github.com/vdibart/polis-cli/cli-go/pkg/did"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
+	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
 // Version is set at startup by the cmd package.
@@ -31,6 +33,26 @@ type InitOptions struct {
 	Email     string // Optional email address — private by default, only written if explicitly provided
 	Theme     string // Optional initial theme (default: empty, selected randomly on first render)
 	Generator string // e.g. "polis-cli-go/0.59.0" — used in metadata; falls back to package default if empty
+
+	// License is the licence profile to state at init: "reserved", "open", or
+	// "none". Empty means the caller has not asked, and NOTHING IS WRITTEN —
+	// no licence file, no pointer, no robots.txt.
+	//
+	// That silence is deliberate and it is the conservative option. A
+	// license.json is a signed statement of the author's INTENT; creating one
+	// the author never made would be authoring on their behalf, which is worse
+	// than the operator-signing cases already ruled out. Absent = unstated is a
+	// defined, honest state: they have not said.
+	//
+	// A default nobody saw is not consent, so the caller is responsible for
+	// having asked (interactive prompt) or for surfacing the choice prominently
+	// afterwards (hosted signup).
+	License string
+
+	// BaseURL is the site's public URL. Only used to build the licence
+	// payload's pointers, which must live on the author's own domain. When
+	// empty the licence is still written, without the terms/contact URLs.
+	BaseURL string
 }
 
 // InitResult contains the result of site initialization.
@@ -40,7 +62,16 @@ type InitResult struct {
 	PublicKey    string   `json:"public_key"`
 	DirsCreated  []string `json:"directories_created,omitempty"`
 	FilesCreated []string `json:"files_created,omitempty"`
-	KeyPaths     struct {
+	// License is the profile actually stated, or "" if none was. Surfaced so
+	// callers can SHOW what was chosen rather than merely recording it.
+	License string `json:"license,omitempty"`
+	// DID is the did:web identifier published for this site, or "" when the
+	// site's canonical host was not known at init (no BaseURL) and the
+	// document could not be built. Surfaced rather than swallowed so a
+	// missing DID is observable at the moment it fails to appear instead of
+	// being discovered later by a resolver.
+	DID      string `json:"did,omitempty"`
+	KeyPaths struct {
 		Private string `json:"private"`
 		Public  string `json:"public"`
 	} `json:"key_paths"`
@@ -102,6 +133,7 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 		filepath.Join(siteDir, "content", "pub.polis.core", "comment"),
 		filepath.Join(siteDir, "content", "pub.polis.core", "follow"),
 		filepath.Join(siteDir, "content", "pub.polis.core", "tag"),
+		filepath.Join(siteDir, "content", "pub.polis.core", "license"),
 		// Policies
 		filepath.Join(siteDir, "policies"),
 	}
@@ -181,6 +213,25 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 		return nil, fmt.Errorf("failed to create .well-known/polis: %w", err)
 	}
 
+	// Publish the genesis entry of this key's history.
+	//
+	// A site that publishes only its CURRENT key stops being able to verify its
+	// own past the moment it rotates: everything signed under the old key fails
+	// against what the site publishes. So the chain starts here, at epoch 0, and
+	// every rotation appends to it.
+	//
+	// ⭐ NO DS CONSULT IS NEEDED HERE, unlike Medic's provisioning for existing
+	// tenants. Medic has to ask because it cannot prove from the site alone that
+	// the key it finds is the FIRST key. A key generated three lines above has no
+	// history to contradict, so the assumption is not an assumption.
+	//
+	// The entry says nothing the document does not already say — public_key and
+	// created, restated as a chain — which is what makes it derived rather than
+	// authored, and safe to write unasked.
+	if _, err := WriteGenesisKeyHistory(siteDir); err != nil {
+		return nil, fmt.Errorf("failed to publish the genesis key-history entry: %w", err)
+	}
+
 	// Provision the DM keyring (bootstrap epoch) and publish its signed
 	// public_key_messages block into .well-known/polis, so the site can receive
 	// encrypted DMs from message #1. Medic performs the same on existing tenants.
@@ -193,8 +244,29 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 		return nil, fmt.Errorf("failed to create favicon.svg: %w", err)
 	}
 
-	// Create bundle.json
 	var filesCreated []string
+
+	// Publish the same identity key a second time, as a did:web DID Document.
+	//
+	// Derived, not authored: it re-encodes the public_key written just above
+	// and says nothing the site is not already saying, which is why it can be
+	// written without asking anyone. Only the canonical host is new
+	// information, and it comes from the caller — a site initialised without
+	// one gets no document, because a DID whose id names the wrong host does
+	// not resolve and is worse than none. Medic and Tailor publish it later,
+	// once the host is known.
+	//
+	// Not fatal: this is a projection of an identity that already exists on
+	// disk, so a failure here must not take down site creation (hosted signup
+	// runs through this path). The result carries what happened.
+	if host := polisurl.ExtractDomain(opts.BaseURL); host != "" {
+		if err := PublishDIDDocument(siteDir, host); err == nil {
+			result.DID = did.ID(host)
+			filesCreated = append(filesCreated, ".well-known/did.json")
+		}
+	}
+
+	// Create bundle.json
 	coreBundle := bundle.DefaultCoreBundle()
 	bundlePath := filepath.Join(siteDir, "content", "pub.polis.core", "bundle.json")
 	if err := bundle.SaveBundle(bundlePath, coreBundle); err != nil {
@@ -233,6 +305,18 @@ func Init(siteDir string, opts InitOptions) (*InitResult, error) {
 	// Create content files
 	if err := initContentFiles(siteDir, &filesCreated, gen); err != nil {
 		return nil, fmt.Errorf("failed to create content files: %w", err)
+	}
+
+	// State the licence, if and only if the caller has actually chosen one.
+	if opts.License != "" {
+		stated, err := StateLicense(siteDir, opts.License, opts.BaseURL, privKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to state licence: %w", err)
+		}
+		if stated {
+			filesCreated = append(filesCreated, "content/pub.polis.core/license/license.json")
+			result.License = opts.License
+		}
 	}
 
 	// Create default about snippet

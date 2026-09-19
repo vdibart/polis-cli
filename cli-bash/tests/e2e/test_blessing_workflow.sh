@@ -63,6 +63,7 @@ test_comment_with_beseech() {
         # Skip network mode: just verify comment creation without API call
         log "  [SKIP-NETWORK] Skipping actual comment command (requires network)"
         log "  [OK] Comment file created, network call skipped"
+        mark_skip "Skipping actual comment command (requires network)"
         return 0
     fi
 
@@ -84,6 +85,7 @@ test_comment_with_beseech() {
         if [[ "$error_code" == "API_ERROR" || "$error_code" == "NETWORK_ERROR" ]]; then
             log "  [WARN] Network/API error - discovery service may not be available"
             log "  [SKIP] Skipping remainder of test due to network issues"
+            mark_skip "Skipping remainder of test due to network issues"
             return 0
         fi
     fi
@@ -109,6 +111,7 @@ test_blessing_requests() {
     if ! check_e2e_prerequisites; then
         if should_skip_network; then
             log "  [SKIP-NETWORK] Skipping blessing requests test"
+            mark_skip "Skipping blessing requests test"
             return 0
         else
             log_error "Missing POLIS_BASE_URL or DISCOVERY_SERVICE_KEY"
@@ -122,6 +125,7 @@ test_blessing_requests() {
     if should_skip_network; then
         log "  [SKIP-NETWORK] Skipping actual API call"
         log "  [OK] Test setup validated, network call skipped"
+        mark_skip "Skipping actual API call"
         return 0
     fi
 
@@ -136,6 +140,7 @@ test_blessing_requests() {
 
         if [[ "$error_code" == "API_ERROR" || "$error_code" == "NETWORK_ERROR" ]]; then
             log "  [WARN] Network/API error - discovery service may not be available"
+            mark_skip "Network/API error - discovery service may not be available"
             return 0
         fi
 
@@ -149,9 +154,36 @@ test_blessing_requests() {
     assert_json_has_field "$result" ".data.count" || return 1
     assert_json_has_field "$result" ".data.requests" || return 1
 
+    # The envelope must never carry the discovery service's wire key.
+    if echo "$result" | jq -e '.data.records' > /dev/null 2>&1; then
+        log_error "[FAIL] .data.records present - DS wire key leaked into the CLI contract"
+        return 1
+    fi
+
     local count
     count=$(echo "$result" | jq -r '.data.count')
     log "  Pending requests: $count"
+
+    # count must describe the array actually returned
+    local actual
+    actual=$(echo "$result" | jq -r '.data.requests | length')
+    if [[ "$count" != "$actual" ]]; then
+        log_error "[FAIL] .data.count is $count but .data.requests has $actual entries"
+        return 1
+    fi
+
+    # Item shape, asserted only when there is an item to assert on
+    if [[ "$count" -gt 0 ]]; then
+        assert_json_has_field "$result" ".data.requests[0].id" || return 1
+        assert_json_has_field "$result" ".data.requests[0].comment_url" || return 1
+        assert_json_has_field "$result" ".data.requests[0].comment_version" || return 1
+        assert_json_has_field "$result" ".data.requests[0].in_reply_to" || return 1
+        assert_json_has_field "$result" ".data.requests[0].author" || return 1
+        assert_json_has_field "$result" ".data.requests[0].created_at" || return 1
+        log "  [OK] Request item shape matches the documented contract"
+    else
+        log "  No requests returned - item shape not exercised"
+    fi
 
     log "  [OK] Blessing requests retrieved successfully"
     return 0
@@ -166,6 +198,7 @@ test_blessing_grant() {
     if ! check_e2e_prerequisites; then
         if should_skip_network; then
             log "  [SKIP-NETWORK] Skipping blessing grant test"
+            mark_skip "Skipping blessing grant test"
             return 0
         else
             log_error "Missing POLIS_BASE_URL or DISCOVERY_SERVICE_KEY"
@@ -179,6 +212,7 @@ test_blessing_grant() {
     if should_skip_network; then
         log "  [SKIP-NETWORK] Skipping actual API call"
         log "  [OK] Test setup validated, network call skipped"
+        mark_skip "Skipping actual API call"
         return 0
     fi
 
@@ -189,6 +223,7 @@ test_blessing_grant() {
     if ! echo "$requests_result" | jq -e '.data.requests[0]' > /dev/null 2>&1; then
         log "  No pending blessing requests to test with"
         log "  [SKIP] Skipping grant test - no requests available"
+        mark_skip "Skipping grant test - no requests available"
         return 0
     fi
 
@@ -218,6 +253,7 @@ test_blessing_grant() {
 
         if [[ "$error_code" == "API_ERROR" ]]; then
             log "  [WARN] API error - discovery service issue"
+            mark_skip "API error - discovery service issue"
             return 0
         fi
 
@@ -256,6 +292,7 @@ test_blessing_deny() {
     if ! check_e2e_prerequisites; then
         if should_skip_network; then
             log "  [SKIP-NETWORK] Skipping blessing deny test"
+            mark_skip "Skipping blessing deny test"
             return 0
         else
             log_error "Missing POLIS_BASE_URL or DISCOVERY_SERVICE_KEY"
@@ -269,6 +306,7 @@ test_blessing_deny() {
     if should_skip_network; then
         log "  [SKIP-NETWORK] Skipping actual API call"
         log "  [OK] Test setup validated, network call skipped"
+        mark_skip "Skipping actual API call"
         return 0
     fi
 
@@ -279,6 +317,7 @@ test_blessing_deny() {
     if ! echo "$requests_result" | jq -e '.data.requests[0]' > /dev/null 2>&1; then
         log "  No pending blessing requests to test with"
         log "  [SKIP] Skipping deny test - no requests available"
+        mark_skip "Skipping deny test - no requests available"
         return 0
     fi
 
@@ -308,6 +347,7 @@ test_blessing_deny() {
 
         if [[ "$error_code" == "API_ERROR" ]]; then
             log "  [WARN] API error - discovery service issue"
+            mark_skip "API error - discovery service issue"
             return 0
         fi
 

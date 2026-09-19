@@ -1,5 +1,7 @@
 # Direct Message Encryption
 
+*For* [Writers](../../README.md#writing-on-polis) · [Reviewers](../../README.md#reviewing-the-security-and-identity-design) — *About* [Relationships](../README.md#relationships) — *Kind* [Concept](../../README.md#kinds-of-page) — *See also* [spec](../../../cli-go/pkg/dm/FORMAT.md) · [spec](../../../cli-go/pkg/dm/PROTOCOL.md) · [tour](../../handbook/dm-encryption.md) · no recipe yet
+
 This is the authoritative treatment of direct-message (DM) confidentiality in polis: what it
 protects, what it does **not**, and exactly how it works. It is written to be checked — every
 claim is scoped, and every limit is named. If a sentence here reads as a softer promise than
@@ -43,6 +45,8 @@ The rest of this document is the precise version of the above. Terms in **bold**
 are defined in the [Glossary](#glossary).
 
 ---
+
+<a id="what-this-protects"></a>
 
 ## What this protects — and what it does not {#what-this-protects}
 
@@ -92,6 +96,8 @@ password plus Argon2id makes that infeasible.
 
 ---
 
+<a id="how-it-works"></a>
+
 ## How it works {#how-it-works}
 
 ### A separate key for messages
@@ -129,6 +135,8 @@ Each message carries a `key_epoch` tag, so the reader knows which epoch's DEK it
 
 ---
 
+<a id="bootstrap-window"></a>
+
 ## The bootstrap window {#bootstrap-window}
 
 New accounts can send and receive messages immediately, with no setup — because epoch 0's DEK
@@ -149,7 +157,11 @@ This is a deliberate trade for zero-friction onboarding, and it is disclosed, no
 
 ---
 
+<a id="passwords-and-recovery"></a>
+
 ## Passwords and recovery {#passwords-and-recovery}
+
+<a id="change-password"></a>
 
 ### Setting a password — the upgrade {#change-password}
 
@@ -171,6 +183,8 @@ The only attack surface is offline brute-force against an exfiltrated blob.
 We deliberately offer **no password hint** of any kind. A hint stored anywhere we can read it
 would weaken the offline-attacker guarantee; a hint we cannot read is just a second secret.
 
+<a id="recovery-phrase"></a>
+
 ### The recovery phrase {#recovery-phrase}
 
 When you set a password you are shown a **12-word BIP39 recovery phrase, once**. It derives an
@@ -186,6 +200,8 @@ You can **regenerate** the recovery phrase (retiring the old one) from Settings 
 this re-wraps the current DEK under a fresh phrase and leaves the password untouched.
 
 ---
+
+<a id="message-lifecycle"></a>
 
 ## The lifecycle of one message {#message-lifecycle}
 
@@ -215,6 +231,8 @@ this re-wraps the current DEK under a fresh phrase and leaves the password untou
 
 ---
 
+<a id="delivery"></a>
+
 ## Point-to-point delivery {#delivery}
 
 A DM travels **directly** from the sender's polis instance to the recipient's instance —
@@ -222,9 +240,12 @@ A DM travels **directly** from the sender's polis instance to the recipient's in
 header. The discovery service is **not** in the message path. This is why the metadata
 exposure is to the two endpoint operators only: no central polis entity ever sees that a DM
 was sent, let alone its contents. Acceptance is gated by the recipient's Layer-1 policy
-(`pub.polis.dm`), which by default restricts DMs to followed (mutual) domains.
+(`pub.polis.dm`), which by default accepts DMs only from domains the recipient follows; the
+sending UI separately offers messaging only between mutual follows.
 
 ---
+
+<a id="wire-at-rest-handoff"></a>
 
 ## The wire→at-rest handoff {#wire-at-rest-handoff}
 
@@ -255,6 +276,8 @@ Two server-side re-seal paths touch ciphertext + public keys only, never a passw
   password) is **rejected for refetch + retry**, not stored as ciphertext nobody can open — so
   clearing `server_dek` never strands an in-flight message.
 
+<a id="metadata"></a>
+
 ## What we see: content vs. metadata {#metadata}
 
 "We cannot read your messages" is a claim about **content**, and only content. The endpoint
@@ -266,6 +289,8 @@ operators still observe:
 We do not, and cannot, claim to hide that. Scoping the claim to content is the honest framing.
 
 ---
+
+<a id="browser-crypto"></a>
 
 ## Browser cryptography (transparency disclosure) {#browser-crypto}
 
@@ -291,6 +316,8 @@ user-facing guarantee (unlike the bootstrap-window `server_dek` disclosure, whic
 therefore also stated in plain language above and in the Terms of Service).
 
 ---
+
+<a id="local-decryption"></a>
 
 ## Reading your messages offline {#local-decryption}
 
@@ -326,6 +353,8 @@ It is tracked but not yet shipped.
 
 ---
 
+<a id="detection-limits"></a>
+
 ## What we can and cannot verify {#detection-limits}
 
 Honesty about detection matters as much as honesty about the crypto:
@@ -343,6 +372,8 @@ Honesty about detection matters as much as honesty about the crypto:
   is the protocol (you seal to their verified key) plus your judgment about whom you message.
 
 ---
+
+<a id="glossary"></a>
 
 ## Glossary {#glossary}
 

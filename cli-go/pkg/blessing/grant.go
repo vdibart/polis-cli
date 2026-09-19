@@ -20,11 +20,22 @@ type GrantResult struct {
 // Grant approves a blessing request.
 // This:
 // 1. Calls the discovery service to grant the blessing via relationship-update
-// 2. Updates the local metadata/blessed-comments.json index
+// 2. Updates the local blessed.json — SIGNED with the blesser's key
+//
+// ⚠️ Order is DS-then-local for failure reasons, NOT because the DS is
+// authoritative. blessed.json is AUTHORED: the author knows what they blessed,
+// and the DS is how the network learns it (SIGNET epic 14, D1/D4).
 // 3. Optionally runs the post-comment hook
 func Grant(siteDir string, request *IncomingRequest, client *discovery.Client, hookConfig *hooks.HookConfig, privateKey []byte) (*GrantResult, error) {
+	return grant(siteDir, request, client, hookConfig, privateKey, discovery.AgentMarker{})
+}
+
+// grant is Grant with an optional agent marker. The zero marker is the user's
+// own act and produces exactly the bytes Grant always has; only GrantAsAgent
+// passes a non-zero one, after checking the live grant.
+func grant(siteDir string, request *IncomingRequest, client *discovery.Client, hookConfig *hooks.HookConfig, privateKey []byte, marker discovery.AgentMarker) (*GrantResult, error) {
 	// Grant via unified relationship-update endpoint
-	if err := client.UpdateRelationship("pub.polis.comment.blessing", request.CommentURL, request.InReplyTo, "grant", privateKey); err != nil {
+	if err := client.UpdateRelationshipMarked("pub.polis.comment.blessing", request.CommentURL, request.InReplyTo, "grant", marker, privateKey); err != nil {
 		return nil, fmt.Errorf("failed to grant blessing: %w", err)
 	}
 
@@ -36,11 +47,16 @@ func Grant(siteDir string, request *IncomingRequest, client *discovery.Client, h
 	blessedComment := metadata.BlessedComment{
 		URL:     request.CommentURL,
 		Version: request.CommentVersion,
+		// The marker rides on the entry INSIDE the list's signature (epic 11 D7).
+		Agent: marker.Agent,
+		Grant: marker.Grant,
 	}
 
-	if err := metadata.AddBlessedComment(siteDir, postPath, blessedComment); err != nil {
+	// SIGNET epic 14 — SIGNED, because this is the author's own act. The blesser
+	// decided; blessed.json records that decision and the DS learns afterward.
+	// A nil key falls through to an unsigned write, which is the safe direction.
+	if err := metadata.AddBlessedCommentSigned(siteDir, postPath, blessedComment, privateKey); err != nil {
 		// Log warning but don't fail - the blessing was granted on discovery service
-		// The local index is a convenience, not the source of truth
 		fmt.Printf("[warning] Failed to update blessed-comments.json: %v\n", err)
 	}
 

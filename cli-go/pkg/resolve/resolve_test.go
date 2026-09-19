@@ -289,7 +289,7 @@ func TestAbs(t *testing.T) {
 func TestContentTypeNames(t *testing.T) {
 	r := testResolver(t)
 	names := r.ContentTypeNames()
-	if len(names) != 6 {
-		t.Errorf("got %d content types, want 6", len(names))
+	if len(names) != 9 {
+		t.Errorf("got %d content types, want 9", len(names))
 	}
 }

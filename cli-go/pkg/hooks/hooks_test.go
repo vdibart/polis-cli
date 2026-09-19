@@ -202,4 +202,3 @@ func TestRunHook_Timeout(t *testing.T) {
 		t.Errorf("Hook took too long (%v), timeout may not be working", elapsed)
 	}
 }
-

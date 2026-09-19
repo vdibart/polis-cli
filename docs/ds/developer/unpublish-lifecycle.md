@@ -1,5 +1,7 @@
 # Unpublish Lifecycle
 
+*For* [Developers](../../README.md#building-on-polis) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [Discovery service](../README.md)
+
 Unpublish is the mechanism for authors to retract published posts or comments. It is a **clean break** — all ties to the published identity are severed, and any future republish is treated as a completely fresh publication.
 
 ## What Unpublish Does
@@ -15,7 +17,7 @@ The content body is preserved as a draft for potential reuse, but all published 
 
 ## Post Unpublish
 
-When a post is unpublished, blessings on comments that reference the post are cascaded:
+When a post is unpublished, the blessing relationships whose target is the post — comments whose `in_reply_to` is the post itself — are cascaded (a reply to a comment has that comment as its target and is not touched):
 
 | Before | After | Rationale |
 |--------|-------|-----------|
@@ -32,7 +34,7 @@ Comments themselves (their content, ownership, and DS content records) are **not
 When a comment is unpublished:
 
 - The comment's DS status transitions to `unpublished`
-- The comment's **own blessing relationship** is reset to `pending` (so republish triggers fresh policy evaluation)
+- The comment's **own blessing relationship** is reset to `pending` (so on republish the post author decides it again)
 - **No cascade to child comments.** If other comments have `in_reply_to` pointing to this comment, they are unaffected. Their `root_post` (the original post) is still valid, and their blessing relationship is with the post author, not the parent commenter. The thread has a gap, but each comment remains independently valid.
 - The comment is saved as a draft locally with `in-reply-to` metadata preserved
 
@@ -50,7 +52,7 @@ When a comment is unpublished:
 
 - The draft has no signature or version — it goes through the normal sign, beseech, and blessing workflow as if brand new
 - DS receives a fresh `registerContent` call which upserts back to `active`
-- `handleCommentBlessing` runs fresh policy evaluation (the blessing was reset to `pending` on unpublish)
+- The DS records the blessing request as pending again (it was reset on unpublish) and wakes the post author, whose own site applies their rules
 - The post author must grant fresh approval
 
 ## Rationale for Clean Break

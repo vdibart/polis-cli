@@ -125,6 +125,9 @@ func allChecks() []checkFunc {
 		checkRegistryIntegrity,
 		checkKeyConsistency,
 		checkBundlePathIntegrity,
+		// Before the declarations check, so a tenant the migration reaches is
+		// read against the defaults it now satisfies.
+		checkUnpublishedEmitsMigration,
 		checkBundleDeclarations,
 		checkIndexEntries,
 		checkBlessedFollowingStructure,

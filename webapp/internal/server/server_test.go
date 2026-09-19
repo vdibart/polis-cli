@@ -1026,25 +1026,48 @@ func TestBlessingSyncHandler_NoPolicyManualReview(t *testing.T) {
 // Structured Logging Tests (Phase 7)
 // ============================================================================
 
-func TestEventCategory(t *testing.T) {
+// TestEventDisabled pins the LOG_EVENTS_DISABLED match: an entry silences an
+// event it equals or is a dotted prefix of, at any depth — and a bare
+// category behaves exactly as the old first-segment filter did.
+func TestEventDisabled(t *testing.T) {
 	tests := []struct {
-		event string
-		want  string
+		name     string
+		disabled string
+		event    string
+		want     bool
 	}{
-		{"pub.polis.post.publish", "post"},
-		{"pub.polis.comment.blessing.grant", "comment"},
-		{"pub.polis.site.render", "site"},
-		{"pub.polis.feed.refresh", "feed"},
-		{"pub.polis.follow.add", "follow"},
-		{"pub.polis.hook.post_publish", "hook"},
-		{"other.event", ""},
-		{"pub.polis.singleword", "singleword"},
+		// Bare categories: unchanged from the old filter.
+		{"bare category, landlord event", "judge", "judge.alert.key_change", true},
+		{"bare category, landlord sweep", "judge", "judge.sweep", true},
+		{"bare category, other actor", "judge", "patrol.alert.volume", false},
+		{"bare category, pub.polis event", "feed", "pub.polis.feed.refresh", true},
+		{"bare category, deep pub.polis event", "comment", "pub.polis.comment.blessing.grant", true},
+		{"bare category, one-segment pub.polis event", "singleword", "pub.polis.singleword", true},
+		{"bare category, other pub.polis event", "feed", "pub.polis.post.publish", false},
+		{"bare category is not a substring match", "judge", "judgement.sweep", false},
+		// Exact names: now possible, and they silence only that event.
+		{"exact name silences itself", "judge.sweep", "judge.sweep", true},
+		{"exact name spares the alarms", "judge.sweep", "judge.alert.key_change", false},
+		{"exact pub.polis name, short form", "feed.refresh", "pub.polis.feed.refresh", true},
+		{"exact pub.polis name, full form", "pub.polis.feed.refresh", "pub.polis.feed.refresh", true},
+		{"exact name spares a sibling", "feed.refresh", "pub.polis.feed.sync", false},
+		// Dotted prefixes at any depth.
+		{"two-segment prefix", "judge.alert", "judge.alert.key_change", true},
+		{"two-segment prefix spares siblings", "judge.alert", "judge.fail.signature", false},
+		{"deep pub.polis prefix", "comment.blessing", "pub.polis.comment.blessing.grant", true},
+		{"a longer entry never matches a shorter event", "judge.sweep.extra", "judge.sweep", false},
+		{"a deep prefix is not a substring match", "judge.alert", "judge.alerts.key_change", false},
+		// Events outside pub.polis.* can now be filtered.
+		{"unprefixed security-style event", "other.event", "other.event", true},
+		{"several entries", "widget, judge.sweep", "widget.connect", true},
+		{"empty list", "", "judge.sweep", false},
 	}
 	for _, tt := range tests {
-		got := eventCategory(tt.event)
-		if got != tt.want {
-			t.Errorf("eventCategory(%q) = %q, want %q", tt.event, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			if got := EventDisabled(ParseDisabledEvents(tt.disabled), tt.event); got != tt.want {
+				t.Errorf("EventDisabled(%q, %q) = %v, want %v", tt.disabled, tt.event, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1806,5 +1829,74 @@ func TestBlessedCommentLifecycle_E2E(t *testing.T) {
 	}
 	if html := render.LoadLocalCommentContent(dataDir, commentURL); strings.Contains(html, "thoughtful reply") {
 		t.Errorf("display still shows the unpublished comment; got %q", html)
+	}
+}
+
+// polis-server --editor answers every unknown path with the SPA shell, so
+// /robots.txt, /rsl.xml and the licence pages came back as the SPA's HTML with
+// a 200 (epic 29 E2): a generated file read as present-and-wrong, and a missing
+// one read as present. They are the site's files and are served from the site
+// folder before the fallback; absent means 404, never the shell.
+func TestSPAHandler_SiteFilesAreNotTheSPA(t *testing.T) {
+	dataDir := t.TempDir()
+	files := map[string]string{
+		"robots.txt":              "User-agent: *\nContent-Usage: train-ai=n\n",
+		"rsl.xml":                 "<rsl></rsl>\n",
+		"license/index.html":      "<html>terms</html>",
+		"license/reserved-1.html": "<html>reserved</html>",
+		".well-known/polis":       `{"public_key":"ssh-ed25519 AAAA"}`,
+		".well-known/did.json":    `{"id":"did:web:example.com"}`,
+	}
+	for rel, body := range files {
+		p := filepath.Join(dataDir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := spaHandler(newTestFS(), dataDir, false)
+	get := func(path string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		return w
+	}
+
+	for path, want := range map[string]string{
+		"/robots.txt":              files["robots.txt"],
+		"/rsl.xml":                 files["rsl.xml"],
+		"/license":                 files["license/index.html"],
+		"/license/":                files["license/index.html"],
+		"/license/reserved-1":      files["license/reserved-1.html"],
+		"/license/reserved-1.html": files["license/reserved-1.html"],
+		"/.well-known/polis":       files[".well-known/polis"],
+		"/.well-known/did.json":    files[".well-known/did.json"],
+	} {
+		w := get(path)
+		if w.Code != http.StatusOK || w.Body.String() != want {
+			t.Errorf("GET %s = %d %q, want 200 %q", path, w.Code, w.Body.String(), want)
+		}
+	}
+	if ct := get("/robots.txt").Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("robots.txt Content-Type = %q", ct)
+	}
+
+	// A site that stated no terms has none of these: 404, not the shell.
+	empty := spaHandler(newTestFS(), t.TempDir(), false)
+	for _, path := range []string{"/robots.txt", "/rsl.xml", "/license", "/license/open-1", "/.well-known/polis"} {
+		w := httptest.NewRecorder()
+		empty.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("GET %s on a bare site = %d %q, want 404", path, w.Code, w.Body.String())
+		}
+	}
+
+	// The fallback itself is untouched, including paths that merely start
+	// with the mount's name.
+	for _, path := range []string{"/_/settings", "/licenses-page"} {
+		if w := get(path); w.Body.String() != "<html>SPA</html>" {
+			t.Errorf("GET %s = %q, want the SPA shell", path, w.Body.String())
+		}
 	}
 }

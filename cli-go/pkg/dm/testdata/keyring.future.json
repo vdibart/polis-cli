@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "revision": 3,
+  "generator": "polis-cli-go/dev",
+  "epochs": [
+    {
+      "id": 0,
+      "kind": "bootstrap",
+      "public_key_messages": "cHViMA==",
+      "server_held": true,
+      "created_at": "2026-09-01T00:00:00Z",
+      "future_epoch": "e0"
+    },
+    {
+      "id": 1,
+      "kind": "password",
+      "public_key_messages": "cHViMQ==",
+      "server_held": false,
+      "wrapped_dek": "d3JhcA==",
+      "wrapped_dek_recovery": "cmVj",
+      "kdf": {
+        "algo": "argon2id",
+        "salt": "c2FsdA==",
+        "t": 3,
+        "m": 65536,
+        "p": 4,
+        "future_kdf": 7
+      },
+      "recovery_kdf": {
+        "algo": "hkdf-sha256",
+        "salt": "cnNhbHQ=",
+        "future_recovery_kdf": "r"
+      },
+      "created_at": "2026-09-02T00:00:00Z",
+      "future_epoch": {
+        "wrapped_dek_v2": "bmV3"
+      }
+    }
+  ],
+  "current": 1,
+  "future_top": {
+    "a": 1,
+    "b": [
+      true,
+      null
+    ]
+  }
+}

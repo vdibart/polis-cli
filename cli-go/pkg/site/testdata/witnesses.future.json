@@ -1,0 +1,60 @@
+{
+  "witnesses": {
+    "https://a.example/p.md": [
+      {
+        "action": "content-registration",
+        "type": "pub.polis.post",
+        "url": "https://a.example/p.md",
+        "version": "sha256:aa",
+        "author": "a.example",
+        "public_key": "ssh-ed25519 AAAA",
+        "artifact_hash": "sha256:bb",
+        "ds": "https://ds.example",
+        "ds_key_id": "k1",
+        "witnessed_at": "2026-09-01T00:00:00Z",
+        "signature": "c2ln",
+        "future_witness": "kept"
+      },
+      {
+        "action": "relationship-update",
+        "type": "pub.polis.blessing",
+        "actor": "a.example",
+        "timestamp": "2026-09-03T00:00:00Z",
+        "source_url": "https://b.example/c.md",
+        "target_url": "https://a.example/p.md",
+        "decision": "grant",
+        "agent": "rosie",
+        "grant": "https://a.example/g.json",
+        "grant_state": "live",
+        "ds": "https://ds.example",
+        "ds_key_id": "k1",
+        "witnessed_at": "2026-09-03T00:00:01Z",
+        "signature": "c2ln",
+        "future_witness": {
+          "x": [
+            1,
+            2
+          ]
+        }
+      }
+    ],
+    "https://a.example/q.md": [
+      {
+        "action": "content-registration",
+        "type": "pub.polis.post",
+        "url": "https://a.example/q.md",
+        "version": "sha256:aa",
+        "author": "a.example",
+        "public_key": "ssh-ed25519 AAAA",
+        "artifact_hash": "sha256:bb",
+        "ds": "https://ds.example",
+        "ds_key_id": "k1",
+        "witnessed_at": "2026-09-02T00:00:00.5Z",
+        "signature": "c2ln"
+      }
+    ]
+  },
+  "future_top": {
+    "note": "added by a newer build"
+  }
+}

@@ -25,11 +25,11 @@ func TestParseOriginOverrides_HappyPath(t *testing.T) {
 
 func TestParseOriginOverrides_Errors(t *testing.T) {
 	cases := map[string]string{
-		"missing equals":  "discover.polis.pub",
-		"empty host":      "=http://x",
-		"empty url":       "discover.polis.pub=",
-		"no scheme":       "discover.polis.pub=localhost:9000",
-		"no host in url":  "discover.polis.pub=http://",
+		"missing equals": "discover.polis.pub",
+		"empty host":     "=http://x",
+		"empty url":      "discover.polis.pub=",
+		"no scheme":      "discover.polis.pub=localhost:9000",
+		"no host in url": "discover.polis.pub=http://",
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -3,11 +3,16 @@ package verify
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/sitecheck"
+	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
 // ContentType represents the type of content (post or comment).
@@ -32,12 +37,27 @@ type VerificationResult struct {
 	Hash             HashResult      `json:"hash"`
 	ValidationIssues []string        `json:"validation_issues,omitempty"`
 	Body             string          `json:"body"`
+
+	// Witness is the second axis beside Signature.Key (SIGNET epic 32): did a
+	// discovery service countersign THESE bytes, and when. Read from the site's
+	// published witness set. ⛔ Never affects Signature or Hash — an unwitnessed
+	// artifact is a weaker claim, not an invalid one.
+	Witness *sitecheck.WitnessResult `json:"witness,omitempty"`
 }
 
 // SignatureResult contains signature verification status.
 type SignatureResult struct {
 	Status  string `json:"status"` // valid, invalid, missing, error
 	Message string `json:"message"`
+
+	// Key says WHICH of the site's keys verified a valid signature — the one the
+	// site publishes now, or a retired one its published key history resolves for
+	// the artifact's claimed signing time (SIGNET epic 31 D4). Nil unless valid.
+	//
+	// ⚠️ Status stays "valid" for a retired key. The distinction lives HERE, so
+	// a consumer applying policy reads Key.Source rather than a second status
+	// word every existing caller would have to learn.
+	Key *sitecheck.KeyUsed `json:"key,omitempty"`
 }
 
 // HashResult contains hash verification status.
@@ -58,7 +78,29 @@ type Frontmatter struct {
 }
 
 // VerifyContent verifies the signature and hash of remote polis content.
+//
+// ⛔ It does NOT evaluate the witness axis, and that is deliberate (SIGNET epic
+// 32). Rosie's blessed-comment cache and the webapp's sync call this for every
+// comment they ingest; witness evaluation costs a witness-file fetch per site
+// and a discovery-service key fetch, which on the hosted fleet would be an actor
+// behaviour change no epic scoped — and would run into the DS public-key rate
+// limit. Result.Witness is nil here. A caller that wants the axis — `polis
+// preview` — calls VerifyContentWitnessed.
 func VerifyContent(contentURL string) (*VerificationResult, error) {
+	return verifyContent(contentURL, false, "")
+}
+
+// VerifyContentWitnessed is VerifyContent plus the witness axis (SIGNET epic 32
+// D8): whether a discovery service countersigned these bytes, read from the
+// site's published witness set. It never changes Signature or Hash.
+//
+// requestID is sent as X-Request-Id on the discovery-service key fetch the
+// witness check may make; "" sends none.
+func VerifyContentWitnessed(contentURL, requestID string) (*VerificationResult, error) {
+	return verifyContent(contentURL, true, requestID)
+}
+
+func verifyContent(contentURL string, withWitness bool, requestID ...string) (*VerificationResult, error) {
 	client := remote.NewClient()
 
 	// Fetch content
@@ -96,7 +138,7 @@ func VerifyContent(contentURL string) (*VerificationResult, error) {
 
 	// Extract base URL and fetch author info
 	baseURL := remote.ExtractBaseURL(actualURL)
-	wk, err := client.FetchWellKnown(baseURL)
+	wk, chain, chainNote, witnessesPointer, err := fetchIdentity(client, baseURL)
 
 	var publicKey string
 	var authorIdentity string
@@ -110,10 +152,19 @@ func VerifyContent(contentURL string) (*VerificationResult, error) {
 	}
 
 	// Verify signature
-	sigResult := verifySignature(content, publicKey, fm.Signature, contentType == TypeComment)
+	sigResult := verifySignatureWithHistory(content, publicKey, fm.Signature, signing.MarkdownObjectTypeFor(string(contentType), false), chain, chainNote, fm.Published)
 
 	// Verify hash
 	hashResult := verifyHash(body, fm.CurrentVersion)
+
+	// Witness axis (SIGNET epic 32 D8). The artifact is already verified or not;
+	// this only adds or withholds a claim. The set comes from the site; the DS
+	// key comes from the DS the witness names, and an unreachable DS leaves the
+	// witness "unverifiable" rather than failing anything.
+	var witness *sitecheck.WitnessResult
+	if withWitness {
+		witness = witnessFor(client, baseURL, witnessesPointer, actualURL, content, signing.MarkdownObjectTypeFor(string(contentType), false), fm.CurrentVersion, requestID[0])
+	}
 
 	// Collect validation issues
 	var issues []string
@@ -146,7 +197,37 @@ func VerifyContent(contentURL string) (*VerificationResult, error) {
 		Hash:             hashResult,
 		ValidationIssues: issues,
 		Body:             body,
+		Witness:          witness,
 	}, nil
+}
+
+// witnessFor evaluates the witness axis for one fetched artifact.
+func witnessFor(client *remote.Client, baseURL, pointer, artifactURL, content string, typ signing.ObjectType, currentVersion, requestID string) *sitecheck.WitnessResult {
+	artifactHash := discovery.ArtifactHash(signing.MarkdownSigningBase(content, typ))
+	if pointer == "" || strings.Contains(pointer, "://") {
+		return sitecheck.CheckContentWitnesses(nil, artifactHash, currentVersion, nil)
+	}
+	body, err := client.FetchContent(strings.TrimSuffix(baseURL, "/") + "/" + strings.TrimPrefix(pointer, "/"))
+	if err != nil {
+		return sitecheck.CheckContentWitnesses(nil, artifactHash, currentVersion, nil)
+	}
+	file, err := site.WitnessesFromBytes([]byte(body))
+	if err != nil {
+		return sitecheck.CheckContentWitnesses(nil, artifactHash, currentVersion, nil)
+	}
+	var set []discovery.Witness
+	path := artifactURL
+	if i := strings.Index(path, "://"); i >= 0 {
+		if j := strings.Index(path[i+3:], "/"); j >= 0 {
+			path = path[i+3+j:]
+		}
+	}
+	for key, ws := range file.Witnesses {
+		if strings.HasSuffix(key, path) {
+			set = append(set, ws...)
+		}
+	}
+	return sitecheck.CheckContentWitnesses(set, artifactHash, currentVersion, sitecheck.NewDSKeyLookup(nil, requestID))
 }
 
 // parseFrontmatter extracts frontmatter fields and body from content.
@@ -169,8 +250,12 @@ func parseFrontmatter(content string) (*Frontmatter, string, error) {
 		}
 
 		if inFrontmatter {
-			// Parse key: value pairs
-			if idx := strings.Index(line, ":"); idx > 0 {
+			// Parse key: value pairs. Keys are matched by STRUCTURAL POSITION:
+			// an indented line is a child of the key above it (the licence
+			// block, in-reply-to's url) and never a field of its own. Trimming
+			// first — as this did until epic 08 — is the same defect class as
+			// the signing base's old document-wide prefix scan.
+			if idx := strings.Index(line, ":"); idx > 0 && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
 				key := strings.TrimSpace(line[:idx])
 				value := strings.TrimSpace(line[idx+1:])
 
@@ -218,8 +303,44 @@ func parseFrontmatter(content string) (*Frontmatter, string, error) {
 	return &fm, body, nil
 }
 
-// verifySignature verifies the content signature against the public key.
-func verifySignature(content, publicKey, signature string, isComment bool) SignatureResult {
+// fetchIdentity reads the author's .well-known/polis ONCE, for both the key and
+// the key history (SIGNET epic 31): the history is inside the identity document,
+// so resolving a retired key costs no second request.
+//
+// The domain the history's handovers are checked against is the host fetched
+// from, port stripped — the same derivation `polis validate <url>` uses and the
+// rotation paths sign. Nothing inside the content chooses it (epic 31: "the
+// verifier resolves the key from where the content was SERVED").
+//
+// It also returns the site's `witnesses` pointer (SIGNET epic 32), from the same
+// document, so finding the witness set costs no extra identity fetch.
+func fetchIdentity(client *remote.Client, baseURL string) (*remote.WellKnown, *site.KeyHistoryBlock, string, string, error) {
+	body, err := client.FetchContent(strings.TrimSuffix(baseURL, "/") + "/.well-known/polis")
+	if err != nil {
+		return nil, nil, "", "", fmt.Errorf("failed to fetch .well-known/polis: %w", err)
+	}
+	var wk remote.WellKnown
+	if err := json.Unmarshal([]byte(body), &wk); err != nil {
+		return nil, nil, "", "", fmt.Errorf("failed to parse .well-known/polis: %w", err)
+	}
+	pointer := site.WitnessesPointerFromWellKnown([]byte(body))
+	block, herr := site.KeyHistoryFromWellKnown([]byte(body))
+	if herr != nil {
+		return &wk, nil, "", pointer, nil
+	}
+	chain, note := sitecheck.ResolvingChain(block, polisurl.ExtractDomain(baseURL), wk.PublicKey)
+	return &wk, chain, note, pointer, nil
+}
+
+// verifySignature verifies the content signature against the public key alone.
+func verifySignature(content, publicKey, signature string, typ signing.ObjectType) SignatureResult {
+	return verifySignatureWithHistory(content, publicKey, signature, typ, nil, "", "")
+}
+
+// verifySignatureWithHistory verifies the content signature against the site's
+// current key and, only if that fails, against the key its published history
+// resolves for published — the one rule in sitecheck.VerifySignatureWithHistory.
+func verifySignatureWithHistory(content, publicKey, signature string, typ signing.ObjectType, chain *site.KeyHistoryBlock, chainNote, published string) SignatureResult {
 	if publicKey == "" {
 		return SignatureResult{
 			Status:  "error",
@@ -243,49 +364,41 @@ func verifySignature(content, publicKey, signature string, isComment bool) Signa
 		sshSig = reconstructSSHSignature(sshSig)
 	}
 
-	// Reconstruct the exact bytes that were signed and verify (comment-aware:
-	// comments drop the after-signing-injected author line — signing.ContentToSign).
-	contentToVerify := signing.ContentToSign(content, isComment)
-	valid, err := signing.VerifySignature([]byte(contentToVerify), []byte(publicKey), sshSig)
-	if err != nil || !valid {
-		return SignatureResult{
-			Status:  "invalid",
-			Message: "SIGNATURE DOES NOT MATCH - content may have been tampered with",
+	// Reconstruct the exact bytes that were signed and verify. typ selects the
+	// base: comments drop the after-signing-injected author line.
+	contentToVerify := signing.MarkdownSigningBase(content, typ)
+	status, used, err := sitecheck.VerifySignatureWithHistory([]byte(contentToVerify), sshSig, []byte(publicKey), chain, published)
+	if status != sitecheck.SigValid {
+		msg := "SIGNATURE DOES NOT MATCH - content may have been tampered with"
+		// Only when the key history had something to say. A plain current-key
+		// failure keeps its message byte-for-byte.
+		switch {
+		case chain != nil && len(chain.History) > 0 && err != nil:
+			msg += " (" + err.Error() + ")"
+		case chainNote != "":
+			msg += " (" + chainNote + ")"
 		}
+		return SignatureResult{Status: "invalid", Message: msg}
 	}
 
+	if used.Source == sitecheck.KeyRetired {
+		return SignatureResult{
+			Status:  "valid",
+			Message: "Signature " + used.Describe(),
+			Key:     used,
+		}
+	}
 	return SignatureResult{
 		Status:  "valid",
 		Message: "Signature verified against author's public key",
+		Key:     used,
 	}
 }
 
-// reconstructSSHSignature rewraps a bare-base64 signature (as stored in the
-// `signature:` frontmatter field) into the PEM-armored SSH SIGNATURE block that
-// signing.parseSSHSignature expects. Mirrors judge.reconstructSSHSignature and
-// patrol.reconstructSSHSignature.
-func reconstructSSHSignature(base64Body string) string {
-	return "-----BEGIN SSH SIGNATURE-----\n" + wrapBase64(base64Body, 76) + "\n-----END SSH SIGNATURE-----"
-}
-
-// wrapBase64 wraps a base64 string at the given line width.
-func wrapBase64(s string, width int) string {
-	if width <= 0 {
-		return s
-	}
-	var b strings.Builder
-	for i := 0; i < len(s); i += width {
-		end := i + width
-		if end > len(s) {
-			end = len(s)
-		}
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString(s[i:end])
-	}
-	return b.String()
-}
+// reconstructSSHSignature rewraps a bare-base64 signature into the PEM-armored
+// SSH SIGNATURE block signing.VerifySignature expects. An ALIAS of the shared
+// predicate — the same function value Judge and Patrol call.
+var reconstructSSHSignature = sitecheck.ReconstructSSHSignature
 
 // verifyHash verifies the content hash against the current-version field.
 func verifyHash(body, currentVersion string) HashResult {
@@ -295,6 +408,11 @@ func verifyHash(body, currentVersion string) HashResult {
 
 	// Remove sha256: prefix if present
 	expectedHash := strings.TrimPrefix(currentVersion, "sha256:")
+
+	// ⚠️ DELIBERATELY NOT sitecheck.VerifyHash. That predicate — the one Patrol
+	// and Judge run — also accepts a raw-byte hash; this one accepts only the
+	// canonical form (R20-C-F9, below). The divergence is real and unreconciled;
+	// see epic 20's Escalations.
 
 	// Canonicalize and hash the body. The non-canonical raw-byte fallback that
 	// once lived here was removed (R20-C-F9): dual-accepting both canonical and

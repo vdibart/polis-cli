@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
+	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
@@ -677,6 +679,10 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read the author's per-work licence override BEFORE stripping — it lives
+	// in the frontmatter that is about to be discarded.
+	authoredLicense, _ := license.AuthoredProfile(req.Markdown)
+
 	// Strip existing frontmatter if present
 	markdown := req.Markdown
 	if publish.HasFrontmatter(markdown) {
@@ -684,7 +690,8 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.LogDebug("Publishing post with filename: %s", req.Filename)
-	result, err := publish.PublishPost(s.DataDir, markdown, req.Filename, s.PrivateKey, s.DiscoveryConfig())
+	result, err := publish.PublishPost(s.DataDir, markdown, req.Filename, s.PrivateKey,
+		s.publishConfigWithLicense(authoredLicense))
 	if err != nil {
 		s.LogError("Failed to publish: %v", err)
 		http.Error(w, "Failed to publish", http.StatusInternalServerError)
@@ -694,6 +701,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		"path":  result.Path,
 		"title": result.Title,
 	})
+	s.logLicenseMaterialised(result.Path)
 
 	// Render site to generate HTML files. stream-shape tenants get the incremental
 	// cascade (bounded work per publish per step-03/3.a); v3 falls through
@@ -778,11 +786,14 @@ func (s *Server) handlePosts(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			continue
 		}
-		// Filter out comments - only include posts
-		if path, ok := entry["path"].(string); ok {
-			if strings.HasPrefix(path, "comments/") || strings.Contains(path, "/comment/") {
-				continue
-			}
+		// Only posts. ⚠️ Key on `type`, never on "not a comment":
+		// index.jsonl carries every content type the site publishes — tag and
+		// attestation since Signet epic 25 — so a not-a-comment test lists
+		// tags as posts.
+		entryType, _ := entry["type"].(string)
+		entryPath, _ := entry["path"].(string)
+		if !isPostIndexEntry(entryType, entryPath) {
+			continue
 		}
 		// Generate excerpt and get modification time from source markdown
 		if path, ok := entry["path"].(string); ok {
@@ -1104,20 +1115,24 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 	// exactly `# title\n\n<body-without-leading-title>`, regardless
 	// of how many cycles the user has run.
 	body := publish.StripFrontmatter(contentStr)
-	body = render.StripLeadingTitleHeading(body, title)
 
 	// Build draft content
 	var draftContent string
 	if isPost {
+		// ⛔ Unquote BEFORE the strip: the publisher escapes the title
+		// (publish.escapeYAMLString) while the body heading keeps the plain
+		// text, so comparing the raw frontmatter value never matched and each
+		// cycle stacked a heading AND re-escaped the title (close-out R3-1).
+		// Same helper as the comment builder.
+		title = publish.UnquoteYAMLString(title)
+		body = render.StripLeadingTitleHeading(body, title)
 		draftContent = "# " + title + "\n\n" + body
 	} else {
-		// Preserve in-reply-to reference for comments
-		inReplyTo := fm["in-reply-to"]
-		var header string
-		if inReplyTo != "" {
-			header = "<!-- in-reply-to: " + inReplyTo + " -->\n"
-		}
-		draftContent = header + "# " + title + "\n\n" + body
+		// A comment draft keeps its reply fields in the format LoadDraft reads,
+		// so the republish this promises is actually possible (close-out E2).
+		// The builder owns the unquote + heading strip; the body arrives here
+		// exactly as published.
+		draftContent = comment.UnpublishedDraftContent(contentStr, title, body)
 	}
 
 	// Determine draft destination
@@ -1254,7 +1269,7 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 
 	// Notify DS FIRST (strict ordering — if DS fails, do NOT proceed with local swap)
 	dsClient := s.NewDSClient(r)
-	err = dsClient.RotateKey(discovery.KeyRotationRequest{
+	witness, err := dsClient.RotateKey(discovery.KeyRotationRequest{
 		Domain:        domain,
 		OldKey:        oldPubKey,
 		NewKey:        newPubKey,
@@ -1266,19 +1281,16 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Discovery service rejected key rotation", http.StatusBadGateway)
 		return
 	}
+	// SIGNET epic 32: the DS's countersignature, carried in the new entry below.
+	var witnesses []discovery.Witness
+	if witness != nil {
+		witnesses = append(witnesses, *witness)
+	}
 
-	// Backup old keys
+	// No .old backup is made. The published key history replaces it — see the
+	// same note in cli-go/pkg/cmd/rotate_key.go. Existing .old files are left in
+	// place and reaper.go still excludes them from a departing user's archive.
 	keysDir := filepath.Join(s.DataDir, ".polis", "keys")
-	if err := os.Rename(filepath.Join(keysDir, "id_ed25519"), filepath.Join(keysDir, "id_ed25519.old")); err != nil {
-		s.LogError("Key rotation failed: backup old private key: %v", err)
-		http.Error(w, "Failed to backup old keys", http.StatusInternalServerError)
-		return
-	}
-	if err := os.Rename(filepath.Join(keysDir, "id_ed25519.pub"), filepath.Join(keysDir, "id_ed25519.pub.old")); err != nil {
-		s.LogError("Key rotation failed: backup old public key: %v", err)
-		http.Error(w, "Failed to backup old keys", http.StatusInternalServerError)
-		return
-	}
 
 	// Write new keys
 	if err := os.WriteFile(filepath.Join(keysDir, "id_ed25519"), newPrivPEM, 0600); err != nil {
@@ -1292,19 +1304,27 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update .well-known/polis with new public key
-	wk, err := site.LoadWellKnown(s.DataDir)
-	if err != nil {
-		s.LogError("Key rotation failed: loading .well-known/polis: %v", err)
+	// Update .well-known/polis: the new public_key AND the appended history
+	// entry, in one write, through the shared seam.
+	//
+	// ⛔ This handler is a SECOND, independent implementation of rotation — the
+	// CLI has its own. Both must append, or a site rotated through one of them
+	// publishes a key its own history never learned about, and every artifact
+	// signed under it becomes unverifiable against that history. Neither path
+	// touches public_key or public_key_history directly; site.RecordKeyRotation
+	// writes both in one go, so they cannot drift apart. It preserves unmodelled
+	// fields (public_key_messages), as every well-known writer does.
+	//
+	// timestamp is passed verbatim: the old key signed it, and it becomes the new
+	// entry's valid_from. Reformatting it breaks the transition signature.
+	if err := site.RecordKeyRotation(s.DataDir, newPubKey, transitionSig, timestamp, witnesses...); err != nil {
+		s.LogError("Key rotation failed: recording the rotation in .well-known/polis: %v", err)
 		http.Error(w, "Failed to update site identity", http.StatusInternalServerError)
 		return
 	}
-	wk.PublicKey = newPubKey
-	// Preserving save so the public-key update doesn't drop public_key_messages.
-	if err := site.SaveWellKnownPreserving(s.DataDir, wk); err != nil {
-		s.LogError("Key rotation failed: saving .well-known/polis: %v", err)
-		http.Error(w, "Failed to update site identity", http.StatusInternalServerError)
-		return
+	keyEpoch := 0
+	if block, herr := site.LoadKeyHistory(s.DataDir); herr == nil && block != nil {
+		keyEpoch = block.Current.Epoch
 	}
 
 	// Re-sign + re-publish the DM messages key under the NEW identity key. The
@@ -1317,6 +1337,21 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Republish the DID Document so it carries the new key and, since SIGNET
+	// epic 16, the retired ones.
+	//
+	// ⚠️ This branch used to do nothing, leaving did.json naming a RETIRED key
+	// until Medic's next hourly sweep healed it — and a self-hosted webapp has no
+	// Medic at all. A stale derived artifact answers 200 with a key the site no
+	// longer holds, which a resolver cannot tell from a good one; an absent one
+	// fails honestly. So: republish, and if that fails, remove. Never fatal —
+	// the rotation has already happened and been announced, and the document is
+	// derived, so `polis did --write` rebuilds it.
+	if err := site.PublishDIDDocument(s.DataDir, domain); err != nil {
+		removed := os.Remove(site.DIDDocumentPath(s.DataDir)) == nil
+		s.LogError("Key rotation: did.json republish failed (removed=%v): %v", removed, err)
+	}
+
 	// Reload in-memory keys
 	s.LoadKeys()
 
@@ -1325,12 +1360,15 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[warning] post-rotation render failed: %v", err)
 	}
 
-	s.LogEvent("pub.polis.site.key_rotate", nil)
+	s.LogEvent("pub.polis.site.key_rotate", map[string]interface{}{
+		"key_history_epoch": keyEpoch,
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":    true,
-		"public_key": newPubKey,
+		"success":           true,
+		"public_key":        newPubKey,
+		"key_history_epoch": keyEpoch,
 	})
 }
 
@@ -1571,7 +1609,7 @@ func (s *Server) handleCommentBeseech(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Run hooks if auto-blessed
+	// Run hooks if the post author had already blessed it (a re-registration)
 	if result.AutoBlessed && s.EnableHooks {
 		hc := s.getHookConfig()
 		payload := &hooks.HookPayload{
@@ -1908,9 +1946,11 @@ func (s *Server) handleBlessingDeny(w http.ResponseWriter, r *http.Request) {
 	// Create discovery client
 	client := s.NewDSClient(r)
 
-	// Deny the blessing (with signed request)
+	// Deny the blessing (with signed request). Normalise to .md like grant: the
+	// DS matches the relationship on its exact URLs, and the v4 stream hands the
+	// SPA the rendered .html forms.
 	s.LogDebug("Denying blessing for comment: %s", req.CommentURL)
-	result, err := blessing.Deny(req.CommentURL, req.InReplyTo, client, s.PrivateKey)
+	result, err := blessing.Deny(polisurl.NormalizeToMD(req.CommentURL), polisurl.NormalizeToMD(req.InReplyTo), client, s.PrivateKey)
 	if err != nil {
 		s.LogError("Failed to deny blessing: %v", err)
 		http.Error(w, "Failed to deny blessing", http.StatusInternalServerError)
@@ -2041,8 +2081,10 @@ func (s *Server) handleBlessingRevoke(w http.ResponseWriter, r *http.Request) {
 	// Normalize URL to .md format for consistent lookup
 	normalizedURL := polisurl.NormalizeToMD(req.CommentURL)
 
-	// Remove from blessed-comments.json
-	if err := metadata.RemoveBlessedComment(s.DataDir, normalizedURL); err != nil {
+	// Remove from blessed.json, SIGNED — an unbless is as much an authored act as
+	// a bless (SIGNET epic 14). A nil key writes unsigned, which is the safe
+	// direction: unsigned is a fact, a stale signature is a false alarm.
+	if err := metadata.RemoveBlessedCommentSigned(s.DataDir, normalizedURL, s.PrivateKey); err != nil {
 		s.LogError("failed to revoke blessing: %v", err)
 		http.Error(w, "Failed to revoke blessing", http.StatusInternalServerError)
 		return
@@ -2165,6 +2207,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		"editor_panel_mode":      editorPanelMode,
 		"active_theme":           activeTheme,
 		"themes":                 themes,
+		"license":                s.licenseSettings(),
+		"rosie":                  s.rosieSettings(),
 	})
 }
 
@@ -2184,7 +2228,7 @@ func (s *Server) getAutomations() []Automation {
 	allHooks := []hookInfo{
 		{hooks.EventPostPublish, "post-publish", "Post-publish hook", "Runs after each publish"},
 		{hooks.EventPostRepublish, "post-republish", "Post-republish hook", "Runs after each republish"},
-		{hooks.EventPostComment, "post-comment", "Post-comment hook", "Runs when a comment becomes blessed (grant, sync, or auto-bless)"},
+		{hooks.EventPostComment, "post-comment", "Post-comment hook", "Runs when a comment becomes blessed (grant, sync, or Rosie)"},
 	}
 
 	for _, h := range allHooks {
@@ -2775,15 +2819,6 @@ func (s *Server) handleEditorPanelMode(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Valid hex color pattern for avatar config
-var hexColorRegex = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
-
-// Valid avatar pattern names
-var validPatterns = map[string]bool{
-	"none": true, "rings": true, "cross": true, "grid": true,
-	"dots": true, "stripes": true, "diamond": true, "halves": true,
-}
-
 func (s *Server) handleUpdateAvatar(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -2797,53 +2832,27 @@ func (s *Server) handleUpdateAvatar(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
+	if req.Avatar != nil {
+		// A request body is not an authored avatar block: members the settings
+		// UI does not send are not written into the public identity document.
+		req.Avatar.Extra = nil
+	}
 
-	wk, err := site.LoadWellKnown(s.DataDir)
-	if err != nil {
-		s.LogError("failed to load .well-known/polis: %v", err)
-		http.Error(w, "Failed to load site config", http.StatusInternalServerError)
+	if err := site.ValidateAvatar(req.Avatar); err != nil {
+		http.Error(w, "Invalid avatar: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if req.Avatar != nil {
-		// Validate hex colors
-		for _, c := range []string{req.Avatar.BG, req.Avatar.FG} {
-			if !hexColorRegex.MatchString(c) {
-				http.Error(w, "Invalid color: must be #RRGGBB hex", http.StatusBadRequest)
-				return
-			}
-		}
-		for _, c := range []string{req.Avatar.Border, req.Avatar.PatternColor} {
-			if c != "" && !hexColorRegex.MatchString(c) {
-				http.Error(w, "Invalid color: must be #RRGGBB hex", http.StatusBadRequest)
-				return
-			}
-		}
-		// Validate border width
-		if req.Avatar.BorderW < 0 || req.Avatar.BorderW > 3 {
-			http.Error(w, "Invalid border_w: must be 0-3", http.StatusBadRequest)
-			return
-		}
-		// Validate pattern
-		if req.Avatar.Pattern != "" && !validPatterns[req.Avatar.Pattern] {
-			http.Error(w, "Invalid pattern", http.StatusBadRequest)
-			return
-		}
-	}
-
-	wk.Avatar = req.Avatar
-
-	// Preserving save: a plain SaveWellKnown would drop public_key_messages (not
-	// modeled by the WellKnown struct), leaving the tenant unable to receive DMs.
-	if err := site.SaveWellKnownPreserving(s.DataDir, wk); err != nil {
+	// site.SetAvatar saves through the one lossless writer (every member the
+	// struct does not model survives) and regenerates the favicon.
+	faviconErr, err := site.SetAvatar(s.DataDir, req.Avatar)
+	if err != nil {
 		s.LogError("failed to save .well-known/polis: %v", err)
 		http.Error(w, "Failed to save site config", http.StatusInternalServerError)
 		return
 	}
-
-	// Regenerate favicon from updated avatar config
-	if err := site.WriteFavicon(s.DataDir); err != nil {
-		s.LogWarn("failed to regenerate favicon: %v", err)
+	if faviconErr != nil {
+		s.LogWarn("failed to regenerate favicon: %v", faviconErr)
 	}
 
 	s.LogEvent("pub.polis.site.avatar_update", map[string]interface{}{
@@ -2853,7 +2862,7 @@ func (s *Server) handleUpdateAvatar(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"avatar":  wk.Avatar,
+		"avatar":  req.Avatar,
 	})
 }
 
@@ -2871,24 +2880,14 @@ func (s *Server) handleUpdateAuthorName(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	name := strings.TrimSpace(req.AuthorName)
-	if len(name) > 50 {
+	if _, err := site.ValidateAuthorName(req.AuthorName); err != nil {
 		http.Error(w, "Display name must be 50 characters or less", http.StatusBadRequest)
 		return
 	}
 
-	wk, err := site.LoadWellKnown(s.DataDir)
+	// The one lossless writer, shared with `polis site set author-name`.
+	name, err := site.SetAuthorName(s.DataDir, req.AuthorName)
 	if err != nil {
-		s.LogError("failed to load .well-known/polis: %v", err)
-		http.Error(w, "Failed to load site config", http.StatusInternalServerError)
-		return
-	}
-
-	wk.AuthorName = name
-
-	// Preserving save: a plain SaveWellKnown would drop public_key_messages (not
-	// modeled by the WellKnown struct), leaving the tenant unable to receive DMs.
-	if err := site.SaveWellKnownPreserving(s.DataDir, wk); err != nil {
 		s.LogError("failed to save .well-known/polis: %v", err)
 		http.Error(w, "Failed to save site config", http.StatusInternalServerError)
 		return
@@ -3737,16 +3736,33 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if dirty {
-				if err := following.Save(followingPath, f); err != nil {
+				// SIGNET epic 02: re-sign. This backfill is the site's own agent
+				// enriching the user's roster with their own key — not an operator
+				// actor signing on someone's behalf. Passing the key matters: a
+				// plain Save here would silently strip a good signature every time
+				// a title got filled in.
+				if err := following.SaveSigned(followingPath, f, s.PrivateKey); err != nil {
 					s.LogError("following backfill: save failed: %v", err)
 				}
 			}
+		}
+
+		// SIGNET epic 02 — the roster's signature state travels with the roster.
+		// Reported as a fact and never enforced: the list is returned in full
+		// regardless, because a follow list is how a person reaches their
+		// network and withholding it over a signature would disconnect them
+		// (D4). Unsigned is the normal state until the epic-11 backfill.
+		followSig, followSigErr := following.VerifySite(s.DataDir)
+		signature := map[string]interface{}{"status": string(followSig)}
+		if followSigErr != nil {
+			signature["message"] = followSigErr.Error()
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"following": f.All(),
 			"count":     f.Count(),
+			"signature": signature,
 		})
 
 	case http.MethodPost:
@@ -3786,7 +3802,7 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 		privPath, pubPath := policy.DefaultPaths(s.DataDir)
 		policies, _ := policy.LoadPolicies(privPath, pubPath)
 
-		result, err := following.FollowWithBlessing(followingPath, req.URL, discoveryClient, remoteClient, s.PrivateKey, policies)
+		result, err := following.FollowWithBlessing(followingPath, req.URL, discoveryClient, remoteClient, s.PrivateKey, policies, s.FollowConfig())
 		if err != nil {
 			s.LogError("follow failed: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -3840,7 +3856,7 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 		privPath2, pubPath2 := policy.DefaultPaths(s.DataDir)
 		unfollowPolicies, _ := policy.LoadPolicies(privPath2, pubPath2)
 
-		result, err := following.UnfollowWithDenial(followingPath, req.URL, discoveryClient, remoteClient, s.PrivateKey, unfollowPolicies)
+		result, err := following.UnfollowWithDenial(followingPath, req.URL, discoveryClient, remoteClient, s.PrivateKey, unfollowPolicies, s.FollowConfig())
 		if err != nil {
 			s.LogError("unfollow failed: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -3922,10 +3938,13 @@ func (s *Server) handleFeedViewed(w http.ResponseWriter, r *http.Request) {
 	discoveryDomain := s.GetDiscoveryDomain()
 	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
 
-	// Set viewed cursor to current sync cursor position
-	syncCursor, _ := store.GetCursor("pub.polis.sync")
-	if syncCursor != "" {
-		_ = store.SetCursor("pub.polis.feed.viewed", syncCursor)
+	// Catch the viewed cursor up to the feed-CONTENT high-water mark (the
+	// position of the last sync that actually added feed items), NOT the raw
+	// sync cursor — matching the has-new computation in localCounts. Using the
+	// sync cursor here would mark own-post-only syncs as "seen" inconsistently.
+	contentCursor, _ := store.GetCursor("pub.polis.feed.content")
+	if contentCursor != "" {
+		_ = store.SetCursor("pub.polis.feed.viewed", contentCursor)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -4547,9 +4566,14 @@ func (s *Server) handleRemotePost(w http.ResponseWriter, r *http.Request) {
 
 	var body, htmlContent string
 	if looksLikeHTML(content) {
-		// Content is already HTML — serve it directly (strip full page shell if present)
-		htmlContent = extractHTMLBody(content)
-		body = content
+		// No markdown source, only a rendered page. Never hand remote markup to
+		// the caller: the SPA inserts `content` with innerHTML, so a hostile
+		// page would run script in the owner's logged-in web app (R20-D-H1).
+		// A polis post always publishes its .md; a host that answers both
+		// extensions with a page is not serving a post source, so the viewer
+		// gets a link to the original instead of the page's body.
+		htmlContent = `<p class="remote-post-unavailable">No markdown source for this post. <a href="` +
+			html.EscapeString(fetchedURL) + `" target="_blank" rel="noopener noreferrer">Open the original</a>.</p>`
 	} else {
 		// Content is markdown — strip frontmatter and render
 		body = stripFrontmatter(content)
@@ -4678,8 +4702,6 @@ func looksLikeHTML(content string) bool {
 		strings.HasPrefix(trimmed, "<HTML")
 }
 
-// extractHTMLBody extracts content between <body> and </body> tags,
-// or between <main> and </main> tags, falling back to the full content.
 // extractCommentRelPath extracts the relative content path (e.g.
 // "content/pub.polis.core/comment/20260222/id.md") from a full comment URL.
 // Tolerant of BOTH the legacy mount form (/comments/<…>) and the canonical
@@ -4701,35 +4723,6 @@ func commentSourceURL(commentURL string) string {
 		return commentURL
 	}
 	return commentURL[:idx] + "/content/pub.polis.core/comment/" + commentURL[idx+len("/comments/"):]
-}
-
-func extractHTMLBody(content string) string {
-	lower := strings.ToLower(content)
-
-	// Try <main>...</main> first (most specific)
-	if mainStart := strings.Index(lower, "<main"); mainStart >= 0 {
-		// Find end of opening tag
-		tagEnd := strings.Index(content[mainStart:], ">")
-		if tagEnd >= 0 {
-			innerStart := mainStart + tagEnd + 1
-			if mainEnd := strings.Index(lower[innerStart:], "</main>"); mainEnd >= 0 {
-				return strings.TrimSpace(content[innerStart : innerStart+mainEnd])
-			}
-		}
-	}
-
-	// Try <body>...</body>
-	if bodyStart := strings.Index(lower, "<body"); bodyStart >= 0 {
-		tagEnd := strings.Index(content[bodyStart:], ">")
-		if tagEnd >= 0 {
-			innerStart := bodyStart + tagEnd + 1
-			if bodyEnd := strings.Index(lower[innerStart:], "</body>"); bodyEnd >= 0 {
-				return strings.TrimSpace(content[innerStart : innerStart+bodyEnd])
-			}
-		}
-	}
-
-	return content
 }
 
 // ConversationComment is a comment in a conversation thread.
@@ -5293,12 +5286,15 @@ func (s *Server) handleWidgetPublishComment(w http.ResponseWriter, r *http.Reque
 		s.LogError("widget publish comment: beseech failed: %v", err)
 		blessingStatus = "error"
 	} else if result.AutoBlessed {
+		// Only a comment the post author had ALREADY blessed (a re-registration).
+		// A new comment is always "pending": the post author's own site decides
+		// it later, and the widget must not promise otherwise (Signet epic 45 D8).
 		blessingStatus = "granted"
 	}
 
 	// Always re-render after beseech attempt — PublishComment() runs early inside
 	// BeseechComment, so the .md is on disk even if DS registration fails or the
-	// comment is not auto-blessed. Without this, the comment HTML and index.html
+	// comment is still pending. Without this, the comment HTML and index.html
 	// are never generated.
 	if renderErr := s.RenderSite(); renderErr != nil {
 		s.LogError("widget publish comment: render failed: %v", renderErr)
@@ -5355,7 +5351,7 @@ func (s *Server) handleWidgetFollow(w http.ResponseWriter, r *http.Request) {
 		privPath, pubPath := policy.DefaultPaths(s.DataDir)
 		widgetPolicies, _ := policy.LoadPolicies(privPath, pubPath)
 
-		result, err := following.FollowWithBlessing(followingPath, authorURL, discoveryClient, remoteClient, s.PrivateKey, widgetPolicies)
+		result, err := following.FollowWithBlessing(followingPath, authorURL, discoveryClient, remoteClient, s.PrivateKey, widgetPolicies, s.FollowConfig())
 		if err != nil {
 			s.LogError("widget follow failed: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -5376,7 +5372,7 @@ func (s *Server) handleWidgetFollow(w http.ResponseWriter, r *http.Request) {
 		privPath, pubPath := policy.DefaultPaths(s.DataDir)
 		widgetUnfollowPolicies, _ := policy.LoadPolicies(privPath, pubPath)
 
-		result, err := following.UnfollowWithDenial(followingPath, authorURL, discoveryClient, remoteClient, s.PrivateKey, widgetUnfollowPolicies)
+		result, err := following.UnfollowWithDenial(followingPath, authorURL, discoveryClient, remoteClient, s.PrivateKey, widgetUnfollowPolicies, s.FollowConfig())
 		if err != nil {
 			s.LogError("widget unfollow failed: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -6485,7 +6481,7 @@ func (s *Server) handleDMRecipients(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if followingChanged {
-		following.Save(followingPath, f)
+		following.SaveSigned(followingPath, f, s.PrivateKey)
 	}
 
 	// Resolve each recipient's avatar for the composer list. Uses the shared

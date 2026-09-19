@@ -4,7 +4,10 @@ The polis CLI is the primary tool for managing a polis site from the command lin
 
 ## Architecture
 
-Polis has two CLI implementations sharing the same feature set and data formats:
+Polis has two CLI implementations sharing the same **data formats**. They no longer share a
+**feature set** — the Go CLI leads and the bash CLI is feature-frozen. See
+[implementation-parity.md](implementation-parity.md) for the command matrix, the behavioural
+divergences within shared commands, and the policy.
 
 | Implementation | Language | Status | Version |
 |---------------|----------|--------|---------|
@@ -25,9 +28,9 @@ webapp/               (web UI — consumer, never the reverse)
 
 | Target | Binary | Contents | Size |
 |--------|--------|----------|------|
-| CLI-only | `polis` | CLI commands, no HTTP server | ~8-9 MB |
-| Webapp-only | `polis-server` | HTTP server + web UI | ~11 MB |
-| Bundled | `polis-full` | CLI + `serve` command | ~11-12 MB |
+| CLI-only | `polis` | CLI commands, no HTTP server | ~15 MB |
+| Webapp-only | `polis-server` | HTTP server + web UI | ~17 MB |
+| Bundled | `polis-full` | CLI + `serve` command | ~18 MB |
 
 ## Quick Start
 
@@ -42,7 +45,7 @@ cd cli-go && go test ./...
 ./polis init
 
 # Publish a post
-./polis post publish content.md
+./polis post content.md
 
 # See all commands
 ./polis --help
@@ -54,11 +57,13 @@ cd cli-go && go test ./...
 |----------|----------|-------------|
 | [user/command-reference.md](user/command-reference.md) | Users | Complete CLI command reference |
 | [user/json-mode.md](user/json-mode.md) | Users | Machine-readable `--json` output format |
-| [user/templating.md](user/templating.md) | Users | Theme customization and template syntax |
+| [user/policies.md](user/policies.md) | Users | Inbound policy — who may comment on your posts and what gets blessed |
+| [user/templating.md](user/templating.md) | Users | Template syntax, variables and snippets |
+| [implementation-parity.md](implementation-parity.md) | Users, Developers | Go and bash command matrix and behavioural divergences |
 | [developer/packages.md](developer/packages.md) | Developers | Package structure, import rules, version propagation |
 
 ## See Also
 
 - [cli-go/README.md](../../cli-go/README.md) — Go CLI build instructions and library usage
-- `cli-bash/polis` — Bash CLI (feature-frozen)
+- [`cli-bash/polis`](../../cli-bash/polis) — Bash CLI (feature-frozen)
 - [docs/general/concepts/content-system.md](../general/concepts/content-system.md) — Content types and filesystem layout

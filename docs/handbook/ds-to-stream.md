@@ -1,8 +1,10 @@
 # Tour: DS to stream
 
+*For* [Contributors](../README.md#contributing-to-polis) — *Kind* [Tour](../README.md#kinds-of-page) — *See also* [concept](../general/concepts/infinity-stream.md)
+
 > A guided tour of how content flows from the Discovery Service into the stream-screen you see in your browser. Source-of-truth concept docs live in [`../general/`](../general/); this tour walks the source code with you. Map of all threads: [`../../AGENTS.md`](../../AGENTS.md).
 >
-> **Scope note.** The DS-side files referenced in this tour (e.g. `discovery-service/core/handlers/stream.ts`, `counts.ts`) are not part of this public repo. The DS reference implementation is planned for open-source release; until then, the [DS API reference](../ds/developer/api-reference.md) and [stream architecture doc](../ds/developer/stream-architecture.md) describe the same behavior as a stable public contract. Webapp- and CLI-side files in this tour are all in this repo and clickable.
+> **Scope note.** The Discovery Service source is not in the public repository, so the DS-side files this tour names (under `discovery-service/`, such as `stream.ts` and `counts.ts`) cannot be opened here. The [DS API reference](../ds/developer/api-reference.md) and the [stream architecture doc](../ds/developer/stream-architecture.md) specify the same behaviour as a public contract. The webapp and CLI files in this tour are all in this repository.
 
 ## The observation
 
@@ -30,13 +32,13 @@ The infinity stream draws content from the DS through **two distinct paths** tha
    │       │                                                              │
    │       │ events[] (typed, cursor-paginated)                           │
    │       ▼                                                              │
-   │   handler fan-out (feed / follow / blessing / notification)          │
+   │   handler fan-out (feed / follow / comment status / blessing)        │
    │       │                                                              │
    │       │ writes local state                                           │
    │       ▼                                                              │
    │   .polis/ds/<domain>/pub.polis.core/state/*.jsonl + cursors.json     │
    │       │                                                              │
-   │       │ SPA reads via local /api/feed etc.                           │
+   │       │ stream.js reads via local GET /pql/<sentence>                │
    │       ▼                                                              │
    │   stream.js renders new items                                        │
    │                                                                      │
@@ -45,9 +47,9 @@ The infinity stream draws content from the DS through **two distinct paths** tha
    │   Path B — on-demand aggregation (pull-ish, render-driven)           │
    │   ────────────────────────────────────────────────                   │
    │                                                                      │
-   │   stream item enters viewport (or is in the visible horizon)         │
+   │   webapp stream handler renders a page of items                      │
    │       │                                                              │
-   │       │ webapp batches the URLs                                      │
+   │       │ webapp batches the page's post URLs                          │
    │       ▼                                                              │
    │   webapp stream handler  ──HTTP POST──►  DS /v1/content/comments/counts │
    │       │                                                              │
@@ -85,7 +87,7 @@ Each cycle emits two structured log events for observability:
 
 The `sync_id` correlates all DS HTTP calls within a single cycle via the `X-Request-Id` header.
 
-### A.2 DS endpoint: [`discovery-service/core/handlers/stream.ts`](https://github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/stream.ts)
+### A.2 DS endpoint: `discovery-service/core/handlers/stream.ts`
 
 The webapp's sync hits the DS at `/v1/stream/unified?since=<cursor>&involved=<my-domain>&actor=<followed-domains>`. Server-side, this lands in `queryStream` (and `queryStreamUnified` for the multi-filter variant):
 
@@ -112,12 +114,14 @@ Cursor pagination is the contract: the response carries the cursor of the last r
 
 ### A.3 Handlers: [`cli-go/pkg/feed/handler.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/feed/handler.go) (and siblings)
 
-Back on the webapp side, the events returned by the DS go through a fan-out. `runUnifiedSync` knows about four handlers, each one a small interface implementation registered in `sync.go`:
+Back on the webapp side, the events returned by the DS go through a fan-out. `runUnifiedSync` knows about four handlers, each one a small interface implementation defined in `sync.go` and registered in `server.go`:
 
 - `feedSyncHandler` — wraps `cli-go/pkg/feed`'s `FeedHandler` to convert post/comment/follow events into `FeedItem` rows for the cache.
 - `followSyncHandler` — wraps `cli-go/pkg/following` to reconcile your local follower set with DS follow events.
+- `commentStatusSyncHandler` — reconciles the status of comments this site has sent (pending, blessed, denied).
 - `blessingSyncHandler` — wraps `cli-go/pkg/blessing` to reconcile blessing state.
-- `notificationSyncHandler` — wraps `cli-go/pkg/notification` to add notification entries.
+
+There is no notification handler. The sync cycle still reports a `new_notifications` field, filled only from a handler named `notifications`; none is registered, so it reads 0.
 
 Each handler declares `EventTypes()` (which event names it consumes) and `Process(events)` (what to do with them). The fan-out is type-routed: each event is sent only to handlers that asked for it.
 
@@ -155,7 +159,7 @@ The materialized files match cursor keys: cursor `pub.polis.feed` → file `pub.
 
 ### A.5 Consumer: [`webapp/internal/webui/www/app.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/app.js) → [`stream.js`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js)
 
-When the SPA renders the stream-screen, it fetches from the webapp's local API (`/api/feed?...`), which reads from the JSONL cache populated by the sync loop. The PQL sentence in the URL becomes the filter applied at fetch time. See the [URL-as-filter tour](url-as-filter.md) for that side of the story.
+When the SPA renders the stream-screen, `stream.js` fetches `GET /pql/<sentence>` with `Accept: application/json`. The webapp's `handleStreamPQL` (`webapp/internal/server/handlers_pql.go`) parses the sentence and delegates to the stream-items pipeline in `handlers_stream.go`, which reads from the JSONL cache populated by the sync loop. The PQL sentence in the URL is the filter applied at fetch time. See the [URL-as-filter tour](url-as-filter.md) for that side of the story.
 
 New events arriving during a session are surfaced as the next render cycle picks them up. The SSE channel that keeps the sync loop alive also nudges the SPA to re-query when new data is known to be ready.
 
@@ -190,9 +194,9 @@ const (
 
 An earlier design used a "visible-horizon" heuristic — sync-fetch the first 10 items, background-fetch the rest — but it made badges flicker `0↔1↔0` as below-the-fold and cold-cache posts shipped "0," warmed on a later render, then reset when the count cache's TTL expired. The current handler trades that for one batched fetch of up to `streamCountBatchMax` (50) URLs per render, so a post's badge is the same number every time it renders. Only an explicit oversized `limit` (more than 50 items) spills past the cap, and that overflow falls back to a background fill.
 
-### B.3 DS endpoint: [`discovery-service/core/handlers/counts.ts`](https://github.com/vdibart/polis-cli/blob/main/discovery-service/core/handlers/counts.ts)
+### B.3 DS endpoint: `discovery-service/core/handlers/counts.ts`
 
-The webapp batches up to 50 URLs into a single `POST /v1/content/comments/counts` request:
+The webapp batches up to 50 URLs into a single `POST /v1/content/comments/counts` request. The response maps each URL to its total comment count; URLs with no comments are omitted:
 
 ```json
 // Request
@@ -206,8 +210,8 @@ The webapp batches up to 50 URLs into a single `POST /v1/content/comments/counts
 // Response
 {
   "counts": {
-    "https://alice.com/posts/2026/04/hello.md": { "total": 7, "blessed": 3 },
-    "https://bob.com/posts/2026/04/welcome.md": { "total": 2, "blessed": 2 }
+    "https://alice.com/posts/2026/04/hello.md": 7,
+    "https://bob.com/posts/2026/04/welcome.md": 2
   }
 }
 ```
@@ -222,7 +226,7 @@ Two takeaways. First, this endpoint exists specifically because polis content is
 
 ### B.4 Tying back to the stream
 
-The webapp's stream handler merges the counts into the page response. The SPA's renderer reads `meta.comment_count` and `meta.blessed_count` from each item and draws the badge. From the SPA's perspective, it never knows whether the count came from local cache or a live DS query — it just gets numbers.
+The webapp's stream handler (`populateCrossTenantCommentCounts`) merges the counts into the page response. The SPA's renderer reads `meta.comment_count` from each item and draws the badge. From the SPA's perspective, it never knows whether the count came from local cache or a live DS query — it just gets numbers.
 
 ---
 
@@ -231,11 +235,11 @@ The webapp's stream handler merges the counts into the page response. The SPA's 
 The stream-screen renders **a single mixed list**:
 
 - The items themselves come from the local feed cache populated by Path A (continuous sync).
-- The cross-tenant decorations (comment counts, blessing counts) come from Path B (aggregation).
+- The cross-tenant decoration (the comment count) comes from Path B (aggregation).
 
-The PQL sentence in the URL filters the items (see the [URL-as-filter tour](url-as-filter.md)). When you change the filter, the items re-fetch from local cache (no DS roundtrip — the cache already has them); Path B fires again to top up counts for items that slid into the new view.
+The PQL sentence in the URL filters the items (see the [URL-as-filter tour](url-as-filter.md)). When you change the filter, the items re-fetch from local cache (no DS roundtrip — the cache already has them); Path B fires again to top up counts for the posts on the new page.
 
-This is why polis.pub feels live without feeling expensive. The continuous data is pre-staged locally; the decorative-but-network-wide bits are batched and tied to viewport visibility.
+This is why polis.pub feels live without feeling expensive. The continuous data is pre-staged locally; the decorative-but-network-wide bits are batched, one DS call per rendered page.
 
 ---
 
@@ -259,7 +263,7 @@ If you followed the tour end-to-end:
 
 - The DS doesn't push to your browser. The webapp pulls. The continuous "your stream stays current" feeling is a 30-second polling loop, not a websocket.
 - The webapp's local JSONL cache is the source of truth for what your stream shows. The cache is rebuilt from DS events, so it's deletable / regeneratable without data loss.
-- Cross-tenant data (comment counts, blessing counts) that no individual site can know is exposed via batched aggregation queries on the DS, with a viewport-horizon strategy that keeps visible items fast and off-screen items eventually-consistent.
+- Cross-tenant data (comment counts) that no individual site can know is exposed via batched aggregation queries on the DS, fetched for the whole rendered page in one call so a badge shows the same number every time it renders.
 - Cursor-paginated events + on-demand aggregation queries together compose the "live network feed" experience without any actual real-time push infrastructure.
 - The PQL sentence-as-URL filter (see [URL-as-filter](url-as-filter.md)) decides *which* items render; this tour is about how the items *get there*.
 

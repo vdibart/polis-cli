@@ -23,8 +23,8 @@ type ProjectionHandler interface {
 // Note: NotificationHandler is not included here because it uses a different
 // processing model (rule-driven, writes to state.jsonl instead of projection state).
 var BuiltinHandlers = map[string]ProjectionHandler{
-	"pub.polis.follow":            &FollowHandler{},
-	"pub.polis.comment.blessing":  &BlessingHandler{},
+	"pub.polis.follow":           &FollowHandler{},
+	"pub.polis.comment.blessing": &BlessingHandler{},
 }
 
 // SyncHandler processes batches of stream events as part of the unified sync loop.

@@ -111,9 +111,10 @@ func matchesSource(source, actorDomain string, ctx EvalContext) bool {
 	case "self":
 		return ctx.MyDomain != "" && strings.EqualFold(actorDomain, ctx.MyDomain)
 	case "thread-blessed":
-		// thread-blessed is resolved by the DS via storage query.
-		// Client-side, it always returns false (no local resolution).
-		return false
+		// Resolved on the site owner's own instance from the owner's blessing
+		// list for this thread (Signet epic 45 D4). The discovery service used to
+		// answer it from its relationship rows; it no longer decides.
+		return ctx.ThreadBlessedDomains[lowerActor]
 	default:
 		return false
 	}

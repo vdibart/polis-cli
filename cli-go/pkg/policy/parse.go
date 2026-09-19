@@ -169,8 +169,11 @@ func validateTenantLayer(r *ParsedRule) error {
 }
 
 // validateOperatorLayer enforces Layer 3 verbs for DS operator policies.
-// Operator policies gate stream ingestion (allow/deny any type) and may
-// also carry fallback blessing rules (bless/review on pub.polis.comment).
+// Operator policies gate stream ingestion (allow/deny any type) — live. They
+// also accept bless/review on pub.polis.comment, which PARSE and are never
+// applied: those were the discovery service's fallback blessing policy, and a
+// discovery service decides no blessing for a user (the post author's own site
+// does). Still accepted so operator rows already stored keep loading.
 func validateOperatorLayer(r *ParsedRule) error {
 	switch r.Action {
 	case "allow", "deny":

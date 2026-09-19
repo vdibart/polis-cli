@@ -2808,6 +2808,43 @@
         });
     }
 
+    // normalizeForTitleCompare / titleStartsFirstLine mirror the Go detector
+    // render.normalizeForTitleCompare + render.TitleStartsFirstSentence
+    // (cli-go/pkg/render/stream.go). The server precomputes title_redundant
+    // for list items, but a CROSS-TENANT post shipped with no excerpt (lean
+    // feed-cache entry) leaves the flag unset — and the body only arrives later
+    // via the focus-mode lazy fetch. This client re-derivation closes that gap
+    // so read-focus suppresses the duplicated title the same way condensed view
+    // does. Keep these in lockstep with the Go source of truth.
+    function normalizeForTitleCompare(s) {
+        s = String(s == null ? '' : s).toLowerCase()
+            .replace(/[“”]/g, '"')   // curly double quotes
+            .replace(/[‘’]/g, "'")   // curly single quotes / apostrophe
+            .replace(/[—–]/g, '-')   // em-dash, en-dash
+            .replace(/…/g, '...')          // horizontal ellipsis
+            .replace(/\\/g, '');                // strip backslash escape leakage
+        return s.split(/\s+/).filter(Boolean).join(' ');
+    }
+    function titleStartsFirstLine(title, firstLine) {
+        // Trim trailing truncation markers (".", " ", "-") off the title, as
+        // the Go detector does, then prefix-check against the first prose line.
+        var t = normalizeForTitleCompare(title).replace(/[.\- ]+$/, '');
+        if (!t) return false;
+        return normalizeForTitleCompare(firstLine).indexOf(t) === 0;
+    }
+    // firstProseLine returns the first non-empty prose line of a rendered body,
+    // skipping leading headings (mirrors the Go detector skipping markdown
+    // headings before the prefix check).
+    function firstProseLine(contentEl) {
+        var kids = contentEl.children || [];
+        for (var i = 0; i < kids.length; i++) {
+            if (/^H[1-6]$/.test(kids[i].tagName)) continue;
+            var t = (kids[i].textContent || '').trim();
+            if (t) return t;
+        }
+        return (contentEl.textContent || '').trim();
+    }
+
     function injectBody(entry, bodyHtml) {
         var oldBody = entry.querySelector('.entry-body');
         if (!oldBody) return;
@@ -2826,15 +2863,33 @@
         var newBody = document.createElement('div');
         newBody.className = 'entry-body entry-body--expanded';
 
+        var content = document.createElement('div');
+        content.className = 'entry-content';
+        // ── TRUST CHAIN — see the named comment block at the first
+        // innerHTML site in renderComment for the four assumptions
+        // every innerHTML call site in this file depends on. Lazy-
+        // fetched body HTML originates from the same publish-time
+        // sanitization + sign-verify chain as comment body_html.
+        content.innerHTML = bodyHtml;
+
         if (titleEl) {
             var titleLink = document.createElement('a');
             titleLink.className = 'entry-title-link';
-            // Carry forward the title-redundant flag stamped by renderPost.
-            // Without this, the body-swap from excerpt → expanded loses
-            // the dedup signal: the new .entry-title-link gets default
-            // styling (visible h3) even though the body's first sentence
-            // begins with the title.
-            if (entry.dataset.polisTitleRedundant === '1') {
+            // Title-redundant flag. Primary signal: stamped by renderPost from
+            // the server-computed meta.title_redundant. Fallback: a cross-tenant
+            // post shipped with no excerpt leaves that flag unset, and the body
+            // only arrives now via the focus lazy-fetch — so re-derive from the
+            // fetched body's first prose line (same detector as the server). Set
+            // it on the dataset too so re-binds (e.g. focus re-entry) stay
+            // consistent. Without this the read-focus view shows the title
+            // duplicated above an identical first body line.
+            var titleRedundant = entry.dataset.polisTitleRedundant === '1';
+            if (!titleRedundant &&
+                titleStartsFirstLine(titleEl.textContent || '', firstProseLine(content))) {
+                titleRedundant = true;
+                entry.dataset.polisTitleRedundant = '1';
+            }
+            if (titleRedundant) {
                 titleLink.className += ' is-redundant';
             }
             titleLink.setAttribute('href', url);
@@ -2846,15 +2901,6 @@
             titleLink.appendChild(titleClone);
             newBody.appendChild(titleLink);
         }
-
-        var content = document.createElement('div');
-        content.className = 'entry-content';
-        // ── TRUST CHAIN — see the named comment block at the first
-        // innerHTML site in renderComment for the four assumptions
-        // every innerHTML call site in this file depends on. Lazy-
-        // fetched body HTML originates from the same publish-time
-        // sanitization + sign-verify chain as comment body_html.
-        content.innerHTML = bodyHtml;
         // The author avatar is NOT relocated here anymore. Post chips are now
         // absolutely positioned top-right of the rail with a reserved body
         // gutter (see .entry--post .entry-rail > .entry-avatar-link in
@@ -3663,6 +3709,29 @@
             attrs: { type: 'button', 'aria-expanded': 'false', hidden: '' },
         }));
 
+        // Collapsed-stream contract: in the non-comments views (postFocus —
+        // the activity/posts streams) the POST is the subject and comments
+        // stay COLLAPSED, exactly like a renderPost entry. Show a comment-
+        // count badge for the PARENT post and DON'T expand the comment card
+        // inline — read-focus is where the latest comment loads. Only the
+        // dedicated comments view (postFocus=false, the comment IS the
+        // subject) keeps the inline comment card built below. The count comes
+        // from meta.comment_count, which the server stamps on comment items
+        // with their target post's total (populateCrossTenantCommentCounts).
+        var threadBadge = null;
+        if (postFocus && !meta.draft) {
+            var threadCount = (meta.comment_count != null) ? meta.comment_count : 0;
+            threadBadge = el('a', {
+                cls: 'entry-comments-badge',
+                href: (meta.target_url || '#') + '#comments',
+                children: [
+                    buildCommentSVG(),
+                    buildAddCommentSVG(),
+                    el('span', { cls: 'count', text: formatCommentCount(threadCount) }),
+                ],
+            });
+        }
+
         // Comment region — the FOCUS of the comments view. Framed card (left
         // accent + tint, see stream.css). The commenter's identity is the
         // floated 24px avatar (rollover handle, links to the COMMENT's URL);
@@ -3725,8 +3794,11 @@
         // .entry--comment-thread > .entry-rail in stream.css carries the
         // post-body anchor; the comment rail below is nested and carries the
         // comment-body anchor instead).
-        article.appendChild(bodyRail(timelineDot(), postAvatar, postBody));
-        article.appendChild(commentBlock);
+        article.appendChild(bodyRail(timelineDot(), postAvatar, postBody, threadBadge));
+        // Inline comment card only in the dedicated comments view; collapsed
+        // out of the activity/posts streams, where the badge above conveys the
+        // count and read-focus loads the latest comment on demand.
+        if (!postFocus) article.appendChild(commentBlock);
         return article;
     }
 
@@ -3845,7 +3917,15 @@
         // used to sit flush-right, but the avatar now occupies the top-right
         // reserved column. When there's no date, lead with the status (no
         // dangling separator).
-        if (statusLabel) {
+        // Relationship labels (mutual / follows you / following) describe the
+        // TENANT's relationships, which are only meaningful inside the owner's
+        // own SPA. On the public site page (a logged-out visitor, or anyone
+        // who isn't this tenant) the first-person "follows you" reads as
+        // addressed to the viewer — which is wrong. So only surface the label
+        // on the owner surface (body.is-owner, set by app.js; never on the
+        // canonical/public shell).
+        var ownerSurface = !!(document.body && document.body.classList.contains('is-owner'));
+        if (statusLabel && ownerSurface) {
             if (dateText) {
                 entryMeta.appendChild(el('span', { cls: 'entry-meta-sep', text: '·' }));
             }
@@ -3853,6 +3933,18 @@
                 cls: 'entry-byline follow-state ' +
                      (isFollowing ? 'is-following' : 'is-not-following'),
                 text: statusLabel,
+            }));
+        }
+        // Author handle in the standard upper-right slot (mono, hover-revealed),
+        // linking to the author's site — the explicit "go to their site"
+        // affordance the directory page was missing. Mirrors the post entry's
+        // .entry-handle; margin-left:auto (CSS) floats it to the right edge,
+        // stopping at the avatar gutter.
+        if (meta.author_domain) {
+            entryMeta.appendChild(el('a', {
+                cls: 'entry-handle',
+                href: meta.author_url || ('https://' + meta.author_domain),
+                text: meta.author_domain,
             }));
         }
         article.appendChild(entryMeta);
@@ -3873,18 +3965,32 @@
         }
 
         // Title: display name when available, otherwise fall back to
-        // the handle (matches the by-name sort key fallback).
+        // the handle (matches the by-name sort key fallback). Wrapped in a
+        // link to the author's site so clicking the name navigates there
+        // (the directory's job is to send you to people's sites). The wrapper
+        // class is deliberately NOT a focus-trigger, so bindCardClick lets it
+        // navigate natively instead of trying to open read-focus.
         var titleText = meta.display_name || meta.author_domain || '';
-        article.appendChild(el('h3', { cls: 'entry-title', text: titleText }));
+        article.appendChild(el('a', {
+            cls: 'entry-profile-link',
+            href: meta.author_url || (meta.author_domain ? 'https://' + meta.author_domain : '#'),
+            attrs: { 'aria-label': 'Visit ' + (meta.author_domain || 'site') },
+            children: [ el('h3', { cls: 'entry-title', text: titleText }) ],
+        }));
 
         // Recent-post-attached: sunset-tinted preview of the author's
         // most-recent post, mirroring the .comment-attached chrome but
-        // with --color-follow-accent. Click-to-expand wiring lives in
-        // owner-extras.js.
+        // with --color-follow-accent. It's a LINK to the author's site —
+        // clicking the preview (title or body) sends you to their site, same
+        // as the name/handle. (It previously toggled an inline expand in the
+        // owner SPA, which did nothing useful and read as an ignored click.)
         if (meta.recent_post && (meta.recent_post.title || meta.recent_post.url)) {
             var rp = meta.recent_post;
-            var attached = el('div', { cls: 'recent-post-attached' });
-            if (rp.url) attached.dataset.polisRecentPostUrl = rp.url;
+            var attached = el('a', {
+                cls: 'recent-post-attached',
+                href: meta.author_url || (meta.author_domain ? 'https://' + meta.author_domain : '#'),
+                attrs: { 'aria-label': 'Visit ' + (meta.author_domain || 'site') },
+            });
 
             var metaLine = el('div', { cls: 'recent-post-meta-line' });
             metaLine.appendChild(el('span', { cls: 'recent-post-label', text: 'Most recent post' }));
@@ -4657,7 +4763,21 @@
                     // scroll (siblings + appended entries already in
                     // place — user just hit the bottom of the corpus).
                     if (wasFirstFetch && items.length === 0 && entries.length <= 1) {
-                        renderEmptyState();
+                        // Don't clobber a valid focus. On a permalink page the
+                        // focus IS a result for the active filter (e.g. "all
+                        // posts" where the focus is the tenant's only post): the
+                        // before_url=focus anchor returns zero items because
+                        // there are no OLDER siblings — that's "end of history",
+                        // not "no posts". applyFocusVisibilityForFilter() hides
+                        // the focus (is-hidden-by-filter) when it genuinely
+                        // doesn't belong to the active filter (type=comments,
+                        // with-comments on a 0-comment post, etc.); only then is
+                        // an empty fetch truly empty.
+                        var vf = document.querySelector('.entry.is-focused');
+                        var hasVisibleFocus = !!(vf && !vf.classList.contains('is-hidden-by-filter'));
+                        if (!hasVisibleFocus) {
+                            renderEmptyState();
+                        }
                     }
                 } else {
                     // New entries appended — re-anchor observer on the
@@ -5073,8 +5193,8 @@
             }
         });
         // Wire ESC into the controller's existing popover-close registry
-        // so any open dropdown closes alongside other popovers (compose
-        // surface, etc. that step 6 layers in).
+        // so any open dropdown closes alongside other popovers (the compose
+        // surface, etc. that owner-extras layers in).
         registerPopoverCloseHandler(closeOpenDropdown);
     }
 
@@ -5539,7 +5659,7 @@
         // Clear all entries except the focus (SSR'd siblings + dynamics).
         // The focus stays — it's the page's main content; the filter
         // changes the surrounding stream. (Public per-post view only;
-        // step 6 owner stream may handle this differently.)
+        // the owner SPA stream may handle this differently.)
         clearStreamForFilterChange();
         // Invalidate any in-flight fetch from the prior filter — its response
         // would otherwise append stale, off-filter entries (see the

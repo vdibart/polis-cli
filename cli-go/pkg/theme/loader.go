@@ -37,11 +37,11 @@ type Templates struct {
 
 	// stream shape fields (step-02/2.b). Loaded from shapes/v4/ when
 	// LoadShape is called with shapeName=="v4".
-	Stream        string // stream.html - required for v4
-	StreamPost    string // stream-post.html - sibling-excerpt partial
-	StreamComment string // stream-comment.html - inline comment partial
-	StreamProfile string // stream-profile.html - profile item (WS-2/WS-5)
-	StreamMention string // stream-mention.html - mention item (WS-2/WS-5)
+	Stream     string // stream.html - required for v4
+	StreamPost string // stream-post.html - sibling-excerpt partial (the only
+	// live entry template — included via {{> stream-post}}. Comment/profile/
+	// mention/dm entries render client-side in stream.js; their SSR templates
+	// were removed as dead scaffolding.
 }
 
 // Manifest represents the site manifest (metadata/manifest.json).
@@ -177,10 +177,12 @@ func loadBlogTemplates(themeDir, baseDir string) (*Templates, error) {
 	return templates, nil
 }
 
-// loadStreamTemplates loads the stream shape template set (step-02/2.b). Requires
-// stream.html (the per-post page shell); per-type partials (post/comment/
-// profile/mention) are loaded if present. Themes may override via themeDir
-// but most v4 themes are CSS-only and use the shape-shipped markup.
+// loadStreamTemplates loads the stream shape template set (step-02/2.b).
+// Requires stream.html (the per-post page shell) and loads stream-post.html —
+// the only entry partial, included via {{> stream-post}} for the SSR focus +
+// sibling posts. Comment/profile/mention/dm entries render client-side in
+// stream.js, so their SSR templates were removed. Themes may override via
+// themeDir but most v4 themes are CSS-only and use the shape-shipped markup.
 func loadStreamTemplates(themeDir, baseDir string) (*Templates, error) {
 	templates := &Templates{}
 
@@ -194,10 +196,7 @@ func loadStreamTemplates(themeDir, baseDir string) (*Templates, error) {
 	// Per-type partials — all optional. The render pipeline gates their
 	// use on item-type at compose time.
 	optional := map[string]*string{
-		"stream-post.html":    &templates.StreamPost,
-		"stream-comment.html": &templates.StreamComment,
-		"stream-profile.html": &templates.StreamProfile,
-		"stream-mention.html": &templates.StreamMention,
+		"stream-post.html": &templates.StreamPost,
 	}
 	for filename, dest := range optional {
 		if content, err := readWithFallback(themeDir, baseDir, filename); err == nil {
@@ -358,7 +357,9 @@ func CopyStreamCSS(dataDir, themeName string) error {
 // will trigger a shape version bump for cache-bust + tenant resync.
 //
 // Source: <dataDir>/.polis/bundles/pub.polis.core/shapes/v4/stream.js
-//         (installed by Patrol/Medic from the embedded reference payload).
+//
+//	(installed by Patrol/Medic from the embedded reference payload).
+//
 // Destination: <dataDir>/stream.js
 func CopyStreamController(dataDir string) error {
 	srcPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "shapes", "v4", "stream.js")
@@ -462,9 +463,9 @@ func isValidTheme(themeDir string) bool {
 // GetThemeDir returns the path to a theme's directory.
 //
 // Checks in post-step-01 canonical order:
-//   1. Installed bundle theme at .polis/bundles/pub.polis.core/themes/<name>/
-//   2. Legacy per-tenant override at site/themes/<name>/
-//   3. CLI-shipped theme (legacy, transition-only)
+//  1. Installed bundle theme at .polis/bundles/pub.polis.core/themes/<name>/
+//  2. Legacy per-tenant override at site/themes/<name>/
+//  3. CLI-shipped theme (legacy, transition-only)
 //
 // Returns "" if the theme isn't found in any location. Mirrors resolveThemeDir
 // but kept as a separate exported function for palette-extraction callers

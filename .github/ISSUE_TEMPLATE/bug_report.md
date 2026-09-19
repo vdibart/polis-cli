@@ -37,5 +37,5 @@ Add any other context about the problem here.
 
 ## Checklist
 - [ ] I have verified my download using `sha256sum -c polis.sha256`
-- [ ] I have checked the [USAGE.md](../../USAGE.md) documentation
+- [ ] I have checked the [command reference](https://github.com/vdibart/polis-cli/blob/main/docs/cli/user/command-reference.md)
 - [ ] I have searched existing issues to ensure this isn't a duplicate

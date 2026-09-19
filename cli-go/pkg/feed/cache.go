@@ -58,8 +58,6 @@ func PublishedBefore(a, b string) bool {
 	return ta.Before(tb)
 }
 
-
-
 // ExcerptCharCap is the single dial controlling how many characters of
 // post body are extracted into a CachedFeedItem.Excerpt. Tune in one place:
 // raising shows richer previews at the cost of larger feed cache files +
@@ -75,8 +73,8 @@ const ExcerptCharCap = 200
 // CachedFeedItem represents a single item in the feed cache.
 type CachedFeedItem struct {
 	ID           string `json:"id"`
-	Type         string `json:"type"`                    // "post", "comment", "announcement", or "follow"
-	EventType    string `json:"event_type,omitempty"`    // Original DS event type (e.g. "pub.polis.post.published")
+	Type         string `json:"type"`                 // "post", "comment", "announcement", or "follow"
+	EventType    string `json:"event_type,omitempty"` // Original DS event type (e.g. "pub.polis.post.published")
 	Title        string `json:"title"`
 	URL          string `json:"url"`
 	Published    string `json:"published"`
@@ -98,8 +96,8 @@ type CachedFeedItem struct {
 // FeedConfig holds user-editable feed configuration.
 type FeedConfig struct {
 	StalenessMinutes int `json:"staleness_minutes"`
-	MaxItems         int `json:"max_items"`          // Legacy: used as fallback total cap when per-type limits are zero
-	MaxAgeDays       int `json:"max_age_days"`       // Age limit for posts and comments
+	MaxItems         int `json:"max_items"`    // Legacy: used as fallback total cap when per-type limits are zero
+	MaxAgeDays       int `json:"max_age_days"` // Age limit for posts and comments
 	// Per-type retention limits. When set, these override MaxItems.
 	MaxPosts            int `json:"max_posts,omitempty"`             // default 300
 	MaxComments         int `json:"max_comments,omitempty"`          // default 150

@@ -524,3 +524,65 @@ func BenchmarkMarkdownToHTML_Long(b *testing.B) {
 		MarkdownToHTML(input)
 	}
 }
+
+// --- Line breaks -----------------------------------------------------------
+//
+// These pin CommonMark's distinction, which polis got wrong until 2026-08-28
+// by setting goldmark's WithHardWraps: a lone newline inside a paragraph is a
+// SOFT break and joins with a space; a HARD break is opt-in, via two trailing
+// spaces or a backslash. Prose wrapped at a column is ordinary practice, and
+// the old behaviour broke it at the author's column and again at the
+// container.
+
+func TestMarkdownToHTML_WrappedProseJoinsIntoOneLine(t *testing.T) {
+	// The shape every editor and `fmt` produces, and what broke.
+	html, err := MarkdownToHTML("At the bottom of this post's source file, just above\nthe signature, there is a short block that\nsays what you may do with it.")
+	if err != nil {
+		t.Fatalf("MarkdownToHTML failed: %v", err)
+	}
+	if strings.Contains(html, "<br") {
+		t.Errorf("a wrapped paragraph must not contain <br> — got %q", html)
+	}
+	// Joined by whitespace, so the words end up adjacent in the rendered text.
+	if !strings.Contains(html, "just above\nthe signature") && !strings.Contains(html, "just above the signature") {
+		t.Errorf("wrapped lines should join into one paragraph, got %q", html)
+	}
+}
+
+func TestMarkdownToHTML_TwoTrailingSpacesIsAHardBreak(t *testing.T) {
+	html, err := MarkdownToHTML("first line  \nsecond line")
+	if err != nil {
+		t.Fatalf("MarkdownToHTML failed: %v", err)
+	}
+	if !strings.Contains(html, "<br") {
+		t.Errorf("two trailing spaces must still produce a hard break, got %q", html)
+	}
+}
+
+func TestMarkdownToHTML_BackslashIsAHardBreak(t *testing.T) {
+	html, err := MarkdownToHTML("first line\\\nsecond line")
+	if err != nil {
+		t.Fatalf("MarkdownToHTML failed: %v", err)
+	}
+	if !strings.Contains(html, "<br") {
+		t.Errorf("a trailing backslash must still produce a hard break, got %q", html)
+	}
+}
+
+// Lists and blockquotes are block-level, so removing hard wraps must not
+// change them. Every existing post sampled before the change was one of these
+// two shapes, which is why nothing needed re-authoring.
+func TestMarkdownToHTML_ListsAndQuotesUnaffectedByLineBreakRules(t *testing.T) {
+	html, err := MarkdownToHTML("* one\n* two\n\n> quoted line one\n> still the same quoted paragraph")
+	if err != nil {
+		t.Fatalf("MarkdownToHTML failed: %v", err)
+	}
+	if strings.Contains(html, "<br") {
+		t.Errorf("list items and quoted paragraphs must not gain <br>, got %q", html)
+	}
+	for _, want := range []string{"<li>", "<blockquote>"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("expected %s in %q", want, html)
+		}
+	}
+}

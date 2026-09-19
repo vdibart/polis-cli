@@ -103,7 +103,6 @@ const App = {
     _feedTimeFilter: '24h',     // '1h', '24h', '2d', '7d', '30d'
     _feedContentType: '',       // '' (items), 'post', 'comment', 'announcement'
     _feedScope: 'network',      // 'network', 'followers', 'global'
-    _feedPopoverOpen: null,     // currently open popover filter name, or null
     _feedFilterOnly: false,     // true when re-render is from filter change only (skip DS sync)
     _feedPendingScrollY: 0,     // scroll position to restore after feed render (from sessionStorage)
     _feedStateRestored: false,  // guard flag to prevent double-restore of feed state
@@ -111,12 +110,6 @@ const App = {
     _markReadQueue: [],         // batched item IDs waiting to be marked read
     _markReadTimer: null,       // debounce timer for batch mark-read
     // _feedHasNewTimer removed — feed dot now driven by has_new_feed in counts payload
-    _feedEditorOpen: false,
-    _feedEditorTitle: '',
-    _feedEditorBody: '',
-    _feedEditorStatus: '',
-    _feedEditorDraftId: null,
-    _feedEditorSaveTimer: null,
 
     // Screen management
     screens: {
@@ -145,7 +138,6 @@ const App = {
 
     // Auto-save state
     _autoSaveTimer: null,
-    _focusMode: false,
 
     // Inline comment editor state
     _inlineCommentOpen: false,
@@ -1086,10 +1078,6 @@ const App = {
                             }
                         }
                     });
-                    // Save feed filter state on navigation away (for restore on return)
-                    window.addEventListener('beforeunload', () => {
-                        if (this.currentView === 'conversations') this._saveFeedState();
-                    });
                     this.checkSetupBanner();
 
                     // Show follow link footer in sidebar
@@ -1284,6 +1272,86 @@ const App = {
         if (!sourcePath) return;
         await this.api('POST', '/api/unpublish', { path: sourcePath });
         await this.loadAllCounts();
+    },
+
+    // Comment actions for the v4 stream's comment entries (owner-extras.js
+    // decorateComment). Same regression as deleteDraft / unpublishPost: the
+    // v3 cutover deleted these with the blessing-requests view, and the
+    // stream's Bless / Deny / Unpublish buttons fell through to a console
+    // warning. spa_app_methods_test.go now fails on any App.* use that
+    // nothing defines. owner-extras refreshes the stream once each resolves.
+    //
+    // Errors toast here rather than reject: the caller only refreshes.
+
+    // Bless a comment on one of the owner's posts. commentVersion is the
+    // stream item's hash; the server looks it up at the DS when empty.
+    async grantBlessing(commentVersion, commentUrl, inReplyTo) {
+        if (!commentUrl) return;
+        try {
+            await this.api('POST', '/api/blessing/grant', {
+                comment_version: commentVersion || '',
+                comment_url: commentUrl,
+                in_reply_to: inReplyTo || '',
+            });
+            this.showToast('Comment blessed', 'success');
+        } catch (err) {
+            this.showToast('Failed to bless: ' + err.message, 'error');
+        }
+        await this.loadAllCounts();
+    },
+
+    // Deny a comment on one of the owner's posts.
+    async denyBlessing(commentUrl, inReplyTo) {
+        if (!commentUrl || !inReplyTo) return;
+        const confirmed = await this.showConfirmModal(
+            'Deny comment',
+            'Deny this comment? It will not appear on your post.',
+            'Deny', 'Cancel', 'danger');
+        if (!confirmed) return;
+        try {
+            await this.api('POST', '/api/blessing/deny', {
+                comment_url: commentUrl,
+                in_reply_to: inReplyTo,
+            });
+            this.showToast('Comment denied', 'success');
+        } catch (err) {
+            this.showToast('Failed to deny: ' + err.message, 'error');
+        }
+        await this.loadAllCounts();
+    },
+
+    // Unpublish one of the owner's own comments. Takes the stream item's
+    // source path (content/pub.polis.core/comment/...); anything else is
+    // treated as a comment id, which the server resolves.
+    async unpublishComment(commentIdOrPath) {
+        if (!commentIdOrPath) return;
+        const confirmed = await this.showConfirmModal(
+            'Unpublish comment',
+            'This removes the comment from discovery and saves it as a draft. ' +
+            'Its signature and versions are stripped; republishing it asks for blessing again.',
+            'Unpublish', 'Cancel', 'danger');
+        if (!confirmed) return;
+        const body = commentIdOrPath.startsWith('content/')
+            ? { path: commentIdOrPath }
+            : { comment_id: commentIdOrPath };
+        try {
+            await this.api('POST', '/api/unpublish', body);
+            this.showToast('Comment unpublished and saved to drafts', 'success');
+        } catch (err) {
+            this.showToast('Failed to unpublish: ' + err.message, 'error');
+        }
+        await this.loadAllCounts();
+    },
+
+    // First `# heading` in a markdown body, or ''. owner-extras.js names a
+    // new draft after it; without it every draft saved from compose was
+    // named untitled-<random> by the server.
+    extractTitleFromMarkdown(markdown) {
+        for (const line of (markdown || '').split('\n')) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('# ')) return trimmed.substring(2).trim();
+        }
+        return '';
     },
 
     // Load all counts via single consolidated endpoint
@@ -1707,26 +1775,10 @@ const App = {
                     return;
                 }
             }
-            // Ctrl/Cmd + Enter to publish from inline feed editor.
-            // (Cmd-S / Cmd-Enter / Cmd-Shift-F for the v3 editor +
-            // comment screens were removed along with those
-            // screens. The v4 inline editor card has its own keyboard
-            // wiring in owner-extras.js.)
-            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && this._feedEditorOpen && this.currentView === 'conversations') {
-                e.preventDefault();
-                this.publishFromFeed();
-            }
-            // Escape closes feed filter popovers, feed editor, or exits focus mode
-            if (e.key === 'Escape') {
-                if (this._feedPopoverOpen) {
-                    this._closeFeedPopovers();
-                } else if (this._focusMode) {
-                    e.preventDefault();
-                    this._toggleFocusMode();
-                } else if (this._feedEditorOpen) {
-                    this.closeFeedEditor();
-                }
-            }
+            // (The v3 feed editor, filter popovers and focus mode had
+            // Cmd-Enter / Escape handling here; their methods went with the
+            // v3 cutover and only the calls survived. The v4 inline editor
+            // card has its own keyboard wiring in owner-extras.js.)
         });
 
         // (About editor events removed — inline editor in owner-card.)
@@ -1902,7 +1954,168 @@ const App = {
         // screen post editor it used to open was retired.
     },
 
+    // Rosie — the user's helper (Signet epic 11). ONE switch.
+    //
+    // The words come from the server (`rosie.text`), which reads the same Go
+    // source `polis init` prints, so the two surfaces cannot drift. Nothing here
+    // may say "grant", "disclosure" or "attribution": a person switching a helper
+    // on is not signing an instrument.
+    _rosieSectionHtml(info) {
+        if (!info || !info.text) return '';
+        const t = info.text;
+        this._rosieText = t;
+        const day = (s) => (s || '').slice(0, 10);
+        const on = !!info.on;
+
+        let status;
+        if (on) {
+            const who = info.live && info.live.basis === 'hosting-terms'
+                ? 'polis.pub switched her on for you'
+                : 'you switched her on';
+            status = `On &mdash; ${who}, ${this.escapeHtml(day(info.live && info.live.since))}`;
+        } else if (info.never) {
+            status = 'Off';
+        } else {
+            status = `Off since ${this.escapeHtml(day(info.off_since))}`;
+        }
+
+        const history = (info.history || []).map(h => `
+                                    <li>${this.escapeHtml(day(h.since))} &middot;
+                                        ${h.basis === 'hosting-terms' ? 'switched on by polis.pub' : 'switched on by you'}
+                                        &middot; <code>${this.escapeHtml(h.behaviours)}</code>
+                                        ${h.state === 'withdrawn' ? `&middot; switched off ${this.escapeHtml(day(h.withdrawn_at))}` : ''}
+                                        &middot; <a href="${this.escapeHtml(h.url)}" target="_blank" rel="noopener">record</a></li>`).join('');
+
+        return `
+                    <div class="settings-section" id="settings-rosie">
+                        <div class="settings-section-label">Rosie</div>
+                        <div class="settings-card">
+                            <div class="settings-row settings-row-stacked">
+                                <div class="license-current">
+                                    <div class="license-current-summary">${this.escapeHtml(t.title)} &mdash; ${status}</div>
+                                    <div class="license-current-meta">
+                                        <span>${this.escapeHtml(t.does)}</span>
+                                        <span>${this.escapeHtml(t.if_off)}</span>
+                                        <span>${this.escapeHtml(t.anytime)}</span>
+                                        ${on ? '' : `<span>${this.escapeHtml(t.catch_up)}</span>`}
+                                        <span>${this.escapeHtml(t.traced)}</span>
+                                    </div>
+                                </div>
+                            </div>
+                            ${info.not_started ? `
+                            <div class="settings-row settings-row-stacked">
+                                <div class="license-nonretro">${this.escapeHtml(t.not_started)}</div>
+                            </div>` : ''}
+                            <div class="settings-row settings-row-stacked">
+                                <div class="settings-row-actions license-actions">
+                                    ${on
+                                        ? `<button class="danger" onclick="App.setRosie(false)">Switch Rosie off</button>`
+                                        : `<button class="primary" onclick="App.setRosie(true)">Switch Rosie on</button>`}
+                                </div>
+                            </div>
+                            ${history ? `
+                            <div class="settings-row settings-row-stacked">
+                                <details><summary>History</summary><ul>${history}</ul></details>
+                            </div>` : ''}
+                        </div>
+                    </div>`;
+    },
+
+    async setRosie(on) {
+        const t = this._rosieText || {};
+        if (!on && !confirm('Switch Rosie off?\n\n' + (t.if_off || '') + '\n\n' + (t.anytime || ''))) {
+            return;
+        }
+        try {
+            await this.api('POST', '/api/settings/rosie', { on });
+            this.showToast(on ? 'Rosie is on.' : 'Rosie is off. Comments will wait for you.', 'success');
+            const contentList = document.getElementById('content-list');
+            if (contentList) this.renderSettings(contentList);
+        } catch (e) {
+            this.showToast('Could not change Rosie: ' + (e.message || e), 'error');
+        }
+    },
+
     // Render settings page
+    // Terms of use — the settings surface for the site's signed licence.
+    //
+    // Two states, and the difference matters. A site that has STATED nothing is
+    // not misconfigured: absent means unstated, a defined state under the
+    // standard, and nothing here should read as an error or nag. But it does get
+    // an invitation, because a choice nobody was offered is not a choice.
+    _licenseSectionHtml(info) {
+        const stated = !!(info && info.stated);
+
+        const body = stated ? `
+                            <div class="settings-row settings-row-stacked">
+                                <div class="license-current">
+                                    <div class="license-current-summary">${this.escapeHtml(info.summary || '')}</div>
+                                    <div class="license-current-meta">
+                                        <code>${this.escapeHtml(info.profile || '')}</code>
+                                        <span>${this.escapeHtml(info.content_usage || '')}</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="settings-row settings-row-stacked">
+                                <div class="settings-row-actions license-actions">
+                                    <button onclick="App.setLicense('reserved')">Reserved</button>
+                                    <button onclick="App.setLicense('open')">Open</button>
+                                    <button class="danger" onclick="App.setLicense('none')">Publish no terms</button>
+                                </div>
+                            </div>` : `
+                            <div class="settings-row settings-row-stacked">
+                                <div class="license-current">
+                                    <div class="license-current-summary">Your posts don&rsquo;t carry terms describing how others may use them.</div>
+                                    <div class="license-current-meta">
+                                        <span>Reserved is the recommendation: read and quote freely with a link back;
+                                        AI training and answer-engine summaries require asking.</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="settings-row settings-row-stacked">
+                                <div class="settings-row-actions license-actions">
+                                    <button class="primary" onclick="App.setLicense('reserved')">Use Reserved</button>
+                                    <button onclick="App.setLicense('open')">Use Open</button>
+                                </div>
+                            </div>`;
+
+        return `
+                    <div class="settings-section">
+                        <div class="settings-section-label">Terms of use</div>
+                        <div class="settings-card">
+${body}
+                            <div class="settings-row settings-row-stacked">
+                                <div class="license-nonretro">
+                                    Terms are <strong>not retroactive</strong>. Posts you have already
+                                    published keep the terms they were signed with &mdash; changing this
+                                    applies from here on.
+                                </div>
+                            </div>
+                        </div>
+                    </div>`;
+    },
+
+    // Change (or withdraw) the site's terms. The user picks; the server signs
+    // what it was handed and never chooses a profile of its own.
+    async setLicense(profile) {
+        if (profile === 'none' && !confirm(
+            'Publish no terms from now on?\n\n' +
+            'Posts you have already published are unchanged — they keep the terms ' +
+            'they were signed with.')) {
+            return;
+        }
+        try {
+            await this.api('POST', '/api/site/license', { profile });
+            this.showToast(profile === 'none'
+                ? 'Terms withdrawn. New posts will carry none.'
+                : 'Terms updated. New posts will carry them.', 'success');
+            const contentList = document.getElementById('content-list');
+            if (contentList) this.renderSettings(contentList);
+        } catch (e) {
+            this.showToast('Could not update terms: ' + (e.message || e), 'error');
+        }
+    },
+
     async renderSettings(container) {
         try {
             const settings = await this.api('GET', '/api/settings');
@@ -1949,6 +2162,8 @@ const App = {
                     </div>
                 `).join('');
             }
+
+            const licenseInfo = settings.license || { stated: false };
 
             const discoveryStatus = site.discovery_configured
                 ? `<span style="color: var(--success-color);">Connected</span>`
@@ -2033,6 +2248,10 @@ const App = {
                         </div>
                     </div>
                     ` : ''}
+
+                    ${this._rosieSectionHtml(settings.rosie)}
+
+                    ${this._licenseSectionHtml(licenseInfo)}
 
                     ${!this.isHosted ? `
                     <div class="settings-section">
@@ -3823,11 +4042,10 @@ echo "File: $POLIS_PATH"</code>
                 const beseechResult = await this.api('POST', '/api/comments/beseech', {
                     comment_id: signResult.comment?.id || signResult.id,
                 });
-                if (beseechResult.status === 'blessed') {
-                    this.showToast('Comment auto-blessed!', 'success');
-                } else {
-                    this.showToast('Comment signed & sent for blessing', 'success');
-                }
+                // Always pending at this point: the post author's site decides later,
+                // so never promise a blessing here (Signet epic 45 D8).
+                void beseechResult;
+                this.showToast('Comment signed & sent. It appears once the author approves it.', 'success');
             } catch (beseechErr) {
                 this.showToast('Comment signed. Could not send blessing request: ' + beseechErr.message, 'warning', 6000);
             }

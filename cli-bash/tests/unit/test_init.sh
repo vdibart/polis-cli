@@ -29,7 +29,11 @@ test_init_basic() {
     assert_dir_exists "content/pub.polis.core/comment" || return 1
     assert_dir_exists "content/pub.polis.core/follow" || return 1
     assert_dir_exists "site/snippets" || return 1
-    assert_dir_exists "site/themes" || return 1
+    # Themes live inside the per-tenant installed bundle. The legacy site/themes/
+    # path is deliberately removed by the bundle refactor (Patrol/Medic/Tailor
+    # delete it), so assert the bundle path and guard against its return.
+    assert_dir_exists ".polis/bundles/pub.polis.core/themes" || return 1
+    assert_dir_not_exists "site/themes" || return 1
     assert_dir_exists ".well-known" || return 1
 
     # Verify key files created

@@ -16,11 +16,11 @@ const maxOGDescriptionLen = 150
 
 // buildOGDescription extracts a plain-text excerpt from a markdown body for
 // use in og:description / twitter:description. Strategy:
-//   1. Reuse the existing MarkdownToPlainText helper to strip markdown syntax.
-//   2. Collapse whitespace to single spaces.
-//   3. Truncate at the last word boundary ≤ maxOGDescriptionLen, falling back
-//      to a hard cut if no word boundary exists.
-//   4. Append an ellipsis when truncation occurred.
+//  1. Reuse the existing MarkdownToPlainText helper to strip markdown syntax.
+//  2. Collapse whitespace to single spaces.
+//  3. Truncate at the last word boundary ≤ maxOGDescriptionLen, falling back
+//     to a hard cut if no word boundary exists.
+//  4. Append an ellipsis when truncation occurred.
 //
 // Empty body → empty string (caller should fall back to title).
 func buildOGDescription(markdownBody string) string {
@@ -72,14 +72,19 @@ func attrEscape(s string) string {
 // step-03/3.d. Field order in the final JSON follows struct order; that
 // ordering is irrelevant to crawlers but kept stable for readable output.
 type blogPostingJSONLD struct {
-	Context          string                 `json:"@context"`
-	Type             string                 `json:"@type"`
-	Headline         string                 `json:"headline"`
-	DatePublished    string                 `json:"datePublished,omitempty"`
-	DateModified     string                 `json:"dateModified,omitempty"`
-	Author           jsonLDAuthor           `json:"author"`
-	URL              string                 `json:"url"`
-	MainEntityOfPage string                 `json:"mainEntityOfPage"`
+	Context          string       `json:"@context"`
+	Type             string       `json:"@type"`
+	Headline         string       `json:"headline"`
+	DatePublished    string       `json:"datePublished,omitempty"`
+	DateModified     string       `json:"dateModified,omitempty"`
+	Author           jsonLDAuthor `json:"author"`
+	URL              string       `json:"url"`
+	MainEntityOfPage string       `json:"mainEntityOfPage"`
+	// License is schema.org/CreativeWork's `license` — the URL of the terms
+	// this work was published under. Omitted when the author has stated none,
+	// because JSON-LD is the shape most ingestion pipelines already parse and
+	// an empty licence field there would read as an assertion of no terms.
+	License string `json:"license,omitempty"`
 }
 
 type webSiteJSONLD struct {
@@ -101,7 +106,7 @@ type jsonLDAuthor struct {
 // JSON has its `</` sequences escaped as `<\/` (JSON-spec-valid; backslash-
 // escaped solidus parses identically) so adversarial body content containing
 // "</script>" can't break out of the script tag.
-func buildBlogPostingJSONLD(title, isoPublished, isoModified, authorName, authorURL, canonicalURL string) (string, error) {
+func buildBlogPostingJSONLD(title, isoPublished, isoModified, authorName, authorURL, canonicalURL, licenseURL string) (string, error) {
 	v := blogPostingJSONLD{
 		Context:          "https://schema.org",
 		Type:             "BlogPosting",
@@ -110,6 +115,7 @@ func buildBlogPostingJSONLD(title, isoPublished, isoModified, authorName, author
 		DateModified:     isoModified,
 		URL:              canonicalURL,
 		MainEntityOfPage: canonicalURL,
+		License:          licenseURL,
 		Author: jsonLDAuthor{
 			Type: "Person",
 			Name: authorName,

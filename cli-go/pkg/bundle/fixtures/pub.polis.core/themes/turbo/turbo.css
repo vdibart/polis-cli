@@ -35,13 +35,13 @@
     --filter-dark-underline: color-mix(in srgb, #c080c0 55%, transparent);
     --filter-dark-underline-hover: #c080c0;
     --filter-dark-identity: #c080c0;
-    --filter-dark-dot: color-mix(in srgb, #c080c0 50%, transparent);
+    --filter-dark-dot: #c080c0;
     --filter-light-text: #0c1626;
     --filter-light-text-hover: #050b14;
     --filter-light-underline: color-mix(in srgb, #7a2a7a 55%, transparent);
     --filter-light-underline-hover: #7a2a7a;
     --filter-light-identity: #7a2a7a;
-    --filter-light-dot: color-mix(in srgb, #7a2a7a 50%, transparent);
+    --filter-light-dot: #7a2a7a;
 
     /* Borders */
     --color-border: rgba(0, 212, 255, 0.3);

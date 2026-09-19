@@ -143,3 +143,21 @@ func TestPublishMessagesKey_PreservesOtherFields(t *testing.T) {
 		t.Errorf("site_title disturbed: %v", raw["site_title"])
 	}
 }
+
+// With no .well-known/polis there is nothing to publish into. That is an
+// error, never a panic — `polis dm` would otherwise crash outright.
+func TestPublishMessagesKey_AbsentWellKnownIsAnErrorNotAPanic(t *testing.T) {
+	siteDir := t.TempDir()
+	privPEM, _, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("PublishMessagesKey panicked on an absent identity document: %v", r)
+		}
+	}()
+	if err := ProvisionAndPublishMessagesKey(siteDir, privPEM); err == nil {
+		t.Fatal("publishing a messages key with no .well-known/polis succeeded")
+	}
+}

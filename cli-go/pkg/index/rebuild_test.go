@@ -29,13 +29,13 @@ Hello World content.
 	// Create a version file that should NOT be indexed
 	os.WriteFile(filepath.Join(versionsDir, "hello.md"), []byte("version data"), 0644)
 
-	count, err := rebuildPostsIndex(dataDir, "https://test.polis.pub")
+	result, err := RebuildContentIndex(dataDir, []string{EntryTypePost})
 	if err != nil {
 		t.Fatalf("rebuild failed: %v", err)
 	}
 
-	if count != 1 {
-		t.Errorf("expected 1 post (skipping .versions), got %d", count)
+	if got := result.Rebuilt[EntryTypePost]; got != 1 {
+		t.Errorf("expected 1 post (skipping .versions), got %d", got)
 	}
 }
 
@@ -74,12 +74,5 @@ func TestRebuildCommentsIndex_UsesPackageVersion(t *testing.T) {
 
 	if !strings.Contains(string(data), `"version": "`+GetGenerator()+`"`) {
 		t.Errorf("blessed.json should contain version %q, got: %s", GetGenerator(), string(data))
-	}
-}
-
-func TestRegenerateManifest_IsNoOp(t *testing.T) {
-	dataDir := t.TempDir()
-	if err := regenerateManifest(dataDir); err != nil {
-		t.Fatalf("regenerateManifest should return nil: %v", err)
 	}
 }

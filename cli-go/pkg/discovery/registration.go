@@ -105,4 +105,3 @@ func RemoveRegistrationMarker(dataDir, dsURL string) error {
 	}
 	return err
 }
-

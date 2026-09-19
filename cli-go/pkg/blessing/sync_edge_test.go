@@ -14,14 +14,12 @@ import (
 
 // SyncBlessedComments edge cases not in sync_test.go.
 
-// The DS query is parameterized as `status: granted` — DS filters
-// server-side. Verify the client honors only what DS returned (it
-// shouldn't try to re-filter, because that would mask DS bugs).
-//
-// If a future DS regression leaked denied entries into a "granted"
-// query, the client should treat them as granted (DS is the source
-// of truth on relationship status). This test pins that down.
-func TestSyncBlessedComments_TrustsDSStatusField(t *testing.T) {
+// Trust posture: the CLI trusts the DS and does NOT re-verify autobless DS
+// attestations (that gate lives in stream.BlessingHandler, which drops
+// autobless events without a DSKeyCache). blessing sync intentionally has no
+// DSKeyCache, so an auto_blessed granted event with no attestation must still
+// be synced — pinning that the CLI stays on the trust-the-DS path.
+func TestSyncBlessedComments_TrustsDSAutobless(t *testing.T) {
 	siteDir := t.TempDir()
 	commentDir := filepath.Join(siteDir, metadata.BundleContentDir, "comment")
 	if err := os.MkdirAll(commentDir, 0755); err != nil {
@@ -32,37 +30,32 @@ func TestSyncBlessedComments_TrustsDSStatusField(t *testing.T) {
 		t.Fatalf("SaveBlessedComments: %v", err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// DS returns 3 entries — one with status=granted (correct),
-		// two with weird status fields. SyncBlessedComments doesn't
-		// inspect status (the query already filtered server-side), so
-		// it should accept all 3 into the local index.
-		resp := discovery.RelationshipQueryResponse{
-			Count: 3,
-			Records: []discovery.RelationshipRecord{
-				{ID: json.Number("1"), SourceURL: "https://a.example/comments/1.md", TargetURL: "https://bob.com/posts/p1.md", Status: "granted", UpdatedAt: "2026-05-21T00:00:00Z"},
-				{ID: json.Number("2"), SourceURL: "https://b.example/comments/2.md", TargetURL: "https://bob.com/posts/p2.md", Status: "weird-status", UpdatedAt: "2026-05-21T00:00:00Z"},
-				{ID: json.Number("3"), SourceURL: "https://c.example/comments/3.md", TargetURL: "https://bob.com/posts/p3.md", Status: "", UpdatedAt: "2026-05-21T00:00:00Z"},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
+	autoblessNoAttestation := discovery.StreamEvent{
+		ID:        json.Number("1"),
+		Type:      "pub.polis.comment.blessing.granted",
+		Timestamp: "2026-05-21T00:00:00Z",
+		Actor:     "bob.com",
+		Payload: map[string]interface{}{
+			"comment_url":   "https://a.example/comments/1.md",
+			"in_reply_to":   "https://bob.com/posts/p1.md",
+			"target_domain": "bob.com",
+			"auto_blessed":  true, // no ds_attestation present
+		},
+	}
+	server := newStreamServer(t, "bob.com", []discovery.StreamEvent{autoblessNoAttestation})
 	defer server.Close()
 
-	client := &discovery.Client{BaseURL: server.URL, HTTPClient: server.Client()}
-	result, err := SyncBlessedComments(siteDir, "bob.com", client)
+	result, err := SyncBlessedComments(siteDir, "bob.com", clientFor(server))
 	if err != nil {
 		t.Fatalf("SyncBlessedComments: %v", err)
 	}
-	if result.Synced != 3 {
-		t.Errorf("expected to sync all 3 records DS returned, got %d", result.Synced)
+	if result.Synced != 1 {
+		t.Errorf("expected autobless event to be trusted and synced, got synced=%d", result.Synced)
 	}
 }
 
-// Sync against a non-empty starting index that has *some* overlap
-// with the DS response. Existing entries should be left alone; only
-// the new ones get added.
+// Sync against a non-empty starting index that has *some* overlap with the DS
+// response. Existing entries should be left alone; only the new ones get added.
 func TestSyncBlessedComments_PartialOverlapAcrossPosts(t *testing.T) {
 	siteDir := t.TempDir()
 	commentDir := filepath.Join(siteDir, metadata.BundleContentDir, "comment")
@@ -82,24 +75,16 @@ func TestSyncBlessedComments_PartialOverlapAcrossPosts(t *testing.T) {
 		t.Fatalf("SaveBlessedComments: %v", err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// DS reports 4 entries: 2 already-local, 2 new
-		resp := discovery.RelationshipQueryResponse{
-			Count: 4,
-			Records: []discovery.RelationshipRecord{
-				{ID: json.Number("1"), SourceURL: "https://a.example/comments/old1.md", TargetURL: "https://bob.com/posts/p1.md", Status: "granted"},
-				{ID: json.Number("2"), SourceURL: "https://b.example/comments/old2.md", TargetURL: "https://bob.com/posts/p2.md", Status: "granted"},
-				{ID: json.Number("3"), SourceURL: "https://c.example/comments/new3.md", TargetURL: "https://bob.com/posts/p1.md", Status: "granted"},
-				{ID: json.Number("4"), SourceURL: "https://d.example/comments/new4.md", TargetURL: "https://bob.com/posts/p3.md", Status: "granted"},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
+	// DS reports 4 grants: 2 already-local, 2 new.
+	server := newStreamServer(t, "bob.com", []discovery.StreamEvent{
+		grantedEvent("1", "https://a.example/comments/old1.md", "https://bob.com/posts/p1.md", "bob.com", "2026-04-01T00:00:00Z"),
+		grantedEvent("2", "https://b.example/comments/old2.md", "https://bob.com/posts/p2.md", "bob.com", "2026-04-01T00:00:00Z"),
+		grantedEvent("3", "https://c.example/comments/new3.md", "https://bob.com/posts/p1.md", "bob.com", "2026-05-01T00:00:00Z"),
+		grantedEvent("4", "https://d.example/comments/new4.md", "https://bob.com/posts/p3.md", "bob.com", "2026-05-01T00:00:00Z"),
+	})
 	defer server.Close()
 
-	client := &discovery.Client{BaseURL: server.URL, HTTPClient: server.Client()}
-	result, err := SyncBlessedComments(siteDir, "bob.com", client)
+	result, err := SyncBlessedComments(siteDir, "bob.com", clientFor(server))
 	if err != nil {
 		t.Fatalf("SyncBlessedComments: %v", err)
 	}
@@ -124,10 +109,8 @@ func TestSyncBlessedComments_PartialOverlapAcrossPosts(t *testing.T) {
 	}
 }
 
-// Malformed DS response (missing required fields) — Sync should still
-// not panic. The behavior is to swallow and continue: invalid records
-// are silently skipped. Pin this so a future refactor doesn't make
-// the loop fail-fast on the first bad record.
+// Malformed DS event (missing comment/target URL) — Sync should not panic and
+// should skip it, continuing with the rest.
 func TestSyncBlessedComments_MalformedRecord_Tolerated(t *testing.T) {
 	siteDir := t.TempDir()
 	commentDir := filepath.Join(siteDir, metadata.BundleContentDir, "comment")
@@ -138,38 +121,36 @@ func TestSyncBlessedComments_MalformedRecord_Tolerated(t *testing.T) {
 		t.Fatalf("SaveBlessedComments: %v", err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := discovery.RelationshipQueryResponse{
-			Count: 2,
-			Records: []discovery.RelationshipRecord{
-				{ID: json.Number("1"), SourceURL: "", TargetURL: "https://bob.com/posts/p1.md", Status: "granted"}, // empty SourceURL
-				{ID: json.Number("2"), SourceURL: "https://a.example/c.md", TargetURL: "https://bob.com/posts/p2.md", Status: "granted"},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
+	malformed := discovery.StreamEvent{
+		ID:        json.Number("1"),
+		Type:      "pub.polis.comment.blessing.granted",
+		Timestamp: "2026-05-21T00:00:00Z",
+		Actor:     "bob.com",
+		Payload:   map[string]interface{}{"target_domain": "bob.com"}, // no comment/target URL
+	}
+	server := newStreamServer(t, "bob.com", []discovery.StreamEvent{
+		malformed,
+		grantedEvent("2", "https://a.example/c.md", "https://bob.com/posts/p2.md", "bob.com", "2026-05-21T00:00:00Z"),
+	})
 	defer server.Close()
 
-	client := &discovery.Client{BaseURL: server.URL, HTTPClient: server.Client()}
-	result, err := SyncBlessedComments(siteDir, "bob.com", client)
+	result, err := SyncBlessedComments(siteDir, "bob.com", clientFor(server))
 	if err != nil {
 		t.Fatalf("SyncBlessedComments shouldn't fail on malformed record: %v", err)
 	}
-	// The current implementation accepts the empty-SourceURL entry —
-	// it doesn't validate. If that ever changes, this number drops.
-	// Either is acceptable; the test pins down "no panic" + "sync
-	// returns".
-	if result.Total != 2 {
-		t.Errorf("Total = %d, want 2", result.Total)
+	// The malformed event is skipped before it counts; only the valid grant
+	// is processed.
+	if result.Total != 1 {
+		t.Errorf("Total = %d, want 1", result.Total)
+	}
+	if result.Synced != 1 {
+		t.Errorf("Synced = %d, want 1", result.Synced)
 	}
 }
 
-// Sync where the DS response is paginated — first page returns has_more=true.
-// SyncBlessedComments today doesn't paginate; verify the single-page
-// behavior is what's documented. If a future refactor adds pagination,
-// this test fails fast at the assertion.
-func TestSyncBlessedComments_SinglePageOnly(t *testing.T) {
+// Sync must page the stream to completion: page 1 returns has_more=true with a
+// cursor, page 2 finishes. Both pages' grants must land, over exactly 2 calls.
+func TestSyncBlessedComments_PaginatesStream(t *testing.T) {
 	siteDir := t.TempDir()
 	commentDir := filepath.Join(siteDir, metadata.BundleContentDir, "comment")
 	if err := os.MkdirAll(commentDir, 0755); err != nil {
@@ -182,24 +163,37 @@ func TestSyncBlessedComments_SinglePageOnly(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		// Always respond with one record and ignore any cursor — if
-		// the client retries, calls > 1.
-		resp := discovery.RelationshipQueryResponse{
-			Count: 1,
-			Records: []discovery.RelationshipRecord{
-				{ID: json.Number("1"), SourceURL: "https://a.example/c.md", TargetURL: "https://bob.com/posts/p.md", Status: "granted"},
-			},
-		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		if r.URL.Query().Get("since") == "" {
+			// Page 1
+			_ = json.NewEncoder(w).Encode(discovery.StreamQueryResponse{
+				Events: []discovery.StreamEvent{
+					grantedEvent("1", "https://a.example/c1.md", "https://bob.com/posts/p1.md", "bob.com", "2026-05-01T00:00:00Z"),
+				},
+				Cursor:  "cursor-2",
+				HasMore: true,
+			})
+			return
+		}
+		// Page 2 (since=cursor-2)
+		_ = json.NewEncoder(w).Encode(discovery.StreamQueryResponse{
+			Events: []discovery.StreamEvent{
+				grantedEvent("2", "https://b.example/c2.md", "https://bob.com/posts/p2.md", "bob.com", "2026-05-02T00:00:00Z"),
+			},
+			Cursor:  "cursor-2",
+			HasMore: false,
+		})
 	}))
 	defer server.Close()
 
-	client := &discovery.Client{BaseURL: server.URL, HTTPClient: server.Client()}
-	if _, err := SyncBlessedComments(siteDir, "bob.com", client); err != nil {
+	result, err := SyncBlessedComments(siteDir, "bob.com", clientFor(server))
+	if err != nil {
 		t.Fatalf("SyncBlessedComments: %v", err)
 	}
-	if calls != 1 {
-		t.Errorf("expected exactly 1 DS call (no pagination), got %d", calls)
+	if calls != 2 {
+		t.Errorf("expected 2 DS calls (paginated), got %d", calls)
+	}
+	if result.Synced != 2 {
+		t.Errorf("expected synced=2 across both pages, got %d", result.Synced)
 	}
 }

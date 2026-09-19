@@ -43,11 +43,11 @@ func LogSuppressedEmit(eventType, reason, actor string, context map[string]inter
 		return
 	}
 	rec := map[string]interface{}{
-		"ts":     time.Now().UTC().Format(time.RFC3339),
-		"event":  "pub.polis.emit.suppressed",
-		"source": "cli",
+		"ts":         time.Now().UTC().Format(time.RFC3339),
+		"action":     "pub.polis.emit.suppressed", // the stack-wide name field (C20); never `event`
+		"source":     "cli",
 		"event_type": eventType,
-		"reason": reason,
+		"reason":     reason,
 	}
 	if actor != "" {
 		rec["actor"] = actor

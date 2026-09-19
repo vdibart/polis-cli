@@ -1,5 +1,7 @@
 # Contributing to Polis
 
+*For* [Contributors](https://github.com/vdibart/polis-cli/blob/main/docs/README.md#contributing-to-polis) — *Kind* [Guide](https://github.com/vdibart/polis-cli/blob/main/docs/README.md#kinds-of-page) — *See also* [tour](https://github.com/vdibart/polis-cli/blob/main/docs/handbook/README.md)
+
 Thank you for your interest in contributing to Polis! This document covers the development setup for each component and the conventions to follow.
 
 ## Repository Layout
@@ -10,8 +12,8 @@ Polis has four main components:
 |-----------|----------|--------|-------------|
 | `cli-go/` | Go | Active | Go CLI — core packages imported by the webapp |
 | `webapp/` | Go | Active | Local web interface for managing a Polis site |
-| `cli-bash/` | Bash | Frozen (v0.56.0) | Original CLI — functional but receives no new features |
-| `discovery-service/` | TypeScript | Active | Fly.io/Hono server for discovery coordination |
+| `cli-bash/` | Bash | Feature-frozen | Original CLI — correctness and security fixes only; its version number tracks the Go CLI's, not its capability |
+| Discovery Service | TypeScript | Active (closed for now) | Hono server for discovery coordination. Source not yet in the public repo. The [DS API reference](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md) is the stable public contract. |
 
 **Key dependency rule:** The Go CLI (`cli-go/pkg/`) owns all core packages. The webapp imports from the CLI, never the reverse.
 
@@ -57,7 +59,7 @@ Feature requests are welcome! Please:
 
 ### Prerequisites
 
-- **Go 1.21+**
+- **Go 1.24+**
 
 ### Development
 
@@ -87,7 +89,7 @@ Core packages live in `cli-go/pkg/` and are designed to be importable:
 - `pkg/discovery/` — Discovery service HTTP client
 - `pkg/metadata/` — Public index (JSONL) management
 
-See [cli-go/README.md](../cli-go/README.md) for the full package list and library usage examples.
+See [cli-go/README.md](https://github.com/vdibart/polis-cli/blob/main/cli-go/README.md) for the full package list and library usage examples.
 
 ### Version Propagation
 
@@ -110,7 +112,7 @@ Packages that write version strings into files must follow this pattern:
 
 ### Prerequisites
 
-- **Go 1.21+**
+- **Go 1.24+**
 
 ### Development
 
@@ -137,7 +139,7 @@ go build -o polis-server ./cmd/server && ./polis-server
 - Add or update tests for every handler change
 - Check bash CLI parity when modifying behavior that both CLIs share
 
-See [webapp/CLAUDE.md](../webapp/CLAUDE.md) for detailed patterns, handler conventions, and frontend architecture.
+See the [webapp development guide](https://github.com/vdibart/polis-cli/blob/main/docs/webapp/developer/development.md) for detailed patterns, handler conventions, and frontend architecture.
 
 ### Key Files
 
@@ -149,7 +151,7 @@ See [webapp/CLAUDE.md](../webapp/CLAUDE.md) for detailed patterns, handler conve
 
 ## Bash CLI (`cli-bash/`)
 
-> The bash CLI is **feature-frozen** at v0.56.0. Bug fixes are accepted but new features should be implemented in the Go CLI.
+> The bash CLI is **feature-frozen**: correctness and security fixes are accepted, new features go in the Go CLI. Its version number tracks the Go CLI's, so a matching version does not mean matching capability — see [implementation-parity.md](https://github.com/vdibart/polis-cli/blob/main/docs/cli/implementation-parity.md).
 
 ### Prerequisites
 
@@ -180,26 +182,11 @@ shellcheck bin/polis
 - Functions: `snake_case`; constants: `UPPER_SNAKE_CASE`
 - All commands must support `--json` output mode
 
-## Discovery Service (`discovery-service/`)
+## Discovery Service
 
-### Prerequisites
+The DS source is not part of the public repo at this time, so contributions to the DS itself are not yet accepted via pull request. Issues, API-contract feedback, and proposed event-stream additions are welcome — open an issue.
 
-- **Supabase CLI** (`supabase`)
-- **Deno** (for local Edge Function development)
-
-### Development
-
-```bash
-cd discovery-service
-
-# Deploy a specific function
-supabase functions deploy <function-name>
-
-# Deploy all functions
-supabase functions deploy
-```
-
-See [discovery-service/README.md](../discovery-service/README.md) for the full API reference and deployment guide.
+See the [DS API reference](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md) and [stream architecture doc](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/stream-architecture.md) for the stable public contract.
 
 ## Pull Request Process
 

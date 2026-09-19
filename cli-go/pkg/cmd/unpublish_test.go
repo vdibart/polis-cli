@@ -369,11 +369,11 @@ func TestRunUnpublish_PreservesOtherPosts(t *testing.T) {
 // discovery-only `polis unpublish --url` path (removing stale/duplicate rows).
 func TestInferContentTypeFromURL(t *testing.T) {
 	cases := map[string]string{
-		"https://x.polis.pub/comments/20260304/david-hello-world-20260304.md":                      "pub.polis.comment",
+		"https://x.polis.pub/comments/20260304/david-hello-world-20260304.md":                       "pub.polis.comment",
 		"https://x.polis.pub/content/pub.polis.core/comment/20260304/david-hello-world-20260304.md": "pub.polis.comment",
 		"https://x.polis.pub/posts/20260317/the-simplest-architecture.md":                           "pub.polis.post",
-		"https://x.polis.pub/content/pub.polis.core/post/20260317/the-simplest-architecture.md":      "pub.polis.post",
-		"https://x.polis.pub/tags/follow-up/abc":                                                     "", // not post/comment
+		"https://x.polis.pub/content/pub.polis.core/post/20260317/the-simplest-architecture.md":     "pub.polis.post",
+		"https://x.polis.pub/tags/follow-up/abc":                                                    "", // not post/comment
 	}
 	for url, want := range cases {
 		if got := inferContentTypeFromURL(url); got != want {

@@ -1,5 +1,7 @@
 # Polis Architecture Overview
 
+*For* [Developers](../../README.md#building-on-polis) · [Reviewers](../../README.md#reviewing-the-security-and-identity-design) · [Writers](../../README.md#writing-on-polis) — *Kind* [Concept](../../README.md#kinds-of-page) — *See also* [reference](content-system.md) · [reference](../../ds/developer/api-reference.md) · [guide](../../webapp/user/user-manual.md)
+
 Polis is a decentralized social system with **four primary surfaces**. Each surface is independently deployable, has its own public contract, and serves a different audience. This doc maps them — what each is, what it owns, how data flows between them, and where to look for deeper docs on each.
 
 > **Read first if** you're new to polis, or you know one surface well and need to place it in the larger picture. Once you have this map, every other doc in the tree has a clearer home.
@@ -59,24 +61,23 @@ Polis is a decentralized social system with **four primary surfaces**. Each surf
 **Key docs:**
 - [`webapp/user/user-manual.md`](../../webapp/user/user-manual.md) — what each page does for an end user.
 - [`webapp/developer/development.md`](../../webapp/developer/development.md) — handler patterns, build commands, drift rules.
-- [`webapp/designer/*.md`](../../webapp/designer/) — design system: theme variables, nav anatomy, page model.
+- [`webapp/designer/`](../../webapp/README.md) — design system: brand, nav anatomy, page model.
 
 ### 3. polis.pub — the hosted platform
 
-**Where it lives:** `webapp/` (same code as the local webapp) plus operational infrastructure. Production runs on a managed hosting platform, with Postgres for accounts and sessions and a persistent volume for tenant directories. The hosted runtime itself is not in this repo; only the polis pieces it composes (`cli-go/pkg/*`, `webapp/*`) are open-sourced here.
+**Where it lives:** `webapp/` (same code as the local webapp) plus operational infrastructure documented under [`ops/`](../../ops/README.md). Production runs on a managed hosting platform, with a SQL database for accounts and sessions (Postgres when `DATABASE_URL` is set, otherwise a SQLite file on the data volume) and a persistent volume for tenant directories.
 
 **What it owns:**
 - Multi-tenant routing: every registered handle gets `<handle>.polis.pub` and a tenant directory on the hosted data volume.
-- Account lifecycle: sign-up, handle claim, registration, key generation, unregistration (hard delete).
+- Account lifecycle: sign-up, handle claim, registration, key generation, unregistration from the discovery service.
 - The background actors that keep tenants healthy:
-  - **Clerk + Chaplain** — registration intake and follow-up.
-  - **Patrol + Medic** — detect and fix tenant drift.
-  - **Judge** — validate signatures and watch key continuity (proto-TOFU).
-  - **Reaper** — reclaim unused handles.
-  - **Tailor** — replay Patrol/Medic changes for audit / rollback.
-
-  Of these, `pkg/tailor` (multi-version site diagnostic and auto-fixer) is open-source and useful to self-hosters as well; the rest of the multi-tenant operational toolchain stays in the hosted runtime.
+  - **Patrol + Medic** — Patrol detects drift from the on-disk site format; Medic heals it.
+  - **Clerk + Chaplain** — Clerk measures parity between what a tenant holds and what the discovery service was told, read-only; Chaplain reconciles what Clerk finds.
+  - **Judge** — independently verifies signatures, attestations and key-history continuity, and reports; it never heals.
+  - **Reaper** — reminds, then archives and deletes, accounts that never verified.
 - The canonical DS deployment at `ds.polis.pub`.
+
+Two more names appear beside the actors and are neither hosted-only nor operator actors. **Tailor** is a standalone `tailor` binary that diagnoses any site against the current spec and, with `--apply`, fixes it — self-hosters run it. **Rosie** is the **user's agent**: under the user's own grant, signing with the user's key and marking every act as hers, she decides blessing requests by the user's published policy. That behaviour runs wherever the user's server runs — localhost, `serve`, or a hosted tenant. (The daily sweep that keeps each tenant's content caches faithful on polis.pub is Medic's, not hers.)
 
 **Who it serves:**
 - Users who want polis without running infrastructure themselves.
@@ -87,7 +88,7 @@ Polis is a decentralized social system with **four primary surfaces**. Each surf
 
 ### 4. Discovery Service (DS) — the coordination layer
 
-**Where it lives:** The DS source is currently operated as part of the hosted runtime and is not yet included in this public repo. The canonical deployment runs at `ds.polis.pub`. The public API contract is documented in [`ds/developer/api-reference.md`](../../ds/developer/api-reference.md) and is the stable surface integrators and alternate implementations should target. An open-source release of the DS reference implementation is planned but not committed to a date.
+**Where it lives:** The Discovery Service source is not in the public repository. The canonical deployment runs at `ds.polis.pub`, and its public contract, the stable surface for integrators and alternate implementations, is [`ds/developer/api-reference.md`](../../ds/developer/api-reference.md). The code is pure business logic plus a `StorageAdapter` interface, with a Hono server as the active adapter.
 
 **What it owns:**
 - Site registry (who's on the network, what their public key is, what bundles they ship).
@@ -132,11 +133,11 @@ The four surfaces compose into one network. The CLI is the trust root; everythin
                    (readers fetch via widget)         polled by every site)
 ```
 
-**Authoring path:** Author runs `polis post` (CLI) or hits "Publish" in the webapp. The same `publish` package signs the content, writes it under `content/pub.polis.core/post/...`, updates `metadata/public.jsonl`, and registers the URL + version + signature with the DS. The DS verifies the signature against the site's public key and emits a `pub.polis.post.published` event into its stream.
+**Authoring path:** Author runs `polis post` (CLI) or hits "Publish" in the webapp. The same `publish` package signs the content, writes it under `content/pub.polis.core/post/...`, updates the site index `content/pub.polis.core/index.jsonl`, and registers the URL + version + signature with the DS. The DS verifies the signature against the site's public key and emits a `pub.polis.post.published` event into its stream.
 
-**Reading path:** Visitors fetch a polis site's static HTML directly from the author's domain. The HTML loads the webapp's widget (`webapp/internal/hosted/widget/widget.js`), which queries the DS for blessed comments, blessing status, and (for logged-in viewers) injects the viewer's icon nav as an overlay that autohides over foreign content.
+**Reading path:** Visitors fetch a polis site's static HTML directly from the author's domain. The HTML loads the widget script served by the hosted service (not in the public repository), which queries the DS for blessed comments, blessing status, and (for logged-in viewers) injects the viewer's icon nav as an overlay that autohides over foreign content.
 
-**Coordination path:** When Alice comments on Bob's post, her CLI/webapp registers the comment, then sends a beseech request to the DS, which routes a `pub.polis.comment.beseeched` event to Bob's site. Bob's webapp polls the stream, sees the event, surfaces it on his `comment` icon with a badge dot. He grants or denies; that decision goes back through the DS as a relationship update; the DS emits a blessing event; Alice's site sees it on its next poll.
+**Coordination path:** When Alice comments on Bob's post, her CLI/webapp registers the comment with the DS, which records a `pub.polis.comment.blessing.requested` event. The DS decides nothing. Bob's own software reads the event from the stream: if his policy settles it and he has granted Rosie, she decides it for him; otherwise it surfaces on his `comment` icon with a badge dot and he grants or denies. The decision goes back through the DS as a signed relationship update, the DS emits `pub.polis.comment.blessing.granted` or `.denied`, and Alice's site sees it on its next poll.
 
 **Multi-tenant path (polis.pub):** Each hosted tenant is a polis site running the same webapp code, isolated to its own per-tenant directory on the hosted volume. The hosted DS at `ds.polis.pub` is just a DS — there's nothing special about it from a polis site's perspective. A self-hosted site can point at `ds.polis.pub` or any other compatible DS.
 
@@ -149,17 +150,17 @@ The four surfaces compose into one network. The CLI is the trust root; everythin
 | Publish a post from the terminal | [`cli/user/command-reference.md#polis-post`](../../cli/user/command-reference.md) |
 | Use a browser instead | [`webapp/user/user-manual.md`](../../webapp/user/user-manual.md) |
 | Understand bundles, content types, shapes, themes | [`content-system.md`](content-system.md) |
-| Customize a theme | [`webapp/designer/theme-system.md`](../../webapp/designer/theme-system.md) + [`cli/user/templating.md`](../../cli/user/templating.md) |
+| Customize a theme | [`themes.md`](themes.md) + [`cli/user/templating.md`](../../cli/user/templating.md) |
 | Write a policy rule | [`cli/user/policies.md`](../../cli/user/policies.md) + [`policy-grammar.md`](../reference/policy-grammar.md) |
 | Filter the stream from the URL bar | [`pql.md`](../reference/pql.md) |
 | Sign up on polis.pub | [`webapp/user/user-manual.md`](../../webapp/user/user-manual.md) |
 | Self-host polis | [`webapp/developer/development.md`](../../webapp/developer/development.md) + [`ds/admin/deployment.md`](../../ds/admin/deployment.md) |
 | Integrate via REST API | [`api/developer/reference.md`](../../api/developer/reference.md) |
 | Operate a Discovery Service | [`ds/admin/configuration.md`](../../ds/admin/configuration.md) + [`ds/admin/deployment.md`](../../ds/admin/deployment.md) |
-| Verify someone else's content | [`security-model.md`](../security/security-model.md) |
+| Verify someone else's content | [`signet/guides/verify-content.md`](../../signet/guides/verify-content.md) |
 | Understand identity, keys, trust | [`security-model.md`](../security/security-model.md) |
 | Build a tool on top of polis primitives | [`cli/developer/packages.md`](../../cli/developer/packages.md) + [`api/developer/reference.md`](../../api/developer/reference.md) |
-| Run a custom content type | [`api/developer/dispatch-engine.md`](../../api/developer/dispatch-engine.md) §"Custom Bundles" |
+| Run a custom content type | [`api/developer/dispatch-engine.md`](../../api/developer/dispatch-engine.md) §"Handler Types" |
 
 ---
 

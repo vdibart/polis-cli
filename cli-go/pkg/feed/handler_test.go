@@ -216,7 +216,6 @@ func TestFeedHandler_IncludeSelf(t *testing.T) {
 	}
 }
 
-
 // selfAndOtherEvents returns a pair of events: one self-authored and one from alice.
 func selfAndOtherEvents() []discovery.StreamEvent {
 	return []discovery.StreamEvent{

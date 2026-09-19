@@ -1,5 +1,7 @@
 # PQL JSON API
 
+*For* [Developers](../../README.md#building-on-polis) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [Discovery service](../README.md) · [Webapp](../../webapp/README.md) — *Code* [`webapp/internal/server/handlers_pql.go`](../../../webapp/internal/server/handlers_pql.go) — *See also* [spec](../../general/reference/pql.md)
+
 `GET /pql/<sentence>` is the PQL-native query endpoint. The **same
 grammar** drives the owner SPA, the public infinity stream, and this
 developer-facing JSON API — see [`../../general/reference/pql.md`](../../general/reference/pql.md)
@@ -68,18 +70,20 @@ to `all polis`.
 |---|---|
 | `version` | Envelope version. `pql.v1` today. New shapes bump this; integrators should branch on it. |
 | `query` | The **resolved** sentence (explicit scope), for display/debugging. |
-| `url` | The short, shareable canonical URL (tenant-relative clause omitted). |
+| `url` | Tenant endpoint only; the short, shareable canonical URL (tenant-relative clause omitted). |
 | `parsed` | The structured filter the server resolved the sentence to. |
 | `tenant` | Tenant endpoint only; the serving domain. Absent on the DS. |
+| `ds_signature`, `ds_key_id` | DS endpoint only; the service's signature over the rest of the envelope, as on its other query responses. |
 | `items` | Tenant: rendered content items. DS: raw stream events. |
-| `pagination.next_cursor` | Opaque cursor; empty/absent when there are no more pages. |
+| `pagination.next_cursor` | Opaque cursor. On a tenant it is empty when there are no more pages; on the DS it is always present (the last event's id, or the cursor you sent when the page is empty). |
 | `pagination.has_more` | Whether another page exists. |
 
 ## Pagination
 
 Pass `?cursor=<next_cursor>` to fetch the following page; stop when
-`has_more` is false (or `next_cursor` is empty). `?limit=<n>` caps the
-page size (server-clamped).
+`has_more` is false. `?limit=<n>` caps the page size (server-clamped; the
+DS allows at most 1000). The DS also accepts `?since=` as a synonym for
+`cursor`.
 
 ```bash
 curl -H 'Accept: application/json' \
@@ -91,12 +95,15 @@ curl -H 'Accept: application/json' \
 PQL is one grammar, but **where a scope resolves** differs by host (full
 rationale in [`../../general/reference/pql.md`](../../general/reference/pql.md#scope-resolution-boundary-who-resolves-what)):
 
-- **Public scopes** — `all polis`, `<handle>`, `about <handle>`,
-  `<handle>'s network` — resolve anywhere (tenant **and** DS).
+- **Public scopes** — `all polis`, `<handle>`, `about <handle>` —
+  resolve on the DS, and (`about` aside) on a tenant.
+- **`<handle>'s network`** is public, but only a tenant serves it, and
+  only for its own handle's profiles; the DS rejects it
+  (`PQL_NETWORK_SCOPE_UNSUPPORTED`).
 - **First-person scopes** — `me`, `my network`, `my mutuals` (and
   `about me`) — resolve **only** on the owner's own tenant, via the
-  authenticated session. The DS rejects them; an anonymous tenant
-  request rejects them too.
+  authenticated session. The DS rejects them; on a hosted tenant an
+  anonymous request for one gets `401 {"error": "unauthorized"}`.
 - **Owner-local types** — `messages` (DMs), `drafts` — owner only.
 - The `about` relation and **fully-qualified event types**
   (`pub.polis.follow.announced`) are served by the **DS** endpoint, not
@@ -104,7 +111,7 @@ rationale in [`../../general/reference/pql.md`](../../general/reference/pql.md#s
 
 ## Errors
 
-Errors are JSON with an HTTP status and a stable `code`:
+Errors are JSON with an HTTP status. **The DS** adds a stable `code`:
 
 ```json
 { "error": "owner-relative scopes ... use a public scope", "code": "PQL_OWNER_RELATIVE_UNSUPPORTED" }
@@ -113,12 +120,17 @@ Errors are JSON with an HTTP status and a stable `code`:
 | Code | Status | Meaning |
 |---|---|---|
 | `PQL_PARSE_ERROR` | 400 | The sentence is not valid PQL. |
-| `PQL_OWNER_RELATIVE_UNSUPPORTED` | 400 | A first-person scope was sent to a surface that can't resolve it (the DS, or an anonymous tenant request). |
+| `PQL_OWNER_RELATIVE_UNSUPPORTED` | 400 | A first-person scope was sent to the DS, which cannot resolve it. |
 | `PQL_OWNER_LOCAL_TYPE` | 400 | `messages`/`drafts` requested on the DS. |
 | `PQL_NETWORK_SCOPE_UNSUPPORTED` | 400 | `<handle>'s network` on the DS (reserved). |
+| `PQL_BAD_SCOPE` | 400 | A scope the DS does not recognise. |
 
-The tenant endpoint additionally rejects the `about` relation and FQ
-event types with a 400 pointing to the DS endpoint.
+A signed request whose headers fail verification gets the DS's `AUTH_*`
+codes with `401` (see the [API reference](api-reference.md#error-responses)).
+
+**The tenant endpoint** returns `{"error": "..."}` with no `code`: `400`
+for an invalid sentence, and `400` pointing to the DS endpoint for the
+`about` relation or a fully-qualified event type.
 
 ## Authentication
 

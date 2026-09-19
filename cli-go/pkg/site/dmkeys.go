@@ -48,8 +48,14 @@ func PublishMessagesKey(siteDir string, identityPrivPEM []byte) error {
 	if err != nil {
 		return fmt.Errorf("load well-known: %w", err)
 	}
+	if raw == nil {
+		// LoadWellKnownRaw reports an absent file as (nil, nil); writing into
+		// that map would panic rather than say what is wrong.
+		return fmt.Errorf(".well-known/polis not found in %s — there is no identity document to publish a messages key into", siteDir)
+	}
 	raw["public_key_messages"] = block
-	if err := SaveWellKnownRaw(siteDir, raw); err != nil {
+	// Republishing the block is the one write that means to change it.
+	if err := SaveWellKnownRaw(siteDir, raw, ChangeMessagesKey); err != nil {
 		return fmt.Errorf("save well-known: %w", err)
 	}
 	return nil

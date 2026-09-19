@@ -107,5 +107,5 @@ For comprehensive CLI documentation, see [`docs/cli/`](../docs/cli/README.md):
 
 - [Command Reference](../docs/cli/user/command-reference.md) — Complete CLI usage guide
 - [JSON Mode](../docs/cli/user/json-mode.md) — Machine-readable output format
-- [Templating](../docs/cli/user/templating.md) — Theme customization
+- [Templating](../docs/cli/user/templating.md) — Template syntax, variables and snippets
 - [Package Structure](../docs/cli/developer/packages.md) — Import rules and version propagation

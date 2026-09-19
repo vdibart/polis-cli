@@ -22,10 +22,43 @@ func handleNotifications(args []string) {
 	switch subcommand {
 	case "list":
 		handleNotificationsList(subArgs)
+	case "clear":
+		handleNotificationsClear(subArgs)
 	default:
 		// Treat as list with options
 		handleNotificationsList(args)
 	}
+}
+
+// handleNotificationsClear empties the local notification state.
+//
+// ⚠️ This is a DELETE and nothing can undo it — no source anywhere can put the
+// entries back. It used to live under `polis rebuild --notifications`, which is
+// why the old flag is still accepted with a deprecation pointer: a verb called
+// "rebuild" should only contain things that can be rebuilt. Signet epic 25 D5.
+func handleNotificationsClear(args []string) {
+	fs := flag.NewFlagSet("notifications clear", flag.ExitOnError)
+	fs.Parse(args)
+
+	dir := getDataDir()
+	if !isPolisSite(dir) {
+		exitError("Not a polis site directory")
+	}
+
+	count, err := notification.ClearAll(dir)
+	if err != nil {
+		exitError("Failed to clear notifications: %v", err)
+	}
+
+	if jsonOutput {
+		outputJSON(map[string]interface{}{
+			"status":  "success",
+			"command": "notifications clear",
+			"data":    map[string]interface{}{"notifications_cleared": count},
+		})
+		return
+	}
+	fmt.Printf("[✓] Cleared %d notification(s)\n", count)
 }
 
 func handleNotificationsList(args []string) {

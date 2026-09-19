@@ -12,62 +12,70 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 )
 
-func TestSyncBlessedComments_AddsNewComments(t *testing.T) {
-	siteDir := t.TempDir()
+// grantedEvent builds a pub.polis.comment.blessing.granted stream event as the
+// DS emits it: actor = post author (the granter), payload carries the comment
+// URL, the in_reply_to post URL, and target_domain (the post owner).
+func grantedEvent(id, commentURL, inReplyTo, postOwnerDomain, ts string) discovery.StreamEvent {
+	return discovery.StreamEvent{
+		ID:        json.Number(id),
+		Type:      "pub.polis.comment.blessing.granted",
+		Timestamp: ts,
+		Actor:     postOwnerDomain,
+		Payload: map[string]interface{}{
+			"comment_url":   commentURL,
+			"in_reply_to":   inReplyTo,
+			"target_domain": postOwnerDomain,
+		},
+	}
+}
 
-	// Create empty blessed.json
+// newStreamServer returns a test server that serves a single page of the given
+// events from GET /v1/stream (HasMore=false). It fails the test if the request
+// does not carry the expected type/actor filters.
+func newStreamServer(t *testing.T, wantActor string, events []discovery.StreamEvent) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if got := q.Get("type"); got != "pub.polis.comment.blessing.granted" {
+			t.Errorf("type filter = %q, want %q", got, "pub.polis.comment.blessing.granted")
+		}
+		if got := q.Get("actor"); got != wantActor {
+			t.Errorf("actor filter = %q, want %q", got, wantActor)
+		}
+		resp := discovery.StreamQueryResponse{Events: events, HasMore: false}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+// writeEmptyBlessed creates an empty blessed.json under siteDir.
+func writeEmptyBlessed(t *testing.T, siteDir string) {
+	t.Helper()
 	commentDir := filepath.Join(siteDir, metadata.BundleContentDir, "comment")
 	if err := os.MkdirAll(commentDir, 0755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	emptyBC := &metadata.BlessedComments{
-		Version:  "test",
-		Comments: []metadata.PostComments{},
-	}
-	if err := metadata.SaveBlessedComments(siteDir, emptyBC); err != nil {
+	empty := &metadata.BlessedComments{Version: "test", Comments: []metadata.PostComments{}}
+	if err := metadata.SaveBlessedComments(siteDir, empty); err != nil {
 		t.Fatalf("SaveBlessedComments: %v", err)
 	}
+}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("status") != "granted" {
-			t.Errorf("status filter = %q, want %q", r.URL.Query().Get("status"), "granted")
-		}
-		if r.URL.Query().Get("actor") != "bob.com" {
-			t.Errorf("actor filter = %q, want %q", r.URL.Query().Get("actor"), "bob.com")
-		}
+func clientFor(server *httptest.Server) *discovery.Client {
+	return &discovery.Client{BaseURL: server.URL, HTTPClient: server.Client()}
+}
 
-		resp := discovery.RelationshipQueryResponse{
-			Count: 2,
-			Records: []discovery.RelationshipRecord{
-				{
-					ID:        json.Number("1"),
-					SourceURL: "https://alice.com/comments/reply1.md",
-					TargetURL: "https://bob.com/posts/20260127/hello.md",
-					Actor:     "alice.com",
-					Status:    "granted",
-					UpdatedAt: "2026-01-15T12:00:00Z",
-				},
-				{
-					ID:        json.Number("2"),
-					SourceURL: "https://charlie.com/comments/reply2.md",
-					TargetURL: "https://bob.com/posts/20260128/world.md",
-					Actor:     "charlie.com",
-					Status:    "granted",
-					UpdatedAt: "2026-01-16T12:00:00Z",
-				},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
+func TestSyncBlessedComments_AddsNewComments(t *testing.T) {
+	siteDir := t.TempDir()
+	writeEmptyBlessed(t, siteDir)
+
+	server := newStreamServer(t, "bob.com", []discovery.StreamEvent{
+		grantedEvent("1", "https://alice.com/comments/reply1.md", "https://bob.com/posts/20260127/hello.md", "bob.com", "2026-01-15T12:00:00Z"),
+		grantedEvent("2", "https://charlie.com/comments/reply2.md", "https://bob.com/posts/20260128/world.md", "bob.com", "2026-01-16T12:00:00Z"),
+	})
 	defer server.Close()
 
-	client := &discovery.Client{
-		BaseURL:    server.URL,
-		HTTPClient: server.Client(),
-	}
-
-	result, err := SyncBlessedComments(siteDir, "bob.com", client)
+	result, err := SyncBlessedComments(siteDir, "bob.com", clientFor(server))
 	if err != nil {
 		t.Fatalf("SyncBlessedComments: %v", err)
 	}
@@ -82,7 +90,6 @@ func TestSyncBlessedComments_AddsNewComments(t *testing.T) {
 		t.Errorf("result.Existing = %d, want 0", result.Existing)
 	}
 
-	// Verify the local file was updated
 	bc, err := metadata.LoadBlessedComments(siteDir)
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
@@ -92,10 +99,64 @@ func TestSyncBlessedComments_AddsNewComments(t *testing.T) {
 	}
 }
 
+// TestSyncBlessedComments_OnlySyncsPostOwnerSide is the regression test for the
+// actor-direction bug: the stream returns a mix of grants where THIS tenant is
+// the post owner (target_domain == me) and grants where this tenant is instead
+// the commenter (target_domain != me, i.e. my own comment blessed on someone
+// else's post). Only the post-owner grants belong in my blessed.json. The old
+// {actor: me} relationship query synced exactly the wrong (commenter) set.
+func TestSyncBlessedComments_OnlySyncsPostOwnerSide(t *testing.T) {
+	siteDir := t.TempDir()
+	writeEmptyBlessed(t, siteDir)
+
+	events := []discovery.StreamEvent{
+		// Mine: someone commented on MY post and I blessed it.
+		grantedEvent("1", "https://alice.com/comments/on-my-post.md", "https://bob.com/posts/20260127/hello.md", "bob.com", "2026-01-15T12:00:00Z"),
+		// NOT mine: I commented on Alice's post and SHE blessed it. Its actor is
+		// alice.com, but assert the defensive target_domain guard drops it even
+		// if such an event reached us.
+		{
+			ID:        json.Number("2"),
+			Type:      "pub.polis.comment.blessing.granted",
+			Timestamp: "2026-01-16T12:00:00Z",
+			Actor:     "alice.com",
+			Payload: map[string]interface{}{
+				"comment_url":   "https://bob.com/comments/on-alice-post.md",
+				"in_reply_to":   "https://alice.com/posts/20260101/foo.md",
+				"target_domain": "alice.com",
+			},
+		},
+	}
+	server := newStreamServer(t, "bob.com", events)
+	defer server.Close()
+
+	result, err := SyncBlessedComments(siteDir, "bob.com", clientFor(server))
+	if err != nil {
+		t.Fatalf("SyncBlessedComments: %v", err)
+	}
+
+	if result.Synced != 1 {
+		t.Errorf("result.Synced = %d, want 1 (only the post-owner grant)", result.Synced)
+	}
+
+	bc, err := metadata.LoadBlessedComments(siteDir)
+	if err != nil {
+		t.Fatalf("LoadBlessedComments: %v", err)
+	}
+	if len(bc.Comments) != 1 {
+		t.Fatalf("bc.Comments len = %d, want 1", len(bc.Comments))
+	}
+	if bc.Comments[0].Post != "posts/20260127/hello.md" {
+		t.Errorf("post = %q, want the post I own", bc.Comments[0].Post)
+	}
+	if len(bc.Comments[0].Blessed) != 1 || bc.Comments[0].Blessed[0].URL != "https://alice.com/comments/on-my-post.md" {
+		t.Errorf("synced the wrong comment: %+v", bc.Comments[0].Blessed)
+	}
+}
+
 func TestSyncBlessedComments_SkipsExisting(t *testing.T) {
 	siteDir := t.TempDir()
 
-	// Pre-populate with one existing blessed comment
 	commentDir := filepath.Join(siteDir, metadata.BundleContentDir, "comment")
 	if err := os.MkdirAll(commentDir, 0755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -115,39 +176,13 @@ func TestSyncBlessedComments_SkipsExisting(t *testing.T) {
 		t.Fatalf("SaveBlessedComments: %v", err)
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := discovery.RelationshipQueryResponse{
-			Count: 2,
-			Records: []discovery.RelationshipRecord{
-				{
-					ID:        json.Number("1"),
-					SourceURL: "https://alice.com/comments/reply1.md", // Already exists locally
-					TargetURL: "https://bob.com/posts/20260127/hello.md",
-					Actor:     "alice.com",
-					Status:    "granted",
-					UpdatedAt: "2026-01-15T12:00:00Z",
-				},
-				{
-					ID:        json.Number("2"),
-					SourceURL: "https://charlie.com/comments/reply2.md", // New
-					TargetURL: "https://bob.com/posts/20260128/world.md",
-					Actor:     "charlie.com",
-					Status:    "granted",
-					UpdatedAt: "2026-01-16T12:00:00Z",
-				},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
+	server := newStreamServer(t, "bob.com", []discovery.StreamEvent{
+		grantedEvent("1", "https://alice.com/comments/reply1.md", "https://bob.com/posts/20260127/hello.md", "bob.com", "2026-01-15T12:00:00Z"),   // already local
+		grantedEvent("2", "https://charlie.com/comments/reply2.md", "https://bob.com/posts/20260128/world.md", "bob.com", "2026-01-16T12:00:00Z"), // new
+	})
 	defer server.Close()
 
-	client := &discovery.Client{
-		BaseURL:    server.URL,
-		HTTPClient: server.Client(),
-	}
-
-	result, err := SyncBlessedComments(siteDir, "bob.com", client)
+	result, err := SyncBlessedComments(siteDir, "bob.com", clientFor(server))
 	if err != nil {
 		t.Fatalf("SyncBlessedComments: %v", err)
 	}
@@ -165,36 +200,12 @@ func TestSyncBlessedComments_SkipsExisting(t *testing.T) {
 
 func TestSyncBlessedComments_EmptyDSResponse(t *testing.T) {
 	siteDir := t.TempDir()
+	writeEmptyBlessed(t, siteDir)
 
-	// Create the blessed comments directory
-	commentDir := filepath.Join(siteDir, metadata.BundleContentDir, "comment")
-	if err := os.MkdirAll(commentDir, 0755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	emptyBC := &metadata.BlessedComments{
-		Version:  "test",
-		Comments: []metadata.PostComments{},
-	}
-	if err := metadata.SaveBlessedComments(siteDir, emptyBC); err != nil {
-		t.Fatalf("SaveBlessedComments: %v", err)
-	}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := discovery.RelationshipQueryResponse{
-			Count:   0,
-			Records: []discovery.RelationshipRecord{},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
+	server := newStreamServer(t, "bob.com", []discovery.StreamEvent{})
 	defer server.Close()
 
-	client := &discovery.Client{
-		BaseURL:    server.URL,
-		HTTPClient: server.Client(),
-	}
-
-	result, err := SyncBlessedComments(siteDir, "bob.com", client)
+	result, err := SyncBlessedComments(siteDir, "bob.com", clientFor(server))
 	if err != nil {
 		t.Fatalf("SyncBlessedComments: %v", err)
 	}
@@ -212,16 +223,11 @@ func TestSyncBlessedComments_DSFailure(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"internal error"}`))
+		_, _ = w.Write([]byte(`{"error":"internal error"}`))
 	}))
 	defer server.Close()
 
-	client := &discovery.Client{
-		BaseURL:    server.URL,
-		HTTPClient: server.Client(),
-	}
-
-	_, err := SyncBlessedComments(siteDir, "bob.com", client)
+	_, err := SyncBlessedComments(siteDir, "bob.com", clientFor(server))
 	if err == nil {
 		t.Fatal("expected error on DS failure")
 	}
@@ -229,34 +235,15 @@ func TestSyncBlessedComments_DSFailure(t *testing.T) {
 
 func TestSyncBlessedComments_NoBlessedFileYet(t *testing.T) {
 	siteDir := t.TempDir()
-	// Do NOT create blessed.json - SyncBlessedComments should fail
-	// because LoadBlessedComments requires the file to exist
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := discovery.RelationshipQueryResponse{
-			Count: 1,
-			Records: []discovery.RelationshipRecord{
-				{
-					ID:        json.Number("1"),
-					SourceURL: "https://alice.com/comments/reply.md",
-					TargetURL: "https://bob.com/posts/hello.md",
-					Actor:     "alice.com",
-					Status:    "granted",
-					UpdatedAt: "2026-01-15T12:00:00Z",
-				},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
+	// Do NOT create blessed.json - SyncBlessedComments should fail because
+	// LoadBlessedComments requires the file to exist (and it is loaded before
+	// any DS call, so no server is needed).
+	server := newStreamServer(t, "bob.com", []discovery.StreamEvent{
+		grantedEvent("1", "https://alice.com/comments/reply.md", "https://bob.com/posts/hello.md", "bob.com", "2026-01-15T12:00:00Z"),
+	})
 	defer server.Close()
 
-	client := &discovery.Client{
-		BaseURL:    server.URL,
-		HTTPClient: server.Client(),
-	}
-
-	_, err := SyncBlessedComments(siteDir, "bob.com", client)
+	_, err := SyncBlessedComments(siteDir, "bob.com", clientFor(server))
 	if err == nil {
 		t.Fatal("expected error when blessed.json does not exist")
 	}
@@ -264,44 +251,14 @@ func TestSyncBlessedComments_NoBlessedFileYet(t *testing.T) {
 
 func TestSyncBlessedComments_ExtractsPostPathFromTargetURL(t *testing.T) {
 	siteDir := t.TempDir()
+	writeEmptyBlessed(t, siteDir)
 
-	commentDir := filepath.Join(siteDir, metadata.BundleContentDir, "comment")
-	if err := os.MkdirAll(commentDir, 0755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	emptyBC := &metadata.BlessedComments{
-		Version:  "test",
-		Comments: []metadata.PostComments{},
-	}
-	if err := metadata.SaveBlessedComments(siteDir, emptyBC); err != nil {
-		t.Fatalf("SaveBlessedComments: %v", err)
-	}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := discovery.RelationshipQueryResponse{
-			Count: 1,
-			Records: []discovery.RelationshipRecord{
-				{
-					ID:        json.Number("1"),
-					SourceURL: "https://alice.com/comments/reply.md",
-					TargetURL: "https://bob.com/posts/20260201/deep-thought.md",
-					Actor:     "alice.com",
-					Status:    "granted",
-					UpdatedAt: "2026-02-01T12:00:00Z",
-				},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}))
+	server := newStreamServer(t, "bob.com", []discovery.StreamEvent{
+		grantedEvent("1", "https://alice.com/comments/reply.md", "https://bob.com/posts/20260201/deep-thought.md", "bob.com", "2026-02-01T12:00:00Z"),
+	})
 	defer server.Close()
 
-	client := &discovery.Client{
-		BaseURL:    server.URL,
-		HTTPClient: server.Client(),
-	}
-
-	_, err := SyncBlessedComments(siteDir, "bob.com", client)
+	_, err := SyncBlessedComments(siteDir, "bob.com", clientFor(server))
 	if err != nil {
 		t.Fatalf("SyncBlessedComments: %v", err)
 	}

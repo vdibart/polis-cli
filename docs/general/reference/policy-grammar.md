@@ -1,5 +1,7 @@
 # Polis Policy Grammar
 
+*For* [Developers](../../README.md#building-on-polis) · [Reviewers](../../README.md#reviewing-the-security-and-identity-design) — *About* [Relationships](../README.md#relationships) — *Kind* [Spec](../../README.md#kinds-of-page) — *Code* [`cli-go/pkg/policy`](../../../cli-go/pkg/policy) — *See also* [concept](in-defense-of-bless.md) · [guide](../../cli/user/policies.md)
+
 Authoritative specification for polis policy rules (v2, current).
 
 This document exists so that the layered model and verb-by-layer matrix do
@@ -25,6 +27,24 @@ parser validates that the verb + type combination is legal for the target
 layer — invalid combinations fail to parse (tenant files) or are skipped
 (operator rows).
 
+> ### ⚠️ Policy is not a licence
+>
+> These two share a noun and nothing else, and building them as one thing would
+> be a mess. **Policy is inbound; a licence is outbound.**
+>
+> | | Policy (this document) | [Licence](../../signet/spec/license.md) |
+> |---|---|---|
+> | Direction | others → me | me → the world |
+> | Audience | polis peers | any consumer, mostly non-polis |
+> | Governs | interaction | use of content |
+> | Verbs | `allow` / `deny` / `bless` / `review` | AIPREF `train-ai`/`search`, RSL `ai-input`/`attribution` |
+> | Lives in | `policies/rules.jsonl` | `content/pub.polis.core/license/license.json`, signed |
+>
+> Layer 2's reserved `emit`/`omit` verbs are also **not** a licence: they govern
+> whether *this site announces its own events to the DS*, which is a routing
+> decision about polis peers. A licence says what a third party may do with the
+> work once they have it.
+
 ## The three layers, in detail
 
 ### Layer 1 — Tenant inbound
@@ -36,8 +56,8 @@ the verbs are decision verbs.
 
 | Content type | Valid verbs | What each means | Evaluator |
 |---|---|---|---|
-| `pub.polis.dm` | `allow`, `deny` | Accept this DM into storage, or reject it | `cli-go/pkg/dm/receive.go:441`, `cli-go/pkg/policycheck/check.go:168` |
-| `pub.polis.comment` | `deny`, `bless`, `review` | Reject the comment; auto-display it alongside my post; queue it for human review | DS `handlers/content.ts:316-405`; webapp `sync.go:568`; CLI `following/social.go:140` |
+| `pub.polis.dm` | `allow`, `deny` | Accept this DM into storage, or reject it | recipient: `Receiver.checkPolicy` in `cli-go/pkg/dm/receive.go`; sender pre-flight: `CheckDMEligibilityURL` in `cli-go/pkg/policycheck/check.go` |
+| `pub.polis.comment` | `deny`, `bless`, `review` | Reject the comment; auto-display it alongside my post; queue it for human review | the post author's own site: webapp `internal/server/rosie.go` (`rosieEvaluate`, Rosie); CLI `following/social.go` (`FollowWithBlessing`). ⛔ **Never the discovery service** |
 
 **Why no `allow` for `pub.polis.comment`.** Comments live on the commenter's
 site; there is no acceptance/storage step on the recipient's side. The only
@@ -71,21 +91,29 @@ administrative firewall vocabulary.
 
 | Content type | Valid verbs | What each means | Evaluator |
 |---|---|---|---|
-| `pub.polis.post` | `allow`, `deny` | Admit post announcement to stream | `discovery-service/core/stream.ts:84` |
+| `pub.polis.post` | `allow`, `deny` | Admit post announcement to stream | `isBlocked` in `discovery-service/core/stream.ts` |
 | `pub.polis.comment` | `allow`, `deny` | Admit comment announcement to stream | same |
 | `pub.polis.follow` | `allow`, `deny` | Admit follow announcement to stream | same |
 | `pub.polis.site` | `allow`, `deny` | Admit site-registration announcement to stream | same |
-| `pub.polis.comment` | `bless`, `review` | Fallback blessing policy when tenant file cannot be fetched | `discovery-service/core/handlers/content.ts:320` |
+| any other `pub.polis.*` type (tag, attestation, actor, …) | `allow`, `deny` | Admit that announcement to stream | same |
+| `pub.polis.comment` | `bless`, `review` | ⚠️ **Parsed and stored, never applied** — see *Why bless/review appear here* | no evaluator |
 
 **Who writes Layer 3 rules.** The DS operator, via `ds_operator_policies`
 rows. These rules are not authored by tenants. They must not appear in
 tenant `rules.jsonl` files — the tenant-mode parser rejects them.
 
-**Why bless/review appear here.** When a comment announcement arrives, the
-DS fetches the target tenant's public `rules.jsonl` to decide blessing. If
-that fetch fails, the DS falls back to its seeded operator-level blessing
-rules. These are the same bless/review verbs, serving as a default instead
-of per-tenant policy.
+**Why bless/review appear here, and what they do now.** They are history the
+grammar still parses. A discovery service used to fetch the target tenant's
+public `rules.jsonl` when a comment announcement arrived, decide the blessing
+itself, and fall back to its own seeded blessing rows when that fetch failed.
+**It no longer decides a blessing for anyone:** registering a comment records a
+pending request and wakes the post author, whose own site applies these verbs
+(Layer 1). The seeded `bless`/`review` rows still ship — in the
+`ds_operator_policies` seed and in `DS_DEFAULT_POLICIES_CONTENT` /
+`core/default-policies.jsonl` — and the operator parser still accepts them, but
+**nothing evaluates them**, and no blessing decision carries a
+`policy_source` or a `fallback_reason` any more. ⚠️ Layer 3's `allow`/`deny`
+ingestion is untouched and live.
 
 ## Writable grammar
 
@@ -108,8 +136,9 @@ of per-tenant policy.
 - `self` — the tenant's own domain
 - `following` — domains in the tenant's following list
 - `followers` — domains in the tenant's followers list
-- `thread-blessed` — actors with a prior blessing on the same thread
-  (resolved by the DS; always false client-side)
+- `thread-blessed` — actors with a comment already blessed on the same thread
+  (resolved on the post author's own instance, from its blessing list for the
+  thread's root post; the discovery service does not resolve it)
 - `<specific-domain>` — exact actor domain (via the `at` clause)
 
 **Optional clauses:**
@@ -124,15 +153,16 @@ for the target layer. Invalid combinations fail to parse in tenant files
 
 | Rule form | Tenant files | Operator policies |
 |---|---|---|
-| `allow pub.polis.dm from <scope>` | ✅ live (Layer 1) | ❌ |
-| `deny pub.polis.dm from <scope>` | ✅ live (Layer 1) | ❌ |
-| `bless pub.polis.comment from <scope>` | ✅ live (Layer 1) | ✅ live (Layer 3 fallback) |
-| `review pub.polis.comment from <scope>` | ✅ live (Layer 1) | ✅ live (Layer 3 fallback) |
-| `deny pub.polis.comment from <scope>` | ✅ live (Layer 1) | ❌ |
+| `allow pub.polis.dm from <scope>` | ✅ live (Layer 1) | ⚠️ parses (Layer 3 accepts `allow`/`deny` for any type); inert — DMs never pass through the DS |
+| `deny pub.polis.dm from <scope>` | ✅ live (Layer 1) | ⚠️ parses; inert, as above |
+| `bless pub.polis.comment from <scope>` | ✅ live (Layer 1) | ⚠️ parses; **not applied** — the DS decides no blessing for a user |
+| `review pub.polis.comment from <scope>` | ✅ live (Layer 1) | ⚠️ parses; **not applied** — the DS decides no blessing for a user |
+| `deny pub.polis.comment from <scope>` | ✅ live (Layer 1) | ✅ live (Layer 3) |
 | `allow pub.polis.comment from <scope>` | ❌ parse error | ✅ live (Layer 3) |
 | `allow pub.polis.post from <scope>` | ❌ parse error | ✅ live (Layer 3) |
 | `allow pub.polis.follow from <scope>` | ❌ parse error | ✅ live (Layer 3) |
 | `allow pub.polis.site from <scope>` | ❌ parse error | ✅ live (Layer 3) |
+| `deny pub.polis.<other type> from <scope>` (post, follow, tag, …) | ✅ parses (defensive deny) | ✅ live (Layer 3) |
 | `emit pub.polis.<type> from <scope>` | ✅ reserved (Layer 2, no evaluator) | ❌ |
 | `omit pub.polis.<type> from <scope>` | ✅ reserved (Layer 2, no evaluator) | ❌ |
 | `bless` / `review` on any non-comment type | ❌ parse error | ❌ parse error |
@@ -201,7 +231,7 @@ JSON lines are silently skipped (operationally this makes partial-write
 recovery safer). `"active": false` rules are loaded but not evaluated.
 
 **Paths.**
-- Tenant public: `<site>/policies/rules.jsonl` (published, fetched by DS)
+- Tenant public: `<site>/policies/rules.jsonl` (published; a sender's software fetches it for the DM pre-flight check — the DS does not fetch it)
 - Tenant private: `<site>/.polis/policies/rules.jsonl` (not published; higher priority than public at evaluation time)
 
 ## Detecting and upgrading v1 files
@@ -213,13 +243,15 @@ and flags any with `version < 2`. Drift events are emitted as
 
 **Upgrade.** Medic rewrites v1 files with the canonical v2 default content
 from `policy.DefaultPublicPolicyContent()` / `DefaultPrivatePolicyContent()`.
-Because per-tenant policy customization does not yet exist, overwrite is
-safe — the rewrite is equivalent to re-running `polis init`. When
-customization lands, this logic needs revisiting (likely a real translator
-rather than a template overwrite).
+⚠️ **The rewrite does not keep a site's own rules.** A site's owner can edit
+either rules file, and any file that differs from the default is replaced by
+it: by Medic on a hosted tenant, whatever the file's version, and by
+`tailor --apply` on a self-hosted site. Back up a customised policy file
+before running `tailor --apply`. A translator that carries a site's own rules
+across an upgrade is planned.
 
 **Observability.** Medic emits `medic.policy_upgrade` with `handle`, `path`,
-and `rule_count` on every rewrite. Re-running after upgrade is a no-op.
+and `detail` on every rewrite (alongside the general `medic.provision`). Re-running after upgrade is a no-op.
 
 ## Canonical default files
 
@@ -263,7 +295,7 @@ Seeded on fresh DS install:
 'bless pub.polis.comment from thread-blessed'
 ```
 
-Source: `discovery-service/schema/postgres.sql` (around line 236).
+Source: the seed `INSERT INTO ds_operator_policies` in `discovery-service/schema/postgres.sql`, applied only when the table is empty.
 
 ## FAQ
 
@@ -310,4 +342,6 @@ several type+verb combinations that looked valid but had no evaluator.
 - `docs/cli/user/policies.md` — user-facing policy reference
 - `docs/general/security/security-model.md` — overall security model
 - `cli-go/pkg/policy/` — Go parser + evaluator
-- `discovery-service/core/policy.ts` — TypeScript parser + evaluator
+- The discovery service's TypeScript parser and evaluator (its source is not public)
+- [`docs/signet/spec/license.md`](../../signet/spec/license.md) — the **outbound** licence
+  (`pub.polis.license`). Not policy; see the callout in the TL;DR.

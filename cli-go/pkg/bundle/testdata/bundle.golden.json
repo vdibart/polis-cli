@@ -1,0 +1,234 @@
+{
+  "name": "pub.polis.core",
+  "version": "1.0.0",
+  "description": "Core polis content types",
+  "handler": {
+    "type": "builtin"
+  },
+  "ds": {
+    "subscribes_to": [
+      "pub.polis.*"
+    ]
+  },
+  "types": {
+    "pub.polis.actor": {
+      "dir": "actor",
+      "mount": "/actors",
+      "storage": {
+        "pattern": "flat"
+      },
+      "emits": [
+        "pub.polis.actor.registered",
+        "pub.polis.actor.reregistered",
+        "pub.polis.actor.withdrawn"
+      ]
+    },
+    "pub.polis.attestation": {
+      "dir": "attestation",
+      "mount": "/attestations",
+      "storage": {
+        "pattern": "flat"
+      },
+      "emits": [
+        "pub.polis.attestation.issued",
+        "pub.polis.attestation.withdrawn"
+      ]
+    },
+    "pub.polis.comment": {
+      "dir": "comment",
+      "mount": "/comments",
+      "renderer": "html",
+      "storage": {
+        "pattern": "dated",
+        "date_format": "YYYYMMDD"
+      },
+      "emits": [
+        "pub.polis.comment.published",
+        "pub.polis.comment.republished",
+        "pub.polis.comment.blessing.requested",
+        "pub.polis.comment.blessing.granted",
+        "pub.polis.comment.blessing.denied"
+      ]
+    },
+    "pub.polis.dm": {
+      "dir": "dm",
+      "storage": {
+        "pattern": "flat"
+      },
+      "private": true
+    },
+    "pub.polis.follow": {
+      "dir": "follow",
+      "mount": "/follow",
+      "emits": [
+        "pub.polis.follow.announced",
+        "pub.polis.follow.removed"
+      ],
+      "private": true
+    },
+    "pub.polis.license": {
+      "dir": "license",
+      "mount": "/license"
+    },
+    "pub.polis.post": {
+      "dir": "post",
+      "mount": "/posts",
+      "renderer": "html",
+      "storage": {
+        "pattern": "dated",
+        "date_format": "YYYYMMDD",
+        "versions": true
+      },
+      "emits": [
+        "pub.polis.post.published",
+        "pub.polis.post.republished"
+      ]
+    },
+    "pub.polis.tag": {
+      "dir": "tag",
+      "mount": "/tags",
+      "storage": {
+        "pattern": "flat"
+      },
+      "emits": [
+        "pub.polis.tag.applied",
+        "pub.polis.tag.removed"
+      ]
+    },
+    "pub.polis.theme": {
+      "dir": "theme",
+      "storage": {
+        "pattern": "flat"
+      }
+    }
+  },
+  "shapes": {
+    "v3": {
+      "name": "v3",
+      "version": "1.0.0",
+      "entry": {
+        "archive": "posts.html",
+        "comment": "comment.html",
+        "comment_inline": "comment-inline.html",
+        "index": "index.html",
+        "post": "post.html",
+        "tag": "tag.html",
+        "tag_index": "tag-index.html"
+      },
+      "partials": [
+        "snippets/about.html",
+        "snippets/also-reading.html",
+        "snippets/blessed-comment.html",
+        "snippets/comment-item.html",
+        "snippets/polis-widget.html",
+        "snippets/post-item.html"
+      ],
+      "default_css": "themes/_shared/base.css"
+    },
+    "v4": {
+      "name": "v4",
+      "version": "1.8.65",
+      "entry": {
+        "post": "stream-post.html",
+        "stream": "stream.html"
+      },
+      "partials": [
+        "snippets/sentence-filter.html"
+      ],
+      "default_css": "themes/_shared/base.css"
+    }
+  },
+  "themes": {
+    "_shared": {
+      "name": "_shared",
+      "version": "1.2.0",
+      "css": "base.css",
+      "compatible_shapes": [
+        "pub.polis.shapes.v3",
+        "pub.polis.shapes.v4"
+      ]
+    },
+    "especial": {
+      "name": "especial",
+      "version": "1.1.0",
+      "css": "especial.css",
+      "compatible_shapes": [
+        "pub.polis.shapes.v3",
+        "pub.polis.shapes.v4"
+      ]
+    },
+    "especial-light": {
+      "name": "especial-light",
+      "version": "1.1.0",
+      "css": "especial-light.css",
+      "compatible_shapes": [
+        "pub.polis.shapes.v3",
+        "pub.polis.shapes.v4"
+      ]
+    },
+    "sols": {
+      "name": "sols",
+      "version": "1.1.0",
+      "css": "sols.css",
+      "compatible_shapes": [
+        "pub.polis.shapes.v3",
+        "pub.polis.shapes.v4"
+      ]
+    },
+    "stardust": {
+      "name": "stardust",
+      "version": "1.0.0",
+      "css": "stardust.css",
+      "compatible_shapes": [
+        "pub.polis.shapes.v4"
+      ]
+    },
+    "studio13": {
+      "name": "studio13",
+      "version": "1.0.0",
+      "css": "studio13.css",
+      "compatible_shapes": [
+        "pub.polis.shapes.v4"
+      ]
+    },
+    "studio13-nk": {
+      "name": "studio13-nk",
+      "version": "1.0.1",
+      "css": "studio13-nk.css",
+      "display_name": "studio13",
+      "compatible_shapes": [
+        "pub.polis.shapes.v3"
+      ]
+    },
+    "turbo": {
+      "name": "turbo",
+      "version": "1.1.0",
+      "css": "turbo.css",
+      "compatible_shapes": [
+        "pub.polis.shapes.v3",
+        "pub.polis.shapes.v4"
+      ]
+    },
+    "vice": {
+      "name": "vice",
+      "version": "1.1.0",
+      "css": "vice.css",
+      "compatible_shapes": [
+        "pub.polis.shapes.v3",
+        "pub.polis.shapes.v4"
+      ]
+    },
+    "zane": {
+      "name": "zane",
+      "version": "1.1.0",
+      "css": "zane.css",
+      "compatible_shapes": [
+        "pub.polis.shapes.v3",
+        "pub.polis.shapes.v4"
+      ]
+    }
+  },
+  "artifacts": [
+    "index.jsonl"
+  ]
+}

@@ -153,7 +153,7 @@
        getBoundingClientRect().y at scrollY=0 reads 98px on a default
        theme; calc resolves to 50+48=98, matching exactly. */
     --layout-sticky-top: calc(var(--topbar-height) + var(--nav-content-gap));
-    --topbar-height: 50px;
+    --topbar-height: 64px;
     --filter-bar-inset: 20px;        /* filter "all" → past the timeline-cap dot */
 
     /* Topbar palette tokens. Themes set --topbar-bg / --topbar-border
@@ -171,15 +171,16 @@
     --topbar-bg: var(--color-bg-light, var(--color-bg, var(--nav-bg, #1a1525)));
     --topbar-border: var(--color-border, var(--nav-border, rgba(255, 255, 255, 0.08)));
 
-    /* Compose-"+" disc — the dark node behind the write-anchor "+", shared by
-       the ghost-compose row's dot AND the post editor's rail-"+"
+    /* Compose-"+" disc — the SOLID accent node behind the write-anchor "+",
+       shared by the ghost-compose row's dot AND the post editor's rail-"+"
        (.editor-card-plus, the editor-open state) so they read as one affordance
-       across views/states. Rest: nav bg lifted ~30% toward the muted text color
-       (a quiet dark node that lets the accent "+" pop). Active/hover: nav bg
-       lifted ~42% toward --color-accent (a dark accent tint, not white). All
-       theme-derived, so every theme gets its own coherent result. */
-    --compose-disc-bg: color-mix(in srgb, var(--topbar-bg) 70%, var(--color-text-muted));
-    --compose-disc-bg-active: color-mix(in srgb, var(--topbar-bg) 58%, var(--color-accent, var(--accent, #d8a060)));
+       across views/states. v4 design tuning (David Alcorn): the post-compose
+       "+" is now a solid theme-accent disc with a contrasting (topbar-bg)
+       glyph — bumps its visibility and matches the nav "+". Rest: solid
+       --color-accent. Active/hover: the same accent lifted toward white for
+       feedback. All theme-derived, so every theme gets its own coherent disc. */
+    --compose-disc-bg: var(--color-accent, var(--accent, #d8a060));
+    --compose-disc-bg-active: color-mix(in srgb, var(--color-accent, var(--accent, #d8a060)) 82%, white);
 
     /* Text tokens. Same cascade pattern as --topbar-bg:
        defaults assume a dark theme (peachy light text), but chain
@@ -214,12 +215,13 @@
        uniform muting independent of how each theme's *-soft tokens
        happen to be defined. Themes can still override
        --color-timeline-bar / --color-timeline-dot directly if they
-       want a different look (see sols.css). Bar at ~25%, dot at
-       ~50%: dot needs to read as a marker, bar as a continuous-
-       but-quiet thread. .has-unread overrides --color-timeline-dot
-       to full --color-accent so unread items pop. */
+       want a different look (see sols.css). Bar stays at ~25% (a
+       continuous-but-quiet thread); the dot is SOLID accent (no
+       alpha) so it reads as a clear marker with no rail/hover bleed
+       through it — per the v4 design tuning. .has-unread keeps the
+       same solid fill plus a glow ring so unread items still pop. */
     --color-timeline-bar: color-mix(in srgb, var(--color-accent, var(--accent, #c8a878)) 25%, transparent);
-    --color-timeline-dot: color-mix(in srgb, var(--color-accent, var(--accent, #c8a878)) 50%, transparent);
+    --color-timeline-dot: var(--color-accent, var(--accent, #c8a878));
 
     /* Single source of truth for the timeline bar's left edge inside
        .layout's coordinate space. The bar (.layout::before), the topbar
@@ -547,10 +549,10 @@ body.is-activity-mode .entry--comment-thread .entry-content {
        above), so opening the editor reads as the ghost's "+" persisting rather
        than swapping for a different glyph. Position is editor-card-specific. */
     position: absolute;
-    top: calc(var(--nav-content-gap) + 6px);
-    left: calc(-1 * var(--layout-gap) / 2 - 9.5px);
-    width: 18px;
-    height: 18px;
+    top: calc(var(--nav-content-gap) + 3px);
+    left: calc(-1 * var(--layout-gap) / 2 - 12.5px);
+    width: 24px;
+    height: 24px;
     border-radius: 50%;
     background: var(--compose-disc-bg);
     border: none;
@@ -933,10 +935,10 @@ body.is-editor-focus .entry--editor {
     height: auto;
     max-height: none;
     margin: 0;
-    /* Title sits vertically centered within the topbar's 50px band:
-       top padding 10px + title height ≈ 30px + bottom margin 10px =
-       50px (matched to --topbar-height by the ::before rule below). */
-    padding: 10px 0 1em;
+    /* Title sits vertically centered within the topbar band (now 64px
+       via --topbar-height): top padding ≈ (64 − 30)/2 = 17px for a
+       title height ≈ 30px. Re-tune if --topbar-height changes. */
+    padding: 17px 0 1em;
     z-index: 100;
     box-shadow: none;
 }
@@ -1085,9 +1087,9 @@ body.is-editor-focus .entry--editor::after {
     font-family: var(--font-content, 'Newsreader', Georgia, serif);
     font-style: italic;
     font-size: 23px;             /* centerpiece — absolute-positioned in
-                                    the topbar (topbar-height is fixed at
-                                    50px), so bumps stay independent of
-                                    nav chrome height. */
+                                    the topbar (height from --topbar-height,
+                                    currently 64px), so bumps stay independent
+                                    of nav chrome height. */
     font-weight: 500;
     letter-spacing: 0.015em;
     line-height: 1.3;
@@ -1425,11 +1427,17 @@ body.is-editor-focus .entry--editor::after {
 .layout-left .site-identity > .site-bio-wrap     { order: 1; }
 .layout-left .site-identity > .site-follow       { order: 2; }
 .layout-left .site-identity > .site-stats        { order: 3; }
+/* Avatar on top, name/handle stacked beneath it (v4 design tuning, David
+   Alcorn) — a column instead of the old avatar|text row. Stacking gives the
+   display name the full column width so long names get room to breathe and
+   wrap naturally, instead of being squeezed into the space beside the avatar.
+   align-items:flex-start left-aligns the avatar, name, and handle with the
+   bio/stats below them. */
 .site-identity-row {
     display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 12px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
 }
 .site-avatar-link { text-decoration: none; flex-shrink: 0; }
 .site-avatar {
@@ -2114,16 +2122,16 @@ body.is-filter-comments .entry--ghost-compose {
     background: var(--compose-disc-bg);
     border: none;
     border-radius: 50%;
-    width: 18px;
-    height: 18px;
-    /* Centering on the bar: half the 18px disc is 9px; +0.5px carries the
+    width: 24px;
+    height: 24px;
+    /* Centering on the bar: half the 24px disc is 12px; +0.5px carries the
        bar's -1px AA nudge (same convention as the base dot's -4.5px =
        -half-width - 0.5px) so the disc's center lands on the bar's midline. */
-    left: calc(-1 * var(--layout-gap) / 2 - 9.5px);
-    /* Vertical: disc center (top + 9px) sits on the prompt's first-line
+    left: calc(-1 * var(--layout-gap) / 2 - 12.5px);
+    /* Vertical: disc center (top + 12px) sits on the prompt's first-line
        optical center (~13px from the line-box top for the 20px italic
-       Newsreader at line-height 1.3) → top ≈ 4px. */
-    top: 4px;
+       Newsreader at line-height 1.3) → top ≈ 1px. */
+    top: 1px;
     transform: none;
     /* Hide the literal "+" text node; the visible + is the two pseudo bars. */
     color: transparent;
@@ -2137,11 +2145,11 @@ body.is-filter-comments .entry--ghost-compose {
     pointer-events: auto;
     cursor: pointer;
 }
-/* The "+" — two bars crossing at the disc's exact center, in the
-   active/rollover color. 9px long × 2px thick inside the 18px disc: bolder
-   stroke so the cross reads clearly, still tight to the circle so the + and
-   the disc read as one unit. Shared by the ghost-compose dot AND the post
-   editor's rail-"+" (.editor-card-plus) so the two states match. */
+/* The "+" — two bars crossing at the disc's exact center, in the contrasting
+   glyph color. 12px long × 2.5px thick inside the 24px disc: bolder stroke so
+   the cross reads clearly, still tight to the circle so the + and the disc
+   read as one unit. Shared by the ghost-compose dot AND the post editor's
+   rail-"+" (.editor-card-plus) so the two states match. */
 .entry--ghost-compose .timeline-dot::before,
 .entry--ghost-compose .timeline-dot::after,
 .editor-card-plus::before,
@@ -2150,20 +2158,22 @@ body.is-filter-comments .entry--ghost-compose {
     position: absolute;
     top: 50%;
     left: 50%;
-    background: var(--network-color, var(--color-accent));
+    /* Contrasting glyph on the solid-accent disc (dark "+" on the gold/coral
+       node) — matches the designer's reference. Falls back to content bg. */
+    background: var(--topbar-bg, var(--color-bg, #1a1525));
     border-radius: 1px;
     transition: background 0.15s ease;
 }
 .entry--ghost-compose .timeline-dot::before,
 .editor-card-plus::before {            /* vertical bar */
-    width: 2px;
-    height: 9px;
+    width: 2.5px;
+    height: 12px;
     transform: translate(-50%, -50%);
 }
 .entry--ghost-compose .timeline-dot::after,
 .editor-card-plus::after {             /* horizontal bar */
-    width: 9px;
-    height: 2px;
+    width: 12px;
+    height: 2.5px;
     transform: translate(-50%, -50%);
 }
 .ghost-prompt {
@@ -3426,6 +3436,24 @@ body.focus-mode .entry.is-focus-mode .post-body-toggle {
 .entry--post .entry-content > :last-child {
     margin-bottom: 0;
 }
+/* List markup inside post bodies. The owner SPA loads stream.css but NOT
+   base.css, and its /style.css ships a `* { margin:0; padding:0 }` reset that
+   strips the browser-default list indent — so <ul>/<ol> discs render off the
+   left edge and vanish (the canonical post page is unaffected: it loads
+   base.css, which sets this indent, and has no such reset). Re-assert the
+   indent here (mirrors base.css's .content-body list rules) so bullets render
+   in the stream the same way they do on the canonical page. */
+.focus-content .content-body ul,
+.focus-content .content-body ol,
+.entry--post .entry-content ul,
+.entry--post .entry-content ol {
+    margin: 12px 0;
+    padding-left: 1.5rem;
+}
+.focus-content .content-body li,
+.entry--post .entry-content li {
+    margin-bottom: 0.4em;
+}
 
 /* --- entry--comment --- */
 .entry--comment .comment-body {
@@ -3616,6 +3644,42 @@ body.is-search-active .entry--ghost-compose {
 }
 .entry--profile .entry-byline.follow-state.is-not-following {
     color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
+}
+
+/* The name and the recent-post preview are links to the author's site
+   (built as <a> in renderProfile). Strip default anchor chrome so they read
+   as the directory entry, not blue underlined links; the name tints to the
+   accent on hover to signal it's clickable. */
+.entry--profile .entry-profile-link {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+}
+.entry--profile .entry-profile-link:hover .entry-title {
+    color: var(--color-accent, var(--accent, #d8a060));
+}
+.entry--profile a.recent-post-attached {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+}
+
+/* Match the · separator and the follow-state label to the date's metrics so
+   they sit on the timestamp's line. They inherited the entry's serif font +
+   larger size, whose taller metrics centered differently than the date's
+   Inter 12px under the row's align-items:center. */
+.entry--profile .entry-meta-line > .entry-meta-sep,
+.entry--profile .entry-byline.follow-state {
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
+    font-size: 12px;
+    line-height: 1;
+}
+/* The label ALSO rode high because .entry-byline ships margin-bottom:6px and
+   center-alignment counts the margin box (~3px lift). Zero just the label's
+   margin — NOT the separator, whose base margin:0 7px gives the · its
+   breathing room on either side. */
+.entry--profile .entry-byline.follow-state {
+    margin: 0;
 }
 
 /* ============================================================
@@ -4595,4 +4659,47 @@ body.is-search-active .entry--ghost-compose {
        shrinks the page chrome around it. */
     .layout { padding: 20px 14px 56px; }
     .stream { gap: 24px; }
+}
+
+/* ── Per-post licence notice ────────────────────────────────────────────
+   One of the three human-readable licence surfaces. Renders only when the
+   post carries terms; the producer emits an empty string otherwise, so
+   there is no "no terms stated" state to style.
+
+   Deliberately quiet: this is provenance, not a call to action. It reads
+   at the weight of the date line, below the body and above the comment
+   badge, so a reader who wants it finds it and a reader who doesn't is
+   not interrupted.
+
+   ⚠️ .entry-license-link is an <a>. It carries an explicit color for the
+   same reason every other anchor in this file does — without one, themes
+   that don't reset anchor color render it default blue. */
+.entry-license {
+    display: block;
+    margin: 14px 0 10px;
+    font-family: var(--font-ui, 'Inter', system-ui, sans-serif);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--color-text-muted, rgba(255, 255, 255, 0.45));
+}
+
+.entry-license-summary {
+    display: inline;
+}
+
+.entry-license-link,
+.entry-license-link:visited {
+    color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    transition: color 0.15s ease;
+}
+
+.entry-license-link:hover,
+.entry-license-link:focus-visible {
+    color: var(--color-accent, var(--accent, #d8a060));
+}
+
+.entry-license-asserted {
+    opacity: 0.75;
 }

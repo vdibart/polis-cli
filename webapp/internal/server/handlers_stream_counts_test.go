@@ -83,6 +83,37 @@ func TestPopulateCrossTenantCommentCounts_StampsVisibleItems(t *testing.T) {
 	}
 }
 
+// TestPopulateCrossTenantCommentCounts_CommentItemsGetParentPostCount verifies
+// that a comment-thread item (which collapses to a post + count badge in the
+// non-comments views) is stamped with its PARENT post's total count, keyed by
+// TargetURL — so the collapsed badge matches what the post entry would show
+// instead of a misleading 0.
+func TestPopulateCrossTenantCommentCounts_CommentItemsGetParentPostCount(t *testing.T) {
+	parentURL := "https://discover.polis.pub/posts/mirror.md"
+	ds, requests := makeFakeDS(t, map[string]int{parentURL: 1}, 0)
+	defer ds.Close()
+
+	s := newCountsTestServer(t, ds)
+	page := []feed.CachedFeedItem{
+		{
+			Type:         "comment",
+			URL:          "https://scott.polis.pub/comments/great.md",
+			AuthorDomain: "scott.polis.pub",
+			TargetURL:    parentURL,
+		},
+	}
+	r := httptest.NewRequest("GET", "/api/stream/items", nil)
+
+	s.populateCrossTenantCommentCounts(r, page, "test-site.polis.pub")
+
+	if page[0].CommentCount != 1 {
+		t.Errorf("comment item should be stamped with parent post count 1, got %d", page[0].CommentCount)
+	}
+	if requests.Load() != 1 {
+		t.Errorf("DS should be queried once for the parent post, got %d", requests.Load())
+	}
+}
+
 // TestPopulateCrossTenantCommentCounts_OwnPostsGetDSTotal verifies that own
 // posts (AuthorDomain == myDomain, relative mount URL) are absolutized to the
 // canonical form DS indexed and stamped with the DS TOTAL — overwriting the

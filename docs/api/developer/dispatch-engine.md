@@ -1,8 +1,10 @@
 # Dispatch Engine Architecture
 
+*For* [Contributors](../../README.md#contributing-to-polis) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [Webapp](../../webapp/README.md) — *Code* [`cli-go/pkg/ops`](../../../cli-go/pkg/ops)
+
 The content type API is built on a two-layer architecture: a **dispatch engine** that routes operations to handlers, and a **REST API layer** that translates HTTP into engine calls.
 
-> **Currently wired content types** (handled end-to-end by `BuiltinCoreHandler` for the `pub.polis.core` bundle): `pub.polis.post` (list, create), `pub.polis.comment` (create), `pub.polis.follow` (list), `pub.polis.dm` (full CRUD: list/get/send/deliver/mark_read/delete/retry), `pub.polis.tag` (full CRUD: list/apply/remove/delete), `pub.polis.theme` (list, get). Other actions declared in `Actions()` have REST routes but the handler returns "unsupported action" until they are wired. See [reference.md § Current Implementation Status](reference.md#current-implementation-status) for the full matrix.
+> **Currently wired content types** (handled end-to-end by `BuiltinCoreHandler` for the `pub.polis.core` bundle): `pub.polis.post` (list, create), `pub.polis.comment` (create, update), `pub.polis.follow` (list), `pub.polis.dm` (list/get/send/deliver/protection_status/mark_read/delete/retry), `pub.polis.tag` (list/apply/remove/delete), `pub.polis.theme` (list, get), `pub.polis.license` (get). The core bundle also declares `pub.polis.attestation` and `pub.polis.actor`, which the handler does not serve at all. `Actions()` lists exactly these. Other standard actions have REST routes, and the handler returns "unsupported action" until they are wired. See [reference.md § Current Implementation Status](reference.md#current-implementation-status) for the full matrix.
 
 ## Dispatch Engine (`cli-go/pkg/ops/`)
 
@@ -16,8 +18,9 @@ Key files:
 - `engine.go` — Engine struct, Dispatch(), handler registry, type name resolution
 - `handler.go` — Handler interface + ExecutableHandler + HTTPHandler
 - `builtin_core.go` — BuiltinCoreHandler for pub.polis.core operations
-- `auth.go` — API key generation, validation, revocation
-- `render.go` — Content-type-aware site render helper
+- `auth.go` — API key validation (`ValidateAPIKey`)
+
+There is no render helper in the package: the host passes an `OnContentChanged` callback (the webapp's re-render) when it builds the engine.
 
 ### Engine
 
@@ -32,14 +35,14 @@ The `Engine` struct holds:
 
 ```go
 type ActionRequest struct {
-    Action      string          // "create", "list", "bless", etc.
-    ContentType string          // "pub.polis.post" (always fully-qualified after resolution)
-    Payload     json.RawMessage // Action-specific input
+    Action      string         // "create", "list", "bless", etc.
+    ContentType string         // "pub.polis.post" (always fully-qualified after resolution)
+    Payload     map[string]any // Action-specific input
 }
 
 type ActionResult struct {
-    Status string      // "success" or "error"
-    Data   interface{} // Action-specific output
+    Status string         // "success" or "error"
+    Data   map[string]any // Action-specific output
 }
 ```
 
@@ -47,7 +50,7 @@ type ActionResult struct {
 
 ```go
 type Handler interface {
-    Handle(ctx context.Context, req ActionRequest, env HandlerEnv) (ActionResult, error)
+    Handle(ctx context.Context, req ActionRequest, env HandlerEnv) (*ActionResult, error)
     Actions(contentType string) []string
 }
 ```
@@ -68,17 +71,19 @@ Bundles declare their handler type in `bundle.json`. The engine instantiates the
 
 Handles all `pub.polis.core` content types by calling into `cli-go/pkg/` packages:
 
-- `pub.polis.post/create` → `publish.Publish()`
+- `pub.polis.post/create` → `publish.PublishPost()`
 - `pub.polis.post/list` → reads `index.jsonl`
-- `pub.polis.comment/create` → `blessing.Beseech()`
+- `pub.polis.comment/create` → `comment.BeseechComment()`
+- `pub.polis.comment/update` → `comment.RepublishComment()`
 - `pub.polis.follow/list` → `following.Load()`
-- `pub.polis.dm/{list,get,send,deliver,mark_read,delete,retry}` → `dm.*`
+- `pub.polis.dm/{list,get,send,deliver,protection_status,mark_read,delete,retry}` → `dm.*`
 - `pub.polis.tag/list` → lists tags with optional filters
 - `pub.polis.tag/apply` → applies a tag to a target URL
 - `pub.polis.tag/remove` → removes a tag from a target URL
 - `pub.polis.tag/delete` → deletes a tag and all associations
 - `pub.polis.theme/list` → returns themes declared by the active bundle (with `active` field)
 - `pub.polis.theme/get` → returns a single theme's manifest entry
+- `pub.polis.license/get` → `site.SiteTerms()`
 
 Each operation is a method on `BuiltinCoreHandler`. New operations are wired by adding a case to the action dispatch switch.
 
@@ -104,9 +109,9 @@ For `http` bundles, the handler:
 
 Thin HTTP layer that translates REST conventions into `ActionRequest` objects:
 
-- `router.go` — Route registration, path parsing, auth enforcement
+- `router.go` — Route registration, path parsing, auth enforcement (Bearer keys and the DM signed-request actions)
 - `handlers.go` — HTTP → Dispatch → JSON adapters, error mapping
-- `middleware.go` — CORS, body size limits, auth middleware
+- `middleware.go` — body size limit, and a CORS hook that is currently a no-op (no CORS headers are sent)
 
 ### Route → Action Mapping
 
@@ -123,9 +128,9 @@ Thin HTTP layer that translates REST conventions into `ActionRequest` objects:
 | POST | `/v1/content/{type}/drafts` | `draft.save` |
 | DELETE | `/v1/content/{type}/drafts/{id}` | `draft.delete` |
 
-### Auth Middleware
+### Auth
 
-The auth middleware extracts the Bearer token from the `Authorization` header, hashes it with SHA-256, and checks against stored hashes in `.polis/api-keys.json`. GET requests on content and bundle routes bypass auth.
+`routeContent` in `router.go` extracts the Bearer token from the `Authorization` header, hashes it with SHA-256, and checks against stored hashes in `.polis/api-keys.json`. GET requests on content and bundle routes bypass auth, except drafts and the private types (`dm`, `follow`).
 
 ### Error Mapping
 
@@ -141,12 +146,10 @@ Engine errors are mapped to HTTP status codes:
 
 ## API Key Management
 
-API keys are managed via `ops.GenerateAPIKey()`, `ops.ValidateAPIKey()`, and `ops.RevokeAPIKey()`:
+Only validation exists: `ops.ValidateAPIKey()`. There is no generate or revoke function and no command; keys are added to and removed from `.polis/api-keys.json` by hand (see [reference.md § Authentication](reference.md#authentication)):
 
-- Keys are generated as random hex strings prefixed with `polis_`
-- Only SHA-256 hashes are stored (in `.polis/api-keys.json`)
-- The plaintext key is returned exactly once at creation time
-- Keys include a name and creation timestamp for management
+- Only SHA-256 hashes are stored (in `.polis/api-keys.json`), compared in constant time
+- Each entry carries an `id`, a `name` and a `created_at` timestamp
 
 ## Adding a New Operation
 
@@ -154,13 +157,8 @@ To wire a new operation for an existing content type:
 
 1. Implement the operation in the appropriate `cli-go/pkg/` package
 2. Add a case to `BuiltinCoreHandler.Handle()` in `builtin_core.go`
-3. Add the action name to `BuiltinCoreHandler.Actions()` for the content type
+3. Add the action name to `BuiltinCoreHandler.Actions()` for the content type, in the same change — `TestActionsAreExactlyWhatTheHandlerAccepts` fails when the two disagree in either direction
 4. The REST routes already handle all standard CRUD + custom actions — no route changes needed
-5. Add tests in `builtin_core_test.go`
+5. Add tests in `cli-go/pkg/ops/` beside the existing ones (e.g. `comment_update_test.go`)
 
-To add a new content type via a third-party bundle:
-
-1. Create `content/<bundle>/bundle.json` declaring the type, handler, and actions
-2. Implement the handler (executable script or HTTP endpoint)
-3. Register the bundle in `.well-known/polis`
-4. The engine discovers it at startup and routes actions automatically
+A third-party bundle cannot be added this way today. The engine accepts any number of bundles, but the webapp builds it from exactly one — the site's `content/pub.polis.core/bundle.json`, or the built-in default — and nothing discovers others.

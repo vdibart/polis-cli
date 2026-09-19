@@ -45,12 +45,17 @@ func FetchPendingRequests(client *discovery.Client, domain string) ([]IncomingRe
 		}
 
 		commentVersion, _ := r.Metadata["comment_version"].(string)
+		// Signet epic 45 D4: the thread a request belongs to, which Rosie needs to
+		// resolve `thread-blessed` on the catch-up path. The field was declared
+		// and never filled.
+		rootPost, _ := r.Metadata["root_post"].(string)
 
 		result = append(result, IncomingRequest{
 			ID:             r.ID.String(),
 			CommentURL:     r.SourceURL,
 			CommentVersion: commentVersion,
 			InReplyTo:      r.TargetURL,
+			RootPost:       rootPost,
 			Author:         r.Actor,
 			CreatedAt:      r.CreatedAt,
 		})

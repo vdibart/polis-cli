@@ -15,6 +15,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
+	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
 )
 
@@ -40,28 +41,75 @@ func (h *BuiltinCoreHandler) Handle(ctx context.Context, req ActionRequest, env 
 		return h.handleTag(ctx, req, env)
 	case "pub.polis.theme":
 		return h.handleTheme(ctx, req, env)
+	case "pub.polis.license":
+		return h.handleLicense(ctx, req, env)
 	default:
-		return nil, fmt.Errorf("unsupported content type: %s", req.ContentType)
+		// A type the bundle declares but this handler has no operations for
+		// (attestation, actor) is the caller asking for something unsupported,
+		// not a server fault — "unsupported content type" reached the v1 API
+		// as a 500.
+		return nil, fmt.Errorf("unsupported action %q for %s", req.Action, req.ContentType)
 	}
 }
 
+// Actions lists exactly the actions Handle accepts for a type; /v1/bundles
+// publishes it as what a caller may do. ⚠️ Change it with the handler's switch,
+// never ahead of it: it once advertised post get/update/delete/render and the
+// draft verbs, comment list/get/bless/deny/revoke/sync and follow
+// create/delete, none of which was ever handled.
+// TestActionsAreExactlyWhatTheHandlerAccepts holds both directions.
 func (h *BuiltinCoreHandler) Actions(contentType string) []string {
 	switch contentType {
 	case "pub.polis.post":
-		return []string{"list", "get", "create", "update", "delete", "render",
-			"draft.list", "draft.get", "draft.save", "draft.delete"}
+		return []string{"list", "create"}
 	case "pub.polis.comment":
-		return []string{"list", "get", "create", "update", "bless", "deny", "revoke", "sync"}
+		return []string{"create", "update"}
 	case "pub.polis.follow":
-		return []string{"list", "create", "delete"}
+		return []string{"list"}
 	case "pub.polis.dm":
 		return []string{"list", "get", "send", "deliver", "protection_status", "mark_read", "delete", "retry"}
 	case "pub.polis.tag":
 		return []string{"list", "apply", "remove", "delete"}
 	case "pub.polis.theme":
 		return []string{"list", "get"}
+	case "pub.polis.license":
+		// Read-only over the API. Stating terms is a signing act and belongs to
+		// the key holder (`polis license`), not to an API caller — an operator
+		// with API access must not be able to change what an author says.
+		return []string{"get"}
 	default:
 		return nil
+	}
+}
+
+// ── Licence operations ──────────────────────────────────────────────
+
+// handleLicense serves the site's current terms — the machine endpoint for the
+// site default.
+//
+// This answers "what are her terms NOW?" and nothing else. For "what may I do
+// with THIS post?", read the work: its terms are inside its signature, and the
+// index carries them too. The two questions are never asked of the same
+// artifact, which is why a consumer never has to reconcile them.
+func (h *BuiltinCoreHandler) handleLicense(ctx context.Context, req ActionRequest, env HandlerEnv) (*ActionResult, error) {
+	switch req.Action {
+	case "get":
+		terms, err := site.SiteTerms(env.Resolver.SiteDir())
+		if err != nil {
+			return nil, fmt.Errorf("read licence: %w", err)
+		}
+		// A site that has stated nothing returns stated:false rather than an
+		// error or an empty grant. Absent is a defined, honest state.
+		return &ActionResult{
+			Status: "success",
+			Data: map[string]any{
+				"stated":  terms != nil,
+				"terms":   terms,
+				"pointer": site.LicensePointer(env.Resolver.SiteDir()),
+			},
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported action %q for pub.polis.license", req.Action)
 	}
 }
 
@@ -104,11 +152,20 @@ func (h *BuiltinCoreHandler) listPosts(env HandlerEnv) (*ActionResult, error) {
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			continue
 		}
-		// Filter out comments — only include posts
-		if path, ok := entry["path"].(string); ok {
-			if strings.HasPrefix(path, "comments/") {
+		// Only posts. ⚠️ Key on `type`, never on a path prefix: comment
+		// entries are written as content/pub.polis.core/comment/… and never
+		// matched the old "comments/" test, so they have always leaked into
+		// this list — and tag + attestation entries would join them (Signet
+		// epic 25).
+		entryType, _ := entry["type"].(string)
+		entryPath, _ := entry["path"].(string)
+		if entryType != "" {
+			if entryType != "post" {
 				continue
 			}
+		} else if !strings.HasPrefix(entryPath, "content/pub.polis.core/post/") &&
+			!strings.HasPrefix(entryPath, "posts/") {
+			continue
 		}
 		posts = append(posts, entry)
 	}
@@ -302,11 +359,28 @@ func (h *BuiltinCoreHandler) listFollowing(env HandlerEnv) (*ActionResult, error
 		entryMaps = append(entryMaps, m)
 	}
 
+	// SIGNET epic 02 — report the roster's signature state alongside the roster.
+	// A caller asking "who do I follow" is exactly who should be told whether
+	// that answer is signed, and this is one of the few follow-file reads whose
+	// result is actually SURFACED to someone. Verification costs one small file
+	// read plus one ed25519 check.
+	//
+	// It is a FACT, never a gate: the list is returned in full whatever the
+	// status says. Whether "unsigned" or "invalid" is acceptable belongs to
+	// whoever is asking (Law 2), and an unsigned follow file is the normal
+	// state until the epic-11 backfill.
+	sigStatus, sigErr := following.VerifySite(siteDir)
+	signature := map[string]any{"status": string(sigStatus)}
+	if sigErr != nil {
+		signature["message"] = sigErr.Error()
+	}
+
 	return &ActionResult{
 		Status: "success",
 		Data: map[string]any{
 			"following": entryMaps,
 			"count":     f.Count(),
+			"signature": signature,
 		},
 	}, nil
 }
@@ -491,8 +565,9 @@ func (h *BuiltinCoreHandler) deliverDM(req ActionRequest, env HandlerEnv) (*Acti
 	siteDir := env.Resolver.SiteDir()
 	followingDomains := loadFollowingDomains(siteDir)
 
-	rl := dm.NewRateLimiter(envInt("POLIS_DM_RATE_PER_SENDER", 0), envInt("POLIS_DM_RATE_GLOBAL", 0))
-	receiver := dm.NewReceiver(env.PrivateKey, env.PublicKey, env.BaseURL, siteDir, rl)
+	// One limiter per recipient site, for the life of the process — see
+	// dm_ratelimit.go. Built per call, it limited nothing.
+	receiver := dm.NewReceiver(env.PrivateKey, env.PublicKey, env.BaseURL, siteDir, dmRateLimiterFor(siteDir))
 	if maxSize := envInt("POLIS_DM_MAX_SIZE", 0); maxSize > 0 {
 		receiver.MaxMessageSize = maxSize
 	}
@@ -895,7 +970,12 @@ func (h *BuiltinCoreHandler) listThemes(env HandlerEnv) (*ActionResult, error) {
 
 // getTheme returns a single theme's declared metadata.
 func (h *BuiltinCoreHandler) getTheme(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
-	name, _ := req.Payload["name"].(string)
+	// The v1 route passes the path segment as "id", like every other get;
+	// "name" is kept for direct dispatch callers.
+	name, _ := req.Payload["id"].(string)
+	if name == "" {
+		name, _ = req.Payload["name"].(string)
+	}
 	if name == "" {
 		return nil, fmt.Errorf("theme name required")
 	}
@@ -904,7 +984,7 @@ func (h *BuiltinCoreHandler) getTheme(req ActionRequest, env HandlerEnv) (*Actio
 	}
 	th, err := env.Bundle.GetTheme(name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("theme %q: %w", name, ErrNotFound)
 	}
 	return &ActionResult{
 		Status: "success",

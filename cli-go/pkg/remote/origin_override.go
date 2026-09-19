@@ -116,4 +116,3 @@ func joinPath(a, b string) string {
 	}
 	return a + b
 }
-

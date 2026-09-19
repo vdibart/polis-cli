@@ -1,5 +1,7 @@
 # Policies
 
+*For* [Writers](../../README.md#writing-on-polis) — *Kind* [Guide](../../README.md#kinds-of-page) — *Component* [CLI](../README.md) — *See also* [concept](../../general/reference/in-defense-of-bless.md) · [concept](../../general/concepts/policy-and-licence.md) · [spec](../../general/reference/policy-grammar.md)
+
 Policies are declarative rules that control how your polis site handles
 incoming content and (in the future) outgoing event announcements. They
 replace hardcoded logic with user-configurable statements.
@@ -63,7 +65,7 @@ having any effect today.
 | `following` | Actors in your following list |
 | `followers` | Actors who follow you |
 | `self` | Your own domain |
-| `thread-blessed` | Actors with a prior blessing on the same thread (DS-resolved) |
+| `thread-blessed` | Actors with a comment you already blessed on the same thread (resolved by your own site from `blessed.json`) |
 
 ### Optional clauses
 
@@ -106,9 +108,11 @@ Created by `polis init`:
 What these mean:
 
 - DMs accepted only from people you follow; rejected from everyone else.
-- Your own comments on your posts are auto-blessed.
-- Comments from people you follow are auto-blessed.
-- Authors with a prior blessed comment in the same thread are auto-blessed.
+- Your own comments on your posts are blessed.
+- Comments from people you follow are blessed.
+- Authors with a prior blessed comment in the same thread are blessed.
+- ⚠️ These comment rules are applied by **your own site** when Rosie is on (the web app). The discovery
+  service records requests and never decides them; a CLI-only site leaves every comment for you.
 - **All other commenters land in the review queue** — this is the
   explicit terminal rule that replaces the v1 silent-deny behavior.
 - Default-deny catch-all for unrecognized content types.
@@ -150,10 +154,10 @@ at parse time to their v2 equivalent — `bless pub.polis.comment from
 <scope>` — and evaluated accordingly. Writers (new policy files, Medic
 rewrites) never produce the legacy form.
 
-If Patrol detects a v1 file (`version:1` header), Medic silently rewrites
-it with the canonical v2 defaults on the next healing sweep. This is safe
-because per-tenant policy customization does not yet exist; when it lands,
-the rewrite logic will be replaced with a real translator.
+On the hosted service, if Patrol detects a v1 file (`version:1` header),
+Medic silently rewrites it with the canonical v2 defaults on the next
+healing sweep. The same sweep converges **any** difference from the
+defaults — see the note under *Common recipes*.
 
 ## System behaviors
 
@@ -167,8 +171,9 @@ own posts, regardless of policy. Required for the blessing workflow.
 
 ### Fail-closed
 
-If the DS cannot load or evaluate policies (e.g. storage error), events
-are blocked rather than allowed. Prevents policy bypass during outages.
+If a discovery service cannot evaluate its operator's ingestion rules (e.g. a storage error), the event
+is blocked rather than allowed. Prevents policy bypass during outages. Your own rules are applied by your
+own software, not by the discovery service.
 
 ### Operational limits
 
@@ -178,11 +183,16 @@ affect content decisions. Policies cannot override operational limits.
 ### SSRF protection
 
 Domains matching localhost, IP literals, reserved TLDs (`.local`,
-`.internal`, `.test`, `.example`, `.invalid`), and cloud metadata
+`.internal`, `.localhost`, `.test`, `.example`, `.invalid`), and cloud metadata
 endpoints are always rejected. Infrastructure security, not content
 policy.
 
 ## Common recipes
+
+⚠️ **These recipes are for a site you run yourself.** On the polis.pub hosted
+service there is no way to edit either policy file, and the maintenance sweep
+(Patrol and Medic) resets both files to the defaults above whenever they
+differ from them.
 
 ### Block a domain
 
@@ -231,15 +241,17 @@ The first line of each policy file is a version header:
 
 Version `2` is the current format (introduced with the decision-verb
 refactor). Version `1` files are automatically upgraded by Patrol + Medic
-on hosted deployments — no action required.
+on hosted deployments — no action required. The `generator` in a new file
+reads `polis-cli-go/0.63.0` whatever version wrote it: the string is fixed
+in the code rather than taken from the running CLI.
 
 ## DS operator policies
 
 The discovery service maintains its own operator policies, stored in the
 database and served at `GET /policies/rules.jsonl`. These are **Layer 3**
-rules — they gate whether announcements enter the DS event stream and
-provide fallback blessing policy when a tenant's rules.jsonl cannot be
-fetched.
+rules — they gate whether announcements enter the DS event stream. ⛔ They
+never decide a blessing for you: the discovery service records a comment's
+blessing request as pending and wakes you; your own site decides it.
 
 Operators manage these via the admin API:
 
@@ -254,11 +266,12 @@ Operators manage these via the admin API:
 
 **Operator-layer rules differ from tenant-layer rules.** Operator policies
 accept `allow`/`deny` on `pub.polis.{post,comment,follow,site}` — which
-tenant files reject. They also accept `bless`/`review` on
-`pub.polis.comment` as fallback blessing policy. They do not accept
-`emit`/`omit`. See the [grammar spec](../../general/reference/policy-grammar.md#layer-3-ds-operator-ingestion)
+tenant files reject. They also parse `bless`/`review` on `pub.polis.comment`,
+left over from when a discovery service decided blessings itself; ⚠️ **nothing
+applies them**. They do not accept `emit`/`omit`. See the [grammar spec](../../general/reference/policy-grammar.md#layer-3--ds-operator-ingestion)
 for the full operator matrix.
 
-When the DS uses its defaults instead of your policies for blessing
-decisions, event metadata includes `policy_source: "ds-default"` and a
-`fallback_reason` so you can see exactly which rules were applied.
+⚠️ **A blessing decision is yours, so no event reports a DS policy source.**
+Blessing events recorded before this change may still carry
+`policy_source: "ds-default"` and a `fallback_reason` from when a discovery
+service applied its own rules; nothing writes either field now.

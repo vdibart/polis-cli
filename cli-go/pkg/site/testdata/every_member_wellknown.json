@@ -1,0 +1,72 @@
+{
+  "actor_registry": "/content/pub.polis.core/actor/registry.json",
+  "agents": "/content/pub.polis.core/attestation/agents.json",
+  "author_name": "Alice",
+  "avatar": {
+    "bg": "#2a5a6a",
+    "border": "#000000",
+    "border_w": 2,
+    "com.example.halo": {
+      "glow": true
+    },
+    "fg": "#ffffff",
+    "pattern": "rings",
+    "pattern_color": "#cccccc"
+  },
+  "bundles": {
+    "pub.polis.core": {
+      "com.example.pinned": "2026-09-01",
+      "path": "content/pub.polis.core/bundle.json"
+    }
+  },
+  "com.example.future": {
+    "nested": {
+      "flag": false,
+      "list": [
+        1,
+        2.5,
+        "three",
+        null
+      ]
+    }
+  },
+  "created": "2026-09-03T21:42:24Z",
+  "email": "alice@example.com",
+  "license": "/content/pub.polis.core/license/license.json",
+  "operator": "polis.polis.pub",
+  "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHLOpXLmMNzPmUHinMsEIGFEnxE9ml0qQtCjqOAFpXBE polis@cl4p-tp",
+  "public_key_history": {
+    "current": {
+      "epoch": 2,
+      "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHLOpXLmMNzPmUHinMsEIGFEnxE9ml0qQtCjqOAFpXBE polis@cl4p-tp",
+      "transition_sig": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAghuigiqEqNitr146gkTTg46aGBG\n0Nx0ETkriGeCeRmewAAAAEZmlsZQAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gtZWQyNTUx\nOQAAAEC1u2kEYO3rzin+J3L6yd62sQ0Mo6unNN2WjN6ExSwz80kYZ1tY6cY9+obev5w1b6\nBiazNbyYI7QZHT85H78SAL\n-----END SSH SIGNATURE-----",
+      "valid_from": "2026-09-03T21:42:24Z"
+    },
+    "history": [
+      {
+        "epoch": 0,
+        "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFWOzr1nP5H7L+pStDVMp0jTrt89fpq94XEDBDg1ro3C polis@cl4p-tp",
+        "transition_sig": null,
+        "valid_from": "2026-09-03T21:42:24Z",
+        "valid_until": "2026-09-03T21:42:24Z"
+      },
+      {
+        "epoch": 1,
+        "key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIbooIqhKjYra9eOoJE04OOmhgRtDcdBE5K4hngnkZns polis@cl4p-tp",
+        "transition_sig": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgVY7OvWc/kfsv6lK0NUynSNOu3z\n1+mr3hcQMEODWujcIAAAAEZmlsZQAAAAAAAAAGc2hhNTEyAAAAUwAAAAtzc2gtZWQyNTUx\nOQAAAEC4u4Jj1kwS57SNuJWOfXWdDQFZyNKxS/VkNOpfjnqTIOcIFl+7MAl6PSGwZaGo9N\nCx98KJwNgGJx96izX29bIF\n-----END SSH SIGNATURE-----",
+        "valid_from": "2026-09-03T21:42:24Z",
+        "valid_until": "2026-09-03T21:42:24Z"
+      }
+    ]
+  },
+  "public_key_messages": {
+    "current": {
+      "epoch": 1,
+      "key": "bWVzc2FnZXMta2V5LWZvci1hbGljZS0zMi1ieXRlcw==",
+      "sig": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQ==\n-----END SSH SIGNATURE-----"
+    }
+  },
+  "site_title": "Alice writes",
+  "version": "polis-cli-go/0.70.0",
+  "witnesses": "/content/witness/witnesses.json"
+}

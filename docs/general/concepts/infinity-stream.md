@@ -1,5 +1,7 @@
 # The Infinity Stream
 
+*For* [Developers](../../README.md#building-on-polis) · [Writers](../../README.md#writing-on-polis) — *About* [Content](../README.md#content) — *Kind* [Concept](../../README.md#kinds-of-page) — *Component* [Webapp](../../webapp/README.md) — *See also* [spec](../reference/pql.md) · [guide](../../webapp/user/user-manual.md) · [tour](../../handbook/stream-overview.md)
+
 > Builds on: [architecture.md](architecture.md), [shapes.md](shapes.md), [pql.md](../reference/pql.md). Implementation lives in the `pub.polis.shapes.v4` shape; see also [`webapp/designer/pages.md`](../../webapp/designer/pages.md) for the page model and [`webapp/designer/navigation.md`](../../webapp/designer/navigation.md) for the icon-row nav that drives it.
 
 The **infinity stream** is the single-screen, sentence-filtered view of a polis site. It's the shape `pub.polis.shapes.v4` and the experience that polis.pub leads with. Where the [blog shape](shapes.md) gives you per-post pages and per-tag archives, the infinity stream gives you one screen that becomes everything: your network's activity, your own posts, comments awaiting blessing, profiles you might follow, message threads, anything composable from [PQL](../reference/pql.md).
@@ -44,9 +46,9 @@ The owner POV is the full webapp SPA at `<handle>.polis.pub/_/`. The icon-row pr
 
 ### POV 2 — Network member (you, visiting alice.polis.pub)
 
-When you visit a polis site you don't own, you're still authenticated as yourself, and you see *their* content rendered through *their* active shape — but your nav rides along on top, autohiding to give their content visual primacy. The widget (`webapp/internal/hosted/widget/widget.js`) injects your icon nav as an overlay; the sentence-filter still works, scoped to that handle.
+When you visit a polis site you don't own, you're still authenticated as yourself, and you see *their* content rendered through *their* active shape — but your nav rides along on top. The hosted server patches a placeholder into the page and `webapp/internal/hosted/nav/nav.js` fills it with your icon nav, fetched from your own home server; the sentence filter still works, scoped to that handle, and takes the author's theme colours. (The comment and follow widget, `webapp/internal/hosted/widget/widget.js`, is a separate script.)
 
-**Why this matters.** A polis site isn't a destination you visit and leave. The infinity stream's scope vocabulary (`from <handle>`, `from my network`, `from everyone`) means the same icon presets pivot meaning by who you're looking at. The gateway icon on your own SPA says "Activity from my network"; on alice.polis.pub it says "Activity in Alice's network." Same gesture, different sentence.
+**Why this matters.** A polis site isn't a destination you visit and leave. The infinity stream's scope vocabulary (`from <handle>`, `from my network`, `from everyone`) means the same icon presets pivot meaning by who you're looking at. The icon row is the same gesture everywhere; the sentence filter beside it is what re-aims at the site you are on.
 
 ### POV 3 — Public visitor (not logged in)
 
@@ -62,26 +64,24 @@ The shape is a small set of files that ship in `pub.polis.core` and install per-
 
 | File | Role |
 |---|---|
-| `stream.html` | The single page. Renders the topbar, the centered column, and the empty stream container. |
+| `stream.html` | The single page. Renders the topbar, the centered column, and the server-rendered focus post with its neighbours. |
+| `stream-post.html` | The one per-type template: a post, rendered on the server as the focus entry or a sibling. |
 | `stream.css` | Shape-level CSS — layout, item anatomy, transitions. Themes layer their colors on top of this. |
-| `stream.js` | The stream controller. Reads the URL (sentence or default), fetches matching content, hydrates the column, exposes `window.PolisStream` for owner-extras. |
-| `snippets/` | Reusable partials (item chrome, date separators, empty states). |
-| `stream-post.html` | Per-type template for a post item in the stream. |
-| `stream-comment.html` | Per-type template for a comment. |
-| `stream-profile.html` | Per-type template for a profile row. |
-| `stream-dm.html` | Per-type template for a DM thread row. |
-| `stream-mention.html` | Per-type template for a future at-mentions item. |
+| `stream.js` | The stream controller. Reads the URL (sentence or default), fetches matching entries, hydrates the column, and renders comments, profiles and every other non-post item itself. Exposes `window.PolisStream` for owner-extras. |
+| `snippets/` | Partials — `sentence-filter.html` is the one the shape declares. |
 
-The webapp adds `app.js` (route handling, settings, editor wiring) and `owner-extras.js` (owner-only behaviors). The widget bundles a comparable subset for foreign-site visits.
+Only posts have a server-side template. Every other item type is rendered in the browser by `stream.js`.
+
+The webapp adds `app.js` (route handling, settings, editor wiring) and `owner-extras.js` (owner-only behaviors).
 
 ### The hydration flow
 
 When the page loads:
 
-1. **Boot** — `index.html` loads `stream.css`, `stream.js`, `app.js`, and (on owner SPA) `owner-extras.js`. `theme-boot.js` reads `localStorage` and sets `[data-theme]` before anything paints, avoiding flash-of-wrong-theme.
-2. **Parse** — `stream.js` reads `location.pathname`. If `/_/pql/<sentence>`, it parses the sentence; otherwise it loads the default landing sentence.
-3. **Fetch** — `stream.js` calls the local v1 API (`/v1/content/<type>`) and the DS event stream as needed, scoped by the sentence.
-4. **Render** — Each result is matched to its `stream-<type>.html` partial and inserted into `<main class="layout">`.
+1. **Boot** — on the owner SPA, `index.html` loads `theme-boot.js` first (it reads `localStorage` and sets `[data-theme]` before anything paints, avoiding flash-of-wrong-theme), then `stream.js`, `owner-extras.js` and `app.js`. A public page loads the shape's own `stream.js`.
+2. **Parse** — `stream.js` reads `location.pathname`. For `/pql/<sentence>` or `/_/pql/<sentence>` it parses the sentence; otherwise it uses the default landing sentence.
+3. **Fetch** — `stream.js` asks the site's own `/pql/` endpoint for JSON (`Accept: application/json`), scoped by the sentence, and fetches post bodies and focus comments through the site's `/api/v1/stream/*` proxies.
+4. **Render** — posts that arrived server-rendered are kept; everything else is rendered by `stream.js` into the stream column.
 5. **Decorate** — On the owner SPA, `owner-extras.js` runs `afterRender` hooks per type: wiring bless/deny buttons on comments, edit affordances on owner posts, count refresh on icon-row dots, etc. On public pages this layer is absent — the content renders, but no owner-only affordances appear.
 6. **Listen** — `stream.js` subscribes to URL changes (so icon clicks and sentence-filter changes don't full-reload) and re-runs the fetch+render cycle.
 
@@ -106,6 +106,6 @@ The single-screen model also makes a subtle promise: **you never leave context.*
 - [architecture.md](architecture.md) — Where the stream sits within the four-surface model.
 - [webapp/designer/pages.md](../../webapp/designer/pages.md) — The v4 routing model and surfaces.
 - [webapp/designer/navigation.md](../../webapp/designer/navigation.md) — The icon-row anatomy and badge-dot system.
-- [webapp/designer/theme-system.md](../../webapp/designer/theme-system.md) — How themes layer over the stream shape.
+- [themes.md](themes.md) — How themes layer over the stream shape.
 - [webapp/developer/feed-architecture.md](../../webapp/developer/feed-architecture.md) — Cache + sync architecture behind the stream.
 - [snap-off-architecture.md](snap-off-architecture.md) — Why the stream is a *shape* (replaceable layer), not a baked-in feature.

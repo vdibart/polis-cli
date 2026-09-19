@@ -71,7 +71,7 @@ type RemoteAvatarConfig struct {
 // WellKnown represents the .well-known/polis file structure.
 type WellKnown struct {
 	Version    string              `json:"version"`
-	Author     string              `json:"author"`      // deprecated; use DisplayName()
+	Author     string              `json:"author"` // deprecated; use DisplayName()
 	Domain     string              `json:"domain,omitempty"`
 	Email      string              `json:"email,omitempty"`
 	PublicKey  string              `json:"public_key"`
@@ -136,6 +136,12 @@ type PublicIndexEntry struct {
 
 // GetPath returns the entry's path, preferring the "path" field,
 // falling back to "url" for backwards compatibility.
+//
+// ⚠️ The `url` branch is DEAD for anything polis writes — every writer has
+// emitted `path`/`current_version` since Signet epic 25 closed R24-9 — and it
+// stays anyway. This is a READER of foreign sites, and a site in the wild may
+// still be serving an index built by an older binary. Deleting the fallback
+// would make those sites silently unreadable rather than merely old.
 func (e PublicIndexEntry) GetPath() string {
 	if e.Path != "" {
 		return e.Path
@@ -229,31 +235,56 @@ func (c *Client) FetchManifest(baseURL string) (*Manifest, error) {
 	return &manifest, nil
 }
 
-// FetchPublicIndex fetches and parses the public.jsonl index from a site.
+// FetchPublicIndex fetches and parses the public.jsonl index from a site,
+// SKIPPING lines it cannot parse. Kept for callers that only consume entries.
+//
+// ⚠️ A caller that REPORTS on the index must use FetchPublicIndexReport, or a
+// half-garbage index reads as clean over the half that parses.
 func (c *Client) FetchPublicIndex(baseURL string) ([]PublicIndexEntry, error) {
+	entries, _, err := c.FetchPublicIndexReport(baseURL)
+	return entries, err
+}
+
+// IndexSkipReport says what a read of a remote index.jsonl could NOT use —
+// the same shape as metadata.IndexReadReport for the local file.
+type IndexSkipReport struct {
+	// Skipped counts non-blank lines that did not parse as an entry.
+	Skipped int `json:"skipped"`
+	// SkippedLines are their 1-based line numbers, in file order.
+	SkippedLines []int `json:"skipped_lines,omitempty"`
+}
+
+// FetchPublicIndexReport is FetchPublicIndex that also reports every line it
+// could not parse.
+func (c *Client) FetchPublicIndexReport(baseURL string) ([]PublicIndexEntry, *IndexSkipReport, error) {
 	baseURL = strings.TrimSuffix(baseURL, "/")
 	url := baseURL + "/content/pub.polis.core/index.jsonl"
 
+	report := &IndexSkipReport{}
 	content, err := c.FetchContent(url)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch public.jsonl: %w", err)
+		return nil, report, fmt.Errorf("failed to fetch public.jsonl: %w", err)
 	}
 
 	var entries []PublicIndexEntry
-	for _, line := range strings.Split(content, "\n") {
+	for i, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 
-		var entry PublicIndexEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue // Skip malformed lines
+		// A pointer, so a literal `null` is counted as skipped rather than read
+		// as the zero entry — the rule metadata.ReadPublicIndex follows.
+		var entry *PublicIndexEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil || entry == nil {
+			report.Skipped++
+			report.SkippedLines = append(report.SkippedLines, i+1)
+			continue
 		}
-		entries = append(entries, entry)
+		entries = append(entries, *entry)
 	}
 
-	return entries, nil
+	return entries, report, nil
 }
 
 // Policy represents a single line from a remote rules.jsonl file.

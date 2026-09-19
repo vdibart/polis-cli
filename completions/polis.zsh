@@ -24,7 +24,7 @@ _polis() {
         'notifications:View and manage notifications'
         'post:Create a new post (--filename, --title for stdin)'
         'preview:Preview a post or comment with signature verification'
-        'rebuild:Rebuild indexes (--posts, --comments, --notifications, --all)'
+        'rebuild:Rebuild the content index (--posts, --comments, --tags, --attestations, --all)'
         'register:Register site with discovery service'
         'render:Render markdown to HTML (--force, --init-templates)'
         'republish:Update an already-published file'
@@ -56,6 +56,7 @@ _polis() {
 
     notifications_subcommands=(
         'list:List notifications (--type to filter)'
+        'clear:Delete local notification state'
     )
 
     tag_subcommands=(
@@ -164,10 +165,11 @@ _polis() {
                 rebuild)
                     _arguments \
                         '--json[Output in JSON format]' \
-                        '--posts[Rebuild public.jsonl from posts and comments]' \
-                        '--comments[Rebuild blessed-comments.json]' \
-                        '--notifications[Reset notification files]' \
-                        '--all[Rebuild all indexes and reset notifications]'
+                        '--posts[Rebuild the post entries in index.jsonl]' \
+                        '--comments[Rebuild the comment entries in index.jsonl and reconcile blessed.json]' \
+                        '--tags[Rebuild the tag entries in index.jsonl]' \
+                        '--attestations[Rebuild the attestation entries in index.jsonl]' \
+                        '--all[Rebuild every content type]'
                     ;;
                 unregister)
                     _arguments \

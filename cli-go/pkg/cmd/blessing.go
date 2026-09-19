@@ -46,7 +46,7 @@ Subcommands:
   grant <version>       Grant a blessing to a comment
   deny <version>        Deny a blessing request
   beseech <version>     Re-request blessing by content hash
-  sync                  Sync auto-blessed comments from discovery service
+  sync                  Sync blessed comments from discovery service
 
 Examples:
   polis blessing requests
@@ -55,6 +55,27 @@ Examples:
   polis blessing beseech sha256:abc123...
   polis blessing sync
 `)
+}
+
+// blessingRequestsPayload builds the JSON-mode payload for `blessing requests`.
+//
+// The {status, command, data} envelope is the CLI's documented contract and is
+// what every consumer parses (docs/cli/user/json-mode.md, the polis skill, and
+// the bash e2e suite). This command previously emitted a bare {"requests": ...}
+// while its siblings in this file used the envelope, so every one of those
+// consumers was broken against the Go binary.
+func blessingRequestsPayload(requests []blessing.IncomingRequest) map[string]interface{} {
+	if requests == nil {
+		requests = []blessing.IncomingRequest{}
+	}
+	return map[string]interface{}{
+		"status":  "success",
+		"command": "blessing-requests",
+		"data": map[string]interface{}{
+			"count":    len(requests),
+			"requests": requests,
+		},
+	}
 }
 
 func handleBlessingRequests(args []string) {
@@ -90,9 +111,7 @@ func handleBlessingRequests(args []string) {
 	}
 
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
-			"requests": requests,
-		})
+		outputJSON(blessingRequestsPayload(requests))
 	} else {
 		if len(requests) == 0 {
 			fmt.Println("No pending blessing requests.")
@@ -133,10 +152,21 @@ func handleBlessingGrant(args []string) {
 		discoveryURL = "https://ds.polis.pub"
 	}
 
-	client := discovery.NewClient(discoveryURL, discoveryKey)
+	baseURL := os.Getenv("POLIS_BASE_URL")
+	if baseURL == "" {
+		exitError("POLIS_BASE_URL not set")
+	}
+	domain := polisurl.ExtractDomain(baseURL)
+	if domain == "" {
+		exitError("Could not extract domain from POLIS_BASE_URL")
+	}
 
-	// Grant the blessing
-	result, err := blessing.GrantByVersion(dir, commentVersion, "", "", client, nil, privKey)
+	client := discovery.NewAuthenticatedClient(discoveryURL, discoveryKey, domain, privKey)
+
+	// Grant the blessing. The version alone cannot be granted — the DS needs
+	// the comment URL and the post it replies to — so the pending request is
+	// resolved from it first.
+	result, err := blessing.GrantPending(dir, domain, commentVersion, client, nil, privKey)
 	if err != nil {
 		exitError("Failed to grant blessing: %v", err)
 	}
@@ -186,21 +216,9 @@ func handleBlessingDeny(args []string) {
 	client := discovery.NewAuthenticatedClient(discoveryURL, discoveryKey, domain, privKey)
 
 	// Find the pending request matching this comment version
-	requests, err := blessing.FetchPendingRequests(client, domain)
+	targetRequest, err := blessing.ResolvePendingRequest(client, domain, commentVersion)
 	if err != nil {
-		exitError("Failed to fetch pending requests: %v", err)
-	}
-
-	var targetRequest *blessing.IncomingRequest
-	for _, req := range requests {
-		if req.CommentVersion == commentVersion || req.CommentURL == commentVersion {
-			targetRequest = &req
-			break
-		}
-	}
-
-	if targetRequest == nil {
-		exitError("No pending blessing found for: %s", commentVersion)
+		exitError("%v", err)
 	}
 
 	// Deny the blessing
@@ -256,7 +274,9 @@ func handleBlessingBeseech(args []string) {
 		} else {
 			fmt.Printf("[x] Comment %s not found in discovery service\n", commentVersion)
 		}
-		return
+		// A failure exits non-zero in both modes: scripts branch on the exit
+		// status, per the JSON contract.
+		os.Exit(1)
 	}
 
 	// For re-beseech, we need the original comment data

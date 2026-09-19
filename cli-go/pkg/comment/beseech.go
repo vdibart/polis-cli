@@ -2,10 +2,13 @@ package comment
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
@@ -35,7 +38,7 @@ type BeseechResult struct {
 	Success     bool         `json:"success"`
 	Status      string       `json:"status"` // "created" or "updated"
 	Message     string       `json:"message"`
-	AutoBlessed bool         `json:"auto_blessed"` // true if auto-blessed by discovery
+	AutoBlessed bool         `json:"auto_blessed"` // true only if the post author had already blessed it (the DS decides nothing)
 	Comment     *CommentMeta `json:"comment"`      // comment metadata (for callers that need it for hooks etc.)
 }
 
@@ -55,8 +58,7 @@ type BeseechResult struct {
 // the DS to register the comment as content WITHOUT requesting a blessing
 // (publish-only). When beseech is true the flag is OMITTED, so the payload is
 // byte-identical to the historical default (publish + beseech together) and
-// existing clients/signatures are unaffected. Defect 4,
-// plans/comment-registration-severe-bug.md.
+// existing clients/signatures are unaffected.
 func commentRegistrationMetadata(meta *CommentMeta, beseech bool) map[string]interface{} {
 	m := map[string]interface{}{
 		"in_reply_to": meta.InReplyTo,
@@ -72,7 +74,7 @@ func commentRegistrationMetadata(meta *CommentMeta, beseech bool) map[string]int
 	return m
 }
 
-func registerCommentContent(meta *CommentMeta, commentID string, privateKey []byte, dsURL, dsKey, baseURL string, beseech bool) (*discovery.ContentRegisterResponse, error) {
+func registerCommentContent(dataDir string, meta *CommentMeta, commentID string, privateKey []byte, dsURL, dsKey, baseURL string, beseech bool) (*discovery.ContentRegisterResponse, error) {
 	ts, err := time.Parse("2006-01-02T15:04:05Z", meta.Timestamp)
 	if err != nil {
 		return nil, fmt.Errorf("invalid timestamp: %w", err)
@@ -80,10 +82,21 @@ func registerCommentContent(meta *CommentMeta, commentID string, privateKey []by
 	dateDir := ts.Format("20060102")
 	// Register the CANONICAL source-path URL (content/pub.polis.core/comment/...),
 	// matching where the signed .md lives and how posts register — NOT the
-	// /comments/ mount path. Defect 1, plans/comment-registration-severe-bug.md.
+	// /comments/ mount path. The registered URL is signature-bound and the DS's
+	// (type,url) upsert key, so it must be the canonical artifact's; the mount
+	// path only reaches the .md through a permanent 301.
 	commentURL := polisurl.CommentContentURL(baseURL, dateDir, commentID)
 
 	commentMetadata := commentRegistrationMetadata(meta, beseech)
+	// SIGNET epic 32: bind the DS's witness to the whole published comment, not
+	// only the body `version` hashes. The file is the one PublishComment (or
+	// RepublishComment) just wrote; if it cannot be read the registration goes
+	// ahead and the witness binds `version` alone.
+	publishedPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", dateDir, commentID+".md")
+	if data, rerr := os.ReadFile(publishedPath); rerr == nil {
+		commentMetadata[discovery.MetadataArtifactHash] = discovery.ArtifactHash(
+			signing.MarkdownSigningBase(string(data), signing.TypeComment))
+	}
 
 	canonical, err := discovery.MakeContentCanonicalJSON(
 		"pub.polis.comment", commentURL, meta.CommentVersion, meta.Author, commentMetadata,
@@ -98,7 +111,7 @@ func registerCommentContent(meta *CommentMeta, commentID string, privateKey []by
 	}
 
 	client := discovery.NewClient(dsURL, dsKey)
-	return client.RegisterContent(&discovery.ContentRegisterRequest{
+	resp, err := client.RegisterContent(&discovery.ContentRegisterRequest{
 		Type:      "pub.polis.comment",
 		URL:       commentURL,
 		Version:   meta.CommentVersion,
@@ -106,6 +119,13 @@ func registerCommentContent(meta *CommentMeta, commentID string, privateKey []by
 		Metadata:  commentMetadata,
 		Signature: sig,
 	})
+	if err == nil && resp != nil && resp.Witness != nil {
+		// Never fails the registration; see publish.RegisterPost.
+		if _, werr := site.RecordWitness(dataDir, commentURL, *resp.Witness); werr != nil {
+			fmt.Printf("[!] Could not publish the discovery service's witness for %s: %v\n", commentURL, werr)
+		}
+	}
+	return resp, err
 }
 
 // BeseechComment publishes a pending comment, registers it with the discovery
@@ -123,13 +143,13 @@ func BeseechComment(dataDir, commentID string, privateKey []byte, dsCfg ...*Disc
 
 // publishAndRegisterComment publishes a pending comment to the public content
 // tree and registers it with the discovery service. The beseech parameter
-// DECOUPLES publication from the blessing request (Defect 4): when true the DS
-// also evaluates/requests a blessing (the default); when false the comment is
+// DECOUPLES publication from the blessing request: when true the DS
+// also records a (pending) blessing request (the default); when false the comment is
 // registered as content only (publish-only, via signed metadata.beseech=false).
 // Either way PublishComment runs FIRST and unconditionally — so a comment is
 // always published, indexed, rendered, and discoverable regardless of whether a
 // blessing is ever requested (it is never stuck unpublished for lack of a
-// beseech). plans/comment-registration-severe-bug.md.
+// beseech).
 func publishAndRegisterComment(dataDir, commentID string, privateKey []byte, beseech bool, dsCfg ...*DiscoveryConfig) (*BeseechResult, error) {
 	var dsURL, dsKey, baseURL string
 	if len(dsCfg) > 0 && dsCfg[0] != nil {
@@ -185,7 +205,7 @@ func publishAndRegisterComment(dataDir, commentID string, privateKey []byte, bes
 
 	// Register the comment content with the discovery service (beseech controls
 	// whether the DS also requests a blessing).
-	resp, err := registerCommentContent(signed.Meta, commentID, privateKey, dsURL, dsKey, baseURL, beseech)
+	resp, err := registerCommentContent(dataDir, signed.Meta, commentID, privateKey, dsURL, dsKey, baseURL, beseech)
 	if err != nil {
 		return nil, fmt.Errorf("register: %w", err)
 	}
@@ -197,11 +217,15 @@ func publishAndRegisterComment(dataDir, commentID string, privateKey []byte, bes
 		Comment: signed.Meta,
 	}
 
-	// If auto-blessed, move to blessed directory. (A no-op when beseech=false:
-	// the DS skips blessing evaluation, so RelationshipStatus is never granted.)
+	// ⚠️ Signet epic 45: the discovery service decides nothing for the post
+	// author, so a FIRST registration always answers "pending" and the post
+	// author's own site decides later — the commenter learns asynchronously, and
+	// no caller may promise a blessing here. "granted" now means only that the
+	// post author blessed this comment earlier (a re-registration), which is a
+	// fact worth reflecting locally. (Never granted when beseech=false.)
 	if resp.RelationshipStatus == "granted" {
 		if err := MoveComment(dataDir, commentID, StatusPending, StatusBlessed); err != nil {
-			return result, fmt.Errorf("move auto-blessed comment: %w", err)
+			return result, fmt.Errorf("move already-blessed comment: %w", err)
 		}
 		result.AutoBlessed = true
 	}

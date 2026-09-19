@@ -1,5 +1,7 @@
 # Tour: URL-as-filter
 
+*For* [Contributors](../README.md#contributing-to-polis) — *Kind* [Tour](../README.md#kinds-of-page) — *See also* [spec](../general/reference/pql.md)
+
 > A guided tour of the URL-as-filter thread. Source-of-truth concept docs live in [`../general/`](../general/); this tour walks the source code with you. Map of all threads: [`../../AGENTS.md`](../../AGENTS.md).
 
 ## The observation
@@ -37,10 +39,12 @@ Three files carry the thread, in this order: **producer** (intercepts URLs), **g
 The owner SPA's navigation dispatch. When you click any link or icon in the topbar, `App.navigateTo(path)` runs. Inside it, the very first check is the PQL URL intercept:
 
 ```javascript
-// PQL URL intercept (chunk B). Paths shaped /_/pql/<sentence>
-// (or /pql/<sentence> relative) parse the sentence, push the
-// canonical URL, activate the stream-screen, and apply the
-// filter once owner-extras + the controller are ready.
+// ─── HANDBOOK TRAIL MARKER: URL-as-filter thread ─────────────────────
+// The URL string IS the active filter, not a tracker of it. /_/pql/<sentence>
+// gets parsed by pql.js, pushed back through history.pushState in its
+// canonical form, then handed to the v4 stream controller (stream.js) which
+// re-renders the column. Concept doc: docs/general/reference/pql.md.
+// ─────────────────────────────────────────────────────────────────────
 if (path && (path.indexOf('/pql/') === 0 || path.indexOf('pql/') === 0)) {
     return this._navigateToPQL(path, opts);
 }
@@ -71,10 +75,10 @@ The stream controller — installed per-tenant from the embedded bundle fixture,
 
 `stream.js` exposes a public surface on `window.PolisStream`:
 
-- `setFilterScope(value, opts)`, `setFilterType(value)`, etc. — programmatic filter mutation. When the icon row in the topbar wires up a preset, these are the functions it calls.
-- `applyFilter()` — clears the dynamic entries and re-fetches matching content for the current filter state.
+- `setFilter(state)` — set every slot at once from a filter-state object; this is what `_navigateToPQL` calls with the parsed sentence. `setFilterScope(value, opts)`, `setFilterType(value, opts)`, `setFilterQualifier(value)` and `setFilterModifier(value, opts)` set one slot. Each ends in the controller's internal `applyFilter`, which clears the dynamic entries and re-fetches matching content.
+- `getFilter()`, `onFilterChange(fn)`, `refresh()` — read the current filter, subscribe to changes, and re-fetch without changing the filter.
 - `appendEntry`, `clearDynamicEntries`, `getEntries` — DOM-side primitives.
-- `renderers.{post,comment,profile,mention,dm,dm-message,follow,announcement}` — type-specific renderers (`announcement`/`follow` draw the activity-feed lines: "actor followed target", blessings, site-registered); `registerRenderer` lets `owner-extras.js` override for owner-only views (e.g., DM with decryption indicator).
+- `renderers.{post,comment,profile,mention,dm,dm-message,follow,announcement}` — type-specific renderers (`follow` and `announcement` draw the activity-feed lines: follows, blessings, site-registered); `registerRenderer` lets `owner-extras.js` override for owner-only views (e.g., DM with decryption indicator). `registerFilterOption` lets it add owner-only dropdown values (`activity`, `dms`, `my-mutuals`, …).
 - `afterRender(type, fn)` — extension hook fired after a renderer produces DOM; the place where owner-only chrome (bless/edit/deny rollovers) gets bolted on without touching the base renderer.
 
 The scroll-driven URL update closes the loop the other way: an `IntersectionObserver` watches each entry, and when the focused entry changes, the controller calls `history.replaceState` to update the URL with the focused item's path. This is what you saw scrolling — the URL is the *current view*, even when the change came from your scroll wheel rather than a click.
@@ -95,9 +99,9 @@ The scroll-driven URL update closes the loop the other way: an `IntersectionObse
    │              │       (pql.js)                                     │
    │              │                                                    │
    │              ▼                                                    │
-   │   stream.js (PolisStream.applyFilter)                             │
+   │   stream.js (PolisStream.setFilter → applyFilter)                 │
    │              │                                                    │
-   │              ├──→ fetch matching content (local API + DS stream)  │
+   │              ├──→ fetch matching content (GET /pql/<sentence>)    │
    │              │                                                    │
    │              ├──→ render via renderers.{type}                     │
    │              │                                                    │

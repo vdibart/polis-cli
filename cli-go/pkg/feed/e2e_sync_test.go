@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 )
@@ -77,26 +78,26 @@ func TestE2E_DSStreamToFeedCache(t *testing.T) {
 			"id":         "1",
 			"type":       "pub.polis.post.published",
 			"actor":      "alice.example",
-			"created_at": "2026-05-21T00:00:00Z",
+			"created_at": tsDaysAgo(1),
 			"signature":  "sig1",
 			"payload": map[string]interface{}{
 				"url":          "https://alice.example/posts/hello.md",
 				"version":      "sha256:" + strings.Repeat("a", 64),
 				"title":        "Hello",
-				"published_at": "2026-05-21T00:00:00Z",
+				"published_at": tsDaysAgo(1),
 			},
 		},
 		{
 			"id":         "2",
 			"type":       "pub.polis.comment.published",
 			"actor":      "alice.example",
-			"created_at": "2026-05-21T00:05:00Z",
+			"created_at": tsDaysAgoPlus(1, 5*time.Minute),
 			"signature":  "sig2",
 			"payload": map[string]interface{}{
 				"url":          "https://alice.example/comments/r1.md",
 				"in_reply_to":  "https://carol.example/posts/p.md",
 				"root_post":    "https://carol.example/posts/p.md",
-				"published_at": "2026-05-21T00:05:00Z",
+				"published_at": tsDaysAgoPlus(1, 5*time.Minute),
 			},
 		},
 	}
@@ -201,24 +202,24 @@ func TestE2E_DSStreamToFeedCache_SelfEventsSkipped(t *testing.T) {
 			"id":         "1",
 			"type":       "pub.polis.post.published",
 			"actor":      "bob.example", // SELF
-			"created_at": "2026-05-21T00:00:00Z",
+			"created_at": tsDaysAgo(1),
 			"signature":  "sig1",
 			"payload": map[string]interface{}{
 				"url":          "https://bob.example/posts/me.md",
 				"title":        "My Own Post",
-				"published_at": "2026-05-21T00:00:00Z",
+				"published_at": tsDaysAgo(1),
 			},
 		},
 		{
 			"id":         "2",
 			"type":       "pub.polis.post.published",
 			"actor":      "alice.example", // not self
-			"created_at": "2026-05-21T00:05:00Z",
+			"created_at": tsDaysAgoPlus(1, 5*time.Minute),
 			"signature":  "sig2",
 			"payload": map[string]interface{}{
 				"url":          "https://alice.example/posts/hi.md",
 				"title":        "Alice's Post",
-				"published_at": "2026-05-21T00:05:00Z",
+				"published_at": tsDaysAgoPlus(1, 5*time.Minute),
 			},
 		},
 	}
@@ -251,12 +252,12 @@ func TestE2E_DSStreamToFeedCache_IncludeSelf(t *testing.T) {
 			"id":         "1",
 			"type":       "pub.polis.post.published",
 			"actor":      "bob.example", // self
-			"created_at": "2026-05-21T00:00:00Z",
+			"created_at": tsDaysAgo(1),
 			"signature":  "sig1",
 			"payload": map[string]interface{}{
 				"url":          "https://bob.example/posts/me.md",
 				"title":        "My Own Post",
-				"published_at": "2026-05-21T00:00:00Z",
+				"published_at": tsDaysAgo(1),
 			},
 		},
 	}
@@ -285,7 +286,7 @@ func TestE2E_DSStreamToFeedCache_UnknownEventTypeIgnored(t *testing.T) {
 			"id":         "1",
 			"type":       "pub.polis.future.eventtype.fromtomorrow",
 			"actor":      "alice.example",
-			"created_at": "2026-05-21T00:00:00Z",
+			"created_at": tsDaysAgo(1),
 			"signature":  "sig1",
 			"payload":    map[string]interface{}{"url": "https://alice.example/x.md"},
 		},
@@ -293,12 +294,12 @@ func TestE2E_DSStreamToFeedCache_UnknownEventTypeIgnored(t *testing.T) {
 			"id":         "2",
 			"type":       "pub.polis.post.published",
 			"actor":      "alice.example",
-			"created_at": "2026-05-21T00:05:00Z",
+			"created_at": tsDaysAgoPlus(1, 5*time.Minute),
 			"signature":  "sig2",
 			"payload": map[string]interface{}{
 				"url":          "https://alice.example/posts/hi.md",
 				"title":        "Hi",
-				"published_at": "2026-05-21T00:05:00Z",
+				"published_at": tsDaysAgoPlus(1, 5*time.Minute),
 			},
 		},
 	}

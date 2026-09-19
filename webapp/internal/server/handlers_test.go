@@ -4550,10 +4550,14 @@ func TestHandleFeedRead_PrunedItem(t *testing.T) {
 func TestHandleFeedViewed_SetsCursor(t *testing.T) {
 	s := newConfiguredServer(t)
 
-	// Set a sync cursor to simulate background sync having run
+	// Simulate sync having run: feed-content cursor at 100 (the last sync that
+	// added feed items) while the raw sync cursor is further ahead at 999
+	// (e.g. own-post-only syncs advanced it). handleFeedViewed must catch the
+	// viewed cursor up to the CONTENT cursor (100), not the sync cursor.
 	discoveryDomain := s.GetDiscoveryDomain()
 	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
-	_ = store.SetCursor("pub.polis.sync", "100")
+	_ = store.SetCursor("pub.polis.feed.content", "100")
+	_ = store.SetCursor("pub.polis.sync", "999")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/feed/viewed", nil)
 	w := httptest.NewRecorder()
@@ -4563,10 +4567,10 @@ func TestHandleFeedViewed_SetsCursor(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	// Verify viewed cursor was set to sync cursor
+	// Verify viewed cursor was set to the feed-content cursor, not sync.
 	viewedCursor, _ := store.GetCursor("pub.polis.feed.viewed")
 	if viewedCursor != "100" {
-		t.Errorf("expected viewed cursor '100', got %q", viewedCursor)
+		t.Errorf("expected viewed cursor '100' (feed.content), got %q", viewedCursor)
 	}
 }
 
@@ -4610,17 +4614,17 @@ func TestComputeAllCounts_HasNewFeed(t *testing.T) {
 	discoveryDomain := s.GetDiscoveryDomain()
 	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
 
-	// No sync cursor — should not show has_new_feed
+	// No feed-content cursor — should not show has_new_feed
 	counts := s.computeAllCounts()
 	if counts.HasNewFeed {
-		t.Error("expected HasNewFeed=false when sync cursor is empty")
+		t.Error("expected HasNewFeed=false when feed-content cursor is empty")
 	}
 
-	// Sync cursor set, viewed cursor empty — cold-start seeds the viewed
-	// cursor to the current sync position and leaves the flag false. The
+	// Feed-content cursor set, viewed cursor empty — cold-start seeds the viewed
+	// cursor to the current content position and leaves the flag false. The
 	// previous behavior (flag=true) was over-noisy on first load when the
 	// user has had no opportunity to acknowledge anything yet.
-	_ = store.SetCursor("pub.polis.sync", "100")
+	_ = store.SetCursor("pub.polis.feed.content", "100")
 	counts = s.computeAllCounts()
 	if counts.HasNewFeed {
 		t.Error("expected HasNewFeed=false on cold start (viewed cursor gets seeded)")
@@ -4629,17 +4633,26 @@ func TestComputeAllCounts_HasNewFeed(t *testing.T) {
 		t.Errorf("expected viewed cursor seeded to '100', got %q", pos)
 	}
 
-	// Sync and viewed match — no new content.
+	// Content and viewed match — no new content.
 	counts = s.computeAllCounts()
 	if counts.HasNewFeed {
-		t.Error("expected HasNewFeed=false when sync and viewed cursors match")
+		t.Error("expected HasNewFeed=false when content and viewed cursors match")
 	}
 
-	// Advance sync past viewed — flag fires.
-	_ = store.SetCursor("pub.polis.sync", "200")
+	// Regression (#37): an own-post-only sync advances pub.polis.sync but NOT
+	// the feed-content cursor (own posts are filtered out of the feed). The dot
+	// must stay dark — publishing your own post is not "new feed activity".
+	_ = store.SetCursor("pub.polis.sync", "500")
+	counts = s.computeAllCounts()
+	if counts.HasNewFeed {
+		t.Error("expected HasNewFeed=false when only pub.polis.sync advanced (own post), feed.content unchanged")
+	}
+
+	// Advance feed-content past viewed (a followed author posted) — flag fires.
+	_ = store.SetCursor("pub.polis.feed.content", "200")
 	counts = s.computeAllCounts()
 	if !counts.HasNewFeed {
-		t.Error("expected HasNewFeed=true when sync cursor is ahead of viewed")
+		t.Error("expected HasNewFeed=true when feed-content cursor is ahead of viewed")
 	}
 
 	// Advance viewed to catch up — flag clears.
@@ -4990,46 +5003,6 @@ func TestLooksLikeHTML(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := looksLikeHTML(tt.input); got != tt.expected {
 				t.Errorf("looksLikeHTML() = %v, want %v", got, tt.expected)
-			}
-		})
-	}
-}
-
-// ============================================================================
-// extractHTMLBody Tests
-// ============================================================================
-
-func TestExtractHTMLBody(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "extracts body",
-			input:    "<html><head><title>T</title></head><body><h1>Hello</h1></body></html>",
-			expected: "<h1>Hello</h1>",
-		},
-		{
-			name:     "prefers main over body",
-			input:    "<html><body><nav>Nav</nav><main><h1>Content</h1></main></body></html>",
-			expected: "<h1>Content</h1>",
-		},
-		{
-			name:     "no body tag returns full content",
-			input:    "<h1>Just a heading</h1>",
-			expected: "<h1>Just a heading</h1>",
-		},
-		{
-			name:     "body with attributes",
-			input:    `<html><body class="dark"><p>Text</p></body></html>`,
-			expected: "<p>Text</p>",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := extractHTMLBody(tt.input); got != tt.expected {
-				t.Errorf("extractHTMLBody() = %q, want %q", got, tt.expected)
 			}
 		})
 	}
@@ -7921,7 +7894,7 @@ func TestHandleRotateKey_KeysChangedOnDisk(t *testing.T) {
 		t.Fatalf("failed to load well-known: %v", err)
 	}
 	wk.PublicKey = newPubKey
-	if err := site.SaveWellKnown(s.DataDir, wk); err != nil {
+	if err := site.SaveWellKnown(s.DataDir, wk, site.ChangePublicKey); err != nil {
 		t.Fatalf("failed to save well-known: %v", err)
 	}
 

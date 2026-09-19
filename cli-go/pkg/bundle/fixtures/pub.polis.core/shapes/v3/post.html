@@ -16,6 +16,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{title}} - {{site_title}}</title>
     <meta name="description" content="{{title}}">
+    <!-- Licence discovery, generated from this post's own signed terms.
+         Empty when the author has stated none. -->
+    {{license_head}}
     <link rel="icon" type="image/svg+xml" href="{{favicon_path}}">
     <link rel="stylesheet" href="{{base_css_path}}">
     <link rel="stylesheet" href="{{css_path}}">
@@ -51,6 +54,8 @@
             <div class="content-body">
                 {{content}}
             </div>
+            <!-- Per-post terms, frozen at publish. Empty when unstated. -->
+            {{license_notice}}
         </article>
 
         <!-- Blessed Comments -->

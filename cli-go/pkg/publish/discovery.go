@@ -1,7 +1,10 @@
 package publish
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -32,6 +35,16 @@ type DiscoveryConfig struct {
 	DiscoveryKey string
 	BaseURL      string
 	Generator    string // e.g. "polis-cli-go/0.59.0" — used in frontmatter metadata
+
+	// LicenseProfile is the licence the AUTHOR wrote on this specific work
+	// ("reserved", "open", "none"), or "" to inherit the site default.
+	//
+	// It has to arrive from the caller because the command layer strips the
+	// source file's frontmatter before handing the body over, so by the time
+	// publish sees the markdown the author's own `license:` line is gone.
+	// Precedence is work > site, resolved once at publish and frozen into the
+	// signed payload.
+	LicenseProfile string
 }
 
 // resolveDiscoveryConfig returns the effective config: explicit if provided,
@@ -102,6 +115,15 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 		"published_at":    now,
 		"last_updated_at": now,
 	}
+	// SIGNET epic 32: a hash of the WHOLE signed post, so the DS's witness binds
+	// the frontmatter (`published:`, `license:`, title) and not only the body
+	// `version` hashes. Inside metadata, so the registration signature covers it.
+	// ⚠️ published_at above is the REGISTRATION time, not the post's own
+	// `published:` — two different dates with similar names.
+	if data, rerr := os.ReadFile(filepath.Join(dataDir, result.Path)); rerr == nil {
+		metadata[discovery.MetadataArtifactHash] = discovery.ArtifactHash(
+			signing.MarkdownSigningBase(string(data), signing.TypePost))
+	}
 
 	// Build canonical JSON for signing
 	canonical, err := discovery.MakeContentCanonicalJSON(
@@ -127,18 +149,25 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 	}
 
 	// Retry once on transient failures (e.g., DS timeout fetching public key).
+	// EXCEPT rate limits: a 429/503 won't recover within the 3s retry delay (the
+	// budget is per-hour), and re-hitting it only deepens the limit — so fail
+	// fast and propagate ErrRateLimited so callers (Chaplain) back off instead.
 	var registerErr error
+	var registered *discovery.ContentRegisterResponse
 	for attempt := 0; attempt < 2; attempt++ {
-		if _, err := client.RegisterContent(req); err != nil {
-			registerErr = err
-			if attempt == 0 {
-				fmt.Printf("[!] DS registration attempt failed, retrying: %v\n", err)
-				time.Sleep(3 * time.Second)
-				continue
-			}
-		} else {
+		resp, err := client.RegisterContent(req)
+		if err == nil {
 			registerErr = nil
+			registered = resp
 			break
+		}
+		registerErr = err
+		if errors.Is(err, discovery.ErrRateLimited) {
+			break
+		}
+		if attempt == 0 {
+			fmt.Printf("[!] DS registration attempt failed, retrying: %v\n", err)
+			time.Sleep(3 * time.Second)
 		}
 	}
 	if registerErr != nil {
@@ -146,5 +175,12 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 	}
 
 	fmt.Printf("[✓] Registered with discovery service: %s\n", postURL)
+	if registered != nil && registered.Witness != nil {
+		// Publishing the witness never fails the registration: it happened, and
+		// an unpublished witness is lost testimony, not a broken post.
+		if _, werr := site.RecordWitness(dataDir, postURL, *registered.Witness); werr != nil {
+			fmt.Printf("[!] Could not publish the discovery service's witness for %s: %v\n", postURL, werr)
+		}
+	}
 	return nil
 }

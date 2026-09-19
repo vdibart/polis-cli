@@ -114,7 +114,9 @@ func handleFollow(args []string) {
 
 	f.Add(authorURL)
 
-	if err := following.Save(followingPath, f); err != nil {
+	// SIGNET epic 02: the user acted, so the file they authored is signed with
+	// their key. No migration needed — the write path is the migration.
+	if err := following.SaveSigned(followingPath, f, privKey); err != nil {
 		exitError("Failed to save following.json: %v", err)
 	}
 

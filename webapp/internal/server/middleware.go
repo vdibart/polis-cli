@@ -104,24 +104,28 @@ func CleanupSharedPublicContentLimiter() int {
 // limiter reads the leftmost. We now read the rightmost.
 //
 // `Fly-Client-IP` is set by Fly's proxy directly and isn't spoofable
-// by the client; if present we trust it absolutely. This mirrors the
+// by the client; behind Fly we trust it absolutely. This mirrors the
 // posture in webapp/internal/hosted/hosted.go:clientIP.
 //
-// In localhost / no-proxy mode there's no XFF and no Fly-Client-IP, so
-// we fall back to RemoteAddr's host portion. Same behavior as before
-// for that case.
-func remoteIP(r *http.Request) string {
-	// Fly's proxy sets this directly; cannot be spoofed by the client.
-	if flyIP := r.Header.Get("Fly-Client-IP"); flyIP != "" {
-		return strings.TrimSpace(flyIP)
-	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// Rightmost entry is what the trusted proxy set; everything
-		// to the left is attacker-controlled.
-		if i := strings.LastIndex(xff, ","); i >= 0 {
-			return strings.TrimSpace(xff[i+1:])
+// ⛔ Both headers are trusted ONLY when trustProxy is set (hosted, behind
+// Fly's proxy; Server.BehindTrustedProxy). With no proxy in front, a client
+// sets them itself, so a self-hosted server exposed directly would let it pick
+// a fresh IP per request and walk past the limit. Localhost and self-hosted
+// mode therefore always read RemoteAddr's host portion.
+func remoteIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		// Fly's proxy sets this directly; cannot be spoofed by the client.
+		if flyIP := r.Header.Get("Fly-Client-IP"); flyIP != "" {
+			return strings.TrimSpace(flyIP)
 		}
-		return strings.TrimSpace(xff)
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// Rightmost entry is what the trusted proxy set; everything
+			// to the left is attacker-controlled.
+			if i := strings.LastIndex(xff, ","); i >= 0 {
+				return strings.TrimSpace(xff[i+1:])
+			}
+			return strings.TrimSpace(xff)
+		}
 	}
 	addr := r.RemoteAddr
 	if i := strings.LastIndex(addr, ":"); i >= 0 {
@@ -136,7 +140,7 @@ func remoteIP(r *http.Request) string {
 // cross-origin (the v4 lazy-fetch path in the controller relies on this).
 // Rate limiting protects against bursty/abusive clients while leaving
 // generous headroom for legitimate scroll sessions.
-func publicContentMiddleware(limiter *publicContentLimiter, next http.HandlerFunc) http.HandlerFunc {
+func publicContentMiddleware(limiter *publicContentLimiter, trustProxy bool, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
@@ -145,7 +149,7 @@ func publicContentMiddleware(limiter *publicContentLimiter, next http.HandlerFun
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		ip := remoteIP(r)
+		ip := remoteIP(r, trustProxy)
 		if allowed, retry := limiter.Allow(ip); !allowed {
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
@@ -356,22 +360,44 @@ func CSPAdminSPA(nonce string) string {
 	}, "; ")
 }
 
+// WithRequestID gives a request its correlation id: the inbound X-Request-Id
+// when it is well formed, otherwise a fresh UUIDv4. The id is set on the
+// response and stored in the context, where NewDSClient and NewAuthDSClient
+// read it to send it on to the discovery service.
+//
+// ⚠️ Shared by the self-hosted middleware and the hosted edge (R24-20: hosted
+// tenant requests used to carry no id at all). An inbound id goes verbatim into
+// log lines and outbound headers, so anything but a short token is replaced.
+func WithRequestID(w http.ResponseWriter, r *http.Request) (*http.Request, string) {
+	requestID := r.Header.Get("X-Request-Id")
+	if !wellFormedRequestID(requestID) {
+		requestID = generateRequestID()
+	}
+	w.Header().Set("X-Request-Id", requestID)
+	return r.WithContext(context.WithValue(r.Context(), requestIDKey, requestID)), requestID
+}
+
+// wellFormedRequestID accepts 1–64 characters of [A-Za-z0-9._-]: a UUID, or an
+// actor's "clerk-<millis>" style id.
+func wellFormedRequestID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, c := range id {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // requestLoggingMiddleware logs every HTTP request as structured JSON and
 // propagates X-Request-Id through the request context.
 func requestLoggingMiddleware(logger *Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Read or generate request ID
-		requestID := r.Header.Get("X-Request-Id")
-		if requestID == "" {
-			requestID = generateRequestID()
-		}
-
-		// Set on response header for client correlation
-		w.Header().Set("X-Request-Id", requestID)
-
-		// Store in context
-		ctx := context.WithValue(r.Context(), requestIDKey, requestID)
-		r = r.WithContext(ctx)
+		r, requestID := WithRequestID(w, r)
 
 		path := r.URL.Path
 

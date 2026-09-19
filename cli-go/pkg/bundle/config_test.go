@@ -215,17 +215,14 @@ func readWellKnown(t *testing.T, siteDir string) map[string]interface{} {
 	return m
 }
 
-func TestMigrateActiveThemeToRegistry_HappyPath(t *testing.T) {
-	siteDir := t.TempDir()
-	writeWellKnown(t, siteDir, map[string]interface{}{
-		"public_key":   "ssh-ed25519 AAAA...",
-		"active_theme": "vice",
-		"author":       "alice",
-	})
-	if err := MigrateActiveThemeToRegistry(siteDir); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+// The well-known half of the migration (stripping the legacy field) lives in
+// pkg/site and is tested there; these cover the registry half.
 
+func TestAdoptLegacyActiveTheme_CreatesTheRegistry(t *testing.T) {
+	siteDir := t.TempDir()
+	if err := AdoptLegacyActiveTheme(siteDir, "vice"); err != nil {
+		t.Fatalf("Adopt: %v", err)
+	}
 	reg, err := LoadRegistry(siteDir)
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
@@ -236,76 +233,47 @@ func TestMigrateActiveThemeToRegistry_HappyPath(t *testing.T) {
 	if reg.ActiveShape != "pub.polis.shapes.v4" {
 		t.Errorf("ActiveShape = %q, want pub.polis.shapes.v4 (post-cutover default)", reg.ActiveShape)
 	}
-
-	wk := readWellKnown(t, siteDir)
-	if _, ok := wk["active_theme"]; ok {
-		t.Error("expected active_theme stripped from well-known")
-	}
-	if wk["author"] != "alice" {
-		t.Error("expected other well-known fields preserved")
+	if _, err := os.Stat(filepath.Join(siteDir, ".well-known", "polis")); !os.IsNotExist(err) {
+		t.Error("the registry half must never write .well-known/polis")
 	}
 }
 
-func TestMigrateActiveThemeToRegistry_Idempotent(t *testing.T) {
+func TestAdoptLegacyActiveTheme_Idempotent(t *testing.T) {
 	siteDir := t.TempDir()
-	writeWellKnown(t, siteDir, map[string]interface{}{
-		"public_key":   "ssh-ed25519 AAAA...",
-		"active_theme": "vice",
-	})
-	if err := MigrateActiveThemeToRegistry(siteDir); err != nil {
-		t.Fatalf("first migrate: %v", err)
-	}
-	// Second run should be no-op (active_theme already gone, registry exists).
-	if err := MigrateActiveThemeToRegistry(siteDir); err != nil {
-		t.Fatalf("second migrate: %v", err)
+	for i := 0; i < 2; i++ {
+		if err := AdoptLegacyActiveTheme(siteDir, "vice"); err != nil {
+			t.Fatalf("adopt #%d: %v", i+1, err)
+		}
 	}
 	reg, _ := LoadRegistry(siteDir)
 	if reg.ActiveTheme != "pub.polis.themes.vice" {
-		t.Errorf("ActiveTheme changed on second migration: %q", reg.ActiveTheme)
+		t.Errorf("ActiveTheme changed on second adoption: %q", reg.ActiveTheme)
 	}
 }
 
-func TestMigrateActiveThemeToRegistry_NoActiveTheme(t *testing.T) {
+func TestAdoptLegacyActiveTheme_NothingToAdopt(t *testing.T) {
 	siteDir := t.TempDir()
-	writeWellKnown(t, siteDir, map[string]interface{}{
-		"public_key": "ssh-ed25519 AAAA...",
-	})
-	if err := MigrateActiveThemeToRegistry(siteDir); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := AdoptLegacyActiveTheme(siteDir, ""); err != nil {
+		t.Fatalf("adopt: %v", err)
 	}
 	if _, err := LoadRegistry(siteDir); err == nil {
-		t.Error("expected no registry created when there's nothing to migrate")
+		t.Error("expected no registry created when there's nothing to adopt")
 	}
 }
 
-func TestMigrateActiveThemeToRegistry_NoWellKnown(t *testing.T) {
+func TestAdoptLegacyActiveTheme_PreservesExistingRegistryTheme(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := MigrateActiveThemeToRegistry(siteDir); err != nil {
-		t.Fatalf("migrate with no well-known: %v", err)
-	}
-}
-
-func TestMigrateActiveThemeToRegistry_PreservesExistingRegistryTheme(t *testing.T) {
-	siteDir := t.TempDir()
-	// Pre-existing registry with a different active_theme.
 	preExisting := DefaultRegistry()
 	preExisting.ActiveTheme = "pub.polis.themes.especial-light"
 	if err := SaveRegistry(siteDir, preExisting); err != nil {
 		t.Fatalf("seed registry: %v", err)
 	}
-	// Well-known has a stale legacy value.
-	writeWellKnown(t, siteDir, map[string]interface{}{"active_theme": "vice"})
-
-	if err := MigrateActiveThemeToRegistry(siteDir); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := AdoptLegacyActiveTheme(siteDir, "vice"); err != nil {
+		t.Fatalf("adopt: %v", err)
 	}
 	reg, _ := LoadRegistry(siteDir)
 	if reg.ActiveTheme != "pub.polis.themes.especial-light" {
 		t.Errorf("registry's active_theme overwritten: %q", reg.ActiveTheme)
-	}
-	wk := readWellKnown(t, siteDir)
-	if _, ok := wk["active_theme"]; ok {
-		t.Error("legacy active_theme should still be stripped")
 	}
 }
 

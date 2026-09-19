@@ -2,10 +2,8 @@
  *
  * Aladdin-Sane palette captured from the Ziggy patterned-jacket photo. CSS-only
  * DELTA from shapes/v4/stream.css: colour + font + the focus-dot halo ONLY.
- * Geometry, spacing, chrome, and behaviour are inherited from the shape — see
- * "Maintainer instructions — mockup fidelity" in plans/stardust-theme.md.
+ * Geometry, spacing, chrome, and behaviour are inherited from the shape.
  *
- * Visual source of truth: docs/design/v4/mockups/themes/stardust.html.
  * Expect ongoing colour tuning (esp. the nav green).
  */
 
@@ -80,7 +78,7 @@
     --filter-light-underline: color-mix(in srgb, #9a7322 55%, transparent);
     --filter-light-underline-hover: #9a7322;
     --filter-light-identity: #9a7322;
-    --filter-light-dot: color-mix(in srgb, #9a7322 50%, transparent);
+    --filter-light-dot: #9a7322;
 
     /* Timeline: gold thread + red dots, set DIRECTLY (accent alone can't give a
        gold bar AND red dots; the shape would otherwise derive both from accent). */

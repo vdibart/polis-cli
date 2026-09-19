@@ -12,9 +12,11 @@ import (
 	"testing"
 )
 
-// TestNoCommentURLConstructionOutsidePolisurl is WS5 guard ③ (comment-infra
-// remediation, plan plans/comment-registration-severe-bug.md): the URL-derivation
-// lint. It FAILS if any Go code OUTSIDE this package (cli-go/pkg/url) *constructs*
+// TestNoCommentURLConstructionOutsidePolisurl is the URL-derivation lint.
+// Comments once registered the /comments/ mount URL instead of the canonical
+// artifact's, and a registered URL is signature-bound, so it cannot be corrected
+// later; keeping construction in one package keeps that fixed. It FAILS if any
+// Go code OUTSIDE this package (cli-go/pkg/url) *constructs*
 // a comment URL from parts — either via fmt.Sprintf with the comment-path literal
 // in the format string, or via string concatenation against that literal.
 //

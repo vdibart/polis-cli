@@ -870,6 +870,9 @@
             // it doesn't make sense on a comments stream. The nav +
             // still opens the editor unchanged.
             syncCommentsFilterClass(snapshot.type);
+            // Keep the nav "+" tooltip/label matching the action this
+            // surface's + will take (post / message / follow).
+            syncEditTooltip(snapshot);
             // Ensure the .entry--search row is
             // mounted at the top of the stream under
             // (profiles, all-polis), removed otherwise.
@@ -924,6 +927,7 @@
             if (initialSnapshot) {
                 currentFilterSnapshot = initialSnapshot;
                 syncActiveIconFromFilter(initialSnapshot);
+                syncEditTooltip(initialSnapshot);
             }
         }
     }
@@ -1145,6 +1149,31 @@
 
     function syncCommentsFilterClass(filterType) {
         document.body.classList.toggle('is-filter-comments', filterType === 'comments');
+    }
+
+    // The nav write-anchor "+" is contextual: openEditor() dispatches to the
+    // post editor, the DM composer, or the people-search depending on the
+    // active filter surface (see openEditor's type switch). Keep its tooltip
+    // and label honest about what a click will actually do, instead of the
+    // static "New post". Single source of truth for the action label so the
+    // desktop rollover (data-tip), the a11y name (aria-label), and the mobile
+    // drawer row all agree.
+    function editActionLabel(snapshot) {
+        switch (snapshot && snapshot.type) {
+            case 'dms':      return 'New message';
+            case 'profiles': return 'Follow a site';
+            default:         return 'New post';
+        }
+    }
+    function syncEditTooltip(snapshot) {
+        var label = editActionLabel(snapshot);
+        var editBtn = document.getElementById('nav-btn-edit');
+        if (editBtn) {
+            editBtn.setAttribute('data-tip', label);
+            editBtn.setAttribute('aria-label', label);
+        }
+        var drawerLabel = document.querySelector('.nav-mobile-item[data-action="edit"] span');
+        if (drawerLabel) drawerLabel.textContent = label;
     }
 
     // Map a sentence-filter snapshot to the icon that should appear
@@ -2130,29 +2159,11 @@
         var profileURL = meta.author_url || (meta.author_domain ? ('https://' + meta.author_domain) : '');
         if (!profileURL) return; // no actionable target
 
-        // Recent-post-attached click → toggle .is-expanded with
-        // singleton semantics. Opening one collapses any other
-        // .recent-post-attached.is-expanded on the page. The CSS
-        // handles the visual swap (line-clamp on/off, chevron rotate,
-        // accent border deepening). The full-body lazy-fetch is
-        // deferred — this ships excerpt-only since the feed cache
-        // already carries it; a later pass can wire the per-post
-        // fetch off the data-polis-recent-post-url attribute we
-        // already set in renderProfile.
-        var attached = entry.querySelector(':scope > .recent-post-attached');
-        if (attached && !attached.dataset.polisExpandWired) {
-            attached.dataset.polisExpandWired = '1';
-            attached.addEventListener('click', function (ev) {
-                ev.stopPropagation();
-                var nowOpen = !attached.classList.contains('is-expanded');
-                // Singleton collapse — find any other open block and close it.
-                var others = document.querySelectorAll('.recent-post-attached.is-expanded');
-                for (var i = 0; i < others.length; i++) {
-                    if (others[i] !== attached) others[i].classList.remove('is-expanded');
-                }
-                attached.classList.toggle('is-expanded', nowOpen);
-            });
-        }
+        // The recent-post preview, the name, and the handle are all links to
+        // the author's site now (built as <a> in stream.js renderProfile), so
+        // they navigate natively — no click wiring needed here. (This used to
+        // toggle an inline .is-expanded on the preview, which did nothing
+        // useful and read as an ignored click.)
 
         // Whether the OTHER side follows ME — frozen from the initial
         // render's relationship snapshot. Used to compute the right
@@ -4164,10 +4175,10 @@
                                 // with the DS. Comment is captured locally;
                                 // DS contact is deferred until registration.
                                 toastFn(beseechResult.message || 'Comment saved locally — register your site to send for blessing.', 'info', 6000);
-                            } else if (status === 'blessed') {
-                                toastFn('Comment auto-blessed', 'success');
                             } else {
-                                toastFn('Comment sent for blessing', 'success');
+                                // Pending: the post author's site decides later,
+                                // so never promise a blessing here (Signet epic 45 D8).
+                                toastFn('Comment sent. It appears once the author approves it.', 'success');
                             }
                             finishUp();
                         });

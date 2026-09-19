@@ -1,0 +1,15 @@
+{
+  "setup_at": "2026-09-01T00:00:00Z",
+  "hooks": {
+    "post-publish": "./hooks/pp.sh",
+    "post-comment": "./hooks/pc.sh",
+    "future_hook": "./hooks/x.sh"
+  },
+  "show_frontmatter": false,
+  "setup_wizard_dismissed": true,
+  "webapp_theme": "light",
+  "editor_panel_mode": "help",
+  "future_top": {
+    "panel": "wide"
+  }
+}

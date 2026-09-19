@@ -284,4 +284,3 @@ func SyncFromEvents(dataDir, baseURL string, events []discovery.StreamEvent, hoo
 
 	return result, nil
 }
-

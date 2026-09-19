@@ -1,116 +1,10 @@
-# Polis Theme System
+# Templating
 
-The polis theme system renders markdown posts and comments to styled HTML pages. Themes are self-contained packages that include layout templates, stylesheets, and snippets.
+*For* [Writers](../../README.md#writing-on-polis) · [Developers](../../README.md#building-on-polis) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [CLI](../README.md) — *Code* [`cli-go/pkg/template`](../../../cli-go/pkg/template) — *See also* [concept](../../general/concepts/themes.md)
 
-## Purpose
+Themes and shapes now ship inside bundles: a [shape](../../general/concepts/shapes.md) provides a site's templates and a [theme](../../general/concepts/themes.md) provides its CSS. Those two pages describe how they are installed, chosen and customised. This page covers the template language itself: the Mustache-like syntax, the variables templates can use, and how snippets are resolved.
 
-Polis stores content as signed markdown files with YAML frontmatter. While this format is ideal for:
-- Cryptographic verification
-- AI/LLM consumption
-- Programmatic access via `public.jsonl`
-
-It's not ideal for human readers browsing your site. The theme system bridges this gap by generating HTML files that:
-- Display beautifully in browsers
-- Include blessed comments inline on post pages
-- Provide an index page listing all content
-- Preserve the original markdown files for verification
-
-## Quick Start
-
-```bash
-# Initialize a polis site (themes are installed automatically)
-polis init
-
-# Render all posts and comments to HTML
-polis render
-
-# Force re-render everything (ignore timestamps)
-polis render --force
-```
-
-## Built-in Themes
-
-Polis ships with six themes:
-
-| Theme | Description |
-|-------|-------------|
-| **turbo** | Retro computing aesthetic with deep blue foundation |
-| **zane** | Neutral dark theme with teal and salmon accents |
-| **sols** | Nine Sols inspired theme with violet and peach tones |
-| **vice** | GTA Vice City / Miami Vice inspired with coral and sunset tones |
-| **especial** | Modelo Especial inspired dark theme with gold and cream |
-| **especial-light** | Light variant of especial with warm fog background |
-
-On first render, polis randomly selects a theme from those available. You can change the active theme at any time.
-
-## Changing Themes
-
-### Via the Dashboard (recommended)
-
-Open **Settings** in the webapp dashboard. The **Theme** section shows all available themes with color palette previews. Click any theme to switch immediately — the site is re-rendered automatically.
-
-### Via the CLI
-
-Edit `metadata/manifest.json` and set the `active_theme` field:
-
-```json
-{
-  "version": "0.27.0",
-  "active_theme": "zane",
-  "post_count": 5,
-  "comment_count": 3
-}
-```
-
-Then re-render:
-
-```bash
-polis render --force
-```
-
-The theme's CSS will be copied to `styles.css` at your site root.
-
-## Theme Structure
-
-Themes use a **shared base layout** system. The `_base/` directory contains canonical HTML templates and snippets. Individual themes provide only a CSS file and optional template overrides.
-
-```
-.polis/themes/
-├── _base/                      # Shared base templates (system-managed)
-│   ├── index.html              # Homepage template
-│   ├── post.html               # Post page template
-│   ├── comment.html            # Comment page template
-│   ├── comment-inline.html     # Blessed comment template
-│   ├── posts.html              # Archive page template
-│   ├── tag.html                # Tag page template
-│   ├── tag-index.html          # Tag index template
-│   └── snippets/               # Shared snippets
-│       ├── about.html
-│       ├── post-item.html
-│       ├── comment-item.html
-│       ├── blessed-comment.html
-│       ├── also-reading.html
-│       └── polis-widget.html
-├── turbo/
-│   └── turbo.css               # CSS-only theme (inherits HTML from _base)
-├── sols/
-│   └── sols.css
-└── studio13/                   # Theme with structural overrides
-    ├── studio13.css
-    ├── index.html              # Overrides _base/index.html
-    ├── post.html               # Overrides _base/post.html
-    ├── posts.html              # Overrides _base/posts.html
-    └── snippets/
-        └── post-item.html      # Overrides _base/snippets/post-item.html
-```
-
-### Template Resolution
-
-For each template file, the render pipeline checks:
-1. **Theme directory** — if the active theme has the file, use it
-2. **`_base/` directory** — fall back to the shared base template
-
-This means most themes only need a CSS file. The base templates provide the HTML structure, and CSS customizes the visual appearance.
+The earlier version of this page also described the theme system as it worked before bundles; that material has been retired. The last full version is at [v0.66.0](https://github.com/vdibart/polis-cli/blob/v0.66.0/docs/cli/user/templating.md).
 
 ## Snippets
 
@@ -120,11 +14,16 @@ Snippets are reusable template fragments included with `{{> name}}` syntax.
 
 When resolving `{{> path}}`:
 
-1. **Global snippets** - `./snippets/{path}.md` or `.html` (author overrides)
-2. **Theme snippets** - `.polis/bundles/pub.polis.core/themes/{active_theme}/snippets/{path}.html` or `.md`
-3. **Shape snippets** - `.polis/bundles/pub.polis.core/shapes/{active_shape}/snippets/{path}.html` or `.md`
+1. **Global snippets** - `site/snippets/{path}` (author overrides)
+2. **Theme snippets** - `site/themes/{active_theme}/snippets/{path}`, if that directory exists
+3. **Shape snippets** - `.polis/bundles/pub.polis.core/shapes/{active_shape}/snippets/{path}`
+4. **Shape root** - `.polis/bundles/pub.polis.core/shapes/{active_shape}/{path}` (entry templates such as `stream-post.html`)
 
-This allows you to override theme defaults by creating snippets in `./snippets/`.
+Each tier tries `{path}.md`, then `{path}.html`, then `{path}` exactly. This allows you to override
+the defaults by creating snippets in `site/snippets/`.
+
+⚠️ The installed bundle themes under `.polis/bundles/pub.polis.core/themes/` are CSS-only and carry no
+snippets, so tier 2 applies only to a theme you add under `site/themes/`.
 
 > **Migration note:** Pre-bundle-refactor sites used `.polis/themes/<name>/snippets/`
 > and `.polis/themes/_base/snippets/`. Patrol/Medic (hosted) and Tailor
@@ -136,11 +35,11 @@ Use prefixes to control which tier is checked first:
 
 | Prefix | Behavior |
 |--------|----------|
-| `{{> about}}` | Default: global first, then theme |
+| `{{> about}}` | Default: global, then theme, then shape |
 | `{{> global:about}}` | Explicit global-first (same as default) |
-| `{{> theme:about}}` | Theme-first, then global fallback |
+| `{{> theme:about}}` | Theme, then shape, then global last |
 
-Example: A theme's `about.html` provides default styling, but your `snippets/about.md` with personal content takes precedence. Use `{{> theme:about}}` if you need the theme version.
+Example: A theme's `about.html` provides default styling, but your `site/snippets/about.md` with personal content takes precedence. Use `{{> theme:about}}` if you need the theme version.
 
 ### Explicit File Extensions
 
@@ -161,9 +60,10 @@ Prefixes and extensions can be combined:
 {{> global:about.md}}    <!-- Global's markdown version specifically -->
 ```
 
-### Default Theme Snippets
+### Default Shape Snippets
 
-Each theme includes these snippets:
+The blog shape (`pub.polis.shapes.v3`) ships these snippets; the stream shape (`pub.polis.shapes.v4`)
+ships `blessed-comment.html`, `sentence-filter.html` and `stream-filter.html`:
 
 | File | Purpose |
 |------|---------|
@@ -171,18 +71,20 @@ Each theme includes these snippets:
 | `post-item.html` | Post list item (used in `{{#posts}}` loops) |
 | `comment-item.html` | Comment list item (used in `{{#comments}}` loops) |
 | `blessed-comment.html` | Blessed comment (used in `{{#blessed_comments}}` loops) |
+| `also-reading.html` | "Also reading" — the sites this author follows (a `{{#following}}` loop) |
+| `polis-widget.html` | The comment/follow widget mount |
 
 ### Global Snippets
 
-Create snippets in `./snippets/` to override theme defaults or add custom content:
+Create snippets in `site/snippets/` to override the defaults or add custom content:
 
 ```bash
 # Override the about section (will take precedence over theme)
-echo '# About Me' > snippets/about.md
+echo '# About Me' > site/snippets/about.md
 
 # Create a custom snippet
-mkdir -p snippets/widgets
-echo '<div class="newsletter">Subscribe!</div>' > snippets/widgets/newsletter.html
+mkdir -p site/snippets/widgets
+echo '<div class="newsletter">Subscribe!</div>' > site/snippets/widgets/newsletter.html
 ```
 
 Reference in templates:
@@ -191,44 +93,6 @@ Reference in templates:
 {{> theme:about}}            <!-- Forces theme version -->
 {{> widgets/newsletter}}     <!-- Uses your custom snippet -->
 ```
-
-## How Rendering Works
-
-### Rendering Process
-
-1. **Select theme** - On first render, randomly selects from available themes
-2. **Load templates** - Reads HTML templates from active theme
-3. **Copy CSS** - Copies theme stylesheet to `styles.css`
-4. **Scan content** - Finds all `.md` files in `posts/` and `comments/`
-5. **Check timestamps** - Skips files where `.html` is newer than `.md` (unless `--force`)
-6. **Extract frontmatter** - Reads title, published date, signature, etc.
-7. **Convert to HTML** - Uses pandoc to render markdown body
-8. **Apply template** - Substitutes variables and renders snippets
-9. **Write output** - Creates `.html` file alongside `.md` file
-10. **Generate index** - Creates `index.html` from `public.jsonl`
-
-### File Relationships
-
-```
-posts/
-└── 2026/
-    └── 01/
-        ├── my-post.md           # Source (signed markdown)
-        └── my-post.html         # Generated (rendered HTML)
-
-comments/
-└── 2026/
-    └── 01/
-        ├── reply.md             # Source (signed markdown)
-        └── reply.html           # Generated (rendered HTML)
-
-index.html                       # Generated (listing page)
-posts/
-└── index.html                   # Generated (archive page, all posts)
-styles.css                       # Copied from active theme
-```
-
-The `.md` files remain the source of truth. HTML files are regenerated from them.
 
 ## Mustache Syntax
 
@@ -299,6 +163,7 @@ The `{{#recent_posts}}` and `{{#recent_comments}}` sections display the 10 most 
 | `{{published}}` | ISO date |
 | `{{published_human}}` | Human-readable date |
 | `{{comment_count}}` | Number of blessed comments |
+| `{{comment_count_display}}` | The same count, or empty when it is zero |
 
 **Inside `{{#comments}}` and `{{#recent_comments}}` loops:**
 
@@ -316,6 +181,8 @@ The `{{#recent_posts}}` and `{{#recent_comments}}` sections display the 10 most 
 |----------|-------------|
 | `{{url}}` | Comment URL |
 | `{{author_name}}` | Comment author |
+| `{{author_domain}}` | Comment author's domain |
+| `{{author_avatar_html}}` | Pre-rendered avatar markup |
 | `{{published}}` | ISO date |
 | `{{published_human}}` | Human-readable date |
 | `{{content}}` | Comment body |
@@ -363,392 +230,3 @@ The `{{#recent_posts}}` and `{{#recent_comments}}` sections display the 10 most 
 |----------|-------------|---------|
 | `{{post_count}}` | Number of posts | `12` |
 | `{{comment_count}}` | Number of comments | `5` |
-
-## Creating Custom Themes
-
-### CSS-Only Theme (Recommended)
-
-The simplest way to create a theme — just provide a CSS file:
-
-```bash
-# Create your theme directory
-mkdir .polis/themes/mytheme
-
-# Create your CSS file (must match directory name)
-vim .polis/themes/mytheme/mytheme.css
-
-# Activate your theme
-# Edit .well-known/polis: "active_theme": "mytheme"
-
-# Render
-polis render --force
-```
-
-Your theme automatically inherits all HTML templates from `_base/`. Only customize CSS variables and styles.
-
-### Theme with Template Overrides
-
-If you need different HTML structure for specific pages, override individual templates:
-
-```bash
-# Create a CSS-only theme directory under your installed bundle.
-mkdir -p .polis/bundles/pub.polis.core/themes/mytheme
-vim .polis/bundles/pub.polis.core/themes/mytheme/mytheme.css
-
-# Override just the homepage (other pages fall through to the shape).
-cp .polis/bundles/pub.polis.core/shapes/v3/index.html .polis/bundles/pub.polis.core/themes/mytheme/index.html
-vim .polis/bundles/pub.polis.core/themes/mytheme/index.html
-
-# Override a snippet
-mkdir -p .polis/bundles/pub.polis.core/themes/mytheme/snippets
-cp .polis/bundles/pub.polis.core/shapes/v3/snippets/post-item.html .polis/bundles/pub.polis.core/themes/mytheme/snippets/post-item.html
-vim .polis/themes/mytheme/snippets/post-item.html
-```
-
-### Theme Requirements
-
-| File | Required | Purpose |
-|------|----------|---------|
-| `{themename}.css` | Yes | Theme stylesheet |
-| HTML templates | No | Inherited from `_base/` — override only if structural changes needed |
-| `snippets/` | No | Inherited from `_base/` — override only if needed |
-
-### Template Documentation
-
-Base templates include comment headers documenting which snippets they load:
-
-```html
-<!--
-    Polis Base Theme - Homepage Template
-
-    Snippets loaded by this template:
-    - theme:about        - About section
-    - theme:post-item    - Post list item
-    - theme:comment-item - Comment list item
-
-    Lookup order: theme snippets -> base snippets -> global snippets
--->
-```
-
-## Configuration
-
-### THEMES_DIR
-
-The themes directory can be configured:
-
-| Method | Example |
-|--------|---------|
-| Environment | `THEMES_DIR=custom/themes polis render` |
-| .env file | `THEMES_DIR=custom/themes` |
-| .well-known/polis | `{"config": {"directories": {"themes": "custom/themes"}}}` |
-
-Default: `.polis/themes`
-
-### Site Information
-
-The theme system reads site information from `metadata/manifest.json`:
-
-```json
-{
-  "version": "0.42.0",
-  "active_theme": "turbo",
-  "last_published": "2026-01-14T00:00:00Z",
-  "post_count": 5,
-  "comment_count": 3
-}
-```
-
-Note: `site_title` is stored in `.well-known/polis`, not in `manifest.json`.
-
-Set the site title during initialization: `polis init --site-title "My Site"`
-
-## Important Files and Paths
-
-| Path | Purpose |
-|------|---------|
-| `.polis/themes/` | Installed themes |
-| `snippets/` | Global snippets (override theme snippets) |
-| `styles.css` | Active theme's stylesheet (copied on render) |
-| `index.html` | Generated listing page |
-| `posts/index.html` | Generated archive page (all posts) |
-| `posts/**/*.html` | Generated post pages |
-| `comments/**/*.html` | Generated comment pages |
-| `metadata/manifest.json` | Site metadata including `active_theme` |
-| `metadata/public.jsonl` | Content index (used for index.html) |
-| `metadata/blessed-comments.json` | Blessed comments (rendered inline) |
-
-## Troubleshooting
-
-### "pandoc is required for rendering"
-
-Install pandoc:
-
-```bash
-# Linux
-sudo apt install pandoc
-
-# macOS
-brew install pandoc
-```
-
-### "Polis not initialized"
-
-Run `polis init` first to create the required directory structure.
-
-### "Theme 'xyz' not found"
-
-Check that the theme exists in `.polis/themes/xyz/`. Available themes can be listed:
-
-```bash
-ls .polis/themes/
-```
-
-### HTML files not updating
-
-The render command skips files where the `.html` is newer than the `.md`. Use `--force` to re-render:
-
-```bash
-polis render --force
-```
-
-### Template variables not substituting
-
-Check that:
-1. Variables use double curly braces: `{{variable}}`
-2. Variable names are spelled correctly (case-sensitive)
-3. Required data exists (e.g., `POLIS_BASE_URL` for `{{site_url}}`)
-
-### Blessed comments not appearing
-
-Verify that:
-1. `metadata/blessed-comments.json` exists and contains entries
-2. The post URL in the JSON matches the post being rendered
-3. Comment files are accessible (local or via HTTP)
-
-Run `polis blessing sync` to update blessed comments from the discovery service.
-
-### Blessed comments showing stale content
-
-Remote blessed comments are fetched when a post is rendered, but caching may show outdated content if:
-- The comment author updated their comment after you last rendered
-- Your post's HTML is already up-to-date based on local file timestamps
-
-Use `polis render --force` to re-fetch all remote blessed comments.
-
-### Styling not applied
-
-1. Check that `styles.css` exists at your site root
-2. Verify the theme's CSS file exists in `.polis/themes/{theme}/{theme}.css`
-3. Re-render to copy the CSS: `polis render --force`
-
-### Index page empty
-
-The index is generated from `metadata/public.jsonl`. Ensure:
-
-1. Posts are published (have frontmatter with `version` field)
-2. Run `polis rebuild --content` to regenerate the index
-
-## Dependencies
-
-| Tool | Required | Purpose |
-|------|----------|---------|
-| pandoc | Yes | Markdown to HTML conversion |
-| jq | Yes | JSON parsing |
-| curl | For remote comments | Fetching blessed comments |
-
-## Theme Developer's Guide
-
-This section covers advanced topics for creating polished, consistent themes.
-
-### CSS Variable Conventions
-
-The built-in themes follow a consistent CSS variable naming pattern:
-
-```css
-:root {
-    /* Background layers (dark to light) */
-    --color-bg: #000818;         /* Page background */
-    --color-bg-light: #001030;   /* Slightly lighter background */
-    --color-surface: #001448;    /* Card/panel backgrounds */
-    --color-panel: #001a58;      /* Elevated elements */
-
-    /* Primary accent (Polis cyan - keep consistent for branding) */
-    --color-cyan: #00d4ff;
-    --color-cyan-soft: #80e4ff;
-    --color-cyan-dim: #0090b0;
-    --color-cyan-glow: rgba(0, 212, 255, 0.3);
-
-    /* Text hierarchy */
-    --color-text: #ffffff;       /* Primary text */
-    --color-text-soft: #a0c0d8;  /* Secondary text */
-    --color-text-muted: #607890; /* Tertiary/meta text */
-
-    /* Borders */
-    --color-border: rgba(0, 212, 255, 0.2);
-    --color-border-light: rgba(0, 212, 255, 0.35);
-
-    /* Typography */
-    --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
-    --font-display: 'Orbitron', var(--font-mono);
-
-    /* Layout */
-    --max-width: 600px;
-}
-```
-
-### Required CSS Classes
-
-Themes should style these key classes:
-
-| Class | Used In | Purpose |
-|-------|---------|---------|
-| `.hero` | index, post, comment | Page header section |
-| `.hero-title` | all | Main page title |
-| `.hero-subtitle` | post, comment | Date/metadata line |
-| `.about` | index | About section wrapper |
-| `.about-content` | index | About section content box |
-| `.recent-posts` | index | Posts listing section |
-| `.recent-comments` | index | Comments listing section |
-| `.section-title` | index | Section headers |
-| `.post-list` | index | Post list container |
-| `.post-item` | index (loop) | Individual post entry |
-| `.post-date` | index | Post date in list |
-| `.post-title` | index | Post title in list |
-| `.post-comments` | index | Comment count in list |
-| `.comment-list` | index | Comment list container |
-| `.comment-item` | index (loop) | Individual comment entry |
-| `.comment-meta` | index | Comment metadata row |
-| `.comment-author` | all | Comment author name |
-| `.comment-date` | all | Comment date |
-| `.comment-preview` | index | Comment preview text |
-| `.post-content` | post, comment | Main content wrapper |
-| `.content-body` | post, comment | Content box with styling |
-| `.reply-context` | comment | "In reply to" section |
-| `.context-box` | comment | Reply context container |
-| `.context-label` | comment | "In reply to:" label |
-| `.context-link` | comment | Link to parent content |
-| `.comments` | post | Blessed comments section |
-| `.comments-title` | post | "Comments (N)" header |
-| `.comments-list` | post | Comment list container |
-| `.comment` | post (inline) | Individual blessed comment |
-| `.comment-header` | post (inline) | Comment header row |
-| `.comment-body` | post (inline) | Comment content |
-| `.site-footer` | all | Page footer |
-| `.footer-logo` | all | Polis branding link |
-| `.footer-tagline` | all | Tagline text |
-| `.view-all` | index | "View all N posts" link |
-| `.post-meta` | post, comment | Signature/metadata block |
-| `.meta-label` | post, comment | "Signed by" etc. |
-| `.meta-value` | post, comment | Author name etc. |
-| `.meta-sep` | post, comment | Separator between meta items |
-
-### Responsive Design
-
-Include mobile breakpoints. The built-in themes use 600px:
-
-```css
-@media (max-width: 600px) {
-    .hero-title {
-        font-size: 1.25rem;
-    }
-
-    .footer-logo {
-        font-size: 1.4rem;
-    }
-}
-```
-
-### Template HTML Structure
-
-Templates should follow this general structure:
-
-```html
-<!--
-    Polis Theme: [Name] - [Template Type]
-
-    Snippets loaded by this template:
-    - snippet-name  - Description
-
-    Snippet lookup order: theme snippets -> global snippets
--->
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{title}} - {{site_title}}</title>
-    <meta name="description" content="...">
-    <link rel="stylesheet" href="{{css_path}}">
-    <!-- Optional: Google Fonts for display font -->
-</head>
-<body>
-    <!-- Hero section -->
-    <section class="hero">...</section>
-
-    <!-- Main content -->
-    <article class="post-content">...</article>
-
-    <!-- Comments (for posts) -->
-    <section class="comments">...</section>
-
-    <!-- Footer -->
-    <footer class="site-footer">
-        <a href="https://polis.pub" class="footer-logo">POLIS
-            <span class="footer-tagline">Your content, free from platform control</span>
-        </a>
-    </footer>
-
-<!-- Hidden metadata comment -->
-<!-- Source: {{url}} | Version: {{version}} -->
-</body>
-</html>
-```
-
-### Snippet Best Practices
-
-1. **Keep snippets focused** - One purpose per snippet
-2. **Use semantic HTML** - `<article>`, `<section>`, `<time>` where appropriate
-3. **Support all loop variables** - Don't assume which variables will be present
-4. **Test with empty data** - Ensure graceful handling of missing comments/posts
-
-Example well-structured snippet:
-
-```html
-<!-- snippets/post-item.html -->
-<a href="{{url}}" class="post-item">
-    <span class="post-date">{{published_human}}</span>
-    <span class="post-title">{{title}}</span>
-    <span class="post-comments">{{comment_count}} comments</span>
-</a>
-```
-
-### Testing Your Theme
-
-1. Create test content with various lengths
-2. Test with 0, 1, and many posts/comments
-3. Test mobile and desktop viewports
-4. Verify all links work (CSS, internal navigation)
-5. Check that blessed comments render correctly
-
-```bash
-# Quick test workflow
-echo "active_theme: mytheme" | ... # (edit manifest.json)
-polis render --force
-python -m http.server 8000  # Preview at localhost:8000
-```
-
-### Polis Branding
-
-We'd appreciate it if you keep the cyan color (`#00d4ff`) for the footer POLIS logo across custom themes. This helps with consistent branding while you're free to use theme-specific accent colors elsewhere.
-
-## Migration from Templates
-
-If you have a custom `.polis/templates/` directory from a previous version:
-
-1. Create a new theme: `mkdir -p .polis/themes/custom/snippets`
-2. Move templates: `mv .polis/templates/*.html .polis/themes/custom/`
-3. Create CSS: `touch .polis/themes/custom/custom.css`
-4. Move relevant snippets to `snippets/` (global) or `.polis/themes/custom/snippets/` (theme-specific)
-5. Set active theme in `manifest.json`: `"active_theme": "custom"`
-6. Remove old directory: `rm -r .polis/templates`
-7. Render: `polis render --force`

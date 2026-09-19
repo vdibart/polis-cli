@@ -41,6 +41,9 @@ type KDFParams struct {
 	Time    uint32 `json:"t,omitempty"`
 	Memory  uint32 `json:"m,omitempty"`
 	Threads uint8  `json:"p,omitempty"`
+
+	// Extra carries members this build does not model — see Keyring.Extra.
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // Epoch is one generation of DM key material. Epoch 0 is the bootstrap epoch
@@ -58,6 +61,9 @@ type Epoch struct {
 	KDF                *KDFParams `json:"kdf,omitempty"`                  // password KEK params
 	RecoveryKDF        *KDFParams `json:"recovery_kdf,omitempty"`         // recovery-phrase KEK params
 	CreatedAt          string     `json:"created_at"`                     // RFC3339
+
+	// Extra carries members this build does not model — see Keyring.Extra.
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // Keyring is the per-user DM key material: an ordered list of epochs plus the
@@ -69,6 +75,16 @@ type Keyring struct {
 	Generator     string  `json:"generator,omitempty"`
 	Epochs        []Epoch `json:"epochs"`
 	Current       int     `json:"current"`
+
+	// Extra holds every member this build does not model, at this level (Epoch
+	// and KDFParams carry their own), and Save writes them back after the
+	// declared fields (keyring_extra.go).
+	//
+	// ⛔ KEY MATERIAL MAY LIVE HERE. A newer polis that adds a member to the
+	// keyring must not lose it the first time an older build saves, which is what
+	// LoadKeyring's "unknown fields are tolerated" always promised and Save did
+	// not keep. And for the same reason BrowserView never serves it.
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // keyringPath returns the keyring.json path for a tenant DM dir.
@@ -77,7 +93,7 @@ func keyringPath(dmDir string) string { return filepath.Join(dmDir, keyringFile)
 // LoadKeyring reads keyring.json from a tenant DM dir. A missing file returns an
 // error satisfying os.IsNotExist, so callers can distinguish "not provisioned
 // yet" from a real read/parse failure. Unknown JSON fields are tolerated
-// (forward-compatibility for schema growth).
+// (forward-compatibility for schema growth) and kept, so Save writes them back.
 func LoadKeyring(dmDir string) (*Keyring, error) {
 	data, err := os.ReadFile(keyringPath(dmDir))
 	if err != nil {
@@ -118,14 +134,32 @@ func (k *Keyring) Save(dmDir string) error {
 // the user's password and unwrap a password epoch's DEK, and the wrapped blobs are useless
 // to anyone without the password. This is the single place the "never serve server_dek"
 // rule lives.
+//
+// ⛔ Nor does it serve any member this build does not model (Extra, at every level). One
+// may be key material a newer build keeps server-side, and a build cannot classify what
+// it cannot read; the SPA this build serves reads only what this build declares.
 func (k *Keyring) BrowserView() *Keyring {
 	out := *k
+	out.Extra = nil
 	out.Epochs = make([]Epoch, len(k.Epochs))
 	copy(out.Epochs, k.Epochs)
 	for i := range out.Epochs {
 		out.Epochs[i].ServerDEK = ""
+		out.Epochs[i].Extra = nil
+		out.Epochs[i].KDF = browserKDF(out.Epochs[i].KDF)
+		out.Epochs[i].RecoveryKDF = browserKDF(out.Epochs[i].RecoveryKDF)
 	}
 	return &out
+}
+
+// browserKDF copies KDF params without their unmodelled members.
+func browserKDF(p *KDFParams) *KDFParams {
+	if p == nil {
+		return nil
+	}
+	c := *p
+	c.Extra = nil
+	return &c
 }
 
 // CurrentEpoch returns the epoch selected by the keyring's Current pointer.

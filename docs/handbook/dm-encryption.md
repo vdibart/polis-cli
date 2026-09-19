@@ -1,5 +1,7 @@
 # Tour: DM encryption
 
+*For* [Contributors](../README.md#contributing-to-polis) · [Reviewers](../README.md#reviewing-the-security-and-identity-design) — *Kind* [Tour](../README.md#kinds-of-page) — *See also* [concept](../general/security/dm-encryption.md)
+
 > A guided tour of how a direct message gets encrypted, delivered from one polis instance to another, stored where its own server can't read it, and unlocked again in your browser. Source-of-truth concept docs live in [`../general/`](../general/) — chiefly [`dm-encryption.md`](../general/security/dm-encryption.md); this tour walks the source code with you. Map of all threads: [`../../AGENTS.md`](../../AGENTS.md).
 
 ## The observation

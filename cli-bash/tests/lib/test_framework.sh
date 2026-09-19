@@ -16,6 +16,9 @@ PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
 TEST_RESULTS=()
+# Set by mark_skip() when a running test bails out without asserting; consumed
+# and cleared by run_test().
+TEST_SKIP_REASON=""
 
 # Configuration (set by run_tests.sh or environment)
 : "${JSON_OUTPUT:=false}"
@@ -159,13 +162,13 @@ run_test() {
         echo -e "${BLUE}=== TEST: $test_name ===${NC}"
     fi
 
-    # Run the test function and capture result
+    # Run the test function and capture result.
+    # A test that bails out early (missing prerequisites, no network, nothing to
+    # act on) must call mark_skip so it is counted as a SKIP rather than a PASS
+    # — a test that returns 0 without asserting anything is a false green.
+    TEST_SKIP_REASON=""
     local result=0
-    if $test_func; then
-        result=0
-    else
-        result=1
-    fi
+    $test_func || result=$?
 
     end_time=$(date +%s%N)
     duration=$(( (end_time - start_time) / 1000000 ))  # milliseconds
@@ -178,7 +181,15 @@ run_test() {
     fi
     ORIGINAL_TEST_DIR=""
 
-    if [[ $result -eq 0 ]]; then
+    if [[ $result -eq 0 && -n "$TEST_SKIP_REASON" ]]; then
+        # Bailed out without asserting — report honestly as a skip, not a pass.
+        SKIP_COUNT=$((SKIP_COUNT + 1))
+        if [[ "$JSON_OUTPUT" != "true" ]]; then
+            echo -e "${YELLOW}[SKIP]${NC} $test_name: $TEST_SKIP_REASON (${duration}ms)"
+        fi
+        TEST_RESULTS+=("{\"name\":\"$test_name\",\"status\":\"skip\",\"reason\":\"$TEST_SKIP_REASON\",\"duration_ms\":$duration}")
+        TEST_SKIP_REASON=""
+    elif [[ $result -eq 0 ]]; then
         PASS_COUNT=$((PASS_COUNT + 1))
         if [[ "$JSON_OUTPUT" != "true" ]]; then
             echo -e "${GREEN}[PASS]${NC} $test_name (${duration}ms)"
@@ -193,6 +204,17 @@ run_test() {
     fi
 
     # Always return 0 — failures are tracked via FAIL_COUNT
+    return 0
+}
+
+# Mark the CURRENTLY RUNNING test as skipped, then return from it.
+# Usage: mark_skip "no requests available"; return 0
+#
+# Use this for every early bail-out inside a test body. Without it a bail-out
+# returns 0 and is recorded as a PASS, which is how a test that asserts nothing
+# reports success. run_test converts a set reason into a real skip.
+mark_skip() {
+    TEST_SKIP_REASON="$1"
     return 0
 }
 

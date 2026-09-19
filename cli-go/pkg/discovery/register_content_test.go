@@ -9,6 +9,7 @@ package discovery
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,68 @@ import (
 	"testing"
 	"time"
 )
+
+// TestRegisterContent_RateLimitObjectError is the regression for the
+// re-registration flood. The DS's IP rate limit returns 429 with an OBJECT-shaped
+// error ({"error":{"code","message"}}). The pre-fix client unmarshaled the body
+// into ContentRegisterResponse (Error is a string) BEFORE checking the status, so
+// the object failed to parse and surfaced as "failed to parse response" — hiding
+// the rate limit AND giving callers no signal to back off. The client must now
+// (a) surface the real message and (b) mark it retryable via ErrRateLimited.
+func TestRegisterContent_RateLimitObjectError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "538")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]string{
+				"code":    "RATE_LIMIT_EXCEEDED",
+				"message": "Rate limit exceeded. Retry after 538s",
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-key")
+	_, err := client.RegisterContent(testRegisterRequest())
+	if err == nil {
+		t.Fatal("expected error for 429 object-shaped response")
+	}
+	if !errors.Is(err, ErrRateLimited) {
+		t.Errorf("expected errors.Is(err, ErrRateLimited) so callers back off, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "parse response") {
+		t.Errorf("object error must NOT be misread as a parse failure, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Rate limit exceeded") {
+		t.Errorf("expected the DS message surfaced, got: %v", err)
+	}
+}
+
+// TestRegisterContent_ObjectErrorSurfaced confirms a non-rate-limit object-shaped
+// error (e.g. a middleware 400) is read for its message instead of masked.
+func TestRegisterContent_ObjectErrorSurfaced(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]string{"code": "INVALID_PAYLOAD", "message": "Invalid JSON"},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test-key")
+	_, err := client.RegisterContent(testRegisterRequest())
+	if err == nil {
+		t.Fatal("expected error for 400 object-shaped response")
+	}
+	if errors.Is(err, ErrRateLimited) {
+		t.Errorf("400 is not a rate limit, should not be ErrRateLimited: %v", err)
+	}
+	if strings.Contains(err.Error(), "parse response") || !strings.Contains(err.Error(), "Invalid JSON") {
+		t.Errorf("expected object error message surfaced (not a parse failure), got: %v", err)
+	}
+}
 
 func testRegisterRequest() *ContentRegisterRequest {
 	return &ContentRegisterRequest{

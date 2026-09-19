@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.68.0] - 2026-09-19
+
+A trust-and-provenance release. A site can now state the **terms** its work may be used under, keeps a signed **history of its keys** so old posts keep verifying after a rotation, and signs its follow list and blessing list. **Auto-blessing moves to your own software**: the discovery service no longer blesses anything for you. `polis validate` now checks what it always documented. 0.67.0 was never published; this release follows 0.66.0.
+
+### Upgrading: read this first
+
+- **Auto-blessing needs the web app, and you switch it on.** Since 2026-09-18 the discovery service auto-blesses nothing for anyone, whatever version a site runs. CLI-only sites stop auto-blessing; web apps from v0.57.0 keep deciding with your own rules, unmarked, until you upgrade, and then only with a live grant (switch Rosie on in Settings). An upgraded self-hosted site gets **no default grant**, so after upgrading nothing is auto-blessed until you switch Rosie on. To have your rules applied automatically, run the web app (`polis-full serve`, or `polis-server`) and switch Rosie on in Settings → Rosie; she decides only while it runs. With the `polis` binary alone, every blessing request waits for `polis blessing grant`.
+- **`polis rotate-key --delete-old-key` is gone**, and rotation no longer writes an `id_ed25519.old` backup. The old public key is kept in your site's key history instead. Scripts that pass the flag will fail.
+- **Key history covers rotations made from this version on.** A key your site rotated away from before you upgrade is not in its history.
+- **Paragraph line breaks follow CommonMark.** A single newline inside a paragraph is now a soft break. Hard-wrapped posts re-render as joined paragraphs; use two trailing spaces or a backslash for a hard break. Signatures are unaffected.
+- **`polis blessing requests --json`** now uses the standard `{status, command, data}` envelope. **`polis rotate-key --json`** reports `ds_rotation` as `skipped` when the discovery service was not updated, no longer has `old_key_backed_up` or `old_key_path`, and adds `key_history_epoch`, `did_published` and `did_removed`.
+- **Tailor:** update it, and back up any policy file you have customised first. See *Tailor* below.
+
+### Added
+
+- **[CLI] Terms of use (`polis license`).** State the terms your work may be used under (`reserved`, `open`, or `none`), as a signed licence on your site. New posts carry the terms in their signed frontmatter; terms are never retroactive. The rendered site states them where crawlers look: `robots.txt` (AIPREF `content-usage`), `rsl.xml`, page metadata and a terms page. `polis post --license` overrides the site terms for one post. Nothing states terms on your behalf: interactive `polis init` asks, with nothing pre-selected, and non-interactive `init` states none unless you pass `--license`.
+- **[CLI] Key history.** `.well-known/polis` carries a signed chain of every key your site has held. Rotation appends to it, and verifiers resolve a retired key from it, so posts signed before a rotation keep verifying, with no discovery-service call.
+- **[CLI] `did:web`.** `polis init` publishes `.well-known/did.json` when `POLIS_BASE_URL` is set (otherwise run `polis did --write` once it is); `polis did` prints or regenerates it. Retired keys stay listed for verification only.
+- **[CLI] Signed follow and blessing lists.** `following.json` and `blessed.json` are signed on every write, and reads show their signature state.
+- **[CLI] Attestations (`polis attest`).** Issue, list, show, verify, withdraw and register signed statements about sites and content.
+- **[CLI] Actor registry (`polis actor`).** An operator can publish a signed list of the system actors it runs, and anyone can see whether an actor's acts match what the operator declared. `polis actor verify --custody <domain>` shows who holds a site's key and who signed what.
+- **[CLI] Witnesses.** Registrations store the discovery service's signed witness on your own site (`content/witness/witnesses.json`); `polis validate` and `polis preview` report what is witnessed.
+- **[CLI] `polis validate <record-url>`** verifies a published JSON record: an attestation, a licence, a tag, a follow file or a blessing list. For an actor registry, use `polis actor verify`.
+- **[CLI] Interactive `polis init` asks whether to switch Rosie on**, with nothing pre-selected. She takes effect only while the web app runs.
+- **[CLI] `polis site set author-name|avatar`**, **`polis notifications clear`**, and **`polis rebuild --tags` / `--attestations`**.
+- **[Webapp] Settings → Terms of use** and **Settings → Rosie**. With a grant you issue, Rosie applies your own blessing rules in your web app. She verifies each comment first, and marks every act she signs so it can be told from yours.
+- **[Webapp]** `polis-server` serves `robots.txt`, `rsl.xml`, licence pages and `.well-known/*` from your site, with CORS on the files other software reads, and sends `Content-Usage` / `Link` response headers derived from your terms (as polis.pub does; a static host serves the files without them).
+- **[Docs]** Specifications for the licence, key history, the signing base, attestations, custody, delegation and witnesses, and a recipe book whose recipes run as tests. The documentation tree is reorganised around who is reading.
+
+### Changed
+
+- **[CLI] `polis validate` really checks:** signatures, index consistency, policy, key permissions, the bundle, your terms and your witnesses. Local and remote checks agree, and malformed index lines are named. A signed field it does not recognise reads as `unknown`, never as `invalid`. Some sites that passed before will now report problems.
+- **[CLI] Forward compatibility.** Unsigned files keep fields this version does not model. A signed file carrying fields this version does not model is refused rather than rewritten; `polis site rewrite-unsigned` is the explicit way out, and never signs.
+- **[CLI] `polis rebuild`** keeps an existing `blessed.json` byte for byte, and rebuilds index entries of every content type together.
+- **[All]** Registering a comment no longer suggests it will be blessed. The author's own software decides.
+- **[Bash]** `polis post` does not carry your site's terms: a post published with the bash CLI has no `license:` block. Use the Go CLI to publish under stated terms.
+
+### Fixed
+
+- **[CLI]** `polis republish` failed on bundle-layout sites. `blessing grant <version>` sent an empty request, and `blessing sync` missed real blessings. An unpublished comment could not be signed again, and titles containing `:` degraded on each unpublish cycle.
+- **[CLI]** A post whose body had a line starting `signature:` failed verification. `polis clone` dropped `.well-known` fields and comments. A rate-limited response was reported as a parse error.
+- **[Webapp]** The stream's Bless, Deny and Unpublish buttons did nothing. Follows made in the web app were not announced. Several stream fixes: duplicate items, thread collapse, permalink focus, list bullets, follower counts.
+- **[Bash]** Blessing reads had returned nothing since March. Every authentic comment was reported as tampered. `rebuild` erased tag and attestation index lines. `polis-upgrade` fetched from a repository that does not exist.
+- **[Security]** The local web app refused no request from another website: a page you visited could change your site or read its files. It now accepts only same-origin requests addressed to localhost. A self-hosted server also took the client IP for its rate limits from headers the client sets; it now uses the connection's address.
+- **[Security]** Self-hosted sites had no DM rate limits: the per-sender and overall limits the security model states (10 per sender and 100 in all, per hour) were reset on every delivery. They now hold for the life of the server.
+- **[Security]** `/api/remote/post` returned unsanitised remote HTML. `polis clone` (Go and bash) could write outside its folder. Bash `rotate-key` treated an unreachable discovery service as success.
+
+### Tailor
+
+**Self-hosters should update Tailor.** It no longer reports "needs rebuild" on every run for a site with blessed comments (applying that would have truncated them). It checks sites that have tags or attestations but no posts, and migrates `bundle.json` to declare the two `*.unpublished` events. It does not yet add a key history, `did.json` or signed lists to an existing site; `polis did --write` publishes `did.json`.
+
+⚠️ **`tailor --apply` replaces a customised policy file with the default.** If you have edited `policies/rules.jsonl` or `.polis/policies/rules.jsonl`, copy them somewhere safe before applying, and restore your rules afterwards.
+
 ## [0.66.0] - 2026-06-12
 
 A documentation-cleanup release, headlined by a reorganized `docs/general/` tree and an **owner-themed sentence filter** for the cross-visit nav. Also lands robustness fixes for DM key publication and comment/discovery registration.

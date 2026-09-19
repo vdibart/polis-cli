@@ -9,6 +9,7 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
+	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/sitemap"
 	"github.com/vdibart/polis-cli/cli-go/pkg/template"
@@ -58,11 +59,28 @@ func (r *PageRenderer) renderStreamAll(force bool) (*RenderStats, error) {
 
 	// Empty corpus: emit a minimal index.html so first-load doesn't 404.
 	// Posts directory intentionally not created — nothing to put in it.
+	//
+	// ⛔ THE LICENCE SURFACES ARE NOT POST-DEPENDENT AND MUST BE RENDERED HERE
+	// TOO. A site's terms are a statement it makes about itself, not about its
+	// corpus; a tenant that has stated terms and published nothing still owes a
+	// terms page at the URL its own rsl.xml and robots.txt point at.
+	//
+	// This branch used to return before RenderLicenseSurfaces, and every hosted
+	// signup takes it — a new tenant has zero posts, and hosted signup applies
+	// the licence and renders immediately. The result was a live 404 on the
+	// terms URL inside a signed, machine-readable licence surface, made worse by
+	// Medic backfilling robots.txt and rsl.xml an hour later: the two repaired
+	// files went on advertising the one page nothing would ever write. The v3
+	// path below (page.go) has never had this guard, which is why v3 tenants
+	// were unaffected.
 	if len(posts) == 0 {
 		if err := r.renderStreamEmptyIndex(); err != nil {
 			return nil, fmt.Errorf("failed to render empty index: %w", err)
 		}
 		stats.IndexGenerated = true
+		if err := r.RenderLicenseSurfaces(); err != nil {
+			return nil, fmt.Errorf("failed to render licence surfaces: %w", err)
+		}
 		return stats, nil
 	}
 
@@ -113,6 +131,16 @@ func (r *PageRenderer) renderStreamAll(force bool) (*RenderStats, error) {
 		// Surface as a warning but don't fail the render — sitemap.xml is
 		// SEO infrastructure, not user-facing content.
 		fmt.Fprintf(os.Stderr, "[!] sitemap rebuild failed: %v\n", err)
+	}
+
+	// Licence surfaces: the terms page, the profile explanation, robots.txt,
+	// and rsl.xml — all generated from the signed licence. Unlike the sitemap
+	// this IS fatal: a licence that half-renders would leave the machine
+	// surfaces disagreeing with the signed source, which is the one thing the
+	// one-source-of-truth rule exists to prevent. No-op for a site that has
+	// stated no terms.
+	if err := r.RenderLicenseSurfaces(); err != nil {
+		return nil, fmt.Errorf("failed to render licence surfaces: %w", err)
 	}
 
 	return stats, nil
@@ -187,9 +215,17 @@ func (r *PageRenderer) populateSiteIdentity(ctx *template.RenderContext, postsCo
 			if err != nil {
 				continue
 			}
-			var followers []interface{}
-			if err := json.Unmarshal(followerData, &followers); err == nil {
-				ctx.FollowersCount = len(followers)
+			// pub.polis.follow.json is a FollowerState OBJECT
+			// ({followers:[...], followed_at:{...}, count:N}), NOT a bare
+			// array. The old []interface{} unmarshal silently failed on the
+			// object and left FollowersCount at 0 — so every site showed
+			// "0 followers" even with real followers (and the all-profiles
+			// list, which reads the same file as a struct, disagreed).
+			var fs struct {
+				Followers []json.RawMessage `json:"followers"`
+			}
+			if err := json.Unmarshal(followerData, &fs); err == nil {
+				ctx.FollowersCount = len(fs.Followers)
 				break
 			}
 		}
@@ -359,19 +395,19 @@ func (r *PageRenderer) populateSiblingBodies(siblings []template.PostData, cache
 // and suppresses the title chrome accordingly. If you are adding a new render
 // path that ships title + body content, add it here:
 //
-//   v3 per-post pages          — cli-go/pkg/render/page.go (RenderContext.TitleLinkState)
-//   v4 focus-entry SSR         — cli-go/pkg/render/stream.go (RenderContext.TitleLinkState)
-//   v4 sibling SSR             — cli-go/pkg/render/stream.go (siblings_above/below loop)
-//   /api/v1/stream/items
-//     own-handle scope         — buildPostTitleRedundancy (reads markdown body)
-//     cross-tenant scope       — handleStreamItems inline (uses cached excerpt)
-//   /api/feed/grouped          — handleFeedGrouped inline (uses cached excerpt)
+//	v3 per-post pages          — cli-go/pkg/render/page.go (RenderContext.TitleLinkState)
+//	v4 focus-entry SSR         — cli-go/pkg/render/stream.go (RenderContext.TitleLinkState)
+//	v4 sibling SSR             — cli-go/pkg/render/stream.go (siblings_above/below loop)
+//	/api/v1/stream/items
+//	  own-handle scope         — buildPostTitleRedundancy (reads markdown body)
+//	  cross-tenant scope       — handleStreamItems inline (uses cached excerpt)
+//	/api/feed/grouped          — handleFeedGrouped inline (uses cached excerpt)
 //
 // Surfaces that should consume the flag (renderer-side):
 //
-//   v3/v4 SSR templates        — .is-redundant CSS class on title-link wrapper
-//   v4 stream.js renderPost    — meta.title_redundant → entry-title.is-redundant
-//   legacy app.js renderConversationsTabbed — group.post_title_redundant gate
+//	v3/v4 SSR templates        — .is-redundant CSS class on title-link wrapper
+//	v4 stream.js renderPost    — meta.title_redundant → entry-title.is-redundant
+//	legacy app.js renderConversationsTabbed — group.post_title_redundant gate
 //
 // When the title is derived from the body via excerpt-fetch (no markdown
 // source on disk), use the cached excerpt as the body argument — the
@@ -675,6 +711,18 @@ func (r *PageRenderer) renderStreamFile(focus template.PostData, siblingsAbove, 
 		ctx.PageTitle = ctx.Title
 	}
 
+	// The work's OWN terms, frozen at publish and read back out of the file —
+	// never the site's current terms. A post published in March says what it
+	// said in March, and the rendered page must not quietly re-state it under
+	// today's licence.
+	postTerms := license.ParseBlock(string(content))
+	ctx.LicenseHead = license.HeadHTML(postTerms)
+	ctx.LicenseNotice = licenseNoticeHTML(postTerms)
+	licenseURL := ""
+	if postTerms != nil {
+		licenseURL = postTerms.Terms
+	}
+
 	var jsonLD string
 	if isIndex {
 		// Index gets a WebSite JSON-LD describing the tenant as a whole. The
@@ -690,6 +738,7 @@ func (r *PageRenderer) renderStreamFile(focus template.PostData, siblingsAbove, 
 			ctx.AuthorName,
 			ctx.AuthorURL,
 			ctx.CanonicalURL,
+			licenseURL,
 		)
 	}
 	if err != nil {
@@ -801,6 +850,11 @@ func (r *PageRenderer) renderStreamEmptyIndex() error {
 	}
 
 	body := fmt.Sprintf(`<!DOCTYPE html>
+<!--! POLIS · stream shape (empty/getting-started state). Dev trail:
+     render/stream.go (this Go-built page) → stream.css; populated pages use the
+     stream.html template hydrated by stream.js. Docs: github.com/vdibart/polis-cli
+     — docs/general/concepts/infinity-stream.md, docs/handbook/url-as-filter.md,
+     AGENTS.md (map). -->
 <html lang="en"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -876,6 +930,12 @@ func (r *PageRenderer) renderStreamEmptyIndex() error {
     </div>
   </main>
 </div>
+<!-- Hydrate the site-follow placeholder above into a Follow button. This is
+     the polis embed widget (NOT stream.js / the controller) — it reads
+     #polis-widget-follow[data-author] and renders the follow flow, exactly as
+     a populated page does. Without it the empty page showed the bio with no
+     way to follow a brand-new (0-post) site. -->
+<script src="https://polis.pub/widget-%s.js" crossorigin="anonymous" defer></script>
 </body></html>
 `,
 		attrEscape(siteTitle),
@@ -892,6 +952,7 @@ func (r *PageRenderer) renderStreamEmptyIndex() error {
 		bioHTML,
 		attrEscape(authorDomain),
 		attrEscape(subject),
+		attrEscape(WidgetVersion),
 	)
 	return os.WriteFile(filepath.Join(r.config.DataDir, "index.html"), []byte(body), 0644)
 }
@@ -941,4 +1002,3 @@ func streamHostFromDomain(domain string) string {
 	}
 	return ""
 }
-

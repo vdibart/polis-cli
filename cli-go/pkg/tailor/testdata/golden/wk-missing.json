@@ -1,0 +1,194 @@
+{
+  "diagnose": [
+    {
+      "name": "wellknown-exists",
+      "status": "skip",
+      "message": ".well-known/polis not found — run 'polis init' first",
+      "reason": "A polis site requires a .well-known/polis identity document"
+    }
+  ],
+  "dry_run": [
+    {
+      "name": "author-field-migration",
+      "status": "skip",
+      "message": "cannot read .well-known/polis",
+      "reason": "CLI renamed the .well-known/polis `author` field to `author_name` for consistency with content-type field naming"
+    },
+    {
+      "name": "policy-content-converge",
+      "status": "pass",
+      "message": "Policy files match canonical templates",
+      "reason": ""
+    },
+    {
+      "name": "dm-directories",
+      "status": "pass",
+      "message": "DM directories present with correct permissions",
+      "reason": ""
+    },
+    {
+      "name": "webapp-view-mode",
+      "status": "pass",
+      "message": "No deprecated view_mode key",
+      "reason": ""
+    },
+    {
+      "name": "reference-payload-integrity",
+      "status": "pass",
+      "message": "reference payload matches embedded fixtures byte-for-byte",
+      "reason": ""
+    },
+    {
+      "name": "registry-integrity",
+      "status": "pass",
+      "message": "registry integrity OK",
+      "reason": ""
+    },
+    {
+      "name": "key-consistency",
+      "status": "skip",
+      "message": "cannot load .well-known/polis: open $SITES/wk-missing/.well-known/polis: no such file or directory",
+      "reason": "F3 content-aware integrity — divergence between .polis/keys/id_ed25519.pub and .well-known/polis.public_key silently breaks signature verification; the resolution is operator-trust-dependent and not auto-remediable"
+    },
+    {
+      "name": "bundle-path-integrity",
+      "status": "skip",
+      "message": "cannot load .well-known/polis: open $SITES/wk-missing/.well-known/polis: no such file or directory",
+      "reason": "F4 content-aware integrity — every declared bundle's path must point at a readable bundle.json; pub.polis.core is repairable to a canonical path, non-core bundles need operator review. F9 — empty author_name breaks identity for rendered pages"
+    },
+    {
+      "name": "bundle-declarations",
+      "status": "pass",
+      "message": "bundle declarations complete and match defaults",
+      "reason": ""
+    },
+    {
+      "name": "index-entries",
+      "status": "pass",
+      "message": "all index entries valid",
+      "reason": ""
+    },
+    {
+      "name": "blessed-following-structure",
+      "status": "pass",
+      "message": "blessed.json + following.json structure OK (or absent)",
+      "reason": ""
+    },
+    {
+      "name": "foreign-content-in-public-path",
+      "status": "pass",
+      "message": "no foreign content in public paths",
+      "reason": ""
+    },
+    {
+      "name": "stale-scoped-feed",
+      "status": "pass",
+      "message": "no DS directory",
+      "reason": ""
+    },
+    {
+      "name": "stale-feed-viewed-at",
+      "status": "pass",
+      "message": "no DS directory",
+      "reason": ""
+    },
+    {
+      "name": "orphaned-theme-dirs",
+      "status": "pass",
+      "message": "no orphan theme dirs",
+      "reason": ""
+    }
+  ],
+  "apply": [
+    {
+      "name": "author-field-migration",
+      "status": "skip",
+      "message": "cannot read .well-known/polis",
+      "reason": "CLI renamed the .well-known/polis `author` field to `author_name` for consistency with content-type field naming"
+    },
+    {
+      "name": "policy-content-converge",
+      "status": "pass",
+      "message": "Policy files match canonical templates",
+      "reason": ""
+    },
+    {
+      "name": "dm-directories",
+      "status": "pass",
+      "message": "DM directories present with correct permissions",
+      "reason": ""
+    },
+    {
+      "name": "webapp-view-mode",
+      "status": "pass",
+      "message": "No deprecated view_mode key",
+      "reason": ""
+    },
+    {
+      "name": "reference-payload-integrity",
+      "status": "pass",
+      "message": "reference payload matches embedded fixtures byte-for-byte",
+      "reason": ""
+    },
+    {
+      "name": "registry-integrity",
+      "status": "pass",
+      "message": "registry integrity OK",
+      "reason": ""
+    },
+    {
+      "name": "key-consistency",
+      "status": "skip",
+      "message": "cannot load .well-known/polis: open $SITES/wk-missing/.well-known/polis: no such file or directory",
+      "reason": "F3 content-aware integrity — divergence between .polis/keys/id_ed25519.pub and .well-known/polis.public_key silently breaks signature verification; the resolution is operator-trust-dependent and not auto-remediable"
+    },
+    {
+      "name": "bundle-path-integrity",
+      "status": "skip",
+      "message": "cannot load .well-known/polis: open $SITES/wk-missing/.well-known/polis: no such file or directory",
+      "reason": "F4 content-aware integrity — every declared bundle's path must point at a readable bundle.json; pub.polis.core is repairable to a canonical path, non-core bundles need operator review. F9 — empty author_name breaks identity for rendered pages"
+    },
+    {
+      "name": "bundle-declarations",
+      "status": "pass",
+      "message": "bundle declarations complete and match defaults",
+      "reason": ""
+    },
+    {
+      "name": "index-entries",
+      "status": "pass",
+      "message": "all index entries valid",
+      "reason": ""
+    },
+    {
+      "name": "blessed-following-structure",
+      "status": "pass",
+      "message": "blessed.json + following.json structure OK (or absent)",
+      "reason": ""
+    },
+    {
+      "name": "foreign-content-in-public-path",
+      "status": "pass",
+      "message": "no foreign content in public paths",
+      "reason": ""
+    },
+    {
+      "name": "stale-scoped-feed",
+      "status": "pass",
+      "message": "no DS directory",
+      "reason": ""
+    },
+    {
+      "name": "stale-feed-viewed-at",
+      "status": "pass",
+      "message": "no DS directory",
+      "reason": ""
+    },
+    {
+      "name": "orphaned-theme-dirs",
+      "status": "pass",
+      "message": "no orphan theme dirs",
+      "reason": ""
+    }
+  ]
+}

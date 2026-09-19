@@ -1,5 +1,5 @@
 {
-  "$comment": "CANONICAL PQL vocabulary. Single source of truth for ALL parsers (JS: webapp/internal/webui/www/pql.js; Go: cli-go/pkg/pql; TS: discovery-service/core/pql.ts). Each parser embeds/loads this file so the grammar can never drift. The spec prose lives in docs/general/pql.md; this file is the machine-readable form. Golden fixtures that all three parsers assert against: docs/general/pql-golden.jsonl.",
+  "$comment": "CANONICAL PQL vocabulary. Single source of truth for ALL parsers (JS: webapp/internal/webui/www/pql.js; Go: cli-go/pkg/pql; TS: discovery-service/core/pql.ts). Each parser embeds/loads this file so the grammar can never drift. The spec prose lives in docs/general/reference/pql.md; this file is the machine-readable form. Golden fixtures that all three parsers assert against: docs/general/reference/pql-golden.jsonl.",
   "version": "pql.v1",
 
   "grammar": "qualifier type relation scope [modifier]",

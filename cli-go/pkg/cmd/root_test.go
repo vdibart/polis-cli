@@ -63,14 +63,15 @@ func TestPrintUsage(t *testing.T) {
 		t.Error("Expected usage to mention --json flag")
 	}
 
-	// Verify init options are listed
+	// Verify init options are listed — the flags handleInit defines. The
+	// path flags (--keys-dir, --posts-dir, …) are bash-only and must not be
+	// advertised here; TestHelp_AdvertisesOnlyFormsTheHandlersAccept guards that.
 	initOptions := []string{
 		"--site-title",
-		"--keys-dir",
-		"--posts-dir",
-		"--comments-dir",
-		"--snippets-dir",
-		"--versions-dir",
+		"--author",
+		"--email",
+		"--theme",
+		"--license",
 	}
 	for _, opt := range initOptions {
 		if !strings.Contains(output, opt) {

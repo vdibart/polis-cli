@@ -814,11 +814,11 @@ func TestCacheManager_PruneByType_AnnouncementsDoNotDisplacePosts(t *testing.T) 
 	cm := NewCacheManager(dir, testDiscoveryDomain)
 
 	cm.SaveConfig(&FeedConfig{
-		StalenessMinutes: 15,
-		MaxPosts:         3,
-		MaxComments:      2,
-		MaxAnnouncements: 2,
-		MaxAgeDays:       90,
+		StalenessMinutes:    15,
+		MaxPosts:            3,
+		MaxComments:         2,
+		MaxAnnouncements:    2,
+		MaxAgeDays:          90,
 		MaxAnnouncementDays: 14,
 	})
 
@@ -875,7 +875,7 @@ func TestCacheManager_PruneByType_AnnouncementAgeShorter(t *testing.T) {
 
 	now := time.Now()
 	recentDate := now.Add(-1 * time.Hour).UTC().Format(time.RFC3339)
-	oldPostDate := now.AddDate(0, 0, -30).UTC().Format(time.RFC3339)       // 30 days: within 90-day post limit
+	oldPostDate := now.AddDate(0, 0, -30).UTC().Format(time.RFC3339)         // 30 days: within 90-day post limit
 	oldAnnouncementDate := now.AddDate(0, 0, -20).UTC().Format(time.RFC3339) // 20 days: beyond 14-day announcement limit
 
 	cm.MergeItems([]FeedItem{
@@ -1299,11 +1299,11 @@ func TestCacheManager_UpdateExcerpts(t *testing.T) {
 
 // TestCacheManager_UpdateExcerpts_RaceFreeWithMerge — sanity-check the
 // race scenario the API was designed to fix. Sequence:
-//   1. Background goroutine reads cache snapshot.
-//   2. Concurrent goroutine merges new items.
-//   3. Background goroutine writes excerpts via UpdateExcerpts.
-//   4. Final cache should contain BOTH the merged items AND the
-//      background goroutine's excerpts. No new items lost.
+//  1. Background goroutine reads cache snapshot.
+//  2. Concurrent goroutine merges new items.
+//  3. Background goroutine writes excerpts via UpdateExcerpts.
+//  4. Final cache should contain BOTH the merged items AND the
+//     background goroutine's excerpts. No new items lost.
 //
 // Pre-fix (SaveItems): the background goroutine's SaveItems(items)
 // would overwrite the cache with its older snapshot, losing the
@@ -1371,9 +1371,12 @@ func TestList_OversizeLine_Skipped(t *testing.T) {
 	cm := NewCacheManager(tempDir, "default")
 
 	// Seed a tiny valid item.
+	// Clock-relative: a hardcoded date here would be pruned by MaxAgeDays once
+	// the calendar moved past it, which is exactly what happened to this test.
+	// See fixtures_test.go.
 	valid := FeedItem{
 		Type: "post", Title: "Valid", URL: "posts/v.md",
-		Published: "2026-05-18T00:00:00Z",
+		Published: tsDaysAgo(1),
 		AuthorURL: "https://a.pub", AuthorDomain: "a.pub",
 	}
 	if _, err := cm.MergeItems([]FeedItem{valid}); err != nil {
@@ -1399,7 +1402,8 @@ func TestList_OversizeLine_Skipped(t *testing.T) {
 	// this. We can't easily get this through MergeItems because
 	// MergeItems re-reads + re-writes (which would hit the same
 	// scanner bug) — so append directly.
-	valid2 := `{"type":"post","title":"After","url":"posts/a.md","published":"2026-05-18T01:00:00Z","author_url":"https://a.pub","author_domain":"a.pub"}` + "\n"
+	valid2 := `{"type":"post","title":"After","url":"posts/a.md","published":"` + tsDaysAgoPlus(1, time.Hour) +
+		`","author_url":"https://a.pub","author_domain":"a.pub"}` + "\n"
 	f, _ = os.OpenFile(cachePath, os.O_APPEND|os.O_WRONLY, 0644)
 	f.WriteString(valid2)
 	f.Close()

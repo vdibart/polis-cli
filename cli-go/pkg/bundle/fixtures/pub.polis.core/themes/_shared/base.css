@@ -582,6 +582,110 @@ body {
     margin-bottom: 0.5rem;
 }
 
+/* Bio / about pull-quotes.  The <blockquote class="site-quote"> +
+   <cite class="site-attr"> convention is authored by hand in
+   site/snippets/about.md and is used across sites — but until now only
+   stardust.css styled it, so every other theme fell through to the browser
+   default (blockquote { margin: 1em 40px }): indented, upright, and visibly
+   misaligned against the site name and handle above it.
+   ⚠️ NO left border and NO left padding — a rule here competes with the v4
+   timeline thread running down the same column.
+   Themes may still override; stardust does. */
+.site-bio blockquote,
+.site-bio .site-quote {
+    margin: 0 0 0.7em;
+    padding-left: 0;
+    border-left: none;
+    font-family: var(--font-serif, Georgia, serif);
+    font-style: italic;
+    font-size: 0.92rem;
+    line-height: 1.55;
+    color: var(--color-text-soft, inherit);
+}
+
+.site-bio .site-attr {
+    display: block;                 /* <cite> is inline by default */
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--color-text-muted, rgba(128, 128, 128, 0.85));
+}
+
+/* Undo the shape's bio clamp so both quotes and the attribution show in full —
+   an attribution cut off by a fade reads as a broken citation. */
+.site-bio-wrap .site-bio {
+    max-height: none;
+    -webkit-mask-image: none;
+    mask-image: none;
+}
+
+/* Thematic break.  Markdown "---" emits a bare <hr>, and nothing styled one,
+   so an author separating two halves of a post got the browser's default
+   inset 3D groove — heavier and narrower than anything else on the page.
+   A hairline the width of the measure reads as a pause instead of a divider. */
+.content-body hr,
+.entry-content hr {
+    border: 0;
+    border-top: 1px solid var(--color-border, rgba(128, 128, 128, 0.25));
+    margin: 1.6rem 0 1.4rem;
+}
+
+/* Markdown tables.  GFM emits a bare <table> with no class, so these have to
+   match the element — and until now nothing did: the only table rule in this
+   file was .license-table, so every table an author wrote rendered as raw
+   browser default (no borders, no padding, serif fallback).  Covers both
+   shapes: .content-body is v3, .entry-content is v4.
+   ⚠️ Scoped to post content on purpose — never bare `table`, which would
+   reach the license pages and any table a theme ships. */
+.content-body table,
+.entry-content table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-family: var(--font-body, inherit);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    display: block;
+    overflow-x: auto;
+}
+
+.content-body thead th,
+.entry-content thead th {
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0 0.75rem 0.45rem 0;
+    color: var(--color-text-muted, rgba(128, 128, 128, 0.85));
+    border-bottom: 1px solid var(--color-border, rgba(128, 128, 128, 0.3));
+}
+
+.content-body tbody th,
+.content-body tbody td,
+.entry-content tbody th,
+.entry-content tbody td {
+    text-align: left;
+    vertical-align: top;
+    padding: 0.55rem 0.75rem 0.55rem 0;
+    border-bottom: 1px solid var(--color-border, rgba(128, 128, 128, 0.18));
+}
+
+/* A first column that labels its row reads as a heading, not as data. */
+.content-body tbody td:first-child,
+.content-body tbody th:first-child,
+.entry-content tbody td:first-child,
+.entry-content tbody th:first-child {
+    color: var(--color-text-muted, rgba(128, 128, 128, 0.85));
+    font-weight: 400;
+}
+
+.content-body tbody tr:last-child td,
+.content-body tbody tr:last-child th,
+.entry-content tbody tr:last-child td,
+.entry-content tbody tr:last-child th {
+    border-bottom: none;
+}
+
 /* ============================================
    COMMENT CTA (inline in comments header)
    ============================================ */
@@ -791,4 +895,125 @@ body {
         padding-left: 0.75rem;
         padding-right: 0.75rem;
     }
+}
+
+/* ── Per-post licence notice (blog shape) ───────────────────────────────
+   Mirrors the stream shape's .entry-license. Explicit anchor color: a new
+   element inside an <a> renders default blue in any theme that doesn't
+   reset it. */
+.entry-license {
+    margin: 20px 0 0;
+    padding-top: 14px;
+    border-top: 1px solid var(--color-border, rgba(128, 128, 128, 0.18));
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--color-text-muted, rgba(128, 128, 128, 0.85));
+}
+
+.entry-license-link,
+.entry-license-link:visited {
+    color: var(--color-text-muted, rgba(128, 128, 128, 0.9));
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.entry-license-link:hover,
+.entry-license-link:focus-visible {
+    color: var(--color-accent, var(--accent, #d8a060));
+}
+
+.entry-license-asserted {
+    opacity: 0.75;
+}
+
+/* ── Licence pages (site terms + profile explanation) ───────────────────
+   Two of the three human-readable licence surfaces. Generated from the
+   signed licence.json, never hand-authored.
+
+   Anchors carry explicit colors: elements added inside <a> render default
+   blue in any theme that doesn't reset them. */
+.license-page .license-body {
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: 2rem 0 4rem;
+}
+
+.license-title {
+    font-size: 1.6rem;
+    line-height: 1.25;
+    margin: 0 0 0.5rem;
+}
+
+.license-lede {
+    font-size: 1.05rem;
+    line-height: 1.55;
+    margin: 0 0 2rem;
+    color: var(--color-text-muted, rgba(128, 128, 128, 0.95));
+}
+
+.license-body h2 {
+    font-size: 1.05rem;
+    margin: 2rem 0 0.75rem;
+}
+
+.license-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    margin: 0 0 1rem;
+    display: block;
+    overflow-x: auto;
+}
+
+.license-table th,
+.license-table td {
+    text-align: left;
+    padding: 0.5rem 0.75rem 0.5rem 0;
+    border-bottom: 1px solid var(--color-border, rgba(128, 128, 128, 0.18));
+    vertical-align: top;
+}
+
+.license-table th {
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted, rgba(128, 128, 128, 0.85));
+}
+
+.license-note {
+    display: block;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    margin-top: 0.15rem;
+    color: var(--color-text-muted, rgba(128, 128, 128, 0.8));
+}
+
+.license-layers {
+    font-size: 0.88rem;
+    line-height: 1.55;
+    color: var(--color-text-muted, rgba(128, 128, 128, 0.9));
+}
+
+/* Non-retroactivity is the one thing on this page a reader must not skim
+   past: without it, current terms get read as covering the archive. */
+.license-heading-warn {
+    margin-top: 2.5rem;
+}
+
+.license-nonretro {
+    padding: 0.9rem 1.1rem;
+    border-left: 3px solid var(--color-accent, var(--accent, #d8a060));
+    background: var(--color-surface-raised, rgba(128, 128, 128, 0.07));
+    line-height: 1.6;
+}
+
+.license-sources {
+    line-height: 1.7;
+    padding-left: 1.2rem;
+}
+
+.license-body a,
+.license-body a:visited {
+    color: var(--color-accent, var(--accent, #d8a060));
 }

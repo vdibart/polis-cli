@@ -2,11 +2,19 @@ package verify
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/sitecheck"
 )
 
 func TestParseFrontmatter_Valid(t *testing.T) {
@@ -178,17 +186,17 @@ func TestVerifyHash(t *testing.T) {
 	})
 }
 
-func TestExtractContentToSign(t *testing.T) {
+func TestMarkdownSigningBase(t *testing.T) {
 	// The signer (publish.PublishPost) signs the canonicalized frontmatter
 	// WITHOUT the signature line, INCLUDING the closing "---" and the full body.
-	// extractContentToSign must reproduce exactly those bytes by dropping only
+	// signing.MarkdownSigningBase must reproduce exactly those bytes by dropping only
 	// the signature line. A previous version stopped at the signature line,
 	// discarding the closing "---" and body; these tests guard against that
 	// regression (see TestVerifySignature_PublishRoundTrip for the e2e proof).
 
 	t.Run("drops only the signature line, keeps closing --- and body", func(t *testing.T) {
 		content := "---\ntitle: Hello\nsignature: SIGDATA\n---\nBody\n"
-		result := signing.ContentToSign(content, false)
+		result := signing.MarkdownSigningBase(content, signing.TypePost)
 		expected := "---\ntitle: Hello\n---\nBody\n"
 		if result != expected {
 			t.Errorf("expected %q, got %q", expected, result)
@@ -197,7 +205,7 @@ func TestExtractContentToSign(t *testing.T) {
 
 	t.Run("canonicalizes when no signature present", func(t *testing.T) {
 		content := "---\ntitle: Hello\n---\nBody\n"
-		result := signing.ContentToSign(content, false)
+		result := signing.MarkdownSigningBase(content, signing.TypePost)
 		expected := "---\ntitle: Hello\n---\nBody\n"
 		if result != expected {
 			t.Errorf("expected %q, got %q", expected, result)
@@ -206,7 +214,7 @@ func TestExtractContentToSign(t *testing.T) {
 
 	t.Run("keeps fields and body that follow the signature line", func(t *testing.T) {
 		content := "---\ntitle: Test Post\npublished: 2024-01-01\ncurrent-version: sha256:abc\nsignature: MYSIG\ngenerator: polis-cli/0.50.0\n---\nContent body\n"
-		result := signing.ContentToSign(content, false)
+		result := signing.MarkdownSigningBase(content, signing.TypePost)
 		if !strings.Contains(result, "title: Test Post") {
 			t.Error("expected result to contain title")
 		}
@@ -238,21 +246,21 @@ func TestVerifySignature(t *testing.T) {
 
 	t.Run("invalid signature", func(t *testing.T) {
 		content := "---\ntitle: Test\nsignature: BADSIG\n---\nBody\n"
-		result := verifySignature(content, publicKey, "BADSIG", false)
+		result := verifySignature(content, publicKey, "BADSIG", signing.TypePost)
 		if result.Status != "invalid" {
 			t.Errorf("expected 'invalid', got %q", result.Status)
 		}
 	})
 
 	t.Run("missing signature", func(t *testing.T) {
-		result := verifySignature("content", publicKey, "", false)
+		result := verifySignature("content", publicKey, "", signing.TypePost)
 		if result.Status != "missing" {
 			t.Errorf("expected 'missing', got %q", result.Status)
 		}
 	})
 
 	t.Run("missing public key", func(t *testing.T) {
-		result := verifySignature("content", "", "somesig", false)
+		result := verifySignature("content", "", "somesig", signing.TypePost)
 		if result.Status != "error" {
 			t.Errorf("expected 'error', got %q", result.Status)
 		}
@@ -323,7 +331,7 @@ func TestVerifySignature_PublishRoundTrip(t *testing.T) {
 		body := "First paragraph of the post.\n\nSecond paragraph with more text.\n"
 		published, bareSig := signPublishStyle(t, privPEM, body)
 
-		result := verifySignature(published, publicKey, bareSig, false)
+		result := verifySignature(published, publicKey, bareSig, signing.TypePost)
 		if result.Status != "valid" {
 			t.Errorf("expected 'valid', got %q: %s", result.Status, result.Message)
 		}
@@ -333,7 +341,7 @@ func TestVerifySignature_PublishRoundTrip(t *testing.T) {
 		body := "The web is already federated. Every domain is a node.\n"
 		published, bareSig := signPublishStyle(t, privPEM, body)
 
-		result := verifySignature(published, publicKey, bareSig, false)
+		result := verifySignature(published, publicKey, bareSig, signing.TypePost)
 		if result.Status != "valid" {
 			t.Errorf("expected 'valid', got %q: %s", result.Status, result.Message)
 		}
@@ -344,7 +352,7 @@ func TestVerifySignature_PublishRoundTrip(t *testing.T) {
 		published, bareSig := signPublishStyle(t, privPEM, body)
 		tampered := strings.Replace(published, "Original content", "Tampered content", 1)
 
-		result := verifySignature(tampered, publicKey, bareSig, false)
+		result := verifySignature(tampered, publicKey, bareSig, signing.TypePost)
 		if result.Status != "invalid" {
 			t.Errorf("expected 'invalid' for tampered body, got %q", result.Status)
 		}
@@ -355,7 +363,7 @@ func TestVerifySignature_PublishRoundTrip(t *testing.T) {
 		published, bareSig := signPublishStyle(t, privPEM, body)
 		tampered := strings.Replace(published, "title: Test Post", "title: Forged Title", 1)
 
-		result := verifySignature(tampered, publicKey, bareSig, false)
+		result := verifySignature(tampered, publicKey, bareSig, signing.TypePost)
 		if result.Status != "invalid" {
 			t.Errorf("expected 'invalid' for tampered frontmatter, got %q", result.Status)
 		}
@@ -365,8 +373,8 @@ func TestVerifySignature_PublishRoundTrip(t *testing.T) {
 // TestVerifySignature_CommentRoundTrip is the regression test for the
 // blessed-comment cache bug: comments inject an `author:` line into the written
 // frontmatter AFTER signing (comment.go), so the verifier MUST drop that line
-// (isComment=true) to reproduce the signed bytes. Verifying a comment with the
-// post extraction (isComment=false) leaves the unsigned author line in the hash
+// (signing.TypeComment) to reproduce the signed bytes. Verifying a comment with the
+// post extraction (signing.TypePost) leaves the unsigned author line in the hash
 // and wrongly reports INVALID — which made the cache refuse every blessed comment.
 func TestVerifySignature_CommentRoundTrip(t *testing.T) {
 	privPEM, pubSSH, err := signing.GenerateKeypair()
@@ -407,10 +415,96 @@ func TestVerifySignature_CommentRoundTrip(t *testing.T) {
 		"signature: " + bareSig + "\n" +
 		"---\n\n" + canonicalBody
 
-	if res := verifySignature(published, publicKey, bareSig, true); res.Status != "valid" {
-		t.Errorf("comment must verify valid with isComment=true, got %q: %s", res.Status, res.Message)
+	if res := verifySignature(published, publicKey, bareSig, signing.TypeComment); res.Status != "valid" {
+		t.Errorf("comment must verify valid under signing.TypeComment, got %q: %s", res.Status, res.Message)
 	}
-	if res := verifySignature(published, publicKey, bareSig, false); res.Status != "invalid" {
-		t.Errorf("the injected author line must break post-style verification (isComment=false), got %q", res.Status)
+	if res := verifySignature(published, publicKey, bareSig, signing.TypePost); res.Status != "invalid" {
+		t.Errorf("the injected author line must break post-style verification (signing.TypePost), got %q", res.Status)
 	}
+}
+
+// SIGNET epic 31 — `polis preview` and the blessed-comment cache verify through
+// pkg/verify, so a post signed before a rotation must verify here too, and the
+// result must say a RETIRED key did it (D4).
+func TestVerifyContent_APostSignedBeforeARotationVerifiesAfterIt(t *testing.T) {
+	gen := func() ([]byte, string) {
+		priv, pub, err := signing.GenerateKeypair()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return priv, strings.TrimSpace(string(pub))
+	}
+	k0priv, k0pub := gen()
+	_, k1pub := gen()
+
+	// A real site directory, really rotated, so the served chain is the seam's.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".well-known"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	wk, _ := json.Marshal(map[string]string{"public_key": k0pub, "created": "2026-03-03T05:35:09Z", "author_name": "A"})
+	if err := os.WriteFile(filepath.Join(dir, ".well-known", "polis"), wk, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := site.WriteGenesisKeyHistory(dir); err != nil {
+		t.Fatal(err)
+	}
+	// httptest serves on 127.0.0.1:<port>; rotation signs the port-less host.
+	canonical, err := discovery.MakeKeyRotationCanonicalJSON("127.0.0.1", k0pub, k1pub, "2026-09-15T10:22:03Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition, err := signing.SignContent(canonical, k0priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := site.RecordKeyRotation(dir, k1pub, transition, "2026-09-15T10:22:03Z"); err != nil {
+		t.Fatal(err)
+	}
+	served, err := os.ReadFile(filepath.Join(dir, ".well-known", "polis"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	post := signPublishStyleAt(t, k0priv, "Written before the rotation.\n", "2026-05-01T09:00:00Z")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/polis":
+			w.Write(served)
+		case "/posts/old.md":
+			w.Write([]byte(post))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	result, err := VerifyContent(ts.URL + "/posts/old.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Signature.Status != "valid" {
+		t.Fatalf("a post signed before the rotation must verify: %+v", result.Signature)
+	}
+	k := result.Signature.Key
+	if k == nil || k.Source != sitecheck.KeyRetired || k.Epoch == nil || *k.Epoch != 0 || k.ClaimedSigningTime != "2026-05-01T09:00:00Z" {
+		t.Fatalf("the result must say a retired key at epoch 0 verified it, got %+v", k)
+	}
+	if !strings.Contains(result.Signature.Message, "RETIRED key") || !strings.Contains(result.Signature.Message, "CLAIMED signing time") {
+		t.Errorf("the message must not read like a current-key pass, got %q", result.Signature.Message)
+	}
+}
+
+// signPublishStyleAt is signPublishStyle claiming a chosen `published:`.
+func signPublishStyleAt(t *testing.T, privPEM []byte, body, published string) string {
+	t.Helper()
+	canonicalBody := signing.CanonicalizeContent(body)
+	unsigned := "---\ntitle: Test Post\npublished: " + published + "\ngenerator: polis-cli-go/test\ncurrent-version: sha256:0000\n---"
+	sigPEM, err := signing.SignContent([]byte(signing.CanonicalizeContent(unsigned+"\n\n"+canonicalBody)), privPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := bareBase64FromPEM(sigPEM)
+	signed := "---\ntitle: Test Post\npublished: " + published + "\ngenerator: polis-cli-go/test\ncurrent-version: sha256:0000\nsignature: " + sig + "\n---"
+	return signed + "\n\n" + canonicalBody + "\n"
 }

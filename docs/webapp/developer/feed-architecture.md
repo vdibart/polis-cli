@@ -1,24 +1,30 @@
 # Feed Architecture
 
-The feed is a **local-first** system that caches content from the Discovery Service (DS) stream into JSONL files on disk. All filtering, read tracking, and rendering happens client-side against the local cache.
+*For* [Contributors](../../README.md#contributing-to-polis) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [Webapp](../README.md) — *Code* [`cli-go/pkg/feed`](../../../cli-go/pkg/feed) — *See also* [tour](../../handbook/ds-to-stream.md)
+
+The feed is a **local-first** system that caches content from the Discovery Service (DS) stream into JSONL files on disk. Filtering and read tracking run in the local webapp against that cache — no DS round trip at read time — and the browser renders the result.
 
 ## Data Flow
 
 ```
 DS Stream (live events)
-  ↓ syncFeed() — filtered by event types + actor domains
-FeedHandler.Process() — policy eval, event→item conversion
+  ↓ unified sync (runUnifiedSync → feedSyncHandler) — event types + followed/involved domains
+FeedHandler.Process() — event→item conversion, self-event filter
   ↓
 CacheManager.MergeItems() — dedup, sort, per-type prune
   ↓
 state/pub.polis.feed.jsonl (JSONL cache)
-  ↓ /api/feed/grouped — read from cache, group, respond
-Frontend — client-side time/type/read filtering
+  ↓ GET /pql/<sentence> → stream-items pipeline (handlers_stream.go) — scope, type, time and read filters, pagination
+v4 stream controller (stream.js) — renders the page
 ```
+
+`FeedHandler` does not evaluate policy: policy governs network engagement (DM acceptance, blessing decisions), not what the feed displays.
+
+The pre-v4 endpoints `/api/feed` and `/api/feed/grouped` are still registered, but the SPA no longer calls them.
 
 ## Scopes
 
-The feed supports four scopes. Two are **materialized** (separate JSONL + cursor) and two are **runtime-filtered** (predicates over the network cache):
+The feed cache has four scope keys. Two are **materialized** (separate JSONL + cursor) and two are **runtime-filtered** (predicates over the network cache). The stream's PQL scopes map onto them: `my-network` → `network`, `all-polis` → `global` unioned with `network`, `my-mutuals` / `@handle` → author filters over `network`. `my` (and `@<your own handle>`) does not read the cache at all: the unified sync skips self-authored events, so the stream loads your own content from disk instead.
 
 | Scope | Type | Actors | File | Cursor Key |
 |---|---|---|---|---|
@@ -29,7 +35,7 @@ The feed supports four scopes. Two are **materialized** (separate JSONL + cursor
 
 All materialized files live in `.polis/ds/<ds-domain>/pub.polis.core/state/`.
 
-**Why two types?** The `global` scope contains posts from domains you don't follow — data outside the unified sync boundary that can't be derived from the network cache. `followers` and `me` are strict subsets of the network cache (every follower's or self-authored post is already fetched by the unified sync). Materializing subsets as separate files would duplicate data, drift cursors, and create a new file for every future filter type. Runtime filtering over ~500 cached items is sub-millisecond.
+**Why two types?** The `global` scope contains posts from domains you don't follow — data outside the unified sync boundary that can't be derived from the network cache. `followers` is a strict subset of the network cache. ⚠️ `me` is kept as a runtime filter for the pre-v4 `/api/feed`, but the unified sync skips self-authored events, so over the cache it returns nothing — the v4 stream reads your own content from disk instead. Materializing subsets as separate files would duplicate data, drift cursors, and create a new file for every future filter type. Runtime filtering over ~500 cached items is sub-millisecond.
 
 Runtime-filtered scopes use `FilterOptions.AuthorDomains` in `ListFiltered()` to restrict results by author domain at read time. The `feedFilterForScope()` helper populates this from the follower list or own domain.
 
@@ -54,14 +60,13 @@ The `event_type` preserves the original DS event type for rendering. The `type` 
 
 Each content type has its own count cap and age limit, preventing announcement storms from displacing posts/comments.
 
-### Default Retention by Scope
+### Default Retention
 
-| Scope | Posts | Comments | Announcements | Post/Comment MaxAge | Announcement MaxAge |
-|---|---|---|---|---|---|
-| network | 300 | 150 | 50 | 90 days | 14 days |
-| global | 100 | 50 | 30 | 7 days | 2 days |
+| Posts | Comments | Announcements | Post/Comment MaxAge | Announcement MaxAge |
+|---|---|---|---|---|
+| 300 | 150 | 50 | 90 days | 14 days |
 
-Runtime-filtered scopes (`followers`, `me`) inherit the network scope's retention since they read from the same cache.
+The limits come from `DefaultFeedConfig()`, overridable in `config/feed.json`. ⚠️ Both materialized caches read the **same** config file, so `global` has the same limits as `network` — there is no tighter global retention. Its volume is bounded instead by the 24-hour query window below. Runtime-filtered scopes (`followers`, `me`) read the network cache, so its retention applies.
 
 ### Why Per-Type Limits
 
@@ -79,11 +84,9 @@ A scope needs its own JSONL file only if it contains data **outside the unified 
 
 Scopes that are subsets of the network cache (followers, me, and any future filters like "mutual follows" or text search) are runtime filters applied at read time against the single network cache. This prevents file proliferation: new filter types require zero new state files, just a predicate in `FilterOptions`.
 
-### "All of polis" restricted to "last hour" and "last day"
+### "All of polis" restricted to the last 24 hours
 
-Unbounded global queries could fetch thousands of events on a busy DS. Bounding by time keeps volume predictable and sync fast. The DS `created_after` parameter provides a server-side timestamp floor to avoid paginating through old history.
-
-Expand later based on user feedback.
+Unbounded global queries could fetch thousands of events on a busy DS. Bounding by time keeps volume predictable and sync fast. The global sync sets the DS `created_after` parameter to 24 hours ago, a server-side timestamp floor that avoids paginating through old history.
 
 ### Activity stream consolidated into feed cache
 
@@ -97,13 +100,11 @@ This created real problems:
 
 Resolution: all event types now flow through the feed cache, giving uniform filtering, read tracking, and scope support. `/api/activity` was removed.
 
-### Global scope syncs lazily
+### Global scope syncs on demand
 
-Background sync (30-second ticker) is reserved for the primary "my network" scope. The global scope syncs **on-demand only** — when the user switches to that scope and the cache is stale. This reduces DS query volume and avoids syncing data the user may never look at. Runtime-filtered scopes (followers, me) use the unified sync since their data is already in the network cache.
+Background sync (30-second ticker, only while a browser tab is connected) is reserved for the network cache, through the unified sync. The global scope syncs **on demand only** — through `syncFeedScoped("global")`, whose one caller is `POST /api/feed/refresh?scope=global`. This reduces DS query volume and avoids syncing data the user may never look at. Runtime-filtered scopes (followers, me) use the unified sync since their data is already in the network cache.
 
-### Global scope uses tighter retention
-
-Global content is exploratory, not the user's primary feed. Tighter bounds (100 posts, 50 comments, 30 announcements, 7-day/2-day age limits) keep disk usage and sync volume low.
+⚠️ The v4 SPA does not call `/api/feed/refresh`, so nothing in the current UI triggers a global sync; `all polis` serves whatever the global cache already holds, unioned with the network cache.
 
 ## Key Files
 
@@ -113,8 +114,9 @@ Global content is exploratory, not the user's primary feed. Tighter bounds (100 
 | `cli-go/pkg/feed/handler.go` | FeedHandler: DS events → FeedItems |
 | `cli-go/pkg/feed/feed.go` | FeedItem struct |
 | `webapp/internal/server/server.go` | syncFeed(), syncFeedScoped(), feedCacheForScope(), feedFilterForScope() |
-| `webapp/internal/server/sync.go` | feedSyncHandler (unified sync) |
-| `webapp/internal/server/handlers.go` | /api/feed, /api/feed/grouped, /api/feed/refresh |
+| `webapp/internal/server/sync.go` | runUnifiedSync(), feedSyncHandler |
+| `webapp/internal/server/handlers_stream.go` | stream-items pipeline behind `/pql/`, streamCacheForScope() |
+| `webapp/internal/server/handlers.go` | /api/feed, /api/feed/grouped (pre-v4), /api/feed/refresh, /api/feed/read |
 
 ## DS Index
 

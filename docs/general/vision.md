@@ -39,6 +39,7 @@ An identity only matters if ordinary people can actually hold it. So a key and a
 
 But "easy" must never quietly mean "we kept your keys and you didn't notice." The promise has to hold all the way down the ladder of convenience — identical content, identical signatures, identical export — whether you read RFCs for fun or just want to write.
 
+<a id="part-2-experience-principles"></a>
 ### Meeting everyone where they are
 
 Ownership that only a developer can claim isn't ownership; it's a hobby. So the same guarantee has to reach the careful tinkerer and the person who only wants to post, through a ladder of convenience that never changes what's underneath.
@@ -59,7 +60,7 @@ What keeps that true is a short list of things that must hold at *every* level, 
 
 1. **Content is always markdown files** — never a proprietary format or a database schema.
 2. **Signatures are always the same format** — made the same way, verified the same way.
-3. **Keys are always exportable** — even custodied keys can be downloaded, rotated, and content re-signed.
+3. **Keys are always exportable** — even custodied keys can be downloaded and rotated, and a post, comment or record signed under an old key keeps verifying through the site's published key history.
 4. **Export produces identical output** — a Level 7 export is byte-for-byte usable at Level 1.
 5. **The CLI is always the foundation** — every layer above is calling it, or faithfully reimplementing it.
 
@@ -119,8 +120,6 @@ It's fair to wonder, at the end of a vision like this, whether it's only a visio
 **The pieces already exist.** Nothing here waits on an invention. Ed25519 signatures, static web hosting, domains, `.well-known` files, ordinary HTTPS — decades old, boring, everywhere. Polis is an assembly of proven parts, not a bet on a breakthrough.
 
 **Every layer can be replaced — including us.** A promise of ownership is worth exactly the ease of walking away from it, and polis's is structural. The binary, the authoring app, where your files live, how your key is held, the rendering, the theme, the host, the discovery service, the reader — each is a separate concern with a swappable default. Don't like the app? The files are plain markdown. Don't like the host? They're static files; move them. Don't like the discovery service? Run your own, or none. Don't like polis? Take your key and your content and go. What *can't* be swapped is a small, fixed contract — Ed25519 signatures over canonical content, an identity file at `.well-known/polis`, a published namespace, a discovery API, the minimum shape of the core content types — and everything else is a choice. That is what makes the ownership real instead of rhetorical: you don't own what you can't leave with. (The full layer-by-layer account is in [snap-off-architecture.md](concepts/snap-off-architecture.md).)
-
-**It pays for itself without locking you in.** The line is simple, and everything else defends it: everything below the ownership bar is free and open; above it, paid services buy convenience, never permission. Always free — your content, the baseline tools (CLI and webapp), the protocol spec, the data format, and the ability to crawl your own content and switch providers. Potentially paid — managed hosting, domain provisioning, a real-time firehose, advanced analytics, specialized discovery. The test for which side a thing falls on: *can a technical user do it for free?* If yes, the paid version is convenience, and you are never locked in.
 
 ---
 

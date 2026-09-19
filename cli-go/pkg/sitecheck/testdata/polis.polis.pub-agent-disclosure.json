@@ -1,0 +1,18 @@
+{
+  "type": "pub.polis.attestation",
+  "issuer": "https://polis.polis.pub",
+  "predicate": "pub.polis.attestation.agent-disclosure",
+  "subject": {
+    "type": "identity",
+    "id": "https://polis.polis.pub"
+  },
+  "payload": {
+    "authority": "operator",
+    "expected_actions": "pub.polis.actor.registered,pub.polis.actor.reregistered,pub.polis.actor.withdrawn,pub.polis.attestation.agent-disclosure,pub.polis.attestation.withdrawal",
+    "operator": "polis.polis.pub"
+  },
+  "asserted": "2026-09-13T02:07:18Z",
+  "generator": "polis-cli-go/0.67.0",
+  "current_version": "sha256:411630ed319bf4dbab253dac6b72c6e4564f6c8f27b5cfebf0ef0fa445784f61",
+  "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgor/QKpWG1J8YCSw8/RE3\nVQgEnljxwstK1JCpTkWBO0cAAAAEZmlsZQAAAAAAAAAGc2hhNTEyAAAAUwAAAAtz\nc2gtZWQyNTUxOQAAAEClI7nwXG1M9rptOiahcdHIbW56tRDkEt5ulipI/fIrVI0A\n2o3pYCq5gF1kvmNazMFz58A/JIixeeFB32BV9WsP\n-----END SSH SIGNATURE-----\n"
+}

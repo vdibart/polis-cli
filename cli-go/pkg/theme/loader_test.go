@@ -572,9 +572,6 @@ func installStreamShapeFixture(t *testing.T, dataDir string) {
 	os.MkdirAll(filepath.Join(dir, "snippets"), 0755)
 	os.WriteFile(filepath.Join(dir, "stream.html"), []byte("<html>V4 STREAM</html>"), 0644)
 	os.WriteFile(filepath.Join(dir, "stream-post.html"), []byte("<a>V4 POST</a>"), 0644)
-	os.WriteFile(filepath.Join(dir, "stream-comment.html"), []byte("<div>V4 COMMENT</div>"), 0644)
-	os.WriteFile(filepath.Join(dir, "stream-profile.html"), []byte("<a>V4 PROFILE</a>"), 0644)
-	os.WriteFile(filepath.Join(dir, "stream-mention.html"), []byte("<a>V4 MENTION</a>"), 0644)
 }
 
 func TestLoadShape_StreamLoadsTemplates(t *testing.T) {
@@ -591,15 +588,6 @@ func TestLoadShape_StreamLoadsTemplates(t *testing.T) {
 	if templates.StreamPost != "<a>V4 POST</a>" {
 		t.Errorf("StreamPost = %q, want shape-dir content", templates.StreamPost)
 	}
-	if templates.StreamComment != "<div>V4 COMMENT</div>" {
-		t.Errorf("StreamComment = %q, want shape-dir content", templates.StreamComment)
-	}
-	if templates.StreamProfile != "<a>V4 PROFILE</a>" {
-		t.Errorf("StreamProfile = %q, want shape-dir content", templates.StreamProfile)
-	}
-	if templates.StreamMention != "<a>V4 MENTION</a>" {
-		t.Errorf("StreamMention = %q, want shape-dir content", templates.StreamMention)
-	}
 	// v3 fields must NOT be populated when shape is v4.
 	if templates.Post != "" || templates.Comment != "" || templates.Index != "" {
 		t.Errorf("v4 LoadShape populated v3 fields (Post/Comment/Index) — want empty")
@@ -615,8 +603,7 @@ func TestLoadShape_BlogDoesNotLoadStreamFields(t *testing.T) {
 		t.Fatalf("LoadShape(v3): %v", err)
 	}
 	// stream fields must stay empty on blog shape.
-	if templates.Stream != "" || templates.StreamPost != "" || templates.StreamComment != "" ||
-		templates.StreamProfile != "" || templates.StreamMention != "" {
+	if templates.Stream != "" || templates.StreamPost != "" {
 		t.Errorf("v3 LoadShape populated stream fields — want empty; got Stream=%q", templates.Stream)
 	}
 	// v3 required fields populated.

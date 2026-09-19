@@ -2,6 +2,11 @@ version: 2
 
 project_name: polis
 
+# The stamp is X.Y.Z+<private shortsha>: POLIS_SOURCE_SHA is the private commit the release was synced from,
+# so a binary traces to its source. A snapshot build (the dry run) takes its version from POLIS_VERSION.
+snapshot:
+  version_template: "{{ .Env.POLIS_VERSION }}"
+
 before:
   hooks:
     - go mod tidy -C cli-go
@@ -26,7 +31,7 @@ builds:
       - goos: windows
         goarch: arm64
     ldflags:
-      - -s -w -X main.Version={{.Version}}
+      - -s -w -X main.Version={{.Version}}+{{.Env.POLIS_SOURCE_SHA}}
 
   # Webapp-only binary (~11 MB)
   - id: polis-server
@@ -46,7 +51,7 @@ builds:
       - goos: windows
         goarch: arm64
     ldflags:
-      - -s -w -X main.Version={{.Version}}
+      - -s -w -X main.Version={{.Version}}+{{.Env.POLIS_SOURCE_SHA}}
 
   # Bundled binary: CLI + serve command (~12 MB)
   - id: polis-full
@@ -66,7 +71,7 @@ builds:
       - goos: windows
         goarch: arm64
     ldflags:
-      - -s -w -X main.Version={{.Version}}
+      - -s -w -X main.Version={{.Version}}+{{.Env.POLIS_SOURCE_SHA}}
 
   # Tailor: site migration & health tool for self-hosters (~10 MB)
   - id: tailor
@@ -86,7 +91,7 @@ builds:
       - goos: windows
         goarch: arm64
     ldflags:
-      - -s -w -X main.Version={{.Version}}
+      - -s -w -X main.Version={{.Version}}+{{.Env.POLIS_SOURCE_SHA}}
 
 archives:
   # CLI-only archives
@@ -157,7 +162,7 @@ release:
   prerelease: auto
   mode: replace
   header: |
-    ## Polis v{{ .Tag }}
+    ## Polis {{ .Tag }}
 
     ### Four Distribution Targets
 

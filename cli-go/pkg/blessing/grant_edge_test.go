@@ -173,8 +173,7 @@ func TestGrant_HookFailure_DoesNotBlockGrant(t *testing.T) {
 // SaveBlessedComments amplified the race: first goroutine's rename
 // consumed the only tmp file, every subsequent rename failed with
 // ENOENT). The fix replaces the racy read-modify-write with a
-// serialized critical section. See `plans/operational-hardening.md`
-// R22 for the diagnosis + fix shape.
+// serialized critical section (metadata.blessedMu).
 func TestGrant_ConcurrentGrants_AllEntriesLandInIndex(t *testing.T) {
 	siteDir := t.TempDir()
 	privPEM, _, _ := signing.GenerateKeypair()

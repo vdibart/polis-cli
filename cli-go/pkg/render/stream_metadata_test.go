@@ -54,8 +54,8 @@ func TestBuildOGDescription_StripMarkdown(t *testing.T) {
 
 func TestAttrEscape_HandlesSpecials(t *testing.T) {
 	cases := map[string]string{
-		`Hello "world"`:  `Hello &#34;world&#34;`,
-		`a < b & c > d`:  `a &lt; b &amp; c &gt; d`,
+		`Hello "world"`:      `Hello &#34;world&#34;`,
+		`a < b & c > d`:      `a &lt; b &amp; c &gt; d`,
 		`<script>x</script>`: `&lt;script&gt;x&lt;/script&gt;`,
 	}
 	for in, want := range cases {
@@ -71,6 +71,7 @@ func TestBuildBlogPostingJSONLD_ValidJSON(t *testing.T) {
 	jsonLD, err := buildBlogPostingJSONLD(
 		"My Post", "2026-04-23T12:00:00Z", "2026-04-23T12:00:00Z",
 		"Alice", "https://alice.example", "https://alice.example/posts/20260423/my-post.html",
+		"https://alice.example/license",
 	)
 	if err != nil {
 		t.Fatalf("buildBlogPostingJSONLD: %v", err)
@@ -86,6 +87,31 @@ func TestBuildBlogPostingJSONLD_ValidJSON(t *testing.T) {
 	if probe["headline"] != "My Post" {
 		t.Errorf("headline = %v", probe["headline"])
 	}
+	// schema.org/CreativeWork license — the shape most ingestion pipelines
+	// already parse.
+	if probe["license"] != "https://alice.example/license" {
+		t.Errorf("license = %v, want the post's terms URL", probe["license"])
+	}
+}
+
+func TestBuildBlogPostingJSONLD_OmitsLicenseWhenUnstated(t *testing.T) {
+	// An empty license field would read as an assertion that there are no
+	// terms. Absent means unstated, and JSON-LD has to say that by omission.
+	jsonLD, err := buildBlogPostingJSONLD(
+		"My Post", "2026-04-23T12:00:00Z", "2026-04-23T12:00:00Z",
+		"Alice", "https://alice.example", "https://alice.example/post.html", "",
+	)
+	if err != nil {
+		t.Fatalf("buildBlogPostingJSONLD: %v", err)
+	}
+	body := stripScriptTag(t, jsonLD)
+	var probe map[string]interface{}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := probe["license"]; present {
+		t.Error("JSON-LD carries a license key for a work that states no terms")
+	}
 }
 
 func TestBuildBlogPostingJSONLD_DefensiveScriptEscape(t *testing.T) {
@@ -94,7 +120,7 @@ func TestBuildBlogPostingJSONLD_DefensiveScriptEscape(t *testing.T) {
 	jsonLD, err := buildBlogPostingJSONLD(
 		`Title with </script> embedded`,
 		"2026-04-23T12:00:00Z", "2026-04-23T12:00:00Z",
-		"Alice", "https://alice.example", "https://alice.example/post.html",
+		"Alice", "https://alice.example", "https://alice.example/post.html", "",
 	)
 	if err != nil {
 		t.Fatalf("buildBlogPostingJSONLD: %v", err)

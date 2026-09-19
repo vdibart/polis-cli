@@ -111,11 +111,11 @@ func newTestServer(t *testing.T, opts testSiteOpts) *httptest.Server {
 }
 
 type testSiteOpts struct {
-	indexEntries []remote.PublicIndexEntry
-	postContent  map[string]string // path -> content
-	blessedJSON  string
+	indexEntries  []remote.PublicIndexEntry
+	postContent   map[string]string // path -> content
+	blessedJSON   string
 	followingJSON string
-	indexError   bool
+	indexError    bool
 }
 
 func TestClone_SuccessfulFullClone(t *testing.T) {

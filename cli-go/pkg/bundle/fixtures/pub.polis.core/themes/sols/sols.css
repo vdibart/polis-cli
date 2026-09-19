@@ -60,13 +60,13 @@
     --filter-dark-underline: color-mix(in srgb, #d4829a 55%, transparent);
     --filter-dark-underline-hover: #d4829a;
     --filter-dark-identity: #d4829a;
-    --filter-dark-dot: color-mix(in srgb, #d4829a 50%, transparent);
+    --filter-dark-dot: #d4829a;
     --filter-light-text: #2a2030;
     --filter-light-text-hover: #15101c;
     --filter-light-underline: color-mix(in srgb, #a06078 55%, transparent);
     --filter-light-underline-hover: #a06078;
     --filter-light-identity: #a06078;
-    --filter-light-dot: color-mix(in srgb, #a06078 50%, transparent);
+    --filter-light-dot: #a06078;
 
     /* Timeline tokens — explicit overrides because --color-accent-soft is
        set to a solid pink (#e8a0b8) above, and stream.css's default
@@ -78,7 +78,7 @@
        the timeline reads consistent with the rest of the catalog.
        2026-05-18 user feedback. */
     --color-timeline-bar: color-mix(in srgb, var(--color-pink) 25%, transparent);
-    --color-timeline-dot: color-mix(in srgb, var(--color-pink) 50%, transparent);
+    --color-timeline-dot: var(--color-pink);
 
     /* Typography */
     --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;

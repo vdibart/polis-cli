@@ -1,16 +1,15 @@
-// Kind-agnostic cache contract (Rosie's substrate).
+// Kind-agnostic cache contract (the cache upkeep's substrate).
 //
-// WS-R1 (plans/rosie-cache-custodian-design.md) generalizes the concrete
-// blessed-comment cache (WS3 of plans/comment-registration-severe-bug.md) into
-// a kind-agnostic descriptor/registry contract, so future caches (avatar,
-// reply-context, feed) plug into the SAME machinery and Rosie never
+// This generalizes the concrete blessed-comment cache (blessed.go) into a
+// kind-agnostic descriptor/registry contract, so future caches (avatar,
+// reply-context, feed) plug into the SAME machinery and the upkeep never
 // special-cases a type. The blessed kind is the only descriptor registered
 // today (YAGNI) — adopting another cache is *registering a descriptor*, not
-// editing Rosie.
+// editing the upkeep.
 //
 // The anti-drift property: the real-time sync handlers ingest/evict THROUGH the
-// generic ops here, and Rosie's periodic backstop reconciles THROUGH the same
-// ops — one code path, two triggers, guaranteed not to drift.
+// generic ops here, and the periodic upkeep (Medic's, in the hosted service) reconciles
+// THROUGH the same ops — one code path, two triggers, guaranteed not to drift.
 package cache
 
 import (

@@ -7,7 +7,7 @@ import (
 
 // VerificationState tracks signature verification failures across sync cycles.
 type VerificationState struct {
-	DSFailures     DSFailureStats               `json:"ds_failures"`
+	DSFailures     DSFailureStats                `json:"ds_failures"`
 	AuthorFailures map[string]*AuthorFailureStat `json:"author_failures,omitempty"`
 }
 

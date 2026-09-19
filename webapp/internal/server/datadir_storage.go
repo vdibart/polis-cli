@@ -26,7 +26,7 @@ func NewDataDirStorage(dataDir string) *DataDirStorage {
 
 // StatPublicFile stats a file relative to the data directory. handle
 // is unused (single-tenant).
-func (s *DataDirStorage) StatPublicFile(_ , relativePath string) (fs.FileInfo, error) {
+func (s *DataDirStorage) StatPublicFile(_, relativePath string) (fs.FileInfo, error) {
 	return os.Stat(filepath.Join(s.DataDir, relativePath))
 }
 

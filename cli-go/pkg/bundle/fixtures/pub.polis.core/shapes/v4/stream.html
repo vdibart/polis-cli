@@ -1,3 +1,24 @@
+<!--! =========================================================================
+     POLIS · HANDBOOK TRAIL MARKER (preserved in rendered output via the `<!--!`
+     keep-bang; every other layout comment below is stripped for payload).
+
+     This page is an SSR "stream shape" artifact — stream.js hydrates it into an
+     infinity stream. The public per-post page and the owner SPA share one
+     entry-grammar, so keep this markup in lockstep with the JS renderers.
+
+     Developer trail (stream shape):
+       producer (SSR)  — stream.html + stream-post.html   (this template)
+       renderer (Go)   — cli-go/pkg/render/stream.go
+       consumer (JS)   — pub.polis.core/shapes/v4/stream.js   (hydration)
+       styling         — pub.polis.core/shapes/v4/stream.css  (+ active theme)
+       owner overlay   — webapp/internal/webui/www/owner-extras.js
+
+     Pull the thread (github.com/vdibart/polis-cli/blob/main/):
+       docs/general/concepts/infinity-stream.md  (why)
+       docs/general/reference/pql.md             (spec)
+       docs/handbook/url-as-filter.md            (tour)
+       AGENTS.md                                 (map)
+     ========================================================================= -->
 <!--
     Polis stream shape — per-post page template (the "stream shell").
 
@@ -95,6 +116,12 @@
     <meta name="twitter:description" content="{{og_description}}">
     <meta name="twitter:image" content="{{og_image_url}}">
     {{json_ld}}
+    <!-- Licence discovery. Generated from this post's OWN signed terms — the
+         ones it was published with, not the site's current ones — so a crawler
+         reading a March post sees March's terms. Empty when the author has
+         stated none: absent means unstated, which is a defined state, and an
+         empty assertion here would be worse than silence. -->
+    {{license_head}}
     <link rel="icon" type="image/svg+xml" href="{{favicon_path}}">
     <link rel="stylesheet" href="{{base_css_path}}">
     <link rel="stylesheet" href="{{css_path}}">
@@ -161,10 +188,10 @@
         to the chrome. Mobile collapses to single-column at ≤900px.
     -->
     <div class="layout">
-        <!-- LEFT COLUMN — sticky site-identity card. Avatar + name/handle in
-             a row, bio + stats + follow button below. Public per-post artifact
-             only; owner SPA's unified stream omits this when multiple authors
-             interleave. -->
+        <!-- LEFT COLUMN — sticky site-identity card. Avatar on top with
+             name/handle stacked beneath it, bio + stats + follow button below.
+             Public per-post artifact only; owner SPA's unified stream omits
+             this when multiple authors interleave. -->
         <aside class="layout-left">
             <div class="site-identity">
                 <div class="site-identity-row">
@@ -354,6 +381,15 @@
                              protocol marker so cross-tenant body extractors
                              don't see it. -->
                         <button class="post-body-toggle" type="button" aria-expanded="false" hidden>show more</button>
+                        <!-- Per-post terms — one of the three human-readable
+                             licence surfaces (the others are the site terms page
+                             and the versioned profile explanation). FROZEN: this
+                             describes what THIS post was signed with, never the
+                             author's current licence. Empty string when the work
+                             states no terms, so nothing renders. Sits OUTSIDE
+                             the .focus-content protocol marker so cross-tenant
+                             body extractors don't pull it into the body. -->
+                        {{license_notice}}
                         <!-- Comment indicator BELOW the post body (last in the
                              rail), left-aligned with the date / title / body and
                              ABOVE the comments panel — mirrors the JS renderPost

@@ -8,6 +8,8 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
@@ -22,6 +24,10 @@ import (
 // from existing tenants' .well-known/polis — see stripBundleActiveFields.
 type BundleEntry struct {
 	Path string `json:"path"`
+
+	// Extra carries members of this entry the struct does not model, so a
+	// round-trip keeps them. See WellKnown.Extra.
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // AvatarConfig represents custom avatar styling for a polis site.
@@ -32,6 +38,10 @@ type AvatarConfig struct {
 	BorderW      int    `json:"border_w,omitempty"`
 	Pattern      string `json:"pattern,omitempty"`
 	PatternColor string `json:"pattern_color,omitempty"`
+
+	// Extra carries members of the avatar block the struct does not model, so
+	// a round-trip keeps them. See WellKnown.Extra.
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // WellKnown represents the .well-known/polis v2 file structure.
@@ -48,9 +58,91 @@ type WellKnown struct {
 	Avatar     *AvatarConfig          `json:"avatar,omitempty"`
 	Created    string                 `json:"created"`
 	Bundles    map[string]BundleEntry `json:"bundles,omitempty"`
+
+	// License is the POINTER to this site's signed licence document — the
+	// site-relative or absolute URL of license.json. Discovery is by pointer
+	// and never by convention: `dir` and `mount` are per-type declarations in
+	// bundle.json, so a site's layout is user-configurable and a hardcoded
+	// /license path would contradict that. Move the file, update the pointer,
+	// and every consumer follows.
+	//
+	// POINTER ONLY — the terms are never inlined here. Inlining would make
+	// .well-known/polis a second copy that can diverge from the signed source,
+	// and a pointer can only go stale in location, never in content. The fast
+	// path for a crawler that wants terms in one fetch is robots.txt.
+	//
+	// Unsigned, like everything else in this document: TLS and the web PKI bind
+	// it, exactly as they do for public_key. What is signed is what it points
+	// at. (A rewritten pointer could redirect a crawler to permissive terms —
+	// which is why it matters that Judge already snapshots this file.)
+	//
+	// Absent when the author has stated no terms, consistent with
+	// absent = unstated.
+	License string `json:"license,omitempty"`
+
+	// ActorRegistry is the POINTER to this site's signed actor registry — the
+	// site-relative or absolute URL of registry.json. Same rule as License and
+	// for the same reason: `dir` and `mount` are per-type declarations in
+	// bundle.json, so a hardcoded /actors path would contradict a decision
+	// already made.
+	//
+	// ⭐ THIS IS HOW A STRANGER REACHES THE REGISTRY, and it is why the
+	// operator site does not need to live at the root domain. Nobody finds the
+	// registry by guessing an operator's hostname — they arrive from an ACTOR:
+	// judge.polis.pub/.well-known/polis names its operator, and the operator's
+	// own .well-known/polis points here.
+	//
+	// Absent when the site runs no actors, which is every ordinary tenant. The
+	// type is declared for everyone and present on some, exactly as with
+	// licences — a self-hoster running their own actors is an operator and
+	// publishes their own.
+	ActorRegistry string `json:"actor_registry,omitempty"`
+
+	// Agents is the POINTER to this site's generated agents.json — the
+	// projection of its grant records: which user agents work for this site's
+	// owner, and under which record (Signet epic 11). Same rule as License.
+	//
+	// ⚠️ A PROJECTION'S ADDRESS, never cited in a signature: an agent's acts cite
+	// the grant record's own URL. Absent when the site has never had a grant.
+	//
+	// A writer that round-trips this struct must not drop the pointer —
+	// TestEveryWellKnownWriterPreservesEveryMember.
+	Agents string `json:"agents,omitempty"`
+
+	// Operator names the party accountable for this site's actor, as a domain —
+	// the operator site whose registry should list this one. Present only on an
+	// ACTOR site, and it is the first half of the two-hop discovery above.
+	//
+	// ⚠️ Unsigned, like everything else in this document. It is a claim BY the
+	// actor site that must be corroborated: fetch the named operator's registry
+	// and check this domain is actually in it. An actor site claiming an
+	// operator that does not list it is exactly the lookalike case, and it is
+	// caught by the operator's list, never by this field.
+	Operator string `json:"operator,omitempty"`
+
+	// Extra holds every member of the document this struct does not model,
+	// verbatim, and MarshalJSON writes them back.
+	//
+	// ⛔ THIS IS WHAT MAKES A STRUCT ROUND-TRIP LOSSLESS, and it is deliberately
+	// general. public_key_history, public_key_messages and witnesses live here —
+	// not as declared fields — because the failure was never "these three keys"
+	// but "a key the struct does not model", and declaring today's three would
+	// leave the fourth to the next author. The first of them cannot be restored
+	// by anyone once dropped: a chain carries signatures by keys that no longer
+	// exist. TestEveryWellKnownWriterPreservesEveryMember.
+	//
+	// ⚠️ .well-known/polis is UNSIGNED, which is why preserving is right here.
+	// The six signed JSON types answer the same problem the opposite way — they
+	// refuse to rewrite (pkg/signing.GuardRewrite) — because re-emitting a member
+	// under the user's signature would assert bytes this build cannot read.
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // LoadWellKnown reads and parses the .well-known/polis file from a site directory.
+//
+// ⭐ Every member the struct does not model lands in Extra (see
+// WellKnown.UnmarshalJSON), so the value returned here can be mutated and handed
+// straight back to SaveWellKnown without losing anything.
 func LoadWellKnown(siteDir string) (*WellKnown, error) {
 	path := filepath.Join(siteDir, ".well-known", "polis")
 	data, err := os.ReadFile(path)
@@ -94,75 +186,308 @@ func LoadWellKnownRaw(siteDir string) (map[string]interface{}, error) {
 
 // SaveWellKnown writes the .well-known/polis file to a site directory.
 // Atomic: a crash mid-write cannot leave the trust anchor truncated.
-func SaveWellKnown(siteDir string, wk *WellKnown) error {
-	dir := filepath.Join(siteDir, ".well-known")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
+//
+// ⭐ IT IS LOSSLESS BY CONSTRUCTION, and it is the ONE struct writer. A
+// LoadWellKnown → mutate → SaveWellKnown round-trip keeps every member the
+// struct does not model (public_key_history, public_key_messages, witnesses,
+// and whatever the next author adds), because they ride in Extra. There used
+// to be a second, "preserving" save beside a lossy one; two functions where one
+// is a trap was the bug, so there is one.
+//
+// ⛔ It still REFUSES to drop or alter public_key, public_key_history or
+// public_key_messages unless the caller names the change in allow — see
+// checkIdentityWrite. That is the backstop for a caller that builds a WellKnown
+// from scratch over an existing site, which Extra cannot help.
+func SaveWellKnown(siteDir string, wk *WellKnown, allow ...IdentityChange) error {
 	data, err := json.MarshalIndent(wk, "", "  ")
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
-
-	return atomicfile.WriteFile(filepath.Join(dir, "polis"), data, 0644)
+	return writeWellKnown(siteDir, append(data, '\n'), allow)
 }
 
 // SaveWellKnownRaw writes a raw map back to .well-known/polis with
-// pretty-printing. Use when callers mutate a raw JSON map (to preserve fields
-// not modeled by the WellKnown struct) and need to write it back atomically.
-// Mirrors SaveWellKnown but takes a map; the on-disk format is identical.
-func SaveWellKnownRaw(siteDir string, raw map[string]interface{}) error {
-	dir := filepath.Join(siteDir, ".well-known")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
+// pretty-printing. Use when callers mutate a raw JSON map and need to write it
+// back atomically. The on-disk format is identical to SaveWellKnown's — both
+// emit members in sorted order — so switching between them never re-hashes an
+// untouched file.
+//
+// Subject to the same identity-change refusal as SaveWellKnown.
+func SaveWellKnownRaw(siteDir string, raw map[string]interface{}, allow ...IdentityChange) error {
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
-
-	return atomicfile.WriteFile(filepath.Join(dir, "polis"), data, 0644)
+	return writeWellKnown(siteDir, append(data, '\n'), allow)
 }
 
-// SaveWellKnownPreserving writes the modeled fields of wk WITHOUT dropping any
-// field already on disk that the WellKnown struct does not model — most
-// importantly `public_key_messages` (the published DM messages key). It loads the
-// current file as a raw map, overlays the struct's fields onto it, and writes the
-// merged map back.
+// IdentityChange names a member of .well-known/polis whose loss or alteration
+// is not recoverable by a heal, and which a write must therefore INTEND.
+type IdentityChange string
+
+const (
+	// ChangePublicKey — only a key rotation changes the published key.
+	ChangePublicKey IdentityChange = "public_key"
+	// ChangeKeyHistory — only a rotation appends to the chain. ⛔ Nothing may
+	// drop it: its entries carry signatures by keys that no longer exist.
+	ChangeKeyHistory IdentityChange = "public_key_history"
+	// ChangeMessagesKey — republishing the DM messages-key block after a
+	// keyring change or an identity rotation.
+	ChangeMessagesKey IdentityChange = "public_key_messages"
+)
+
+// protectedIdentityMembers is the D5 list, in a stable order for messages.
+var protectedIdentityMembers = []IdentityChange{ChangePublicKey, ChangeKeyHistory, ChangeMessagesKey}
+
+// IdentityChangeError is the refusal: the write would have dropped or altered a
+// protected member without saying it meant to.
+type IdentityChangeError struct {
+	Dropped []string
+	Altered []string
+}
+
+func (e *IdentityChangeError) Error() string {
+	var parts []string
+	if len(e.Dropped) > 0 {
+		parts = append(parts, "drop "+strings.Join(e.Dropped, ", "))
+	}
+	if len(e.Altered) > 0 {
+		parts = append(parts, "alter "+strings.Join(e.Altered, ", "))
+	}
+	return "refusing to write .well-known/polis: the new document would " + strings.Join(parts, " and ") +
+		" — a write that means to change these must say so, and one that does not is losing identity a heal cannot restore"
+}
+
+// writeWellKnown is the single point every Go writer of .well-known/polis goes
+// through: the D5 content check, then the atomic write.
+func writeWellKnown(siteDir string, data []byte, allow []IdentityChange) error {
+	dir := filepath.Join(siteDir, ".well-known")
+	path := filepath.Join(dir, "polis")
+	if err := checkIdentityWrite(path, data, allow); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	return atomicfile.WriteFile(path, data, 0644)
+}
+
+// checkIdentityWrite validates BEFORE the write, not after (D5). Writes are
+// already atomic, which answers "can a crash truncate it"; this answers "is
+// what we are about to write still the same identity".
 //
-// Use this for any partial update of an EXISTING site's identity (avatar,
-// author_name, etc.). The plain SaveWellKnown serializes only the struct, so a
-// LoadWellKnown→mutate-one-field→SaveWellKnown round-trip silently erases
-// public_key_messages — which leaves the tenant unable to RECEIVE DMs and, after
-// the next Judge sweep, fires judge.alert.wellknown_change. (Identity-key
-// rotation is the one case this does NOT fix: the preserved block is signed by
-// the OLD key, so rotation must re-publish the block, not merely preserve it.)
-func SaveWellKnownPreserving(siteDir string, wk *WellKnown) error {
+// ⚠️ ADDING a protected member is always allowed — genesis provisioning and a
+// first messages-key publish are additions, and a site that never had the
+// member has nothing to lose. What needs intent is dropping one or changing
+// its value.
+//
+// ⚠️ A present-but-unparseable file is refused outright: nothing can be said
+// about what the write would lose, and Go writers reach this only by building a
+// document from scratch — every load path fails on the same bytes first.
+func checkIdentityWrite(path string, next []byte, allow []IdentityChange) error {
+	current, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var before map[string]json.RawMessage
+	if err := json.Unmarshal(current, &before); err != nil {
+		return fmt.Errorf("refusing to overwrite .well-known/polis: the existing file does not parse (%v), so what this write would lose cannot be checked — fix the file first", err)
+	}
+	var after map[string]json.RawMessage
+	if err := json.Unmarshal(next, &after); err != nil {
+		return err
+	}
+	allowed := map[IdentityChange]bool{}
+	for _, a := range allow {
+		allowed[a] = true
+	}
+	refusal := &IdentityChangeError{}
+	for _, member := range protectedIdentityMembers {
+		old, had := before[string(member)]
+		if !had || allowed[member] {
+			continue
+		}
+		neu, has := after[string(member)]
+		if !has {
+			refusal.Dropped = append(refusal.Dropped, string(member))
+			continue
+		}
+		if !sameJSON(old, neu) {
+			refusal.Altered = append(refusal.Altered, string(member))
+		}
+	}
+	if len(refusal.Dropped) > 0 || len(refusal.Altered) > 0 {
+		return refusal
+	}
+	return nil
+}
+
+// sameJSON compares two JSON values by meaning, not bytes: indentation and
+// member order differ between a hand-edited file and a Go write of the same
+// content, and neither is a change of identity.
+func sameJSON(a, b json.RawMessage) bool {
+	var av, bv interface{}
+	if json.Unmarshal(a, &av) != nil || json.Unmarshal(b, &bv) != nil {
+		return false
+	}
+	return reflect.DeepEqual(av, bv)
+}
+
+// SetLicensePointer writes (or, with an empty pointer, removes) the `license`
+// field in .well-known/polis.
+//
+// Goes through the raw map rather than the struct so that clearing the pointer
+// actually deletes the key — the struct's omitempty would round-trip an empty
+// string to the same absent state, but only for a caller who remembered to load
+// and re-save every other field. Withdrawal has to be as reliable as statement.
+//
+// ⚠️ This changes .well-known/polis, which Judge snapshots (WellKnownSnapshot,
+// sha256). Judge will report the change once and then re-baseline, so callers
+// should emit an event at the same moment: the finding is then correlatable as
+// PROVISIONING rather than looking like tampering. This only ever fires on a
+// deliberate act by the site owner — existing sites are never touched until
+// they choose.
+func SetLicensePointer(siteDir, pointer string) error {
 	raw, err := LoadWellKnownRaw(siteDir)
 	if err != nil {
 		return err
 	}
 	if raw == nil {
-		raw = map[string]interface{}{}
+		return fmt.Errorf(".well-known/polis not found in %s", siteDir)
 	}
-	// Marshal the struct to a map and overlay: modeled fields take the struct's
-	// (updated) value; unmodeled on-disk fields (public_key_messages, …) persist.
-	b, err := json.Marshal(wk)
+	if pointer == "" {
+		delete(raw, "license")
+	} else {
+		raw["license"] = pointer
+	}
+	return SaveWellKnownRaw(siteDir, raw)
+}
+
+// LicensePointer returns the site's licence pointer, or "" if it has stated no
+// terms. Absent is a defined state, not an error.
+func LicensePointer(siteDir string) string {
+	raw, err := LoadWellKnownRaw(siteDir)
+	if err != nil || raw == nil {
+		return ""
+	}
+	v, _ := raw["license"].(string)
+	return v
+}
+
+// SetActorRegistryPointer writes (or, with an empty pointer, removes) the
+// `actor_registry` field in .well-known/polis.
+//
+// Goes through the raw map for the same reason SetLicensePointer does: clearing
+// the pointer must actually delete the key, and withdrawal has to be as
+// reliable as statement. An operator that stops running actors and leaves a
+// pointer to a deleted file publishes a 404 where a fact used to be.
+//
+// ⚠️ This changes .well-known/polis, which Judge snapshots. Judge reports the
+// change once and re-baselines, so emit an event at the same moment or the
+// finding reads as tampering rather than provisioning.
+func SetActorRegistryPointer(siteDir, pointer string) error {
+	return setWellKnownPointer(siteDir, "actor_registry", pointer)
+}
+
+// ActorRegistryPointer returns the site's actor-registry pointer, or "" if it
+// publishes none. Absent is a defined state — most sites run no actors — and
+// not an error.
+func ActorRegistryPointer(siteDir string) string {
+	raw, err := LoadWellKnownRaw(siteDir)
+	if err != nil || raw == nil {
+		return ""
+	}
+	v, _ := raw["actor_registry"].(string)
+	return v
+}
+
+// SetOperatorPointer writes (or clears) the `operator` field — the domain of
+// the party accountable for this actor site.
+func SetOperatorPointer(siteDir, operatorDomain string) error {
+	return setWellKnownPointer(siteDir, "operator", operatorDomain)
+}
+
+// OperatorPointer returns the operator domain an actor site claims, or "".
+//
+// ⛔ It is a CLAIM, not a fact. Corroborate it by fetching that operator's
+// registry and checking this domain is listed; a site can say anything about
+// who runs it.
+func OperatorPointer(siteDir string) string {
+	raw, err := LoadWellKnownRaw(siteDir)
+	if err != nil || raw == nil {
+		return ""
+	}
+	v, _ := raw["operator"].(string)
+	return v
+}
+
+// SetAgentsPointer writes (or, with an empty value, removes) the `agents`
+// pointer. Written only by pkg/agent's projection refresh.
+//
+// ⚠️ This changes .well-known/polis, which Patrol (mtime) and Judge (hash)
+// track. The caller writes it only when the value changes, and emits the grant
+// event that makes the finding correlatable as provisioning.
+func SetAgentsPointer(siteDir, pointer string) error {
+	return setWellKnownPointer(siteDir, "agents", pointer)
+}
+
+// AgentsPointer returns the site's `agents` pointer, or "" when it has none.
+func AgentsPointer(siteDir string) string {
+	raw, err := LoadWellKnownRaw(siteDir)
+	if err != nil || raw == nil {
+		return ""
+	}
+	v, _ := raw["agents"].(string)
+	return v
+}
+
+func setWellKnownPointer(siteDir, key, value string) error {
+	raw, err := LoadWellKnownRaw(siteDir)
 	if err != nil {
 		return err
 	}
-	var modeled map[string]interface{}
-	if err := json.Unmarshal(b, &modeled); err != nil {
-		return err
+	if raw == nil {
+		return fmt.Errorf(".well-known/polis not found in %s", siteDir)
 	}
-	for k, v := range modeled {
-		raw[k] = v
+	if value == "" {
+		delete(raw, key)
+	} else {
+		raw[key] = value
 	}
 	return SaveWellKnownRaw(siteDir, raw)
+}
+
+// MigrateActiveThemeToRegistry moves the legacy active_theme field from
+// .well-known/polis into the tenant's registry.json and strips it from the
+// identity document.
+//
+// One-time migration. Idempotent — re-running on an already-migrated site is a
+// no-op, and so is a missing or unparseable well-known.
+//
+// ⭐ The registry half is bundle.AdoptLegacyActiveTheme; the well-known half
+// goes through SaveWellKnownRaw, the guarded writer. It lives here rather than
+// in pkg/bundle because site imports bundle, and the package that owns a file
+// is the one that writes it.
+func MigrateActiveThemeToRegistry(siteDir string) error {
+	raw, err := LoadWellKnownRaw(siteDir)
+	if err != nil || raw == nil {
+		return nil // missing or unparseable; can't safely migrate
+	}
+	legacyTheme, _ := raw["active_theme"].(string)
+	if legacyTheme == "" {
+		return nil // already migrated or never set
+	}
+	if err := bundle.AdoptLegacyActiveTheme(siteDir, legacyTheme); err != nil {
+		return err
+	}
+	delete(raw, "active_theme")
+	if err := SaveWellKnownRaw(siteDir, raw); err != nil {
+		return fmt.Errorf("rewrite well-known: %w", err)
+	}
+	return nil
 }
 
 // LegacyPrivateContentExists reports whether the tenant has any private state

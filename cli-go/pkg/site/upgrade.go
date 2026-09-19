@@ -21,8 +21,7 @@ import (
 // LIVE content. Errors during stat/remove are swallowed (best-effort
 // remediation pattern); next call re-attempts.
 //
-// Closes R17-2 (operational-hardening.md). Pairs with the no-archive
-// emission contract test in cli-go/pkg/render/stream_test.go which
+// Pairs with the no-archive emission contract test in cli-go/pkg/render/stream_test.go which
 // locks down the emission side; this helper handles the cleanup side
 // for tenants that have legacy files on disk.
 //

@@ -119,10 +119,14 @@ Reference for parsing JSON responses from polis CLI commands.
     "count": 3,
     "requests": [
       {
-        "id": 1,
+        "id": "42",
         "comment_url": "https://alice.com/comments/reply.md",
-        "author": "alice@example.com",
-        "timestamp": "2026-01-05T12:00:00Z"
+        "comment_version": "sha256:f4bac5d0...",
+        "in_reply_to": "https://bob.com/posts/hello.md",
+        "root_post": "",
+        "author": "alice.com",
+        "timestamp": "",
+        "created_at": "2026-01-05T12:00:00Z"
       }
     ]
   }
@@ -457,8 +461,8 @@ polis --json post post.md | jq -r '.data.content_hash'
 # Get pending request count
 polis --json blessing requests | jq -r '.data.count'
 
-# List all request IDs
-polis --json blessing requests | jq -r '.data.requests[].id'
+# List the comment versions to grant or deny (grant takes a version, not an id)
+polis --json blessing requests | jq -r '.data.requests[].comment_version'
 
 # Check for error
 result=$(polis --json post test.md 2>&1)

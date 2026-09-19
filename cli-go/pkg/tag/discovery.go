@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
@@ -35,6 +37,16 @@ type DiscoveryConfig struct {
 	DataDir      string
 	HTTPClient   *http.Client // Optional shared HTTP client for connection pooling
 	Generator    string       // e.g. "polis-cli-go/0.59.0" — used in tag metadata
+
+	// RequestID is sent as X-Request-Id so a tag sync can be joined to the
+	// caller's own log line.
+	//
+	// ⛔ THIS PATH SENT NO CORRELATION ID AT ALL until Signet epic 04. Every
+	// other cross-boundary call in polis carries one (an X-Request-Id header),
+	// and Chaplain's tag repair was the one that did
+	// not — so a DS row written by a repair could not be tied to the sweep that
+	// wrote it. Empty means "no caller id", which is what the CLI passes.
+	RequestID string
 }
 
 // resolveDiscoveryConfig returns the effective config: explicit if provided,
@@ -102,7 +114,7 @@ func SyncTag(dataDir string, tf *TagFile, privateKey []byte, dsCfg *DiscoveryCon
 		if dsCfg != nil {
 			hc = dsCfg.HTTPClient
 		}
-		if err := registerTagRow(dsURL, dsKey, url, tf.Version, author, meta, privateKey, hc); err != nil {
+		if err := registerTagRow(checkDir, dsURL, dsKey, url, tf.Version, author, meta, privateKey, hc, requestIDOf(dsCfg)); err != nil {
 			return fmt.Errorf("register tag target %q: %w", target.URI, err)
 		}
 	}
@@ -139,13 +151,13 @@ func UnregisterTarget(tagName, targetURI string, privateKey []byte, dsCfg *Disco
 	if dsCfg != nil {
 		hc = dsCfg.HTTPClient
 	}
-	return softDeleteRow(dsURL, dsKey, url, privateKey, hc)
+	return softDeleteRow(dsURL, dsKey, url, privateKey, hc, requestIDOf(dsCfg))
 }
 
 // registerTagRow registers a single tag+target row with the DS. The payload
 // is signed with the tenant's private key and the signature is included so
 // the DS can verify against the tenant's well-known public key.
-func registerTagRow(dsURL, dsKey, contentURL, version, author string, meta map[string]string, privateKey []byte, hc *http.Client) error {
+func registerTagRow(siteDir, dsURL, dsKey, contentURL, version, author string, meta map[string]string, privateKey []byte, hc *http.Client, requestID string) error {
 	// Metadata must be map[string]interface{} so it matches the canonical
 	// payload structure the DS builds (DS uses generic object shape).
 	metaIface := make(map[string]interface{}, len(meta))
@@ -189,6 +201,9 @@ func registerTagRow(dsURL, dsKey, contentURL, version, author string, meta map[s
 	if dsKey != "" {
 		req.Header.Set("Authorization", "Bearer "+dsKey)
 	}
+	if requestID != "" {
+		req.Header.Set("X-Request-Id", requestID)
+	}
 
 	if hc == nil {
 		hc = &http.Client{Timeout: 10 * time.Second}
@@ -203,11 +218,34 @@ func registerTagRow(dsURL, dsKey, contentURL, version, author string, meta map[s
 		return fmt.Errorf("DS returned HTTP %d", resp.StatusCode)
 	}
 
+	// SIGNET epic 32: publish the DS's countersignature under the row's URL. A
+	// tag file's `version` hashes the whole signed file, so the witness binds all
+	// of it. Never fails the registration.
+	if siteDir != "" {
+		var result struct {
+			Witness *discovery.Witness `json:"witness"`
+		}
+		if data, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20)); rerr == nil &&
+			json.Unmarshal(data, &result) == nil && result.Witness != nil {
+			if _, werr := site.RecordWitness(siteDir, contentURL, *result.Witness); werr != nil {
+				fmt.Printf("[!] Could not publish the discovery service's witness for %s: %v\n", contentURL, werr)
+			}
+		}
+	}
+
 	return nil
 }
 
+// requestIDOf returns the caller's correlation id, or "" when there is none.
+func requestIDOf(cfg *DiscoveryConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.RequestID
+}
+
 // softDeleteRow marks a content row as removed in the DS.
-func softDeleteRow(dsURL, dsKey, contentURL string, privateKey []byte, hc *http.Client) error {
+func softDeleteRow(dsURL, dsKey, contentURL string, privateKey []byte, hc *http.Client, requestID string) error {
 	payload := map[string]interface{}{
 		"type":   "pub.polis.tag",
 		"url":    contentURL,
@@ -226,6 +264,9 @@ func softDeleteRow(dsURL, dsKey, contentURL string, privateKey []byte, hc *http.
 	req.Header.Set("Content-Type", "application/json")
 	if dsKey != "" {
 		req.Header.Set("Authorization", "Bearer "+dsKey)
+	}
+	if requestID != "" {
+		req.Header.Set("X-Request-Id", requestID)
 	}
 
 	if hc == nil {

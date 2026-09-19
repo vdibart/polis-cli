@@ -10,11 +10,11 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/style.css">
     <link rel="stylesheet" href="/nav-themes.css">
-    <!-- v4 stream shape CSS (step-06/6.a). Served from cli-go/pkg/bundle/fixtures
+    <!-- v4 stream shape CSS. Served from cli-go/pkg/bundle/fixtures
          via /bundle-assets/ route so SPA stays in lockstep with the public
          shape's structural rules (.layout, .stream, .entry, etc.). -->
     <link rel="stylesheet" href="/bundle-assets/pub.polis.core/shapes/v4/stream.css">
-    <!-- R18-21: FOUC theme-bootstrap moved to external /theme-boot.js so
+    <!-- FOUC theme-bootstrap moved to external /theme-boot.js so
          the admin SPA can ship a strict CSP without 'unsafe-inline' on
          inline scripts. Loaded WITHOUT defer/async so it executes before
          any subsequent rendering. See webui/www/theme-boot.js. -->
@@ -49,7 +49,7 @@
          requests on first editor open (vs 5 with bundle) — acceptable
          since the editor is lazy-loaded and after first load
          everything is cached. -->
-    <!-- R18-21: nonce attribute is injected per-response by the SPA handler
+    <!-- nonce attribute is injected per-response by the SPA handler
          so the strict admin-SPA CSP can permit this importmap without
          'unsafe-inline'. The nonce-placeholder below is replaced with a
          fresh random per-response value; if the handler doesn't inject
@@ -66,20 +66,20 @@
         }
     }
     </script>
-    <!-- v4 stream controller (step-06/6.a). Loaded from bundle fixtures so
+    <!-- v4 stream controller. Loaded from bundle fixtures so
          the SPA hydrates with the canonical controller code. The owner SPA
          signals its intent to be hydrated via body[data-polis-stream-direction]
-         (set below). owner-extras.js (6.d) layers on top via the registries
+         (set below). owner-extras.js layers on top via the registries
          (afterRender, registerRenderer) exposed on window.PolisStream. -->
     <script src="/bundle-assets/pub.polis.core/shapes/v4/stream.js" defer></script>
-    <!-- PQL parser (chunk B). Sentence-filter ↔ URL binding. Owns the
+    <!-- PQL parser. Sentence-filter ↔ URL binding. Owns the
          /_/pql/<sentence> URL form. owner-extras subscribes to
          PolisStream.onFilterChange to keep the URL in sync; app.js
          routes /_/pql/<sentence> paths through PQL.parseURL on init +
          popstate. Loaded before owner-extras so the parser is available
          when the URL-push wiring sets up. -->
     <script src="/pql.js" defer></script>
-    <!-- DM end-to-end crypto stack (phase 4). Same-origin vendored libs +
+    <!-- DM end-to-end crypto stack. Same-origin vendored libs +
          the polis wrappers, loaded in dependency order: vendored IIFEs
          (tweetnacl → hash-wasm Argon2id → @scure/bip39) populate
          globalThis.{nacl,hashwasm,scureBip39}; dm-crypto.js wraps them as
@@ -95,11 +95,11 @@
     <script src="/dm-crypto.js" defer></script>
     <script src="/dm-session.js" defer></script>
     <script src="/dm.js" defer></script>
-    <!-- owner-extras (step-06/6.d). Loaded ONLY by the SPA — public per-post
-         artifacts never reference this file. Skeleton + readiness check
-         today; subsequent step-6 sub-steps (6.e icon presets, 6.f.2
-         activity render mode, 6.h inline editor, 6.i afterRender
-         decorators, 6.j canonical comment-WRITE CTA) compose against it. -->
+    <!-- owner-extras. Loaded ONLY by the SPA — public per-post
+         artifacts never reference this file. Composes owner-only features
+         (icon presets, activity render mode, inline editor, afterRender
+         decorators, canonical comment-WRITE CTA) on top of the shared
+         controller via the window.PolisStream registries. -->
     <script src="/owner-extras.js" defer></script>
 </head>
 <body data-polis-stream-direction="newest-top">
@@ -229,13 +229,13 @@
         </div>
 
         <!-- Icon Nav Bar (global, shared across screens).
-             step-06/6.a: nav restructured for v4 owner-stream grammar.
+             Nav restructured for the v4 owner-stream grammar.
              Order: avatar | gateway | paragraph | comment | people | envelope | separator | edit.
-             Click handlers stay on legacy navigateTo for now; 6.e rewires
-             them to load filter presets via owner-extras.js.
+             Click handlers stay on legacy navigateTo as a fallback;
+             owner-extras.js rewires them to load filter presets.
              Wordmark removed (v4 SPA logged-in nav has no wordmark).
              Editor controls retained — they show only when editor is active.
-             step-06/6.c: also tagged .polis-topbar so v4 stream.css's
+             Also tagged .polis-topbar so v4 stream.css's
              topbar rules apply (filter slot calc-positioning, pinned-dot,
              height). The filter widget lives inside as a child
              .polis-topbar-filter element. -->
@@ -269,14 +269,15 @@
             <div class="nav-sep"></div>
 
             <!-- v4 owner-stream icon row: gateway | paragraph | comment | people | envelope | sep | edit
-                 Icon SVGs preserved from v3; reordered + relabeled per step-06 plan.
-                 SYNC: this surface (SPA) is on v4 grammar as of step-06/6.a.
-                 The hosted nav surfaces remain on v3 grammar (feed/posts/comments/messages)
-                 and are intentionally deferred to step-06/6.k (auth-aware retheming +
-                 v4-grammar port). When 6.k lands, sync these three:
-                 1. HERE (index.html) — localhost SPA — v4 ✓
-                 2. webapp/internal/hosted/nav_inject.go — hosted SSR — v3 (port at 6.k)
-                 3. webapp/internal/hosted/nav/nav.js ICONS object — hosted widget — v3 (port at 6.k) -->
+                 SYNC: the icon SVG geometry is shared across three copies —
+                 1. HERE (index.html) — the SPA desktop row, below
+                 2. the .nav-mobile-item drawer further down in this file
+                 3. webapp/internal/hosted/nav/nav.js ICONS — the cross-site widget
+                 The widget is served verbatim to foreign sites, so it can't
+                 import these assets; the duplication is guarded by
+                 TestNavIconsMatchAcrossSurfaces (hosted/nav_icons_test.go),
+                 which fails CI if any copy's geometry drifts. (The old
+                 server-rendered hosted nav in nav_inject.go was removed.) -->
             <!-- Icon-row preset buttons. Each button's onclick is a SAFE
                  FALLBACK that lands the user on /feed (the v4 stream)
                  if owner-extras.js fails to load — never on a legacy
@@ -297,22 +298,23 @@
                  envelope shape. -->
             <button id="nav-btn-envelope" class="nav-icon-btn" onclick="App.navigateTo('/pql/all+messages+from+my+mutuals+by+date')" data-tip="My messages"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 8l9 6 9-6"/></svg><span class="nav-dot hidden" id="nav-dot-envelope"></span></button>
             <div class="nav-sep"></div>
-            <!-- Squared + glyph (Variant C from the write-anchor mockup).
-                 Replaces the pencil/edit SVG. Two perpendicular <line>s
-                 dead-centered in the 24-unit viewBox so the glyph reads
-                 as visually anchored (the prior pencil's M16.5,3.5→7,19
-                 path had its visual mass biased upper-right). Click
-                 toggles the post editor open/closed via App.toggleCompose(). -->
-            <button id="nav-btn-edit" class="nav-icon-btn" onclick="App.toggleCompose()" data-tip="New post"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+            <!-- Circled "+" glyph (David Alcorn standardized the nav compose
+                 icon to the SAME ⊕ motif as the timeline's compose disc —
+                 the timeline version is a FILLED accent disc + plus, this nav
+                 version is the OUTLINE equivalent: a stroked circle enclosing
+                 a "+", in the idle nav-icon color). Circle r=9 / plus arms
+                 8→16 mirror the design frame. Click toggles the post editor
+                 open/closed via App.toggleCompose(). -->
+            <button id="nav-btn-edit" class="nav-icon-btn" onclick="App.toggleCompose()" data-tip="New post" aria-label="New post"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg></button>
 
             <div class="nav-spacer"></div>
 
-            <!-- Editor controls retired in chunk A — the v3 editor
+            <!-- Editor controls retired — the v3 editor
                  screen they belonged to is gone; the v4 inline editor
                  card on the stream-screen owns its own controls. -->
             <div class="editor-controls hidden" id="editor-controls"></div>
 
-            <!-- step-06/6.c — Filter widget. Mirrors the v4 stream snippet
+            <!-- Filter widget. Mirrors the v4 stream snippet
                  (cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/snippets/
                  stream-filter.html). Inlined here because the SPA's
                  index.html isn't bundle-templated; app.js substitutes the
@@ -373,7 +375,7 @@
                     </button>
                     <hr>
                     <button class="nav-mobile-item" type="button" data-action="edit">
-                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
                         <span>New post</span>
                     </button>
                     <button class="nav-mobile-item" type="button" data-action="copy-follow-link">
@@ -396,14 +398,14 @@
         <div id="dm-banner-host" class="dm-banner-host" aria-live="polite"></div>
 
         <!-- Stream Screen (v4 layout container; shown when navigating to /feed).
-             step-06/6.c: brings the v4 stream layout into the SPA homepage so
-             the controller (loaded via /bundle-assets/) hydrates a real .stream
-             element. layout-left is hidden via body.is-owner (per 6.a CSS gate);
-             layout-right hosts the stream entries. owner-extras.js (6.d) will
-             register afterRender hooks against this container. -->
+             Brings the v4 stream layout into the SPA homepage so the
+             controller (loaded via /bundle-assets/) hydrates a real .stream
+             element. layout-left is hidden via the body.is-owner CSS gate;
+             layout-right hosts the stream entries. owner-extras.js registers
+             afterRender hooks against this container. -->
         <main id="stream-screen" class="screen hidden layout">
             <aside class="layout-left">
-                <!-- R22 #11: scratch-column owner card. Mirrors the
+                <!-- Scratch-column owner card. Mirrors the
                      v4 public site-identity layout (avatar + name +
                      bio + stats), but stats are owner-relevant
                      (posts / drafts counts as filter shortcuts) and
@@ -411,7 +413,7 @@
                      Owner-extras' setupOwnerCard populates the
                      dynamic content (avatar, bio, counts) at init. -->
                 <div class="site-identity owner-card" id="owner-card">
-                    <!-- R23 #6: avatar dropped from the owner card — the
+                    <!-- Avatar dropped from the owner card — the
                          topbar already renders the avatar in the nav,
                          so a second blank-fallback placeholder above
                          the bio just added visual noise. Name + handle
@@ -446,7 +448,7 @@
                 <button class="site-bio-hide-floating" type="button" hidden>hide</button>
             </aside>
             <section class="layout-right">
-                <!-- R24 #1: top-fade overlay so entries scrolling under
+                <!-- Top-fade overlay so entries scrolling under
                      the topbar gradient out instead of cutting hard
                      against the nav. updateTopFadeVisibility in
                      stream.js toggles .show-top-fade on .layout-right
@@ -472,7 +474,7 @@
                          after the initial /api/v1/stream/items fetch. -->
                 </div>
             </section>
-            <!-- R23 #5: page-edge bottom fade — mirrors stream.html's
+            <!-- Page-edge bottom fade — mirrors stream.html's
                  sibling on the public surface so the bottom of the
                  stream gradients into the page bg instead of cutting
                  off hard against the viewport edge. CSS in stream.css
@@ -480,9 +482,9 @@
             <div class="bottom-fade" aria-hidden="true"></div>
         </main>
 
-        <!-- Dashboard Screen — refactored to a settings-only host
-             in chunk A. Every other v3 view (posts list, comments,
-             blessings, following, DMs, pulse) is retired; the inline
+        <!-- Dashboard Screen — refactored to a settings-only host.
+             Every other v3 view (posts list, comments, blessings,
+             following, DMs, pulse) is retired; the inline
              editor card on the v4 stream-screen replaces the editor
              + comment screens. `renderSettings` is the only function
              that renders into #content-list now. -->
@@ -613,8 +615,9 @@
                     <div class="wizard-section">
                         <p style="line-height: 1.6; color: var(--text-soft);">
                             Key rotation generates a new Ed25519 signing keypair for your site.
-                            Your old key is backed up and previously signed content remains
-                            verifiable via key history.
+                            Previously signed content stays verifiable through your published key
+                            history. Your old key is <strong>not</strong> backed up &mdash; it is
+                            replaced. Keep your own copy first if you want one.
                         </p>
                     </div>
                     <div class="wizard-section">

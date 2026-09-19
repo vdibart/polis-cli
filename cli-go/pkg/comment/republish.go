@@ -216,7 +216,7 @@ signature: %s
 	}
 	// Republish always re-registers + re-evaluates blessing (beseech=true),
 	// preserving the historical behavior.
-	resp, err := registerCommentContent(meta, commentID, privateKey, dsURL, dsKey, base, true)
+	resp, err := registerCommentContent(dataDir, meta, commentID, privateKey, dsURL, dsKey, base, true)
 	if err != nil {
 		result.RegisterError = err.Error()
 		return result, nil // non-fatal, mirroring RepublishPost

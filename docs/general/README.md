@@ -1,48 +1,66 @@
 # General Documentation
 
-Cross-cutting documentation that applies to the polis project as a whole — protocol specifications, project governance, and reference material.
+Concepts and reference that span every component, **grouped by what they are about**: the three things polis is built from —
+**identity** (who said it), **content** (what was said) and **relationships** (who vouches for whom, and who may reach whom).
+A page about how those combine sits under *Across all three*.
 
-## Start here
+Pages in [`signet/`](../signet/README.md), the identity-layer specification suite, are listed here too. Signet's own index
+orders them by kind: concepts, specs, guides and recipes.
 
-| Document | Description |
-|----------|-------------|
-| [vision.md](vision.md) | Project manifesto and experience principles — why polis exists and how it meets users |
-| [contributing.md](contributing.md) | Development setup, testing, and contribution guidelines |
+## Across all three
 
-## Concepts — how polis is built
+| Page | What it is about |
+|---|---|
+| [concepts/architecture.md](concepts/architecture.md) | the four surfaces (CLI, webapp, hosted service, discovery service), how they relate, and where to go for what |
+| [concepts/snap-off-architecture.md](concepts/snap-off-architecture.md) | every layer's default, why you would replace it, how, and what you keep |
+| [How polis thinks about identity and trust](../signet/overview.md) | the identity layer on one page, including what it has not solved |
+| [Assertions](../signet/concepts/assertions.md) · [Projection](../signet/concepts/projection.md) · [Verification](../signet/concepts/verification.md) | what a person can say, what is signed versus computed, and what a verifier may conclude |
+| [concepts/actors.md](concepts/actors.md) | the background actors on a hosted service, and what each may and may not do |
+| [security/security-model.md](security/security-model.md) | cryptographic foundations, key management, attack vectors and threat analysis |
+| [security/known-issues.md](security/known-issues.md) | known integrity issues, in plain language |
+| [reference/glossary.md](reference/glossary.md) | polis's words |
+| [vision.md](vision.md) | why polis exists |
+| [contributing.md](contributing.md) · [security/SECURITY.md](security/SECURITY.md) | changing polis, and reporting a vulnerability |
 
-| Document | Description |
-|----------|-------------|
-| [concepts/architecture.md](concepts/architecture.md) | System overview — the four surfaces (CLI, webapp, polis.pub, DS), how they relate, and where to go for X |
-| [concepts/snap-off-architecture.md](concepts/snap-off-architecture.md) | The layer-by-layer replaceability table — every layer's default, why you'd replace, how, what you keep |
-| [concepts/bundles.md](concepts/bundles.md) | The package container — what a bundle is, what it ships, how it installs per tenant |
-| [concepts/content-types.md](concepts/content-types.md) | The data model — core content types, actions, public/private split, custom types |
-| [concepts/content-system.md](concepts/content-system.md) | Deep reference: filesystem layout, full `bundle.json` schema, event catalog |
-| [concepts/shapes.md](concepts/shapes.md) | The rendering approach — blog (v3) vs infinity stream (v4), the render pipeline |
-| [concepts/themes.md](concepts/themes.md) | The presentation layer — CSS-only themes, the variable contract, cross-theme compatibility |
-| [concepts/infinity-stream.md](concepts/infinity-stream.md) | The single-screen sentence-filtered view (`pub.polis.shapes.v4`) — what it means, why it represents polis.pub, three POVs |
-| [concepts/actors.md](concepts/actors.md) | The background actors that keep a polis site healthy (Patrol, Medic, Judge, Clerk, Chaplain, Reaper, Rosie, Tailor) |
+## Identity
 
-## Reference — specs & lookup
+| Page | What it is about |
+|---|---|
+| [Identity](../signet/concepts/identity.md) | a polis identity is a domain and a keypair |
+| [Key history](../signet/spec/key-history.md) · [did:web](../signet/spec/did-web.md) | surviving a key rotation, and the same identity as a DID document |
+| [Delegation](../signet/concepts/delegation.md) | why a user agent signs with the user's key, marks every act, and can be switched off |
+| [Custody](../signet/spec/custody.md) · [Delegation](../signet/spec/delegation.md) | what an operator holds, and what a user grants an agent |
+| [Witnesses](../signet/spec/witness.md) | a discovery service's signed observation that something existed |
+| [security/who-holds-your-key.md](security/who-holds-your-key.md) | who holds your key on polis.pub and on your own machine, for the person whose key it is |
+| [security/security-model.md § Key Custody](security/security-model.md#key-custody) | where a private key lives, and who holds it on a hosted service |
+| [security/registration-and-privacy.md](security/registration-and-privacy.md) | registering with a discovery service, what it learns, and what leaving removes |
 
-| Document | Description |
-|----------|-------------|
-| [reference/pql.md](reference/pql.md) | Polis Query Language — sentence-driven stream filtering |
-| [reference/policy-grammar.md](reference/policy-grammar.md) | Authoritative spec for v2 policy grammar (Layer 1/2/3, verb-by-type matrix) |
-| [reference/glossary.md](reference/glossary.md) | Polis-specific terminology reference |
-| [reference/in-defense-of-bless.md](reference/in-defense-of-bless.md) | Why polis uses the word "bless" — its four senses, what it actually does here, and what it says about polis that no platform can claim |
+## Content
 
-## Security & privacy
+| Page | What it is about |
+|---|---|
+| [concepts/content-types.md](concepts/content-types.md) | the data model: core content types, actions, public and private |
+| [concepts/bundles.md](concepts/bundles.md) | the package container: what a bundle ships and how it installs |
+| [concepts/shapes.md](concepts/shapes.md) · [concepts/themes.md](concepts/themes.md) | rendering approaches, and CSS-only presentation |
+| [guides/themes.md](guides/themes.md) | switching a theme, and writing your own |
+| [concepts/infinity-stream.md](concepts/infinity-stream.md) | the single-screen, sentence-filtered view |
+| [concepts/content-system.md](concepts/content-system.md) | the deep reference: filesystem layout, `bundle.json`, event catalog |
+| [reference/pql.md](reference/pql.md) | the Polis Query Language |
+| [Signing base](../signet/spec/signing-base.md) | the exact bytes every signature covers |
+| [Licence](../signet/spec/license.md) | an author's signed, outbound terms |
 
-| Document | Description |
-|----------|-------------|
-| [security/security-model.md](security/security-model.md) | Cryptographic foundations, identity, trust model, policies, attack vectors, and threat analysis |
-| [security/dm-encryption.md](security/dm-encryption.md) | Direct-message encryption — what it protects, what it doesn't, and how it works |
-| [security/registration-and-privacy.md](security/registration-and-privacy.md) | DS registration, hard delete, self-hosting your own DS |
-| [security/SECURITY.md](security/SECURITY.md) | Vulnerability reporting policy (the deep threat model is in `security/security-model.md`) |
+## Relationships
+
+| Page | What it is about |
+|---|---|
+| [Trust](../signet/concepts/trust.md) · [The graph](../signet/concepts/graph.md) | why follows and blessings are signed, and walking the graph they make |
+| [Attestation](../signet/spec/attestation.md) | one party's signed claim about another's work |
+| [concepts/policy-and-licence.md](concepts/policy-and-licence.md) | inbound policy against outbound licence: two directions that share a noun |
+| [reference/policy-grammar.md](reference/policy-grammar.md) | inbound policy: who may reach you, and what you accept |
+| [reference/in-defense-of-bless.md](reference/in-defense-of-bless.md) | why polis says "bless", and what a blessing does |
+| [security/dm-encryption.md](security/dm-encryption.md) | direct messages: what encryption protects, and what it does not; the bytes are in the [format](../../cli-go/pkg/dm/FORMAT.md) and [protocol](../../cli-go/pkg/dm/PROTOCOL.md) |
 
 ## See Also
 
-- [docs/README.md](../README.md) — Documentation navigation index
-- [Architecture overview](../cli/README.md) — CLI package structure and build targets
-- [Discovery stream](../ds/developer/stream-architecture.md) — Event stream design
+- [docs/README.md](../README.md): the documentation's doors, reading paths and kinds of page
+- [Discovery stream](../ds/developer/stream-architecture.md): the event stream design

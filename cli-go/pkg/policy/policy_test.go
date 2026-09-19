@@ -312,10 +312,10 @@ func TestParse_Errors(t *testing.T) {
 		"invalid all from all",           // bad action
 		"grant all from all",             // bad action (not allow/deny/emit/omit)
 		"allow all to all",               // "to" instead of "from"
-		"allow all from nobody",           // bad source
-		"allow all from all at",           // at without domain
-		"allow all from all on",           // on without target
-		"allow all from all bogus extra",  // unexpected token
+		"allow all from nobody",          // bad source
+		"allow all from all at",          // at without domain
+		"allow all from all on",          // on without target
+		"allow all from all bogus extra", // unexpected token
 	}
 
 	for _, rule := range tests {
@@ -425,6 +425,8 @@ func TestMatchesSource(t *testing.T) {
 		MyDomain:         "mysite.com",
 		FollowingDomains: map[string]bool{"alice.com": true, "bob.com": true},
 		FollowerDomains:  map[string]bool{"charlie.com": true},
+		// Signet epic 45 D4: resolved on the instance, for one thread.
+		ThreadBlessedDomains: map[string]bool{"dana.com": true},
 	}
 
 	tests := []struct {
@@ -441,7 +443,9 @@ func TestMatchesSource(t *testing.T) {
 		// self source
 		{"self", "mysite.com", true},
 		{"self", "other.com", false},
-		// thread-blessed always false client-side
+		// thread-blessed: only a domain with a blessed comment on this thread
+		{"thread-blessed", "dana.com", true},
+		{"thread-blessed", "DANA.com", true},
 		{"thread-blessed", "alice.com", false},
 		{"thread-blessed", "mysite.com", false},
 	}

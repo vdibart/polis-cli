@@ -1,0 +1,12 @@
+{
+  "component": "cli",
+  "migrations": [
+    {
+      "from": "0.56.0",
+      "to": "0.57.0",
+      "script": "v0.56.0_to_v0.57.0.sh",
+      "sha256": "2388914eca01a6c78349e13bb74fdc6961f1ef0c9a7e0ab6da0243edb4eb24c1",
+      "description": "Add default policy files for policy-driven blessing and notification system"
+    }
+  ]
+}

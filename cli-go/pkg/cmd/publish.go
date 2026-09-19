@@ -9,6 +9,7 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
+	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 )
@@ -16,6 +17,7 @@ import (
 func handlePublish(args []string) {
 	fs := flag.NewFlagSet("publish", flag.ExitOnError)
 	filename := fs.String("filename", "", "Custom filename for the post (without .md)")
+	licenseFlag := fs.String("license", "", "Licence for this post: reserved, open, or none (default: the site's terms)")
 	fs.Parse(args)
 
 	remaining := fs.Args()
@@ -43,6 +45,15 @@ func handlePublish(args []string) {
 		exitError("Failed to load private key: %v", err)
 	}
 
+	// Read the author's per-work licence override BEFORE stripping, since it
+	// lives in the frontmatter that is about to be discarded. Authors write the
+	// terse form — `license: reserved` — or nothing at all, in which case the
+	// site default applies.
+	authoredLicense, _ := license.AuthoredProfile(string(content))
+	if *licenseFlag != "" {
+		authoredLicense = *licenseFlag
+	}
+
 	// Strip frontmatter if present
 	markdown := string(content)
 	if publish.HasFrontmatter(markdown) {
@@ -51,10 +62,11 @@ func handlePublish(args []string) {
 
 	// Publish the post
 	dsCfg := &publish.DiscoveryConfig{
-		DiscoveryURL: discoveryURL,
-		DiscoveryKey: discoveryKey,
-		BaseURL:      baseURL,
-		Generator:    generator,
+		DiscoveryURL:   discoveryURL,
+		DiscoveryKey:   discoveryKey,
+		BaseURL:        baseURL,
+		Generator:      generator,
+		LicenseProfile: authoredLicense,
 	}
 	result, err := publish.PublishPost(dir, markdown, *filename, privKey, dsCfg)
 	if err != nil {
@@ -103,7 +115,10 @@ func handleRepublish(args []string) {
 
 	remaining := fs.Args()
 	if len(remaining) < 1 {
-		exitError("Usage: polis republish <posts/YYYYMMDD/post.md | comments/YYYYMMDD/comment.md> [new-content.md]")
+		exitError("Usage: polis republish <path> [new-content.md]\n" +
+			"  <path> may be the mount form (posts/YYYYMMDD/post.md) or the\n" +
+			"  content path that `polis post` prints\n" +
+			"  (content/pub.polis.core/post/YYYYMMDD/post.md).")
 	}
 
 	postPath := remaining[0]
@@ -114,16 +129,40 @@ func handleRepublish(args []string) {
 		exitError("Not a polis site directory (no .well-known/polis found)")
 	}
 
-	// Comment republish: branch before the post-specific path check. Accept either
-	// the comments/ mount form or the content-relative path.
-	if strings.HasPrefix(postPath, "comments/") || strings.Contains(postPath, "content/pub.polis.core/comment/") {
+	// NORMALISE FIRST, AND ONLY ONCE. Accept either the mount form
+	// (posts/YYYYMMDD/x.md) or the content-relative path that `polis post`
+	// itself prints, and convert to the content path before anything else
+	// looks at it.
+	//
+	// ⛔ This must happen BEFORE the existence check, the type dispatch, and
+	// RepublishPost — because postPath is then used for four different things:
+	// reading the file, writing it back, version.AppendHistory, and
+	// UpdateIndexEntry. index.jsonl keys entries on the CONTENT path
+	// ("content/<bundle>/<dir>/…"), so letting a mount-form path through to
+	// the tail of that list would write the new version and silently miss the
+	// index entry — a post whose bytes moved on while the index still points
+	// at the old hash. Normalising here is what keeps those four in agreement.
+	b := loadOrDefaultBundle(dir)
+	postPath = b.MountToSourcePath(postPath)
+
+	// Comment republish: branch on the type the BUNDLE says this path belongs
+	// to, never on a path prefix. `dir` and `mount` are user-configurable, so
+	// a hardcoded path is wrong for any bundle that sets them — the same
+	// reason .well-known/polis discovers by pointer instead of by convention.
+	//
+	// The TYPE NAME, by contrast, is protocol vocabulary and is stable, which
+	// is why comparing to "pub.polis.comment" here is not the same kind of
+	// hardcoding the old "content/pub.polis.core/comment/" prefix was.
+	if contentTypeForPath(b, postPath) == "pub.polis.comment" {
 		handleRepublishComment(dir, postPath, remaining)
 		return
 	}
 
-	// Validate the post path
-	if !strings.HasPrefix(postPath, "posts/") {
-		exitError("Post path must be under posts/ directory")
+	// Name the path we actually tried. The previous message ("must be under
+	// posts/ directory") pointed at the one directory where the .md is NOT —
+	// posts/ is the render mount and holds .html.
+	if _, err := os.Stat(filepath.Join(dir, postPath)); err != nil {
+		exitError("Post not found at %s", postPath)
 	}
 
 	// Load private key
@@ -194,11 +233,28 @@ func handleRepublish(args []string) {
 // handleRepublishComment republishes an already-published comment, producing a new
 // signed version. It accepts either the comments/ mount form or the content-relative
 // path and normalizes to the content path comment.RepublishComment expects.
-func handleRepublishComment(dir, rawPath string, remaining []string) {
-	contentPath := rawPath
-	if strings.HasPrefix(rawPath, "comments/") {
-		contentPath = "content/pub.polis.core/comment/" + strings.TrimPrefix(rawPath, "comments/")
+// contentTypeForPath reports which of a bundle's declared content types owns a
+// content-relative path ("post", "comment", …), or "" when none does. It is the
+// dispatch counterpart to MountToSourcePath: that maps a mount path onto the
+// content tree, this says what the bundle calls the thing it landed on.
+func contentTypeForPath(b *bundle.Bundle, contentPath string) string {
+	for name, ct := range b.Types {
+		if ct.Dir == "" {
+			continue
+		}
+		if strings.HasPrefix(contentPath, filepath.Join("content", b.Name, ct.Dir)+"/") {
+			return name
+		}
 	}
+	return ""
+}
+
+func handleRepublishComment(dir, rawPath string, remaining []string) {
+	// Idempotent when handleRepublish already normalised; still correct when
+	// this is reached with a mount-form path. Uses the bundle's own mount
+	// config rather than a hardcoded "content/pub.polis.core/comment/", which
+	// was wrong for any bundle declaring a different dir or mount.
+	contentPath := loadOrDefaultBundle(dir).MountToSourcePath(rawPath)
 
 	fullPath := filepath.Join(dir, contentPath)
 	if _, err := os.Stat(fullPath); err != nil {
@@ -233,7 +289,7 @@ func handleRepublishComment(dir, rawPath string, remaining []string) {
 	}
 
 	// NOTE: the v4 stream re-render cascade for comment republish is deferred until
-	// the feature is surfaced in the UI (see plans/comment-versioning-design.md).
+	// the feature is surfaced in the UI.
 
 	if jsonOutput {
 		outputJSON(map[string]interface{}{

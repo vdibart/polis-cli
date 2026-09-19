@@ -63,8 +63,9 @@ const (
 // e.g. https://site/content/pub.polis.core/comment/20260302/<id>.md. This is
 // the same path PublishComment writes the signed .md to, so the DS-registered
 // URL dereferences the canonical artifact (posts register their source path the
-// same way). Comments historically (mis)registered the /comments/ mount path —
-// see plans/comment-registration-severe-bug.md, Defect 1.
+// same way). Comments historically (mis)registered the /comments/ mount path,
+// which holds rendered .html; a .md there is at most a legacy duplicate, and
+// the serve path 301s it to this one.
 func CommentContentURL(baseURL, dateDir, commentID string) string {
 	return strings.TrimSuffix(baseURL, "/") + commentSrcSeg + dateDir + "/" + commentID + ".md"
 }

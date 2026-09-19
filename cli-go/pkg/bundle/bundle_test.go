@@ -28,8 +28,8 @@ func TestLoadBundle(t *testing.T) {
 	if loaded.Name != "pub.polis.core" {
 		t.Errorf("got name %q, want pub.polis.core", loaded.Name)
 	}
-	if len(loaded.Types) != 6 {
-		t.Errorf("got %d types, want 6", len(loaded.Types))
+	if len(loaded.Types) != 9 {
+		t.Errorf("got %d types, want 9", len(loaded.Types))
 	}
 }
 
@@ -43,6 +43,8 @@ func TestContentDir(t *testing.T) {
 		{"pub.polis.post", "content/pub.polis.core/post"},
 		{"pub.polis.comment", "content/pub.polis.core/comment"},
 		{"pub.polis.follow", "content/pub.polis.core/follow"},
+		{"pub.polis.license", "content/pub.polis.core/license"},
+		{"pub.polis.attestation", "content/pub.polis.core/attestation"},
 	}
 
 	for _, tt := range tests {
@@ -67,6 +69,8 @@ func TestMountDir(t *testing.T) {
 		{"pub.polis.post", "posts"},
 		{"pub.polis.comment", "comments"},
 		{"pub.polis.follow", "follow"},
+		{"pub.polis.license", "license"},
+		{"pub.polis.attestation", "attestations"},
 	}
 
 	for _, tt := range tests {
@@ -498,7 +502,13 @@ func TestDefaultCoreBundle_Studio13Rename(t *testing.T) {
 func TestDefaultCoreBundle_Step02_2a2_VersionBumps(t *testing.T) {
 	b := DefaultCoreBundle()
 
-	wantV110 := []string{"_shared", "especial", "especial-light", "sols", "turbo", "vice", "zane"}
+	// _shared has since moved past the extraction bump: 1.2.0 adds generic
+	// markdown-table rules to base.css (nothing styled a bare <table> before,
+	// so every author-written table rendered as browser default). It is pinned
+	// separately below rather than dropped from the check — the point of these
+	// pins is that a CSS change without a version bump would strand hosted
+	// tenants on stale styles, and that still has to hold.
+	wantV110 := []string{"especial", "especial-light", "sols", "turbo", "vice", "zane"}
 	for _, name := range wantV110 {
 		th, err := b.GetTheme(name)
 		if err != nil {
@@ -507,6 +517,12 @@ func TestDefaultCoreBundle_Step02_2a2_VersionBumps(t *testing.T) {
 		if th.Version != "1.1.0" {
 			t.Errorf("%s Version = %q, want %q (step-02/2.a.2 bump for resync)", name, th.Version, "1.1.0")
 		}
+	}
+
+	if sh, err := b.GetTheme("_shared"); err != nil {
+		t.Fatalf("GetTheme(_shared): %v", err)
+	} else if sh.Version != "1.2.0" {
+		t.Errorf("_shared Version = %q, want %q (markdown-table rules in base.css)", sh.Version, "1.2.0")
 	}
 
 	// new studio13 is unchanged by extraction in terms of visibility:
@@ -568,11 +584,8 @@ func TestDefaultCoreBundle_StreamShape(t *testing.T) {
 		t.Errorf("stream shape Version = %q, want StreamShapeVersion %q", v4.Version, StreamShapeVersion)
 	}
 	wantEntries := map[string]string{
-		"stream":  "stream.html",
-		"post":    "stream-post.html",
-		"comment": "stream-comment.html",
-		"profile": "stream-profile.html",
-		"mention": "stream-mention.html",
+		"stream": "stream.html",
+		"post":   "stream-post.html",
 	}
 	if len(v4.Entry) != len(wantEntries) {
 		t.Errorf("v4 Entry has %d keys, want %d", len(v4.Entry), len(wantEntries))
@@ -854,9 +867,13 @@ func TestAllEmittedEvents(t *testing.T) {
 	b := DefaultCoreBundle()
 	events := b.AllEmittedEvents()
 
-	// pub.polis.core emits: 3 (post) + 5 (comment) + 2 (follow) + 2 (tag) + 2 (theme) = 14
-	if len(events) != 14 {
-		t.Errorf("got %d events, want 14", len(events))
+	// pub.polis.core emits: 3 (post) + 6 (comment) + 2 (follow) + 2 (tag) +
+	// 2 (attestation) + 3 (actor) = 18. Licence and theme declare none, and
+	// post no longer declares `.removed` — close-out E1 dropped the five names
+	// nothing emitted, and E1-R2 declared the two `.unpublished` events the DS
+	// does emit.
+	if len(events) != 18 {
+		t.Errorf("got %d events, want 18", len(events))
 	}
 
 	// Check a few key events exist
@@ -872,5 +889,55 @@ func TestAllEmittedEvents(t *testing.T) {
 		if !eventSet[expected] {
 			t.Errorf("missing event: %s", expected)
 		}
+	}
+}
+
+// TestActorRegistryIsPublic asserts the one line in pub.polis.actor's
+// declaration that decides whether the actor registry works at all.
+//
+// The registry's only property is that a STRANGER can fetch it and check a
+// claim about our actors without our infrastructure. `Private: true` puts it
+// behind auth on the v1 API and that property is gone — with no test failing
+// and no alert firing, because everything else about the type still works.
+//
+// The mistake is a natural one, not a hypothetical: pub.polis.follow is the
+// closest STRUCTURAL precedent — singular type name, one file that is a list,
+// per-item announced/removed events — and follow ships `Private: true`.
+// Copying its shape is the obvious way to write this type.
+func TestActorRegistryIsPublic(t *testing.T) {
+	ct, ok := DefaultCoreBundle().Types["pub.polis.actor"]
+	if !ok {
+		t.Fatal("pub.polis.actor is not declared in the core bundle")
+	}
+	if ct.Private {
+		t.Error("pub.polis.actor must NOT be private — a registry a stranger cannot fetch proves nothing")
+	}
+}
+
+// TestActorRegistryDeclaresItsEmits pins the three event types against the
+// declaration. Code that emits an event absent from some bundle's Emits is
+// undeclared, and Patrol's subset check cannot catch that direction — it
+// catches a tenant MISSING a declared emit, never code emitting something
+// UNDECLARED.
+func TestActorRegistryDeclaresItsEmits(t *testing.T) {
+	ct := DefaultCoreBundle().Types["pub.polis.actor"]
+	want := []string{
+		"pub.polis.actor.registered",
+		"pub.polis.actor.reregistered",
+		"pub.polis.actor.withdrawn",
+	}
+	for _, w := range want {
+		found := false
+		for _, g := range ct.Emits {
+			if g == w {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("pub.polis.actor does not declare %s (emits: %v)", w, ct.Emits)
+		}
+	}
+	if len(ct.Emits) != len(want) {
+		t.Errorf("emits = %v, want exactly %v", ct.Emits, want)
 	}
 }

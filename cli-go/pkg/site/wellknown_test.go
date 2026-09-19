@@ -47,10 +47,10 @@ func loadTestdata(t *testing.T, filename string) []byte {
 func TestWellKnownFileExists(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
-		Version:   "polis-cli-go/0.57.0",
-		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		AuthorName:    "test",
-		Created:   time.Now().UTC().Format(time.RFC3339),
+		Version:    "polis-cli-go/0.57.0",
+		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		AuthorName: "test",
+		Created:    time.Now().UTC().Format(time.RFC3339),
 	}
 	writeTestWellKnown(t, dir, wk)
 
@@ -71,7 +71,7 @@ func TestWellKnownFileExists(t *testing.T) {
 func TestWellKnownValidJSON(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
-		Version:     "polis-cli-go/0.57.0",
+		Version:    "polis-cli-go/0.57.0",
 		AuthorName: "Test Author",
 		Email:      "test@example.com",
 		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
@@ -172,10 +172,10 @@ func TestCreatedFormat(t *testing.T) {
 func TestBundleRegistryRoundTrip(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
-		Version:   "polis-cli-go/0.57.0",
-		AuthorName:    "alice",
-		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		Created:   "2026-01-01T00:00:00Z",
+		Version:    "polis-cli-go/0.57.0",
+		AuthorName: "alice",
+		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		Created:    "2026-01-01T00:00:00Z",
 		Bundles: map[string]BundleEntry{
 			"pub.polis.core":      {Path: "content/pub.polis.core/bundle.json"},
 			"com.example.recipes": {Path: "content/com.example.recipes/bundle.json"},
@@ -206,10 +206,10 @@ func TestBundleRegistryRoundTrip(t *testing.T) {
 func TestNoBundlesField(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
-		Version:   "polis-cli-go/0.57.0",
-		AuthorName:    "alice",
-		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		Created:   "2026-01-01T00:00:00Z",
+		Version:    "polis-cli-go/0.57.0",
+		AuthorName: "alice",
+		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		Created:    "2026-01-01T00:00:00Z",
 	}
 	writeTestWellKnown(t, dir, wk)
 
@@ -325,10 +325,10 @@ func TestLoadCorruptWellKnown(t *testing.T) {
 func TestEmailOmitempty_NotSerializedWhenEmpty(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
-		Version:   "polis-cli-go/0.57.0",
-		AuthorName:    "alice",
-		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		Created:   "2026-01-01T00:00:00Z",
+		Version:    "polis-cli-go/0.57.0",
+		AuthorName: "alice",
+		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		Created:    "2026-01-01T00:00:00Z",
 	}
 	writeTestWellKnown(t, dir, wk)
 
@@ -344,11 +344,11 @@ func TestEmailOmitempty_NotSerializedWhenEmpty(t *testing.T) {
 func TestEmailOmitempty_SerializedWhenSet(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
-		Version:   "polis-cli-go/0.57.0",
-		AuthorName:    "alice",
-		Email:     "alice@example.com",
-		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		Created:   "2026-01-01T00:00:00Z",
+		Version:    "polis-cli-go/0.57.0",
+		AuthorName: "alice",
+		Email:      "alice@example.com",
+		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		Created:    "2026-01-01T00:00:00Z",
 	}
 	writeTestWellKnown(t, dir, wk)
 
@@ -399,10 +399,10 @@ func TestLoadCorruptedJSON(t *testing.T) {
 func TestSaveCreatesDirectory(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
-		Version:   "polis-cli-go/0.57.0",
-		AuthorName:    "alice",
-		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		Created:   "2026-01-01T00:00:00Z",
+		Version:    "polis-cli-go/0.57.0",
+		AuthorName: "alice",
+		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		Created:    "2026-01-01T00:00:00Z",
 	}
 
 	if err := SaveWellKnown(dir, wk); err != nil {
@@ -473,10 +473,10 @@ func TestFieldOrderDoesNotMatter(t *testing.T) {
 func TestSaveWellKnownIndentation(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
-		Version:   "polis-cli-go/0.57.0",
-		AuthorName:    "alice",
-		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		Created:   "2026-01-01T00:00:00Z",
+		Version:    "polis-cli-go/0.57.0",
+		AuthorName: "alice",
+		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		Created:    "2026-01-01T00:00:00Z",
 		Bundles: map[string]BundleEntry{
 			"pub.polis.core": {Path: "content/pub.polis.core/bundle.json"},
 		},
@@ -585,11 +585,11 @@ func TestAvatarRoundTrip(t *testing.T) {
 	dir := setupTestDir(t)
 	avatar := &AvatarConfig{BG: "#2a5a6a", FG: "#ffffff"}
 	wk := &WellKnown{
-		Version:   "polis-cli-go/0.57.0",
-		AuthorName:    "alice",
-		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		Created:   "2026-01-01T00:00:00Z",
-		Avatar:    avatar,
+		Version:    "polis-cli-go/0.57.0",
+		AuthorName: "alice",
+		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		Created:    "2026-01-01T00:00:00Z",
+		Avatar:     avatar,
 	}
 	writeTestWellKnown(t, dir, wk)
 
@@ -611,10 +611,10 @@ func TestAvatarRoundTrip(t *testing.T) {
 func TestAvatarOmitempty_NotSerializedWhenNil(t *testing.T) {
 	dir := setupTestDir(t)
 	wk := &WellKnown{
-		Version:   "polis-cli-go/0.57.0",
-		AuthorName:    "alice",
-		PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
-		Created:   "2026-01-01T00:00:00Z",
+		Version:    "polis-cli-go/0.57.0",
+		AuthorName: "alice",
+		PublicKey:  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyXXXXXXXXXXXXXXXXXXXXXXXX polis-local",
+		Created:    "2026-01-01T00:00:00Z",
 	}
 	writeTestWellKnown(t, dir, wk)
 
@@ -942,11 +942,12 @@ func TestWriteFavicon_OverwritesExisting(t *testing.T) {
 	}
 }
 
-// TestSaveWellKnownPreserving_KeepsUnmodeledFields locks the fix for the
-// well-known data-loss class: a partial identity update (here, author_name) must
-// NOT erase public_key_messages, which the WellKnown struct does not model. The
-// negative control confirms the plain SaveWellKnown DOES drop it — the bug.
-func TestSaveWellKnownPreserving_KeepsUnmodeledFields(t *testing.T) {
+// TestSaveWellKnownKeepsUnmodeledFields locks the fix for the well-known
+// data-loss class: a partial identity update (here, author_name) must NOT erase
+// public_key_messages, which the WellKnown struct does not model. There used to
+// be a lossy plain save and a separate preserving one; now the one writer is
+// lossless by construction.
+func TestSaveWellKnownKeepsUnmodeledFields(t *testing.T) {
 	dir := setupTestDir(t)
 
 	// Seed a well-known carrying a published DM messages key (unmodeled field).
@@ -963,14 +964,13 @@ func TestSaveWellKnownPreserving_KeepsUnmodeledFields(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// Preserving update: change a modeled field, keep the unmodeled one.
 	wk, err := LoadWellKnown(dir)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	wk.AuthorName = "new name"
-	if err := SaveWellKnownPreserving(dir, wk); err != nil {
-		t.Fatalf("preserving save: %v", err)
+	if err := SaveWellKnown(dir, wk); err != nil {
+		t.Fatalf("save: %v", err)
 	}
 
 	raw, err := LoadWellKnownRaw(dir)
@@ -978,7 +978,7 @@ func TestSaveWellKnownPreserving_KeepsUnmodeledFields(t *testing.T) {
 		t.Fatalf("reload raw: %v", err)
 	}
 	if _, ok := raw["public_key_messages"]; !ok {
-		t.Fatal("SaveWellKnownPreserving dropped public_key_messages")
+		t.Fatal("SaveWellKnown dropped public_key_messages")
 	}
 	if raw["author_name"] != "new name" {
 		t.Errorf("author_name not updated: %v", raw["author_name"])
@@ -986,14 +986,5 @@ func TestSaveWellKnownPreserving_KeepsUnmodeledFields(t *testing.T) {
 	pkm := raw["public_key_messages"].(map[string]interface{})["current"].(map[string]interface{})
 	if pkm["key"] != "MESSAGESKEYB64" {
 		t.Errorf("messages key mangled: %v", pkm["key"])
-	}
-
-	// Negative control: the plain typed save IS lossy (documents the bug).
-	if err := SaveWellKnown(dir, wk); err != nil {
-		t.Fatalf("plain save: %v", err)
-	}
-	rawAfter, _ := LoadWellKnownRaw(dir)
-	if _, ok := rawAfter["public_key_messages"]; ok {
-		t.Fatal("expected plain SaveWellKnown to drop public_key_messages (the bug); it did not — test no longer guards the regression")
 	}
 }

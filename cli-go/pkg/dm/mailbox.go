@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
+	"github.com/vdibart/polis-cli/cli-go/pkg/jsonextra"
 )
 
 // Per-dmDir mutation lock (DM-14): the mailbox does load→mutate→save on messages.jsonl,
@@ -212,24 +214,47 @@ func (m *Mailbox) AppendReceived(peer, fromDomain string, keyEpoch int, wireCiph
 	return &msg, nil
 }
 
-// writeMessages atomically overwrites a conversation's messages.jsonl with the given
-// messages (used by the re-seal-forward path, which rewrites rather than appends).
-func (m *Mailbox) writeMessages(peer string, msgs []MailboxMessage) error {
+// messageLine is one line of messages.jsonl: the bytes read, the message they
+// decode to, and whether a writer changed it.
+type messageLine struct {
+	raw     []byte
+	msg     MailboxMessage
+	changed bool
+}
+
+// writeMessages atomically overwrites a conversation's messages.jsonl (used by the
+// re-seal-forward path, which rewrites rather than appends).
+//
+// ⛔ An unchanged line is written back AS ITS ORIGINAL BYTES, and a changed one
+// keeps every member of its original line this build does not model: the log is
+// unsigned, so what a newer build wrote is preserved, never dropped. ⚠️ This is
+// done here from the raw line, NOT with an Extra field and JSON methods on
+// MailboxMessage — DecryptedMessage embeds it, and promoted methods would take
+// over DecryptedMessage's own encoding (see pkg/jsonextra).
+func (m *Mailbox) writeMessages(peer string, lines []messageLine) error {
 	dir := m.convDir(peer)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create conversation dir: %w", err)
 	}
 	var out []byte
-	for i := range msgs {
-		line, err := json.Marshal(&msgs[i])
-		if err != nil {
-			return fmt.Errorf("marshal message: %w", err)
+	for i := range lines {
+		line := lines[i].raw
+		if lines[i].changed {
+			extra, err := jsonextra.Unmodelled(lines[i].raw, mailboxMessageType)
+			if err != nil {
+				return fmt.Errorf("read message line: %w", err)
+			}
+			if line, err = jsonextra.Marshal(lines[i].msg, extra); err != nil {
+				return fmt.Errorf("marshal message: %w", err)
+			}
 		}
 		out = append(out, line...)
 		out = append(out, '\n')
 	}
 	return atomicfile.WriteFile(filepath.Join(dir, messagesFile), out, 0o600)
 }
+
+var mailboxMessageType = reflect.TypeOf(MailboxMessage{})
 
 // ReencryptBootstrapForward re-seals every stored bootstrap-epoch (epoch-0) message
 // FORWARD to the current password epoch, so that once the server-held bootstrap DEK is
@@ -260,26 +285,27 @@ func (m *Mailbox) ReencryptBootstrapForward(bootstrapEpoch int, bootstrapDEK [32
 			continue
 		}
 		peer := d.Name()
-		msgs, err := m.LoadMessages(peer)
+		lines, err := m.loadMessageLines(peer)
 		if err != nil {
 			return total, fmt.Errorf("load %s: %w", peer, err)
 		}
 		changed := false
-		for i := range msgs {
-			if msgs[i].KeyEpoch != bootstrapEpoch {
+		for i := range lines {
+			msg := &lines[i].msg
+			if msg.KeyEpoch != bootstrapEpoch {
 				continue
 			}
-			ct, err := base64.StdEncoding.DecodeString(msgs[i].Ciphertext)
+			ct, err := base64.StdEncoding.DecodeString(msg.Ciphertext)
 			if err != nil {
-				return total, fmt.Errorf("decode ciphertext %s: %w", msgs[i].ID, err)
+				return total, fmt.Errorf("decode ciphertext %s: %w", msg.ID, err)
 			}
-			nb, err := base64.StdEncoding.DecodeString(msgs[i].Nonce)
+			nb, err := base64.StdEncoding.DecodeString(msg.Nonce)
 			if err != nil || len(nb) != 24 {
-				return total, fmt.Errorf("bad nonce %s", msgs[i].ID)
+				return total, fmt.Errorf("bad nonce %s", msg.ID)
 			}
-			pb, err := base64.StdEncoding.DecodeString(msgs[i].BoxPub)
+			pb, err := base64.StdEncoding.DecodeString(msg.BoxPub)
 			if err != nil || len(pb) != 32 {
-				return total, fmt.Errorf("bad box_pub %s", msgs[i].ID)
+				return total, fmt.Errorf("bad box_pub %s", msg.ID)
 			}
 			var nonce [24]byte
 			copy(nonce[:], nb)
@@ -289,7 +315,7 @@ func (m *Mailbox) ReencryptBootstrapForward(bootstrapEpoch int, bootstrapDEK [32
 			// Open with the bootstrap DEK (the server still holds it here).
 			plaintext, err := Decrypt(ct, &nonce, &storedPub, &bootstrapDEK)
 			if err != nil {
-				return total, fmt.Errorf("open bootstrap message %s: %w", msgs[i].ID, err)
+				return total, fmt.Errorf("open bootstrap message %s: %w", msg.ID, err)
 			}
 
 			// Re-seal forward to the new epoch's pubkey under a fresh ephemeral sender key.
@@ -299,17 +325,18 @@ func (m *Mailbox) ReencryptBootstrapForward(bootstrapEpoch int, bootstrapDEK [32
 			}
 			newCT, newNonce, err := Encrypt(plaintext, &currentEpochPub, &ephSK)
 			if err != nil {
-				return total, fmt.Errorf("re-seal message %s: %w", msgs[i].ID, err)
+				return total, fmt.Errorf("re-seal message %s: %w", msg.ID, err)
 			}
-			msgs[i].KeyEpoch = currentEpoch
-			msgs[i].Ciphertext = base64.StdEncoding.EncodeToString(newCT)
-			msgs[i].Nonce = base64.StdEncoding.EncodeToString(newNonce[:])
-			msgs[i].BoxPub = base64.StdEncoding.EncodeToString(ephPub[:])
+			msg.KeyEpoch = currentEpoch
+			msg.Ciphertext = base64.StdEncoding.EncodeToString(newCT)
+			msg.Nonce = base64.StdEncoding.EncodeToString(newNonce[:])
+			msg.BoxPub = base64.StdEncoding.EncodeToString(ephPub[:])
+			lines[i].changed = true
 			changed = true
 			total++
 		}
 		if changed {
-			if err := m.writeMessages(peer, msgs); err != nil {
+			if err := m.writeMessages(peer, lines); err != nil {
 				return total, fmt.Errorf("rewrite %s: %w", peer, err)
 			}
 		}
@@ -399,6 +426,19 @@ func (m *Mailbox) saveMeta(peer string, meta *ConversationMeta) error {
 
 // LoadMessages reads the raw (still-encrypted) message lines for a conversation.
 func (m *Mailbox) LoadMessages(peer string) ([]MailboxMessage, error) {
+	lines, err := m.loadMessageLines(peer)
+	if err != nil {
+		return nil, err
+	}
+	var msgs []MailboxMessage
+	for _, l := range lines {
+		msgs = append(msgs, l.msg)
+	}
+	return msgs, nil
+}
+
+// loadMessageLines reads a conversation's messages.jsonl keeping each line's bytes.
+func (m *Mailbox) loadMessageLines(peer string) ([]messageLine, error) {
 	f, err := os.Open(filepath.Join(m.convDir(peer), messagesFile))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -407,7 +447,7 @@ func (m *Mailbox) LoadMessages(peer string) ([]MailboxMessage, error) {
 		return nil, err
 	}
 	defer f.Close()
-	var msgs []MailboxMessage
+	var lines []messageLine
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
@@ -419,9 +459,9 @@ func (m *Mailbox) LoadMessages(peer string) ([]MailboxMessage, error) {
 		if err := json.Unmarshal(line, &msg); err != nil {
 			return nil, fmt.Errorf("parse message line: %w", err)
 		}
-		msgs = append(msgs, msg)
+		lines = append(lines, messageLine{raw: append([]byte(nil), line...), msg: msg})
 	}
-	return msgs, sc.Err()
+	return lines, sc.Err()
 }
 
 // ReadConversation opens each message with the supplied per-epoch DEKs. A message whose

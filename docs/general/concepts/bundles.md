@@ -1,10 +1,12 @@
 # Bundles
 
+*For* [Developers](../../README.md#building-on-polis) — *About* [Content](../README.md#content) — *Kind* [Concept](../../README.md#kinds-of-page) — *See also* [reference](content-system.md) · no spec yet · no recipe yet
+
 > Part of the foundation set: **bundles** (this doc), [content types](content-types.md), [shapes](shapes.md), [themes](themes.md). See [architecture.md](architecture.md) for the four-surface map these concepts live within. For the full reference (schemas, validation rules, event catalog), see [content-system.md](content-system.md).
 
 A **bundle** is the package container that ships a coherent set of polis primitives — content types, shapes, themes — together as one versioned unit. It's the unit of extensibility: the difference between "what every polis site knows how to do" (the core bundle) and "what a community ships on top of polis" (third-party bundles) is one `bundle.json` declaration.
 
-Today the network ships a single bundle: **`pub.polis.core`** — posts, comments, follows, blessings, tags, DMs, themes, and the blog/stream shapes. Everything else listed in this doc is the architecture that *would* support more bundles, when they exist.
+Today the network ships a single bundle: **`pub.polis.core`** — nine content types (post, comment, follow, DM, tag, attestation, actor registry, licence, theme), the blog and stream shapes, and the themes. Everything else listed in this doc is the architecture that *would* support more bundles, when they exist.
 
 ---
 
@@ -14,8 +16,8 @@ A bundle is a namespaced unit that declares four kinds of things:
 
 | Declared in `bundle.json` | What it is | Doc |
 |---|---|---|
-| **Content types** | The data model — what records the bundle understands (e.g. `pub.polis.post`, `pub.polis.dm`). Each declares storage layout, actions, and a handler. | [content-types.md](content-types.md) |
-| **Handler declarations** | How the bundle's actions get executed: `builtin` (Go code in the CLI), `executable` (JSON stdin/stdout to a binary), or `http` (JSON POST to a URL). | [api/developer/dispatch-engine.md](../../api/developer/dispatch-engine.md) |
+| **Content types** | The data model — what records the bundle understands (e.g. `pub.polis.post`, `pub.polis.dm`). Each declares its directory, public mount, storage layout, the events it emits, and whether it is private. | [content-types.md](content-types.md) |
+| **Handler declaration** | How the bundle's actions get executed — one for the whole bundle: `builtin` (Go code in the CLI), `executable` (JSON stdin/stdout to a binary), or `http` (JSON POST to a URL). | [api/developer/dispatch-engine.md](../../api/developer/dispatch-engine.md) |
 | **Shapes** | Rendering approaches — the templates that turn content into HTML. The core bundle ships `pub.polis.shapes.v3` (blog) and `pub.polis.shapes.v4` (infinity stream). | [shapes.md](shapes.md) |
 | **Themes** | CSS-only presentation, scoped to the bundle and compatible with one or more of its shapes. | [themes.md](themes.md) |
 
@@ -59,7 +61,8 @@ cli-go/pkg/bundle/fixtures/pub.polis.core/
     ├── _shared/               # base CSS used by themes that don't ship their own
     ├── especial/
     ├── especial-light/
-    ├── sols/                  # system-only, reserved for logged-out landing
+    ├── sols/                  # reserved: the logged-out landing theme
+    ├── stardust/              # reserved: not user-selectable
     ├── studio13/
     ├── studio13-nk/
     ├── turbo/
@@ -80,7 +83,9 @@ When `polis init` creates a site, it installs the bundle's reference payload und
 └── themes/...
 ```
 
-This is what the renderer reads at runtime. **It is never edited by hand on hosted sites** — Patrol/Medic forcibly resync it on every cycle, so any drift between the on-disk copy and the binary's embedded source is corrected automatically (see [`actors.md`](actors.md)). Self-hosters get the same migrations via `polis tailor apply`.
+The same step writes the bundle's **declaration** to `content/pub.polis.core/bundle.json` — public, and pointed at from `.well-known/polis` → `bundles`.
+
+This is what the renderer reads at runtime. **It is never edited by hand on hosted sites** — Patrol checks it on every cycle and Medic resyncs it whenever the installed shape or theme versions fall behind the binary's, so drift from the embedded source is corrected automatically (see [`actors.md`](actors.md)). Self-hosters get the same migrations from the standalone `tailor --apply` binary.
 
 ### 3. Per-tenant registry (`.polis/bundles/registry.json`)
 
@@ -88,15 +93,22 @@ The tenant's private configuration — which bundle is active, which theme, whic
 
 ```json
 {
+  "schema_version": 2,
   "active_theme": "pub.polis.themes.vice",
-  "active_shape": "pub.polis.shapes.v3",
+  "active_shape": "pub.polis.shapes.v4",
   "installed_bundles": [
-    { "name": "pub.polis.core", "path": ".polis/bundles/pub.polis.core", "active": true }
-  ]
+    {
+      "name": "pub.polis.core",
+      "path": ".polis/bundles/pub.polis.core",
+      "shape_versions": { "v3": "1.0.0", "v4": "1.8.65" },
+      "theme_versions": { "vice": "1.1.0", "...": "..." }
+    }
+  ],
+  "notifications": [ "..." ]
 }
 ```
 
-This file is **private state**, not part of the public identity at `.well-known/polis`. (Pre-refactor sites carried `active_theme` in `.well-known/polis`; the migrate routine moves it on first run.)
+This file is **private state**, not part of the public identity at `.well-known/polis`. Listing a bundle in `installed_bundles` is what activates it; the version stamps are what Patrol compares to decide a resync. (Older sites carried `active_theme` in `.well-known/polis`; Medic, or `tailor --apply` for a self-hoster, moves it into the registry.)
 
 ---
 
@@ -109,21 +121,27 @@ The bundle manifest declares everything the dispatch engine and renderer need to
   "name": "pub.polis.core",
   "version": "1.0.0",
   "description": "Core polis content types",
-  "handler": "builtin",
-  "content_types": {
-    "pub.polis.post":    { "dir": "post",    "mount": "posts",    "renderer": "html", "actions": ["list", "get", "create", "update", "delete", "render"] },
-    "pub.polis.comment": { "dir": "comment", "mount": "comments", "renderer": "html", "actions": ["list", "get", "create", "bless", "deny", "revoke", "sync"] },
-    "pub.polis.dm":      { "dir": "dm",      "private": true,                          "actions": ["list", "get", "send", "deliver", "mark_read", "delete", "retry"] }
+  "handler": { "type": "builtin" },
+  "ds": { "subscribes_to": ["pub.polis.*"] },
+  "types": {
+    "pub.polis.post":    { "dir": "post", "mount": "/posts", "renderer": "html",
+                           "storage": { "pattern": "dated", "date_format": "YYYYMMDD", "versions": true },
+                           "emits": ["pub.polis.post.published", "pub.polis.post.republished", "pub.polis.post.unpublished"] },
+    "pub.polis.dm":      { "dir": "dm", "storage": { "pattern": "flat" }, "private": true },
+    "...": "..."
   },
   "shapes": {
-    "v3": { "name": "v3", "version": "1.0.0", "entry": { "post": "post.html", "index": "index.html", "...": "..." }, "default_css": "themes/_shared/base.css" },
-    "v4": { "name": "v4", "version": "1.0.0", "entry": { "stream": "stream.html", "...": "..." } }
+    "v3": { "name": "v3", "version": "1.0.0", "entry": { "post": "post.html", "index": "index.html", "...": "..." }, "partials": ["snippets/about.html", "..."], "default_css": "themes/_shared/base.css" },
+    "v4": { "name": "v4", "version": "1.8.65", "entry": { "stream": "stream.html", "post": "stream-post.html" }, "partials": ["snippets/sentence-filter.html"], "default_css": "themes/_shared/base.css" }
   },
   "themes": {
-    "vice": { "name": "vice", "version": "1.0.0", "css": "vice.css", "compatible_shapes": ["pub.polis.shapes.v3", "pub.polis.shapes.v4"] }
-  }
+    "vice": { "name": "vice", "version": "1.1.0", "css": "vice.css", "compatible_shapes": ["pub.polis.shapes.v3", "pub.polis.shapes.v4"] }
+  },
+  "artifacts": ["index.jsonl"]
 }
 ```
+
+Abridged from what `polis init` writes (the Go struct is `bundle.Bundle` in `cli-go/pkg/bundle/bundle.go`). ⚠️ **A content type declares no actions** — which actions a type supports is the handler's answer (`Handler.Actions`), not the manifest's.
 
 See [`content-system.md` § Bundles](content-system.md#bundles) for the complete schema with every field, every validation rule, and full examples for handler types (executable + http).
 
@@ -149,7 +167,7 @@ The contract is identical: every handler receives an `ActionRequest` (`{action, 
 
 1. A community author publishes a bundle (e.g. `pub.alice.gardening`) — typically as a Git repo containing `bundle.json` plus the executable/HTTP handler.
 2. A polis site operator installs it under `.polis/bundles/pub.alice.gardening/`.
-3. The site's `.well-known/polis` advertises which bundles it has installed; the DS records this on registration.
+3. The site's `.well-known/polis` points at each installed bundle's declaration under `bundles`. (The discovery service does not record bundles.)
 4. Site visitors and other polis tools can introspect the bundle via `GET /v1/bundles` or `GET /v1/bundles/pub.alice.gardening`.
 5. The dispatch engine routes any incoming action for `pub.alice.gardening.plot/<action>` to the bundle's declared handler.
 

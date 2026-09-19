@@ -39,7 +39,22 @@ func init() {
 			parser.WithAutoHeadingID(),
 		),
 		goldmark.WithRendererOptions(
-			goldhtml.WithHardWraps(),
+			// NO WithHardWraps. A single newline inside a paragraph is a
+			// CommonMark *soft* break and renders as a space; a real line
+			// break needs two trailing spaces or a backslash.
+			//
+			// WithHardWraps was set until 2026-08-28 and turned every newline
+			// into <br/>, so prose wrapped at a column — ordinary practice,
+			// and what most editors and writing tools produce — broke at the
+			// author's column AND again at the container, stranding the last
+			// word of every source line.
+			//
+			// The reason to keep it off is the deed, not standards pedantry:
+			// content is always plain markdown files, and a file that only
+			// renders correctly under one renderer's non-standard option is a
+			// little bit proprietary. It also matches the bash CLI, which
+			// shells out to pandoc's CommonMark defaults — the same .md must
+			// not render differently depending on which CLI touched it.
 			goldhtml.WithXHTML(),
 			goldhtml.WithUnsafe(), // Allow raw HTML through so bluemonday can make allow/deny decisions
 		),

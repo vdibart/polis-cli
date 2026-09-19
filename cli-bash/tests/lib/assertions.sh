@@ -116,6 +116,20 @@ assert_dir_exists() {
     fi
 }
 
+# Assert directory does not exist
+# Usage: assert_dir_not_exists "path/to/dir"
+assert_dir_not_exists() {
+    local path="$1"
+
+    if [[ ! -d "$path" ]]; then
+        log "  [OK] Directory does not exist: $path"
+        return 0
+    else
+        log_error "[FAIL] Directory should not exist: $path"
+        return 1
+    fi
+}
+
 # Assert file contains pattern
 # Usage: assert_file_contains "file" "pattern"
 assert_file_contains() {

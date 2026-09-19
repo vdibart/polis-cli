@@ -72,12 +72,12 @@ func TestExtractDomain_Empty(t *testing.T) {
 func TestCountFiles_CountsByExtension(t *testing.T) {
 	dir := t.TempDir()
 	writeFiles(t, dir, map[string]string{
-		"a.md":               "",
-		"b.md":               "",
-		"c.html":             "",
-		"sub/d.md":           "",
-		"sub/deep/e.md":      "",
-		"sub/deep/f.txt":     "",
+		"a.md":           "",
+		"b.md":           "",
+		"c.html":         "",
+		"sub/d.md":       "",
+		"sub/deep/e.md":  "",
+		"sub/deep/f.txt": "",
 	})
 
 	if got := countFiles(dir, ".md"); got != 4 {

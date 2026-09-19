@@ -4,38 +4,13 @@ The Content Type API provides programmatic access to polis content operations vi
 
 ## Scope
 
-This API covers **content type operations only**: publishing posts, managing comments, handling blessings, querying feeds and following lists. Site settings, theme switching, dashboard aggregations, and setup wizards remain in the webapp/CLI.
+This API covers **content type operations only**: publishing posts, publishing and republishing comments, direct messages, tags, and reading following lists, themes and licence terms. Site settings, theme switching, dashboard aggregations, and setup wizards remain in the webapp/CLI.
 
-## Authentication
+Those webapp-owned operations live under `/api/` on a **separate, owner-authenticated surface** with its own auth model — a different audience and a different way in, but documented here alongside the content API rather than somewhere else. See [developer/site-api.md](developer/site-api.md). It indexes every `/api/` route and writes up the site operations a script may rely on. The rest are marked internal: the web app's own plumbing, which may change without notice.
 
-- **Read operations** (GET on content and bundles) are public — no auth required
-- **Write operations** require `Authorization: Bearer <api-key>`
-- API keys are stored as SHA-256 hashes in `.polis/api-keys.json`. There is no generator command yet — you add a key by hand (see [developer/reference.md § Authentication](developer/reference.md#authentication))
+## Authentication, CORS, limits and a quick start
 
-## CORS
-
-All API routes allow `*` origins. OPTIONS preflight returns 200.
-
-## Body Limits
-
-Request bodies are limited to 1MB.
-
-## Quick Start
-
-```bash
-# Create an API key by hand (no generator command yet — see developer/reference.md#authentication)
-KEY="polis_$(openssl rand -hex 16)"
-printf '%s' "$KEY" | sha256sum   # record this hash in .polis/api-keys.json
-
-# List posts (public)
-curl https://mysite.example.com/v1/content/post
-
-# Publish a post (auth required)
-curl -X POST https://mysite.example.com/v1/content/post \
-  -H "Authorization: Bearer polis_abc123..." \
-  -H "Content-Type: application/json" \
-  -d '{"markdown": "# Hello\n\nFirst API post."}'
-```
+All in [developer/reference.md](developer/reference.md): reads are mostly public, writes take a Bearer API key you create by hand ([§ Authentication](developer/reference.md#authentication)), and the site-to-site DM actions take signed request headers instead. That page is the contract; this index does not restate it.
 
 ## Documentation
 
@@ -43,6 +18,7 @@ curl -X POST https://mysite.example.com/v1/content/post \
 |----------|----------|-------------|
 | [developer/reference.md](developer/reference.md) | Developers | Routes, request/response examples, error codes, implementation status |
 | [developer/dispatch-engine.md](developer/dispatch-engine.md) | Developers | Engine architecture, handler types, adding operations |
+| [developer/site-api.md](developer/site-api.md) | Developers | The webapp's `/api/` surface: an index of every route, and the site operations written up in full |
 
 ## See Also
 

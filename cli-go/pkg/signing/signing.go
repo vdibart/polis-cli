@@ -162,30 +162,11 @@ func CanonicalizeContent(content string) string {
 	return result
 }
 
-// ContentToSign reconstructs the exact bytes that were signed for a post or
-// comment from the full on-disk content (frontmatter + body). It drops the
-// `signature:` line (always) and, for comments, the `author:` line — which is
-// injected into comment frontmatter AFTER signing (see comment.go) and is
-// therefore NOT part of the signed payload — then canonicalizes.
-//
-// This is the single signing-base used by verify/judge/patrol. The bug it fixes:
-// verify previously stripped only `signature:` (the post base) for comments too,
-// leaving the unsigned `author:` line in the hashed payload, so every blessed
-// comment failed the cache's verify-and-gate and was never cached.
-func ContentToSign(content string, isComment bool) string {
-	lines := strings.Split(content, "\n")
-	var out []string
-	for _, line := range lines {
-		if strings.HasPrefix(line, "signature:") {
-			continue
-		}
-		if isComment && strings.HasPrefix(line, "author:") {
-			continue
-		}
-		out = append(out, line)
-	}
-	return CanonicalizeContent(strings.Join(out, "\n"))
-}
+// The markdown signing base lives in base.go as
+// MarkdownSigningBase(content, ObjectType). It replaced
+// ContentToSign(content, isComment bool) in Signet epic 08 — the boolean
+// discriminator is gone, and the strip is anchored to the frontmatter block
+// instead of scanning the whole document for a line prefix.
 
 // encodePrivateKey encodes an Ed25519 private key in OpenSSH PEM format.
 func encodePrivateKey(privKey ed25519.PrivateKey) ([]byte, error) {
@@ -255,6 +236,22 @@ func encodePrivateKey(privKey ed25519.PrivateKey) ([]byte, error) {
 	}
 
 	return pem.EncodeToMemory(pemBlock), nil
+}
+
+// PublicKeyFor derives the OpenSSH public key for an OpenSSH private key.
+//
+// It exists for KEY PROJECTION: a private key restored from a secret store must
+// be checkable against the public key a site already publishes, and doing that
+// without deriving is impossible. ⛔ The output is byte-identical to what
+// GenerateKeypair returns for the same key, including the trailing
+// " polis-local\n" comment, so a projected .pub file cannot differ from a
+// generated one and trip Patrol's key-match check for a cosmetic reason.
+func PublicKeyFor(privateKeyPEM []byte) ([]byte, error) {
+	priv, err := parsePrivateKey(privateKeyPEM)
+	if err != nil {
+		return nil, err
+	}
+	return encodePublicKey(priv.Public().(ed25519.PublicKey)), nil
 }
 
 // encodePublicKey encodes an Ed25519 public key in OpenSSH format.

@@ -67,13 +67,13 @@
     --filter-dark-underline: color-mix(in srgb, #f4541a 55%, transparent);
     --filter-dark-underline-hover: #f4541a;
     --filter-dark-identity: #f4541a;
-    --filter-dark-dot: color-mix(in srgb, #f4541a 50%, transparent);
+    --filter-dark-dot: #f4541a;
     --filter-light-text: #181818;
     --filter-light-text-hover: #000000;
     --filter-light-underline: color-mix(in srgb, #b83c10 55%, transparent);
     --filter-light-underline-hover: #b83c10;
     --filter-light-identity: #b83c10;
-    --filter-light-dot: color-mix(in srgb, #b83c10 50%, transparent);
+    --filter-light-dot: #b83c10;
 
     /* Typography */
     --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;

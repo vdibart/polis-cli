@@ -334,8 +334,8 @@ go test -v ./internal/server/...
 
 ## Development Guide
 
-For AI-focused development instructions (drift detection, handler patterns, parity
-checklists), see `CLAUDE.md` in this directory.
+For development instructions (drift detection, handler patterns, parity
+checklists), see the [webapp development guide](../docs/webapp/developer/development.md).
 
 ## Centralized Documentation
 
@@ -343,4 +343,4 @@ For comprehensive webapp documentation, see [`docs/webapp/`](../docs/webapp/READ
 
 - [User Manual](../docs/webapp/user/user-manual.md) — How to use the local web interface
 - [Development Guide](../docs/webapp/developer/development.md) — Handler patterns, testing, frontend architecture
-- [API Reference](../docs/api/user/reference.md) — Content Type REST API
+- [API Reference](../docs/api/developer/reference.md) — Content Type REST API

@@ -44,6 +44,8 @@ type BundleRegistry struct {
 	// rules (e.g. someone who deliberately cleared them) — without it
 	// SaveRegistry would always emit `"notifications": null`.
 	Notifications []NotificationRule `json:"notifications,omitempty"`
+	// Extra: members this build does not model, kept on save (extra.go).
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // CurrentRegistrySchemaVersion is the schema version this build writes.
@@ -70,6 +72,8 @@ type InstalledBundle struct {
 	Path          string            `json:"path"`
 	ShapeVersions map[string]string `json:"shape_versions,omitempty"` // shapeName → version installed
 	ThemeVersions map[string]string `json:"theme_versions,omitempty"` // themeName → version installed
+	// Extra: members this build does not model, kept on save (extra.go).
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // RegistryPath returns the absolute path to a tenant's bundle registry file.
@@ -101,7 +105,7 @@ func LoadRegistry(siteDir string) (*BundleRegistry, error) {
 //
 // This replaces the silent `if err != nil { reg = DefaultRegistry() }`
 // pattern at the four mutator call sites (EnsureReferencePayload,
-// SetActiveThemeName, SetActiveShapeName, MigrateActiveThemeToRegistry).
+// SetActiveThemeName, SetActiveShapeName, AdoptLegacyActiveTheme).
 // That pattern was the root cause of the 2026-04-29 discover.polis.pub
 // regression: hand-edits via root-ssh left registry.json owned by
 // root:root mode 0600, the polis service ran as the polis user and got
@@ -387,38 +391,25 @@ func QualifyShape(name string) string {
 	return "pub.polis.shapes." + name
 }
 
-// MigrateActiveThemeToRegistry moves the legacy active_theme field from
-// .well-known/polis into a per-tenant registry.json (creating the registry if
-// missing) and strips the field from well-known.
+// AdoptLegacyActiveTheme is the REGISTRY half of the active_theme migration:
+// it records a theme found in a pre-step-01/1e .well-known/polis into the
+// tenant's registry.json, creating the registry if missing.
 //
-// One-time migration. Idempotent — re-running on an already-migrated site is
-// a no-op. Returns nil silently if there's nothing to migrate.
-//
-// Behavior:
-//   - If well-known is missing or unparseable → no-op (return nil).
-//   - If well-known has no active_theme → no-op.
 //   - If registry.json doesn't exist → create it with DefaultRegistry() values
 //     plus the migrated active_theme (fully-qualified).
 //   - If registry.json exists and already has active_theme set → do not
-//     overwrite, just strip the legacy field.
+//     overwrite.
 //   - If registry.json exists but active_theme is empty → populate from legacy.
-//   - In all cases where a field is migrated, strip active_theme from
-//     well-known and rewrite it.
-func MigrateActiveThemeToRegistry(siteDir string) error {
-	wkPath := filepath.Join(siteDir, ".well-known", "polis")
-	wkData, err := os.ReadFile(wkPath)
-	if err != nil {
-		return nil // no well-known; nothing to migrate
-	}
-	var wk map[string]interface{}
-	if err := json.Unmarshal(wkData, &wk); err != nil {
-		return nil // unparseable; can't safely migrate
-	}
-	legacyTheme, _ := wk["active_theme"].(string)
+//
+// ⛔ IT DOES NOT TOUCH .well-known/polis. That document belongs to pkg/site,
+// whose one writer refuses identity loss; site.MigrateActiveThemeToRegistry
+// calls this and then strips the legacy field through that writer. This
+// package used to write the file itself (site imports bundle, so it could not
+// call the writer) — which put a well-known write outside every guard.
+func AdoptLegacyActiveTheme(siteDir, legacyTheme string) error {
 	if legacyTheme == "" {
-		return nil // already migrated or never set
+		return nil
 	}
-
 	// Load existing registry, or start from DefaultRegistry only if the
 	// file is genuinely missing. Read errors (permission denied) and
 	// parse errors return up so we don't silently overwrite a present-
@@ -442,18 +433,6 @@ func MigrateActiveThemeToRegistry(siteDir string) error {
 		return fmt.Errorf("save registry: %w", err)
 	}
 
-	// Strip active_theme from well-known and rewrite atomically. Direct
-	// atomicfile call rather than site.SaveWellKnownRaw because site already
-	// imports bundle (cycle). The on-disk format matches site.SaveWellKnownRaw.
-	delete(wk, "active_theme")
-	out, err := json.MarshalIndent(wk, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal well-known: %w", err)
-	}
-	out = append(out, '\n')
-	if err := atomicfile.WriteFile(wkPath, out, 0644); err != nil {
-		return fmt.Errorf("rewrite well-known: %w", err)
-	}
 	return nil
 }
 
@@ -492,7 +471,7 @@ func GetActiveThemeName(siteDir string) (string, error) {
 //
 // Callers in the webapp/CLI theme-switcher path should use this. Pre-existing
 // active_theme entries in .well-known/polis are NOT touched here — that's the
-// migration's job (MigrateActiveThemeToRegistry).
+// migration's job (site.MigrateActiveThemeToRegistry).
 func SetActiveThemeName(siteDir, themeName string) error {
 	if themeName == "" {
 		return fmt.Errorf("theme name is required")

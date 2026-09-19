@@ -53,7 +53,7 @@ func TestLogSuppressedEmit_StructuredJSON(t *testing.T) {
 	}
 
 	checks := map[string]string{
-		"event":         "pub.polis.emit.suppressed",
+		"action":        "pub.polis.emit.suppressed",
 		"event_type":    "pub.polis.follow.announced",
 		"reason":        "not_registered_locally",
 		"actor":         "alice.polis.pub",
@@ -66,6 +66,12 @@ func TestLogSuppressedEmit_StructuredJSON(t *testing.T) {
 		if !ok || got != want {
 			t.Errorf("field %q = %v, want %q", k, rec[k], want)
 		}
+	}
+	// C20: the stack-wide schema carries the name in `action`. An `event`
+	// field is what builds before the v4 cutover wrote, and a query on
+	// `action` never sees it.
+	if _, ok := rec["event"]; ok {
+		t.Errorf("record carries a pre-v4 `event` field: %v", rec["event"])
 	}
 	if _, ok := rec["ts"].(string); !ok {
 		t.Error("missing or non-string ts field")
@@ -138,19 +144,19 @@ func TestLogSuppressedEmit_OtherReasonsAlwaysLog(t *testing.T) {
 
 func TestLogSuppressedEmit_ContextDoesNotOverrideReserved(t *testing.T) {
 	out := captureStderr(t, func() {
-		// Caller maliciously passes "event" in context — should be namespaced.
+		// Caller maliciously passes "action" in context — should be namespaced.
 		LogSuppressedEmit("pub.polis.tag.applied", "config_missing", "alice.polis.pub",
-			map[string]interface{}{"event": "spoofed", "tag": "design"})
+			map[string]interface{}{"action": "spoofed", "tag": "design"})
 	})
 	var rec map[string]interface{}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rec); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if rec["event"] != "pub.polis.emit.suppressed" {
-		t.Errorf("reserved event field clobbered: %v", rec["event"])
+	if rec["action"] != "pub.polis.emit.suppressed" {
+		t.Errorf("reserved action field clobbered: %v", rec["action"])
 	}
-	if rec["context_event"] != "spoofed" {
-		t.Errorf("colliding context field should be namespaced under context_*; got %v", rec["context_event"])
+	if rec["context_action"] != "spoofed" {
+		t.Errorf("colliding context field should be namespaced under context_*; got %v", rec["context_action"])
 	}
 	if rec["tag"] != "design" {
 		t.Errorf("non-colliding context field should pass through; got %v", rec["tag"])

@@ -149,8 +149,11 @@ func (b *blessedDescriptor) makeSidecar(key, pin, fetchedAt, verifiedAt string) 
 // well-known key). Key-rotation handling (basic, in scope): a clean rotation
 // re-signs the artifact → "valid" → NOT an integrity failure. Only a signature
 // that fails the current key → "invalid" → Tampered (possible MITM). A transient
-// fetch/key error → "error" → not a failure (durability). The FULL continuity
-// layer is deferred (plans/foreign-author-key-continuity.md).
+// fetch/key error → "error" → not a failure (durability). A signature made by a
+// retired key resolves through the author's PUBLISHED key history (the verify
+// package reads public_key_history). What is not built is continuity of our own:
+// remembering the keys we have observed for an author, so a history the site
+// rewrites could be told from a clean rotation.
 func (b *blessedDescriptor) VerifyCached(st Store, key string, body []byte, sc Sidecar) IntegrityVerdict {
 	mdURL := polisurl.NormalizeToMD(sourceURLOf(key, sc))
 	result, verr := b.verifyContent(commentSourceURL(mdURL))

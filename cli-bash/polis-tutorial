@@ -612,7 +612,7 @@ section_completion() {
     echo ""
     echo "    - ${CYAN}polis --help${NC}     Full command reference"
     echo "    - ${CYAN}cli/USAGE.md${NC}     Detailed usage guide"
-    echo "    - ${CYAN}docs/manifesto.md${NC} Why we built Polis"
+    echo "    - ${CYAN}docs/general/vision.md${NC} Why we built Polis"
     echo ""
     divider
     echo ""

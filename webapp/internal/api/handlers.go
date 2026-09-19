@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -311,6 +312,12 @@ func (h *handlers) handleDispatchError(w http.ResponseWriter, r *http.Request, e
 	var status int
 	var code, publicMessage string
 	switch {
+	case errors.Is(err, ops.ErrNotFound):
+		// Checked before the message matching below, which would read a name
+		// containing "invalid" as an invalid request.
+		status = http.StatusNotFound
+		code = "not_found"
+		publicMessage = "The requested resource was not found."
 	case strings.Contains(msg, "not configured") || strings.Contains(msg, "no private key"):
 		status = http.StatusServiceUnavailable
 		code = "not_configured"

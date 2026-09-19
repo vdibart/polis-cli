@@ -248,13 +248,13 @@ func TestStripBundleActiveFields_Idempotent(t *testing.T) {
 func TestStripBundleActiveFields_PreservesUnknownFields(t *testing.T) {
 	siteDir := t.TempDir()
 	writeWK(t, siteDir, map[string]interface{}{
-		"public_key":   "x",
-		"author":       "alice",
+		"public_key":        "x",
+		"author":            "alice",
 		"some_future_field": "preserve_me",
 		"bundles": map[string]interface{}{
 			"pub.polis.core": map[string]interface{}{
-				"active":        true,
-				"path":          "content/pub.polis.core/bundle.json",
+				"active":         true,
+				"path":           "content/pub.polis.core/bundle.json",
 				"future_sibling": "preserve_me_too",
 			},
 		},

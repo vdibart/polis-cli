@@ -86,7 +86,8 @@ func handleUnfollow(args []string) {
 
 	removed := f.Remove(authorURL)
 
-	if err := following.Save(followingPath, f); err != nil {
+	// SIGNET epic 02: unfollowing is authorship too — re-sign over the new roster.
+	if err := following.SaveSigned(followingPath, f, privKey); err != nil {
 		exitError("Failed to save following.json: %v", err)
 	}
 
@@ -95,9 +96,9 @@ func handleUnfollow(args []string) {
 			"status":  "success",
 			"command": "unfollow",
 			"data": map[string]interface{}{
-				"author_url":            authorURL,
-				"comments_found":        commentCount,
-				"comments_denied":       deniedCount,
+				"author_url":             authorURL,
+				"comments_found":         commentCount,
+				"comments_denied":        deniedCount,
 				"removed_from_following": removed,
 			},
 		})

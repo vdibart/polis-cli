@@ -106,7 +106,7 @@ func TestCacheManager_ConcurrentMerge_SeparateInstances_LosesItems(t *testing.T)
 		go func(m int) {
 			defer wg.Done()
 			cm := NewCacheManager(dir, testDiscoveryDomain) // SEPARATE INSTANCE
-			<-start                                          // align so they actually race
+			<-start                                         // align so they actually race
 			if _, err := cm.MergeItems(allItems[m]); err != nil {
 				t.Errorf("manager %d merge: %v", m, err)
 			}

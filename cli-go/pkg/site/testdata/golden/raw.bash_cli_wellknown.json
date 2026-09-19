@@ -1,0 +1,15 @@
+{
+  "active_theme": "sols",
+  "author_name": "John Doe",
+  "bundles": {
+    "pub.polis.core": {
+      "active": true,
+      "path": "content/pub.polis.core/bundle.json"
+    }
+  },
+  "created": "2026-01-01T00:00:00Z",
+  "email": "john@example.com",
+  "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBashCLITestKeyXXXXXXXXXXXXXXXXXXXX polis-local",
+  "site_title": "My Site",
+  "version": "polis-cli/0.45.0"
+}

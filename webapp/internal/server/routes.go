@@ -84,6 +84,8 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/site/unregister", limitBody(s.handleSiteUnregister, MaxDefaultBodySize))
 	mux.HandleFunc("/api/site/deploy-check", limitBody(s.handleDeployCheck, MaxDefaultBodySize))
 	mux.HandleFunc("/api/site/setup-wizard-dismiss", limitBody(s.handleSetupWizardDismiss, MaxDefaultBodySize))
+	mux.HandleFunc("/api/site/license", limitBody(s.handleSiteLicense, MaxDefaultBodySize))
+	mux.HandleFunc("/api/settings/rosie", limitBody(s.handleRosieSettings, MaxDefaultBodySize))
 
 	// Social API routes (following, feed, remote content)
 	mux.HandleFunc("/api/following", limitBody(s.handleFollowing, MaxDefaultBodySize))
@@ -107,18 +109,18 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	// Read-focus single-latest-comment lookup (read-focus mode shows exactly
 	// one comment per post, blessed or not — sourced from DS). GET-only, same
 	// public wrapper as /stream/items.
-	mux.HandleFunc("/api/v1/stream/focus-comment", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamFocusComment))
+	mux.HandleFunc("/api/v1/stream/focus-comment", publicContentMiddleware(sharedPublicContentLimiter, s.BehindTrustedProxy, s.handleStreamFocusComment))
 	// Read-focus full-body proxy: returns one post's rendered body so the SPA
 	// can show the whole post (not the excerpt) for cross-tenant entries that
 	// the browser can't fetch directly under its connect-src CSP. GET-only,
 	// same public wrapper as /stream/items.
-	mux.HandleFunc("/api/v1/stream/body", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamBody))
+	mux.HandleFunc("/api/v1/stream/body", publicContentMiddleware(sharedPublicContentLimiter, s.BehindTrustedProxy, s.handleStreamBody))
 	// PQL-native data endpoint (pull-PQL-through Phase 3). GET /pql/<sentence>
 	// content-negotiates: Accept: application/json → versioned JSON envelope;
 	// else → HTML infinity-stream shell (Phase 5). Same public wrapper +
 	// per-IP limiter as /stream/items; owner-private (first-person) scopes are
 	// gated at the routing layer (hosted pqlRequiresOwnerAuth / localhost trust).
-	mux.HandleFunc("/pql/", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamPQL))
+	mux.HandleFunc("/pql/", publicContentMiddleware(sharedPublicContentLimiter, s.BehindTrustedProxy, s.handleStreamPQL))
 	// step-06/6.e: client-emitted structured event endpoint. Owner SPA
 	// posts {event, fields} on icon-preset clicks (pub.polis.stream.
 	// preset_loaded) for usage telemetry. Allowlist-restricted.
@@ -208,11 +210,11 @@ func SetupReaderRoutes(mux *http.ServeMux, s *Server) {
 	// /api/v1/stream/items retired in the PQL hard cutover — see SetupRoutes.
 	// The data path is GET /pql/<sentence> (registered below).
 	// Read-focus single-latest-comment lookup — same wrapper as in SetupRoutes.
-	mux.HandleFunc("/api/v1/stream/focus-comment", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamFocusComment))
+	mux.HandleFunc("/api/v1/stream/focus-comment", publicContentMiddleware(sharedPublicContentLimiter, s.BehindTrustedProxy, s.handleStreamFocusComment))
 	// Read-focus full-body proxy — same wrapper as in SetupRoutes.
-	mux.HandleFunc("/api/v1/stream/body", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamBody))
+	mux.HandleFunc("/api/v1/stream/body", publicContentMiddleware(sharedPublicContentLimiter, s.BehindTrustedProxy, s.handleStreamBody))
 	// PQL-native data endpoint — same wrapper as in SetupRoutes.
-	mux.HandleFunc("/pql/", publicContentMiddleware(sharedPublicContentLimiter, s.handleStreamPQL))
+	mux.HandleFunc("/pql/", publicContentMiddleware(sharedPublicContentLimiter, s.BehindTrustedProxy, s.handleStreamPQL))
 
 	// Content source path redirect (content/ .html → mount path)
 	mux.HandleFunc("/content/", s.handleContentRedirect)

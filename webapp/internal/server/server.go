@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/attestation"
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
@@ -26,6 +27,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
+	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
@@ -116,6 +118,11 @@ type Config struct {
 
 	// Editor right panel mode: "preview", "help", or "browse" (default "preview")
 	EditorPanelMode string `json:"editor_panel_mode,omitempty"`
+
+	// Extra holds members this build does not model, so SaveConfig writes them
+	// back: config.json is unsigned, and another build's setting must survive
+	// this one's next settings save (config_extra.go).
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // SSEEvent is a server-sent event pushed to connected clients.
@@ -180,6 +187,23 @@ type Server struct {
 	// local instance.
 	RestrictDMEgress bool
 
+	// BehindTrustedProxy says the client IP may be read from Fly-Client-IP and
+	// X-Forwarded-For, because a proxy that sets them stands in front. Set true
+	// only by the hosted multi-tenant entry point, which runs behind Fly's
+	// proxy. Left false in localhost and self-hosted mode, where nothing
+	// guarantees a proxy and a client could set the headers itself to slip
+	// past a per-IP limit; the IP is then RemoteAddr.
+	BehindTrustedProxy bool
+
+	// RosiePaused is the hosted operator switch POLIS_ROSIE, seen from one
+	// tenant's server (Signet epic 11 D12). While true, Rosie resolves no grant,
+	// makes no decision and sends no marked request — a marked request to a
+	// discovery service that predates the marker fails with 401. Settings →
+	// Rosie still saves the user's choice and says she has not started.
+	//
+	// Always false outside hosting: self-hosted and localhost have no switch.
+	RosiePaused bool
+
 	// Cross-tenant comment-count cache: post URL → count + expiry.
 	// Populated by populateCrossTenantCommentCounts in handlers_stream.go.
 	// commentCountFlight collapses concurrent stream requests that share
@@ -210,7 +234,6 @@ type Server struct {
 	// scope=my-mutuals requests at high frequency this is wasteful.
 	// Cached value stays valid as long as both source files'
 	// mtimes are unchanged AND the entry is within mutualsCacheTTL.
-	// Capacity-planning Step-6-Scaling-Concerns row.
 	mutualsCacheMu    sync.Mutex
 	mutualsCacheValue map[string]bool
 	mutualsCacheAt    time.Time
@@ -309,7 +332,7 @@ type Logger struct {
 	file           *os.File
 	mu             sync.Mutex
 	jsonOutput     bool            // emit JSON to stdout when true (LOG_FORMAT=json)
-	disabledEvents map[string]bool // category filter (LOG_EVENTS_DISABLED)
+	disabledEvents map[string]bool // LOG_EVENTS_DISABLED (see EventDisabled)
 }
 
 // NewLogger creates a new logger with the given level and logs directory
@@ -418,17 +441,27 @@ func (l *Logger) Debug(format string, args ...interface{}) {
 
 // Event logs a structured event to disk and optionally emits JSON to stdout.
 // Event names use the pub.polis.* namespace for cross-system consistency.
+//
+// ⭐ `pub.polis.security.*` events go out on `source: security`, where the
+// security dashboards look for them (R24-18); everything else on `webapp`.
 func (l *Logger) Event(event string, fields map[string]interface{}) {
+	source := "webapp"
+	if strings.HasPrefix(event, "pub.polis.security.") {
+		source = "security"
+	}
+	l.EventWithSource(source, event, fields)
+}
+
+// EventWithSource is Event with an explicit `source`. Use it only for a source
+// the shared schema already defines — today `security`, for events an operator
+// must see on the security stream (Signet epic 11's agent_act_without_grant).
+func (l *Logger) EventWithSource(source, event string, fields map[string]interface{}) {
 	if l == nil || l.level < LogLevelBasic {
 		return
 	}
 
-	// Check category filter: category is the segment after "pub.polis."
-	if len(l.disabledEvents) > 0 {
-		category := eventCategory(event)
-		if category != "" && l.disabledEvents[category] {
-			return
-		}
+	if EventDisabled(l.disabledEvents, event) {
+		return
 	}
 
 	l.mu.Lock()
@@ -460,10 +493,18 @@ func (l *Logger) Event(event string, fields map[string]interface{}) {
 	if l.jsonOutput {
 		obj := map[string]interface{}{
 			"ts":     now.UTC().Format(time.RFC3339),
-			"source": "webapp",
+			"source": source,
 			"action": event,
 		}
 		for k, v := range fields {
+			// ⛔ THE SCHEMA FIELDS ARE NOT THE CALLER'S TO SET. `action` is the
+			// event name, `source` says which component logged it and `ts` when
+			// — a caller field of any of those names used to overwrite the real
+			// one (C19, R1-6), so a record could claim a source it did not come
+			// from. The caller's value is kept under `context_*`.
+			if schemaLogFields[k] {
+				k = "context_" + k
+			}
 			obj[k] = v
 		}
 		data, err := json.Marshal(obj)
@@ -473,18 +514,54 @@ func (l *Logger) Event(event string, fields map[string]interface{}) {
 	}
 }
 
-// eventCategory extracts the category from a pub.polis.* event name.
-// e.g., "pub.polis.post.publish" → "post", "pub.polis.comment.blessing.grant" → "comment"
-func eventCategory(event string) string {
+// schemaLogFields are the base-schema keys a caller may not set. Hosted's
+// logEvent stamps the same three after copying the caller's fields.
+var schemaLogFields = map[string]bool{"action": true, "source": true, "ts": true}
+
+// EventDisabled reports whether LOG_EVENTS_DISABLED silences event. An entry
+// matches when it EQUALS the event name or is a DOTTED PREFIX of it at any
+// depth: `judge` silences everything Judge emits, `judge.alert` only its
+// alerts, `judge.sweep` only that one event. A pub.polis.* name is also
+// matched with that prefix removed, so the bare categories this filter has
+// always taken (`feed` for pub.polis.feed.refresh) keep working. Both loggers
+// — this one and hosted's logEvent — use it, so one value means one thing.
+func EventDisabled(disabled map[string]bool, event string) bool {
+	if len(disabled) == 0 {
+		return false
+	}
+	if prefixDisabled(disabled, event) {
+		return true
+	}
 	const prefix = "pub.polis."
-	if !strings.HasPrefix(event, prefix) {
-		return ""
+	return strings.HasPrefix(event, prefix) && prefixDisabled(disabled, event[len(prefix):])
+}
+
+// prefixDisabled tests name and each of its dotted prefixes, longest first.
+func prefixDisabled(disabled map[string]bool, name string) bool {
+	for name != "" {
+		if disabled[name] {
+			return true
+		}
+		dot := strings.LastIndex(name, ".")
+		if dot < 0 {
+			return false
+		}
+		name = name[:dot]
 	}
-	rest := event[len(prefix):]
-	if idx := strings.Index(rest, "."); idx > 0 {
-		return rest[:idx]
+	return false
+}
+
+// ParseDisabledEvents parses LOG_EVENTS_DISABLED: a comma-separated list of
+// event names or dotted prefixes (see EventDisabled).
+func ParseDisabledEvents(s string) map[string]bool {
+	m := make(map[string]bool)
+	for _, entry := range strings.Split(s, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry != "" {
+			m[entry] = true
+		}
 	}
-	return rest
+	return m
 }
 
 // Request logs an HTTP request as structured JSON (both disk and stdout).
@@ -703,6 +780,25 @@ func (s *Server) DiscoveryConfig() *publish.DiscoveryConfig {
 		DiscoveryKey: s.DiscoveryKey,
 		BaseURL:      s.BaseURL,
 		Generator:    "polis-cli-go/" + s.CLIVersion,
+	}
+}
+
+// FollowConfig returns a per-instance follow config for
+// following.FollowWithBlessing / UnfollowWithDenial. Like DiscoveryConfig(),
+// this keeps the follow.announced/removed stream events off the multi-tenant-
+// unsafe package globals: in the hosted process every tenant's Initialize()
+// overwrites stream.BaseURL/DataDir, so an interactive follow that relied on
+// globals would announce under the wrong (or empty) domain and get silently
+// suppressed. Returns nil when DS isn't configured (single-tenant CLI fallback).
+func (s *Server) FollowConfig() *following.FollowConfig {
+	if s.DiscoveryURL == "" || s.BaseURL == "" {
+		return nil
+	}
+	return &following.FollowConfig{
+		DataDir:      s.DataDir,
+		DiscoveryURL: s.DiscoveryURL,
+		DiscoveryKey: s.DiscoveryKey,
+		BaseURL:      s.BaseURL,
 	}
 }
 
@@ -1161,6 +1257,13 @@ func (s *Server) Initialize() {
 		following.Version = s.CLIVersion
 		site.Version = s.CLIVersion
 		tag.Version = s.CLIVersion
+		// Wired before the webapp issues an attestation, on purpose. A package
+		// with a Version var, a GetGenerator reader and NO assigner writes
+		// "polis-cli-go/dev" into a signed artifact and nothing catches it —
+		// pkg/following did it for five months, and pkg/license is doing it in
+		// production right now. The assignment is one line; the silence is not.
+		attestation.Version = s.CLIVersion
+		license.Version = s.CLIVersion // E2 — see cmd/root.go
 	}
 
 	// Migrate .polis/drafts -> .polis/bundles/pub.polis.core/posts/drafts if needed
@@ -1228,15 +1331,9 @@ func (s *Server) Initialize() {
 		s.Logger.jsonOutput = true
 	}
 
-	// Parse LOG_EVENTS_DISABLED for category-level filtering (e.g., "feed,site")
+	// LOG_EVENTS_DISABLED: event names or dotted prefixes (e.g., "feed,site")
 	if disabled := os.Getenv("LOG_EVENTS_DISABLED"); disabled != "" {
-		s.Logger.disabledEvents = make(map[string]bool)
-		for _, cat := range strings.Split(disabled, ",") {
-			cat = strings.TrimSpace(cat)
-			if cat != "" {
-				s.Logger.disabledEvents[cat] = true
-			}
-		}
+		s.Logger.disabledEvents = ParseDisabledEvents(disabled)
 	}
 
 	s.Logger.PruneLogs()
@@ -1249,7 +1346,8 @@ func (s *Server) Initialize() {
 	// verification is not yet feasible because DS-emitted events carry the
 	// author's content-registration signature, not a stream-event signature.
 	// The verifier cannot reconstruct the original signed payload.
-	// See operational-hardening.md R6-1 for the tracked fix.
+	// The fix is for the stream to carry the signed content, so the verifier
+	// can rebuild what was signed; until then this stays off.
 	// s.AuthorKeyCache = discovery.NewAuthorKeyCache(0, 0)
 }
 
@@ -1456,16 +1554,15 @@ type CountsPayload struct {
 func (s *Server) computeAllCounts() CountsPayload {
 	counts := CountsPayload{}
 
-	// Posts — read from index.jsonl (handles date-based subdirectories)
-	indexPath := filepath.Join(s.DataDir, "content", "pub.polis.core", "index.jsonl")
-	if data, err := os.ReadFile(indexPath); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			// Skip comment entries in index.jsonl
-			if !strings.Contains(line, "pub.polis.core/comment/") {
+	// Posts — read from index.jsonl (handles date-based subdirectories).
+	//
+	// ⚠️ Count on `type`, never on "not a comment". index.jsonl carries every
+	// content type the site publishes — comments for as long as it has
+	// existed, and tag + attestation since Signet epic 25 — so a
+	// not-a-comment test counts tags as posts.
+	if entries, err := metadata.LoadPublicIndex(s.DataDir); err == nil {
+		for _, e := range entries {
+			if isPostIndexEntry(e.Type, e.Path) {
 				counts.Posts++
 			}
 		}
@@ -1598,14 +1695,19 @@ func (s *Server) computeAllCounts() CountsPayload {
 	// when the user has had no opportunity to acknowledge anything.
 	syncPos, _ := store.GetCursor("pub.polis.sync")
 
+	// Feed has-new keys off the feed-CONTENT cursor (advanced only when a sync
+	// actually added feed items), NOT the raw sync cursor — otherwise your own
+	// posts (synced but filtered out of the feed) would light the dot with
+	// nothing new to show.
+	feedContentPos, _ := store.GetCursor("pub.polis.feed.content")
 	feedViewedPos, _ := store.GetCursor("pub.polis.feed.viewed")
 	if feedViewedPos == "" || feedViewedPos == "0" {
-		if syncPos != "" {
-			_ = store.SetCursor("pub.polis.feed.viewed", syncPos)
+		if feedContentPos != "" {
+			_ = store.SetCursor("pub.polis.feed.viewed", feedContentPos)
 		}
 		counts.HasNewFeed = false
 	} else {
-		counts.HasNewFeed = syncPos != "" && syncPos != feedViewedPos
+		counts.HasNewFeed = feedContentPos != "" && feedContentPos != feedViewedPos
 	}
 
 	// Blessing inbox: dot fires when sync has advanced past the inbox-viewed
@@ -2212,10 +2314,7 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 		OpenBrowser(url)
 	}()
 
-	// Wrap mux with middleware: security headers (outermost) → request logging → mux
-	handler := securityHeadersMiddleware(requestLoggingMiddleware(server.Logger, mux))
-
-	if err := http.ListenAndServe(addr, handler); err != nil {
+	if err := http.ListenAndServe(addr, localhostModeHandler(server.Logger, mux)); err != nil {
 		log.Fatal("Server error:", err)
 	}
 }
@@ -2280,6 +2379,13 @@ func spaHandler(fsys fs.FS, dataDir string, devMode bool) http.Handler {
 		// If the file exists in the embedded FS, serve it directly
 		if _, err := fs.Stat(fsys, path); err == nil {
 			fileServer.ServeHTTP(w, r)
+			return
+		}
+		// The site's own generated files (robots.txt, rsl.xml, licence pages,
+		// .well-known/) come from the data dir, 404 when absent — never the
+		// shell with a 200 (epic 29 E2).
+		if isSiteFilePath(dataDir, r.URL.Path) {
+			serveSiteFile(w, r, dataDir)
 			return
 		}
 		// SPA fallback: serve templated index.html for deep-link paths
@@ -2395,4 +2501,16 @@ func extractDomainFromURL(rawURL string) string {
 		return ""
 	}
 	return u.Hostname()
+}
+
+// isPostIndexEntry reports whether an index.jsonl entry is a post.
+//
+// Keys on `type`, falling back to the source path for entries written before
+// the field was reliably set. Everything else — comment, tag, attestation, a
+// type this build has never heard of — is not a post.
+func isPostIndexEntry(entryType, path string) bool {
+	if entryType != "" {
+		return entryType == "post"
+	}
+	return strings.HasPrefix(path, "content/pub.polis.core/post/") || strings.HasPrefix(path, "posts/")
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
@@ -100,7 +101,9 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 		if isComment {
 			contentKind = "comment"
 		}
-		fmt.Printf("Unpublish \"%s\"?\n\n", title)
+		// The stored title is YAML-escaped; show what it says, not how it is
+		// stored, or a quoted title prints as ""Foo: Bar"".
+		fmt.Printf("Unpublish \"%s\"?\n\n", publish.UnquoteYAMLString(title))
 		fmt.Println("This will:")
 		fmt.Printf("  - Remove the %s from your site and from discovery\n", contentKind)
 		if isPost {
@@ -186,23 +189,24 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 		fmt.Println("[i] DS unpublish skipped: site not registered with discovery service")
 	}
 
-	// Strip frontmatter, preserve only title + body (and in-reply-to for comments)
 	body := publish.StripFrontmatter(contentStr)
 
 	// Build draft content
 	var draftContent string
 	if isPost {
-		// Post draft format: # Title\n\nbody
+		// Post draft format: # Title\n\nbody. ⛔ Unquote BEFORE the strip: the
+		// publisher escapes the title (publish.escapeYAMLString) while the body
+		// heading keeps the plain text, so comparing the raw frontmatter value
+		// never matched and each cycle stacked a heading AND re-escaped the
+		// title (close-out R3-1). Same helper as the comment builder.
+		title = publish.UnquoteYAMLString(title)
+		body = render.StripLeadingTitleHeading(body, title)
 		draftContent = "# " + title + "\n\n" + body
 	} else {
-		// Comment draft: preserve in-reply-to as a comment at the top so the author
-		// knows what post this was replying to, then title + body
-		inReplyTo := fm["in-reply-to"]
-		var header string
-		if inReplyTo != "" {
-			header = "<!-- in-reply-to: " + inReplyTo + " -->\n"
-		}
-		draftContent = header + "# " + title + "\n\n" + body
+		// A comment draft keeps its reply fields in the format LoadDraft reads,
+		// so `polis comment sign` can sign it again (close-out E2). The builder
+		// owns the unquote + heading strip; the body arrives as published.
+		draftContent = comment.UnpublishedDraftContent(contentStr, title, body)
 	}
 
 	// Determine draft destination path

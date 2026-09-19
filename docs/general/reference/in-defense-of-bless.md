@@ -1,5 +1,7 @@
 # In Defense of Bless
 
+*For* [Writers](../../README.md#writing-on-polis) · [Reviewers](../../README.md#reviewing-the-security-and-identity-design) — *About* [Relationships](../README.md#relationships) — *Kind* [Concept](../../README.md#kinds-of-page) — *See also* [spec](policy-grammar.md) · [guide](../../cli/user/policies.md) · [guide](../../signet/guides/who-blessed-this.md)
+
 ---
 
 **bless** · /blɛs/ · *verb*

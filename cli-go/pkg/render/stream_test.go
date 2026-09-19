@@ -3,6 +3,7 @@ package render
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -145,10 +146,10 @@ func TestRenderAll_StreamSmoke(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260325", "charlie", "Charlie", "Third body text.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:           tempDir,
-		BaseURL:           "https://example.com",
-		PostsSourceDir:    "content/pub.polis.core/post",
-		PostsMountDir:     "posts",
+		DataDir:        tempDir,
+		BaseURL:        "https://example.com",
+		PostsSourceDir: "content/pub.polis.core/post",
+		PostsMountDir:  "posts",
 	})
 	if err != nil {
 		t.Fatalf("NewPageRenderer: %v", err)
@@ -444,17 +445,17 @@ func TestRenderAll_StreamDoesNotEmitV3Archives(t *testing.T) {
 // in step-05; 6.j restores it. Per-post pages (focus entry only — NOT
 // siblings) ship:
 //
-//   1. A `#polis-widget` mount inside the focus article — the host
-//      element the polis.pub-served widget.js attaches a closed Shadow
-//      DOM to (which renders the comment form / signup CTA / owner
-//      "Edit →" depending on visitor auth state).
-//   2. A `.polis-widget-fallback` light-DOM child rendering "Reply with
-//      your polis identity at polis.pub →" — visible only when the
-//      widget script never loads or fails to attach (Shadow DOM hides
-//      the light DOM children once attachShadow runs).
-//   3. The widget script tag (`<script src=".../widget-X.Y.Z.js" defer>`)
-//      with the bundle's WidgetVersion templated in.
-//   4. A `<noscript>` fallback link for visitors with JS disabled.
+//  1. A `#polis-widget` mount inside the focus article — the host
+//     element the polis.pub-served widget.js attaches a closed Shadow
+//     DOM to (which renders the comment form / signup CTA / owner
+//     "Edit →" depending on visitor auth state).
+//  2. A `.polis-widget-fallback` light-DOM child rendering "Reply with
+//     your polis identity at polis.pub →" — visible only when the
+//     widget script never loads or fails to attach (Shadow DOM hides
+//     the light DOM children once attachShadow runs).
+//  3. The widget script tag (`<script src=".../widget-X.Y.Z.js" defer>`)
+//     with the bundle's WidgetVersion templated in.
+//  4. A `<noscript>` fallback link for visitors with JS disabled.
 //
 // Locks the contract that downstream theme overrides + future template
 // edits don't drop the comment-WRITE surface again.
@@ -656,14 +657,16 @@ func TestRenderAll_StreamSiteIdentityBlock(t *testing.T) {
 		t.Fatalf("write about.md: %v", err)
 	}
 
-	// Followers: write a JSON array under the DS state path. Use 7 entries
-	// (a value that's not a coincidence with posts/following counts).
+	// Followers: write the FollowerState OBJECT under the DS state path
+	// ({followers:[...], count:N}) — the real on-disk shape written by stream
+	// sync. Use 7 entries (a value that's not a coincidence with
+	// posts/following counts).
 	dsState := filepath.Join(tempDir, ".polis", "ds", "discover.example.com",
 		"pub.polis.core", "state")
 	if err := os.MkdirAll(dsState, 0755); err != nil {
 		t.Fatalf("mkdir ds state: %v", err)
 	}
-	followersJSON := `[{"d":"a"},{"d":"b"},{"d":"c"},{"d":"d"},{"d":"e"},{"d":"f"},{"d":"g"}]`
+	followersJSON := `{"followers":["a.example","b.example","c.example","d.example","e.example","f.example","g.example"],"count":7}`
 	if err := os.WriteFile(filepath.Join(dsState, "pub.polis.follow.json"),
 		[]byte(followersJSON), 0644); err != nil {
 		t.Fatalf("write followers: %v", err)
@@ -1185,6 +1188,11 @@ func TestRenderAll_StreamEmptyCorpus(t *testing.T) {
 		t.Error("empty-state sentence filter should be inert (no aria-haspopup control attrs)")
 	}
 	assertContains(t, indexHTML, `data-polis-focus="true"`, "empty-state demarcation")
+	// Follow affordance: the site-follow placeholder AND the widget script that
+	// hydrates it into a Follow button. Without the script the placeholder stays
+	// empty and a brand-new (0-post) site has no way to be followed.
+	assertContains(t, indexHTML, `id="polis-widget-follow"`, "empty-state follow placeholder")
+	assertContains(t, indexHTML, "polis.pub/widget-"+WidgetVersion+".js", "empty-state hydrates follow widget")
 }
 
 // setupStreamTestSite installs the bundle fixture, sets active_shape=v4 and
@@ -1292,6 +1300,8 @@ func TestStripHTMLComments(t *testing.T) {
 		{"adjacent comments", `<!--x--><!--y--><p>z</p>`, `<p>z</p>`},
 		{"comment with HTML inside", `<p>a</p><!-- <b>not real</b> --><p>b</p>`, `<p>a</p><p>b</p>`},
 		{"escaped comment in body content stays", `<p>&lt;!-- not a real comment --&gt;</p>`, `<p>&lt;!-- not a real comment --&gt;</p>`},
+		{"keep-bang preserved, normal stripped", `<!--! trail -->X<!-- drop -->`, `<!--! trail -->X`},
+		{"keep-bang multi-line preserved", "<!--!\n  trail\n-->\n<!-- drop -->", "<!--!\n  trail\n-->\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1327,18 +1337,24 @@ func TestRenderedHTMLHasNoComments(t *testing.T) {
 		t.Fatalf("RenderAll: %v", err)
 	}
 
-	// Both the per-post page AND the index should be comment-free.
+	// Both the per-post page AND the index should be comment-free EXCEPT for
+	// the single preserved developer trail marker (the `<!--!` keep-bang).
 	for _, rel := range []string{"posts/20260506/p1.html", "index.html"} {
 		out := mustReadFile(t, filepath.Join(tempDir, rel))
-		if strings.Contains(out, "<!--") {
-			// Find the first one and print surrounding context for debugging.
-			idx := strings.Index(out, "<!--")
-			start := idx
+		// The trail marker must survive (it's the whole point of the keep-bang).
+		if !strings.Contains(out, "<!--! ") && !strings.Contains(out, "<!--!\n") {
+			t.Errorf("%s: rendered HTML is missing the preserved <!--! trail marker", rel)
+		}
+		// Strip the preserved keep-bang markers, then assert NOTHING else remains:
+		// no ordinary <!-- ... --> dev-doc comments rode along into the payload.
+		stripped := regexp.MustCompile(`(?s)<!--!.*?-->`).ReplaceAllString(out, "")
+		if strings.Contains(stripped, "<!--") {
+			idx := strings.Index(stripped, "<!--")
 			end := idx + 200
-			if end > len(out) {
-				end = len(out)
+			if end > len(stripped) {
+				end = len(stripped)
 			}
-			t.Errorf("%s: rendered HTML still contains <!-- ... -->. Surrounding:\n%s", rel, out[start:end])
+			t.Errorf("%s: rendered HTML still contains a non-preserved <!-- ... -->. Surrounding:\n%s", rel, stripped[idx:end])
 		}
 	}
 }
@@ -1438,7 +1454,7 @@ func TestTitleStartsFirstSentence(t *testing.T) {
 			want:  true,
 		},
 		{
-			name: "smart apostrophe in body",
+			name:  "smart apostrophe in body",
 			title: "It's a long story",
 			body:  "It’s a long story but I’ll keep it short.\n",
 			want:  true,
@@ -1474,7 +1490,7 @@ func TestTitleStartsFirstSentence(t *testing.T) {
 			want:  true,
 		},
 		{
-			name:  "title trailing dots stripped does not over-match unrelated body",
+			name: "title trailing dots stripped does not over-match unrelated body",
 			// titleNorm post-trim = "hello world"; body = "hello mars" — must not match.
 			title: "Hello World...",
 			body:  "Hello Mars, this is a different post.\n",
