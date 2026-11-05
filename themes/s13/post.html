@@ -1,0 +1,103 @@
+<!--
+    Polis Theme: S13 - Post Template
+
+    Snippets loaded by this template:
+    - theme:blessed-comment - Blessed comment block (theme: snippets/blessed-comment.html)
+
+    To override a theme snippet, create a global snippet with the same name
+    and change the "theme:" prefix to use the global version instead.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{title}} - {{site_title}}</title>
+    <meta name="description" content="{{title}}">
+    <link rel="stylesheet" href="{{css_path}}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <main class="post-main">
+        <div class="container">
+            <a href="{{home_path}}" class="back-link">&larr; Back to homepage</a>
+        </div>
+
+        <!-- Post Content -->
+        <article class="post-content">
+        <div class="container">
+            <div class="post-header">
+                <div class="post-date">{{published_human}}</div>
+                <div class="post-meta">
+                    <span class="meta-label">Signed by</span>
+                    <span class="meta-value">{{site_title}}</span>
+                    <span class="meta-sep">|</span>
+                    <span class="meta-label">Version</span>
+                    <span class="meta-value">{{signature_short}}</span>
+                </div>
+            </div>
+            <div class="content-body">
+                {{content}}
+            </div>
+        </div>
+        </article>
+
+        <!-- Blessed Comments -->
+        <section class="comments">
+        <div class="container">
+            <div class="comments-header">
+                <h2 class="comments-title">Comments ({{blessed_count}})</h2>
+                <details class="cta-inline">
+                    <summary class="cta-link">Learn how&hellip;</summary>
+                    <div class="cta-content">
+                        <p class="cta-text">Polis comments are cryptographically signed and published from your own site. No account needed—just your words and your domain.</p>
+                        <div class="cta-code">
+                            <pre><code><span class="code-comment"># Clone the repo and set up your site</span>
+git clone https://github.com/vdibart/polis-cli
+mkdir ~/my-polis-site && cd ~/my-polis-site
+cp -r /path/to/polis/cli/* .
+./polis init
+
+<span class="code-comment"># Create a comment (creates a signed .md file)</span>
+./polis comment {{url}}
+
+<span class="code-comment"># Deploy to your domain</span>
+<span class="code-comment"># (copy rendered files to your web server)</span></code></pre>
+                        </div>
+                        <a href="https://github.com/vdibart/polis-cli" class="cta-link">Get started with Polis &rarr;</a>
+                    </div>
+                </details>
+            </div>
+            <div class="comments-list">
+{{#blessed_comments}}
+                {{> theme:blessed-comment}}
+{{/blessed_comments}}
+            </div>
+        </div>
+        </section>
+
+        <!-- Recent Posts -->
+        <section class="post-footer-nav">
+        <div class="container">
+            <h2 class="section-title">More from this site</h2>
+            <div class="post-list">
+{{#recent_posts}}
+                {{> theme:post-item}}
+{{/recent_posts}}
+            </div>
+        </div>
+        </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="site-footer">
+        <a href="https://github.com/vdibart/polis-cli" class="footer-logo">POLIS<span class="footer-tagline">View project on GitHub</span></a>
+    </footer>
+
+    <script src="s13.js"></script>
+
+<!-- Source: {{url}} | Version: {{version}} -->
+</body>
+</html>

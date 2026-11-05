@@ -1,0 +1,68 @@
+<!--
+    Polis Theme: S13 - Comment Page Template
+
+    Snippets loaded by this template: none
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Comment by {{author_name}} - {{site_title}}</title>
+    <meta name="description" content="Comment on {{in_reply_to_url}}">
+    <link rel="stylesheet" href="{{css_path}}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="site-nav">
+        <a href="{{home_path}}" class="nav-logo-link">
+            <img src="{{home_path}}logo-s13.png" alt="{{site_title}}" class="nav-logo">
+        </a>
+        <a href="{{home_path}}" class="nav-home"><span class="nav-arrow">←</span> Home</a>
+    </nav>
+
+    <!-- Hero -->
+    <section class="hero">
+        <h1 class="hero-title">{{title}}</h1>
+        <p class="hero-subtitle">{{published_human}}</p>
+    </section>
+
+    <!-- Reply Context -->
+    <section class="reply-context">
+        <div class="container">
+            <div class="context-box">
+                <span class="context-label">In reply to:</span>
+                <a href="{{in_reply_to_url}}" class="context-link">{{in_reply_to_url}}</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Comment Content -->
+    <article class="post-content">
+        <div class="container">
+            <div class="content-body">
+                {{content}}
+            </div>
+        </div>
+    </article>
+
+    <!-- Footer -->
+    <footer class="site-footer">
+        <div class="post-meta">
+            <span class="meta-label">Signed by</span>
+            <span class="meta-value">{{author_name}}</span>
+            <span class="meta-sep">|</span>
+            <span class="meta-label">Version</span>
+            <span class="meta-value">{{signature_short}}</span>
+        </div>
+        <a href="https://github.com/vdibart/polis-cli" class="footer-logo">POLIS<span class="footer-tagline">View project on GitHub</span></a>
+    </footer>
+
+    <script src="s13.js"></script>
+
+<!-- Source: {{url}} | Version: {{version}} -->
+</body>
+</html>
