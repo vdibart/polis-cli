@@ -2,6 +2,7 @@ package template
 
 import (
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,7 +127,7 @@ func TestCommentsSectionViaPartial(t *testing.T) {
 		`<span class="author">{{target_author}}</span> <span class="preview">{{preview}}</span>`), 0644)
 
 	engine := New(Config{
-		DataDir:     tempDir,
+		Site:        storage.At(tempDir),
 		ActiveTheme: "turbo",
 	})
 	ctx := NewRenderContext()
@@ -165,7 +166,7 @@ func TestPartialLoading(t *testing.T) {
 	os.WriteFile(filepath.Join(snippetsDir, "about.html"), []byte("<p>About content</p>"), 0644)
 
 	engine := New(Config{
-		DataDir: tempDir,
+		Site: storage.At(tempDir),
 	})
 	ctx := NewRenderContext()
 
@@ -204,7 +205,7 @@ func TestPartialWithMarkdown(t *testing.T) {
 	os.WriteFile(filepath.Join(snippetsDir, "intro.md"), []byte("# Hello\n\nThis is *intro*"), 0644)
 
 	engine := New(Config{
-		DataDir:          tempDir,
+		Site:             storage.At(tempDir),
 		MarkdownRenderer: mockMarkdownRenderer,
 	})
 	ctx := NewRenderContext()
@@ -241,7 +242,7 @@ func TestPartialResolutionOrder(t *testing.T) {
 	os.WriteFile(filepath.Join(themeDir, "about.html"), []byte("THEME ABOUT"), 0644)
 
 	engine := New(Config{
-		DataDir:     tempDir,
+		Site:        storage.At(tempDir),
 		ActiveTheme: "turbo",
 	})
 	ctx := NewRenderContext()
@@ -290,7 +291,7 @@ func TestBaseSnippetFallback(t *testing.T) {
 	os.MkdirAll(themeDir, 0755)
 
 	engine := New(Config{
-		DataDir:     tempDir,
+		Site:        storage.At(tempDir),
 		ActiveTheme: "minimal",
 	})
 	ctx := NewRenderContext()
@@ -332,7 +333,7 @@ func TestShapeRootResolutionForEntryPartials(t *testing.T) {
 	// shadowing file.
 	os.MkdirAll(filepath.Join(shapeRoot, "snippets"), 0755)
 
-	engine := New(Config{DataDir: tempDir, ActiveShape: "v4"})
+	engine := New(Config{Site: storage.At(tempDir), ActiveShape: "v4"})
 	result, err := engine.Render(`{{> stream-post}}`, NewRenderContext())
 	if err != nil {
 		t.Fatalf("Render failed: %v", err)
@@ -357,7 +358,7 @@ func TestShapeRootShadowedByShapeSnippets(t *testing.T) {
 	os.MkdirAll(snippetsDir, 0755)
 	os.WriteFile(filepath.Join(snippetsDir, "stream-post.html"), []byte("SNIPPETS STREAM POST"), 0644)
 
-	engine := New(Config{DataDir: tempDir, ActiveShape: "v4"})
+	engine := New(Config{Site: storage.At(tempDir), ActiveShape: "v4"})
 	result, err := engine.Render(`{{> stream-post}}`, NewRenderContext())
 	if err != nil {
 		t.Fatalf("Render failed: %v", err)
@@ -380,7 +381,7 @@ func TestBaseSnippetOverriddenByTheme(t *testing.T) {
 	os.WriteFile(filepath.Join(themeDir, "post-item.html"), []byte("STUDIO13 POST ITEM"), 0644)
 
 	engine := New(Config{
-		DataDir:     tempDir,
+		Site:        storage.At(tempDir),
 		ActiveTheme: "studio13",
 	})
 	ctx := NewRenderContext()
@@ -417,7 +418,7 @@ func TestMaxRecursionDepth(t *testing.T) {
 	os.WriteFile(filepath.Join(snippetsDir, "recursive.html"), []byte("{{> recursive}}"), 0644)
 
 	engine := New(Config{
-		DataDir: tempDir,
+		Site: storage.At(tempDir),
 	})
 	ctx := NewRenderContext()
 
@@ -473,7 +474,7 @@ func TestPostTitleWithPartialSyntaxViaSnippet(t *testing.T) {
 		`<a href="{{url}}"><span>{{title}}</span></a>`), 0644)
 
 	engine := New(Config{
-		DataDir:     tempDir,
+		Site:        storage.At(tempDir),
 		ActiveTheme: "sols",
 	})
 	ctx := NewRenderContext()
@@ -983,7 +984,7 @@ func TestProcessPartials_BlocksTraversalToOutsideFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine := New(Config{DataDir: tmpDir})
+	engine := New(Config{Site: storage.At(tmpDir)})
 	ctx := NewRenderContext()
 
 	tmpl := `{{> ../secrets/key}}`

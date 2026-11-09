@@ -1,6 +1,7 @@
 package bundle
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -47,7 +48,7 @@ func TestReferencePayloadFS_ServesShapeAssets(t *testing.T) {
 
 func TestEnsureReferencePayload_CopiesShapeTemplates(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := EnsureReferencePayload(siteDir, "pub.polis.core"); err != nil {
+	if err := EnsureReferencePayload(storage.At(siteDir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 
@@ -82,7 +83,7 @@ func TestEnsureReferencePayload_CopiesShapeTemplates(t *testing.T) {
 
 func TestEnsureReferencePayload_Idempotent(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := EnsureReferencePayload(siteDir, "pub.polis.core"); err != nil {
+	if err := EnsureReferencePayload(storage.At(siteDir), "pub.polis.core"); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 	// Capture post.html content and mtime.
@@ -93,7 +94,7 @@ func TestEnsureReferencePayload_Idempotent(t *testing.T) {
 	}
 
 	// Second run should not error and should leave content identical.
-	if err := EnsureReferencePayload(siteDir, "pub.polis.core"); err != nil {
+	if err := EnsureReferencePayload(storage.At(siteDir), "pub.polis.core"); err != nil {
 		t.Fatalf("second install: %v", err)
 	}
 	second, err := os.ReadFile(postPath)
@@ -112,7 +113,7 @@ func TestEnsureReferencePayload_Idempotent(t *testing.T) {
 // would rewrite every file.
 func TestEnsureReferencePayload_MtimeIdempotent(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := EnsureReferencePayload(siteDir, "pub.polis.core"); err != nil {
+	if err := EnsureReferencePayload(storage.At(siteDir), "pub.polis.core"); err != nil {
 		t.Fatalf("first install: %v", err)
 	}
 	postPath := filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "shapes", "v3", "post.html")
@@ -125,7 +126,7 @@ func TestEnsureReferencePayload_MtimeIdempotent(t *testing.T) {
 	// Sleep briefly so a re-write would produce a differing mtime.
 	time.Sleep(20 * time.Millisecond)
 
-	if err := EnsureReferencePayload(siteDir, "pub.polis.core"); err != nil {
+	if err := EnsureReferencePayload(storage.At(siteDir), "pub.polis.core"); err != nil {
 		t.Fatalf("second install: %v", err)
 	}
 	info2, err := os.Stat(postPath)
@@ -142,11 +143,11 @@ func TestEnsureReferencePayload_MtimeIdempotent(t *testing.T) {
 // checkBundleReferencePayload uses these stamps to decide when to re-install.
 func TestEnsureReferencePayload_RecordsVersions(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := EnsureReferencePayload(siteDir, "pub.polis.core"); err != nil {
+	if err := EnsureReferencePayload(storage.At(siteDir), "pub.polis.core"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 
-	reg, err := LoadRegistry(siteDir)
+	reg, err := LoadRegistry(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
@@ -171,17 +172,17 @@ func TestEnsureReferencePayload_RecordsVersions(t *testing.T) {
 // catches an advanced shape version even when files happen to be identical.
 func TestNeedsRefresh_DetectsShapeVersionDrift(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := EnsureReferencePayload(siteDir, "pub.polis.core"); err != nil {
+	if err := EnsureReferencePayload(storage.At(siteDir), "pub.polis.core"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	reg, _ := LoadRegistry(siteDir)
+	reg, _ := LoadRegistry(storage.At(siteDir))
 	entry := reg.FindInstalledBundle("pub.polis.core")
 	entry.ShapeVersions["v3"] = "0.9.0-old"
-	if err := SaveRegistry(siteDir, reg); err != nil {
+	if err := SaveRegistry(storage.At(siteDir), reg); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	reloaded, _ := LoadRegistry(siteDir)
+	reloaded, _ := LoadRegistry(storage.At(siteDir))
 	if !reloaded.NeedsRefresh(DefaultCoreBundle()) {
 		t.Error("NeedsRefresh should be true when shape version differs from shipped")
 	}
@@ -200,7 +201,7 @@ func TestEnsureReferencePayload_PreservesPrivateState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := EnsureReferencePayload(siteDir, "pub.polis.core"); err != nil {
+	if err := EnsureReferencePayload(storage.At(siteDir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 
@@ -216,17 +217,17 @@ func TestEnsureReferencePayload_PreservesPrivateState(t *testing.T) {
 
 func TestEnsureReferencePayload_UnknownBundle(t *testing.T) {
 	siteDir := t.TempDir()
-	err := EnsureReferencePayload(siteDir, "com.nonexistent.bundle")
+	err := EnsureReferencePayload(storage.At(siteDir), "com.nonexistent.bundle")
 	if err == nil {
 		t.Fatal("expected error for unknown bundle")
 	}
 }
 
 func TestEnsureReferencePayload_EmptyArgs(t *testing.T) {
-	if err := EnsureReferencePayload("", "pub.polis.core"); err == nil {
+	if err := EnsureReferencePayload(storage.At(""), "pub.polis.core"); err == nil {
 		t.Error("expected error for empty siteDir")
 	}
-	if err := EnsureReferencePayload(t.TempDir(), ""); err == nil {
+	if err := EnsureReferencePayload(storage.At(t.TempDir()), ""); err == nil {
 		t.Error("expected error for empty bundleName")
 	}
 }
@@ -237,10 +238,10 @@ func TestEnsureReferencePayload_EmptyArgs(t *testing.T) {
 
 func TestCompareReferencePayload_CleanMatch(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := EnsureReferencePayload(siteDir, "pub.polis.core"); err != nil {
+	if err := EnsureReferencePayload(storage.At(siteDir), "pub.polis.core"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
-	mismatches, err := CompareReferencePayload(siteDir, "pub.polis.core")
+	mismatches, err := CompareReferencePayload(storage.At(siteDir), "pub.polis.core")
 	if err != nil {
 		t.Fatalf("CompareReferencePayload: %v", err)
 	}
@@ -251,7 +252,7 @@ func TestCompareReferencePayload_CleanMatch(t *testing.T) {
 
 func TestCompareReferencePayload_DetectsMutation(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := EnsureReferencePayload(siteDir, "pub.polis.core"); err != nil {
+	if err := EnsureReferencePayload(storage.At(siteDir), "pub.polis.core"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	// Tamper with an installed template.
@@ -259,7 +260,7 @@ func TestCompareReferencePayload_DetectsMutation(t *testing.T) {
 	if err := os.WriteFile(victim, []byte("<!-- corrupted -->"), 0644); err != nil {
 		t.Fatalf("tamper: %v", err)
 	}
-	mismatches, err := CompareReferencePayload(siteDir, "pub.polis.core")
+	mismatches, err := CompareReferencePayload(storage.At(siteDir), "pub.polis.core")
 	if err != nil {
 		t.Fatalf("CompareReferencePayload: %v", err)
 	}
@@ -273,14 +274,14 @@ func TestCompareReferencePayload_DetectsMutation(t *testing.T) {
 
 func TestCompareReferencePayload_DetectsDeletion(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := EnsureReferencePayload(siteDir, "pub.polis.core"); err != nil {
+	if err := EnsureReferencePayload(storage.At(siteDir), "pub.polis.core"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	victim := filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "shapes", "v3", "index.html")
 	if err := os.Remove(victim); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	mismatches, err := CompareReferencePayload(siteDir, "pub.polis.core")
+	mismatches, err := CompareReferencePayload(storage.At(siteDir), "pub.polis.core")
 	if err != nil {
 		t.Fatalf("CompareReferencePayload: %v", err)
 	}
@@ -298,7 +299,7 @@ func TestCompareReferencePayload_DetectsDeletion(t *testing.T) {
 
 func TestCompareReferencePayload_IgnoresExtraFiles(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := EnsureReferencePayload(siteDir, "pub.polis.core"); err != nil {
+	if err := EnsureReferencePayload(storage.At(siteDir), "pub.polis.core"); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	// Tenant adds a draft alongside the reference payload.
@@ -307,7 +308,7 @@ func TestCompareReferencePayload_IgnoresExtraFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(draftsDir, "my-draft.md"), []byte("# draft"), 0644); err != nil {
 		t.Fatalf("seed draft: %v", err)
 	}
-	mismatches, err := CompareReferencePayload(siteDir, "pub.polis.core")
+	mismatches, err := CompareReferencePayload(storage.At(siteDir), "pub.polis.core")
 	if err != nil {
 		t.Fatalf("CompareReferencePayload: %v", err)
 	}
@@ -317,17 +318,52 @@ func TestCompareReferencePayload_IgnoresExtraFiles(t *testing.T) {
 }
 
 func TestCompareReferencePayload_UnknownBundle(t *testing.T) {
-	_, err := CompareReferencePayload(t.TempDir(), "com.nonexistent.bundle")
+	_, err := CompareReferencePayload(storage.At(t.TempDir()), "com.nonexistent.bundle")
 	if err == nil {
 		t.Error("expected error for unknown bundle")
 	}
 }
 
 func TestCompareReferencePayload_EmptyArgs(t *testing.T) {
-	if _, err := CompareReferencePayload("", "pub.polis.core"); err == nil {
+	if _, err := CompareReferencePayload(storage.At(""), "pub.polis.core"); err == nil {
 		t.Error("expected error for empty siteDir")
 	}
-	if _, err := CompareReferencePayload(t.TempDir(), ""); err == nil {
+	if _, err := CompareReferencePayload(storage.At(t.TempDir()), ""); err == nil {
 		t.Error("expected error for empty bundleName")
+	}
+}
+
+// TestEnsureReferencePayloadKeepsTheBundleTreePrivate pins the rule the
+// installer's MkdirAlls used to carry by hand, and which the site store now
+// carries: every directory the reference payload creates under .polis is 0700.
+// ⛔ A 0755 child of a 0700 root is unreachable today but becomes live the
+// moment the tree is copied anywhere else — an export unzipped, an archive
+// restored.
+func TestEnsureReferencePayloadKeepsTheBundleTreePrivate(t *testing.T) {
+	dir := t.TempDir()
+	if err := EnsureReferencePayload(storage.At(dir), DefaultCoreBundle().Name); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(dir, ".polis", "bundles", DefaultCoreBundle().Name)
+	dirs := 0
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return err
+		}
+		dirs++
+		info, ierr := d.Info()
+		if ierr != nil {
+			return ierr
+		}
+		if info.Mode().Perm() != 0o700 {
+			t.Errorf("%s is %v, want 0700", p, info.Mode().Perm())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirs < 3 {
+		t.Fatalf("walked only %d directories; the payload did not install", dirs)
 	}
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -268,7 +269,7 @@ func TestGetUnifiedCursor_ExistingCursor(t *testing.T) {
 	s := newTestServer(t)
 	s.DiscoveryURL = "https://ds.polis.pub"
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 
 	_ = store.SetCursor("pub.polis.sync", "42")
 
@@ -282,7 +283,7 @@ func TestGetUnifiedCursor_NoCursors(t *testing.T) {
 	s := newTestServer(t)
 	s.DiscoveryURL = "https://ds.polis.pub"
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 
 	got := s.getUnifiedCursor(store)
 	if got != "0" {
@@ -294,7 +295,7 @@ func TestGetUnifiedCursor_ZeroTreatedAsEmpty(t *testing.T) {
 	s := newTestServer(t)
 	s.DiscoveryURL = "https://ds.polis.pub"
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 
 	_ = store.SetCursor("pub.polis.sync", "0")
 
@@ -571,7 +572,7 @@ func TestFollowSyncHandler_Process_FollowRemoved(t *testing.T) {
 
 	myDomain := extractDomainFromURL(s.BaseURL)
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 
 	// Pre-populate follower state
 	existingState := &stream.FollowerState{
@@ -1084,7 +1085,7 @@ func TestRealTimeAndReconcileConverge(t *testing.T) {
 		t.Fatal("real-time cacheBlessedComment should store the comment")
 	}
 	// And the post author's render index records it.
-	if err := metadata.AddBlessedComment(dataDir, "posts/20260601/p.md", metadata.BlessedComment{URL: commentURL}); err != nil {
+	if err := metadata.AddBlessedComment(storage.At(dataDir), "posts/20260601/p.md", metadata.BlessedComment{URL: commentURL}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1099,7 +1100,7 @@ func TestRealTimeAndReconcileConverge(t *testing.T) {
 	defer ds.Close()
 
 	// Reconcile over the SAME store the real-time path wrote to.
-	store := cache.Store{DataDir: dataDir, DSDomain: "ds.polis.pub"}
+	store := cache.Store{Site: storage.At(dataDir), DSDomain: "ds.polis.pub"}
 	desc := cache.NewBlessedDescriptor(cache.DescriptorConfig{
 		Client: &discovery.Client{BaseURL: ds.URL, HTTPClient: ds.Client()},
 		Domain: "carol.polis.pub",

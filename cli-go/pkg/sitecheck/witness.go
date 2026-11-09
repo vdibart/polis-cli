@@ -2,6 +2,7 @@ package sitecheck
 
 import (
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/url"
 	"strings"
@@ -100,8 +101,28 @@ type WitnessResult struct {
 	Checks        []WitnessCheck `json:"checks,omitempty"`
 }
 
-// Describe is the sentence a person reads.
+// VersionScope says what an artifact's version hash covers, which is what a
+// witness that binds `version` covers. The two signing families differ.
+type VersionScope string
+
+const (
+	// VersionHashesBody — a post or comment: `current-version` hashes the body
+	// alone, not the frontmatter.
+	VersionHashesBody VersionScope = "body"
+	// VersionHashesRecord — a canonical-JSON record (attestation, licence, tag
+	// file, …): `current_version` hashes the whole signed record.
+	VersionHashesRecord VersionScope = "record"
+)
+
+// Describe is the sentence a person reads, for a post or comment. A JSON
+// record's caller uses DescribeFor(VersionHashesRecord).
 func (w *WitnessResult) Describe() string {
+	return w.DescribeFor(VersionHashesBody)
+}
+
+// DescribeFor is the sentence a person reads, saying what a version-bound
+// witness covers for an artifact whose version hashes scope.
+func (w *WitnessResult) DescribeFor(scope VersionScope) string {
 	if w == nil {
 		return "no witness information"
 	}
@@ -116,11 +137,15 @@ func (w *WitnessResult) Describe() string {
 		}
 		return "INVALID WITNESS: the site publishes a discovery-service countersignature for these bytes that does not verify against that discovery service's key" + reason + " — it claims third-party testimony it does not have. The artifact's own signature is judged separately."
 	case WitnessWitnessed:
-		scope := "the whole signed artifact"
+		covers := "the whole signed artifact"
 		if w.EarliestBinds == "version" {
-			scope = "its `version` only — for a post or comment that is the body, not the frontmatter"
+			if scope == VersionHashesRecord {
+				covers = "its `current_version`, which hashes the whole signed record"
+			} else {
+				covers = "its `version` only — for a post or comment that is the body, not the frontmatter"
+			}
 		}
-		return fmt.Sprintf("witnessed: a discovery service countersigned these bytes at %s, so they existed by then (the witness covers %s). The artifact's own claimed dates are still its own.", w.EarliestWitnessedAt, scope)
+		return fmt.Sprintf("witnessed: a discovery service countersigned these bytes at %s, so they existed by then (the witness covers %s). The artifact's own claimed dates are still its own.", w.EarliestWitnessedAt, covers)
 	case WitnessUnverifiable:
 		reason := ""
 		for _, c := range w.Checks {
@@ -415,11 +440,11 @@ const noWitnessesPublished = "this site publishes no witnesses (no `witnesses` p
 
 // localWitnesses reads a directory's published witness set through its pointer.
 func localWitnesses(siteDir string) (*site.WitnessFile, string) {
-	pointer := site.WitnessesPointer(siteDir)
+	pointer := site.WitnessesPointer(storage.At(siteDir))
 	if pointer == "" {
 		return nil, noWitnessesPublished
 	}
-	f, err := site.LoadWitnesses(siteDir)
+	f, err := site.LoadWitnesses(storage.At(siteDir))
 	if err != nil {
 		return nil, fmt.Sprintf("the site's `witnesses` pointer names %s, which could not be read (%v). Nothing is failed for it — no witness could be read, so none can be checked — but the owner may want to know the pointer leads nowhere.", pointer, err)
 	}
@@ -550,15 +575,16 @@ func (c *witnessCensus) emit(r *Report, scope string) {
 
 // reportArtifactWitness answers the witness axis for ONE artifact as
 // content.witness. Fails only when a published witness for these bytes does not
-// verify (E9).
-func reportArtifactWitness(r *Report, f *site.WitnessFile, unavailable, artifactURL string, res ContentResult, lookup DSKeyLookup) {
+// verify (E9). scope is what the artifact's version hashes, so the detail says
+// what a version-bound witness covers.
+func reportArtifactWitness(r *Report, f *site.WitnessFile, unavailable, artifactURL string, res ContentResult, scope VersionScope, lookup DSKeyLookup) {
 	const id = "content.witness"
 	if f == nil {
 		r.na(id, FamilyContent, unavailable)
 		return
 	}
 	w := CheckContentWitnesses(witnessIndex(f)[urlPath(artifactURL)], res.ArtifactHash, res.CurrentVersion, lookup)
-	detail := w.Describe()
+	detail := w.DescribeFor(scope)
 	if msg := w.ContradictsClaimedTime(res.Key); msg != "" {
 		detail += " " + msg
 	}

@@ -38,14 +38,14 @@ func handleDID(args []string) {
 		exitError("No canonical host — set POLIS_BASE_URL or pass --host")
 	}
 
-	document, err := site.BuildDIDDocument(dir, host)
+	document, err := site.BuildDIDDocument(getSite(), host)
 	if err != nil {
 		exitError("Failed to build DID document: %v", err)
 	}
 
 	published := false
 	if *write {
-		if err := site.PublishDIDDocument(dir, host); err != nil {
+		if err := site.PublishDIDDocument(getSite(), host); err != nil {
 			exitError("Failed to write DID document: %v", err)
 		}
 		published = true
@@ -58,7 +58,7 @@ func handleDID(args []string) {
 	// Whether what is served matches what the site's key says right now. A
 	// stale document is the one failure mode a resolver cannot see: it returns
 	// 200 and a key the site has retired.
-	needsWrite, _, err := site.DIDDocumentNeedsWrite(dir, host)
+	needsWrite, _, err := site.DIDDocumentNeedsWrite(getSite(), host)
 	onDisk := "up to date"
 	if err != nil {
 		onDisk = "unknown"

@@ -2,6 +2,7 @@ package ops
 
 import (
 	"context"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,7 +21,7 @@ func engineAt(t *testing.T, siteDir string) *Engine {
 	priv, _ := os.ReadFile(filepath.Join(siteDir, ".polis/keys/id_ed25519"))
 	pub, _ := os.ReadFile(filepath.Join(siteDir, ".polis/keys/id_ed25519.pub"))
 	engine, err := NewEngine(EngineConfig{
-		Resolver:   resolve.New(siteDir, bundles),
+		Resolver:   resolve.New(storage.At(siteDir), bundles),
 		Bundles:    bundles,
 		PrivateKey: priv,
 		PublicKey:  pub,
@@ -42,8 +43,8 @@ func engineAt(t *testing.T, siteDir string) *Engine {
 // still advance exactly as a real delivery's would.
 func TestDMRateLimitCountsAcrossRequests(t *testing.T) {
 	engine, siteDir := newTestEngine(t)
-	t.Cleanup(func() { forgetDMRateLimiter(siteDir) })
-	forgetDMRateLimiter(siteDir)
+	t.Cleanup(func() { forgetDMRateLimiter(storage.At(siteDir)) })
+	forgetDMRateLimiter(storage.At(siteDir))
 
 	deliver := func() error {
 		_, err := engine.Dispatch(context.Background(), ActionRequest{

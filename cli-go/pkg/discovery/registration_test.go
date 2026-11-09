@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,19 +11,19 @@ import (
 
 func TestIsRegisteredLocally_NoFile(t *testing.T) {
 	dir := t.TempDir()
-	if IsRegisteredLocally(dir, "https://ds.example.com") {
+	if IsRegisteredLocally(storage.At(dir), "https://ds.example.com") {
 		t.Error("expected false when no marker file exists")
 	}
 }
 
 func TestIsRegisteredLocally_EmptyArgs(t *testing.T) {
-	if IsRegisteredLocally("", "https://ds.example.com") {
+	if IsRegisteredLocally(storage.At(""), "https://ds.example.com") {
 		t.Error("expected false for empty dataDir")
 	}
-	if IsRegisteredLocally("/tmp", "") {
+	if IsRegisteredLocally(storage.At("/tmp"), "") {
 		t.Error("expected false for empty dsURL")
 	}
-	if IsRegisteredLocally("", "") {
+	if IsRegisteredLocally(storage.At(""), "") {
 		t.Error("expected false for both empty")
 	}
 }
@@ -32,22 +33,22 @@ func TestRegistrationMarkerRoundTrip(t *testing.T) {
 	dsURL := "https://ds.example.com"
 
 	// Initially not registered
-	if IsRegisteredLocally(dir, dsURL) {
+	if IsRegisteredLocally(storage.At(dir), dsURL) {
 		t.Fatal("expected not registered initially")
 	}
 
 	// Write marker
-	if err := WriteRegistrationMarker(dir, dsURL, "mysite.example.com", ""); err != nil {
+	if err := WriteRegistrationMarker(storage.At(dir), dsURL, "mysite.example.com", ""); err != nil {
 		t.Fatalf("WriteRegistrationMarker: %v", err)
 	}
 
 	// Now registered
-	if !IsRegisteredLocally(dir, dsURL) {
+	if !IsRegisteredLocally(storage.At(dir), dsURL) {
 		t.Error("expected registered after writing marker")
 	}
 
 	// Verify marker file contents
-	path := registrationMarkerPath(dir, dsURL)
+	path := storage.At(dir).Path(registrationMarkerKey(dsURL))
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read marker: %v", err)
@@ -57,12 +58,12 @@ func TestRegistrationMarkerRoundTrip(t *testing.T) {
 	}
 
 	// Remove marker
-	if err := RemoveRegistrationMarker(dir, dsURL); err != nil {
+	if err := RemoveRegistrationMarker(storage.At(dir), dsURL); err != nil {
 		t.Fatalf("RemoveRegistrationMarker: %v", err)
 	}
 
 	// No longer registered
-	if IsRegisteredLocally(dir, dsURL) {
+	if IsRegisteredLocally(storage.At(dir), dsURL) {
 		t.Error("expected not registered after removing marker")
 	}
 }
@@ -70,7 +71,7 @@ func TestRegistrationMarkerRoundTrip(t *testing.T) {
 func TestRemoveRegistrationMarker_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	// Removing a non-existent marker should not error
-	if err := RemoveRegistrationMarker(dir, "https://ds.example.com"); err != nil {
+	if err := RemoveRegistrationMarker(storage.At(dir), "https://ds.example.com"); err != nil {
 		t.Errorf("expected nil error for non-existent marker, got: %v", err)
 	}
 }
@@ -79,7 +80,7 @@ func TestWriteRegistrationMarker_CreatesDirectory(t *testing.T) {
 	dir := t.TempDir()
 	dsURL := "https://ds.example.com"
 
-	if err := WriteRegistrationMarker(dir, dsURL, "test.com", ""); err != nil {
+	if err := WriteRegistrationMarker(storage.At(dir), dsURL, "test.com", ""); err != nil {
 		t.Fatalf("WriteRegistrationMarker: %v", err)
 	}
 
@@ -98,15 +99,15 @@ func TestWriteRegistrationMarker_CreatesDirectory(t *testing.T) {
 	}
 }
 
-func TestRegistrationMarkerPath_EmptyDSURL(t *testing.T) {
-	path := registrationMarkerPath("/tmp", "")
+func TestRegistrationMarkerKey_EmptyDSURL(t *testing.T) {
+	path := registrationMarkerKey("")
 	if path != "" {
 		t.Errorf("expected empty path for empty dsURL, got %q", path)
 	}
 }
 
-func TestRegistrationMarkerPath_InvalidDSURL(t *testing.T) {
-	path := registrationMarkerPath("/tmp", "not-a-url")
+func TestRegistrationMarkerKey_InvalidDSURL(t *testing.T) {
+	path := registrationMarkerKey("not-a-url")
 	// url.Parse succeeds for most strings, Hostname() returns ""
 	if path != "" {
 		t.Errorf("expected empty path for invalid dsURL, got %q", path)
@@ -118,11 +119,11 @@ func TestRegistrationMarker_AttestationRoundTrip(t *testing.T) {
 	dsURL := "https://ds.example.com"
 	attestation := "-----BEGIN SSH SIGNATURE-----\ntest-attestation-data\n-----END SSH SIGNATURE-----"
 
-	if err := WriteRegistrationMarker(dir, dsURL, "mysite.com", attestation); err != nil {
+	if err := WriteRegistrationMarker(storage.At(dir), dsURL, "mysite.com", attestation); err != nil {
 		t.Fatalf("WriteRegistrationMarker: %v", err)
 	}
 
-	path := registrationMarkerPath(dir, dsURL)
+	path := storage.At(dir).Path(registrationMarkerKey(dsURL))
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read marker: %v", err)
@@ -144,11 +145,11 @@ func TestRegistrationMarker_OmitsEmptyAttestation(t *testing.T) {
 	dir := t.TempDir()
 	dsURL := "https://ds.example.com"
 
-	if err := WriteRegistrationMarker(dir, dsURL, "mysite.com", ""); err != nil {
+	if err := WriteRegistrationMarker(storage.At(dir), dsURL, "mysite.com", ""); err != nil {
 		t.Fatalf("WriteRegistrationMarker: %v", err)
 	}
 
-	path := registrationMarkerPath(dir, dsURL)
+	path := storage.At(dir).Path(registrationMarkerKey(dsURL))
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read marker: %v", err)
@@ -166,14 +167,14 @@ func TestIsRegisteredLocally_DifferentDS(t *testing.T) {
 	ds2 := "https://ds2.example.com"
 
 	// Register with ds1
-	if err := WriteRegistrationMarker(dir, ds1, "mysite.com", ""); err != nil {
+	if err := WriteRegistrationMarker(storage.At(dir), ds1, "mysite.com", ""); err != nil {
 		t.Fatal(err)
 	}
 
-	if !IsRegisteredLocally(dir, ds1) {
+	if !IsRegisteredLocally(storage.At(dir), ds1) {
 		t.Error("expected registered with ds1")
 	}
-	if IsRegisteredLocally(dir, ds2) {
+	if IsRegisteredLocally(storage.At(dir), ds2) {
 		t.Error("expected NOT registered with ds2")
 	}
 }

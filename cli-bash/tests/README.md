@@ -57,7 +57,6 @@ cd polis-tester
 
 # 2. Configure environment
 export POLIS_BASE_URL=https://your-vercel-deploy.vercel.app
-export DISCOVERY_SERVICE_KEY=your-api-key
 
 # 3. Run tests with auto-push to trigger deploys
 ./cli/tests/run_tests.sh --auto-push
@@ -82,7 +81,6 @@ End-to-end tests with real API calls:
 
 **Prerequisites for E2E tests:**
 - `POLIS_BASE_URL` environment variable set
-- `DISCOVERY_SERVICE_KEY` environment variable set
 - Discovery service deployed and reachable
 
 ## Options

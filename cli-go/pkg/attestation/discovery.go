@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"net/http"
 	"strings"
@@ -11,7 +12,7 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
-	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	sitepkg "github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
@@ -20,25 +21,24 @@ import (
 // initialization. Multi-tenant callers pass a *DiscoveryConfig instead.
 var (
 	DiscoveryURL string
-	DiscoveryKey string
 	BaseURL      string
-	DataDir      string
 )
 
 // DiscoveryConfig holds per-tenant discovery service configuration.
 type DiscoveryConfig struct {
 	DiscoveryURL string
-	DiscoveryKey string
 	BaseURL      string
-	DataDir      string
-	HTTPClient   *http.Client // Optional shared client for connection pooling
+	// Site is the site the record was issued on: its registration marker is
+	// checked, and the witness is published to it.
+	Site       storage.Site
+	HTTPClient *http.Client // Optional shared client for connection pooling
 }
 
-func resolveDiscoveryConfig(cfg *DiscoveryConfig) (dsURL, dsKey, baseURL string) {
+func resolveDiscoveryConfig(cfg *DiscoveryConfig) (dsURL, baseURL string) {
 	if cfg != nil {
-		return cfg.DiscoveryURL, cfg.DiscoveryKey, cfg.BaseURL
+		return cfg.DiscoveryURL, cfg.BaseURL
 	}
-	return DiscoveryURL, DiscoveryKey, BaseURL
+	return DiscoveryURL, BaseURL
 }
 
 // Register announces one attestation to the discovery service.
@@ -58,7 +58,7 @@ func resolveDiscoveryConfig(cfg *DiscoveryConfig) (dsURL, dsKey, baseURL string)
 // One record, one row. A DS row per claim is the same cardinality as a file per
 // claim, so nothing has to be reconciled between the two.
 func Register(r *Record, id string, privateKey []byte, cfg *DiscoveryConfig) error {
-	dsURL, dsKey, baseURL := resolveDiscoveryConfig(cfg)
+	dsURL, baseURL := resolveDiscoveryConfig(cfg)
 	if dsURL == "" || baseURL == "" {
 		stream.LogSuppressedEmit("pub.polis.attestation.issued", "config_missing",
 			discovery.ExtractDomainFromURL(baseURL),
@@ -66,11 +66,11 @@ func Register(r *Record, id string, privateKey []byte, cfg *DiscoveryConfig) err
 		return nil
 	}
 
-	checkDir := DataDir
-	if cfg != nil && cfg.DataDir != "" {
-		checkDir = cfg.DataDir
+	var issued storage.Site
+	if cfg != nil {
+		issued = cfg.Site
 	}
-	if !discovery.IsRegisteredLocally(checkDir, dsURL) {
+	if !issued.Valid() || !discovery.IsRegisteredLocally(issued, dsURL) {
 		stream.LogSuppressedEmit("pub.polis.attestation.issued", "not_registered_locally",
 			discovery.ExtractDomainFromURL(baseURL),
 			map[string]interface{}{"predicate": r.Predicate, "ds_url": dsURL})
@@ -127,9 +127,6 @@ func Register(r *Record, id string, privateKey []byte, cfg *DiscoveryConfig) err
 		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if dsKey != "" {
-		req.Header.Set("Authorization", "Bearer "+dsKey)
-	}
 
 	var hc *http.Client
 	if cfg != nil {
@@ -151,14 +148,14 @@ func Register(r *Record, id string, privateKey []byte, cfg *DiscoveryConfig) err
 	// SIGNET epic 32: publish the DS's countersignature. An attestation's
 	// `version` already hashes the whole signed record, so the witness binds all
 	// of it with no artifact_hash needed. Never fails the registration.
-	publishWitness(resp.Body, checkDir, contentURL)
+	publishWitness(resp.Body, issued, contentURL)
 	return nil
 }
 
 // publishWitness reads a registration response and records the witness it
 // carries, if any, in the site's published witness set.
-func publishWitness(body io.Reader, siteDir, artifactURL string) {
-	if siteDir == "" {
+func publishWitness(body io.Reader, site storage.Site, artifactURL string) {
+	if !site.Valid() {
 		return
 	}
 	var result struct {
@@ -168,7 +165,7 @@ func publishWitness(body io.Reader, siteDir, artifactURL string) {
 	if err != nil || json.Unmarshal(data, &result) != nil || result.Witness == nil {
 		return
 	}
-	if _, werr := site.RecordWitness(siteDir, artifactURL, *result.Witness); werr != nil {
+	if _, werr := sitepkg.RecordWitness(site, artifactURL, *result.Witness); werr != nil {
 		fmt.Printf("[!] Could not publish the discovery service's witness for %s: %v\n", artifactURL, werr)
 	}
 }
@@ -190,22 +187,22 @@ func publishWitness(body io.Reader, siteDir, artifactURL string) {
 //
 // Re-registering an already-announced record is safe: the DS keys a content
 // row by URL and version.
-func RegisterIssued(dataDir, id string, privateKey []byte, cfg *DiscoveryConfig) (*Record, error) {
-	r, err := Load(Path(dataDir, id))
+func RegisterIssued(site storage.Site, id string, privateKey []byte, cfg *DiscoveryConfig) (*Record, error) {
+	r, err := Load(site, id)
 	if err != nil {
 		return nil, err
 	}
-	dsURL, _, baseURL := resolveDiscoveryConfig(cfg)
+	dsURL, baseURL := resolveDiscoveryConfig(cfg)
 	if dsURL == "" || baseURL == "" {
 		return r, fmt.Errorf("no discovery service configured (DISCOVERY_SERVICE_URL and POLIS_BASE_URL must both be set)")
 	}
-	if !discovery.IsRegisteredLocally(dataDir, dsURL) {
+	if !discovery.IsRegisteredLocally(site, dsURL) {
 		return r, fmt.Errorf("this site is not registered with %s — run `polis register` first", dsURL)
 	}
 	if !strings.EqualFold(strings.TrimRight(r.Issuer, "/"), strings.TrimRight(baseURL, "/")) {
 		return r, fmt.Errorf("record %s was issued by %s, not this site (%s); only its issuer may announce it", id, r.Issuer, baseURL)
 	}
-	switch status, verr := VerifyRecord(dataDir, r); status {
+	switch status, verr := VerifyRecord(site, r); status {
 	case StatusValid:
 	default:
 		detail := ""
@@ -217,7 +214,7 @@ func RegisterIssued(dataDir, id string, privateKey []byte, cfg *DiscoveryConfig)
 	if cfg == nil {
 		cfg = &DiscoveryConfig{}
 	}
-	withDir := *cfg
-	withDir.DataDir = dataDir
-	return r, Register(r, id, privateKey, &withDir)
+	withSite := *cfg
+	withSite.Site = site
+	return r, Register(r, id, privateKey, &withSite)
 }

@@ -3,6 +3,7 @@ package ops
 import (
 	"context"
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,7 +62,7 @@ func newTestEngine(t *testing.T) (*Engine, string) {
 		"pub.polis.core": coreBundle,
 	}
 
-	resolver := resolve.New(siteDir, bundles)
+	resolver := resolve.New(storage.At(siteDir), bundles)
 
 	engine, err := NewEngine(EngineConfig{
 		Resolver:   resolver,
@@ -389,7 +390,7 @@ func TestListFollowingReportsSignature(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := followingpkg.SaveSigned(followingpkg.DefaultPath(siteDir), sample(), privKey); err != nil {
+		if err := followingpkg.SaveSigned(storage.At(siteDir), sample(), privKey); err != nil {
 			t.Fatal(err)
 		}
 		if got := list(t, engine)["status"]; got != "valid" {
@@ -399,7 +400,7 @@ func TestListFollowingReportsSignature(t *testing.T) {
 
 	t.Run("unsigned", func(t *testing.T) {
 		engine, siteDir := newTestEngine(t)
-		if err := followingpkg.Save(followingpkg.DefaultPath(siteDir), sample()); err != nil {
+		if err := followingpkg.Save(storage.At(siteDir), sample()); err != nil {
 			t.Fatal(err)
 		}
 		got := list(t, engine)["status"]
@@ -417,10 +418,10 @@ func TestListFollowingReportsSignature(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		path := followingpkg.DefaultPath(siteDir)
-		if err := followingpkg.SaveSigned(path, sample(), privKey); err != nil {
+		if err := followingpkg.SaveSigned(storage.At(siteDir), sample(), privKey); err != nil {
 			t.Fatal(err)
 		}
+		path := storage.At(siteDir).Path(followingpkg.DefaultKey)
 		raw, _ := os.ReadFile(path)
 		tampered := strings.Replace(string(raw), "alice.example.com", "mallory.example.com", 1)
 		if err := os.WriteFile(path, []byte(tampered), 0644); err != nil {
@@ -442,7 +443,7 @@ func TestWriteRequiresPrivateKey(t *testing.T) {
 
 	coreBundle := bundle.DefaultCoreBundle()
 	bundles := map[string]*bundle.Bundle{"pub.polis.core": coreBundle}
-	resolver := resolve.New(siteDir, bundles)
+	resolver := resolve.New(storage.At(siteDir), bundles)
 
 	engine, err := NewEngine(EngineConfig{
 		Resolver: resolver,
@@ -544,7 +545,7 @@ func TestNewEngineNilResolver(t *testing.T) {
 
 func TestNewEngineNilBundles(t *testing.T) {
 	siteDir := t.TempDir()
-	resolver := resolve.New(siteDir, nil)
+	resolver := resolve.New(storage.At(siteDir), nil)
 
 	engine, err := NewEngine(EngineConfig{
 		Resolver: resolver,

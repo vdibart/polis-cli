@@ -2,6 +2,9 @@ package comment
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,7 +140,7 @@ Great post!
 		},
 	}
 
-	result, err := SyncFromEvents(dataDir, "https://alice.com", events, nil)
+	result, err := SyncFromEvents(storage.At(dataDir), "https://alice.com", events, nil)
 	if err != nil {
 		t.Fatalf("SyncFromEvents error: %v", err)
 	}
@@ -150,7 +153,7 @@ Great post!
 	}
 
 	// Verify the file was moved from pending
-	if _, err := os.Stat(filepath.Join(pendingDir, commentID+".md")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(pendingDir, commentID+".md")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("pending comment file still exists after blessing")
 	}
 }
@@ -193,7 +196,7 @@ Hi!
 		},
 	}
 
-	result, err := SyncFromEvents(dataDir, "https://alice.com", events, nil)
+	result, err := SyncFromEvents(storage.At(dataDir), "https://alice.com", events, nil)
 	if err != nil {
 		t.Fatalf("SyncFromEvents error: %v", err)
 	}
@@ -206,7 +209,7 @@ Hi!
 	}
 
 	// Verify moved to denied
-	if _, err := os.Stat(filepath.Join(deniedDir, commentID+".md")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(deniedDir, commentID+".md")); errors.Is(err, fs.ErrNotExist) {
 		t.Error("denied comment file not found")
 	}
 }
@@ -244,7 +247,7 @@ Hi!
 		},
 	}
 
-	result, err := SyncFromEvents(dataDir, "https://alice.com", events, nil)
+	result, err := SyncFromEvents(storage.At(dataDir), "https://alice.com", events, nil)
 	if err != nil {
 		t.Fatalf("SyncFromEvents error: %v", err)
 	}
@@ -257,7 +260,7 @@ Hi!
 func TestSyncFromEvents_EmptyEvents(t *testing.T) {
 	dataDir := t.TempDir()
 
-	result, err := SyncFromEvents(dataDir, "https://alice.com", nil, nil)
+	result, err := SyncFromEvents(storage.At(dataDir), "https://alice.com", nil, nil)
 	if err != nil {
 		t.Fatalf("SyncFromEvents error: %v", err)
 	}
@@ -275,7 +278,7 @@ func TestSyncFromEvents_EmptyBaseURL(t *testing.T) {
 		}},
 	}
 
-	result, err := SyncFromEvents(dataDir, "", events, nil)
+	result, err := SyncFromEvents(storage.At(dataDir), "", events, nil)
 	if err != nil {
 		t.Fatalf("SyncFromEvents error: %v", err)
 	}

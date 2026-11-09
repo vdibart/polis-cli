@@ -1,8 +1,10 @@
 package following
 
 import (
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -57,7 +59,8 @@ func TestAddAndRemove(t *testing.T) {
 func TestSaveAndLoad(t *testing.T) {
 	// Create temp directory
 	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "following.json")
+	pathSite := storage.At(tmpDir)
+	path := pathSite.Path(DefaultKey)
 
 	// Create and save
 	f := &FollowingFile{
@@ -66,17 +69,17 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 	f.Add("https://example.com")
 
-	if err := Save(path, f); err != nil {
+	if err := Save(pathSite, f); err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
 
 	// Verify file exists
-	if _, err := os.Stat(path); os.IsNotExist(err) {
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("File was not created")
 	}
 
 	// Load and verify
-	loaded, err := Load(path)
+	loaded, err := LoadSite(pathSite)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -97,11 +100,12 @@ func TestSaveAndLoad(t *testing.T) {
 // and asserts the atomic write leaves no stray .tmp file.
 func TestSave_PublicModeAndNoTmpResidue(t *testing.T) {
 	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "following.json")
+	pathSite := storage.At(tmpDir)
+	path := pathSite.Path(DefaultKey)
 
 	f := &FollowingFile{Version: Version, Following: []FollowingEntry{}}
 	f.Add("https://example.com")
-	if err := Save(path, f); err != nil {
+	if err := Save(pathSite, f); err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
 
@@ -112,7 +116,7 @@ func TestSave_PublicModeAndNoTmpResidue(t *testing.T) {
 	if perm := info.Mode().Perm(); perm != 0644 {
 		t.Errorf("following.json must be 0644 (public served content), got %04o", perm)
 	}
-	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+	if _, err := os.Stat(path + ".tmp"); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("atomic write left a stray .tmp file")
 	}
 }
@@ -135,7 +139,7 @@ func TestLoadNonExistent(t *testing.T) {
 
 func TestMetadataRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "following.json")
+	pathSite := storage.At(tmpDir)
 
 	f := &FollowingFile{
 		Version: Version,
@@ -145,11 +149,11 @@ func TestMetadataRoundTrip(t *testing.T) {
 		},
 	}
 
-	if err := Save(path, f); err != nil {
+	if err := Save(pathSite, f); err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
 
-	loaded, err := Load(path)
+	loaded, err := LoadSite(pathSite)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -317,5 +321,30 @@ func TestRemoveAllDuplicates(t *testing.T) {
 	}
 	if f.Following[0].URL != "https://other.com/" {
 		t.Errorf("Expected remaining entry to be other.com, got %s", f.Following[0].URL)
+	}
+}
+
+// ⛔⛔ ABSENCE IS NOT AN ERROR. A site that follows nobody has no follow file,
+// and every caller relies on getting an empty list rather than a failure —
+// `polis validate` reports such a site `unsigned`, and the follow flow starts
+// from the empty file it is handed.
+//
+// ⚠️ PINNED BECAUSE IT WAS ALREADY LOST ONCE: the first store-addressed
+// LoadSite returned the raw not-found and broke six tests across verification
+// and the follow flow. The same family as the ListDir trap — a rewrite that
+// quietly turns "there is nothing there" into "I could not look".
+func TestLoadSiteTreatsAnAbsentFileAsAnEmptyList(t *testing.T) {
+	f, err := LoadSite(storage.At(t.TempDir()))
+	if err != nil {
+		t.Fatalf("an absent follow file must not be an error: %v", err)
+	}
+	if f == nil {
+		t.Fatal("no file and no error")
+	}
+	if f.Count() != 0 {
+		t.Errorf("count = %d, want 0", f.Count())
+	}
+	if f.Following == nil {
+		t.Error("Following is nil; callers append to it, so it must be an empty slice")
 	}
 }

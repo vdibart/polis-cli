@@ -237,21 +237,41 @@ recovery safer). `"active": false` rules are loaded but not evaluated.
 ## Detecting and upgrading v1 files
 
 **Detection.** Patrol reads the header line of each tenant's policy files
-and flags any with `version < 2`. Drift events are emitted as
-`patrol.policy_format_drift` with `handle`, `path`, `current_version`,
-`expected_version` fields.
+and flags any with `version < 2`. Drift is emitted as one
+`patrol.policy_format_drift` event per tenant with `handle`, `check`
+(`policy_format_version`) and `message` fields; the message names the
+expected version and each outdated file with its version, e.g.
+`expected v2; found: policies/rules.jsonl (v1)`.
 
-**Upgrade.** Medic rewrites v1 files with the canonical v2 default content
-from `policy.DefaultPublicPolicyContent()` / `DefaultPrivatePolicyContent()`.
-⚠️ **The rewrite does not keep a site's own rules.** A site's owner can edit
-either rules file, and any file that differs from the default is replaced by
-it: by Medic on a hosted tenant, whatever the file's version, and by
-`tailor --apply` on a self-hosted site. Back up a customised policy file
-before running `tailor --apply`. A translator that carries a site's own rules
-across an upgrade is planned.
+**Upgrade.** Medic (on a hosted tenant) and `tailor --apply` (on a
+self-hosted site) replace a policy file with the current default
+(`policy.DefaultPublicPolicyContent()` / `DefaultPrivatePolicyContent()`)
+**only when the file holds a default an earlier release wrote**. That covers
+every v1 default, the headerless files written before the format had a
+header, and the legacy files that predate the DM rules. The list of past
+defaults is `policy.PastDefaults`; files are compared line by line with the
+header's `generator` ignored.
+
+**A site's own rules are never overwritten.** A site's owner may edit either
+rules file (see the recipes in [`policies.md`](../../cli/user/policies.md)).
+A file that parses and matches no default polis has shipped is the owner's,
+and it is left byte for byte as it is, whatever its format version and
+whether or not it keeps the `deny all from all` catch-all. A file that does
+not parse is left alone too: it may be damaged or mid-edit, and it is the only
+copy. Either way the tool says so:
+
+| Tool | Own rules | Does not parse |
+|---|---|---|
+| Medic | `medic.report`, `report_kind: policy_authored` | `medic.report`, `report_kind: policy_unparseable` |
+| `tailor` | the `policy-content-converge` check passes and flags the file | the check fails and flags the file |
+
+An owner who wants the current defaults back copies them over the file by
+hand. No translator carries a site's own rules into a newer format; the
+legacy blessing rules in an owner's v1 file keep working, because the parser
+still translates them (see above).
 
 **Observability.** Medic emits `medic.policy_upgrade` with `handle`, `path`,
-and `detail` on every rewrite (alongside the general `medic.provision`). Re-running after upgrade is a no-op.
+and `detail` on every format upgrade (alongside the general `medic.provision`). Re-running after upgrade is a no-op.
 
 ## Canonical default files
 

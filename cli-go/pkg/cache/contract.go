@@ -13,18 +13,29 @@
 package cache
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"os"
+	"io/fs"
 	"sort"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/sitecheck"
 	"github.com/vdibart/polis-cli/cli-go/pkg/verify"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Store identifies where a kind's cache lives for one tenant under one DS.
 type Store struct {
-	DataDir  string // the tenant's data directory
+	// Site is the tenant's site: where it is, and what it is stored on.
+	//
+	// ⭐ THIS STRUCT WAS ALREADY THE RIGHT SHAPE — a handle carrying the
+	// identity — and only the identity's TYPE was wrong. It held `DataDir
+	// string`, so every cache operation ended at a POSIX root no matter what
+	// the instance was actually storing on.
+	Site     storage.Site
 	DSDomain string // the discovery-service domain scope (.polis/ds/<DSDomain>/…)
 }
 
@@ -53,7 +64,7 @@ type Provenance struct {
 }
 
 // Sidecar is the kind-agnostic provenance/lifecycle metadata for one cached
-// entry. Rosie reads this uniformly for EVERY kind. Each descriptor owns the
+// entry. The cache upkeep (Medic's, pkg/cache/upkeep) reads this uniformly for EVERY kind. Each descriptor owns the
 // on-disk serialization — the blessed kind persists the WS3 BlessedSidecar (a
 // forward-compatible subset of these fields), so generalizing was additive and
 // old blessed sidecars still load. fetched_at/verified_at are recorded
@@ -70,6 +81,14 @@ type Sidecar struct {
 	Provenance  Provenance `json:"provenance,omitempty"`
 	EvictOn     []string   `json:"evict_on,omitempty"`     // DS event types that evict
 	DesiredFrom string     `json:"desired_from,omitempty"` // the authoritative "should this exist"
+
+	// KeyUsed is WHICH of the signer's keys verified the entry when it was
+	// fetched: the key the site publishes now, or a retired one its published
+	// history resolves for the artifact's claimed signing time (epic 31 D4).
+	// The two are claims of different strength, and a reader applying policy
+	// has to be able to tell them apart. Nil when the entry did not verify, and
+	// on entries cached before this was recorded.
+	KeyUsed *sitecheck.KeyUsed `json:"key_used,omitempty"`
 }
 
 // IntegrityVerdict is the outcome of (re)verifying a cached entry.
@@ -93,19 +112,13 @@ type DesiredEntry struct {
 // CachedItem is one entry currently present on disk.
 type CachedItem struct {
 	Key        string  // normalized comparison key (matches DesiredSet keys)
-	MDPath     string  // absolute path to the cached body
+	MDKey      string  // site-relative key of the cached body (its sidecar is MDKey + ".meta.json")
 	Sidecar    Sidecar // best-effort; zero value if HasSidecar is false
 	HasSidecar bool    // false when the body exists but the sidecar is missing/unreadable
 }
 
 // IngestOptions tune a single ingest.
 type IngestOptions struct {
-	// RelocateFromContent enables the one-time migration fallback: when the
-	// author is unreachable AND no cache entry exists yet, build from a local
-	// content/ cross-tenant copy's bytes (with a relocate marker) rather than
-	// skipping it. The daily actor leaves this false (steady-state has no
-	// content/ copies to relocate from). See the parent plan's WS4 migration.
-	RelocateFromContent bool
 	// Throttle, if set, is called immediately before a real network Fetch (never
 	// on an idempotent cache hit). The migration/actor sets it to a ~1/sec
 	// limiter so a cache rebuild doesn't self-DoS or trip author rate limits.
@@ -117,31 +130,29 @@ type FetchOutcome struct {
 	Body      []byte
 	Sidecar   Sidecar
 	Cacheable bool   // false → do not store (e.g. refused invalid signature)
-	Verdict   string // valid|invalid|missing|error|fetch_failed|relocated|unsupported_key
-	Source    string // descriptor-specific (blessed: content|mount|relocate)
+	Verdict   string // valid|invalid|missing|error|fetch_failed|unsupported_key
+	Source    string // descriptor-specific (blessed: content|mount)
 	Refused   bool   // present-but-invalid signature → refused (security-relevant)
-	Relocated bool   // built from the local content/ copy (migration fallback)
 	Err       error  // hard fetch failure (network); never set with Cacheable
 }
 
 // IngestResult is the outcome of the generic Ingest op.
 type IngestResult struct {
-	Stored    bool   // a new entry was written
-	Skipped   bool   // already cached (pinned kinds never refresh) — no-op
-	Relocated bool   // built from the local content/ copy (migration fallback)
-	Verdict   string // valid|invalid|missing|error|fetch_failed|store_failed|unsupported_key
-	Source    string
-	Refused   bool
-	Err       error
+	Stored  bool   // a new entry was written
+	Skipped bool   // already cached (pinned kinds never refresh) — no-op
+	Verdict string // valid|invalid|missing|error|fetch_failed|store_failed|unsupported_key
+	Source  string
+	Refused bool
+	Err     error
 }
 
 // Descriptor is the ONLY per-kind code. Everything else (Ingest/Evict/
 // Reconcile/GC/…) is generic and runs over this interface unchanged.
 type Descriptor interface {
 	Kind() string
-	// Paths returns the body + sidecar paths for a key under the store, or
-	// ok=false if the key is not valid for this kind.
-	Paths(st Store, key string) (mdPath, metaPath string, ok bool)
+	// Keys returns the body + sidecar keys (site-relative) for a key under the
+	// store, or ok=false if the key is not valid for this kind.
+	Keys(st Store, key string) (mdKey, metaKey string, ok bool)
 	// Fetch retrieves + verifies the payload for a key.
 	Fetch(st Store, key string, opts IngestOptions) FetchOutcome
 	// Store persists a fetched body + sidecar (descriptor owns the on-disk format).
@@ -164,17 +175,17 @@ type Descriptor interface {
 }
 
 // ----------------------------------------------------------------------------
-// Generic operations — both the real-time path AND Rosie call these. No
+// Generic operations — both the real-time path AND the cache upkeep call these. No
 // per-kind branching anywhere below this line.
 // ----------------------------------------------------------------------------
 
 // Ingest fetches+verifies+stores one key via the descriptor, idempotently.
 // Returns Skipped (a no-op) when the key is already cached — pinned kinds never
 // refresh, so a second call is free. Both the real-time sync grant path and
-// Rosie's Reconcile call THIS function, which is what guarantees they cannot
+// the cache upkeep's Reconcile call THIS function, which is what guarantees they cannot
 // drift onto separate fetch/verify/store logic.
 func Ingest(st Store, d Descriptor, key string, opts IngestOptions) IngestResult {
-	if _, _, ok := d.Paths(st, key); !ok {
+	if _, _, ok := d.Keys(st, key); !ok {
 		return IngestResult{Verdict: "unsupported_key"}
 	}
 	// Pinned-by-version: an existing entry is authoritative; an edit never
@@ -195,7 +206,7 @@ func Ingest(st Store, d Descriptor, key string, opts IngestOptions) IngestResult
 	if err := d.Store(st, out.Sidecar, out.Body); err != nil {
 		return IngestResult{Verdict: "store_failed", Source: out.Source, Err: err}
 	}
-	return IngestResult{Stored: true, Relocated: out.Relocated, Verdict: out.Verdict, Source: out.Source}
+	return IngestResult{Stored: true, Verdict: out.Verdict, Source: out.Source}
 }
 
 // Refresh forces a re-fetch even if the key is present. For pinned kinds
@@ -255,7 +266,7 @@ func EnforceTTL(st Store, d Descriptor, now time.Time) (evicted int, err error) 
 type GCReport struct {
 	Kind    string
 	Removed int      // orphan bodies/sidecars removed
-	Paths   []string // removed paths (for logging)
+	Paths   []string // removed bodies, as site-relative keys (for logging; the event field is still "paths")
 	Errors  []string
 }
 
@@ -266,6 +277,7 @@ type GCReport struct {
 // provenance/verification record) and regenerable by a later reconcile.
 func GC(st Store, d Descriptor) (GCReport, error) {
 	rep := GCReport{Kind: d.Kind()}
+	ctx := context.Background()
 	items, err := d.List(st)
 	if err != nil {
 		return rep, err
@@ -274,23 +286,19 @@ func GC(st Store, d Descriptor) (GCReport, error) {
 		if it.HasSidecar {
 			continue
 		}
-		if e := os.Remove(it.MDPath); e != nil && !os.IsNotExist(e) {
-			rep.Errors = append(rep.Errors, fmt.Sprintf("%s: %v", it.MDPath, e))
+		if e := st.Site.Store().Delete(ctx, it.MDKey); e != nil && !errors.Is(e, fs.ErrNotExist) {
+			rep.Errors = append(rep.Errors, fmt.Sprintf("%s: %v", it.MDKey, e))
 			continue
 		}
-		_ = os.Remove(it.MDPath + ".meta.json")
+		_ = st.Site.Store().Delete(ctx, it.MDKey+".meta.json", storage.IgnoreMissing())
 		rep.Removed++
-		rep.Paths = append(rep.Paths, it.MDPath)
+		rep.Paths = append(rep.Paths, it.MDKey)
 	}
 	return rep, nil
 }
 
 // ReconcileOptions tune a reconcile pass.
 type ReconcileOptions struct {
-	// RelocateFromContent is threaded to Ingest for the one-time migration
-	// (build a missing entry from the local content/ copy when the author is
-	// unreachable). The daily actor leaves this false.
-	RelocateFromContent bool
 	// Throttle is threaded to each missing-key Ingest's fetch (see
 	// IngestOptions.Throttle). nil = no throttle.
 	Throttle func()
@@ -302,7 +310,6 @@ type ReconcileReport struct {
 	Desired   int      // authoritative count (DesiredSet)
 	Present   int      // entries currently on disk
 	Refetched int      // missing-desired keys fetched + stored fresh
-	Relocated int      // missing-desired keys built from the local content/ copy
 	Evicted   int      // present keys no longer desired (signed withdrawal/deny)
 	Kept      int      // present + still desired (incl. unreachable authors kept)
 	Evictions []string // evicted keys (for logging)
@@ -359,11 +366,8 @@ func Reconcile(st Store, d Descriptor, opts ReconcileOptions) (ReconcileReport, 
 			rep.Kept++
 			continue
 		}
-		res := Ingest(st, d, de.Key, IngestOptions{RelocateFromContent: opts.RelocateFromContent, Throttle: opts.Throttle})
+		res := Ingest(st, d, de.Key, IngestOptions{Throttle: opts.Throttle})
 		switch {
-		case res.Stored && res.Relocated:
-			rep.Relocated++
-			rep.Refetches = append(rep.Refetches, de.Key)
 		case res.Stored:
 			rep.Refetched++
 			rep.Refetches = append(rep.Refetches, de.Key)
@@ -456,7 +460,7 @@ func (r *Registry) Build(kind string, cfg DescriptorConfig) (Descriptor, bool) {
 
 // DefaultRegistry has exactly the blessed descriptor registered. YAGNI: adopting
 // avatar/reply-context/feed later means REGISTERING a descriptor here, not
-// editing Rosie's sweep.
+// editing the cache upkeep's sweep.
 func DefaultRegistry() *Registry {
 	r := NewRegistry()
 	r.Register(KindBlessed, NewBlessedDescriptor)

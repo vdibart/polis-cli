@@ -73,6 +73,7 @@ func generateSyncID() string {
 
 func (s *Server) runUnifiedSync() SyncResult {
 	result := SyncResult{}
+	s.ReloadKeysIfChanged() // the cycle may sign; never with a retired key
 
 	if s.DiscoveryURL == "" {
 		return result
@@ -96,7 +97,7 @@ func (s *Server) runUnifiedSync() SyncResult {
 	syncStart := time.Now()
 
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 
 	// Get unified cursor, migrating from old per-handler cursors on first run
 	cursor := s.getUnifiedCursor(store)
@@ -112,7 +113,9 @@ func (s *Server) runUnifiedSync() SyncResult {
 	if len(allEvents) == 0 {
 		// Still update cursor timestamp even if no new events
 		if newCursor != "" && cursorGreater(newCursor, cursor) {
-			_ = store.SetCursor("pub.polis.sync", newCursor)
+			if err := store.SetCursor("pub.polis.sync", newCursor); err != nil {
+				s.LogWarn("sync: could not save the pub.polis.sync cursor (the next cycle re-reads from the old one): %v", err)
+			}
 		}
 		// Broadcast counts even with 0 events — feed items may have been
 		// added by other paths (e.g. manual feed refresh) since the last
@@ -157,7 +160,9 @@ func (s *Server) runUnifiedSync() SyncResult {
 
 	// Advance unified cursor
 	if newCursor != "" {
-		_ = store.SetCursor("pub.polis.sync", newCursor)
+		if err := store.SetCursor("pub.polis.sync", newCursor); err != nil {
+			s.LogWarn("sync: could not save the pub.polis.sync cursor (the next cycle re-reads from the old one): %v", err)
+		}
 		// Feed-content high-water mark: advance ONLY when this cycle actually
 		// added feed items. Your own posts are synced (so pub.polis.sync moves)
 		// but the feed handler filters them out, so NewFeedItems stays 0 for an
@@ -165,7 +170,9 @@ func (s *Server) runUnifiedSync() SyncResult {
 		// pub.polis.sync), so publishing your own post no longer lights it with
 		// nothing new to show.
 		if result.NewFeedItems > 0 {
-			_ = store.SetCursor("pub.polis.feed.content", newCursor)
+			if err := store.SetCursor("pub.polis.feed.content", newCursor); err != nil {
+				s.LogWarn("sync: could not save the pub.polis.feed.content cursor: %v", err)
+			}
 		}
 	}
 
@@ -213,7 +220,7 @@ func (s *Server) getUnifiedCursor(store *stream.Store) string {
 func (s *Server) queryStreamEvents(myDomain, cursor, syncID string) ([]discovery.StreamEvent, string) {
 	// Check suspension before making any DS queries
 	discoveryDomain := s.GetDiscoveryDomain()
-	vStore := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	vStore := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 	vCfg := stream.LoadVerificationConfig(vStore)
 	var vState stream.VerificationState
 	_ = vState.Load(vStore)
@@ -235,8 +242,7 @@ func (s *Server) queryStreamEvents(myDomain, cursor, syncID string) ([]discovery
 
 	// Build followed authors list
 	var followedDomains []string
-	followingPath := following.DefaultPath(s.DataDir)
-	f, err := following.Load(followingPath)
+	f, err := following.LoadSite(s.Site())
 	if err == nil && f.Count() > 0 {
 		for _, entry := range f.All() {
 			d := discovery.ExtractDomainFromURL(entry.URL)
@@ -323,8 +329,7 @@ func (h *feedSyncHandler) Process(events []discovery.StreamEvent) stream.Handler
 	}
 
 	// Load followed domains for feed filtering
-	followingPath := following.DefaultPath(s.DataDir)
-	f, err := following.Load(followingPath)
+	f, err := following.LoadSite(s.Site())
 	if err != nil || f.Count() == 0 {
 		return stream.HandlerResult{}
 	}
@@ -404,7 +409,7 @@ func (h *followSyncHandler) Process(events []discovery.StreamEvent) stream.Handl
 	}
 
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 
 	handler := &stream.FollowHandler{MyDomain: myDomain}
 
@@ -456,7 +461,7 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 	}
 
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 
 	handler := &stream.BlessingHandler{MyDomain: myDomain}
 
@@ -471,8 +476,7 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 	_ = store.SaveState(handler.TypePrefix(), newState)
 
 	// Policy-driven auto-decisions for blessing requests
-	privPath, pubPath := policy.DefaultPaths(s.DataDir)
-	policies, _ := policy.LoadPolicies(privPath, pubPath)
+	policies, _ := policy.LoadPolicies(s.Site())
 
 	// ⛔ SIGNET EPIC 11 D10: an auto-decision needs Rosie's live grant, on every
 	// server. No grant — or the hosted operator switch off — means no
@@ -536,25 +540,38 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 			if cu == "" {
 				continue
 			}
-			_, _, cached := cache.FindBlessed(s.DataDir, cu)
-			listed := blessedListHas(s.DataDir, cu)
+			_, _, cached := cache.FindBlessed(s.Site(), cu)
+			listed := blessedListHas(s.Site(), cu)
 			if !cached && !listed {
 				continue
 			}
-			if cached {
-				// Evict through the SAME generic op Rosie's Reconcile uses (WS-R1
-				// anti-drift) — the blessed descriptor evicts across DS scopes.
-				evStore := cache.Store{DataDir: s.DataDir, DSDomain: extractDomainFromURL(s.DiscoveryURL)}
-				evDesc := cache.NewBlessedDescriptor(cache.DescriptorConfig{})
-				_ = cache.Evict(evStore, evDesc, cu)
-			}
+			// ⛔ THE LIST FIRST, THEN THE CACHE. The list is the authority: the
+			// render path's read-through filler re-fetches any LISTED comment
+			// missing from the cache, so evicting first and then failing to
+			// update the list (as this used to, with only a warn) left the
+			// withdrawn comment listed and set to be cached again. If the list
+			// cannot be updated, nothing is evicted — the pair stays consistent
+			// — and an alertable event says the withdrawal was not applied.
 			if listed {
 				// SIGNED (epic 21.2): this is the owner's instance, holding the
 				// owner's key. The unsigned remove cleared the list's signature,
 				// so the first withdrawal un-signed a list the author had signed.
-				if err := metadata.RemoveBlessedCommentSigned(s.DataDir, cu, s.PrivateKey); err != nil {
-					s.LogWarn("blessing sync: evict %s: failed to update blessed.json: %v", cu, err)
+				if err := metadata.RemoveBlessedCommentSigned(s.Site(), cu, s.PrivateKey); err != nil {
+					s.LogError("blessing sync: evict %s: could not update blessed.json, withdrawal NOT applied: %v", cu, err)
+					s.LogEvent("pub.polis.comment.blessing.evict_failed", map[string]interface{}{
+						"comment_url": cu,
+						"cached":      cached,
+						"reason":      err.Error(),
+					})
+					continue
 				}
+			}
+			if cached {
+				// Evict through the SAME generic op Rosie's Reconcile uses (WS-R1
+				// anti-drift) — the blessed descriptor evicts across DS scopes.
+				evStore := cache.Store{Site: s.Site(), DSDomain: extractDomainFromURL(s.DiscoveryURL)}
+				evDesc := cache.NewBlessedDescriptor(cache.DescriptorConfig{})
+				_ = cache.Evict(evStore, evDesc, cu)
 			}
 			filesChanged = true
 			s.LogEvent("pub.polis.comment.blessing.evict", map[string]interface{}{
@@ -591,7 +608,7 @@ func (h *blessingSyncHandler) Process(events []discovery.StreamEvent) stream.Han
 		// Update blessed-comments.json index — SIGNED with the owner's key, for
 		// the same reason as the eviction above (epic 21.2).
 		postPath := extractPostPathFromURL(inReplyTo)
-		if err := metadata.AddBlessedCommentSigned(s.DataDir, postPath, metadata.BlessedComment{URL: commentURL}, s.PrivateKey); err != nil {
+		if err := metadata.AddBlessedCommentSigned(s.Site(), postPath, metadata.BlessedComment{URL: commentURL}, s.PrivateKey); err != nil {
 			s.LogWarn("blessing sync: failed to update blessed-comments for %s: %v", commentURL, err)
 		}
 
@@ -620,7 +637,7 @@ func (s *Server) cacheBlessedComment(commentURL string) bool {
 	// anti-drift): the blessed descriptor owns the fetch + verify-and-gate
 	// policy (refuse invalid sig; cache missing/error). Here we only translate
 	// the result into the existing observability events.
-	store := cache.Store{DataDir: s.DataDir, DSDomain: extractDomainFromURL(s.DiscoveryURL)}
+	store := cache.Store{Site: s.Site(), DSDomain: extractDomainFromURL(s.DiscoveryURL)}
 	desc := cache.NewBlessedDescriptor(cache.DescriptorConfig{})
 	res := cache.Ingest(store, desc, commentURL, cache.IngestOptions{})
 
@@ -709,7 +726,7 @@ func (h *commentStatusSyncHandler) Process(events []discovery.StreamEvent) strea
 
 	hc := s.getHookConfig()
 
-	result, err := comment.SyncFromEvents(s.DataDir, baseURL, events, hc)
+	result, err := comment.SyncFromEvents(s.Site(), baseURL, events, hc)
 	if err != nil {
 		return stream.HandlerResult{Error: err}
 	}

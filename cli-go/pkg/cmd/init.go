@@ -13,7 +13,7 @@ func handleInit(args []string) {
 	siteTitle := fs.String("site-title", "", "Site display name")
 	author := fs.String("author", "", "Author name (default: git config user.name)")
 	email := fs.String("email", "", "Email address (optional, private by default)")
-	theme := fs.String("theme", "", "Initial theme (default: sols)")
+	theme := fs.String("theme", "", "Initial theme (default: a random theme, never a reserved one)")
 	licenseFlag := fs.String("license", "", "Terms for your posts: reserved, open, or none (omit to be asked)")
 	fs.Parse(args)
 
@@ -50,7 +50,7 @@ func handleInit(args []string) {
 		BaseURL:   baseURL,
 	}
 
-	result, err := site.Init(dir, opts)
+	result, err := site.Init(getSite(), opts)
 	if err != nil {
 		exitError("Failed to initialize site: %v", err)
 	}
@@ -97,7 +97,7 @@ func handleInit(args []string) {
 
 		// SHOW what was chosen. Recording it is not enough — the consent
 		// argument rests on the user having seen it.
-		terms, _ := site.SiteTerms(dir)
+		terms, _ := site.SiteTerms(getSite())
 		describeLicenseChoice(result.License, terms)
 
 		if askedRosie {

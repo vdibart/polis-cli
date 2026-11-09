@@ -2,6 +2,7 @@ package index
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,7 +86,7 @@ func readIndexLines(t *testing.T, dataDir string) []string {
 func TestRebuildPosts_PreservesCommentEntriesByteIdentically(t *testing.T) {
 	dataDir, commentLine := seedSiteWithPostAndComment(t)
 
-	if _, err := RebuildIndex(dataDir, RebuildOptions{Posts: true}); err != nil {
+	if _, err := RebuildIndex(storage.At(dataDir), RebuildOptions{Posts: true}); err != nil {
 		t.Fatalf("rebuild --posts: %v", err)
 	}
 
@@ -106,7 +107,7 @@ func TestRebuildPosts_PreservesCommentEntriesByteIdentically(t *testing.T) {
 func TestRebuildPosts_WritesCanonicalEntrySchema(t *testing.T) {
 	dataDir, _ := seedSiteWithPostAndComment(t)
 
-	if _, err := RebuildIndex(dataDir, RebuildOptions{Posts: true}); err != nil {
+	if _, err := RebuildIndex(storage.At(dataDir), RebuildOptions{Posts: true}); err != nil {
 		t.Fatalf("rebuild --posts: %v", err)
 	}
 
@@ -135,7 +136,7 @@ func TestRebuildPosts_WritesCanonicalEntrySchema(t *testing.T) {
 func TestRebuildPosts_IndexIsPubliclyReadable(t *testing.T) {
 	dataDir, _ := seedSiteWithPostAndComment(t)
 
-	if _, err := RebuildIndex(dataDir, RebuildOptions{Posts: true}); err != nil {
+	if _, err := RebuildIndex(storage.At(dataDir), RebuildOptions{Posts: true}); err != nil {
 		t.Fatalf("rebuild --posts: %v", err)
 	}
 

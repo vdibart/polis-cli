@@ -1,7 +1,9 @@
 package metadata
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
@@ -53,17 +55,17 @@ func TestMarkedBlessedListRoundTripsThroughTheGoWriter(t *testing.T) {
 	post := "posts/20260827/hello.md"
 
 	// The agent's act.
-	if err := AddBlessedCommentSigned(dir, post, BlessedComment{
+	if err := AddBlessedCommentSigned(storage.At(dir), post, BlessedComment{
 		URL: "https://bob.example/c/1.md", Agent: "rosie", Grant: markerGrantURL,
 	}, priv); err != nil {
 		t.Fatal(err)
 	}
 	// The user's own act afterwards, through the same writer.
-	if err := AddBlessedCommentSigned(dir, post, BlessedComment{URL: "https://carol.example/c/2.md"}, priv); err != nil {
+	if err := AddBlessedCommentSigned(storage.At(dir), post, BlessedComment{URL: "https://carol.example/c/2.md"}, priv); err != nil {
 		t.Fatal(err)
 	}
 
-	bc, err := LoadBlessedComments(dir)
+	bc, err := LoadBlessedComments(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +84,7 @@ func TestMarkedBlessedListRoundTripsThroughTheGoWriter(t *testing.T) {
 	}
 
 	// And the raw file carries no marker keys on the unmarked entry at all.
-	raw, _ := os.ReadFile(BlessedPath(dir))
+	raw, _ := os.ReadFile(filepath.Join(dir, BlessedKey))
 	if n := countOccurrences(string(raw), `"agent"`); n != 1 {
 		t.Errorf("file has %d agent keys, want 1:\n%s", n, raw)
 	}
@@ -100,15 +102,15 @@ func TestUnsignedEchoWriteLeavesAMarkedListSigned(t *testing.T) {
 	}
 	post := "posts/20260827/hello.md"
 	entry := BlessedComment{URL: "https://bob.example/c/1.md", Agent: "rosie", Grant: markerGrantURL}
-	if err := AddBlessedCommentSigned(dir, post, entry, priv); err != nil {
+	if err := AddBlessedCommentSigned(storage.At(dir), post, entry, priv); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := os.ReadFile(BlessedPath(dir))
+	before, _ := os.ReadFile(filepath.Join(dir, BlessedKey))
 
-	if err := AddBlessedComment(dir, post, BlessedComment{URL: entry.URL}); err != nil {
+	if err := AddBlessedComment(storage.At(dir), post, BlessedComment{URL: entry.URL}); err != nil {
 		t.Fatal(err)
 	}
-	after, _ := os.ReadFile(BlessedPath(dir))
+	after, _ := os.ReadFile(filepath.Join(dir, BlessedKey))
 	if string(before) != string(after) {
 		t.Fatalf("the unsigned echo rewrote the list:\nbefore: %s\nafter:  %s", before, after)
 	}
@@ -118,7 +120,7 @@ func TestUnsignedEchoWriteLeavesAMarkedListSigned(t *testing.T) {
 }
 
 func VerifyBlessedSiteWithKey(dir string, pub []byte) (SignatureStatus, error) {
-	bc, err := LoadBlessedComments(dir)
+	bc, err := LoadBlessedComments(storage.At(dir))
 	if err != nil {
 		return StatusUnknown, err
 	}

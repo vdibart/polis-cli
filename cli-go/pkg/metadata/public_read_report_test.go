@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -31,7 +32,7 @@ null
 		t.Fatal(err)
 	}
 
-	entries, report, err := ReadPublicIndex(dir)
+	entries, report, err := ReadPublicIndex(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,14 +48,14 @@ null
 	}
 
 	// LoadPublicIndex is unchanged for its existing callers.
-	legacy, err := LoadPublicIndex(dir)
+	legacy, err := LoadPublicIndex(storage.At(dir))
 	if err != nil || len(legacy) != 2 {
 		t.Errorf("LoadPublicIndex = %d entries, %v; want 2, nil", len(legacy), err)
 	}
 }
 
 func TestReadPublicIndex_MissingFileIsEmptyAndClean(t *testing.T) {
-	entries, report, err := ReadPublicIndex(t.TempDir())
+	entries, report, err := ReadPublicIndex(storage.At(t.TempDir()))
 	if err != nil || len(entries) != 0 || report.Skipped != 0 {
 		t.Errorf("missing index: %d entries, report %+v, err %v; want empty, clean, nil", len(entries), report, err)
 	}

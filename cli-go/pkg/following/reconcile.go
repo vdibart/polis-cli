@@ -2,6 +2,7 @@ package following
 
 import (
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
@@ -35,8 +36,8 @@ import (
 // Net-based netting here matches how clerk/parity_follow.go measures drift, so
 // the reconcile converges. (The hosted Chaplain's repairFollows applies the same
 // net rule — keep the two in step if either changes.)
-func ReconcileFollowsToDS(followingPath, domain string, ds *discovery.Client, privKey []byte, dsCfg *stream.DiscoveryConfig) ([]string, error) {
-	f, err := Load(followingPath)
+func ReconcileFollowsToDS(site storage.Site, domain string, ds *discovery.Client, privKey []byte, dsCfg *stream.DiscoveryConfig) ([]string, error) {
+	f, err := LoadSite(site)
 	if err != nil {
 		return nil, fmt.Errorf("load following.json: %w", err)
 	}

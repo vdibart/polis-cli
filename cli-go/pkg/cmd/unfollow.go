@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
@@ -32,8 +31,7 @@ func handleUnfollow(args []string) {
 	if discoveryURL == "" {
 		discoveryURL = "https://ds.polis.pub"
 	}
-	apiKey := os.Getenv("DISCOVERY_SERVICE_KEY")
-	client := discovery.NewClient(discoveryURL, apiKey)
+	client := discovery.NewClient(discoveryURL)
 
 	privKey, err := loadPrivateKey(dir)
 	if err != nil {
@@ -78,8 +76,7 @@ func handleUnfollow(args []string) {
 	}
 
 	// Remove from following.json
-	followingPath := filepath.Join(dir, "content", "pub.polis.core", "follow", "following.json")
-	f, err := following.Load(followingPath)
+	f, err := following.LoadSite(getSite())
 	if err != nil {
 		exitError("Failed to load following.json: %v", err)
 	}
@@ -87,7 +84,7 @@ func handleUnfollow(args []string) {
 	removed := f.Remove(authorURL)
 
 	// SIGNET epic 02: unfollowing is authorship too — re-sign over the new roster.
-	if err := following.SaveSigned(followingPath, f, privKey); err != nil {
+	if err := following.SaveSigned(getSite(), f, privKey); err != nil {
 		exitError("Failed to save following.json: %v", err)
 	}
 

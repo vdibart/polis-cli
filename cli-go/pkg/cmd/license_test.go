@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,14 +25,14 @@ import (
 // site is indistinguishable from one that never stated terms.
 func TestCLIWithdrawalRemovesEveryProjection(t *testing.T) {
 	dir, priv := setupUnpublishSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("install reference payload: %v", err)
 	}
 
-	if stated, err := site.StateLicense(dir, "reserved", "https://example.com", priv); err != nil || !stated {
+	if stated, err := site.StateLicense(storage.At(dir), "reserved", "https://example.com", priv); err != nil || !stated {
 		t.Fatalf("StateLicense: stated=%v err=%v", stated, err)
 	}
-	renderer, err := render.NewPageRenderer(render.PageConfig{DataDir: dir, BaseURL: "https://example.com"})
+	renderer, err := render.NewPageRenderer(render.PageConfig{Site: storage.At(dir), BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatalf("NewPageRenderer: %v", err)
 	}
@@ -37,7 +40,7 @@ func TestCLIWithdrawalRemovesEveryProjection(t *testing.T) {
 		t.Fatalf("RenderLicenseSurfaces: %v", err)
 	}
 
-	mount := site.LicenseMountDir(dir)
+	mount := site.LicenseMountDir(storage.At(dir))
 	surfaces := []string{
 		"robots.txt",
 		"rsl.xml",
@@ -57,14 +60,14 @@ func TestCLIWithdrawalRemovesEveryProjection(t *testing.T) {
 	handleLicense([]string{"none"})
 
 	for _, rel := range append(surfaces, mount) {
-		if _, err := os.Stat(filepath.Join(dir, rel)); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(dir, rel)); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s survived `polis license none`", rel)
 		}
 	}
-	if terms, err := site.SiteTerms(dir); err != nil || terms != nil {
+	if terms, err := site.SiteTerms(storage.At(dir)); err != nil || terms != nil {
 		t.Errorf("after `polis license none` SiteTerms = %v, %v; want nil, nil", terms, err)
 	}
-	if p := site.LicensePointer(dir); p != "" {
+	if p := site.LicensePointer(storage.At(dir)); p != "" {
 		t.Errorf("licence pointer survived withdrawal: %q", p)
 	}
 }

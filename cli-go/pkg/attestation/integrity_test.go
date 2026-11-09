@@ -1,6 +1,7 @@
 package attestation
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"strings"
 	"testing"
 
@@ -33,7 +34,7 @@ func TestIssue_IntegrityObservationWellFormed(t *testing.T) {
 	for _, result := range []string{IntegrityVerified, IntegrityNotVerified} {
 		p := wellFormedIntegrityPayload()
 		p[IntegrityKeyResult] = result
-		if _, err := Issue(dir, integrityRecord(p), priv); err != nil {
+		if _, err := Issue(storage.At(dir), integrityRecord(p), priv); err != nil {
 			t.Errorf("result=%s refused: %v", result, err)
 		}
 	}
@@ -65,12 +66,12 @@ func TestIssue_IntegrityObservationRefusesAnIncompleteClaim(t *testing.T) {
 	}
 	for name, build := range cases {
 		dir := t.TempDir()
-		_, err := Issue(dir, build(wellFormedIntegrityPayload()), priv)
+		_, err := Issue(storage.At(dir), build(wellFormedIntegrityPayload()), priv)
 		if err == nil {
 			t.Errorf("%s: Issue accepted it", name)
 			continue
 		}
-		if recs, _ := List(dir); len(recs) != 0 {
+		if recs, _ := List(storage.At(dir)); len(recs) != 0 {
 			t.Errorf("%s: refused, but %d record(s) were written", name, len(recs))
 		}
 	}

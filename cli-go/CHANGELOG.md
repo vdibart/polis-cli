@@ -5,6 +5,42 @@ All notable changes to the Go CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.70.0]
+
+The root `CHANGELOG.md` gives the upgrade notes for this release in full. There is no 0.69.0: during development the version number was advanced to 0.70.0 by mistake, and builds have reported 0.70.0 since, so this release keeps that number rather than go backwards. It follows 0.68.0 directly, and nothing was released in between.
+
+### Added
+
+- **`polis branch <export> --to <url>`**: turn an export of your site into a new site at a new address, on your machine. The handover to a new key is signed by the exported key under the original domain, so everything the site signed still verifies; only the follow and blessing lists are re-signed. `--out`, `--archive`, `--from-domain`, `--without-private`, `--recovery-key`.
+- **`polis branch deploy <branch-output>`** (experimental): create an instance on a host (Vercel first), seed the branched site into its private store, configure it and wait for it to publish.
+- **`polis branch announce`**: tell the discovery service where a branched site came from. Optional.
+- **`polis recover sign --domain HOST [--challenge FILE] [--key PATH]`**: sign a remote instance's recovery challenge. `--domain` is required and must match the challenge.
+- **`polis validate <url>` probes for private files** (`identity.private_files_served`) and fails if one is served; a refused or rate-limited probe is reported as not checked.
+- **Key history entries carry `signing_domain`**, the domain the handover was signed under.
+- **[Webapp]** Remote instances (experimental): the web app runs as a Vercel function over Vercel Blob, a server-signed instance makes its own identity key on first start, and the owner signs in with a recovery key and a passkey.
+- **[Webapp]** Scoped API keys (`full`, `render`) with owner routes to mint, list and revoke them; MCP at `/mcp`, one key per address; a site's own CSS (`site/custom.css`), checked at save and at every render; the Kay page (experimental); *Follow a site* from the avatar menu.
+
+### Changed
+
+- **Under `--json`, `polis unpublish` requires `-y` / `--yes` and `polis unregister` requires `--force`**; without the flag both exit `1` and change nothing. `polis unregister` asks before it unregisters.
+- **`polis follow` blesses only what your policies bless**, names what it blessed (`blessed_comments` under `--json`), and announces the follow when the site is registered.
+- **`polis blessing beseech` exits `1` with `NOT_SUPPORTED`** and names the two ways to ask again.
+- **Key rotation stages the new key** (`id_ed25519.new`), installs it by rename at `0600`, and re-signs the follow file and blessing list when they verify under the old key. A rotation will not start over a staged key; rotating again finishes an interrupted one.
+- **`polis help` lists every subcommand.** Stream publishes carry a timestamp inside the signed payload. `DISCOVERY_SERVICE_KEY` is no longer sent.
+- **[Webapp]** The server answers `404` for a path it does not have. An invalid `POLIS_MODE` stops it at start. An environment variable wins over `.env`.
+
+### Fixed
+
+- **`polis validate`** catches a theme or shape that is not installed, and a policy line that is not JSON.
+- **`tailor --apply` no longer overwrites a customised policy file.**
+- **[Webapp]** Settings buttons are readable on the dark themes; the key pair reloads when the key file changes.
+
+### Security
+
+- **The server no longer serves private files below the top level of a site**, and serves an extensionless file only under `.well-known/`.
+- **[Webapp] `/pql/` refuses owner-private queries** that the owner did not make, so a page you visit cannot read your drafts or direct messages from a local web app.
+- **A hook symlinked outside the site is not run.** Comment ids and foreign comment URLs cannot address a file outside the comment trees. Custom CSS cannot make readers' browsers fetch from elsewhere.
+
 ## [0.68.0]
 
 The root `CHANGELOG.md` records 0.63.0 through 0.66.0 and gives the upgrade notes for this release in full.

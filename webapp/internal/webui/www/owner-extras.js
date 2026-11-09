@@ -398,10 +398,14 @@
                     } else {
                         openEditor();
                     }
+                } else if (action === 'follow-site' && window.App && typeof window.App.openFollowPanel === 'function') {
+                    window.App.openFollowPanel();
                 } else if (action === 'copy-follow-link' && window.App && typeof window.App.copyFollowLink === 'function') {
                     window.App.copyFollowLink();
                 } else if (action === 'settings' && window.App && typeof window.App.navigateTo === 'function') {
                     window.App.navigateTo('/settings');
+                } else if (action === 'kay' && window.App && typeof window.App.navigateTo === 'function') {
+                    window.App.navigateTo('/kay');
                 }
                 closeNavMenu();
             });
@@ -2228,8 +2232,19 @@
         paintCTA(currentFollowing);
     }
 
+    // decorateMark draws the owner's stream mark. The server decides which
+    // posts are marked (the owner's rules, evaluated in the stream response);
+    // this only reads meta.mark, from a closed set, and sets a class the
+    // shipped CSS draws as a "!" in the timeline dot.
+    function decorateMark(entry, meta) {
+        if (!meta || meta.mark !== 'alert') return;
+        entry.classList.add('entry--marked');
+        entry.setAttribute('data-polis-mark', 'alert');
+    }
+
     function registerStreamItemDecorators(stream) {
         stream.afterRender('post', decoratePost);
+        stream.afterRender('post', decorateMark);
         stream.afterRender('comment', decorateComment);
         stream.afterRender('dm', decorateDM);
         stream.afterRender('dm-message', decorateDMMessage);

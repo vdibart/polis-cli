@@ -2,3 +2,5 @@
 polis-server
 /server
 dist/
+.vercel
+.env*.local

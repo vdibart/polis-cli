@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/attestation"
@@ -11,7 +12,8 @@ import (
 
 // Config is what every grant write needs.
 type Config struct {
-	SiteDir string
+	// Site is the user's site: the grants are read from it and written to it.
+	Site    storage.Site
 	BaseURL string
 	// PrivateKey is the USER's key — the grant is her record.
 	PrivateKey []byte
@@ -47,8 +49,8 @@ const (
 )
 
 // LiveRosieGrant resolves Rosie's live grant for blessing, or nil.
-func LiveRosieGrant(siteDir string) (*attestation.LiveGrant, error) {
-	return attestation.ResolveLiveGrant(siteDir, Rosie, RosieSet, BlessingMinVersion)
+func LiveRosieGrant(site storage.Site) (*attestation.LiveGrant, error) {
+	return attestation.ResolveLiveGrant(site, Rosie, RosieSet, BlessingMinVersion)
 }
 
 // IssueDefault applies the default rule for one site and issues a
@@ -62,7 +64,7 @@ func LiveRosieGrant(siteDir string) (*attestation.LiveGrant, error) {
 // design. A user who switched Rosie off stays off — through reboots, through
 // this pass, and through every new version.
 func IssueDefault(cfg Config) (string, *Written, error) {
-	grants, err := attestation.Grants(cfg.SiteDir, Rosie)
+	grants, err := attestation.Grants(cfg.Site, Rosie)
 	if err != nil {
 		return "", nil, fmt.Errorf("read grants: %w", err)
 	}
@@ -87,7 +89,7 @@ func IssueDefault(cfg Config) (string, *Written, error) {
 // version. It writes nothing when a live grant at the current version already
 // stands, and reports that as already on.
 func Enable(cfg Config) (w *Written, alreadyOn bool, err error) {
-	grants, err := attestation.Grants(cfg.SiteDir, Rosie)
+	grants, err := attestation.Grants(cfg.Site, Rosie)
 	if err != nil {
 		return nil, false, fmt.Errorf("read grants: %w", err)
 	}
@@ -110,13 +112,13 @@ func Disable(cfg Config) (written []*Written, err error) {
 	defer func() {
 		// ⛔ EVERY BRANCH REFRESHES THE PROJECTION, the failure branch included:
 		// a stale agents.json still saying "live" is worse than none.
-		perr := RefreshProjections(cfg.SiteDir)
+		perr := RefreshProjections(cfg.Site)
 		for _, w := range written {
 			w.ProjectionErr = perr
 		}
 	}()
 
-	grants, gerr := attestation.Grants(cfg.SiteDir, Rosie)
+	grants, gerr := attestation.Grants(cfg.Site, Rosie)
 	if gerr != nil {
 		return nil, fmt.Errorf("read grants: %w", gerr)
 	}
@@ -124,7 +126,7 @@ func Disable(cfg Config) (written []*Written, err error) {
 		if g.Withdrawn {
 			continue
 		}
-		newID, werr := attestation.Withdraw(cfg.SiteDir, g.ID, cfg.PrivateKey)
+		newID, werr := attestation.Withdraw(cfg.Site, g.ID, cfg.PrivateKey)
 		if werr != nil {
 			if err == nil {
 				err = fmt.Errorf("withdraw %s: %w", g.ID, werr)
@@ -132,7 +134,7 @@ func Disable(cfg Config) (written []*Written, err error) {
 			continue
 		}
 		w := &Written{ID: newID, URL: g.URL, Basis: g.Basis, Behaviours: fmt.Sprintf("%s/%d", g.Set, g.Version)}
-		if rec, lerr := attestation.Load(attestation.Path(cfg.SiteDir, newID)); lerr == nil {
+		if rec, lerr := attestation.Load(cfg.Site, newID); lerr == nil {
 			w.Registered, w.RegisterErr = register(cfg, rec, newID)
 		}
 		written = append(written, w)
@@ -142,7 +144,7 @@ func Disable(cfg Config) (written []*Written, err error) {
 
 func issue(cfg Config, basis string) (w *Written, err error) {
 	defer func() {
-		perr := RefreshProjections(cfg.SiteDir)
+		perr := RefreshProjections(cfg.Site)
 		if w != nil {
 			w.ProjectionErr = perr
 		}
@@ -169,7 +171,7 @@ func issue(cfg Config, basis string) (w *Written, err error) {
 		Subject:   attestation.Subject{Type: attestation.SubjectIdentity, ID: base},
 		Payload:   payload,
 	}
-	id, err := attestation.Issue(cfg.SiteDir, rec, cfg.PrivateKey)
+	id, err := attestation.Issue(cfg.Site, rec, cfg.PrivateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -188,12 +190,12 @@ func register(cfg Config, rec *attestation.Record, id string) (bool, error) {
 	if d == nil || d.DiscoveryURL == "" {
 		return false, nil
 	}
-	if !discovery.IsRegisteredLocally(cfg.SiteDir, d.DiscoveryURL) {
+	if !discovery.IsRegisteredLocally(cfg.Site, d.DiscoveryURL) {
 		return false, nil
 	}
 	c := *d
-	if c.DataDir == "" {
-		c.DataDir = cfg.SiteDir
+	if !c.Site.Valid() {
+		c.Site = cfg.Site
 	}
 	if c.BaseURL == "" {
 		c.BaseURL = rec.Issuer

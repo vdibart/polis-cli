@@ -355,6 +355,37 @@ func modifierToTokens(modifier string) ([]string, error) {
 	return nil, fmt.Errorf("pql: invalid modifier %q", modifier)
 }
 
+// typeTokens is the friendly type tokens in the canonical vocabulary's order,
+// for Vocabulary; pql_test.go asserts it names every key of typeToInternal.
+var typeTokens = []string{"posts", "comments", "profiles", "messages", "drafts", "activity"}
+
+// Vocabulary describes, in one paragraph built from the parser's own tables,
+// the sentences Parse accepts. It is for a reader that writes sentences, such
+// as an AI calling a tool that takes one, so it cannot drift from the parser.
+// The reserved qualifier "new" and fully-qualified event types are left out.
+func Vocabulary() string {
+	join := func(seqs [][]string) string {
+		words := make([]string, len(seqs))
+		for i, s := range seqs {
+			words[i] = strings.Join(s, " ")
+		}
+		return strings.Join(words, ", ")
+	}
+	scopes := make([][]string, 0, len(scopeAtoms))
+	for _, a := range scopeAtoms {
+		scopes = append(scopes, a.tokens)
+	}
+	mods := make([][]string, 0, len(modifierClauses))
+	for _, c := range modifierClauses {
+		mods = append(mods, c.tokens)
+	}
+	return "A PQL sentence is: all <type> from|about <scope> [<order or filter>]. " +
+		"type: " + strings.Join(typeTokens, ", ") + ". " +
+		"scope: " + join(scopes) + ", a site's domain (discover.polis.pub), or a domain's network (discover.polis.pub's network). " +
+		"order or filter (optional, one): " + join(mods) + ". " +
+		"Nothing else is a word of PQL: \"all of polis\" is not a scope, \"all polis\" is."
+}
+
 // ── URL helpers ─────────────────────────────────────────────────────────────
 
 var pqlPathPattern = regexp.MustCompile(`(?:^|/)(?:_/)?pql/(.+?)/?$`)

@@ -305,10 +305,370 @@ test_rotate_key_without_did_document() {
     return 0
 }
 
+# Test: a rotation drops the signature from the follow file and blessing list
+#
+# Both verify against the current key only, so a signature made with the old
+# key reads `invalid` after the rotation. Go re-signs them; bash cannot sign
+# either file, so it drops the signature (the file then reads `unsigned`, which
+# reports OK) and leaves every entry as it was.
+test_rotate_key_drops_list_signatures() {
+    setup_test_env "rotate_key_lists"
+    trap teardown_test_env EXIT
+
+    "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
+
+    mkdir -p content/pub.polis.core/follow content/pub.polis.core/comment
+    echo '{"version":"polis-cli-go/test","following":[{"url":"https://bob.polis.pub","added_at":"2026-09-01T00:00:00Z"}],"signature":"-----BEGIN SSH SIGNATURE-----\nold\n-----END SSH SIGNATURE-----"}' \
+        > content/pub.polis.core/follow/following.json
+    echo '{"version":"polis-cli-go/test","comments":[{"post":"posts/20260901/hello.md","blessed":[{"url":"https://bob.polis.pub/c/1.md","version":"sha256:aaa","blessed_at":"2026-09-01T00:00:00Z","agent":"rosie","grant":"https://example.com/g.json"}]}],"signature":"-----BEGIN SSH SIGNATURE-----\nold\n-----END SSH SIGNATURE-----"}' \
+        > content/pub.polis.core/comment/blessed.json
+
+    local result
+    result=$(POLIS_BASE_URL="https://example.com" "$POLIS_BIN" --json rotate-key 2>&1)
+    assert_exit_code 0 "$?" || return 1
+    assert_valid_json "$result" || return 1
+    assert_json_field "$result" ".data.following_resign" "signature-removed" || return 1
+    assert_json_field "$result" ".data.blessed_resign" "signature-removed" || return 1
+
+    if [ "$(jq -r 'has("signature")' content/pub.polis.core/follow/following.json)" != "false" ]; then
+        echo "    The follow file still carries a signature made with the retired key"
+        return 1
+    fi
+    if [ "$(jq -r 'has("signature")' content/pub.polis.core/comment/blessed.json)" != "false" ]; then
+        echo "    The blessing list still carries a signature made with the retired key"
+        return 1
+    fi
+    # Entries, and the agent marker, are untouched.
+    if [ "$(jq -r '.following[0].url' content/pub.polis.core/follow/following.json)" != "https://bob.polis.pub" ]; then
+        echo "    The follow file's entries changed"
+        return 1
+    fi
+    if [ "$(jq -r '.comments[0].blessed[0].agent' content/pub.polis.core/comment/blessed.json)" != "rosie" ]; then
+        echo "    The blessing list lost its agent marker"
+        return 1
+    fi
+    # The follow file names bash as its last writer, as every bash write does.
+    if [ "$(jq -r '.version' content/pub.polis.core/follow/following.json)" != "polis-cli/$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$POLIS_BIN" | head -1)" ]; then
+        echo "    The follow file's generator was not restamped"
+        return 1
+    fi
+
+    return 0
+}
+
+# Test: a rotation with no lists creates none
+test_rotate_key_creates_no_lists() {
+    setup_test_env "rotate_key_no_lists"
+    trap teardown_test_env EXIT
+
+    "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
+    rm -f content/pub.polis.core/follow/following.json content/pub.polis.core/comment/blessed.json
+
+    local result
+    result=$(POLIS_BASE_URL="https://example.com" "$POLIS_BIN" --json rotate-key 2>&1)
+    assert_exit_code 0 "$?" || return 1
+    assert_json_field "$result" ".data.following_resign" "absent" || return 1
+    assert_json_field "$result" ".data.blessed_resign" "absent" || return 1
+    assert_file_not_exists "content/pub.polis.core/follow/following.json" || return 1
+    assert_file_not_exists "content/pub.polis.core/comment/blessed.json" || return 1
+
+    return 0
+}
+
+# Test: a rotation keeps block-level public_key_history members it does not model
+#
+# A chain is append-only and never rebuilt. The rotation used to rebuild the
+# block as a literal {current, history}, silently dropping anything else a
+# newer writer had put in it.
+test_rotate_key_keeps_unmodelled_chain_members() {
+    setup_test_env "rotate_key_chain_extra"
+    trap teardown_test_env EXIT
+
+    "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
+    jq '.public_key_history.from_the_future = {"kept": true}' .well-known/polis > wk.tmp && mv wk.tmp .well-known/polis
+
+    local result
+    result=$(POLIS_BASE_URL="https://example.com" "$POLIS_BIN" --json rotate-key 2>&1)
+    assert_exit_code 0 "$?" || return 1
+    assert_json_field "$result" ".data.key_history_epoch" "1" || return 1
+
+    if [ "$(jq -c '.public_key_history.from_the_future' .well-known/polis)" != '{"kept":true}' ]; then
+        echo "    An unmodelled block-level member was dropped by the rotation"
+        return 1
+    fi
+    if [ "$(jq -r '.public_key_history.history | length' .well-known/polis)" != "1" ] || \
+       [ "$(jq -r '.public_key_history.current.key' .well-known/polis)" != "$(jq -r '.public_key' .well-known/polis)" ]; then
+        echo "    The chain did not append as it should"
+        return 1
+    fi
+    # Key order within the block is what it always was: current, history, then
+    # the member this CLI does not model.
+    if [ "$(jq -c '.public_key_history | keys_unsorted' .well-known/polis)" != '["current","history","from_the_future"]' ]; then
+        echo "    Block key order changed: $(jq -c '.public_key_history | keys_unsorted' .well-known/polis)"
+        return 1
+    fi
+    return 0
+}
+
 # Run tests
+run_test "Rotate Key Keeps Unmodelled Chain Members" test_rotate_key_keeps_unmodelled_chain_members
+run_test "Rotate Key Drops List Signatures" test_rotate_key_drops_list_signatures
+run_test "Rotate Key Creates No Lists" test_rotate_key_creates_no_lists
 run_test "Rotate Key Appends To Key History" test_rotate_key_appends_to_key_history
 run_test "Rotate Key Twice Keeps Both Retired Keys" test_rotate_key_twice_keeps_both_retired_keys
 run_test "Rotate Key Writes No Old Key File" test_rotate_key_writes_no_old_key_file
 run_test "Rotate Key Rejects Delete Old Key Flag" test_rotate_key_rejects_delete_old_key_flag
 run_test "Rotate Key Removes Stale DID Document" test_rotate_key_removes_stale_did_document
 run_test "Rotate Key Without DID Document" test_rotate_key_without_did_document
+
+# Test: a staged key from an interrupted rotation is resumed, not refused, and
+# never replaced by a freshly generated one
+test_rotate_key_resumes_a_staged_key() {
+    setup_test_env "rotate_key_resume"
+    trap teardown_test_env EXIT
+
+    "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
+    # The Go paths stage only the private key, so leave no .new.pub.
+    ssh-keygen -q -t ed25519 -f .polis/keys/id_ed25519.new -N "" -C staged > /dev/null 2>&1 || return 1
+    rm -f .polis/keys/id_ed25519.new.pub
+    local staged
+    staged=$(ssh-keygen -y -f .polis/keys/id_ed25519.new | awk '{print $1" "$2}')
+
+    POLIS_BASE_URL="https://example.com" "$POLIS_BIN" --json rotate-key > /dev/null 2>&1 || {
+        echo "    rotation with a staged key failed"
+        return 1
+    }
+    if [ "$(awk '{print $1" "$2}' .polis/keys/id_ed25519.pub)" != "$staged" ]; then
+        echo "    the staged key was not the one installed"
+        return 1
+    fi
+    if [ "$(jq -r '.public_key_history.current.key' .well-known/polis | awk '{print $1" "$2}')" != "$staged" ]; then
+        echo "    the key history did not learn the staged key"
+        return 1
+    fi
+    assert_file_not_exists ".polis/keys/id_ed25519.new" || return 1
+    return 0
+}
+
+# Test: ⛔ a discovery service that never answers is NOT a refusal — the staged
+# key may be the only copy of a key it took, so it is kept and nothing changes
+test_rotate_key_keeps_the_staged_key_when_the_ds_does_not_answer() {
+    setup_test_env "rotate_key_no_answer"
+    trap teardown_test_env EXIT
+
+    "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
+    # Registered with a discovery service at an address nothing listens on.
+    mkdir -p ".polis/ds/127.0.0.1:9" && echo "{}" > ".polis/ds/127.0.0.1:9/registration.json"
+    local before result
+    before=$(cat .polis/keys/id_ed25519)
+    result=$(POLIS_BASE_URL="https://example.com" DISCOVERY_SERVICE_URL="http://127.0.0.1:9" \
+        "$POLIS_BIN" --json rotate-key 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "    rotation succeeded without a discovery service answer"
+        return 1
+    fi
+    assert_json_error_code "$result" "ROTATION_PENDING" || return 1
+    assert_file_exists ".polis/keys/id_ed25519.new" || return 1
+    if [ "$(cat .polis/keys/id_ed25519)" != "$before" ]; then
+        echo "    the current key changed"
+        return 1
+    fi
+    return 0
+}
+
+run_test "Rotate Key Resumes A Staged Key" test_rotate_key_resumes_a_staged_key
+run_test "Rotate Key Keeps The Staged Key When The DS Does Not Answer" test_rotate_key_keeps_the_staged_key_when_the_ds_does_not_answer
+
+# _crash_after_install leaves the site exactly as a rotation that died between
+# installing the new key and writing the key history: the new key installed,
+# the staged copy and the retired key (.prev) still on disk, and
+# .well-known/polis still publishing the old key.
+_crash_after_install() {
+    ssh-keygen -q -t ed25519 -f .polis/keys/id_ed25519.new -N "" -C staged > /dev/null 2>&1 || return 1
+    cp .polis/keys/id_ed25519 .polis/keys/id_ed25519.prev
+    cp .polis/keys/id_ed25519.new .polis/keys/id_ed25519
+    cp .polis/keys/id_ed25519.new.pub .polis/keys/id_ed25519.pub
+}
+
+# _transition_verifies checks the chain head's transition_sig against the key
+# it succeeded, over the canonical rotation message, as a verifier walking the
+# chain does.
+_transition_verifies() {
+    local domain="$1" old_key new_key ts sig
+    old_key=$(jq -r '.public_key_history.history[-1].key' .well-known/polis)
+    new_key=$(jq -r '.public_key_history.current.key' .well-known/polis)
+    ts=$(jq -r '.public_key_history.current.valid_from' .well-known/polis)
+    sig=$(jq -r '.public_key_history.current.transition_sig' .well-known/polis)
+    printf '%s' "$sig" > transition.sig
+    echo "polis $old_key" > allowed_signers
+    printf '{"action":"key-rotation","domain":"%s","new_key":"%s","old_key":"%s","timestamp":"%s"}' \
+        "$domain" "$new_key" "$old_key" "$ts" |
+        ssh-keygen -Y verify -f allowed_signers -I polis -n file -s transition.sig > /dev/null 2>&1
+}
+
+# Test: ⛔⛔ a crash after the install and before the key history is written is
+# FINISHED by the next rotation, signed by the retired key, and the chain
+# verifies; then a further rotation extends it
+test_rotate_key_finishes_a_rotation_crashed_before_the_history_write() {
+    setup_test_env "rotate_key_crash"
+    trap teardown_test_env EXIT
+
+    "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
+    local genesis staged
+    genesis=$(jq -r '.public_key' .well-known/polis)
+    _crash_after_install || return 1
+    staged=$(awk '{print $1" "$2}' .polis/keys/id_ed25519.new.pub)
+
+    local result
+    result=$(POLIS_BASE_URL="https://example.com" "$POLIS_BIN" --json rotate-key 2>&1)
+    assert_exit_code 0 "$?" || { echo "$result"; return 1; }
+    if [ "$(jq -r '.public_key_history.current.key' .well-known/polis | awk '{print $1" "$2}')" != "$staged" ]; then
+        echo "    the chain's head is not the installed key"
+        return 1
+    fi
+    if [ "$(jq -r '.public_key_history.history[-1].key' .well-known/polis)" != "$genesis" ]; then
+        echo "    the retired key in history is not the key that was published"
+        return 1
+    fi
+    _transition_verifies "example.com" || {
+        echo "    ⛔ the handover does not verify against the key it retired"
+        return 1
+    }
+    assert_file_not_exists ".polis/keys/id_ed25519.prev" || return 1
+    assert_file_not_exists ".polis/keys/id_ed25519.new" || return 1
+
+    result=$(POLIS_BASE_URL="https://example.com" "$POLIS_BIN" --json rotate-key 2>&1)
+    assert_exit_code 0 "$?" || { echo "$result"; return 1; }
+    _transition_verifies "example.com" || {
+        echo "    ⛔ the next rotation after a resumed one does not verify"
+        return 1
+    }
+    return 0
+}
+
+# Test: ⛔⛔ a crash INSIDE the install — the new private key renamed into place,
+# id_ed25519.pub not yet — is finished by the next rotation, signed by the
+# retired key, without overwriting it, and the chain verifies
+test_rotate_key_finishes_a_rotation_crashed_between_the_key_writes() {
+    setup_test_env "rotate_key_crash_mid_install"
+    trap teardown_test_env EXIT
+
+    "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
+    local genesis staged
+    genesis=$(jq -r '.public_key' .well-known/polis)
+    ssh-keygen -q -t ed25519 -f .polis/keys/id_ed25519.new -N "" -C staged > /dev/null 2>&1 || return 1
+    cp .polis/keys/id_ed25519 .polis/keys/id_ed25519.prev
+    cp .polis/keys/id_ed25519.new .polis/keys/id_ed25519
+    # ✂ crash: id_ed25519.pub still holds the genesis key.
+    staged=$(awk '{print $1" "$2}' .polis/keys/id_ed25519.new.pub)
+
+    local result
+    result=$(POLIS_BASE_URL="https://example.com" "$POLIS_BIN" --json rotate-key 2>&1)
+    assert_exit_code 0 "$?" || { echo "$result"; return 1; }
+    if [ "$(jq -r '.public_key_history.history[-1].key' .well-known/polis)" != "$genesis" ]; then
+        echo "    the retired key in history is not the key that was published"
+        return 1
+    fi
+    if [ "$(awk '{print $1" "$2}' .polis/keys/id_ed25519.pub)" != "$staged" ]; then
+        echo "    the resume did not finish writing id_ed25519.pub"
+        return 1
+    fi
+    _transition_verifies "example.com" || {
+        echo "    ⛔ the handover was not signed by the key it retired"
+        return 1
+    }
+    return 0
+}
+
+# Test: ⛔ a key on disk that is not the published one — what an older build
+# left after that crash — is refused, naming the state, and nothing changes
+test_rotate_key_refuses_a_key_that_is_not_published() {
+    setup_test_env "rotate_key_not_published"
+    trap teardown_test_env EXIT
+
+    "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
+    rm -f .polis/keys/id_ed25519 .polis/keys/id_ed25519.pub
+    ssh-keygen -q -t ed25519 -f .polis/keys/id_ed25519 -N "" -C other > /dev/null 2>&1 || return 1
+    local before result
+    before=$(cat .well-known/polis)
+    result=$(POLIS_BASE_URL="https://example.com" "$POLIS_BIN" --json rotate-key 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "    rotation succeeded from a key the site does not publish"
+        return 1
+    fi
+    assert_json_error_code "$result" "KEY_NOT_PUBLISHED" || return 1
+    if [ "$(cat .well-known/polis)" != "$before" ]; then
+        echo "    ⛔ a refused rotation changed .well-known/polis"
+        return 1
+    fi
+    assert_file_not_exists ".polis/keys/id_ed25519.new" || return 1
+    return 0
+}
+
+# Test: ⛔ a 409 on a RESUMED re-send keeps the staged key and finishes when the
+# DS turns out to hold it — the earlier request landed after the history check.
+# A curl shim plays the DS: history says the old key, the re-send answers 409
+# and the earlier request lands, history then says the staged key.
+test_rotate_key_resumed_409_keeps_the_staged_key() {
+    setup_test_env "rotate_key_resumed_409"
+    trap teardown_test_env EXIT
+
+    "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
+    mkdir -p ".polis/ds/ds.test" && echo "{}" > ".polis/ds/ds.test/registration.json"
+    ssh-keygen -q -t ed25519 -f .polis/keys/id_ed25519.new -N "" -C staged > /dev/null 2>&1 || return 1
+    local old staged
+    old=$(cat .polis/keys/id_ed25519.pub | tr -d '\n')
+    staged=$(cat .polis/keys/id_ed25519.new.pub | tr -d '\n')
+
+    mkdir -p shim
+    echo "$old" > shim/ds_current
+    cat > shim/curl <<SHIM
+#!/bin/bash
+state="$(pwd)/shim/ds_current"
+case "\$*" in
+    *"-X POST"*) echo "$staged" > "\$state"; printf '{"error":"old_key does not match current active key"}\n409' ;;
+    *keys/history*) printf '{"keys":[{"public_key":"%s","valid_until":null}]}\n200' "\$(cat "\$state")" ;;
+    *) printf '{}\n200' ;;
+esac
+SHIM
+    chmod +x shim/curl
+
+    local result
+    result=$(PATH="$(pwd)/shim:$PATH" POLIS_BASE_URL="https://example.com" DISCOVERY_SERVICE_URL="https://ds.test" \
+        "$POLIS_BIN" --json rotate-key 2>&1)
+    assert_exit_code 0 "$?" || { echo "$result"; return 1; }
+    if [ "$(jq -r '.public_key_history.current.key' .well-known/polis | awk '{print $1" "$2}')" != "$(_ssh_key_material_t "$staged")" ]; then
+        echo "    the rotation did not finish with the staged key the DS holds"
+        return 1
+    fi
+
+    # And when the DS still holds the old key after the refusal, the staged key
+    # is kept and the rotation reported pending.
+    ssh-keygen -q -t ed25519 -f .polis/keys/id_ed25519.new -N "" -C staged2 > /dev/null 2>&1 || return 1
+    cat > shim/curl <<'SHIM'
+#!/bin/bash
+case "$*" in
+    *"-X POST"*) printf '{"error":"refused"}\n409' ;;
+    *keys/history*) printf '{"keys":[{"public_key":"%s","valid_until":null}]}\n200' "$(cat .polis/keys/id_ed25519.pub)" ;;
+    *) printf '{}\n200' ;;
+esac
+SHIM
+    result=$(PATH="$(pwd)/shim:$PATH" POLIS_BASE_URL="https://example.com" DISCOVERY_SERVICE_URL="https://ds.test" \
+        "$POLIS_BIN" --json rotate-key 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "    a refused re-send with the DS on the old key reported success"
+        return 1
+    fi
+    assert_json_error_code "$result" "ROTATION_PENDING" || return 1
+    assert_file_exists ".polis/keys/id_ed25519.new" || return 1
+    return 0
+}
+
+_ssh_key_material_t() {
+    echo "$1" | awk '{print $1" "$2}'
+}
+
+run_test "Rotate Key Finishes A Rotation Crashed Before The History Write" test_rotate_key_finishes_a_rotation_crashed_before_the_history_write
+run_test "Rotate Key Finishes A Rotation Crashed Between The Key Writes" test_rotate_key_finishes_a_rotation_crashed_between_the_key_writes
+run_test "Rotate Key Refuses A Key That Is Not Published" test_rotate_key_refuses_a_key_that_is_not_published
+run_test "Rotate Key Resumed 409 Keeps The Staged Key" test_rotate_key_resumed_409_keeps_the_staged_key

@@ -3,6 +3,7 @@ package metadata
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,7 +47,7 @@ const (
 
 func TestAReplaceKeepsUntouchedLinesBytesAndTheReplacedLinesMembers(t *testing.T) {
 	dir, path := seedIndex(t, lineA, lineGarbage, lineB, lineOdd, lineNull)
-	if err := AppendPostToIndex(dir, "p/a.md", "A renamed", "2026-09-01T00:00:00Z", "sha256:9"); err != nil {
+	if err := AppendPostToIndex(storage.At(dir), "p/a.md", "A renamed", "2026-09-01T00:00:00Z", "sha256:9"); err != nil {
 		t.Fatal(err)
 	}
 	got := indexLines(t, path)
@@ -70,7 +71,7 @@ func TestAReplaceKeepsUntouchedLinesBytesAndTheReplacedLinesMembers(t *testing.T
 	}
 
 	// A comment re-indexed against the same parent keeps in_reply_to's members.
-	if err := AppendCommentToIndex(dir, "c/b.md", "B edited", "2026-09-02T00:00:00Z", "sha256:8", "https://x.example/p.md"); err != nil {
+	if err := AppendCommentToIndex(storage.At(dir), "c/b.md", "B edited", "2026-09-02T00:00:00Z", "sha256:8", "https://x.example/p.md"); err != nil {
 		t.Fatal(err)
 	}
 	got = indexLines(t, path)
@@ -92,7 +93,7 @@ func TestAReplaceKeepsUntouchedLinesBytesAndTheReplacedLinesMembers(t *testing.T
 
 func TestRemoveIndexEntryKeepsEveryOtherLineVerbatim(t *testing.T) {
 	dir, path := seedIndex(t, lineA, lineGarbage, lineB, lineOdd, lineNull)
-	if err := RemoveIndexEntry(dir, "c/b.md"); err != nil {
+	if err := RemoveIndexEntry(storage.At(dir), "c/b.md"); err != nil {
 		t.Fatal(err)
 	}
 	got := indexLines(t, path)
@@ -121,10 +122,10 @@ func TestAnUnchangedReindexIsByteIdentical(t *testing.T) {
 	if err := os.WriteFile(path, golden, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := AppendPostToIndex(dir, post, "Hello <&> \"q\"", "2026-09-01T00:00:00Z", "sha256:aa"); err != nil {
+	if err := AppendPostToIndex(storage.At(dir), post, "Hello <&> \"q\"", "2026-09-01T00:00:00Z", "sha256:aa"); err != nil {
 		t.Fatal(err)
 	}
-	if err := AppendCommentToIndex(dir, "content/pub.polis.core/comment/20260902/c.md", "Re: hello", "2026-09-02T00:00:00Z", "sha256:bb", "https://b.example/p.md"); err != nil {
+	if err := AppendCommentToIndex(storage.At(dir), "content/pub.polis.core/comment/20260902/c.md", "Re: hello", "2026-09-02T00:00:00Z", "sha256:bb", "https://b.example/p.md"); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.ReadFile(path)

@@ -3,6 +3,7 @@ package dm
 import (
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,7 +14,7 @@ import (
 func TestIsProtected(t *testing.T) {
 	// No keyring → not provisioned → unprotected.
 	empty := t.TempDir()
-	if got, err := IsProtected(empty); err != nil || got {
+	if got, err := IsProtected(storage.At(empty)); err != nil || got {
 		t.Errorf("no keyring: got protected=%v err=%v, want false/nil", got, err)
 	}
 
@@ -23,10 +24,10 @@ func TestIsProtected(t *testing.T) {
 	if _, err := kr.AddBootstrapEpoch(); err != nil {
 		t.Fatal(err)
 	}
-	if err := kr.Save(DMDir(bootOnly)); err != nil {
+	if err := kr.Save(storage.At(bootOnly)); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := IsProtected(bootOnly); err != nil || got {
+	if got, err := IsProtected(storage.At(bootOnly)); err != nil || got {
 		t.Errorf("bootstrap-only: got protected=%v err=%v, want false/nil", got, err)
 	}
 
@@ -39,10 +40,10 @@ func TestIsProtected(t *testing.T) {
 	if _, _, err := kr2.SetPassword([]byte("pw")); err != nil {
 		t.Fatal(err)
 	}
-	if err := kr2.Save(DMDir(withPw)); err != nil {
+	if err := kr2.Save(storage.At(withPw)); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := IsProtected(withPw); err != nil || !got {
+	if got, err := IsProtected(storage.At(withPw)); err != nil || !got {
 		t.Errorf("password epoch: got protected=%v err=%v, want true/nil", got, err)
 	}
 }
@@ -88,13 +89,13 @@ func TestBuildProtectionStatus(t *testing.T) {
 	if _, _, err := kr.SetPassword([]byte("pw")); err != nil {
 		t.Fatal(err)
 	}
-	if err := kr.Save(DMDir(siteDir)); err != nil {
+	if err := kr.Save(storage.At(siteDir)); err != nil {
 		t.Fatal(err)
 	}
 	following := map[string]bool{"alice.example.com": true}
 
 	// A caller in the follow relationship gets a signed, protected answer.
-	ps, err := BuildProtectionStatus(siteDir, "bob.example.com", privPEM, "Alice.Example.com", following)
+	ps, err := BuildProtectionStatus(storage.At(siteDir), "bob.example.com", privPEM, "Alice.Example.com", following)
 	if err != nil {
 		t.Fatalf("follower build: %v", err)
 	}
@@ -106,7 +107,7 @@ func TestBuildProtectionStatus(t *testing.T) {
 	}
 
 	// A non-follower is refused with the sentinel (handler maps to 403/404).
-	if _, err := BuildProtectionStatus(siteDir, "bob.example.com", privPEM, "carol.example.com", following); !errors.Is(err, ErrProtectionStatusForbidden) {
+	if _, err := BuildProtectionStatus(storage.At(siteDir), "bob.example.com", privPEM, "carol.example.com", following); !errors.Is(err, ErrProtectionStatusForbidden) {
 		t.Errorf("non-follower: got err=%v, want ErrProtectionStatusForbidden", err)
 	}
 }

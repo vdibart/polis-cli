@@ -2,8 +2,12 @@ package tag
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
@@ -88,11 +92,9 @@ func TestNormalizeTagName(t *testing.T) {
 	}
 }
 
-func TestTagPath(t *testing.T) {
-	got := TagPath("/site", "rust")
-	want := filepath.Join("/site", "content", "pub.polis.core", "tag", "rust.json")
-	if got != want {
-		t.Errorf("TagPath = %q, want %q", got, want)
+func TestTagKey(t *testing.T) {
+	if got, want := TagKey("rust"), "content/pub.polis.core/tag/rust.json"; got != want {
+		t.Errorf("TagKey = %q, want %q", got, want)
 	}
 }
 
@@ -100,7 +102,7 @@ func TestApplyTag_CreateNew(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, pubKey := generateTestKey(t)
 
-	tf, err := ApplyTag(dataDir, "rust", "https://alice.com/posts/hello", privKey)
+	tf, err := ApplyTag(storage.At(dataDir), "rust", "https://alice.com/posts/hello", privKey)
 	if err != nil {
 		t.Fatalf("ApplyTag: %v", err)
 	}
@@ -125,7 +127,7 @@ func TestApplyTag_CreateNew(t *testing.T) {
 	}
 
 	// Verify file exists on disk
-	path := TagPath(dataDir, "rust")
+	path := filepath.Join(dataDir, filepath.FromSlash(TagKey("rust")))
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("Tag file not created: %v", err)
 	}
@@ -145,12 +147,12 @@ func TestApplyTag_DuplicateIdempotent(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, _ := generateTestKey(t)
 
-	tf1, err := ApplyTag(dataDir, "rust", "https://alice.com/posts/hello", privKey)
+	tf1, err := ApplyTag(storage.At(dataDir), "rust", "https://alice.com/posts/hello", privKey)
 	if err != nil {
 		t.Fatalf("ApplyTag first: %v", err)
 	}
 
-	tf2, err := ApplyTag(dataDir, "rust", "https://alice.com/posts/hello", privKey)
+	tf2, err := ApplyTag(storage.At(dataDir), "rust", "https://alice.com/posts/hello", privKey)
 	if err != nil {
 		t.Fatalf("ApplyTag duplicate: %v", err)
 	}
@@ -169,8 +171,8 @@ func TestApplyTag_MultipleTargets(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, pubKey := generateTestKey(t)
 
-	ApplyTag(dataDir, "rust", "https://alice.com/posts/hello", privKey)
-	tf, err := ApplyTag(dataDir, "rust", "https://bob.com/posts/world", privKey)
+	ApplyTag(storage.At(dataDir), "rust", "https://alice.com/posts/hello", privKey)
+	tf, err := ApplyTag(storage.At(dataDir), "rust", "https://bob.com/posts/world", privKey)
 	if err != nil {
 		t.Fatalf("ApplyTag second: %v", err)
 	}
@@ -194,7 +196,7 @@ func TestApplyTag_NormalizesName(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, _ := generateTestKey(t)
 
-	tf, err := ApplyTag(dataDir, "My Tag", "https://example.com", privKey)
+	tf, err := ApplyTag(storage.At(dataDir), "My Tag", "https://example.com", privKey)
 	if err != nil {
 		t.Fatalf("ApplyTag: %v", err)
 	}
@@ -203,7 +205,7 @@ func TestApplyTag_NormalizesName(t *testing.T) {
 	}
 
 	// File should be at normalized path
-	path := TagPath(dataDir, "my-tag")
+	path := filepath.Join(dataDir, filepath.FromSlash(TagKey("my-tag")))
 	if _, err := os.Stat(path); err != nil {
 		t.Error("Tag file not at normalized path")
 	}
@@ -213,7 +215,7 @@ func TestApplyTag_EmptyTarget(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, _ := generateTestKey(t)
 
-	_, err := ApplyTag(dataDir, "rust", "", privKey)
+	_, err := ApplyTag(storage.At(dataDir), "rust", "", privKey)
 	if err == nil {
 		t.Error("Expected error for empty target")
 	}
@@ -223,7 +225,7 @@ func TestApplyTag_InvalidTagName(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, _ := generateTestKey(t)
 
-	_, err := ApplyTag(dataDir, "!!!", "https://example.com", privKey)
+	_, err := ApplyTag(storage.At(dataDir), "!!!", "https://example.com", privKey)
 	if err == nil {
 		t.Error("Expected error for invalid tag name")
 	}
@@ -233,10 +235,10 @@ func TestRemoveTarget(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, pubKey := generateTestKey(t)
 
-	ApplyTag(dataDir, "rust", "https://alice.com/posts/a", privKey)
-	ApplyTag(dataDir, "rust", "https://alice.com/posts/b", privKey)
+	ApplyTag(storage.At(dataDir), "rust", "https://alice.com/posts/a", privKey)
+	ApplyTag(storage.At(dataDir), "rust", "https://alice.com/posts/b", privKey)
 
-	tf, err := RemoveTarget(dataDir, "rust", "https://alice.com/posts/a", privKey)
+	tf, err := RemoveTarget(storage.At(dataDir), "rust", "https://alice.com/posts/a", privKey)
 	if err != nil {
 		t.Fatalf("RemoveTarget: %v", err)
 	}
@@ -260,9 +262,9 @@ func TestRemoveTarget_NonExistent(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, _ := generateTestKey(t)
 
-	ApplyTag(dataDir, "rust", "https://alice.com/posts/a", privKey)
+	ApplyTag(storage.At(dataDir), "rust", "https://alice.com/posts/a", privKey)
 
-	_, err := RemoveTarget(dataDir, "rust", "https://nonexistent.com", privKey)
+	_, err := RemoveTarget(storage.At(dataDir), "rust", "https://nonexistent.com", privKey)
 	if err == nil {
 		t.Error("Expected error for non-existent target")
 	}
@@ -272,9 +274,9 @@ func TestRemoveTarget_EmptyAfterRemoval(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, _ := generateTestKey(t)
 
-	ApplyTag(dataDir, "rust", "https://alice.com/posts/a", privKey)
+	ApplyTag(storage.At(dataDir), "rust", "https://alice.com/posts/a", privKey)
 
-	tf, err := RemoveTarget(dataDir, "rust", "https://alice.com/posts/a", privKey)
+	tf, err := RemoveTarget(storage.At(dataDir), "rust", "https://alice.com/posts/a", privKey)
 	if err != nil {
 		t.Fatalf("RemoveTarget: %v", err)
 	}
@@ -288,15 +290,15 @@ func TestDeleteTag(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, _ := generateTestKey(t)
 
-	ApplyTag(dataDir, "rust", "https://example.com", privKey)
+	ApplyTag(storage.At(dataDir), "rust", "https://example.com", privKey)
 
-	err := DeleteTag(dataDir, "rust")
+	err := DeleteTag(storage.At(dataDir), "rust")
 	if err != nil {
 		t.Fatalf("DeleteTag: %v", err)
 	}
 
-	path := TagPath(dataDir, "rust")
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
+	path := filepath.Join(dataDir, filepath.FromSlash(TagKey("rust")))
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("Tag file still exists after delete")
 	}
 }
@@ -304,9 +306,28 @@ func TestDeleteTag(t *testing.T) {
 func TestDeleteTag_NonExistent(t *testing.T) {
 	dataDir := t.TempDir()
 
-	err := DeleteTag(dataDir, "nonexistent")
+	err := DeleteTag(storage.At(dataDir), "nonexistent")
 	if err == nil {
 		t.Error("Expected error for non-existent tag")
+	}
+	// ⚠️ Absence is named as absence, not as a failed delete: the store's
+	// not-found must still be recognised now that the delete goes through it.
+	if err != nil && !strings.Contains(err.Error(), `tag "nonexistent" does not exist`) {
+		t.Errorf("an absent tag must be reported as absent, got %v", err)
+	}
+}
+
+// TestRemoveTarget_AbsentTag pins the reader's absence branch: removing from a
+// tag that was never written is an error that says the tag could not be
+// loaded, and nothing is created.
+func TestRemoveTarget_AbsentTag(t *testing.T) {
+	dataDir := t.TempDir()
+	priv, _ := generateTestKey(t)
+	if _, err := RemoveTarget(storage.At(dataDir), "never", "https://x.com/a", priv); err == nil || !strings.Contains(err.Error(), "load tag") {
+		t.Errorf("RemoveTarget on an absent tag = %v, want a load error", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, filepath.FromSlash(TagKey("never")))); !os.IsNotExist(err) {
+		t.Errorf("RemoveTarget on an absent tag must not create it (stat err %v)", err)
 	}
 }
 
@@ -314,12 +335,12 @@ func TestLoad_RoundTrip(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, _ := generateTestKey(t)
 
-	original, err := ApplyTag(dataDir, "rust", "https://alice.com/posts/hello", privKey)
+	original, err := ApplyTag(storage.At(dataDir), "rust", "https://alice.com/posts/hello", privKey)
 	if err != nil {
 		t.Fatalf("ApplyTag: %v", err)
 	}
 
-	loaded, err := Load(TagPath(dataDir, "rust"))
+	loaded, err := Load(filepath.Join(dataDir, filepath.FromSlash(TagKey("rust"))))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -342,10 +363,10 @@ func TestListTags(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, _ := generateTestKey(t)
 
-	ApplyTag(dataDir, "rust", "https://example.com/a", privKey)
-	ApplyTag(dataDir, "go", "https://example.com/b", privKey)
+	ApplyTag(storage.At(dataDir), "rust", "https://example.com/a", privKey)
+	ApplyTag(storage.At(dataDir), "go", "https://example.com/b", privKey)
 
-	tags, err := ListTags(dataDir)
+	tags, err := ListTags(storage.At(dataDir))
 	if err != nil {
 		t.Fatalf("ListTags: %v", err)
 	}
@@ -367,7 +388,7 @@ func TestListTags(t *testing.T) {
 func TestListTags_EmptyDir(t *testing.T) {
 	dataDir := t.TempDir()
 
-	tags, err := ListTags(dataDir)
+	tags, err := ListTags(storage.At(dataDir))
 	if err != nil {
 		t.Fatalf("ListTags: %v", err)
 	}
@@ -380,13 +401,13 @@ func TestListTags_SkipsMalformed(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, _ := generateTestKey(t)
 
-	ApplyTag(dataDir, "good", "https://example.com", privKey)
+	ApplyTag(storage.At(dataDir), "good", "https://example.com", privKey)
 
 	// Write a malformed JSON file
-	dir := tagDir(dataDir)
+	dir := filepath.Join(dataDir, filepath.FromSlash(TagDirKey))
 	os.WriteFile(filepath.Join(dir, "bad.json"), []byte("not json"), 0644)
 
-	tags, err := ListTags(dataDir)
+	tags, err := ListTags(storage.At(dataDir))
 	if err != nil {
 		t.Fatalf("ListTags: %v", err)
 	}
@@ -401,12 +422,12 @@ func TestDirectoryAutoCreation(t *testing.T) {
 	privKey, _ := generateTestKey(t)
 
 	// Tag directory doesn't exist yet
-	dir := tagDir(dataDir)
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+	dir := filepath.Join(dataDir, filepath.FromSlash(TagDirKey))
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("Tag directory should not exist yet")
 	}
 
-	_, err := ApplyTag(dataDir, "rust", "https://example.com", privKey)
+	_, err := ApplyTag(storage.At(dataDir), "rust", "https://example.com", privKey)
 	if err != nil {
 		t.Fatalf("ApplyTag: %v", err)
 	}
@@ -447,7 +468,7 @@ func TestSignatureCoversAllFields(t *testing.T) {
 	dataDir := t.TempDir()
 	privKey, pubKey := generateTestKey(t)
 
-	tf, _ := ApplyTag(dataDir, "rust", "https://example.com", privKey)
+	tf, _ := ApplyTag(storage.At(dataDir), "rust", "https://example.com", privKey)
 
 	// Verify original signature is valid
 	canonical, _ := canonicalJSON(tf)

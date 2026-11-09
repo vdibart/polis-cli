@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net/http"
 	"strings"
 	"time"
@@ -330,6 +331,20 @@ func (h *handlers) handleDispatchError(w http.ResponseWriter, r *http.Request, e
 		status = http.StatusForbidden
 		code = "forbidden"
 		publicMessage = "Not permitted."
+	// ⭐ A GENUINE ABSENCE IS A DELIBERATE 404, matched on the SENTINEL before any
+	// text comparison.
+	//
+	// ⚠️ The text branch below stays, and an earlier version of this comment was
+	// wrong to call the 404 accidental. TestHandleDispatchErrorMapping asserts that
+	// an error reading "not found" maps to 404 — that is this handler's INTENDED
+	// contract, and removing the phrase broke the test. What the detach changed is
+	// that MORE errors now carry those words, which this mapping already says
+	// should be a 404. The sentinel is added so the common case no longer depends
+	// on wording at all.
+	case errors.Is(err, fs.ErrNotExist):
+		status = http.StatusNotFound
+		code = "not_found"
+		publicMessage = "The requested resource was not found."
 	case strings.Contains(msg, "unknown content type") || strings.Contains(msg, "not found"):
 		status = http.StatusNotFound
 		code = "not_found"

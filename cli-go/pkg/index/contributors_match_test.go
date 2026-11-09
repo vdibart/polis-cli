@@ -2,6 +2,7 @@ package index_test
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -53,7 +54,7 @@ func TestRecordsPatrolWouldRejectAreSkippedNotIndexed(t *testing.T) {
 	writeFile(t, filepath.Join(core, "tag", "odd.json"),
 		`{"tag":"odd","created":"2026-01-03T00:00:00Z","current_version":"dddd"}`)
 
-	result, err := index.RebuildContentIndex(dataDir, nil)
+	result, err := index.RebuildContentIndex(storage.At(dataDir), nil)
 	if err != nil {
 		t.Fatalf("RebuildContentIndex: %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -85,11 +86,11 @@ func TestTheGoldenFixtureCarriesEveryDeclaredAndEveryUnmodelledMember(t *testing
 // a file already in the canonical form, so Judge's snapshot hash does not move.
 func TestAnUntouchedRoundTripIsByteIdentical(t *testing.T) {
 	dir, golden := seedEveryMemberSite(t)
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := SaveWellKnown(dir, wk); err != nil {
+	if err := SaveWellKnown(storage.At(dir), wk); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.ReadFile(filepath.Join(dir, ".well-known", "polis"))
@@ -99,11 +100,11 @@ func TestAnUntouchedRoundTripIsByteIdentical(t *testing.T) {
 
 	// And the raw writer emits the same bytes, so switching between them never
 	// re-hashes a tenant either.
-	raw, err := LoadWellKnownRaw(dir)
+	raw, err := LoadWellKnownRaw(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := SaveWellKnownRaw(dir, raw); err != nil {
+	if err := SaveWellKnownRaw(storage.At(dir), raw); err != nil {
 		t.Fatal(err)
 	}
 	afterRaw, _ := os.ReadFile(filepath.Join(dir, ".well-known", "polis"))
@@ -134,52 +135,52 @@ func TestEveryWellKnownWriterPreservesEveryMember(t *testing.T) {
 	}
 	writers := map[string]writer{
 		"SaveWellKnown(struct round-trip)": {[]string{"author_name"}, func(d string) error {
-			wk, err := LoadWellKnown(d)
+			wk, err := LoadWellKnown(storage.At(d))
 			if err != nil {
 				return err
 			}
 			wk.AuthorName = "Alice Q."
-			return SaveWellKnown(d, wk)
+			return SaveWellKnown(storage.At(d), wk)
 		}},
 		"SetAuthorName": {[]string{"author_name"}, func(d string) error {
-			_, err := SetAuthorName(d, "Alice Q.")
+			_, err := SetAuthorName(storage.At(d), "Alice Q.")
 			return err
 		}},
 		"SetAvatar": {[]string{"avatar"}, func(d string) error {
-			_, err := SetAvatar(d, &AvatarConfig{BG: "#112233", FG: "#ffffff"})
+			_, err := SetAvatar(storage.At(d), &AvatarConfig{BG: "#112233", FG: "#ffffff"})
 			return err
 		}},
 		"SetLicensePointer": {[]string{"license"}, func(d string) error {
-			return SetLicensePointer(d, "/content/pub.polis.core/license/v2.json")
+			return SetLicensePointer(storage.At(d), "/content/pub.polis.core/license/v2.json")
 		}},
 		"SetActorRegistryPointer": {[]string{"actor_registry"}, func(d string) error {
-			return SetActorRegistryPointer(d, "/content/pub.polis.core/actor/v2.json")
+			return SetActorRegistryPointer(storage.At(d), "/content/pub.polis.core/actor/v2.json")
 		}},
-		"SetOperatorPointer":        {[]string{"operator"}, func(d string) error { return SetOperatorPointer(d, "ops.example.com") }},
-		"SetAgentsPointer":          {[]string{"agents"}, func(d string) error { return SetAgentsPointer(d, "/attestations/v2.json") }},
-		"StripBundleActiveFields":   {nil, func(d string) error { return StripBundleActiveFields(d) }},
-		"MigratePrivateBundlesPath": {nil, func(d string) error { return MigratePrivateBundlesPath(d) }},
-		"MigrateAuthorField":        {nil, func(d string) error { return MigrateAuthorField(d) }},
+		"SetOperatorPointer":        {[]string{"operator"}, func(d string) error { return SetOperatorPointer(storage.At(d), "ops.example.com") }},
+		"SetAgentsPointer":          {[]string{"agents"}, func(d string) error { return SetAgentsPointer(storage.At(d), "/attestations/v2.json") }},
+		"StripBundleActiveFields":   {nil, func(d string) error { return StripBundleActiveFields(storage.At(d)) }},
+		"MigratePrivateBundlesPath": {nil, func(d string) error { return MigratePrivateBundlesPath(storage.At(d)) }},
+		"MigrateAuthorField":        {nil, func(d string) error { return MigrateAuthorField(storage.At(d)) }},
 		"WriteGenesisKeyHistory": {nil, func(d string) error {
-			_, err := WriteGenesisKeyHistory(d)
+			_, err := WriteGenesisKeyHistory(storage.At(d))
 			return err
 		}},
 		"RecordKeyRotation": {[]string{"public_key", "public_key_history"}, func(d string) error {
-			return RecordKeyRotation(d, newKey, "sig", "2026-09-16T12:00:00Z")
+			return RecordKeyRotation(storage.At(d), newKey, "sig", "2026-09-16T12:00:00Z", "")
 		}},
 		"ProvisionAndPublishMessagesKey": {[]string{"public_key_messages"}, func(d string) error {
-			return ProvisionAndPublishMessagesKey(d, priv)
+			return ProvisionAndPublishMessagesKey(storage.At(d), priv)
 		}},
 		"MigrateActiveThemeToRegistry": {nil, func(d string) error {
-			raw, err := LoadWellKnownRaw(d)
+			raw, err := LoadWellKnownRaw(storage.At(d))
 			if err != nil {
 				return err
 			}
 			raw["active_theme"] = "vice"
-			if err := SaveWellKnownRaw(d, raw); err != nil {
+			if err := SaveWellKnownRaw(storage.At(d), raw); err != nil {
 				return err
 			}
-			return MigrateActiveThemeToRegistry(d)
+			return MigrateActiveThemeToRegistry(storage.At(d))
 		}},
 	}
 
@@ -256,13 +257,13 @@ func TestARotatedChainSurvivesAStructRoundTripByteIdentically(t *testing.T) {
 		t.Fatalf("the fixture must carry a chain that records a rotation (err=%v)", err)
 	}
 
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
 	wk.AuthorName = "renamed"
 	wk.SiteTitle = "a new title"
-	if err := SaveWellKnown(dir, wk); err != nil {
+	if err := SaveWellKnown(storage.At(dir), wk); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.ReadFile(filepath.Join(dir, ".well-known", "polis"))
@@ -308,9 +309,9 @@ func TestTheWriterRefusesToDropOrAlterProtectedMembers(t *testing.T) {
 	for _, member := range []string{"public_key", "public_key_history", "public_key_messages"} {
 		t.Run("drop "+member, func(t *testing.T) {
 			dir, golden := seedEveryMemberSite(t)
-			raw, _ := LoadWellKnownRaw(dir)
+			raw, _ := LoadWellKnownRaw(storage.At(dir))
 			delete(raw, member)
-			err := SaveWellKnownRaw(dir, raw)
+			err := SaveWellKnownRaw(storage.At(dir), raw)
 			var refusal *IdentityChangeError
 			if !errors.As(err, &refusal) || len(refusal.Dropped) != 1 || refusal.Dropped[0] != member {
 				t.Fatalf("dropping %s: want a refusal naming it, got %v", member, err)
@@ -318,16 +319,16 @@ func TestTheWriterRefusesToDropOrAlterProtectedMembers(t *testing.T) {
 			if after, _ := os.ReadFile(filepath.Join(dir, ".well-known", "polis")); !bytes.Equal(after, golden) {
 				t.Fatal("a refused write still changed the file")
 			}
-			if err := SaveWellKnownRaw(dir, raw, IdentityChange(member)); err != nil {
+			if err := SaveWellKnownRaw(storage.At(dir), raw, IdentityChange(member)); err != nil {
 				t.Fatalf("a write that names the change must proceed: %v", err)
 			}
 		})
 		t.Run("alter "+member, func(t *testing.T) {
 			dir, _ := seedEveryMemberSite(t)
-			raw, _ := LoadWellKnownRaw(dir)
+			raw, _ := LoadWellKnownRaw(storage.At(dir))
 			raw[member] = "something else"
 			var refusal *IdentityChangeError
-			if err := SaveWellKnownRaw(dir, raw); !errors.As(err, &refusal) || len(refusal.Altered) != 1 {
+			if err := SaveWellKnownRaw(storage.At(dir), raw); !errors.As(err, &refusal) || len(refusal.Altered) != 1 {
 				t.Fatalf("altering %s: want a refusal, got %v", member, err)
 			}
 		})
@@ -338,10 +339,10 @@ func TestTheWriterRefusesToDropOrAlterProtectedMembers(t *testing.T) {
 // existing site. The struct writer refuses it.
 func TestAFreshStructOverAnExistingSiteIsRefused(t *testing.T) {
 	dir, _ := seedEveryMemberSite(t)
-	wk, _ := LoadWellKnown(dir)
+	wk, _ := LoadWellKnown(storage.At(dir))
 	fresh := &WellKnown{Version: wk.Version, PublicKey: wk.PublicKey, AuthorName: "x", Created: wk.Created}
 	var refusal *IdentityChangeError
-	if err := SaveWellKnown(dir, fresh); !errors.As(err, &refusal) {
+	if err := SaveWellKnown(storage.At(dir), fresh); !errors.As(err, &refusal) {
 		t.Fatalf("a from-scratch document dropped the chain and the messages key and was written: %v", err)
 	}
 	if !strings.Contains(refusal.Error(), "public_key_history") || !strings.Contains(refusal.Error(), "public_key_messages") {
@@ -351,10 +352,10 @@ func TestAFreshStructOverAnExistingSiteIsRefused(t *testing.T) {
 
 func TestAddingAProtectedMemberNeedsNoIntent(t *testing.T) {
 	dir := t.TempDir()
-	if err := SaveWellKnownRaw(dir, map[string]interface{}{"public_key": "k", "created": "2026-01-01T00:00:00Z"}); err != nil {
+	if err := SaveWellKnownRaw(storage.At(dir), map[string]interface{}{"public_key": "k", "created": "2026-01-01T00:00:00Z"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatalf("genesis is an addition and must not need intent: %v", err)
 	}
 }
@@ -364,7 +365,7 @@ func TestAnUnparseableExistingFileIsNotOverwritten(t *testing.T) {
 	path := filepath.Join(dir, ".well-known", "polis")
 	_ = os.MkdirAll(filepath.Dir(path), 0755)
 	_ = os.WriteFile(path, []byte(`{"public_key": "k",`), 0644)
-	if err := SaveWellKnown(dir, &WellKnown{PublicKey: "k"}); err == nil {
+	if err := SaveWellKnown(storage.At(dir), &WellKnown{PublicKey: "k"}); err == nil {
 		t.Fatal("a half-edited identity document was overwritten without anyone knowing what it held")
 	}
 }
@@ -373,13 +374,13 @@ func TestAnUnparseableExistingFileIsNotOverwritten(t *testing.T) {
 
 func TestSetAuthorNameValidates(t *testing.T) {
 	dir, golden := seedEveryMemberSite(t)
-	if _, err := SetAuthorName(dir, strings.Repeat("x", MaxAuthorNameLen+1)); err == nil {
+	if _, err := SetAuthorName(storage.At(dir), strings.Repeat("x", MaxAuthorNameLen+1)); err == nil {
 		t.Fatal("an over-long display name was accepted")
 	}
 	if after, _ := os.ReadFile(filepath.Join(dir, ".well-known", "polis")); !bytes.Equal(after, golden) {
 		t.Fatal("a rejected name still wrote the file")
 	}
-	name, err := SetAuthorName(dir, "  Alice  ")
+	name, err := SetAuthorName(storage.At(dir), "  Alice  ")
 	if err != nil || name != "Alice" {
 		t.Fatalf("SetAuthorName = %q, %v", name, err)
 	}
@@ -387,10 +388,10 @@ func TestSetAuthorNameValidates(t *testing.T) {
 
 func TestSetAvatarValidates(t *testing.T) {
 	dir, _ := seedEveryMemberSite(t)
-	if _, err := SetAvatar(dir, &AvatarConfig{BG: "red", FG: "#ffffff"}); err == nil {
+	if _, err := SetAvatar(storage.At(dir), &AvatarConfig{BG: "red", FG: "#ffffff"}); err == nil {
 		t.Fatal("a non-hex colour was accepted")
 	}
-	if _, err := SetAvatar(dir, &AvatarConfig{BG: "#000000", FG: "#ffffff", Pattern: "plaid"}); err == nil {
+	if _, err := SetAvatar(storage.At(dir), &AvatarConfig{BG: "#000000", FG: "#ffffff", Pattern: "plaid"}); err == nil {
 		t.Fatal("an unknown pattern was accepted")
 	}
 }
@@ -399,21 +400,21 @@ func TestSetAvatarValidates(t *testing.T) {
 // guarded writer, everything else kept.
 func TestMigrateActiveThemeToRegistry(t *testing.T) {
 	dir := t.TempDir()
-	if err := SaveWellKnownRaw(dir, map[string]interface{}{
+	if err := SaveWellKnownRaw(storage.At(dir), map[string]interface{}{
 		"public_key": "ssh-ed25519 AAAA", "active_theme": "vice", "author_name": "alice",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ { // idempotent
-		if err := MigrateActiveThemeToRegistry(dir); err != nil {
+		if err := MigrateActiveThemeToRegistry(storage.At(dir)); err != nil {
 			t.Fatalf("migrate #%d: %v", i+1, err)
 		}
 	}
-	reg, err := bundle.LoadRegistry(dir)
+	reg, err := bundle.LoadRegistry(storage.At(dir))
 	if err != nil || reg.ActiveTheme != "pub.polis.themes.vice" {
 		t.Fatalf("registry = %+v, %v", reg, err)
 	}
-	raw, _ := LoadWellKnownRaw(dir)
+	raw, _ := LoadWellKnownRaw(storage.At(dir))
 	if _, ok := raw["active_theme"]; ok {
 		t.Error("active_theme not stripped from well-known")
 	}
@@ -423,10 +424,10 @@ func TestMigrateActiveThemeToRegistry(t *testing.T) {
 
 	// Nothing to migrate, and no document at all, are both no-ops.
 	empty := t.TempDir()
-	if err := MigrateActiveThemeToRegistry(empty); err != nil {
+	if err := MigrateActiveThemeToRegistry(storage.At(empty)); err != nil {
 		t.Fatalf("no well-known: %v", err)
 	}
-	if _, err := bundle.LoadRegistry(empty); err == nil {
+	if _, err := bundle.LoadRegistry(storage.At(empty)); err == nil {
 		t.Error("a registry was created with nothing to migrate")
 	}
 }

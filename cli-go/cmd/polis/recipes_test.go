@@ -58,6 +58,7 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/privatepath"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 )
 
@@ -378,13 +379,29 @@ func (d *fakeDS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// staticHost is a static host configured the way a deploy should be: it serves
+// the site directory and refuses every private name in it (privatepath), as a
+// git push that honours the generated .gitignore, or a host with a deny rule,
+// does. ⚠️ A bare file server over the whole directory serves the identity key,
+// and `polis validate <url>` fails it (identity.private_files_served), which is
+// the point of that check.
+func staticHost(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if privatepath.Denied(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
 // newWorld serves workDir's <domain>/ directories and the fake DS.
 func newWorld(t *testing.T, workDir string) *httptest.Server {
 	ds := newFakeDS(t)
 	mux := http.NewServeMux()
 	mux.Handle("/"+fakeDSDomain+"/", http.StripPrefix("/"+fakeDSDomain, ds))
 	for _, d := range fixtureDomains {
-		mux.Handle("/"+d+"/", http.StripPrefix("/"+d, http.FileServer(http.Dir(filepath.Join(workDir, d)))))
+		mux.Handle("/"+d+"/", http.StripPrefix("/"+d, staticHost(http.FileServer(http.Dir(filepath.Join(workDir, d))))))
 	}
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

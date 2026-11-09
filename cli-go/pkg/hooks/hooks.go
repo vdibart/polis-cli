@@ -5,12 +5,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 const (
@@ -62,9 +66,9 @@ type HookResult struct {
 }
 
 // RunHook executes a hook script if configured or discovered by convention.
-// Checks explicit config first, then falls back to .polis/hooks/{event}.sh.
+// Checks explicit config first, then falls back to .polis/webapp/hooks/{event}.sh.
 // Returns nil error if no hook is found (not an error condition).
-func RunHook(siteDir string, config *HookConfig, payload *HookPayload) (*HookResult, error) {
+func RunHook(site storage.Site, config *HookConfig, payload *HookPayload) (*HookResult, error) {
 	// Get hook path from explicit config
 	var hookPath string
 	if config != nil {
@@ -81,8 +85,8 @@ func RunHook(siteDir string, config *HookConfig, payload *HookPayload) (*HookRes
 	// Auto-discover from conventional location if not explicitly configured
 	if hookPath == "" {
 		conventional := filepath.Join(".polis", "webapp", "hooks", string(payload.Event)+".sh")
-		fullPath := filepath.Join(siteDir, conventional)
-		if _, err := os.Stat(fullPath); err == nil {
+		fullPath := site.Path(conventional)
+		if present, _ := storage.PathExists(fullPath); present {
 			hookPath = conventional
 		}
 	}
@@ -93,29 +97,59 @@ func RunHook(siteDir string, config *HookConfig, payload *HookPayload) (*HookRes
 
 	// Resolve relative paths from site root
 	if !filepath.IsAbs(hookPath) {
-		hookPath = filepath.Join(siteDir, hookPath)
+		hookPath = site.Path(hookPath)
 	}
 
-	// Path containment: hook must resolve within siteDir
+	// Path containment: hook must resolve within the site root
 	absHook, err := filepath.Abs(hookPath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve hook path: %w", err)
 	}
-	absSite, err := filepath.Abs(siteDir)
+	absSite, err := filepath.Abs(site.Dir())
 	if err != nil {
 		return nil, fmt.Errorf("resolve site dir: %w", err)
 	}
-	if !strings.HasPrefix(absHook, absSite+string(filepath.Separator)) {
+	if !within(absHook, absSite) {
 		return nil, fmt.Errorf("hook path %s is outside site directory", hookPath)
 	}
 
-	// Check if hook exists
-	if _, err := os.Stat(hookPath); os.IsNotExist(err) {
+	// The check above compares names, and a symlink's name is inside the site
+	// while the file it points at need not be. Resolve both sides and check
+	// again: the site too, or a site reached through a link would refuse all of
+	// its own hooks. A link that stays inside the site is allowed.
+	// NOT the storage interface: filepath.EvalSymlinks RESOLVES links, and the
+	// interface cannot represent one — Stat follows and Info.Mode is Perm() only.
+	realSite, err := filepath.EvalSymlinks(absSite)
+	if err != nil {
+		return nil, fmt.Errorf("resolve site dir: %w", err)
+	}
+	// NOT the storage interface: filepath.EvalSymlinks RESOLVES links, and the
+	// interface cannot represent one — Stat follows and Info.Mode is Perm() only.
+	realHook, err := filepath.EvalSymlinks(absHook)
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("hook not found: %s", hookPath)
 	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve hook path: %w", err)
+	}
+	if !within(realHook, realSite) {
+		return nil, fmt.Errorf("hook path %s is outside site directory", hookPath)
+	}
+	// NOT the storage interface: asks whether a legacy directory is THERE, and an
+	// EMPTY one still counts — which Exists cannot say.
+	info, err := os.Stat(realHook)
+	if err != nil {
+		return nil, fmt.Errorf("hook not found: %s", hookPath)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("hook path %s is not a regular file", hookPath)
+	}
+	// Run the resolved path, so what executes is the file that was checked and
+	// not whatever the link names by then.
+	hookPath = realHook
 
 	// Build environment variables
-	configDir := filepath.Join(siteDir, ".polis")
+	configDir := site.Path(".polis")
 	env := os.Environ()
 	env = append(env,
 		"POLIS_EVENT="+string(payload.Event),
@@ -123,7 +157,7 @@ func RunHook(siteDir string, config *HookConfig, payload *HookPayload) (*HookRes
 		"POLIS_TITLE="+payload.Title,
 		"POLIS_VERSION="+payload.Version,
 		"POLIS_TIMESTAMP="+payload.Timestamp,
-		"POLIS_SITE_DIR="+siteDir,
+		"POLIS_SITE_DIR="+site.Dir(),
 		"POLIS_CONFIG_DIR="+configDir,
 		"POLIS_COMMIT_MESSAGE="+payload.CommitMessage,
 	)
@@ -134,7 +168,7 @@ func RunHook(siteDir string, config *HookConfig, payload *HookPayload) (*HookRes
 
 	cmd := exec.CommandContext(ctx, hookPath)
 	cmd.Env = env
-	cmd.Dir = siteDir               // Run in site directory
+	cmd.Dir = site.Dir()            // Run in site directory
 	cmd.WaitDelay = 3 * time.Second // Force-close pipes if child processes linger after timeout
 
 	// Pass JSON payload to stdin
@@ -163,6 +197,12 @@ func RunHook(siteDir string, config *HookConfig, payload *HookPayload) (*HookRes
 	}, nil
 }
 
+// within reports whether path is strictly inside dir. Both must be absolute
+// and clean.
+func within(path, dir string) bool {
+	return strings.HasPrefix(path, dir+string(filepath.Separator))
+}
+
 // GenerateCommitMessage generates a git commit message for the given event.
 func GenerateCommitMessage(event HookEvent, title string) string {
 	switch event {
@@ -179,8 +219,8 @@ func GenerateCommitMessage(event HookEvent, title string) string {
 
 // GetHookPathWithDiscovery returns the hook path for a given event,
 // checking explicit config first, then auto-discovering from
-// .polis/hooks/{event}.sh under siteDir. Returns empty string if none.
-func GetHookPathWithDiscovery(config *HookConfig, event HookEvent, siteDir string) string {
+// .polis/webapp/hooks/{event}.sh under the site root. Returns empty string if none.
+func GetHookPathWithDiscovery(config *HookConfig, event HookEvent, site storage.Site) string {
 	var hookPath string
 	if config != nil {
 		switch event {
@@ -193,10 +233,10 @@ func GetHookPathWithDiscovery(config *HookConfig, event HookEvent, siteDir strin
 		}
 	}
 
-	if hookPath == "" && siteDir != "" {
+	if hookPath == "" && site.Valid() {
 		conventional := filepath.Join(".polis", "webapp", "hooks", string(event)+".sh")
-		fullPath := filepath.Join(siteDir, conventional)
-		if _, err := os.Stat(fullPath); err == nil {
+		fullPath := site.Path(conventional)
+		if present, _ := storage.PathExists(fullPath); present {
 			hookPath = conventional
 		}
 	}

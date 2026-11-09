@@ -5,6 +5,7 @@ package publish
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -76,7 +77,7 @@ func TestRegisterPost_BindsTheWholeSignedArtifactAndPublishesTheWitness(t *testi
 	result := writeWitnessTestPost(t, dataDir)
 	cfg := &DiscoveryConfig{DiscoveryURL: server.URL, BaseURL: "https://alice.example"}
 
-	if err := RegisterPost(dataDir, result, privKey, cfg); err != nil {
+	if err := RegisterPost(storage.At(dataDir), result, privKey, cfg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -86,7 +87,7 @@ func TestRegisterPost_BindsTheWholeSignedArtifactAndPublishesTheWitness(t *testi
 	}
 
 	postURL := "https://alice.example/" + result.Path
-	f, err := site.LoadWitnesses(dataDir)
+	f, err := site.LoadWitnesses(storage.At(dataDir))
 	if err != nil || f == nil {
 		t.Fatalf("expected a published witness file: %v", err)
 	}
@@ -105,10 +106,10 @@ func TestRegisterPost_ADSThatDoesNotWitnessChangesNothingOnTheSite(t *testing.T)
 	result := writeWitnessTestPost(t, dataDir)
 	cfg := &DiscoveryConfig{DiscoveryURL: server.URL, BaseURL: "https://alice.example"}
 
-	if err := RegisterPost(dataDir, result, privKey, cfg); err != nil {
+	if err := RegisterPost(storage.At(dataDir), result, privKey, cfg); err != nil {
 		t.Fatalf("registration must succeed without a witness (D1): %v", err)
 	}
-	if site.WitnessesPointer(dataDir) != "" {
+	if site.WitnessesPointer(storage.At(dataDir)) != "" {
 		t.Fatal("no witness returned, so the site must publish no witnesses pointer")
 	}
 }

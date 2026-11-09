@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,13 +81,13 @@ func TestCountFiles_CountsByExtension(t *testing.T) {
 		"sub/deep/f.txt": "",
 	})
 
-	if got := countFiles(dir, ".md"); got != 4 {
+	if got := countFiles(dir, dir, ".md"); got != 4 {
 		t.Errorf(".md count = %d, want 4", got)
 	}
-	if got := countFiles(dir, ".html"); got != 1 {
+	if got := countFiles(dir, dir, ".html"); got != 1 {
 		t.Errorf(".html count = %d, want 1", got)
 	}
-	if got := countFiles(dir, ".tsx"); got != 0 {
+	if got := countFiles(dir, dir, ".tsx"); got != 0 {
 		t.Errorf(".tsx count = %d, want 0", got)
 	}
 }
@@ -103,13 +104,13 @@ func TestCountFiles_SkipsVersionsDir(t *testing.T) {
 
 	// Only `current.md` and `sub/now.md` should count. The .versions
 	// subdir contents are excluded.
-	if got := countFiles(dir, ".md"); got != 2 {
+	if got := countFiles(dir, dir, ".md"); got != 2 {
 		t.Errorf(".md count = %d, want 2 (must skip .versions/)", got)
 	}
 }
 
 func TestCountFiles_MissingDirReturnsZero(t *testing.T) {
-	if got := countFiles("/no/such/path/anywhere", ".md"); got != 0 {
+	if got := countFiles("/no/such/path/anywhere", "/no/such/path/anywhere", ".md"); got != 0 {
 		t.Errorf("missing dir count = %d, want 0", got)
 	}
 }
@@ -223,7 +224,7 @@ func TestFilterDMPolicies_KeepsOnlyDMRules(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := filterDMPolicies(rulesPath)
+	got := filterDMPolicies(storage.At(dir), filepath.Base(rulesPath))
 	if len(got) != 2 {
 		t.Fatalf("DM policy count = %d, want 2", len(got))
 	}
@@ -237,7 +238,7 @@ func TestFilterDMPolicies_KeepsOnlyDMRules(t *testing.T) {
 }
 
 func TestFilterDMPolicies_MissingFileReturnsNil(t *testing.T) {
-	if got := filterDMPolicies("/no/such/rules.jsonl"); got != nil {
+	if got := filterDMPolicies(storage.At("/no/such"), "rules.jsonl"); got != nil {
 		t.Errorf("expected nil for missing file, got %v", got)
 	}
 }
@@ -252,7 +253,7 @@ not-valid-json
 	if err := os.WriteFile(rulesPath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
-	got := filterDMPolicies(rulesPath)
+	got := filterDMPolicies(storage.At(dir), filepath.Base(rulesPath))
 	if len(got) != 2 {
 		t.Errorf("malformed line should be skipped; got %d valid DM rules, want 2", len(got))
 	}
@@ -301,5 +302,51 @@ func writeFiles(t *testing.T, base string, files map[string]string) {
 		if err := os.WriteFile(full, []byte(body), 0644); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// ⛔ One unreadable subdirectory must not zero the count. `polis about` printed
+// "Posts: 0" for a site with nine posts because the count gave up on the first
+// listing error; the walk it replaced skipped what it could not read.
+func TestCountFiles_CountsBesideAnUnreadableDirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{
+		"20260101/a.md":      "",
+		"20260102/b.md":      "",
+		"20260103/locked.md": "",
+	})
+	locked := filepath.Join(dir, "20260103")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Skipf("cannot chmod: %v", err)
+	}
+	defer os.Chmod(locked, 0o755)
+	if _, err := os.ReadDir(locked); err == nil {
+		t.Skip("mode 000 is readable here (running as root?)")
+	}
+
+	if got := countFiles(dir, dir, ".md"); got != 2 {
+		t.Errorf(".md count = %d, want 2", got)
+	}
+}
+
+// "Not found" is for content that is genuinely absent. A path that cannot be
+// reached at all is a different failure and must say so, as it did when the
+// check asked os.IsNotExist.
+func TestRunUnpublish_AnUnreachablePathIsNotReportedAsNotFound(t *testing.T) {
+	dir := t.TempDir()
+	// A FILE where the date directory belongs: stat fails with "not a directory".
+	writeFiles(t, dir, map[string]string{"content/pub.polis.core/post/afile": "x"})
+
+	err := RunUnpublish(dir, "content/pub.polis.core/post/afile/x.md", true)
+	if err == nil {
+		t.Fatal("RunUnpublish succeeded on an unreachable path")
+	}
+	if strings.Contains(err.Error(), "content not found") {
+		t.Errorf("err = %q, want the read failure, not \"content not found\"", err)
+	}
+
+	err = RunUnpublish(dir, "content/pub.polis.core/post/20260101/missing.md", true)
+	if err == nil || !strings.Contains(err.Error(), "content not found") {
+		t.Errorf("a genuinely missing post: err = %v, want \"content not found\"", err)
 	}
 }

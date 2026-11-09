@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -52,7 +53,7 @@ func runRotateKeyJSON(t *testing.T, dir, dsURL string) map[string]interface{} {
 // not registered, where nothing was sent. It now says what happened.
 func TestRotateKeyJSON_DSRotationSkippedWhenUnregistered(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := site.Init(dir, site.InitOptions{BaseURL: "https://alice.polis.pub", SiteTitle: "alice"}); err != nil {
+	if _, err := site.Init(storage.At(dir), site.InitOptions{BaseURL: "https://alice.polis.pub", SiteTitle: "alice"}); err != nil {
 		t.Fatal(err)
 	}
 	contacted := false
@@ -73,7 +74,7 @@ func TestRotateKeyJSON_DSRotationSkippedWhenUnregistered(t *testing.T) {
 
 func TestRotateKeyJSON_DSRotationSuccessWhenNotified(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := site.Init(dir, site.InitOptions{BaseURL: "https://alice.polis.pub", SiteTitle: "alice"}); err != nil {
+	if _, err := site.Init(storage.At(dir), site.InitOptions{BaseURL: "https://alice.polis.pub", SiteTitle: "alice"}); err != nil {
 		t.Fatal(err)
 	}
 	contacted := false
@@ -84,7 +85,7 @@ func TestRotateKeyJSON_DSRotationSuccessWhenNotified(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer ts.Close()
-	if err := discovery.WriteRegistrationMarker(dir, ts.URL, "alice.polis.pub", ""); err != nil {
+	if err := discovery.WriteRegistrationMarker(storage.At(dir), ts.URL, "alice.polis.pub", ""); err != nil {
 		t.Fatal(err)
 	}
 

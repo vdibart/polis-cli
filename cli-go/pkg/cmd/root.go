@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/index"
 	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
+	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
@@ -33,7 +35,6 @@ var (
 	dataDir      string
 	jsonOutput   bool
 	discoveryURL string
-	discoveryKey string
 	baseURL      string
 	generator    string   // "polis-cli-go/<version>" — computed once in Execute
 	requestID    string   // UUIDv4 for cross-boundary tracing
@@ -59,6 +60,19 @@ func initCLILogger() {
 	if logPath == "" {
 		return
 	}
+	// NOT the storage interface, and ⭐ THIS ONE STAYS ON PURPOSE — it is not
+	// an unconverted straggler.
+	//
+	// POLIS_LOG_FILE is an arbitrary path the OPERATOR chooses, usually
+	// outside the site, so it is not site state and the site's store has no
+	// business addressing it. ⛔ And on a backend with no append, routing it
+	// through the seam would mean a read-modify-write of the whole log per
+	// line — an object write per log entry, growing without bound.
+	//
+	// ⭐ A deployment whose storage cannot take this writes logs to STDOUT,
+	// which is what the platform captures; the hosted service already ships
+	// stdout to its log pipeline. That is a different answer, not a missing
+	// conversion.
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[!] Failed to open log file %s: %v\n", logPath, err)
@@ -111,6 +125,7 @@ func Execute(args []string) {
 	dm.Version = Version
 	metadata.Version = Version
 	following.Version = Version
+	policy.Version = Version
 	index.Version = Version
 	site.Version = Version
 	tag.Version = Version
@@ -134,23 +149,18 @@ func Execute(args []string) {
 	if discoveryURL == "" {
 		discoveryURL = DefaultDiscoveryServiceURL
 	}
-	discoveryKey = os.Getenv("DISCOVERY_SERVICE_KEY")
 	baseURL = os.Getenv("POLIS_BASE_URL")
 
 	publish.DiscoveryURL = discoveryURL
-	publish.DiscoveryKey = discoveryKey
 	publish.BaseURL = baseURL
 
 	comment.DiscoveryURL = discoveryURL
-	comment.DiscoveryKey = discoveryKey
 	comment.BaseURL = baseURL
 
 	stream.DiscoveryURL = discoveryURL
-	stream.DiscoveryKey = discoveryKey
 	stream.BaseURL = baseURL
 
 	tag.DiscoveryURL = discoveryURL
-	tag.DiscoveryKey = discoveryKey
 	tag.BaseURL = baseURL
 
 	if len(args) < 1 {
@@ -187,17 +197,22 @@ func Execute(args []string) {
 	following.DataDir = resolvedDataDir
 	following.DiscoveryURL = discoveryURL
 
-	// One-time migration: consolidate author → author_name in .well-known/polis
-	site.MigrateAuthorField(resolvedDataDir)
-
 	command := filteredArgs[0]
+
+	// One-time migration: consolidate author → author_name in .well-known/polis.
+	// ⛔ Not for branch, which never modifies any existing site: its inputs are
+	// named on the command line, and the working directory is not one of them.
+	// Nor for recover, which signs with a key outside every site.
+	if command != "branch" && command != "recover" {
+		site.MigrateAuthorField(storage.At(resolvedDataDir))
+	}
 	cmdArgs := filteredArgs[1:]
 
 	// Log CLI action for network-capable commands (audit trail)
 	defer func() {
 		switch command {
 		case "post", "republish", "comment", "follow", "unfollow", "discover",
-			"blessing", "register", "unregister", "dm", "clone", "rotate-key", "tag",
+			"blessing", "register", "unregister", "dm", "clone", "rotate-key", "branch", "tag",
 			"license", "attest", "actor":
 			logCLIAction(command, map[string]interface{}{
 				"args_count": len(cmdArgs),
@@ -238,6 +253,10 @@ func Execute(args []string) {
 		handleRebuild(cmdArgs)
 	case "rotate-key":
 		handleRotateKey(cmdArgs)
+	case "branch":
+		handleBranch(cmdArgs)
+	case "recover":
+		handleRecover(cmdArgs)
 	case "unpublish":
 		handleUnpublish(cmdArgs)
 	case "notifications":
@@ -309,7 +328,7 @@ Commands related to requesting, reviewing, or granting blessings:
   polis blessing requests         List pending blessing requests
   polis blessing grant <hash>     Grant a blessing request by content hash
   polis blessing deny <hash>      Deny a blessing request by content hash
-  polis blessing beseech <hash>   Re-request blessing by content hash
+  polis blessing beseech <hash>   Not supported in the Go CLI (bash only)
   polis blessing sync             Sync blessed comments from discovery service
 
 Commands related to following or unfollowing an author:
@@ -330,6 +349,10 @@ Commands related to direct messages:
   polis dm read <conv_id>         Read messages in a conversation
   polis dm send <url> <message>   Send a DM to a recipient
   polis dm retry [conv_id]        Retry delivering unsent messages
+  polis dm config                 Show the DM rules in your policy files
+  polis dm decrypt [--phrase] [--conversation <id>]
+                                  Decrypt and print your messages from a local or exported site
+  polis dm publish-key            Re-publish your DM messages key into .well-known/polis (repair)
 
 Commands related to your terms:
   polis license                    Show or set the terms your work is offered under
@@ -347,12 +370,17 @@ Commands related to signed claims about others' work and identities:
   polis attest show <id>          Show one attestation
   polis attest verify [id]        Verify issued attestations
   polis attest withdraw <id>      Retract a claim you issued (adds a record, deletes nothing)
+  polis attest register <id>      Announce a record this site already issued to the discovery service
 
 Commands for an operator that runs system actors:
   polis actor register <domain>   Add or update an actor in this operator's registry
   polis actor withdraw <domain>   Remove an actor, and say so permanently
   polis actor list                Show the registry
   polis actor verify              Check the registry signature and countersignatures
+  polis actor announce <domain>   Announce an actor already in the registry, and nothing else
+  polis actor declare-operator <domain>
+                                  On an ACTOR's site: name the operator accountable for it
+                                  (a claim, corroborated only by the operator's registry)
 
 Commands related to site administration:
   polis register                  Register site with discovery service
@@ -383,8 +411,25 @@ Commands related to local configuration:
   polis index                     View index
   polis version                   Print CLI version
   polis about                     Show site, versions, config info
-  polis unpublish <path>          Remove a published post
+  polis unpublish <path> [-y|--yes]
+                                  Remove a published post or comment.
+                                  -y/--yes skips the confirmation prompt
+                                  (before or after the path).
   polis rotate-key                Generate new keypair and rotate discovery key
+  polis branch <export> --to <url> [--out DIR | --archive FILE] [--from-domain D] [--without-private]
+                                  Turn an export of your site into a new site at
+                                  a new address, its key rotated here; sends
+                                  nothing anywhere. Also makes your recovery key
+                                  (--recovery-key PATH), kept outside the new site
+  polis branch deploy <branch-output> [--config FILE] [--build DIR]
+                                  Put a branched site live on a host at its new
+                                  address: creates the instance, seeds the site,
+                                  sets its configuration and deploys it. Settings
+                                  from --config or --platform/--token-file/--team/
+                                  --region/--project, else asked for
+  polis recover sign --domain HOST [--challenge FILE] [--key PATH]
+                                  Sign a sign-in recovery challenge (from a
+                                  file, or stdin) with your recovery key
   polis did [--write] [--host H]  Show this site's did:web identifier and document
   polis site set author-name <name>
                                   Set the display name in .well-known/polis
@@ -404,6 +449,31 @@ Examples:
   polis blessing requests
   polis discover
 `)
+}
+
+// getSite returns the handle for the site this invocation operates on.
+//
+// ⭐⭐⭐ THE CLI'S ONE CONSTRUCTION POINT, and the counterpart of Server.Site()
+// on the self-hosted server and the per-tenant handle on hosted. There is
+// exactly one place per deployment that decides what a site is stored on, which
+// is the question a global root-to-store map would have left open.
+//
+// ⚠️ A blob-backed CLI would construct it with storage.On here and nothing
+// downstream would change.
+//
+// ⛔⛔ IT DOES NOT CACHE, AND THAT IS NOT AN OVERSIGHT. The first version
+// memoised it with sync.Once and broke the init tests immediately: several
+// tests run commands against different temp directories in one process, so the
+// first call cached a site and every later caller got THAT one —
+// "private key already exists — refusing to overwrite", against a directory the
+// test never named.
+//
+// ⭐⭐⭐ That is exactly the failure a global root-to-store map would have, and
+// the reason this migration chose a type over a resolver: CACHED GLOBAL STATE
+// SERVES THE WRONG SITE, and it compiles. A Site is a two-field value; building
+// one per call costs nothing worth that risk.
+func getSite() storage.Site {
+	return storage.At(getDataDir())
 }
 
 // getDataDir returns the data directory, defaulting to current working directory
@@ -461,6 +531,10 @@ func loadEnv() {
 
 // loadEnvFile reads a KEY=VALUE file and sets env vars that aren't already set.
 // Returns true if the file was found and loaded.
+// loadEnvFile reads a .env file. NOT the storage interface: its callers pass
+// NOT the storage interface: the paths are under the working directory and the
+// user home, neither of which is inside the site, so there is no root for a key
+// to be relative to. The read is a streaming line scan.
 func loadEnvFile(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {

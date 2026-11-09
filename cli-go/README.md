@@ -52,25 +52,42 @@ Core packages in `pkg/` are designed to be imported by other Go applications:
 | `pkg/hooks` | Post-action automation |
 | `pkg/url` | URL normalization utilities |
 
-## Usage as Library
+## `pkg/` is an implementation detail, not a supported library surface
+
+These packages exist so the webapp can import them instead of shelling out to
+the CLI, which is what they were extracted from `webapp/internal/` to do. They
+are shared between this module's binaries and the webapp, and nothing more:
+**there is no API stability promise, no semantic versioning of the package
+surface, and signatures change whenever the CLI needs them to.**
+
+You are welcome to import them, and the examples below are accurate as of this
+version — but pin a commit, because a minor release may change a signature
+without saying so in the changelog. If you depend on behaviour here, the stable
+contracts are the **data formats** (documented under `docs/`) and the **CLI
+commands**, not the Go functions.
 
 ```go
 import (
     "github.com/vdibart/polis-cli/cli-go/pkg/render"
+    "github.com/vdibart/polis-cli/cli-go/pkg/storage"
     "github.com/vdibart/polis-cli/cli-go/pkg/publish"
 )
 
+// A site handle: where the site is, and what it is stored on.
+site := storage.At("/path/to/site")
+
 // Render all pages
 renderer, _ := render.NewPageRenderer(render.PageConfig{
-    DataDir:       "/path/to/site",
+    Site:          site,
     CLIThemesDir:  "/path/to/themes",
     BaseURL:       "https://example.com",
     RenderMarkers: false,
 })
 stats, _ := renderer.RenderAll(true)
 
-// Publish a post
-result, _ := publish.PublishPost(dataDir, content, filename, privateKey)
+// Publish a post. Some packages still take the site root as a string; they
+// are being converted to the handle one at a time, so expect both forms.
+result, _ := publish.PublishPost(site.Dir(), content, filename, privateKey)
 ```
 
 ## Commands

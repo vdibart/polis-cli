@@ -1,13 +1,14 @@
 package ops
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"sync"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 )
 
-// DM delivery rate limiters, one per recipient site directory, kept for the
-// life of the process.
+// DM delivery rate limiters, one per recipient site, kept for the life of the
+// process.
 //
 // ⛔ A limiter is only a limiter if it outlives the request. deliverDM built a
 // fresh dm.NewRateLimiter on every call, so each check ran against a counter
@@ -15,9 +16,9 @@ import (
 // model publishes (10/sender/hr, 100/hr) did not exist on any self-hosted
 // deployment, and nothing failed to say so.
 //
-// **Keyed by site dir, not held on the engine or HandlerEnv**, because the
-// recipient is the site, not the object that happens to be serving it. A
-// hosted tenant handler — engine included — is built on demand and evicted
+// **Keyed by the site's identity (Site.ID), not held on the engine or
+// HandlerEnv**, because the recipient is the site, not the object that
+// happens to be serving it. A hosted tenant handler — engine included — is built on demand and evicted
 // from the tenant cache, and an engine-scoped counter would hand a flooding
 // sender a fresh window on every eviction, which is exactly the pressure a
 // flood creates. The process-wide scope also matches how the hosted service
@@ -39,26 +40,26 @@ var (
 // dmRateLimiterFor returns the limiter for a recipient site, creating it on
 // first use. The env overrides are read once per site, when the limiter is
 // created — they are process-level settings, not per-request ones.
-func dmRateLimiterFor(siteDir string) *dm.RateLimiter {
+func dmRateLimiterFor(site storage.Site) *dm.RateLimiter {
 	dmRateLimitersMu.Lock()
 	defer dmRateLimitersMu.Unlock()
 
-	if rl, ok := dmRateLimiters[siteDir]; ok {
+	if rl, ok := dmRateLimiters[site.ID()]; ok {
 		return rl
 	}
 	rl := dm.NewRateLimiter(
 		envInt("POLIS_DM_RATE_PER_SENDER", 0),
 		envInt("POLIS_DM_RATE_GLOBAL", 0),
 	)
-	dmRateLimiters[siteDir] = rl
+	dmRateLimiters[site.ID()] = rl
 	return rl
 }
 
 // forgetDMRateLimiter drops a site's limiter. Tests use it to start from a
 // known window; nothing in the serving path calls it, because forgetting a
 // counter is what the defect did.
-func forgetDMRateLimiter(siteDir string) {
+func forgetDMRateLimiter(site storage.Site) {
 	dmRateLimitersMu.Lock()
 	defer dmRateLimitersMu.Unlock()
-	delete(dmRateLimiters, siteDir)
+	delete(dmRateLimiters, site.ID())
 }

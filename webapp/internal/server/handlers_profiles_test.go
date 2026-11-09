@@ -11,6 +11,7 @@ package server
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,10 +85,10 @@ func TestProfiles_RelationshipEnum(t *testing.T) {
 		{URL: "https://alice.polis.pub", AddedAt: now.Format(time.RFC3339), AuthorName: "Alice"},
 		{URL: "https://carol.polis.pub", AddedAt: now.Format(time.RFC3339), AuthorName: "Carol"},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
-	store := stream.NewStore(s.DataDir, s.GetDiscoveryDomain(), "pub.polis.core")
+	store := stream.NewStore(s.Site(), s.GetDiscoveryDomain(), "pub.polis.core")
 	fs := &stream.FollowerState{
 		Followers: []string{"bob.polis.pub", "carol.polis.pub"},
 		Count:     2,
@@ -144,7 +145,7 @@ func TestProfiles_AvatarPopulated(t *testing.T) {
 		{URL: "https://alice.polis.pub", AddedAt: now.Format(time.RFC3339), AuthorName: "Alice"},
 		{URL: "https://bob.polis.pub", AddedAt: now.Format(time.RFC3339), AuthorName: "Bob"},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 
@@ -205,7 +206,7 @@ func TestProfiles_DisplayNameFallback(t *testing.T) {
 		{URL: "https://zane.polis.pub", AddedAt: now.Format(time.RFC3339)},
 		{URL: "https://alice.polis.pub", AddedAt: now.Format(time.RFC3339), AuthorName: "Alice"},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 	code, resp := profilesRequest(t, s, "sort=by-name")
@@ -243,7 +244,7 @@ func TestProfiles_RecentPostEnrichment(t *testing.T) {
 	ff := &following.FollowingFile{Following: []following.FollowingEntry{
 		{URL: "https://alice.polis.pub", AddedAt: now.Format(time.RFC3339), AuthorName: "Alice"},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 
@@ -303,7 +304,7 @@ func TestProfiles_RecentPostAbsent(t *testing.T) {
 	ff := &following.FollowingFile{Following: []following.FollowingEntry{
 		{URL: "https://orin.polis.pub", AddedAt: now.Format(time.RFC3339)},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 	code, resp := profilesRequest(t, s, "")
@@ -405,10 +406,10 @@ func TestProfiles_ScopeAllPolisProxiesDS(t *testing.T) {
 	ff := &following.FollowingFile{Following: []following.FollowingEntry{
 		{URL: "https://alice.polis.pub", AddedAt: now.Format(time.RFC3339)},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
-	store := stream.NewStore(s.DataDir, s.GetDiscoveryDomain(), "pub.polis.core")
+	store := stream.NewStore(s.Site(), s.GetDiscoveryDomain(), "pub.polis.core")
 	fs := &stream.FollowerState{Followers: []string{"bob.polis.pub"}, Count: 1}
 	if err := store.SaveState("pub.polis.follow", fs); err != nil {
 		t.Fatalf("save follower state: %v", err)
@@ -525,7 +526,7 @@ func TestProfiles_SelfFiltered(t *testing.T) {
 		{URL: "https://" + myDomain, AddedAt: now.Format(time.RFC3339)},
 		{URL: "https://alice.polis.pub", AddedAt: now.Format(time.RFC3339)},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 	code, resp := profilesRequest(t, s, "")

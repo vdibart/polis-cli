@@ -185,7 +185,6 @@ Monospace fonts: JetBrains Mono, Fira Code for editor areas.
 |--------|----------|---------|---------|
 | GET | `/api/status` | `handleStatus` | Site status and identity |
 | POST | `/api/init` | `handleInit` | Initialize new site |
-| POST | `/api/link` | `handleLink` | Link to existing site |
 | GET | `/api/validate` | `handleValidate` | Validate site structure |
 | GET/PUT | `/api/settings` | `handleSettings` | Read/write webapp config |
 

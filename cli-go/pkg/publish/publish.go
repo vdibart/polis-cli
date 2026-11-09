@@ -2,13 +2,12 @@
 package publish
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -18,6 +17,8 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/version"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 var (
@@ -202,11 +203,14 @@ func escapeYAMLString(s string) string {
 	// - Contains colon followed by space (could be key-value)
 	// - Contains newline (multiline)
 	// - Contains double quotes
-	// - Starts/ends with whitespace
+	// - Starts/ends with whitespace (any, not only a space)
 	// - Starts with special YAML chars: *, &, !, |, >, @, `, #
 	needsQuoting := false
 
-	if strings.HasPrefix(s, " ") || strings.HasSuffix(s, " ") {
+	// ANY leading or trailing whitespace, not only a space: a tab-led title
+	// is reachable (`# <tab>Title` survives ExtractTitle), and the frontmatter
+	// parser trims an unquoted value, so an unquoted tab was lost.
+	if s != strings.TrimSpace(s) {
 		needsQuoting = true
 	} else if strings.Contains(s, ": ") || strings.HasSuffix(s, ":") {
 		needsQuoting = true
@@ -281,7 +285,7 @@ func UnquoteYAMLString(s string) string {
 // PublishPost publishes a markdown post and returns the result.
 // If dsCfg is non-nil, it overrides package-level discovery globals for
 // multi-tenant safety. Pass nil to use globals (single-tenant / CLI mode).
-func PublishPost(dataDir, markdown, filename string, privateKey []byte, dsCfg ...*DiscoveryConfig) (*PublishResult, error) {
+func PublishPost(site storage.Site, markdown, filename string, privateKey []byte, dsCfg ...*DiscoveryConfig) (*PublishResult, error) {
 	// Resolve generator from config (or fall back to package global)
 	var cfgForGen *DiscoveryConfig
 	if len(dsCfg) > 0 {
@@ -309,7 +313,7 @@ func PublishPost(dataDir, markdown, filename string, privateKey []byte, dsCfg ..
 
 	// Ensure unique filename (prevent collisions)
 	dateDir := time.Now().UTC().Format("20060102")
-	filename = ensureUniqueFilename(dataDir, dateDir, filename)
+	filename = ensureUniqueFilename(site, dateDir, filename)
 
 	// Canonicalize the raw markdown for consistent hashing
 	canonicalBody := CanonicalizeContent(markdown)
@@ -324,12 +328,12 @@ func PublishPost(dataDir, markdown, filename string, privateKey []byte, dsCfg ..
 	// unsigned frontmatter below and into buildFrontmatter's output; they
 	// differ only by the signature line, which is what the signing base removes to
 	// recover the signed bytes.
-	_, _, baseURLForLicense := resolveDiscoveryConfig(cfgForGen)
+	_, baseURLForLicense := resolveDiscoveryConfig(cfgForGen)
 	authoredProfile := ""
 	if cfgForGen != nil {
 		authoredProfile = cfgForGen.LicenseProfile
 	}
-	licenseYAML, _, err := licenseFrontmatter(dataDir, authoredProfile, baseURLForLicense)
+	licenseYAML, _, err := licenseFrontmatter(site, authoredProfile, baseURLForLicense)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve licence terms: %w", err)
 	}
@@ -372,24 +376,15 @@ version-history:
 	// Build final content
 	finalContent := finalFrontmatter + "\n\n" + canonicalBody
 
-	// Create directory structure: content/pub.polis.core/post/YYYYMMDD/
-	postsDir := filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir)
-	if err := os.MkdirAll(postsDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create posts directory: %w", err)
-	}
-
-	// Write post file
-	postPath := filepath.Join(postsDir, filename+".md")
-	if err := os.WriteFile(postPath, []byte(finalContent), 0644); err != nil {
+	// The post's key, content/pub.polis.core/post/YYYYMMDD/<name>.md. It is
+	// also the index path and the result's Path: one key, written once.
+	relativePath := postKey(dateDir, filename)
+	if err := site.Store().Put(context.Background(), relativePath, []byte(finalContent)); err != nil {
 		return nil, fmt.Errorf("failed to write post file: %w", err)
 	}
 
-	// Update index (path relative to site root for content access)
-	// Use filepath.ToSlash to ensure forward slashes on Windows (URLs must not contain backslashes)
-	relativePath := filepath.ToSlash(filepath.Join("content", "pub.polis.core", "post", dateDir, filename+".md"))
-
 	// Initialize version history side-car. Pass content WITHOUT frontmatter.
-	if err := version.InitializeHistory(version.GetVersionsFilePath(postPath, ".versions"), relativePath, canonicalBody, hash, timestamp); err != nil {
+	if err := version.InitializeHistory(site, version.VersionsKey(relativePath, ".versions"), relativePath, canonicalBody, hash, timestamp); err != nil {
 		// Log but don't fail - version history is nice to have
 		fmt.Printf("[warning] Failed to initialize version history: %v\n", err)
 	}
@@ -400,12 +395,12 @@ version-history:
 		Published:      timestamp,
 		CurrentVersion: "sha256:" + hash,
 	}
-	if err := AppendToIndex(dataDir, meta); err != nil {
+	if err := AppendToIndex(site, meta); err != nil {
 		fmt.Printf("[warning] Failed to update index: %v\n", err)
 	}
 
 	// Update manifest
-	if err := UpdateManifest(dataDir); err != nil {
+	if err := UpdateManifest(site); err != nil {
 		fmt.Printf("[warning] Failed to update manifest: %v\n", err)
 	}
 
@@ -422,7 +417,7 @@ version-history:
 	if len(dsCfg) > 0 {
 		cfg = dsCfg[0]
 	}
-	if err := RegisterPost(dataDir, result, privateKey, cfg); err != nil {
+	if err := RegisterPost(site, result, privateKey, cfg); err != nil {
 		fmt.Printf("[!] Discovery registration skipped: %v\n", err)
 		fmt.Println("[i] If your site is newly deployed, run: polis register")
 	}
@@ -430,22 +425,27 @@ version-history:
 	return result, nil
 }
 
+// postKey is a post's key: content/pub.polis.core/post/<dateDir>/<name>.md.
+func postKey(dateDir, name string) string {
+	return "content/pub.polis.core/post/" + dateDir + "/" + name + ".md"
+}
+
 // ensureUniqueFilename checks for filename collisions and appends -2, -3, etc. if needed.
-func ensureUniqueFilename(dataDir, dateDir, filename string) string {
+func ensureUniqueFilename(site storage.Site, dateDir, filename string) string {
 	candidate := filename
 	suffix := 2
 	for {
-		// Check posts content directory
-		postPath := filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir, candidate+".md")
-		if _, err := os.Stat(postPath); err == nil {
+		// A name is taken if anything answers for it. Any error, absence
+		// included, leaves it free, as the path form did.
+		if _, err := site.Store().Stat(context.Background(), postKey(dateDir, candidate)); err == nil {
 			candidate = fmt.Sprintf("%s-%d", filename, suffix)
 			suffix++
 			continue
 		}
 
 		// Check drafts directory
-		draftPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", candidate+".md")
-		if _, err := os.Stat(draftPath); err == nil {
+		draftKey := ".polis/bundles/pub.polis.core/posts/drafts/" + candidate + ".md"
+		if _, err := site.Store().Stat(context.Background(), draftKey); err == nil {
 			candidate = fmt.Sprintf("%s-%d", filename, suffix)
 			suffix++
 			continue
@@ -479,13 +479,16 @@ func extractSignatureBase64(sig string) string {
 // eventually be used to rewrite one, and rewriting through a subset drops
 // every field it does not know about — which is exactly what UpdateIndexEntry
 // was doing to `license` and `in_reply_to` before Signet epic 25.
-func AppendToIndex(dataDir string, meta *metadata.IndexEntry) error {
-	return metadata.AppendPostToIndex(dataDir, meta.Path, meta.Title, meta.Published, meta.CurrentVersion)
+func AppendToIndex(site storage.Site, meta *metadata.IndexEntry) error {
+	// ⚠️ storage.At at the boundary: this package has not converted yet, so it
+	// still holds a path. ⭐ When publish takes a Site, this becomes passing
+	// the handle straight through — the migration's normal shape.
+	return metadata.AppendPostToIndex(site, meta.Path, meta.Title, meta.Published, meta.CurrentVersion)
 }
 
 // UpdateManifest is a no-op — manifest.json has been absorbed into .well-known/polis.
 // Post/comment counts are computed on-the-fly by the webapp from the content directories.
-func UpdateManifest(dataDir string) error {
+func UpdateManifest(site storage.Site) error {
 	return nil
 }
 
@@ -576,7 +579,7 @@ func ExtractVersionHistory(content string) []string {
 }
 
 // RepublishPost updates an existing published post.
-func RepublishPost(dataDir, postPath, markdown string, privateKey []byte, dsCfg ...*DiscoveryConfig) (*PublishResult, error) {
+func RepublishPost(site storage.Site, postPath, markdown string, privateKey []byte, dsCfg ...*DiscoveryConfig) (*PublishResult, error) {
 	// Resolve generator from config (or fall back to package global)
 	var cfgForGen *DiscoveryConfig
 	if len(dsCfg) > 0 {
@@ -585,8 +588,7 @@ func RepublishPost(dataDir, postPath, markdown string, privateKey []byte, dsCfg 
 	gen := resolveGenerator(cfgForGen)
 
 	// Read existing post to get original metadata
-	fullPath := filepath.Join(dataDir, postPath)
-	existingContent, err := os.ReadFile(fullPath)
+	existingContent, err := site.Store().Get(context.Background(), postPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read existing post: %w", err)
 	}
@@ -631,12 +633,12 @@ func RepublishPost(dataDir, postPath, markdown string, privateKey []byte, dsCfg 
 	// version carrying those terms; copies already made keep the old ones,
 	// provably. Terms are not retroactive, and that is honest rather than a
 	// limitation — the old signature still verifies over the old terms.
-	_, _, baseURLForLicense := resolveDiscoveryConfig(cfgForGen)
+	_, baseURLForLicense := resolveDiscoveryConfig(cfgForGen)
 	authoredProfile := ""
 	if cfgForGen != nil {
 		authoredProfile = cfgForGen.LicenseProfile
 	}
-	licenseYAML, _, err := licenseFrontmatter(dataDir, authoredProfile, baseURLForLicense)
+	licenseYAML, _, err := licenseFrontmatter(site, authoredProfile, baseURLForLicense)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve licence terms: %w", err)
 	}
@@ -697,23 +699,23 @@ signature: %s
 	finalContent := finalFrontmatter + "\n\n" + canonicalBody
 
 	// Write updated post file
-	if err := os.WriteFile(fullPath, []byte(finalContent), 0644); err != nil {
+	if err := site.Store().Put(context.Background(), postPath, []byte(finalContent)); err != nil {
 		return nil, fmt.Errorf("failed to write post file: %w", err)
 	}
 
 	// Append to the version history side-car (pass content WITHOUT frontmatter
-	// for diff computation). fullPath is the absolute canonical file path.
-	if err := version.AppendHistory(version.GetVersionsFilePath(fullPath, ".versions"), postPath, oldHash, hash, updateTimestamp, oldContentWithoutFrontmatter, canonicalBody); err != nil {
+	// for diff computation).
+	if err := version.AppendHistory(site, version.VersionsKey(postPath, ".versions"), postPath, oldHash, hash, updateTimestamp, oldContentWithoutFrontmatter, canonicalBody); err != nil {
 		fmt.Printf("[warning] Failed to update version history: %v\n", err)
 	}
 
 	// Update index entry
-	if err := UpdateIndexEntry(dataDir, postPath, title, "sha256:"+hash); err != nil {
+	if err := UpdateIndexEntry(site, postPath, title, "sha256:"+hash); err != nil {
 		fmt.Printf("[warning] Failed to update index: %v\n", err)
 	}
 
 	// Update manifest
-	if err := UpdateManifest(dataDir); err != nil {
+	if err := UpdateManifest(site); err != nil {
 		fmt.Printf("[warning] Failed to update manifest: %v\n", err)
 	}
 
@@ -730,7 +732,7 @@ signature: %s
 	if len(dsCfg) > 0 {
 		cfg = dsCfg[0]
 	}
-	if err := RegisterPost(dataDir, result, privateKey, cfg); err != nil {
+	if err := RegisterPost(site, result, privateKey, cfg); err != nil {
 		fmt.Printf("[!] Discovery registration skipped: %v\n", err)
 		fmt.Println("[i] If your site is newly deployed, run: polis register")
 	}
@@ -739,10 +741,26 @@ signature: %s
 }
 
 // UpdateIndexEntry updates an existing entry in the index.
-func UpdateIndexEntry(dataDir, postPath, newTitle, newVersion string) error {
-	indexPath := filepath.Join(dataDir, "content", "pub.polis.core", "index.jsonl")
+//
+// It holds the index's key lock for the whole read-modify-write, the same lock
+// pkg/metadata takes to append or rewrite the index, so a publish landing in
+// between is not lost.
+//
+// ⚠️ The write is IN PLACE (Store.Put), deliberately not atomicfile.Write. A
+// temp-and-rename creates a new file, so the umask applies to it: under umask
+// 077 the public index came back 0600 after every republish, where an
+// overwrite keeps the file's existing 0644. The refactor differential caught
+// it; a web server running as another user would have stopped serving it.
+func UpdateIndexEntry(site storage.Site, postPath, newTitle, newVersion string) error {
+	indexKey := metadata.BundleContentDir + "/" + metadata.PublicIndexFilename
+	return storage.WithKeyLock(site.Store(), indexKey, func() error {
+		return updateIndexEntryLocked(site, indexKey, postPath, newTitle, newVersion)
+	})
+}
 
-	data, err := os.ReadFile(indexPath)
+func updateIndexEntryLocked(site storage.Site, indexKey, postPath, newTitle, newVersion string) error {
+	ctx := context.Background()
+	data, err := site.Store().Get(ctx, indexKey)
 	if err != nil {
 		return err
 	}
@@ -780,7 +798,7 @@ func UpdateIndexEntry(dataDir, postPath, newTitle, newVersion string) error {
 			// rewritten. The index's licence block is a projection of the
 			// work's frontmatter, so it follows the bytes rather than lagging
 			// them.
-			if raw, rErr := os.ReadFile(filepath.Join(dataDir, entry.Path)); rErr == nil {
+			if raw, rErr := site.Store().Get(ctx, entry.Path); rErr == nil {
 				entry.License = license.ParseBlock(string(raw))
 			}
 			updated, _ := json.Marshal(entry)
@@ -795,5 +813,5 @@ func UpdateIndexEntry(dataDir, postPath, newTitle, newVersion string) error {
 		return fmt.Errorf("post not found in index: %s", postPath)
 	}
 
-	return os.WriteFile(indexPath, []byte(strings.Join(newLines, "\n")+"\n"), 0644)
+	return site.Store().Put(ctx, indexKey, []byte(strings.Join(newLines, "\n")+"\n"))
 }

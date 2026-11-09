@@ -58,13 +58,14 @@ package attestation
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	pathpkg "path"
 	"regexp"
 	"sort"
 	"strings"
@@ -73,7 +74,9 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/index"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
-	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	sitepkg "github.com/vdibart/polis-cli/cli-go/pkg/site"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Version is set at startup by the cmd package.
@@ -554,9 +557,9 @@ func ID(r *Record) string {
 	return stamp + "-" + digest
 }
 
-// Dir returns the directory holding a site's attestation records.
+// DirKey is the key prefix holding a site's attestation records.
 //
-// The path is a literal on purpose, as tag.TagPath's is. The CORE bundle's
+// The key is a literal on purpose, as tag.TagKey's is. The CORE bundle's
 // layout is fixed by design and not user-configurable, so
 // `content/pub.polis.core/attestation` is correct here and not debt (settled
 // 2026-09-02). Resolving through the bundle is right
@@ -567,13 +570,11 @@ func ID(r *Record) string {
 // content path serves — although epic 11 now writes agents.json and its page
 // under that mount (agent.MountDir). Epic 06's; see
 // TestKnownBug_PathsHardcodeInsteadOfResolvingTheBundle.
-func Dir(dataDir string) string {
-	return filepath.Join(dataDir, "content", "pub.polis.core", "attestation")
-}
+const DirKey = "content/pub.polis.core/attestation"
 
-// Path returns the on-disk path for a record id.
-func Path(dataDir, id string) string {
-	return filepath.Join(Dir(dataDir), id+".json")
+// Key returns the site-relative key of a record id.
+func Key(id string) string {
+	return DirKey + "/" + id + ".json"
 }
 
 // RecordURL is the permanent, fetchable URL of a record.
@@ -616,18 +617,21 @@ var versionPinRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // `polis attest issue --predicate …withdrawal` publish a permanent, unwithdrawable
 // retraction of anything — including a claim this site never made — with none of
 // them. The refusal is a WRITER rule only; readers still accept any predicate.
-func Issue(dataDir string, r *Record, privateKey []byte) (string, error) {
+func Issue(site storage.Site, r *Record, privateKey []byte) (string, error) {
 	if r != nil && r.Predicate == PredicateWithdrawal {
 		return "", fmt.Errorf("predicate %q is issued only by withdrawing a claim — "+
 			"run `polis attest withdraw <id>`, which checks the claim is yours and not already withdrawn",
 			PredicateWithdrawal)
 	}
-	return issue(dataDir, r, privateKey)
+	return issue(site, r, privateKey)
 }
 
 // issue is Issue without the withdrawal refusal. Only Withdraw may call it with
 // PredicateWithdrawal, after its own safeguards have run.
-func issue(dataDir string, r *Record, privateKey []byte) (string, error) {
+func issue(site storage.Site, r *Record, privateKey []byte) (string, error) {
+	if !site.Valid() {
+		return "", fmt.Errorf("issue attestation: site handle is not usable")
+	}
 	if r == nil {
 		return "", fmt.Errorf("no record to issue")
 	}
@@ -698,10 +702,10 @@ func issue(dataDir string, r *Record, privateKey []byte) (string, error) {
 	}
 
 	id := ID(r)
-	if err := write(Path(dataDir, id), r); err != nil {
+	if err := write(site, Key(id), r); err != nil {
 		return "", err
 	}
-	refreshIndex(dataDir)
+	refreshIndex(site)
 	return id, nil
 }
 
@@ -722,8 +726,8 @@ func issue(dataDir string, r *Record, privateKey []byte) (string, error) {
 // ⚠️ Non-fatal. The record is already signed and on disk; failing here would
 // tell the user a claim was not made when it was. Medic heals a missed entry,
 // and `polis rebuild --attestations` does by hand.
-func refreshIndex(dataDir string) {
-	if _, err := index.RebuildContentIndex(dataDir, []string{index.EntryTypeAttestation}); err != nil {
+func refreshIndex(site storage.Site) {
+	if _, err := index.RebuildContentIndex(site, []string{index.EntryTypeAttestation}); err != nil {
 		fmt.Fprintf(os.Stderr, "[!] attestation written, but index.jsonl was not updated: %v (run `polis rebuild --attestations`)\n", err)
 	}
 }
@@ -753,23 +757,23 @@ func signAndStamp(r *Record, privateKey []byte) error {
 // declare (signing.GuardRewrite). A new record never meets one; the rewrite
 // that can is Withdraw's forward reference onto the retracted record, which
 // would drop the members and leave a signature over bytes no longer there.
-func write(path string, r *Record) error {
-	if err := signing.GuardRewrite("attestation", path, Record{}); err != nil {
+func write(site storage.Site, key string, r *Record) error {
+	if err := signing.GuardRewriteAt("attestation", site, key, Record{}); err != nil {
 		return err
 	}
-	return writeRecord(path, r)
+	return writeRecord(site, key, r)
 }
 
 // RewriteUnsigned is the ESCAPE HATCH for a user stranded by write's refusal:
-// it rewrites the record at path from the members this build declares, WITHOUT
+// it rewrites the record with this id from the members this build declares, WITHOUT
 // a signature, and returns what it dropped.
 //
 // ⚠️ An attestation is a claim, and an unsigned claim is not one: after this,
 // the record verifies as nobody's. current_version is KEPT, because the record's
 // id — its filename and every URL that cites it — is derived from it. ⛔ It
 // never signs. A record with nothing unrecognised is left untouched.
-func RewriteUnsigned(path string) ([]string, error) {
-	r, err := Load(path)
+func RewriteUnsigned(site storage.Site, id string) ([]string, error) {
+	r, err := Load(site, id)
 	if err != nil {
 		return nil, err
 	}
@@ -778,27 +782,29 @@ func RewriteUnsigned(path string) ([]string, error) {
 		return nil, nil
 	}
 	r.Signature = ""
-	if err := writeRecord(path, r); err != nil {
+	if err := writeRecord(site, Key(id), r); err != nil {
 		return nil, err
 	}
 	return dropped, nil
 }
 
 // writeRecord marshals and atomically writes a record as-is.
-func writeRecord(path string, r *Record) error {
+//
+// ⭐ atomicfile.Write creates the record directory through the store, at the
+// store's 0755 outside .polis, so the MkdirAll this used to need before a
+// path-form atomic write is gone with the path. It was already a
+// temp-and-rename, so the file's mode is what it was.
+func writeRecord(site storage.Site, key string, r *Record) error {
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal attestation: %w", err)
 	}
 	data = append(data, '\n')
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("create attestation directory: %w", err)
-	}
 	// 0644: PUBLIC served content under content/pub.polis.core/. A self-hoster
 	// serving it through nginx as a different user must be able to read it —
 	// don't tighten a public-facing file to 0600.
-	if err := atomicfile.WriteFile(path, data, 0644); err != nil {
+	if err := atomicfile.Write(context.Background(), site, key, data, 0644); err != nil {
 		return fmt.Errorf("write attestation: %w", err)
 	}
 	return nil
@@ -828,8 +834,8 @@ func writeRecord(path string, r *Record) error {
 //
 // ⚠️ ONE WITHDRAWAL PER CLAIM. A second is refused: it says nothing new and,
 // because withdrawals cannot be withdrawn, it is litter nobody can ever clear.
-func Withdraw(dataDir, id string, privateKey []byte) (string, error) {
-	target, err := Load(Path(dataDir, id))
+func Withdraw(site storage.Site, id string, privateKey []byte) (string, error) {
+	target, err := Load(site, id)
 	if err != nil {
 		return "", fmt.Errorf("no attestation %q to withdraw: %w", id, err)
 	}
@@ -861,7 +867,7 @@ func Withdraw(dataDir, id string, privateKey []byte) (string, error) {
 	//
 	// "I may retract what I can prove I signed" is the whole rule, and it needs
 	// no base URL passed in to enforce.
-	switch status, verr := VerifyRecord(dataDir, target); status {
+	switch status, verr := VerifyRecord(site, target); status {
 	case StatusValid:
 	case StatusUnsigned:
 		return "", fmt.Errorf("attestation %q is unsigned, so there is no claim of ours to retract", id)
@@ -877,7 +883,7 @@ func Withdraw(dataDir, id string, privateKey []byte) (string, error) {
 	// silently succeeding, which would tell the user they did something they
 	// did not.
 	targetURL := RecordURL(issuer, id)
-	existing, err := List(dataDir)
+	existing, err := List(site)
 	if err != nil {
 		return "", fmt.Errorf("check for an existing withdrawal: %w", err)
 	}
@@ -889,7 +895,7 @@ func Withdraw(dataDir, id string, privateKey []byte) (string, error) {
 		}
 	}
 
-	newID, err := issue(dataDir, &Record{
+	newID, err := issue(site, &Record{
 		Issuer:    issuer,
 		Predicate: PredicateWithdrawal,
 		Subject: Subject{
@@ -912,19 +918,22 @@ func Withdraw(dataDir, id string, privateKey []byte) (string, error) {
 	// ⚠️ Non-fatal, like the index refresh. The withdrawal is already signed and
 	// on disk, and it is the proof; the pointer is only discovery.
 	target.WithdrawnBy = RecordURL(issuer, newID)
-	if werr := write(Path(dataDir, id), target); werr != nil {
+	if werr := write(site, Key(id), target); werr != nil {
 		fmt.Fprintf(os.Stderr, "[!] withdrawal %s written, but the forward reference on %s was not: %v\n", newID, id, werr)
 	}
 	return newID, nil
 }
 
-// Load reads and parses a record.
+// Load reads and parses the record with this id.
 //
 // ⚠️ It validates NOTHING beyond the file being JSON. An unrecognised predicate,
 // an unrecognised subject type, an unknown top-level key — all load. A reader
 // that rejected them would make the format unextendable by anyone but us.
-func Load(path string) (*Record, error) {
-	data, err := os.ReadFile(path)
+func Load(site storage.Site, id string) (*Record, error) {
+	if !site.Valid() {
+		return nil, fmt.Errorf("read attestation: site handle is not usable")
+	}
+	data, err := site.Store().Get(context.Background(), Key(id))
 	if err != nil {
 		return nil, fmt.Errorf("read attestation: %w", err)
 	}
@@ -941,8 +950,8 @@ func Load(path string) (*Record, error) {
 // A malformed file is skipped rather than failing the listing: one bad record
 // must not hide every good one. Scan is the same walk and also names what it
 // skipped.
-func List(dataDir string) ([]*Record, error) {
-	records, _, err := Scan(dataDir)
+func List(site storage.Site) ([]*Record, error) {
+	records, _, err := Scan(site)
 	return records, err
 }
 
@@ -965,28 +974,33 @@ type Malformed struct {
 
 // Scan is List that also returns the files it skipped because they do not
 // parse, sorted by name.
-func Scan(dataDir string) ([]*Record, []Malformed, error) {
-	entries, err := os.ReadDir(Dir(dataDir))
+func Scan(site storage.Site) ([]*Record, []Malformed, error) {
+	if !site.Valid() {
+		return nil, nil, fmt.Errorf("read attestation directory: site handle is not usable")
+	}
+	// ⭐ A missing prefix lists EMPTY, which is the answer a site that never
+	// issued a record gets: nothing there. A prefix that could not be read is
+	// an error, because "could not look" is a different answer. Store.List
+	// draws that line, exactly where the ErrNotExist branch of the directory
+	// read it replaced did.
+	entries, err := site.Store().List(context.Background(), DirKey)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil, nil
-		}
 		return nil, nil, fmt.Errorf("read attestation directory: %w", err)
 	}
 
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir || !strings.HasSuffix(pathpkg.Base(e.Key), ".json") {
 			continue
 		}
-		names = append(names, e.Name())
+		names = append(names, pathpkg.Base(e.Key))
 	}
 	sort.Strings(names)
 
 	var records []*Record
 	var malformed []Malformed
 	for _, name := range names {
-		raw, err := os.ReadFile(filepath.Join(Dir(dataDir), name))
+		raw, err := site.Store().Get(context.Background(), DirKey+"/"+name)
 		if err != nil {
 			// Unreadable is not malformed: a permissions or I/O fault says
 			// nothing about the bytes, and Patrol's other checks own it.
@@ -1061,7 +1075,7 @@ func Verify(r *Record, publicKeySSH []byte) (SignatureStatus, error) {
 // retired is the history entry that verified the record; nil for the current
 // key. ⚠️ A retired-key pass is a weaker claim — `asserted` is the record's own
 // statement and nothing here checks it — so a caller must say which it got.
-func VerifyWithHistory(r *Record, publicKeySSH []byte, chain *site.KeyHistoryBlock) (SignatureStatus, *site.KeyHistoryEntry, error) {
+func VerifyWithHistory(r *Record, publicKeySSH []byte, chain *sitepkg.KeyHistoryBlock) (SignatureStatus, *sitepkg.KeyHistoryEntry, error) {
 	if r == nil || r.Signature == "" {
 		return StatusUnsigned, nil, nil
 	}
@@ -1072,7 +1086,7 @@ func VerifyWithHistory(r *Record, publicKeySSH []byte, chain *site.KeyHistoryBlo
 	if err != nil {
 		return StatusUnknown, nil, fmt.Errorf("canonical JSON: %w", err)
 	}
-	ok, retired, err := site.VerifyWithHistory(func(key []byte) (bool, error) {
+	ok, retired, err := sitepkg.VerifyWithHistory(func(key []byte) (bool, error) {
 		return signing.VerifySignature(canonical, key, r.Signature)
 	}, publicKeySSH, chain, r.Asserted, "asserted")
 
@@ -1140,8 +1154,11 @@ func VerifyAgainst(r *Record, keys [][]byte) (SignatureStatus, error) {
 // A missing or unparseable .well-known/polis yields no keys and no error-shaped
 // failure — the caller turns that into StatusUnknown, which is "could not look",
 // not "looked and found a problem".
-func IdentityKeys(siteDir string) ([][]byte, error) {
-	data, err := os.ReadFile(filepath.Join(siteDir, ".well-known", "polis"))
+func IdentityKeys(site storage.Site) ([][]byte, error) {
+	if !site.Valid() {
+		return nil, fmt.Errorf("no .well-known/polis to verify against")
+	}
+	data, err := site.Store().Get(context.Background(), ".well-known/polis")
 	if err != nil {
 		return nil, fmt.Errorf("no .well-known/polis to verify against")
 	}
@@ -1157,19 +1174,19 @@ func IdentityKeys(siteDir string) ([][]byte, error) {
 	return [][]byte{[]byte(wk.PublicKey)}, nil
 }
 
-// VerifyFile checks one record on disk against the issuing site's PUBLISHED
+// VerifyFile checks one stored record against the issuing site's PUBLISHED
 // key.
 //
 // It uses the published key rather than .polis/keys/id_ed25519.pub because that
 // is the key a third party on the network would fetch, so this answers the same
 // question everyone else is asking rather than a locally convenient
 // approximation.
-func VerifyFile(siteDir, path string) (SignatureStatus, error) {
-	r, err := Load(path)
+func VerifyFile(site storage.Site, id string) (SignatureStatus, error) {
+	r, err := Load(site, id)
 	if err != nil {
 		return StatusUnknown, err
 	}
-	return VerifyRecord(siteDir, r)
+	return VerifyRecord(site, r)
 }
 
 // VerifyRecord checks an already-loaded record against the key published at
@@ -1195,8 +1212,8 @@ func VerifyFile(siteDir, path string) (SignatureStatus, error) {
 // ⭐ SIGNET EPIC 11 (review F1): it resolves retired keys through the site's own
 // published key history, so a record signed before a rotation still verifies.
 // See VerifyRecordResolved.
-func VerifyRecord(siteDir string, r *Record) (SignatureStatus, error) {
-	status, _, err := VerifyRecordResolved(siteDir, r)
+func VerifyRecord(site storage.Site, r *Record) (SignatureStatus, error) {
+	status, _, err := VerifyRecordResolved(site, r)
 	return status, err
 }
 
@@ -1204,14 +1221,14 @@ func VerifyRecord(siteDir string, r *Record) (SignatureStatus, error) {
 //
 // Returns a status per record id. A site with no attestations yields an empty
 // map and no error — having issued none is an ordinary state, not a finding.
-func VerifySite(siteDir string) (map[string]SignatureStatus, error) {
-	records, err := List(siteDir)
+func VerifySite(site storage.Site) (map[string]SignatureStatus, error) {
+	records, err := List(site)
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]SignatureStatus, len(records))
 	for _, r := range records {
-		status, _ := VerifyRecord(siteDir, r)
+		status, _ := VerifyRecord(site, r)
 		out[ID(r)] = status
 	}
 	return out, nil

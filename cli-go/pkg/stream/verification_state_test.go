@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"testing"
 	"time"
 )
@@ -124,7 +125,7 @@ func TestVerificationState_RecentAuthorFailures(t *testing.T) {
 
 func TestVerificationState_Persistence(t *testing.T) {
 	dir := t.TempDir()
-	store := NewStore(dir, "ds.example.com", "pub.polis.core")
+	store := NewStore(storage.At(dir), "ds.example.com", "pub.polis.core")
 
 	v := &VerificationState{}
 	v.RecordDSFailure()

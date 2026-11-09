@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -446,7 +447,7 @@ func TestVerifyContent_APostSignedBeforeARotationVerifiesAfterIt(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".well-known", "polis"), wk, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := site.WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := site.WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	// httptest serves on 127.0.0.1:<port>; rotation signs the port-less host.
@@ -458,7 +459,7 @@ func TestVerifyContent_APostSignedBeforeARotationVerifiesAfterIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := site.RecordKeyRotation(dir, k1pub, transition, "2026-09-15T10:22:03Z"); err != nil {
+	if err := site.RecordKeyRotation(storage.At(dir), k1pub, transition, "2026-09-15T10:22:03Z", ""); err != nil {
 		t.Fatal(err)
 	}
 	served, err := os.ReadFile(filepath.Join(dir, ".well-known", "polis"))

@@ -1,9 +1,9 @@
 package render
 
 import (
+	"context"
 	"fmt"
 	"html"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -23,7 +23,7 @@ import (
 // unsigned default would contradict the signed layer's silence in the most
 // visible place.
 func (r *PageRenderer) RenderLicenseSurfaces() error {
-	terms, err := site.SiteTerms(r.config.DataDir)
+	terms, err := site.SiteTerms(r.config.Site)
 	if err != nil {
 		return fmt.Errorf("read site licence: %w", err)
 	}
@@ -35,10 +35,9 @@ func (r *PageRenderer) RenderLicenseSurfaces() error {
 	if err != nil {
 		return err
 	}
-	outDir := filepath.Join(r.config.DataDir, mountDir)
-	if err := os.MkdirAll(outDir, 0755); err != nil {
-		return fmt.Errorf("create licence mount dir: %w", err)
-	}
+	// The mount is user-configurable (bundle.json), so it is normalised to a
+	// key rather than assumed clean.
+	outDir := strings.Trim(filepath.ToSlash(mountDir), "/")
 
 	if err := r.writeSiteTermsPage(outDir, mountDir, terms); err != nil {
 		return err
@@ -59,7 +58,7 @@ func (r *PageRenderer) RenderLicenseSurfaces() error {
 // withdrawal that removes them resolve the same directory. Two answers here
 // would mean withdrawal cleaning a mount the renderer never wrote to.
 func (r *PageRenderer) licenseMountDir() (string, error) {
-	return site.LicenseMountDir(r.config.DataDir), nil
+	return site.LicenseMountDir(r.config.Site), nil
 }
 
 // profileSlug turns a profile tag into a filename. The tag itself stays the
@@ -77,7 +76,7 @@ func profileSlug(profile string) string {
 // terms page that omits it is not merely incomplete, it actively misleads.
 func (r *PageRenderer) writeSiteTermsPage(outDir, mountDir string, t *license.Terms) error {
 	profileURL := "/" + mountDir + "/" + profileSlug(t.Profile) + ".html"
-	sourceURL := site.LicenseURLPath(r.config.DataDir)
+	sourceURL := site.LicenseURLPath(r.config.Site)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, `<h1 class="license-title">Terms of use</h1>`)
@@ -126,7 +125,7 @@ func (r *PageRenderer) writeSiteTermsPage(outDir, mountDir string, t *license.Te
 			html.EscapeString(t.Contact), html.EscapeString(t.Contact))
 	}
 
-	return r.writeLicenseHTML(filepath.Join(outDir, "index.html"), mountDir, "Terms of use", b.String())
+	return r.writeLicenseHTML(outDir+"/index.html", mountDir, "Terms of use", b.String())
 }
 
 // readableValue turns an AIPREF/RSL token into something a person reads. The
@@ -210,13 +209,13 @@ func (r *PageRenderer) writeProfilePage(outDir, mountDir, profile string) error 
 	b.WriteString(`<p class="license-nonretro"><strong>This version of this profile will not change.</strong> ` +
 		`A work signed under it in 2026 means the same thing in 2036. A revised selection gets a new version number instead.</p>`)
 
-	return r.writeLicenseHTML(filepath.Join(outDir, profileSlug(profile)+".html"), mountDir, profile, b.String())
+	return r.writeLicenseHTML(outDir+"/"+profileSlug(profile)+".html", mountDir, profile, b.String())
 }
 
 // writeLicenseHTML wraps body content in a minimal page using the site's own
 // stylesheets, so the terms pages look like the rest of the site without the
 // licence type having to own a shape template.
-func (r *PageRenderer) writeLicenseHTML(outPath, mountDir, title, body string) error {
+func (r *PageRenderer) writeLicenseHTML(outKey, mountDir, title, body string) error {
 	depth := strings.Count(strings.Trim(mountDir, "/"), "/") + 1
 	up := strings.Repeat("../", depth)
 
@@ -250,7 +249,7 @@ func (r *PageRenderer) writeLicenseHTML(outPath, mountDir, title, body string) e
 </body>
 </html>
 `
-	return os.WriteFile(outPath, []byte(page), 0644)
+	return r.config.Site.Store().Put(context.Background(), outKey, []byte(page))
 }
 
 // writeRobotsAndRSL writes the two file-based standards surfaces.
@@ -266,18 +265,18 @@ func (r *PageRenderer) writeLicenseHTML(outPath, mountDir, title, body string) e
 // content is one half of an hourly write war. Anything that should change about
 // robots.txt or rsl.xml changes there, once, for both writers.
 func (r *PageRenderer) writeRobotsAndRSL() error {
-	robots, rsl, err := site.LicenseProjections(r.config.DataDir, r.config.BaseURL)
+	robots, rsl, err := site.LicenseProjections(r.config.Site, r.config.BaseURL)
 	if err != nil {
 		return fmt.Errorf("build licence projections: %w", err)
 	}
 
 	if len(robots) > 0 {
-		if err := os.WriteFile(filepath.Join(r.config.DataDir, "robots.txt"), robots, 0644); err != nil {
+		if err := r.config.Site.Store().Put(context.Background(), "robots.txt", robots); err != nil {
 			return fmt.Errorf("write robots.txt: %w", err)
 		}
 	}
 	if len(rsl) > 0 {
-		if err := os.WriteFile(filepath.Join(r.config.DataDir, "rsl.xml"), rsl, 0644); err != nil {
+		if err := r.config.Site.Store().Put(context.Background(), "rsl.xml", rsl); err != nil {
 			return fmt.Errorf("write rsl.xml: %w", err)
 		}
 	}

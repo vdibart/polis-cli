@@ -1,9 +1,11 @@
 package site
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -11,6 +13,8 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/jsonextra"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // The site's published witness set — SIGNET epic 32.
@@ -89,8 +93,8 @@ func (f *WitnessFile) For(url string) []discovery.Witness {
 // WitnessesPointer returns the site's `witnesses` pointer, or "" when it
 // publishes none. Absent is a defined state — every site before epic 32, and
 // any site never witnessed — and not an error.
-func WitnessesPointer(siteDir string) string {
-	raw, err := LoadWellKnownRaw(siteDir)
+func WitnessesPointer(site storage.Site) string {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil || raw == nil {
 		return ""
 	}
@@ -121,28 +125,34 @@ func WitnessesFromBytes(data []byte) (*WitnessFile, error) {
 	return &f, nil
 }
 
-// witnessesPath resolves a pointer to a path inside siteDir, refusing one that
-// escapes the site.
-func witnessesPath(siteDir, pointer string) (string, error) {
+// witnessesKey resolves a pointer to a KEY inside the site, refusing one that
+// escapes it.
+//
+// ⭐ A KEY, NOT A PATH — and the refusal is the point of the function, so it is
+// unchanged: the pointer comes from `.well-known/polis`, which a site author
+// edits, and `../../etc/passwd` must not resolve. ⚠️ The checks run on the
+// cleaned RELATIVE form, before any root is joined, so they are the same checks
+// on any backend.
+func witnessesKey(site storage.Site, pointer string) (string, error) {
 	rel := filepath.Clean(strings.TrimPrefix(pointer, "/"))
 	if rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("witnesses pointer %q does not name a file inside the site", pointer)
 	}
-	return filepath.Join(siteDir, rel), nil
+	return filepath.ToSlash(rel), nil
 }
 
 // LoadWitnesses reads the site's published witness set through its pointer.
 // Returns (nil, nil) when the site publishes no pointer.
-func LoadWitnesses(siteDir string) (*WitnessFile, error) {
-	pointer := WitnessesPointer(siteDir)
+func LoadWitnesses(site storage.Site) (*WitnessFile, error) {
+	pointer := WitnessesPointer(site)
 	if pointer == "" {
 		return nil, nil
 	}
-	path, err := witnessesPath(siteDir, pointer)
+	key, err := witnessesKey(site, pointer)
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := site.Store().Get(context.Background(), key)
 	if err != nil {
 		return nil, err
 	}
@@ -156,9 +166,11 @@ func LoadWitnesses(siteDir string) (*WitnessFile, error) {
 // ⛔ MERGE, NEVER REPLACE. See discovery.MergeWitnesses.
 //
 // ⚠️ The first call on a site adds a key to .well-known/polis, which Judge
-// snapshots: expect one judge.alert.wellknown_change per site, once, and then
-// silence. A repeat for the same site is the finding.
-func RecordWitness(siteDir, artifactURL string, witnesses ...discovery.Witness) (bool, error) {
+// snapshots: expect judge.alert.wellknown_change for that site while the change
+// is pending, then silence once Judge accepts it. The check is report-only, so
+// the site's health does not move. A new change for the same site later is the
+// finding.
+func RecordWitness(site storage.Site, artifactURL string, witnesses ...discovery.Witness) (bool, error) {
 	if artifactURL == "" {
 		return false, fmt.Errorf("no artifact URL to record a witness under")
 	}
@@ -166,26 +178,26 @@ func RecordWitness(siteDir, artifactURL string, witnesses ...discovery.Witness) 
 		return false, nil
 	}
 
-	pointer := WitnessesPointer(siteDir)
+	pointer := WitnessesPointer(site)
 	setPointer := pointer == ""
 	if setPointer {
 		pointer = DefaultWitnessesPointer
 	}
-	path, err := witnessesPath(siteDir, pointer)
+	key, err := witnessesKey(site, pointer)
 	if err != nil {
 		return false, err
 	}
 
 	file := &WitnessFile{Witnesses: map[string][]discovery.Witness{}}
-	if data, rerr := os.ReadFile(path); rerr == nil {
+	if data, rerr := site.Store().Get(context.Background(), key); rerr == nil {
 		parsed, perr := WitnessesFromBytes(data)
 		if perr != nil {
 			// ⛔ Never overwrite a file we cannot read: it may hold the only copy
 			// of testimony for superseded versions.
-			return false, fmt.Errorf("refusing to rewrite %s: %w", path, perr)
+			return false, fmt.Errorf("refusing to rewrite %s: %w", key, perr)
 		}
 		file = parsed
-	} else if !os.IsNotExist(rerr) {
+	} else if !errors.Is(rerr, fs.ErrNotExist) {
 		return false, rerr
 	}
 
@@ -196,15 +208,15 @@ func RecordWitness(siteDir, artifactURL string, witnesses ...discovery.Witness) 
 		if merr != nil {
 			return false, merr
 		}
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-			return false, err
-		}
-		if err := atomicfile.WriteFile(path, data, 0644); err != nil {
+		// ⭐ Through the site: atomicfile.Write creates the parent the MkdirAll
+		// used to, and on a blob backend the Put is the atomic write. The read
+		// above was already store-addressed, so read and write now agree.
+		if err := atomicfile.Write(context.Background(), site, key, data, 0644); err != nil {
 			return false, err
 		}
 	}
 	if setPointer {
-		if err := setWellKnownPointer(siteDir, witnessesPointerField, pointer); err != nil {
+		if err := setWellKnownPointer(site, witnessesPointerField, pointer); err != nil {
 			return changed, err
 		}
 		changed = true

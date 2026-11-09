@@ -16,7 +16,7 @@ Request blessing from a post author. Publishing a comment registers it with the 
 
 ### API key
 
-A `polis_`-prefixed Bearer token for authenticating with the Content Type API (`/v1/`). Stored as a SHA-256 hash in `.polis/api-keys.json` (there is no generator command yet — keys are added by hand). Required for all write operations; read operations are public.
+A `polis_`-prefixed Bearer token for authenticating with the Content Type API (`/v1/`). Stored as a SHA-256 hash in `.polis/api-keys.json` (minted by the site's owner through the webapp, or added by hand; a key may carry `scopes` that narrow it). Required for all write operations; read operations are public.
 
 **Related**: Content Type API, bundle
 
@@ -268,7 +268,7 @@ A site's signed, **outbound** statement of the terms its author's work may be us
 
 ### Rosie
 
-The user's agent. Under the user's own **grant**, and signing with the user's key, she decides blessing requests by the user's published policy and marks every decision as hers; on polis.pub she also keeps each tenant's content caches faithful. She has no key or site of her own. See [`signet/spec/delegation.md`](../../signet/spec/delegation.md).
+The user's agent. Under the user's own **grant**, and signing with the user's key, she decides blessing requests by the user's published policy and marks every decision as hers. She has no key or site of her own. Keeping each tenant's content caches faithful on polis.pub is not hers: that upkeep signs nothing, and Medic runs it (see [actors](../concepts/actors.md#cache-upkeep)). See [`signet/spec/delegation.md`](../../signet/spec/delegation.md).
 
 **Related**: grant, blessing, policy
 

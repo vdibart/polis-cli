@@ -217,6 +217,12 @@
       "reason": ""
     },
     {
+      "name": "theme-shapes-migration",
+      "status": "pass",
+      "message": "theme compatible shapes include the defaults",
+      "reason": ""
+    },
+    {
       "name": "bundle-declarations",
       "status": "pass",
       "message": "bundle declarations complete and match defaults",

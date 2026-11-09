@@ -25,7 +25,7 @@ The **Go CLI** is the recommended CLI for new users. It implements all commands 
 - Same directory structure and file formats — a site written by one CLI is readable and writable by the other
 - Download pre-built binaries from the releases page, or build from source: `cd cli-go && go build -o polis ./cmd/polis`
 
-⚠️ **The two CLIs do not have the same commands.** `actor`, `attest`, `did`, `dm`, `license`, `serve`, `site` and `validate` are Go only. Among the shared commands, `comment`, `init`, `post` (reading from stdin), `index --json`, `notifications`, `render`, `unregister` and `discover --since` differ; each section below says how.
+⚠️ **The two CLIs do not have the same commands.** `actor`, `attest`, `branch`, `did`, `dm`, `license`, `recover`, `serve`, `site` and `validate` are Go only. Among the shared commands, `comment`, `init`, `post` (reading from stdin), `index --json`, `notifications`, `render` and `discover --since` differ; each section below says how.
 
 ## Installation (Bash CLI)
 
@@ -169,7 +169,7 @@ Registering with the discovery service is a separate step, once the site is depl
 - `--site-title <title>` - Set a custom site title for branding (optional)
 - `--author <name>` - Author name
 - `--email <address>` - Email address (optional)
-- `--theme <name>` - Initial theme (default: one is picked at random)
+- `--theme <name>` - Initial theme (default: one is picked at random, never the reserved `sols` or `stardust`)
 - `--license reserved|open|none` - State terms without being asked (see [`polis license`](#polis-license))
 
 **Options (Bash CLI):** `--site-title`, plus path overrides for the files it creates — `--keys-dir`, `--posts-dir`,
@@ -388,9 +388,10 @@ polis comment sync               # check the blessing status of pending comments
 ```
 
 ⚠️ **`comment sync` checks status; it does not register a comment with the discovery service or request a
-blessing**, and no other Go CLI command does either (`polis blessing beseech` points back at `comment sync`).
-A comment drafted and signed with the Go CLI reaches the post's author only through the web app, which
-publishes, registers and requests the blessing in one step.
+blessing**, and `polis blessing beseech` refuses (`NOT_SUPPORTED`). A comment drafted and signed with the Go
+CLI reaches the post's author only through the web app, which publishes, registers and requests the
+blessing in one step. Once a comment is published, `polis republish <comment path>` signs a new version and
+asks for the blessing again.
 
 **Frontmatter structure:**
 ```yaml
@@ -718,16 +719,15 @@ content records refer to it, and returns a server error. Nothing is removed and 
 local marker is kept, because the CLI removes it only after the service confirms).
 
 ```bash
-# Bash CLI: interactive confirmation required
+# Interactive confirmation required
 polis unregister
 
-# Bash CLI: skip confirmation (for scripting)
+# Skip confirmation (for scripting)
 polis unregister --force
+polis unregister -f
 ```
 
-⚠️ **The Go CLI asks for no confirmation** and has no `--force` flag: `polis unregister` unregisters immediately.
-
-**Warning displayed (Bash CLI):**
+**Warning displayed:**
 ```
 WARNING: Unregistering will remove your site from the public directory.
 
@@ -745,7 +745,8 @@ Are you sure you want to unregister example.com? (type 'yes' to confirm)
 - The service's records of your content, relationships and stream events remain
 - You can rejoin anytime with `polis register`
 
-**JSON mode:** Skips interactive confirmation automatically.
+**JSON mode:** cannot ask, so it **requires `--force`**. Without it the command refuses, exits non-zero and
+unregisters nothing.
 
 ### `polis render [--force]`
 
@@ -866,7 +867,7 @@ Pending blessing requests (1):
   Comment URL: https://bob.example.com/comments/20260106/reply.md
 ```
 
-The Bash CLI prints the same requests as a table, and runs `blessing sync` first.
+The Bash CLI prints the same requests as a table.
 
 #### `polis blessing grant <hash>`
 
@@ -907,8 +908,11 @@ polis blessing beseech sha256:9f2a...
 - Original request failed
 - You updated the comment and want to re-request
 
-⚠️ **Bash CLI only in practice.** The Go CLI checks that the discovery service knows the comment and then
-prints a pointer to `polis comment sync`, which does not re-request a blessing (see [`polis comment`](#polis-comment)).
+⚠️ **Bash CLI only.** The Go CLI cannot re-request a blessing for a comment version: `polis blessing
+beseech` exits `1` with `NOT_SUPPORTED` and contacts nothing. For a **pending** comment, re-request from
+the web app, or republish the comment (`polis republish <comment path>`), which signs a new version and
+asks for the blessing again. A **denied** comment cannot be re-requested: the discovery service keeps the
+denial.
 
 #### `polis blessing sync`
 
@@ -932,27 +936,39 @@ polis blessing sync
 [✓] Synced 3 comment(s) to blessed-comments.json
 ```
 
+⚠️ **Go CLI only.** The Bash CLI's `blessing sync` is deprecated and refuses with `DEPRECATED`: it read the
+wrong set of blessings (this site's own comments blessed elsewhere, not the comments it blessed). For the
+same reason Bash's `rebuild --comments` leaves `blessed.json` unchanged; use the Go CLI's
+`polis rebuild --comments` to reconcile it.
+
 ### `polis follow <author-url>`
 
-Follow an author. Their comments waiting on your posts are blessed now, and the default rules bless their future ones.
+Follow an author. Waiting comments your rules bless are blessed now — with the default rules, the author's — and the default rules bless their future ones.
 
 ```bash
 polis follow https://alice.example.com
 ```
 
 **What it does:**
-1. Blesses this author's comments on your posts that are pending or were denied (your own act, signed with your key)
-2. Adds the author to `content/pub.polis.core/follow/following.json`, signed with your key
-3. Future comments from this author match `bless pub.polis.comment from following` — decided by your own site when Rosie runs there (the web app); a CLI-only site decides nothing automatically
+1. Adds the author to `content/pub.polis.core/follow/following.json`, signed with your key
+2. Re-reads every comment on your posts that is pending or was denied, and blesses each one **your policies
+   bless** (your own act, signed with your key). With the default `bless pub.polis.comment from following`
+   that is the author you just followed; a site with no such rule blesses nothing. This is the same step the
+   web app's follow runs
+3. Announces the follow to the discovery service (`pub.polis.follow.announced`), so the author can see it — when
+   the site is registered
+4. Future comments from this author match `bless pub.polis.comment from following` — decided by your own site when Rosie runs there (the web app); a CLI-only site decides nothing automatically
 
-The Bash CLI also announces the follow to the discovery service (`pub.polis.follow.announced`), so the author
-can see it; the Go CLI's `follow` does not announce. Following from the web app does.
+⚠️ **The Bash CLI does not consult your policies:** it blesses every pending or denied comment from the author,
+whatever your rules say. See [implementation parity](../implementation-parity.md).
 
 **Example output:**
 ```
 [✓] Successfully followed https://alice.example.com
   - Added to following.json
-  - Blessed 3 comment(s)
+  - Blessed 2 comment(s) your policies allow
+      https://alice.example.com/comments/20260105/reply.md
+      https://alice.example.com/comments/20260106/another.md
 ```
 
 ### `polis unfollow <author-url>`
@@ -1207,7 +1223,15 @@ next follow/unfollow or blessing decision re-signs them.
 
 Nothing to do to enable it. `polis init` writes the first entry; each rotation appends one.
 
-**No old key is kept, and there is no `--delete-old-key`.**
+**If a rotation is interrupted, run `polis rotate-key` again.** It finishes the rotation it finds
+rather than starting a second one. The new key is staged at `.polis/keys/id_ed25519.new` before the
+discovery service is told. From the moment it is installed until the handover is recorded, the retired
+key is kept at `.polis/keys/id_ed25519.prev`, because the handover must be signed by it. ⛔ Never move
+either file into place by hand. A run also **refuses to start** when your key on disk is not the key
+`.well-known/polis` publishes. Nothing is changed then; run `polis validate`, because a handover signed
+by any other key would break your key history for good.
+
+**No old key is kept once a rotation finishes, and there is no `--delete-old-key`.**
 
 Earlier versions moved the retired private key to `id_ed25519.old` and offered a flag to skip that.
 Both are gone. The single fixed filename was a poor substitute for a chain — rotate twice and the
@@ -1252,6 +1276,196 @@ that silently skipped it would claim more than it checked.
 
 Must be run from a polis site directory. Full format:
 [`docs/signet/spec/key-history.md`](../../signet/spec/key-history.md).
+
+### `polis branch`
+
+Turn an export of **your** site into a new site at a new address, ready to deploy there. Go CLI only.
+
+**Usage:**
+```bash
+polis branch export.zip --to https://new.example [--out DIR | --archive FILE] [--from-domain D] [--without-private] [--recovery-key PATH]
+```
+
+Flags may come before or after the export. The export is a zip archive or a directory, and it must hold the site's
+private key (`.polis/keys/id_ed25519`).
+
+What it does, all on your machine:
+
+- makes a new key, and signs the handover to it with the exported key **under the origin's domain**, so
+  everything the site signed before still verifies at the new address. The new key-history entry
+  records that domain (`signing_domain`), and so does every earlier handover that did not;
+- re-signs the follow file and the blessing list under the new key, if they verified under the old one
+  (as `polis rotate-key` does). No other signed file changes;
+- sets `POLIS_BASE_URL` in the new site's `.env`, publishes `.well-known/did.json` for the new host, and
+  re-renders the pages for the new address;
+- checks the result with the same checks as `polis validate`, and writes nothing if it fails a check
+  the export passes.
+
+**What does not cross:** the DM keyring and conversations (the new site publishes no
+`public_key_messages`; set DMs up again there), retired and staged keys, the origin's discovery-service
+registration and state (your discovery-service preferences do cross), logs, the origin instance's
+owner sign-in enrolments and deploy credentials, and what the origin's owner gave to others: its API
+keys (`.polis/api-keys.json`), its Kay connection with the v0 key (`.polis/kay/`) and its record of
+API-key calls (`.polis/mcp/`). Mint new API keys on the new site. Of the identity keys, only the new one is in the output.
+
+⛔ **It refuses without the private key.** Without it the handover cannot be signed, and the result
+would be a mirror of the content, not a branch of the site. It also refuses when the key is not the one
+the export's `.well-known/polis` publishes. The origin's domain is read from the export's
+`.well-known/did.json`; pass `--from-domain` when there is none.
+
+**The private residue** (private policies, theme, settings, hooks, drafts, pending comments) crosses
+when the export has it. Without it the command refuses, unless you pass `--without-private`, which
+resets every item to its default and lists each one, policies first.
+
+**Nothing is sent anywhere.** No discovery service is told, and the origin site is not changed: it
+carries on under its own key, and both sites are valid. Deploying the result is a separate step. ⚠️ Your
+export still holds the retired private key; delete it once the branch is deployed.
+
+Writes a directory named after the new address by default, `--out DIR` for another directory (which
+must be empty), or `--archive FILE` for a zip archive.
+
+**Your recovery key.** The branch also makes the key you prove the new site is yours with: the first
+time you sign in there, and whenever you lose access. ⛔ Its private half is written **outside** the new
+site, at `~/.polis/recovery/<new host>` by default (`--recovery-key PATH` for another place), with mode
+0600; the path is printed once. It never goes inside the branch output or the export, and the command
+refuses a path that already exists rather than overwrite it. The public half goes in the new site at
+`.polis/deploy/recovery.pub`, for the deploy step to set on the instance as `POLIS_RECOVERY_KEY` before
+it first starts. Sign the setup screen's challenge with [`polis recover sign`](#polis-recover-sign).
+`--custody server` (the default) is the only custody built: the instance holds the identity key and
+you hold a recovery-only key.
+
+⛔ **Refuses, writing nothing,** when the export is not a polis site, holds no private key or a key
+that isn't the one it publishes, has no origin domain (and no `--from-domain`), or has no private residue
+(without `--without-private`); when `--to` is missing, isn't an http(s) site root, or is the origin's own
+address; when both `--out` and `--archive` are given, the output directory isn't empty, or the recovery
+key path already exists; and when the new site fails a check the export passes.
+
+### `polis branch deploy`
+
+Put a site `polis branch` wrote live on a host, at the address it was branched to. Go CLI only.
+
+**Usage:**
+```bash
+polis branch deploy <branch-output> [--config FILE] [--platform NAME] [--token-file PATH]
+                    [--team TEAM] [--region REGION] [--project NAME] [--build DIR] [--wait DURATION]
+```
+
+It creates the instance and its private store, seeds the site into the store (the identity key first,
+`.well-known/polis` last), sets the instance's configuration (your recovery public key included), hands
+over the instance's deploy token, and deploys the instance's code. Then it visits the address, which
+starts the instance, and waits (`--wait`, five minutes by default, `0` to skip) for the instance to
+deploy the site's pages itself. It ends with the address and how to sign in.
+
+- **The address** comes from the branch output (`POLIS_BASE_URL` in its `.env`), so you never type it
+  twice. On a platform that gives each instance an address from its name, the name comes from the
+  address: `https://alice.vercel.app` makes the instance `alice`. For any other address, name the
+  instance with `--project`; the address is attached to it as a domain, and the DNS records to create
+  are printed.
+- **The settings** are what the branch can't know: `platform` (`vercel`), `token-file`, `team` (by id or
+  slug), `region`, and `project` (only for an address the platform doesn't make from a name). They come
+  from `--config FILE`, then the flags (a flag wins), and a value still missing is asked for at a
+  terminal. In a script, every missing value is refused by name. The config file holds those keys and
+  nothing else:
+
+  ```toml
+  # deploy.toml
+  platform   = "vercel"
+  token-file = "~/.config/polis/vercel-token"
+  team       = "my-team"
+  region     = "iad1"
+  ```
+
+- ⛔ **The token is read once from its file and never saved, printed or logged.** The file must be
+  readable by you alone (`chmod 600`), and the config names the file, never the token.
+- **The code** is the released build matching this polis version, or a local build output with
+  `--build DIR`.
+
+⛔ **Refuses, having changed nothing,** when the directory isn't a branch output (it needs
+`.well-known/polis`, the site key, `.polis/deploy/recovery.pub` and `POLIS_BASE_URL`; unpack an
+`--archive` branch first), when a setting is missing with no terminal to ask at, when the config holds
+any other key or a token itself, when the token file is readable by others or empty, and when there is no
+released build of this version and no `--build`. ⛔ **Refuses, and removes the empty instance it
+made,** when the platform didn't give the instance the branch's address, because the name is taken:
+branch again with another `--to`. ⛔ **Refuses, and leaves the instance as it was,** when the instance
+already holds a site. Each instance is set up once; after that it deploys itself every time you publish,
+so this command never redeploys it.
+
+Nothing is announced to a discovery service.
+
+### `polis branch announce`
+
+Tell your discovery service where a branched site came from, so the software of people who follow the
+original can offer them the new address. Go CLI only. Optional: the branch is valid without it.
+
+**Usage:**
+```bash
+polis register && polis branch announce
+```
+
+Run it in the branched site's directory (`POLIS_BASE_URL` set to its new address), **after** `polis
+register`. It presents the handover in the site's key history (the original's key signing over to this
+site's key, under the original's domain), and the discovery service checks it against the key it saw the
+original holding at that time, then publishes a `pub.polis.site.branched` event. The service's witness is
+kept at `.polis/ds/<service host>/branched.json`.
+
+⛔ **It shows descent, never consent:** it says this site descends from the original, not that the
+original's owner agrees, and **it changes nothing of the original's**: no follow is moved and nothing is
+frozen. ⚠️ Nothing runs it for you yet. `polis branch deploy` mentions it once, and the rest is up to you.
+
+**Refuses** when the site's key history holds no handover from another domain (it wasn't made by `polis
+branch`), when the site isn't registered with the discovery service yet, and with the service's reason when
+it declines the announcement.
+
+### Branching and deploying, end to end
+
+```bash
+# 1. On your current host, export your site with its private key (the export is a zip).
+# 2. Branch it to the new address, on your machine:
+polis branch export.zip --to https://alice.vercel.app --out ./alice
+# 3. Put it live there:
+polis branch deploy ./alice --config deploy.toml
+# 4. Open https://alice.vercel.app and sign in. Save the setup screen's challenge as challenge.txt, then:
+polis recover sign --domain alice.vercel.app --challenge challenge.txt
+```
+
+Paste the signature back into the setup screen. Then delete the export: it still holds the retired
+private key. Both sites stay valid, and the origin is unchanged.
+
+### `polis recover sign`
+
+Sign a sign-in recovery challenge with the key you hold, and print the signature to paste back. Go CLI
+only.
+
+**Usage:**
+```bash
+polis recover sign --domain HOST [--challenge FILE] [--key PATH]
+```
+
+The challenge is the message the setup or recovery screen shows under **Copy message only** (three
+lines, the first `pub.polis.recovery.challenge.v1`). The challenge JSON from `/api/recover/challenge`
+is accepted too. Give it in any of three ways:
+
+```bash
+polis recover sign --domain alice.vercel.app --challenge challenge.txt   # a file you saved it in
+pbpaste | polis recover sign --domain alice.vercel.app                   # a pipe (on Linux: xclip -o -selection clipboard)
+polis recover sign --domain alice.vercel.app                             # pasted at a terminal, then Ctrl-D
+```
+
+Where nothing is piped in and there is no terminal to paste at (an editor's or an agent's command
+runner, say), it says so and names the first two forms. The signature is made under the
+`polis-recovery` namespace, never `file`, so it can't pass as a content signature, and a content
+signature can't pass as it.
+
+- ⛔ **`--domain HOST` is required**: the site you are signing in to. A challenge for any other site is
+  refused. The challenge names a site too, but a page pretending to be yours could relay your real
+  site's challenge, so the site has to come from you.
+- **The key** defaults to `~/.polis/recovery/<host>`, where `polis branch` writes it. `--key PATH`
+  names another, for example your identity key on a site where you hold it.
+- ⛔ **It refuses anything that isn't a challenge**, so it never signs arbitrary text under the
+  recovery namespace, and it refuses a key file that others can read (`chmod 600` it).
+
+It does the same as `ssh-keygen -Y sign -n polis-recovery -f <key>` over the message, which the screen
+also shows, without needing `ssh-keygen`.
 
 ### `polis license`
 
@@ -1587,6 +1801,14 @@ consistency**, **policy file parseability**, **key/handle alignment** and **bund
 Every check is the same code the hosted actors (Patrol, Medic, Judge) run on the fleet, not a
 reimplementation that agrees with them.
 
+**Bundle registry health** (`bundle.registry`, your own site only) fails when
+`.polis/bundles/registry.json` does not parse, or when its `active_theme` or `active_shape` is not a
+fully-qualified name (`pub.polis.themes.vice`, `pub.polis.shapes.v4`) of a theme or shape the renderer can
+find: a shape under `.polis/bundles/pub.polis.core/`, a theme there, in the site's `themes/`, or in the CLI's
+own themes directory (where a legacy theme may still live). The finding names the bad value and lists what is installed, so a
+hand edit can be checked before the next render. A reserved theme (`sols`, `stardust`) is installed and
+passes: it is kept out of the theme picker, not out of the registry.
+
 **Two forms, and neither one writes anything:**
 
 ```bash
@@ -1615,8 +1837,10 @@ against the signing site's current key first, then against the key the site's pu
 was current at the record's **claimed** signing time — an attestation's `asserted`, a tag file's or a
 licence's `updated` — and the output says when a retired key did it. ⚠️ A **follow file** and a
 **blessing list** carry no signing time, so no retired key can be selected for them: they verify
-against the current key only, and for a site that has rotated, one signed before the rotation reads
-as not verifying and the output says why. (Rewriting either file re-signs it with the current key.)
+against the current key only. `polis rotate-key` re-signs both with the new key, provided each
+verified under the old one, so this only arises for a file the rotation did not re-sign: one signed
+before the rotation then reads as not verifying, and the output says why. (Rewriting either file
+re-signs it with the current key.)
 
 **It never clones.** Cloning is [`polis clone`](#polis-clone-url-target-dir)'s job, and the two
 compose:
@@ -1659,7 +1883,7 @@ them on every build. What only one form can see is said in the other:
 
 | Only a directory | Only a URL |
 |---|---|
-| **phantoms** — a file on disk the index does not list (HTTP does not list directories) | **what the edge serves** — `content.license_robots`, `content.license_rsl` |
+| **phantoms** — a file on disk the index does not list (HTTP does not list directories) | **what the edge serves** — `content.license_robots`, `content.license_rsl`, `identity.private_files_served` |
 | key files, key permissions, private policies, the bundle registry | |
 
 Those come back NOT CHECKED in the form that cannot see them, with the reason — never passed.
@@ -1703,6 +1927,27 @@ serious direction: somebody answering a licence question on your behalf.
 belongs to your host, not to you, and polis will not tell you what your terms should be. This is a
 report.
 
+#### Does the site serve anything private?
+
+A URL run asks the site for every name it must never serve — `.polis/keys/id_ed25519` and the rest of
+`.polis/`, `.env`, a `.git` or `.ssh` directory at any depth, key files such as `id_rsa` or `*.pem`,
+editor backups — including encoded spellings such as `/%2Epolis/…`, which a server that decodes before
+routing would treat as the same file. The full list is in the
+[security model](../../general/security/security-model.md#what-is-never-served).
+`identity.private_files_served` **fails** if any of them comes back: a `2xx` response that is not your
+home page, or any response holding a private key. Neither has an innocent reading. A name the server
+**refused (429), failed on (5xx) or never answered is NOT checked**, and is listed as such. It is never
+counted as "not served", and a run where nothing could be checked reports the check as not applicable.
+
+This is the check for a **self-hosted site on a static host**, which serves your directory with no
+polis server in front of it; a directory run cannot answer it, because the question is about the
+server and not the files. If it fails, fix the host first (stop it serving those names), then
+**rotate your key** with `polis rotate-key` if a key was among them: anyone could have copied it.
+
+The finding names the URL and the status only. The response is read only far enough to look for a
+key header, and is never printed or kept. Version history (`.versions/` beside a post) is public by
+design and is never asked for.
+
 **Exit status:** `0` when nothing checked was found wrong, `1` when something failed or the run could
 not start. Neither NOT CHECKED nor a warning affects the exit status — one is an honest gap, the other
 is a fact about your surroundings. Only **failed** is a defect in the site.
@@ -1732,12 +1977,13 @@ Unpublish a post or comment — a *clean break* operation that severs all ties b
 ```bash
 polis unpublish content/pub.polis.core/post/20260201/my-post.md
 polis unpublish content/pub.polis.core/comment/20260201/comment-id.md
-polis unpublish -y <path>                            # Go CLI: skip confirmation
+polis unpublish <path> --yes                         # Go CLI: skip confirmation
 polis unpublish --url <discovery-service-url>        # Go CLI: remove one discovery-service registration only
 ```
 
-**Flags (Go CLI; flags go before the path):**
-- `-y` — skip the confirmation prompt
+**Flags (Go CLI; before or after the path):**
+- `-y`, `--yes` — skip the confirmation prompt. The Bash CLI never prompts.
+- ⚠️ **Under `--json`, `-y` is required.** `--json` cannot show a prompt, so an unpublish without `-y` refuses, exits non-zero and unpublishes nothing — choosing an output format is not consent. This holds for `--url` too.
 - `--url <url>` — unpublish that exact URL at the discovery service and touch no local file — for a stale or duplicate registration
 - `--type pub.polis.post|pub.polis.comment` — the content type for `--url`, when it cannot be inferred from the URL
 
@@ -1789,7 +2035,7 @@ polis serve --help                     # show all options
 
 **Reading an exported archive offline:** unzip your `.polis` export, run `polis serve` inside it, open the printed localhost URL, and enter your message password to read your DMs in the same web UI you use hosted — no network, no CLI crypto. (For a scriptable extract, see [`polis dm decrypt`](#polis-dm) above.)
 
-**Localhost messages are read-only by default.** Direct messages are a networked feature (a message is sealed in your browser and delivered point-to-point to the recipient's running instance), and a served export is offline. So on plain localhost the messages view renders read-only: the conversation list and threads display (and password epochs unlock with your password or recovery phrase, exactly as hosted), but the composer, send, mark-read sync, and recipient-protection checks are disabled, with a *"Reading only — sending is disabled on localhost"* banner and a matching note in **Settings → Messages**. Setting or changing your message password still works offline. The `--dev` flag re-enables the compose/send UI for development and testing (delivery to a real peer still requires a reachable network). The signal is purely `window.__POLIS_HOSTED` (injected by the hosted service) plus the `--dev` override — there is no separate "archive" mode or per-site toggle.
+**Localhost messages are read-only by default.** Direct messages are a networked feature (a message is sealed in your browser and delivered point-to-point to the recipient's running instance), and a served export is offline. So on plain localhost the messages view renders read-only: the conversation list and threads display (and password epochs unlock with your password or recovery phrase, exactly as hosted), but the composer, send, mark-read sync, and recipient-protection checks are disabled, with a *"Reading only — sending is disabled on localhost"* banner and a matching note in **Settings → Messages**. Setting or changing your message password still works offline. The `--dev` flag re-enables the compose/send UI for development and testing (delivery to a real peer still requires a reachable network). The signal is the instance's capability descriptor (`/api/capabilities`): `--dev` runs the server as a reachable instance, so the messaging UI turns on, while the owner is still recognised the way a laptop always is. There is no separate "archive" mode or per-site toggle.
 
 See the [Webapp User Manual](../../webapp/user/user-manual.md) for full usage. Webapp-only and bundled-binary build instructions are in [docs/cli/README.md](../README.md).
 
@@ -1881,9 +2127,6 @@ export POLIS_BASE_URL="https://yourdomain.com"
 
 # Discovery service (optional — defaults to https://ds.polis.pub)
 export DISCOVERY_SERVICE_URL="https://ds.polis.pub"
-
-# Optional bearer token sent to the discovery service when set; requests are authenticated by your signature
-export DISCOVERY_SERVICE_KEY="your-api-key"
 ```
 
 **Bash CLI only** — directory overrides, read at startup by the bash `polis` script; the Go CLI ignores them:
@@ -1917,7 +2160,7 @@ The bash CLI's `init` also writes a `.env.example` template; the Go CLI does not
 Example `.env`:
 ```bash
 POLIS_BASE_URL=https://alice.example.com
-DISCOVERY_SERVICE_KEY=eyJhbGciOiJI...
+DISCOVERY_SERVICE_URL=https://ds.polis.pub
 ```
 
 **Security Note:** Never commit `.env` files containing secrets. The `.gitignore` that `polis init` writes
@@ -2224,8 +2467,8 @@ autoload -Uz compinit && compinit
 ⚠️ **The completion scripts lag the CLI** (`completions/polis.bash`, `completions/polis.zsh`). They do not
 offer `actor`, `attest`, `did`, `license` or `site`, nor `dm decrypt` / `dm publish-key`; and they still
 offer flags neither CLI accepts — `follow`/`unfollow --announce`, `rotate-key --delete-old-key`,
-`init --register` — plus bash-only flags (`init --posts-dir` and friends, `discover --since`,
-`unregister --force`) that the Go CLI rejects or ignores.
+`init --register` — plus bash-only flags (`init --posts-dir` and friends, `discover --since`) that the
+Go CLI rejects or ignores.
 
 ## Troubleshooting
 

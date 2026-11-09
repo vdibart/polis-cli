@@ -2,12 +2,14 @@
 package comment
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
+	pathpkg "path"
 	"regexp"
 	"strings"
 	"time"
@@ -16,10 +18,14 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
-	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	// ⚠️ ALIASED: `site` is the parameter name throughout the site-handle
+	// migration, and an unaliased import of this package shadows it.
+	sitepkg "github.com/vdibart/polis-cli/cli-go/pkg/site"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 	// Aliased: "version" collides with the many local `version := fm[...]` vars.
 	verhist "github.com/vdibart/polis-cli/cli-go/pkg/version"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 var (
@@ -43,14 +49,15 @@ const (
 	StatusDenied  = "denied"
 )
 
-// getCommentDir returns the base directory for comments of a given status.
-// Private statuses (drafts, pending, denied) go to .polis/bundles/pub.polis.core/comments/
-// Blessed comments go to content/pub.polis.core/comment/ (with YYYYMMDD date structure)
-func getCommentDir(dataDir, status string) string {
+// commentDirKey is the key of the directory holding comments of a status.
+// Private statuses (drafts, pending, denied) live under
+// .polis/bundles/pub.polis.core/comments/<status>; blessed comments under
+// content/pub.polis.core/comment/ (with YYYYMMDD date directories).
+func commentDirKey(status string) string {
 	if status == StatusBlessed {
-		return filepath.Join(dataDir, "content", "pub.polis.core", "comment")
+		return "content/pub.polis.core/comment"
 	}
-	return filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", status)
+	return ".polis/bundles/pub.polis.core/comments/" + status
 }
 
 // CommentDraft represents a comment draft before signing.
@@ -118,20 +125,27 @@ func GenerateCommentID(inReplyTo string, timestamp time.Time) string {
 }
 
 // SaveDraft saves a comment draft to the private drafts directory.
-func SaveDraft(dataDir string, draft *CommentDraft) error {
+func SaveDraft(site storage.Site, draft *CommentDraft) error {
 	// Normalize URLs to .md format (defense-in-depth)
 	draft.InReplyTo = polisurl.NormalizeToMD(draft.InReplyTo)
 	draft.RootPost = polisurl.NormalizeToMD(draft.RootPost)
 
-	draftsDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", StatusDrafts)
-	if err := site.MkdirAllPrivate(dataDir, draftsDir); err != nil {
+	draftsDir := ".polis/bundles/pub.polis.core/comments/" + StatusDrafts
+	// ⛔ MkdirAllPrivate wants a PATH — it is directories and modes, which the
+	// store has no verb for — so the key is joined onto the root here. ⚠️ It
+	// stays for a reason learned the hard way: an explicit 0700 removed because "the store
+	// handles it" shipped a world-readable .polis once already.
+	if err := sitepkg.MkdirAllPrivate(site, site.Path(draftsDir)); err != nil {
 		return fmt.Errorf("failed to create drafts directory: %w", err)
 	}
 
 	if draft.ID == "" {
 		draft.ID = GenerateCommentID(draft.InReplyTo, time.Now().UTC())
+	} else if err := lookupCommentID(draft.ID); err != nil {
+		// Refused BEFORE the uniqueness probe below, which stats the id as a path.
+		return err
 	}
-	draft.ID = ensureUniqueCommentID(dataDir, draft.ID)
+	draft.ID = ensureUniqueCommentID(site, draft.ID)
 
 	if draft.CreatedAt == "" {
 		draft.CreatedAt = time.Now().UTC().Format("2006-01-02T15:04:05Z")
@@ -146,8 +160,12 @@ func SaveDraft(dataDir string, draft *CommentDraft) error {
 	// Save as markdown with simple frontmatter
 	content := DraftContent(draft)
 
-	draftPath := filepath.Join(draftsDir, draft.ID+".md")
-	if err := os.WriteFile(draftPath, []byte(content), 0644); err != nil {
+	// ⛔ The ID becomes a path on the next line; see id_safety.go.
+	if err := validCommentID(draft.ID); err != nil {
+		return err
+	}
+	draftKey := draftsDir + "/" + draft.ID + ".md"
+	if err := site.Store().Put(context.Background(), draftKey, []byte(content)); err != nil {
 		return fmt.Errorf("failed to save draft: %w", err)
 	}
 
@@ -155,9 +173,12 @@ func SaveDraft(dataDir string, draft *CommentDraft) error {
 }
 
 // LoadDraft loads a comment draft by ID.
-func LoadDraft(dataDir, id string) (*CommentDraft, error) {
-	draftPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", StatusDrafts, id+".md")
-	data, err := os.ReadFile(draftPath)
+func LoadDraft(site storage.Site, id string) (*CommentDraft, error) {
+	if err := lookupCommentID(id); err != nil {
+		return nil, err
+	}
+	draftKey := ".polis/bundles/pub.polis.core/comments/" + StatusDrafts + "/" + id + ".md"
+	data, err := site.Store().Get(context.Background(), draftKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read draft: %w", err)
 	}
@@ -178,11 +199,11 @@ func LoadDraft(dataDir, id string) (*CommentDraft, error) {
 }
 
 // ListDrafts returns all comment drafts.
-func ListDrafts(dataDir string) ([]*CommentDraft, error) {
-	draftsDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", StatusDrafts)
-	entries, err := os.ReadDir(draftsDir)
+func ListDrafts(site storage.Site) ([]*CommentDraft, error) {
+	draftsDir := ".polis/bundles/pub.polis.core/comments/" + StatusDrafts
+	entries, err := site.Store().List(context.Background(), draftsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return []*CommentDraft{}, nil
 		}
 		return nil, fmt.Errorf("failed to read drafts directory: %w", err)
@@ -190,11 +211,11 @@ func ListDrafts(dataDir string) ([]*CommentDraft, error) {
 
 	var drafts []*CommentDraft
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+		if entry.IsDir || !strings.HasSuffix(pathpkg.Base(entry.Key), ".md") {
 			continue
 		}
-		id := strings.TrimSuffix(entry.Name(), ".md")
-		draft, err := LoadDraft(dataDir, id)
+		id := strings.TrimSuffix(pathpkg.Base(entry.Key), ".md")
+		draft, err := LoadDraft(site, id)
 		if err != nil {
 			continue // Skip invalid drafts
 		}
@@ -205,9 +226,15 @@ func ListDrafts(dataDir string) ([]*CommentDraft, error) {
 }
 
 // DeleteDraft removes a comment draft.
-func DeleteDraft(dataDir, id string) error {
-	draftPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", StatusDrafts, id+".md")
-	if err := os.Remove(draftPath); err != nil {
+func DeleteDraft(site storage.Site, id string) error {
+	if err := lookupCommentID(id); err != nil {
+		return err
+	}
+	// ⭐ One store, addressed by key. This used to build a SECOND store rooted
+	// at the file's own directory and delete by base name, because it had only
+	// a path to work from.
+	draftKey := ".polis/bundles/pub.polis.core/comments/" + StatusDrafts + "/" + id + ".md"
+	if err := site.Store().Delete(context.Background(), draftKey); err != nil {
 		return fmt.Errorf("failed to delete draft: %w", err)
 	}
 	return nil
@@ -217,7 +244,7 @@ func DeleteDraft(dataDir, id string) error {
 // Uses CLI-compatible frontmatter format with nested in-reply-to structure.
 // authorIdentity is the domain (e.g. "alice.polis.pub") written to the author frontmatter field.
 // For backward compatibility, email addresses are also accepted.
-func SignComment(dataDir string, draft *CommentDraft, authorIdentity, siteURL string, privateKey []byte, generator ...string) (*SignedComment, error) {
+func SignComment(site storage.Site, draft *CommentDraft, authorIdentity, siteURL string, privateKey []byte, generator ...string) (*SignedComment, error) {
 	gen := GetGenerator()
 	if len(generator) > 0 && generator[0] != "" {
 		gen = generator[0]
@@ -236,8 +263,11 @@ func SignComment(dataDir string, draft *CommentDraft, authorIdentity, siteURL st
 	commentID := draft.ID
 	if commentID == "" {
 		commentID = GenerateCommentID(draft.InReplyTo, timestamp)
+	} else if err := lookupCommentID(commentID); err != nil {
+		// Refused BEFORE the uniqueness probe below, which stats the id as a path.
+		return nil, err
 	}
-	commentID = ensureUniqueCommentID(dataDir, commentID)
+	commentID = ensureUniqueCommentID(site, commentID)
 	dateDir := timestamp.Format("20060102")
 	// Canonical source-path URL (content/pub.polis.core/comment/...), matching
 	// where PublishComment writes the signed .md — so the comment self-declares
@@ -273,7 +303,7 @@ func SignComment(dataDir string, draft *CommentDraft, authorIdentity, siteURL st
 	// commenter's content on the commenter's domain. That falls out of the
 	// architecture; there is no special case here beyond reading this site's
 	// own licence rather than the post author's.
-	licenseYAML, err := commentLicenseFrontmatter(dataDir, siteURL)
+	licenseYAML, err := commentLicenseFrontmatter(site, siteURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve licence terms: %w", err)
 	}
@@ -351,21 +381,25 @@ signature: %s
 
 	finalContent := finalFrontmatter + "\n\n" + content
 
-	// Create pending directory (private)
-	pendingDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", StatusPending)
-	if err := site.MkdirAllPrivate(dataDir, pendingDir); err != nil {
+	// Create pending directory (private). ⛔ MkdirAllPrivate wants a path: it
+	// is directories and modes, which the store has no verb for, and the
+	// explicit 0700 stays for the reason given in SaveDraft.
+	pendingDir := commentDirKey(StatusPending)
+	if err := sitepkg.MkdirAllPrivate(site, site.Path(pendingDir)); err != nil {
 		return nil, fmt.Errorf("failed to create pending directory: %w", err)
 	}
 
 	// Write to pending
-	pendingPath := filepath.Join(pendingDir, commentID+".md")
-	if err := os.WriteFile(pendingPath, []byte(finalContent), 0644); err != nil {
+	if err := validCommentID(commentID); err != nil {
+		return nil, err
+	}
+	if err := site.Store().Put(context.Background(), pendingDir+"/"+commentID+".md", []byte(finalContent)); err != nil {
 		return nil, fmt.Errorf("failed to write pending comment: %w", err)
 	}
 
 	// Delete draft
 	if draft.ID != "" {
-		_ = DeleteDraft(dataDir, draft.ID)
+		_ = DeleteDraft(site, draft.ID)
 	}
 
 	meta := &CommentMeta{
@@ -392,22 +426,31 @@ signature: %s
 // When moving to blessed status, uses date-based directory structure (content/pub.polis.core/comment/YYYYMMDD/).
 // Other statuses use .polis/bundles/pub.polis.core/comments/<status>/.
 // When moving to blessed, also adds the comment to index.jsonl.
-func MoveComment(dataDir, commentID, fromStatus, toStatus string) error {
+func MoveComment(site storage.Site, commentID, fromStatus, toStatus string) error {
+	if err := lookupCommentID(commentID); err != nil {
+		return err
+	}
+	if err := knownStatus(fromStatus); err != nil {
+		return err
+	}
+	if err := knownStatus(toStatus); err != nil {
+		return err
+	}
 	// Determine source path
-	var fromPath string
+	var fromKey string
 	if fromStatus == StatusBlessed {
 		// Need to find the blessed comment in date directories
-		found, foundPath := findBlessedComment(dataDir, commentID)
+		found, foundKey := findBlessedComment(site, commentID)
 		if !found {
 			return fmt.Errorf("comment not found: %s", commentID)
 		}
-		fromPath = foundPath
+		fromKey = foundKey
 	} else {
-		fromPath = filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", fromStatus, commentID+".md")
+		fromKey = ".polis/bundles/pub.polis.core/comments/" + fromStatus + "/" + commentID + ".md"
 	}
 
 	// Read source file
-	data, err := os.ReadFile(fromPath)
+	data, err := site.Store().Get(context.Background(), fromKey)
 	if err != nil {
 		return fmt.Errorf("failed to read comment: %w", err)
 	}
@@ -416,7 +459,7 @@ func MoveComment(dataDir, commentID, fromStatus, toStatus string) error {
 	fm := ParseFrontmatter(content)
 
 	// Determine destination path
-	var toPath string
+	var toKey string
 	var relativePath string // For public.jsonl entry
 	if toStatus == StatusBlessed {
 		// Extract timestamp from frontmatter to determine date directory
@@ -432,27 +475,32 @@ func MoveComment(dataDir, commentID, fromStatus, toStatus string) error {
 			}
 		}
 		dateDir := timestamp.Format("20060102")
-		toDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment", dateDir)
-		if err := os.MkdirAll(toDir, 0755); err != nil {
-			return fmt.Errorf("failed to create directory: %w", err)
-		}
-		toPath = filepath.Join(toDir, commentID+".md")
-		relativePath = filepath.ToSlash(filepath.Join("content", "pub.polis.core", "comment", dateDir, commentID+".md"))
+		toKey = "content/pub.polis.core/comment/" + dateDir + "/" + commentID + ".md"
+		relativePath = toKey
 	} else {
-		toDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", toStatus)
-		if err := site.MkdirAllPrivate(dataDir, toDir); err != nil {
+		// ⛔ MkdirAllPrivate STAYS, and this is deliberate. The store's Put
+		// does create .polis parents privately — that is what At() guarantees
+		// and two tests assert it — but this is the directory that holds a
+		// tenant's unpublished comments, and the lesson of the append conversion was that an
+		// explicit 0700 removed "because the store handles it" shipped a
+		// world-readable .polis with nothing at any layer catching it. The
+		// call is idempotent and cheap; the property is not recoverable.
+		toDir := site.Path(".polis", "bundles", "pub.polis.core", "comments", toStatus)
+		if err := sitepkg.MkdirAllPrivate(site, toDir); err != nil {
 			return fmt.Errorf("failed to create directory: %w", err)
 		}
-		toPath = filepath.Join(toDir, commentID+".md")
+		toKey = ".polis/bundles/pub.polis.core/comments/" + toStatus + "/" + commentID + ".md"
 	}
 
 	// Write to destination
-	if err := os.WriteFile(toPath, data, 0644); err != nil {
+	if err := site.Store().Put(context.Background(), toKey, data); err != nil {
 		return fmt.Errorf("failed to write comment: %w", err)
 	}
 
-	// Remove source
-	if err := os.Remove(fromPath); err != nil {
+	// Remove source. ⭐ One store, addressed by key — this used to build a
+	// second store rooted at the source file's own DIRECTORY and delete by
+	// base name, because it had only a path to work from.
+	if err := site.Store().Delete(context.Background(), fromKey); err != nil {
 		return fmt.Errorf("failed to remove source comment: %w", err)
 	}
 
@@ -486,7 +534,7 @@ func MoveComment(dataDir, commentID, fromStatus, toStatus string) error {
 
 		// Add to public.jsonl
 		if err := metadata.AppendCommentToIndex(
-			dataDir,
+			site,
 			relativePath,
 			fm["title"],
 			published,
@@ -499,7 +547,7 @@ func MoveComment(dataDir, commentID, fromStatus, toStatus string) error {
 
 		// Add to blessed-comments.json so rendered posts show the comment
 		postPath := extractPostPath(inReplyToURL)
-		if err := metadata.AddBlessedComment(dataDir, postPath, metadata.BlessedComment{
+		if err := metadata.AddBlessedComment(site, postPath, metadata.BlessedComment{
 			URL:     commentURL,
 			Version: version,
 		}); err != nil {
@@ -508,7 +556,7 @@ func MoveComment(dataDir, commentID, fromStatus, toStatus string) error {
 		}
 
 		// Update manifest comment count
-		if err := publish.UpdateManifest(dataDir); err != nil {
+		if err := publish.UpdateManifest(site); err != nil {
 			// Log but don't fail
 			_ = err
 		}
@@ -521,10 +569,13 @@ func MoveComment(dataDir, commentID, fromStatus, toStatus string) error {
 // renders an HTML version, appends it to public.jsonl, and updates the manifest.
 // This makes the comment publicly accessible on the commenter's site regardless
 // of blessing status (matching bash CLI behavior).
-func PublishComment(dataDir, commentID string) error {
+func PublishComment(site storage.Site, commentID string) error {
+	if err := lookupCommentID(commentID); err != nil {
+		return err
+	}
 	// Read the pending comment
-	pendingPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", StatusPending, commentID+".md")
-	data, err := os.ReadFile(pendingPath)
+	pendingKey := ".polis/bundles/pub.polis.core/comments/" + StatusPending + "/" + commentID + ".md"
+	data, err := site.Store().Get(context.Background(), pendingKey)
 	if err != nil {
 		return fmt.Errorf("failed to read pending comment: %w", err)
 	}
@@ -541,15 +592,12 @@ func PublishComment(dataDir, commentID string) error {
 	}
 	dateDir := timestamp.Format("20060102")
 
-	// Create target directory: content/pub.polis.core/comment/YYYYMMDD/
-	targetDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment", dateDir)
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return fmt.Errorf("failed to create comments directory: %w", err)
-	}
+	// The public key: content/pub.polis.core/comment/YYYYMMDD/<id>.md. It is
+	// also the index path.
+	relativePath := commentDirKey(StatusBlessed) + "/" + dateDir + "/" + commentID + ".md"
 
 	// Copy markdown file to public location
-	mdPath := filepath.Join(targetDir, commentID+".md")
-	if err := os.WriteFile(mdPath, data, 0644); err != nil {
+	if err := site.Store().Put(context.Background(), relativePath, data); err != nil {
 		return fmt.Errorf("failed to write public comment: %w", err)
 	}
 
@@ -557,15 +605,12 @@ func PublishComment(dataDir, commentID string) error {
 	// PublishComment(). Writing raw HTML here would produce untemplated output
 	// that gets overwritten anyway.
 
-	// Append to public.jsonl
-	relativePath := filepath.ToSlash(filepath.Join("content", "pub.polis.core", "comment", dateDir, commentID+".md"))
-
 	// Seed the version history side-car (only if absent, never clobber) so a
 	// later RepublishComment can diff against this base version. The base body is
 	// the canonicalized content without frontmatter — identical to what republish
 	// recomputes as the "old" content for its diff.
-	versionsPath := verhist.GetVersionsFilePath(mdPath, ".versions")
-	if _, statErr := os.Stat(versionsPath); os.IsNotExist(statErr) {
+	versionsKey := verhist.VersionsKey(relativePath, ".versions")
+	if _, statErr := site.Store().Stat(context.Background(), versionsKey); errors.Is(statErr, fs.ErrNotExist) {
 		baseHash := strings.TrimPrefix(fm["current-version"], "sha256:")
 		if baseHash == "" {
 			baseHash = strings.TrimPrefix(fm["comment_version"], "sha256:")
@@ -576,7 +621,7 @@ func PublishComment(dataDir, commentID string) error {
 				basePublished = timestamp.Format("2006-01-02T15:04:05Z")
 			}
 			baseBody := CanonicalizeContent(StripFrontmatter(content))
-			if err := verhist.InitializeHistory(versionsPath, relativePath, baseBody, baseHash, basePublished); err != nil {
+			if err := verhist.InitializeHistory(site, versionsKey, relativePath, baseBody, baseHash, basePublished); err != nil {
 				_ = err // non-fatal; version history is best-effort
 			}
 		}
@@ -594,7 +639,7 @@ func PublishComment(dataDir, commentID string) error {
 	}
 
 	if err := metadata.AppendCommentToIndex(
-		dataDir,
+		site,
 		relativePath,
 		fm["title"],
 		fm["published"],
@@ -606,7 +651,7 @@ func PublishComment(dataDir, commentID string) error {
 	}
 
 	// Update manifest comment count
-	if err := publish.UpdateManifest(dataDir); err != nil {
+	if err := publish.UpdateManifest(site); err != nil {
 		_ = err
 	}
 
@@ -615,28 +660,38 @@ func PublishComment(dataDir, commentID string) error {
 
 // FindBlessedComment searches for a blessed comment in the date-based directory structure.
 // Structure: content/pub.polis.core/comment/YYYYMMDD/comment-id.md
-// Returns (found, absolutePath).
-func FindBlessedComment(dataDir, commentID string) (bool, string) {
-	return findBlessedComment(dataDir, commentID)
+// Returns (found, key): the site-relative key, never an absolute path.
+func FindBlessedComment(site storage.Site, commentID string) (bool, string) {
+	return findBlessedComment(site, commentID)
 }
 
 // findBlessedComment is the internal implementation.
-func findBlessedComment(dataDir, commentID string) (bool, string) {
-	commentsDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment")
+// findBlessedComment reports whether a blessed comment exists, and its KEY.
+//
+// ⭐ A KEY, NOT A PATH: its one caller used the result to read and then delete
+// the file, and both go through the store now. ⚠️ The traversal guard stays
+// first — a traversing id is simply not a comment of this site, and that must
+// be decided before anything is joined.
+func findBlessedComment(site storage.Site, commentID string) (bool, string) {
+	if lookupCommentID(commentID) != nil {
+		return false, ""
+	}
+	const commentsKey = "content/pub.polis.core/comment"
 
 	// Walk through date directories (YYYYMMDD format)
-	dateDirs, err := os.ReadDir(commentsDir)
+	ctx := context.Background()
+	dateDirs, err := site.Store().List(ctx, commentsKey)
 	if err != nil {
 		return false, ""
 	}
 
 	for _, dateDir := range dateDirs {
-		if !dateDir.IsDir() {
+		if !dateDir.IsDir {
 			continue
 		}
-		commentPath := filepath.Join(commentsDir, dateDir.Name(), commentID+".md")
-		if _, err := os.Stat(commentPath); err == nil {
-			return true, commentPath
+		key := commentsKey + "/" + pathpkg.Base(dateDir.Key) + "/" + commentID + ".md"
+		if _, err := site.Store().Stat(ctx, key); err == nil {
+			return true, key
 		}
 	}
 
@@ -647,15 +702,18 @@ func findBlessedComment(dataDir, commentID string) (bool, string) {
 // For blessed status, searches the date-based public comments directory.
 // For other statuses, searches the private .polis/comments/<status>/ directory.
 // Parses CLI-compatible frontmatter format.
-func ListComments(dataDir, status string) ([]*CommentMeta, error) {
+func ListComments(site storage.Site, status string) ([]*CommentMeta, error) {
+	if err := knownStatus(status); err != nil {
+		return nil, err
+	}
 	if status == StatusBlessed {
-		return listBlessedComments(dataDir)
+		return listBlessedComments(site)
 	}
 
-	commentsDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", status)
-	entries, err := os.ReadDir(commentsDir)
+	commentsDir := ".polis/bundles/pub.polis.core/comments/" + status
+	entries, err := site.Store().List(context.Background(), commentsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return []*CommentMeta{}, nil
 		}
 		return nil, fmt.Errorf("failed to read comments directory: %w", err)
@@ -663,12 +721,12 @@ func ListComments(dataDir, status string) ([]*CommentMeta, error) {
 
 	var comments []*CommentMeta
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+		if entry.IsDir || !strings.HasSuffix(pathpkg.Base(entry.Key), ".md") {
 			continue
 		}
 
-		commentPath := filepath.Join(commentsDir, entry.Name())
-		data, err := os.ReadFile(commentPath)
+		commentKey := commentsDir + "/" + pathpkg.Base(entry.Key)
+		data, err := site.Store().Get(context.Background(), commentKey)
 		if err != nil {
 			continue
 		}
@@ -709,7 +767,7 @@ func ListComments(dataDir, status string) ([]*CommentMeta, error) {
 		}
 
 		meta := &CommentMeta{
-			ID:             strings.TrimSuffix(entry.Name(), ".md"),
+			ID:             strings.TrimSuffix(pathpkg.Base(entry.Key), ".md"),
 			Title:          fm["title"],
 			CommentURL:     fm["comment_url"], // May be empty for CLI-created comments
 			CommentVersion: version,
@@ -730,44 +788,43 @@ func ListComments(dataDir, status string) ([]*CommentMeta, error) {
 // listBlessedComments walks the date-based directory structure to find all blessed comments.
 // Structure: comments/YYYYMMDD/comment-id.md
 // Parses CLI-compatible frontmatter format.
-func listBlessedComments(dataDir string) ([]*CommentMeta, error) {
+func listBlessedComments(site storage.Site) ([]*CommentMeta, error) {
 	var comments []*CommentMeta
-	commentsDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment")
+	commentsDir := "content/pub.polis.core/comment"
 
 	// Walk through date directories (YYYYMMDD format)
-	dateDirs, err := os.ReadDir(commentsDir)
+	dateDirs, err := site.Store().List(context.Background(), commentsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return []*CommentMeta{}, nil
 		}
 		return nil, fmt.Errorf("failed to read comments directory: %w", err)
 	}
 
 	for _, dateDir := range dateDirs {
-		if !dateDir.IsDir() {
+		if !dateDir.IsDir {
 			continue
 		}
-		datePath := filepath.Join(commentsDir, dateDir.Name())
+		datePath := commentsDir + "/" + pathpkg.Base(dateDir.Key)
 
 		// List comment files in this date directory
-		files, err := os.ReadDir(datePath)
+		files, err := site.Store().List(context.Background(), datePath)
 		if err != nil {
 			continue
 		}
 
 		for _, file := range files {
-			if file.IsDir() || !strings.HasSuffix(file.Name(), ".md") {
+			if file.IsDir || !strings.HasSuffix(pathpkg.Base(file.Key), ".md") {
 				continue
 			}
 
 			// Skip comments that still exist in pending (published-but-pending, not yet blessed)
-			pendingPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", StatusPending, file.Name())
-			if _, err := os.Stat(pendingPath); err == nil {
+			pendingKey := commentDirKey(StatusPending) + "/" + pathpkg.Base(file.Key)
+			if _, err := site.Store().Stat(context.Background(), pendingKey); err == nil {
 				continue
 			}
 
-			commentPath := filepath.Join(datePath, file.Name())
-			data, err := os.ReadFile(commentPath)
+			data, err := site.Store().Get(context.Background(), file.Key)
 			if err != nil {
 				continue
 			}
@@ -808,7 +865,7 @@ func listBlessedComments(dataDir string) ([]*CommentMeta, error) {
 			}
 
 			meta := &CommentMeta{
-				ID:             strings.TrimSuffix(file.Name(), ".md"),
+				ID:             strings.TrimSuffix(pathpkg.Base(file.Key), ".md"),
 				Title:          fm["title"],
 				CommentURL:     fm["comment_url"], // May be empty for CLI-created comments
 				CommentVersion: version,
@@ -831,20 +888,26 @@ func listBlessedComments(dataDir string) ([]*CommentMeta, error) {
 // For blessed status, searches the date-based public directory.
 // For other statuses, uses the private .polis/comments/<status>/ directory.
 // Parses CLI-compatible frontmatter format.
-func GetComment(dataDir, commentID, status string) (*SignedComment, error) {
-	var commentPath string
+func GetComment(site storage.Site, commentID, status string) (*SignedComment, error) {
+	if err := lookupCommentID(commentID); err != nil {
+		return nil, err
+	}
+	if err := knownStatus(status); err != nil {
+		return nil, err
+	}
+	var commentKey string
 
 	if status == StatusBlessed {
-		found, foundPath := findBlessedComment(dataDir, commentID)
+		found, foundKey := findBlessedComment(site, commentID)
 		if !found {
 			return nil, fmt.Errorf("comment not found: %s", commentID)
 		}
-		commentPath = foundPath
+		commentKey = foundKey
 	} else {
-		commentPath = filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", status, commentID+".md")
+		commentKey = ".polis/bundles/pub.polis.core/comments/" + status + "/" + commentID + ".md"
 	}
 
-	data, err := os.ReadFile(commentPath)
+	data, err := site.Store().Get(context.Background(), commentKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read comment: %w", err)
 	}
@@ -1024,7 +1087,10 @@ func extractSlugFromURL(url string) string {
 // holds it; do not change one without the other.
 func escapeYAMLTitle(s string) string {
 	needsQuoting := false
-	if strings.HasPrefix(s, " ") || strings.HasSuffix(s, " ") {
+	// ANY leading or trailing whitespace, not only a space: a tab-led title
+	// is reachable (`# <tab>Title` survives ExtractTitle), and the frontmatter
+	// parser trims an unquoted value, so an unquoted tab was lost.
+	if s != strings.TrimSpace(s) {
 		needsQuoting = true
 	} else if strings.Contains(s, ": ") || strings.HasSuffix(s, ":") {
 		needsQuoting = true
@@ -1135,27 +1201,27 @@ func unquoteYAMLTitle(s string) string {
 
 // ensureUniqueCommentID checks for comment ID collisions across all status directories.
 // Appends -2, -3, etc. if a collision is found.
-func ensureUniqueCommentID(dataDir, commentID string) string {
+func ensureUniqueCommentID(site storage.Site, commentID string) string {
 	candidate := commentID
 	suffix := 2
 	for {
 		collision := false
 		// Check all private status dirs
 		for _, status := range []string{StatusDrafts, StatusPending, StatusDenied} {
-			path := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", status, candidate+".md")
-			if _, err := os.Stat(path); err == nil {
+			key := commentDirKey(status) + "/" + candidate + ".md"
+			if _, err := site.Store().Stat(context.Background(), key); err == nil {
 				collision = true
 				break
 			}
 		}
 		// Check blessed (public) comments date dirs
 		if !collision {
-			commentsDir := filepath.Join(dataDir, "content", "pub.polis.core", "comment")
-			if dateDirs, err := os.ReadDir(commentsDir); err == nil {
+			commentsDir := "content/pub.polis.core/comment"
+			if dateDirs, err := site.Store().List(context.Background(), commentsDir); err == nil {
 				for _, dd := range dateDirs {
-					if dd.IsDir() {
-						path := filepath.Join(commentsDir, dd.Name(), candidate+".md")
-						if _, err := os.Stat(path); err == nil {
+					if dd.IsDir {
+						key := commentsDir + "/" + pathpkg.Base(dd.Key) + "/" + candidate + ".md"
+						if _, err := site.Store().Stat(context.Background(), key); err == nil {
 							collision = true
 							break
 						}

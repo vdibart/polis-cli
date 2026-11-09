@@ -2,6 +2,9 @@ package tailor
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,7 +148,7 @@ func createCurrentSite(t *testing.T) string {
 	// keyring.json, not a signed block, so the fixture's fake key is fine).
 	kr := &dm.Keyring{}
 	kr.AddBootstrapEpoch()
-	kr.Save(dm.DMDir(dir))
+	kr.Save(storage.At(dir))
 
 	// Webapp config (no deprecated view_mode)
 	os.MkdirAll(filepath.Join(dir, ".polis", "webapp"), 0700)
@@ -381,13 +384,13 @@ func TestDiagnoseCurrentSite(t *testing.T) {
 	// bundle-reference-payload + registry-integrity checks pass — a fully-
 	// init'd site has both; createCurrentSite is intentionally minimal
 	// otherwise so per-check fixtures can build on it.
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
-	if err := bundle.SetActiveThemeName(dir, "vice"); err != nil {
+	if err := bundle.SetActiveThemeName(storage.At(dir), "vice"); err != nil {
 		t.Fatalf("SetActiveThemeName: %v", err)
 	}
-	if err := bundle.SetActiveShapeName(dir, "v4"); err != nil {
+	if err := bundle.SetActiveShapeName(storage.At(dir), "v4"); err != nil {
 		t.Fatalf("SetActiveShapeName: %v", err)
 	}
 	result := Diagnose(dir)
@@ -783,8 +786,8 @@ func TestDMDirectories_Apply(t *testing.T) {
 
 func TestPolicyContentConverge_Diagnose(t *testing.T) {
 	dir := createCurrentSite(t)
-	// Overwrite with old/drifted content
-	os.WriteFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"), []byte(`{"version":1}`+"\n"+`{"active":true,"policy":"allow pub.polis.post from all"}`+"\n"), 0600)
+	// Overwrite with a past default (0.61's v1 private file)
+	os.WriteFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"), []byte(`{"version":1,"generator":"polis-cli-go/0.61.0"}`+"\n"), 0600)
 
 	result := checkPolicyContentConverge(&runContext{siteDir: dir, dryRun: true})
 	if result.Status != StatusFail {
@@ -794,9 +797,19 @@ func TestPolicyContentConverge_Diagnose(t *testing.T) {
 
 func TestPolicyContentConverge_Apply(t *testing.T) {
 	dir := createCurrentSite(t)
-	// Overwrite both files with old content
-	os.WriteFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"), []byte(`{"version":1}`+"\n"+`{"active":true,"policy":"deny all from all"}`+"\n"), 0600)
-	os.WriteFile(filepath.Join(dir, "policies", "rules.jsonl"), []byte(`{"version":1}`+"\n"), 0644)
+	// Overwrite both files with past defaults (0.57's v1 files)
+	os.WriteFile(filepath.Join(dir, ".polis", "policies", "rules.jsonl"), []byte(`{"version":1,"generator":"polis-cli-go/0.57.0"}`+"\n"+
+		`{"active":true,"policy":"allow pub.polis.post from all"}`+"\n"+
+		`{"active":true,"policy":"allow pub.polis.comment from all"}`+"\n"+
+		`{"active":true,"policy":"allow pub.polis.follow from all"}`+"\n"+
+		`{"active":true,"policy":"allow pub.polis.site from all"}`+"\n"+
+		`{"active":true,"policy":"allow pub.polis.dm from following"}`+"\n"+
+		`{"active":true,"policy":"deny pub.polis.dm from all"}`+"\n"+
+		`{"active":true,"policy":"omit pub.polis.notification from self"}`+"\n"), 0600)
+	os.WriteFile(filepath.Join(dir, "policies", "rules.jsonl"), []byte(`{"version":1,"generator":"polis-cli-go/0.57.0"}`+"\n"+
+		`{"active":true,"policy":"emit pub.polis.comment.blessing from self"}`+"\n"+
+		`{"active":true,"policy":"emit pub.polis.comment.blessing from following"}`+"\n"+
+		`{"active":true,"policy":"emit pub.polis.comment.blessing from thread-blessed"}`+"\n"), 0644)
 
 	result := checkPolicyContentConverge(&runContext{siteDir: dir, dryRun: false})
 	if result.Status != StatusFail {
@@ -905,7 +918,7 @@ func TestStaleScopedFeed_Diagnose(t *testing.T) {
 	}
 
 	// Dry run should NOT remove files
-	if _, err := os.Stat(filepath.Join(stateDir, "pub.polis.feed.followers.jsonl")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(stateDir, "pub.polis.feed.followers.jsonl")); errors.Is(err, fs.ErrNotExist) {
 		t.Error("Diagnose should not remove files")
 	}
 }
@@ -925,15 +938,15 @@ func TestStaleScopedFeed_Apply(t *testing.T) {
 	}
 
 	// Deprecated files removed
-	if _, err := os.Stat(filepath.Join(stateDir, "pub.polis.feed.followers.jsonl")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(stateDir, "pub.polis.feed.followers.jsonl")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("pub.polis.feed.followers.jsonl should be removed")
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, "pub.polis.feed.me.jsonl")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(stateDir, "pub.polis.feed.me.jsonl")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("pub.polis.feed.me.jsonl should be removed")
 	}
 
 	// Global preserved
-	if _, err := os.Stat(filepath.Join(stateDir, "pub.polis.feed.global.jsonl")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(stateDir, "pub.polis.feed.global.jsonl")); errors.Is(err, fs.ErrNotExist) {
 		t.Error("pub.polis.feed.global.jsonl should NOT be removed")
 	}
 }
@@ -1040,7 +1053,7 @@ func TestLegacyFeedScaffolding_Diagnose(t *testing.T) {
 		t.Errorf("expected 2 actions (dir + bundle.json), got %d", len(result.Actions))
 	}
 
-	if _, err := os.Stat(filepath.Join(dir, "content", "pub.polis.core", "feed")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "content", "pub.polis.core", "feed")); errors.Is(err, fs.ErrNotExist) {
 		t.Error("Diagnose should not remove dir")
 	}
 	b, _ := bundle.LoadBundle(filepath.Join(dir, "content", "pub.polis.core", "bundle.json"))
@@ -1058,7 +1071,7 @@ func TestLegacyFeedScaffolding_Apply(t *testing.T) {
 		t.Errorf("expected fail (applied), got %s: %s", result.Status, result.Message)
 	}
 
-	if _, err := os.Stat(filepath.Join(dir, "content", "pub.polis.core", "feed")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "content", "pub.polis.core", "feed")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("legacy feed dir should be removed")
 	}
 	b, _ := bundle.LoadBundle(filepath.Join(dir, "content", "pub.polis.core", "bundle.json"))
@@ -1084,10 +1097,10 @@ func TestLegacyFeedScaffolding_NonEmptyDirIsFlagged(t *testing.T) {
 	}
 
 	// Non-empty dir must be left in place
-	if _, err := os.Stat(feedDir); os.IsNotExist(err) {
+	if _, err := os.Stat(feedDir); errors.Is(err, fs.ErrNotExist) {
 		t.Error("non-empty legacy feed dir should NOT be removed")
 	}
-	if _, err := os.Stat(filepath.Join(feedDir, "unexpected.txt")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(feedDir, "unexpected.txt")); errors.Is(err, fs.ErrNotExist) {
 		t.Error("unexpected file inside feed dir should be preserved")
 	}
 	// Action should be a flag, not a remove
@@ -1123,11 +1136,11 @@ func TestLegacyFeedScaffolding_Clean(t *testing.T) {
 // registry survived the 2.0 bundle update without being migrated.
 func setStudio13PreRenameRegistry(t *testing.T, dir, shape string) {
 	t.Helper()
-	if err := bundle.SetActiveThemeName(dir, "studio13"); err != nil {
+	if err := bundle.SetActiveThemeName(storage.At(dir), "studio13"); err != nil {
 		t.Fatalf("SetActiveThemeName(studio13): %v", err)
 	}
 	if shape != "" {
-		if err := bundle.SetActiveShapeName(dir, shape); err != nil {
+		if err := bundle.SetActiveShapeName(storage.At(dir), shape); err != nil {
 			t.Fatalf("SetActiveShapeName(%q): %v", shape, err)
 		}
 	}
@@ -1146,7 +1159,7 @@ func TestCheckStudio13RenameMigration_BlogMigrates(t *testing.T) {
 	}
 
 	// Registry actually updated.
-	got, err := bundle.GetActiveThemeName(dir)
+	got, err := bundle.GetActiveThemeName(storage.At(dir))
 	if err != nil {
 		t.Fatalf("GetActiveThemeName: %v", err)
 	}
@@ -1186,7 +1199,7 @@ func TestCheckStudio13RenameMigration_EmptyShapeDoesNotMigrate(t *testing.T) {
 	if result.Status != StatusPass {
 		t.Fatalf("expected Pass (no migration on v4 default), got %s: %s", result.Status, result.Message)
 	}
-	got, _ := bundle.GetActiveThemeName(dir)
+	got, _ := bundle.GetActiveThemeName(storage.At(dir))
 	if got != "studio13" {
 		t.Errorf("active_theme = %q, want studio13 (unchanged)", got)
 	}
@@ -1203,7 +1216,7 @@ func TestCheckStudio13RenameMigration_StreamNotMigrated(t *testing.T) {
 	if result.Status != StatusPass {
 		t.Fatalf("expected Pass for v4 tenant (no migration), got %s: %s", result.Status, result.Message)
 	}
-	got, _ := bundle.GetActiveThemeName(dir)
+	got, _ := bundle.GetActiveThemeName(storage.At(dir))
 	if got != "studio13" {
 		t.Errorf("registry must be unchanged on v4; active_theme = %q, want studio13", got)
 	}
@@ -1222,7 +1235,7 @@ func TestCheckStudio13RenameMigration_DryRun(t *testing.T) {
 	}
 
 	// Registry unchanged under dry-run.
-	got, _ := bundle.GetActiveThemeName(dir)
+	got, _ := bundle.GetActiveThemeName(storage.At(dir))
 	if got != "studio13" {
 		t.Errorf("dry-run should not mutate registry; active_theme = %q, want studio13", got)
 	}
@@ -1230,7 +1243,7 @@ func TestCheckStudio13RenameMigration_DryRun(t *testing.T) {
 
 func TestCheckStudio13RenameMigration_NotStudio13(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.SetActiveThemeName(dir, "vice"); err != nil {
+	if err := bundle.SetActiveThemeName(storage.At(dir), "vice"); err != nil {
 		t.Fatalf("SetActiveThemeName(vice): %v", err)
 	}
 
@@ -1284,7 +1297,7 @@ func TestCheckOrphanedThemeDirs_ReapsOrphan(t *testing.T) {
 	// createCurrentSite doesn't install the bundle reference payload — it
 	// only writes a valid bundle.json and minimal structure. Seed the
 	// registry via EnsureReferencePayload so theme_versions is populated.
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	orphanDir := plantOrphanThemeDir(t, dir, "stale-orphan")
@@ -1296,14 +1309,14 @@ func TestCheckOrphanedThemeDirs_ReapsOrphan(t *testing.T) {
 	if !strings.Contains(result.Message, "stale-orphan") {
 		t.Errorf("message should name reaped orphan; got: %s", result.Message)
 	}
-	if _, err := os.Stat(orphanDir); !os.IsNotExist(err) {
+	if _, err := os.Stat(orphanDir); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("orphan dir must be removed; stat = %v", err)
 	}
 }
 
 func TestCheckOrphanedThemeDirs_CleanSitePassesNoOp(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 
@@ -1315,7 +1328,7 @@ func TestCheckOrphanedThemeDirs_CleanSitePassesNoOp(t *testing.T) {
 
 func TestCheckOrphanedThemeDirs_DryRunPreservesDisk(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	orphanDir := plantOrphanThemeDir(t, dir, "orphan-dry")
@@ -1334,7 +1347,7 @@ func TestCheckOrphanedThemeDirs_DryRunPreservesDisk(t *testing.T) {
 
 func TestCheckOrphanedThemeDirs_DoesNotTouchDeclared(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	// vice is a declared theme — must survive the check.
@@ -1351,7 +1364,7 @@ func TestCheckOrphanedThemeDirs_DoesNotTouchDeclared(t *testing.T) {
 
 func TestCheckOrphanedThemeDirs_SkipsWhenRegistryMissing(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	orphanDir := plantOrphanThemeDir(t, dir, "orphan-no-reg")
@@ -1386,14 +1399,14 @@ func TestCheckBundleReferencePayload_DryRunPreservesDisk(t *testing.T) {
 	if result.Status != StatusFail {
 		t.Fatalf("dry-run should report fail (intended install), got %s", result.Status)
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".polis", "bundles", "registry.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, ".polis", "bundles", "registry.json")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("dry-run must not write registry.json; stat = %v", err)
 	}
 }
 
 func TestCheckBundleReferencePayload_Idempotent(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	result := checkBundleReferencePayload(&runContext{siteDir: dir, dryRun: false})
@@ -1413,7 +1426,7 @@ func TestCheckLegacyContentPath_MigratesOldTree(t *testing.T) {
 	if result.Status != StatusFail {
 		t.Fatalf("expected fail (migration ran), got %s: %s", result.Status, result.Message)
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".polis", "content")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, ".polis", "content")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf(".polis/content should be migrated away; stat = %v", err)
 	}
 	moved := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "posts", "marker.txt")
@@ -1469,7 +1482,7 @@ func TestCheckRegistryMigration_MovesActiveThemeOutOfWellKnown(t *testing.T) {
 	}
 
 	// Registry should now have the FQN-qualified active_theme.
-	reg, err := bundle.LoadRegistry(dir)
+	reg, err := bundle.LoadRegistry(storage.At(dir))
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
@@ -1527,7 +1540,7 @@ func TestCheckBundleActiveFields_StripsBothFiles(t *testing.T) {
 	os.WriteFile(wkPath, out, 0644)
 
 	// Install reference payload so registry.json exists (then inject legacy active).
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	regPath := filepath.Join(dir, ".polis", "bundles", "registry.json")
@@ -1580,7 +1593,7 @@ func TestCheckBundleActiveFields_CleanSitePasses(t *testing.T) {
 
 func TestCheckNotificationRulesMigration_MovesRules(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	// Inject a legacy per-type notification rule into bundle.json.
@@ -1606,7 +1619,7 @@ func TestCheckNotificationRulesMigration_MovesRules(t *testing.T) {
 	}
 
 	// Verify rule arrived in registry.
-	reg, err := bundle.LoadRegistry(dir)
+	reg, err := bundle.LoadRegistry(storage.At(dir))
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
@@ -1635,11 +1648,11 @@ func TestCheckNotificationRulesMigration_CleanSitePasses(t *testing.T) {
 
 func TestCheckActiveShapeUpgrade_FlipsV3ToV4(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	// Force the registry to active_shape v3.
-	if err := bundle.SetActiveShapeName(dir, "v3"); err != nil {
+	if err := bundle.SetActiveShapeName(storage.At(dir), "v3"); err != nil {
 		t.Fatalf("SetActiveShapeName: %v", err)
 	}
 
@@ -1648,7 +1661,7 @@ func TestCheckActiveShapeUpgrade_FlipsV3ToV4(t *testing.T) {
 		t.Fatalf("expected fail (flip ran), got %s: %s", result.Status, result.Message)
 	}
 
-	reg, err := bundle.LoadRegistry(dir)
+	reg, err := bundle.LoadRegistry(storage.At(dir))
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
@@ -1659,10 +1672,10 @@ func TestCheckActiveShapeUpgrade_FlipsV3ToV4(t *testing.T) {
 
 func TestCheckActiveShapeUpgrade_AlreadyV4Passes(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
-	if err := bundle.SetActiveShapeName(dir, "v4"); err != nil {
+	if err := bundle.SetActiveShapeName(storage.At(dir), "v4"); err != nil {
 		t.Fatalf("SetActiveShapeName: %v", err)
 	}
 	result := checkActiveShapeUpgrade(&runContext{siteDir: dir, dryRun: false})
@@ -1681,10 +1694,10 @@ func TestCheckActiveShapeUpgrade_NoRegistryPasses(t *testing.T) {
 
 func TestCheckV3LegacyArchives_RemovesOnV4Tenant(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
-	if err := bundle.SetActiveShapeName(dir, "v4"); err != nil {
+	if err := bundle.SetActiveShapeName(storage.At(dir), "v4"); err != nil {
 		t.Fatalf("SetActiveShapeName: %v", err)
 	}
 	// Plant stale archive files.
@@ -1699,7 +1712,7 @@ func TestCheckV3LegacyArchives_RemovesOnV4Tenant(t *testing.T) {
 		t.Fatalf("expected fail (files removed), got %s: %s", result.Status, result.Message)
 	}
 	for _, p := range []string{"posts/index.html", "comments/index.html", "tag/index.html"} {
-		if _, err := os.Stat(filepath.Join(dir, p)); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(dir, p)); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s should be removed", p)
 		}
 	}
@@ -1707,10 +1720,10 @@ func TestCheckV3LegacyArchives_RemovesOnV4Tenant(t *testing.T) {
 
 func TestCheckV3LegacyArchives_NoOpOnV3Tenant(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
-	if err := bundle.SetActiveShapeName(dir, "v3"); err != nil {
+	if err := bundle.SetActiveShapeName(storage.At(dir), "v3"); err != nil {
 		t.Fatalf("SetActiveShapeName: %v", err)
 	}
 	// Plant an archive file — should NOT be removed (live content on v3).
@@ -1729,10 +1742,10 @@ func TestCheckV3LegacyArchives_NoOpOnV3Tenant(t *testing.T) {
 
 func TestCheckV3LegacyArchives_DryRunPreservesDisk(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
-	if err := bundle.SetActiveShapeName(dir, "v4"); err != nil {
+	if err := bundle.SetActiveShapeName(storage.At(dir), "v4"); err != nil {
 		t.Fatalf("SetActiveShapeName: %v", err)
 	}
 	full := filepath.Join(dir, "posts", "index.html")
@@ -1752,7 +1765,7 @@ func TestCheckV3LegacyArchives_DryRunPreservesDisk(t *testing.T) {
 
 func TestCheckReferencePayloadIntegrity_DetectsDrift(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	// Corrupt a fixture file.
@@ -1765,7 +1778,7 @@ func TestCheckReferencePayloadIntegrity_DetectsDrift(t *testing.T) {
 	}
 
 	// File should now match the embedded fixture (re-installed).
-	mismatches, _ := bundle.CompareReferencePayload(dir, "pub.polis.core")
+	mismatches, _ := bundle.CompareReferencePayload(storage.At(dir), "pub.polis.core")
 	if len(mismatches) != 0 {
 		t.Errorf("after re-install, expected zero mismatches; got %d", len(mismatches))
 	}
@@ -1773,7 +1786,7 @@ func TestCheckReferencePayloadIntegrity_DetectsDrift(t *testing.T) {
 
 func TestCheckReferencePayloadIntegrity_CleanSitePasses(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	result := checkReferencePayloadIntegrity(&runContext{siteDir: dir, dryRun: false})
@@ -1784,7 +1797,7 @@ func TestCheckReferencePayloadIntegrity_CleanSitePasses(t *testing.T) {
 
 func TestCheckRegistryIntegrity_FillsEmptyActiveTheme(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	// EnsureReferencePayload leaves active_theme empty by default.
@@ -1792,7 +1805,7 @@ func TestCheckRegistryIntegrity_FillsEmptyActiveTheme(t *testing.T) {
 	if result.Status != StatusFail {
 		t.Fatalf("expected fail (active_theme populated), got %s: %s", result.Status, result.Message)
 	}
-	reg, err := bundle.LoadRegistry(dir)
+	reg, err := bundle.LoadRegistry(storage.At(dir))
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
@@ -1803,7 +1816,7 @@ func TestCheckRegistryIntegrity_FillsEmptyActiveTheme(t *testing.T) {
 
 func TestCheckRegistryIntegrity_NormalizesBareName(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	// Inject a bare-name active_theme (e.g. "vice") instead of the FQN.
@@ -1819,7 +1832,7 @@ func TestCheckRegistryIntegrity_NormalizesBareName(t *testing.T) {
 	if result.Status != StatusFail {
 		t.Fatalf("expected fail (normalized), got %s: %s", result.Status, result.Message)
 	}
-	reg, _ := bundle.LoadRegistry(dir)
+	reg, _ := bundle.LoadRegistry(storage.At(dir))
 	if reg.ActiveTheme != "pub.polis.themes.vice" {
 		t.Errorf("active_theme should be FQN-qualified; got %q", reg.ActiveTheme)
 	}
@@ -1827,7 +1840,7 @@ func TestCheckRegistryIntegrity_NormalizesBareName(t *testing.T) {
 
 func TestCheckRegistryIntegrity_ResetsDanglingFQN(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	regPath := filepath.Join(dir, ".polis", "bundles", "registry.json")
@@ -1842,7 +1855,7 @@ func TestCheckRegistryIntegrity_ResetsDanglingFQN(t *testing.T) {
 	if result.Status != StatusFail {
 		t.Fatalf("expected fail (reset), got %s: %s", result.Status, result.Message)
 	}
-	reg, _ := bundle.LoadRegistry(dir)
+	reg, _ := bundle.LoadRegistry(storage.At(dir))
 	if reg.ActiveTheme == "pub.polis.themes.does-not-exist" {
 		t.Error("dangling active_theme should be reset")
 	}
@@ -1850,7 +1863,7 @@ func TestCheckRegistryIntegrity_ResetsDanglingFQN(t *testing.T) {
 
 func TestCheckRegistryIntegrity_FlagsMalformedJSON(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	regPath := filepath.Join(dir, ".polis", "bundles", "registry.json")
@@ -1872,7 +1885,7 @@ func TestCheckRegistryIntegrity_FlagsMalformedJSON(t *testing.T) {
 
 func TestCheckRegistryIntegrity_DefersStudio13(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	regPath := filepath.Join(dir, ".polis", "bundles", "registry.json")
@@ -1889,7 +1902,7 @@ func TestCheckRegistryIntegrity_DefersStudio13(t *testing.T) {
 		t.Errorf("pre-rename studio13 on v3 should defer to checkStudio13RenameMigration; got %s: %s", result.Status, result.Message)
 	}
 	// active_theme must remain untouched — handled by the specialized check.
-	reg, _ := bundle.LoadRegistry(dir)
+	reg, _ := bundle.LoadRegistry(storage.At(dir))
 	if reg.ActiveTheme != "pub.polis.themes.studio13" {
 		t.Errorf("F2 must not touch pre-rename studio13/v3; got %q", reg.ActiveTheme)
 	}
@@ -2100,7 +2113,7 @@ func TestCheckAuthorFieldMigration_AlreadyMigratedPasses(t *testing.T) {
 
 func TestCheckActiveThemeUnset_PicksRandom(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	// EnsureReferencePayload leaves active_theme empty by default.
@@ -2108,7 +2121,7 @@ func TestCheckActiveThemeUnset_PicksRandom(t *testing.T) {
 	if result.Status != StatusFail {
 		t.Fatalf("expected fail (theme picked), got %s: %s", result.Status, result.Message)
 	}
-	at, _ := bundle.GetActiveThemeName(dir)
+	at, _ := bundle.GetActiveThemeName(storage.At(dir))
 	if at == "" {
 		t.Error("active_theme should be set after heal")
 	}
@@ -2116,10 +2129,10 @@ func TestCheckActiveThemeUnset_PicksRandom(t *testing.T) {
 
 func TestCheckActiveThemeUnset_AlreadySetPasses(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
-	if err := bundle.SetActiveThemeName(dir, "vice"); err != nil {
+	if err := bundle.SetActiveThemeName(storage.At(dir), "vice"); err != nil {
 		t.Fatalf("SetActiveThemeName: %v", err)
 	}
 	result := checkActiveThemeUnset(&runContext{siteDir: dir, dryRun: false})
@@ -2130,7 +2143,7 @@ func TestCheckActiveThemeUnset_AlreadySetPasses(t *testing.T) {
 
 func TestCheckRegistrySchemaVersion_CurrentPasses(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	result := checkRegistrySchemaVersion(&runContext{siteDir: dir, dryRun: false})
@@ -2141,7 +2154,7 @@ func TestCheckRegistrySchemaVersion_CurrentPasses(t *testing.T) {
 
 func TestCheckRegistrySchemaVersion_OlderFlags(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	regPath := filepath.Join(dir, ".polis", "bundles", "registry.json")
@@ -2163,7 +2176,7 @@ func TestCheckRegistrySchemaVersion_OlderFlags(t *testing.T) {
 
 func TestCheckRegistryFQNSanity_BareNamesFlagged(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
 	regPath := filepath.Join(dir, ".polis", "bundles", "registry.json")
@@ -2190,11 +2203,11 @@ func TestCheckRegistryFQNSanity_BareNamesFlagged(t *testing.T) {
 
 func TestCheckRegistryFQNSanity_ValidFQNsPass(t *testing.T) {
 	dir := createCurrentSite(t)
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
-	bundle.SetActiveThemeName(dir, "vice")
-	bundle.SetActiveShapeName(dir, "v4")
+	bundle.SetActiveThemeName(storage.At(dir), "vice")
+	bundle.SetActiveShapeName(storage.At(dir), "v4")
 	result := checkRegistryFQNSanity(&runContext{siteDir: dir, dryRun: false})
 	if result.Status != StatusPass {
 		t.Errorf("expected pass with valid FQNs, got %s: %s", result.Status, result.Message)
@@ -2257,10 +2270,10 @@ func TestBlessedCacheGC_RemovesOrphan(t *testing.T) {
 	if result.Status != StatusFail {
 		t.Errorf("expected fail (removed orphan), got %s: %s", result.Status, result.Message)
 	}
-	if _, err := os.Stat(filepath.Join(blessedDir, "orphan.md")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(blessedDir, "orphan.md")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("orphan body should be removed")
 	}
-	if _, err := os.Stat(filepath.Join(blessedDir, "good.md")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(blessedDir, "good.md")); errors.Is(err, fs.ErrNotExist) {
 		t.Error("healthy (sidecar-backed) entry must be preserved")
 	}
 }
@@ -2296,10 +2309,10 @@ func TestCheckForeignContentInPublicPath_RemovesForeign(t *testing.T) {
 	if res.Status != StatusFail {
 		t.Fatalf("expected fail (foreign content found), got %s", res.Status)
 	}
-	if _, err := os.Stat(filepath.Join(dir, srcRel)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, srcRel)); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("foreign source must be removed")
 	}
-	if _, err := os.Stat(filepath.Join(dir, mountRel)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, mountRel)); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("foreign mount sibling must be removed")
 	}
 	if _, err := os.Stat(filepath.Join(dir, ownRel)); err != nil {

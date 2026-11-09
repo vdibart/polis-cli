@@ -226,13 +226,19 @@
     {
       "name": "unpublished-emits-migration",
       "status": "skip",
-      "message": "cannot load bundle.json: read bundle $SITES/bundle-missing/content/pub.polis.core/bundle.json: open $SITES/bundle-missing/content/pub.polis.core/bundle.json: no such file or directory",
+      "message": "cannot load bundle.json: read bundle $SITES/bundle-missing/content/pub.polis.core/bundle.json: storage: not found: $SITES/bundle-missing/content/pub.polis.core/bundle.json",
       "reason": "the discovery service emits pub.polis.post.unpublished and pub.polis.comment.unpublished; the core bundle now declares them, and a named migration adds them to existing sites before the defaults change"
+    },
+    {
+      "name": "theme-shapes-migration",
+      "status": "skip",
+      "message": "cannot load bundle.json: read bundle $SITES/bundle-missing/content/pub.polis.core/bundle.json: storage: not found: $SITES/bundle-missing/content/pub.polis.core/bundle.json",
+      "reason": "sites created before the stream shape existed declare their core themes as blog-only, and merging defaults never updates a theme already declared; the missing shapes are added, and none the site lists is removed"
     },
     {
       "name": "bundle-declarations",
       "status": "skip",
-      "message": "cannot load bundle.json: read bundle $SITES/bundle-missing/content/pub.polis.core/bundle.json: open $SITES/bundle-missing/content/pub.polis.core/bundle.json: no such file or directory",
+      "message": "cannot load bundle.json: read bundle $SITES/bundle-missing/content/pub.polis.core/bundle.json: storage: not found: $SITES/bundle-missing/content/pub.polis.core/bundle.json",
       "reason": "F5+F8 content-aware integrity — bundle.json declares types/shapes/themes; missing declarations are auto-merged from defaults, per-field drift on existing types is flagged for operator review"
     },
     {
@@ -392,7 +398,7 @@
     {
       "name": "bundle-declarations",
       "status": "skip",
-      "message": "cannot load bundle.json: read bundle $SITES/bundle-missing/content/pub.polis.core/bundle.json: open $SITES/bundle-missing/content/pub.polis.core/bundle.json: no such file or directory",
+      "message": "cannot load bundle.json: read bundle $SITES/bundle-missing/content/pub.polis.core/bundle.json: storage: not found: $SITES/bundle-missing/content/pub.polis.core/bundle.json",
       "reason": "F5+F8 content-aware integrity — bundle.json declares types/shapes/themes; missing declarations are auto-merged from defaults, per-field drift on existing types is flagged for operator review"
     },
     {
@@ -491,7 +497,7 @@
     {
       "name": "bundle-declarations",
       "status": "skip",
-      "message": "cannot load bundle.json: read bundle $SITES/bundle-missing/content/pub.polis.core/bundle.json: open $SITES/bundle-missing/content/pub.polis.core/bundle.json: no such file or directory",
+      "message": "cannot load bundle.json: read bundle $SITES/bundle-missing/content/pub.polis.core/bundle.json: storage: not found: $SITES/bundle-missing/content/pub.polis.core/bundle.json",
       "reason": "F5+F8 content-aware integrity — bundle.json declares types/shapes/themes; missing declarations are auto-merged from defaults, per-field drift on existing types is flagged for operator review"
     },
     {

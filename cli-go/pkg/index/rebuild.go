@@ -9,6 +9,7 @@ package index
 import (
 	"errors"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"sort"
 	"strings"
@@ -44,14 +45,13 @@ type RebuildOptions struct {
 
 	// Discovery service params for blessed comments recovery
 	DiscoveryURL string
-	DiscoveryKey string
 	BaseURL      string // Site base URL (e.g., https://alice.polis.pub)
 	Generator    string // e.g. "polis-cli-go/0.59.0" — used in metadata
 	// NewDSClient is a hook for tests to inject a discovery client (e.g. one
 	// with DSKeyCache disabled so a fake DS need not sign its responses).
 	// Production leaves it nil and a normal verified client is constructed.
 	// Same seam Clerk uses (webapp/internal/hosted/clerk.go).
-	NewDSClient func(url, key string) *discovery.Client
+	NewDSClient func(url string) *discovery.Client
 }
 
 // contentTypes returns the entry types this run rebuilds, and whether the
@@ -90,11 +90,14 @@ type RebuildResult struct {
 }
 
 // RebuildIndex regenerates the projections named by opts.
-func RebuildIndex(dataDir string, opts RebuildOptions) (*RebuildResult, error) {
+func RebuildIndex(site storage.Site, opts RebuildOptions) (*RebuildResult, error) {
+	if !site.Valid() {
+		return nil, fmt.Errorf("rebuild: site handle is not usable")
+	}
 	result := &RebuildResult{}
 
 	if only, touched := opts.contentTypes(); touched {
-		ci, err := RebuildContentIndex(dataDir, only)
+		ci, err := RebuildContentIndex(site, only)
 		if err != nil {
 			return nil, fmt.Errorf("failed to rebuild content index: %w", err)
 		}
@@ -111,7 +114,7 @@ func RebuildIndex(dataDir string, opts RebuildOptions) (*RebuildResult, error) {
 	// split: a user rebuilding comments wants both, and splitting the flag
 	// changes what an existing script does.
 	if opts.All || opts.Comments {
-		count, err := rebuildCommentsIndex(dataDir, opts)
+		count, err := rebuildCommentsIndex(site, opts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to rebuild comments index: %w", err)
 		}
@@ -121,7 +124,7 @@ func RebuildIndex(dataDir string, opts RebuildOptions) (*RebuildResult, error) {
 	// ⚠️ NOT part of `--all`. Clearing notifications reconstructs nothing —
 	// it is a delete — so it is reached only by naming the deprecated flag.
 	if opts.Notifications {
-		count, err := notification.ClearAll(dataDir)
+		count, err := notification.ClearAll(site)
 		if err != nil {
 			return nil, fmt.Errorf("failed to clear notifications: %w", err)
 		}
@@ -150,18 +153,28 @@ func RebuildIndex(dataDir string, opts RebuildOptions) (*RebuildResult, error) {
 // So: if the file is there, it is the truth and rebuild does not touch it. The
 // DS is consulted only to RECOVER a file that is missing entirely, where the
 // choice is between partial evidence and none.
-func rebuildCommentsIndex(dataDir string, opts RebuildOptions) (int, error) {
+func rebuildCommentsIndex(site storage.Site, opts RebuildOptions) (int, error) {
 	gen := opts.Generator
 	if gen == "" {
 		gen = GetGenerator()
 	}
-	d := newSiteDirs(dataDir)
-	commentDir := d.contentAbs("pub.polis.comment", "comment")
-	if err := os.MkdirAll(commentDir, 0755); err != nil {
-		return 0, err
+	// Stays: kind 3, and only on a filesystem. The comment type's directory is
+	// created up front, as it always was, before blessed.json is looked at. The
+	// save below creates blessed.json's own parent through the store, so this
+	// is not what makes that write work; it keeps a rebuild leaving the same
+	// tree it did, including a failure to create the directory. An object store
+	// has no directories to create.
+	if st := site.Store(); st.Capabilities().RealPath {
+		commentDir, err := st.RealPath(newSiteDirs(site).contentKey("pub.polis.comment", "comment"))
+		if err != nil {
+			return 0, err
+		}
+		if err := os.MkdirAll(commentDir, 0755); err != nil {
+			return 0, err
+		}
 	}
 
-	existing, err := metadata.LoadBlessedComments(dataDir)
+	existing, err := metadata.LoadBlessedComments(site)
 	switch {
 	case err == nil:
 		// PRESERVED, untouched — pins, signature and all. Rewriting it even
@@ -179,7 +192,7 @@ func rebuildCommentsIndex(dataDir string, opts RebuildOptions) (int, error) {
 	}
 
 	// From here: the file is genuinely absent.
-	return recoverCommentsIndex(dataDir, commentDir, gen, opts)
+	return recoverCommentsIndex(site, gen, opts)
 }
 
 // recoverCommentsIndex reconstructs an ABSENT blessed.json from DS relationship
@@ -194,13 +207,13 @@ func rebuildCommentsIndex(dataDir string, opts RebuildOptions) (int, error) {
 // Written UNSIGNED, deliberately. A reconstruction is not the author asserting
 // anything — nobody was asked — and epic 01's rule holds: never assert that
 // someone said something they did not.
-func recoverCommentsIndex(dataDir, commentDir, gen string, opts RebuildOptions) (int, error) {
-	if opts.DiscoveryURL != "" && opts.DiscoveryKey != "" && opts.BaseURL != "" {
+func recoverCommentsIndex(site storage.Site, gen string, opts RebuildOptions) (int, error) {
+	if opts.DiscoveryURL != "" && opts.BaseURL != "" {
 		makeClient := opts.NewDSClient
 		if makeClient == nil {
 			makeClient = discovery.NewClient
 		}
-		client := makeClient(opts.DiscoveryURL, opts.DiscoveryKey)
+		client := makeClient(opts.DiscoveryURL)
 
 		domain := opts.BaseURL
 		domain = strings.TrimPrefix(domain, "https://")
@@ -248,7 +261,7 @@ func recoverCommentsIndex(dataDir, commentDir, gen string, opts RebuildOptions) 
 				})
 			}
 
-			if err := metadata.SaveBlessedComments(dataDir, bc); err != nil {
+			if err := metadata.SaveBlessedComments(site, bc); err != nil {
 				return 0, err
 			}
 
@@ -261,7 +274,7 @@ func recoverCommentsIndex(dataDir, commentDir, gen string, opts RebuildOptions) 
 		Version:  gen,
 		Comments: []metadata.PostComments{},
 	}
-	if err := metadata.SaveBlessedComments(dataDir, bc); err != nil {
+	if err := metadata.SaveBlessedComments(site, bc); err != nil {
 		return 0, err
 	}
 	return 0, nil

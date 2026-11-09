@@ -2,6 +2,7 @@ package attestation
 
 import (
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"regexp"
 	"strconv"
 	"strings"
@@ -119,8 +120,8 @@ type GrantEntry struct {
 //
 // ⚠️ A site that never had a grant yields nil and no error: absence is never a
 // finding.
-func Grants(siteDir, agent string) ([]GrantEntry, error) {
-	records, err := List(siteDir)
+func Grants(site storage.Site, agent string) ([]GrantEntry, error) {
+	records, err := List(site)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +152,7 @@ func Grants(siteDir, agent string) ([]GrantEntry, error) {
 			Basis:  r.Payload[CustodyKeyBasis],
 		}
 		e.Set, e.Version, _ = ParseBehaviours(r.Payload[GrantKeyBehaviours])
-		e.Signature, _ = VerifyRecord(siteDir, r)
+		e.Signature, _ = VerifyRecord(site, r)
 		if w, ok := withdrawals[e.URL]; ok {
 			e.Withdrawn = true
 			e.WithdrawalURL = RecordURL(w.Issuer, ID(w))
@@ -226,8 +227,8 @@ func (g *LiveGrant) Basis() string {
 // published key, is self-issued, and NO withdrawal on disk names it. Anything
 // the resolver cannot establish reads as "no grant", because the only thing it
 // is ever asked is whether an agent may act.
-func ResolveLiveGrant(siteDir, agent, set string, minVersion int) (*LiveGrant, error) {
-	grants, err := Grants(siteDir, agent)
+func ResolveLiveGrant(site storage.Site, agent, set string, minVersion int) (*LiveGrant, error) {
+	grants, err := Grants(site, agent)
 	if err != nil {
 		return nil, err
 	}

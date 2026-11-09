@@ -66,10 +66,18 @@ func init() {
 	// Video/audio attributes — bluemonday URL-scheme-checks `src` on <video>/<audio>
 	// via its internal isURLAttribute list, so the global AllowURLSchemes allowlist
 	// (http/https/mailto, set by UGCPolicy) is enforced here automatically.
-	sanitizer.AllowAttrs("src", "type", "controls", "autoplay", "loop", "muted", "poster", "preload", "width", "height").OnElements("video", "audio")
-	// <source>'s `src` is NOT in bluemonday's isURLAttribute list (sanitize.go:992),
-	// so the global URL-scheme allowlist does not reach it — `<source src="javascript:…">`
-	// would survive sanitization. Enforce safe URLs here via .Matching.
+	sanitizer.AllowAttrs("src", "type", "controls", "autoplay", "loop", "muted", "preload", "width", "height").OnElements("video", "audio")
+	// `poster` is NOT scheme-checked by bluemonday: its URL pass only looks at
+	// `src` on these elements, so `<video poster="javascript:…">` survived.
+	// poster is image-only in browsers, so this is defence in depth, but it is
+	// the same omitted-URL-attribute class as <source src> below.
+	sanitizer.AllowAttrs("poster").Matching(safeSrcURLPattern).OnElements("video", "audio")
+	// <source>'s `src` is NOT scheme-checked either. bluemonday v1.0.27 does
+	// name "source" in its inner src switch (sanitize.go ~:579), but that whole
+	// URL pass runs only when linkable(element) is true, and linkable
+	// (sanitize.go ~:992) omits "source". So the global URL-scheme allowlist
+	// never reaches it and `<source src="javascript:…">` would survive. This
+	// .Matching guard is load-bearing, not redundant.
 	sanitizer.AllowAttrs("src").Matching(safeSrcURLPattern).OnElements("source")
 	sanitizer.AllowAttrs("type", "width", "height").OnElements("source")
 	// Data attributes for custom styling

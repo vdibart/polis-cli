@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"sync"
 	"time"
 
@@ -15,9 +16,9 @@ const blessedFillNegativeTTL = 15 * time.Minute
 
 var (
 	blessedFillMu sync.Mutex
-	// Keyed by dataDir+"\x00"+commentURL: each tenant fills its OWN cache, so a
-	// fill in flight for one tenant must not dedup another tenant's fill (hosted
-	// runs many tenants, with distinct dataDirs, in one process).
+	// Keyed by the site's ID+"\x00"+commentURL: each tenant fills its OWN cache,
+	// so a fill in flight for one tenant must not dedup another tenant's fill
+	// (hosted runs many tenants, with distinct sites, in one process).
 	blessedFillInflight = map[string]struct{}{}  // currently populating
 	blessedFillNegative = map[string]time.Time{} // -> retry-after
 )
@@ -42,8 +43,8 @@ func InstallBlessedCacheFiller(dsDomain string) {
 	if dsDomain == "" {
 		return
 	}
-	render.BlessedCacheFiller = func(dataDir, commentURL string) bool {
-		key := dataDir + "\x00" + commentURL
+	render.BlessedCacheFiller = func(site storage.Site, commentURL string) bool {
+		key := site.ID() + "\x00" + commentURL
 		blessedFillMu.Lock()
 		if t, ok := blessedFillNegative[key]; ok {
 			if time.Now().Before(t) {
@@ -60,7 +61,7 @@ func InstallBlessedCacheFiller(dsDomain string) {
 		blessedFillMu.Unlock()
 
 		go func() {
-			store := cache.Store{DataDir: dataDir, DSDomain: dsDomain}
+			store := cache.Store{Site: site, DSDomain: dsDomain}
 			desc := cache.NewBlessedDescriptor(cache.DescriptorConfig{})
 			res := cache.Ingest(store, desc, commentURL, cache.IngestOptions{})
 

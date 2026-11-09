@@ -1,16 +1,22 @@
 package render
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
 	"html"
 	"io"
+	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
-	"os"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +30,8 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/template"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // replyCacheMu serializes read-modify-write access to the on-disk
@@ -192,7 +200,7 @@ var DefaultHTTPClient *http.Client
 // block page render unboundedly — it is single-flighted and negative-cached by
 // the webapp. nil by default → CLI static render / offline returns a placeholder
 // (empty string) on a miss. See LoadLocalCommentContent.
-var BlessedCacheFiller func(dataDir, commentURL string) bool
+var BlessedCacheFiller func(site storage.Site, commentURL string) bool
 
 // WidgetVersion is the single source of truth for the current polis widget version.
 // Update this constant when widget.js changes. Theme snippets reference it via
@@ -206,11 +214,17 @@ var BlessedCacheFiller func(dataDir, commentURL string) bool
 // Tour: github.com/vdibart/polis-cli/blob/main/docs/handbook/foreign-site-widget.md
 // Map:  github.com/vdibart/polis-cli/blob/main/AGENTS.md
 // ───────────────────────────────────────────────────────────────────────
-const WidgetVersion = "1.4.5"
+const WidgetVersion = "1.5.0"
 
 // PageConfig holds configuration for page rendering.
 type PageConfig struct {
-	DataDir       string // Site data directory
+	// Site is the site being rendered: where it is, and what it is stored on.
+	//
+	// ⭐ THIS STRUCT WAS ALREADY THE RIGHT SHAPE and only the identity's type
+	// was wrong — it held `DataDir string`, and five call sites inside this
+	// package were already wrapping it in storage.At to reach the packages
+	// that had converted.
+	Site          storage.Site
 	CLIThemesDir  string // CLI themes directory (fallback)
 	BaseURL       string // Site base URL
 	RenderMarkers bool   // Add snippet markers for editing
@@ -221,6 +235,12 @@ type PageConfig struct {
 	PostsMountDir     string // e.g. "posts"
 	CommentsSourceDir string // e.g. "content/pub.polis.core/comment"
 	CommentsMountDir  string // e.g. "comments"
+
+	// Offline renders from what the site already holds and makes no network
+	// call: a reply's context comes from the site's cache or its URL, and a
+	// commenter's avatar falls back to the derived one. `polis branch` renders
+	// this way, because it runs before the site has an address of its own.
+	Offline bool
 }
 
 // PageRenderer renders polis pages using templates.
@@ -247,10 +267,13 @@ type RenderStats struct {
 // NewPageRenderer creates a new page renderer.
 func NewPageRenderer(cfg PageConfig) (*PageRenderer, error) {
 	// Load active theme
-	themeName, err := theme.GetActiveTheme(cfg.DataDir)
+	themeName, err := theme.GetActiveTheme(cfg.Site)
 	if err != nil || themeName == "" {
-		themeName, err = theme.SelectRandomTheme(cfg.DataDir, cfg.CLIThemesDir)
-		if err != nil {
+		// ⚠️ A theme that could not be saved still renders: the name is the
+		// stable fallback, so repeated renders agree until the registry is
+		// repaired.
+		themeName, err = theme.SelectRandomTheme(cfg.Site, cfg.CLIThemesDir)
+		if err != nil && !errors.Is(err, theme.ErrThemeNotSaved) {
 			return nil, fmt.Errorf("no theme available: %w", err)
 		}
 	}
@@ -261,20 +284,20 @@ func NewPageRenderer(cfg PageConfig) (*PageRenderer, error) {
 	// remaining v3 stamps. This fallback covers the edge case of a
 	// renderer constructed before Medic has touched a tenant (cold-
 	// boot races, test fixtures without a registry).
-	shapeName, err := bundle.GetActiveShapeName(cfg.DataDir)
+	shapeName, err := bundle.GetActiveShapeName(cfg.Site)
 	if err != nil || shapeName == "" {
 		shapeName = "v4"
 	}
 
 	// Load templates
-	templates, err := theme.LoadShape(cfg.DataDir, cfg.CLIThemesDir, shapeName, themeName)
+	templates, err := theme.LoadShape(cfg.Site, cfg.CLIThemesDir, shapeName, themeName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load theme: %w", err)
 	}
 
 	// Create template engine with markdown renderer
 	engine := template.New(template.Config{
-		DataDir:          cfg.DataDir,
+		Site:             cfg.Site,
 		CLIThemesDir:     cfg.CLIThemesDir,
 		ActiveTheme:      themeName,
 		ActiveShape:      shapeName,
@@ -313,43 +336,35 @@ func (r *PageRenderer) sourceToMountPath(sourcePath, fileType string) string {
 }
 
 // copyFile copies a file from src to dst, creating parent directories as needed.
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0644)
-}
-
 // RenderFile renders a single file (post or comment) to HTML.
 // Returns the rendered HTML, whether it was rendered (vs skipped), and any error.
 func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (string, bool, error) {
 	// Build full paths — source is always in content dir
-	mdPath := filepath.Join(r.config.DataDir, path)
+	mdKey := strings.TrimPrefix(filepath.ToSlash(path), "/")
 	// Map source path to mount path for output
 	mountPath := r.sourceToMountPath(path, fileType)
 	htmlMountRel := strings.TrimSuffix(mountPath, ".md") + ".html"
-	htmlPath := filepath.Join(r.config.DataDir, htmlMountRel)
+	htmlKey := strings.TrimPrefix(filepath.ToSlash(htmlMountRel), "/")
 
 	// Check if rendering is needed (unless force)
 	if !force {
-		mdInfo, err := os.Stat(mdPath)
+		mdInfo, err := r.config.Site.Store().Stat(context.Background(), mdKey)
 		if err != nil {
 			return "", false, fmt.Errorf("source file not found: %w", err)
 		}
 
-		htmlInfo, err := os.Stat(htmlPath)
-		if err == nil && htmlInfo.ModTime().After(mdInfo.ModTime()) {
+		htmlInfo, err := r.config.Site.Store().Stat(context.Background(), htmlKey)
+		// ⚠️ Depends on ModTimes: the skip-if-unchanged check for a single
+		// page. Without mtimes both are the zero time and every page
+		// re-renders every time — correct, slower.
+		if err == nil && htmlInfo.ModTime.After(mdInfo.ModTime) {
 			// HTML is newer than MD, skip
 			return "", false, nil
 		}
 	}
 
 	// Read markdown file
-	content, err := os.ReadFile(mdPath)
+	content, err := r.config.Site.Store().Get(context.Background(), mdKey)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -437,10 +452,10 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 		// Resolve reply context: fetch from remote (with cache) or derive from URL
 		if ctx.InReplyToURL != "" {
 			if r.replyCache == nil {
-				r.replyCache = loadReplyContextCache(r.config.DataDir)
+				r.replyCache = loadReplyContextCache(r.config.Site)
 			}
 			ctx.InReplyToTitle, ctx.InReplyToExcerpt, ctx.InReplyToDomain = resolveReplyContext(
-				r.config.DataDir, ctx.InReplyToURL, r.replyCache,
+				r.config.Site, ctx.InReplyToURL, r.replyCache, r.config.Offline,
 			)
 		}
 		// R23-1: escape the commenter-controlled / remotely-fetched reply-context
@@ -485,11 +500,8 @@ func (r *PageRenderer) RenderFile(path string, fileType string, force bool) (str
 	rendered = StripHTMLComments(rendered)
 
 	// Write HTML output to mount dir
-	if err := os.MkdirAll(filepath.Dir(htmlPath), 0755); err != nil {
-		return "", false, fmt.Errorf("failed to create output directory: %w", err)
-	}
 
-	if err := os.WriteFile(htmlPath, []byte(rendered), 0644); err != nil {
+	if err := r.config.Site.Store().Put(context.Background(), htmlKey, []byte(rendered), storage.Rebuildable()); err != nil {
 		return "", false, fmt.Errorf("failed to write output: %w", err)
 	}
 
@@ -531,8 +543,7 @@ func (r *PageRenderer) RenderIndex() error {
 	ctx.PageType = "index"
 
 	// Load following data (non-fatal if missing)
-	followPath := following.DefaultPath(r.config.DataDir)
-	followFile, err := following.Load(followPath)
+	followFile, err := following.LoadSite(r.config.Site)
 	if err == nil && followFile.Count() > 0 {
 		ctx.FollowingCount = followFile.Count()
 		for _, entry := range followFile.All() {
@@ -574,8 +585,8 @@ func (r *PageRenderer) RenderIndex() error {
 	rendered = StripHTMLComments(rendered)
 
 	// Write output
-	indexPath := filepath.Join(r.config.DataDir, "index.html")
-	if err := os.WriteFile(indexPath, []byte(rendered), 0644); err != nil {
+	indexKey := "index.html"
+	if err := r.config.Site.Store().Put(context.Background(), indexKey, []byte(rendered), storage.Rebuildable()); err != nil {
 		return fmt.Errorf("failed to write index.html: %w", err)
 	}
 
@@ -620,8 +631,7 @@ func (r *PageRenderer) RenderArchive() error {
 	ctx.AvatarHTML = r.buildAvatarHTML()
 
 	// Load following count for archive page stats
-	followPath := following.DefaultPath(r.config.DataDir)
-	if followFile, err := following.Load(followPath); err == nil {
+	if followFile, err := following.LoadSite(r.config.Site); err == nil {
 		ctx.FollowingCount = followFile.Count()
 	}
 
@@ -633,16 +643,16 @@ func (r *PageRenderer) RenderArchive() error {
 	rendered = StripHTMLComments(rendered)
 
 	// Write output to mount dir (posts/index.html) or legacy content dir
-	archiveDir := filepath.Join(r.config.DataDir, r.config.PostsMountDir)
+	// ⭐ A KEY, so the write below goes through the store. ⚠️ The mount dir is
+	// user-configurable, so it is normalised to slashes and de-rooted rather
+	// than assumed clean.
+	archiveDir := strings.TrimPrefix(filepath.ToSlash(r.config.PostsMountDir), "/")
 	if r.config.PostsMountDir == "" {
-		archiveDir = filepath.Join(r.config.DataDir, "content", "pub.polis.core", "post")
-	}
-	if err := os.MkdirAll(archiveDir, 0755); err != nil {
-		return fmt.Errorf("failed to create posts directory: %w", err)
+		archiveDir = "content/pub.polis.core/post"
 	}
 
-	archivePath := filepath.Join(archiveDir, "index.html")
-	if err := os.WriteFile(archivePath, []byte(rendered), 0644); err != nil {
+	archiveKey := archiveDir + "/index.html"
+	if err := r.config.Site.Store().Put(context.Background(), archiveKey, []byte(rendered), storage.Rebuildable()); err != nil {
 		return fmt.Errorf("failed to write posts/index.html: %w", err)
 	}
 
@@ -669,10 +679,10 @@ func (r *PageRenderer) RenderTags() (int, error) {
 		return 0, nil
 	}
 
-	tagsDir := filepath.Join(r.config.DataDir, "content", "pub.polis.core", "tag")
-	entries, err := os.ReadDir(tagsDir)
+	tagsDir := "content/pub.polis.core/tag"
+	entries, err := listSiteDir(r.config.Site, tagsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return 0, nil
 		}
 		return 0, fmt.Errorf("failed to read tags directory: %w", err)
@@ -682,11 +692,19 @@ func (r *PageRenderer) RenderTags() (int, error) {
 	count := 0
 
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		name := pathpkg.Base(entry.Key)
+		if entry.IsDir || !strings.HasSuffix(name, ".json") {
 			continue
 		}
 
-		data, err := os.ReadFile(filepath.Join(tagsDir, entry.Name()))
+		// ⛔ THROUGH THE STORE. This was ReadAtPath(filepath.Join(tagsDir, name))
+		// after tagsDir became a KEY, so it resolved against the process
+		// working directory instead of the site — and the `continue` below
+		// swallowed the error, so every tag silently vanished from the index
+		// with no test failing. ⚠️ A path and a key are both `string`: the
+		// compiler cannot tell them apart, which is exactly why this needs a
+		// test rather than care.
+		data, err := r.config.Site.Store().Get(context.Background(), tagsDir+"/"+name)
 		if err != nil {
 			continue
 		}
@@ -703,6 +721,15 @@ func (r *PageRenderer) RenderTags() (int, error) {
 				URI:   t.URI,
 				Added: t.Added,
 			})
+		}
+
+		// ⛔ The page is written at tags/<tag>/index.html from the file's own
+		// "tag" field, so a planted or cloned tag file naming ".." overwrote
+		// the root index.html. Only a name that is already a normalised tag
+		// name gets a page; anything else is skipped.
+		if n, nerr := tag.NormalizeTagName(tf.Tag); nerr != nil || n != tf.Tag {
+			log.Printf("[!] render: skipping tag file %s: %q is not a tag name", name, tf.Tag)
+			continue
 		}
 
 		// Render individual tag page at tags/<name>/index.html
@@ -727,11 +754,8 @@ func (r *PageRenderer) RenderTags() (int, error) {
 		}
 		rendered = StripHTMLComments(rendered)
 
-		outPath := filepath.Join(r.config.DataDir, tagPagePath)
-		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
-			return count, fmt.Errorf("failed to create tag directory: %w", err)
-		}
-		if err := os.WriteFile(outPath, []byte(rendered), 0644); err != nil {
+		outKey := strings.TrimPrefix(filepath.ToSlash(tagPagePath), "/")
+		if err := r.config.Site.Store().Put(context.Background(), outKey, []byte(rendered), storage.Rebuildable()); err != nil {
 			return count, fmt.Errorf("failed to write tag page: %w", err)
 		}
 
@@ -769,11 +793,8 @@ func (r *PageRenderer) RenderTags() (int, error) {
 	}
 	rendered = StripHTMLComments(rendered)
 
-	indexPath := filepath.Join(r.config.DataDir, "tags", "index.html")
-	if err := os.MkdirAll(filepath.Dir(indexPath), 0755); err != nil {
-		return count, fmt.Errorf("failed to create tags directory: %w", err)
-	}
-	if err := os.WriteFile(indexPath, []byte(rendered), 0644); err != nil {
+	indexKey := "tags/index.html"
+	if err := r.config.Site.Store().Put(context.Background(), indexKey, []byte(rendered), storage.Rebuildable()); err != nil {
 		return count, fmt.Errorf("failed to write tag index: %w", err)
 	}
 
@@ -792,84 +813,74 @@ func (r *PageRenderer) RenderAll(force bool) (*RenderStats, error) {
 	stats := &RenderStats{}
 
 	// Copy CSS first
-	if err := theme.CopyCSS(r.config.DataDir, r.config.CLIThemesDir, r.themeName); err != nil {
+	if err := theme.CopyCSS(r.config.Site, r.config.CLIThemesDir, r.themeName); err != nil {
 		return nil, fmt.Errorf("failed to copy CSS: %w", err)
 	}
 	// Copy base CSS (shared structural styles)
-	if err := theme.CopyBaseCSS(r.config.DataDir, r.config.CLIThemesDir); err != nil {
+	if err := theme.CopyBaseCSS(r.config.Site, r.config.CLIThemesDir); err != nil {
 		return nil, fmt.Errorf("failed to copy base CSS: %w", err)
 	}
 
 	// Find all posts
-	postsDir := filepath.Join(r.config.DataDir, "content", "pub.polis.core", "post")
-	if err := filepath.Walk(postsDir, func(path string, info os.FileInfo, err error) error {
+	postsDir := "content/pub.polis.core/post"
+	// ⭐ The key IS the relative path, so the filepath.Rel this loop used to do
+	// is gone rather than translated. A missing directory lists as empty, which
+	// is what the old !os.IsNotExist guard arrived at by a longer route.
+	postEntries, err := listSiteRecursive(r.config.Site, postsDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range postEntries {
+		// SkipDir has no equivalent once everything is enumerated, so the
+		// .versions skip becomes a key filter.
+		if e.IsDir || !strings.HasSuffix(e.Key, ".md") || isVersionsKey(e.Key) {
+			continue
+		}
+		_, rendered, err := r.RenderFile(e.Key, "post", force)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("failed to render %s: %w", e.Key, err)
 		}
-		if info.IsDir() {
-			if info.Name() == ".versions" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".md") {
-			return nil
-		}
-
-		relPath, _ := filepath.Rel(r.config.DataDir, path)
-		_, rendered, err := r.RenderFile(relPath, "post", force)
-		if err != nil {
-			return fmt.Errorf("failed to render %s: %w", relPath, err)
-		}
-
 		if rendered {
 			stats.PostsRendered++
 		} else {
 			stats.PostsSkipped++
 		}
-		return nil
-	}); err != nil && !os.IsNotExist(err) {
-		return nil, err
 	}
 
 	// Find all comments
-	commentsDir := filepath.Join(r.config.DataDir, "content", "pub.polis.core", "comment")
-	if err := filepath.Walk(commentsDir, func(path string, info os.FileInfo, err error) error {
+	commentsDir := "content/pub.polis.core/comment"
+	// ⭐ The key IS the relative path, so the filepath.Rel this loop used to do
+	// is gone rather than translated. A missing directory lists as empty, which
+	// is what the old !os.IsNotExist guard arrived at by a longer route.
+	commentEntries, err := listSiteRecursive(r.config.Site, commentsDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range commentEntries {
+		// SkipDir has no equivalent once everything is enumerated, so the
+		// .versions skip becomes a key filter.
+		if e.IsDir || !strings.HasSuffix(e.Key, ".md") || isVersionsKey(e.Key) {
+			continue
+		}
+		_, rendered, err := r.RenderFile(e.Key, "comment", force)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("failed to render %s: %w", e.Key, err)
 		}
-		if info.IsDir() {
-			if info.Name() == ".versions" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".md") {
-			return nil
-		}
-
-		relPath, _ := filepath.Rel(r.config.DataDir, path)
-		_, rendered, err := r.RenderFile(relPath, "comment", force)
-		if err != nil {
-			return fmt.Errorf("failed to render %s: %w", relPath, err)
-		}
-
 		if rendered {
 			stats.CommentsRendered++
 		} else {
 			stats.CommentsSkipped++
 		}
-		return nil
-	}); err != nil && !os.IsNotExist(err) {
-		return nil, err
 	}
 
 	// Copy artifacts to mount dirs
 	if r.config.CommentsMountDir != "" {
-		srcBlessed := filepath.Join(r.config.DataDir, "content", "pub.polis.core", "comment", "blessed.json")
-		if _, err := os.Stat(srcBlessed); err == nil {
-			dstBlessed := filepath.Join(r.config.DataDir, r.config.CommentsMountDir, "blessed.json")
-			copyFile(srcBlessed, dstBlessed) // non-fatal
+		// Non-fatal, as before: no blessed list means nothing to copy, and a
+		// failed read or write leaves the mount's copy as it was.
+		ctx := context.Background()
+		if data, err := r.config.Site.Store().Get(ctx, "content/pub.polis.core/comment/blessed.json"); err == nil {
+			dst := strings.TrimPrefix(filepath.ToSlash(r.config.CommentsMountDir), "/") + "/blessed.json"
+			_ = r.config.Site.Store().Put(ctx, dst, data)
 		}
 	}
 
@@ -903,7 +914,7 @@ func (r *PageRenderer) RenderAll(force bool) (*RenderStats, error) {
 
 	// Persist reply context cache if it was populated during comment rendering
 	if r.replyCache != nil && len(r.replyCache) > 0 {
-		saveReplyContextCache(r.config.DataDir, r.replyCache)
+		saveReplyContextCache(r.config.Site, r.replyCache)
 	}
 
 	return stats, nil
@@ -911,14 +922,14 @@ func (r *PageRenderer) RenderAll(force bool) (*RenderStats, error) {
 
 // loadPublicIndex loads posts and comments from public.jsonl.
 func (r *PageRenderer) loadPublicIndex() ([]template.PostData, []template.CommentData, error) {
-	entries, err := metadata.LoadPublicIndex(r.config.DataDir)
+	entries, err := metadata.LoadPublicIndex(r.config.Site)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// Build a map of post path -> blessed comment count
 	commentCountMap := make(map[string]int)
-	if bc, err := metadata.LoadBlessedComments(r.config.DataDir); err == nil {
+	if bc, err := metadata.LoadBlessedComments(r.config.Site); err == nil {
 		for _, pc := range bc.Comments {
 			commentCountMap[pc.Post] = len(pc.Blessed)
 		}
@@ -947,8 +958,8 @@ func (r *PageRenderer) loadPublicIndex() ([]template.PostData, []template.Commen
 
 			// Generate excerpt from post body — read from source path
 			var excerpt string
-			mdPath := filepath.Join(r.config.DataDir, entry.Path)
-			if data, err := os.ReadFile(mdPath); err == nil {
+			mdKey := strings.TrimPrefix(filepath.ToSlash(entry.Path), "/")
+			if data, err := r.config.Site.Store().Get(context.Background(), mdKey); err == nil {
 				body := stripFrontmatter(string(data))
 				excerpt = MarkdownToPlainText(body, 200)
 			}
@@ -995,7 +1006,7 @@ func (r *PageRenderer) loadPublicIndex() ([]template.PostData, []template.Commen
 // loadBlessedCommentsForPost loads blessed comments for a specific post.
 func (r *PageRenderer) loadBlessedCommentsForPost(postPath string) ([]template.BlessedCommentData, error) {
 	// Load blessed comments for this specific post
-	comments, err := metadata.GetBlessedCommentsForPost(r.config.DataDir, postPath)
+	comments, err := metadata.GetBlessedCommentsForPost(r.config.Site, postPath)
 	if err != nil {
 		return nil, err
 	}
@@ -1018,7 +1029,11 @@ func (r *PageRenderer) loadBlessedCommentsForPost(postPath string) ([]template.B
 		// card via the blessed-comment.html template + the .comment-attached
 		// scoping in stream.css.
 		authorDomain := extractDomain(comment.URL)
-		avatarCfg, ok := LoadOrFetchAuthorAvatar(authorDomain)
+		var avatarCfg AvatarConfig
+		ok := false
+		if !r.config.Offline {
+			avatarCfg, ok = LoadOrFetchAuthorAvatar(authorDomain)
+		}
 		if !ok || avatarCfg.BG == "" {
 			avatarCfg = FallbackAvatarConfig(authorDomain)
 		}
@@ -1051,7 +1066,7 @@ func (r *PageRenderer) loadBlessedCommentsForPost(postPath string) ([]template.B
 // loadLocalCommentContent resolves a blessed comment URL to rendered HTML from
 // the isolated blessed-comment cache. Returns empty string if not available.
 func (r *PageRenderer) loadLocalCommentContent(commentURL string) string {
-	return LoadLocalCommentContent(r.config.DataDir, commentURL)
+	return LoadLocalCommentContent(r.config.Site, commentURL)
 }
 
 // LoadLocalCommentContent renders a foreign blessed comment for inline display,
@@ -1068,10 +1083,10 @@ func (r *PageRenderer) loadLocalCommentContent(commentURL string) string {
 // proper provenance sidecar and are never rogue to Rosie's integrity/GC. When
 // the filler is unset (CLI static render / offline), a miss is a graceful empty
 // string. Callers MUST treat "" as "no inline content available" and degrade.
-func LoadLocalCommentContent(dataDir, commentURL string) string {
-	data, _, ok := cache.FindBlessed(dataDir, commentURL)
-	if !ok && BlessedCacheFiller != nil && BlessedCacheFiller(dataDir, commentURL) {
-		data, _, ok = cache.FindBlessed(dataDir, commentURL)
+func LoadLocalCommentContent(site storage.Site, commentURL string) string {
+	data, _, ok := cache.FindBlessed(site, commentURL)
+	if !ok && BlessedCacheFiller != nil && BlessedCacheFiller(site, commentURL) {
+		data, _, ok = cache.FindBlessed(site, commentURL)
 	}
 	if !ok {
 		return ""
@@ -1087,17 +1102,21 @@ func LoadLocalCommentContent(dataDir, commentURL string) string {
 // domain == the owner's domain); FOREIGN blessed comments go through
 // LoadLocalCommentContent (isolated cache only, never a public path). Returns ""
 // when not found, rendered through the same goldmark + bluemonday pipeline.
-func LoadOwnCommentContent(dataDir, commentURL string) string {
+func LoadOwnCommentContent(site storage.Site, commentURL string) string {
 	rel := polisurl.CommentURLToContentRel(commentURL)
 	if rel == "" {
 		return ""
 	}
 	suffix := strings.TrimPrefix(rel, "content/pub.polis.core/comment/") // "<date>/<id>.md"
-	for _, p := range []string{
-		filepath.Join(dataDir, "comments", suffix),
-		filepath.Join(dataDir, "content", "pub.polis.core", "comment", suffix),
+	for _, key := range []string{
+		"comments/" + suffix,
+		"content/pub.polis.core/comment/" + suffix,
 	} {
-		if data, err := os.ReadFile(p); err == nil {
+		// ⛔ Proven inside the comment trees before any read.
+		if !storage.Within(key, "comments") && !storage.Within(key, "content/pub.polis.core/comment") {
+			continue
+		}
+		if data, err := site.Store().Get(context.Background(), key); err == nil {
 			return renderCommentMarkdownBody(data)
 		}
 	}
@@ -1117,8 +1136,8 @@ func renderCommentMarkdownBody(data []byte) string {
 
 // getSiteTitle returns the site title from .well-known/polis.
 func (r *PageRenderer) getSiteTitle() string {
-	wkPath := filepath.Join(r.config.DataDir, ".well-known", "polis")
-	data, err := os.ReadFile(wkPath)
+	wkKey := ".well-known/polis"
+	data, err := r.config.Site.Store().Get(context.Background(), wkKey)
 	if err != nil {
 		return r.config.BaseURL
 	}
@@ -1139,8 +1158,8 @@ func (r *PageRenderer) getSiteTitle() string {
 
 // getAuthorName returns the author name from .well-known/polis.
 func (r *PageRenderer) getAuthorName() string {
-	wkPath := filepath.Join(r.config.DataDir, ".well-known", "polis")
-	data, err := os.ReadFile(wkPath)
+	wkKey := ".well-known/polis"
+	data, err := r.config.Site.Store().Get(context.Background(), wkKey)
 	if err != nil {
 		return ""
 	}
@@ -1276,8 +1295,8 @@ func (r *PageRenderer) buildAvatarHTML() string {
 // loadLocalAvatarConfig reads the serving site's avatar block from
 // .well-known/polis. Returns the zero AvatarConfig when absent or unparseable.
 func (r *PageRenderer) loadLocalAvatarConfig() AvatarConfig {
-	wkPath := filepath.Join(r.config.DataDir, ".well-known", "polis")
-	data, err := os.ReadFile(wkPath)
+	wkKey := ".well-known/polis"
+	data, err := r.config.Site.Store().Get(context.Background(), wkKey)
 	if err != nil {
 		return AvatarConfig{}
 	}
@@ -1475,25 +1494,65 @@ type replyContextCache map[string]replyContextEntry
 const replyContextCachePath = ".polis/bundles/pub.polis.core/comments/reply-context-cache.json"
 
 // loadReplyContextCache loads the cache from disk.
-func loadReplyContextCache(dataDir string) replyContextCache {
+func loadReplyContextCache(site storage.Site) replyContextCache {
 	cache := make(replyContextCache)
-	data, err := os.ReadFile(filepath.Join(dataDir, replyContextCachePath))
+	data, err := site.Store().Get(context.Background(), replyContextCachePath)
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("[!] render: could not read the reply-context cache, starting empty: %v", err)
+		}
 		return cache
 	}
-	_ = json.Unmarshal(data, &cache)
+	if err := json.Unmarshal(data, &cache); err != nil {
+		log.Printf("[!] render: reply-context cache is unreadable, starting empty: %v", err)
+		return make(replyContextCache)
+	}
 	return cache
 }
 
 // saveReplyContextCache persists the cache to disk.
-func saveReplyContextCache(dataDir string, cache replyContextCache) {
+func saveReplyContextCache(site storage.Site, cache replyContextCache) {
+	pruneReplyContextCache(cache, maxReplyContextEntries)
 	data, err := json.MarshalIndent(cache, "", "  ")
 	if err != nil {
+		log.Printf("[!] render: could not encode the reply-context cache: %v", err)
 		return
 	}
-	fullPath := filepath.Join(dataDir, replyContextCachePath)
-	_ = os.MkdirAll(filepath.Dir(fullPath), 0755)
-	_ = os.WriteFile(filepath.Join(dataDir, replyContextCachePath), data, 0644)
+	if err := site.Store().Put(context.Background(), replyContextCachePath, data); err != nil {
+		log.Printf("[!] render: could not save the reply-context cache: %v", err)
+	}
+}
+
+// maxReplyContextEntries bounds the reply-context cache per site. Var so a
+// test can lower it.
+//
+// ⛔ The stream's body endpoint is anonymous on hosted and adds an entry per
+// distinct URL, so without a bound anyone could grow a tenant's .polis file
+// without limit (only a per-IP hourly rate stood in the way). A site's real
+// working set is its own comments' targets, far below this.
+var maxReplyContextEntries = 2000
+
+// pruneReplyContextCache drops the oldest entries (by fetched_at; legacy
+// entries with none count as oldest) until at most max remain. An evicted
+// entry is only refetched when next needed.
+func pruneReplyContextCache(cache replyContextCache, max int) {
+	if max <= 0 || len(cache) <= max {
+		return
+	}
+	keys := make([]string, 0, len(cache))
+	for k := range cache {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := cache[keys[i]].FetchedAt, cache[keys[j]].FetchedAt
+		if a != b {
+			return a < b // RFC3339 UTC sorts as time; "" first
+		}
+		return keys[i] < keys[j]
+	})
+	for _, k := range keys[:len(keys)-max] {
+		delete(cache, k)
+	}
 }
 
 // fetchReplyContext fetches a remote post's .md source and extracts title + excerpt.
@@ -1708,12 +1767,12 @@ func FetchReplyContextFull(htmlURL string) (entry ReplyContextEntry, ok bool) {
 // old `present && entry.BodyMD != ""` predicate was a vestige of
 // buildPostBodies (deleted in commit 174bab8e), which needed full
 // bodies; it now just forces re-fetches that don't help anyone.
-func LoadOrFetchReplyContext(dataDir, htmlURL string, ttl time.Duration) (ReplyContextEntry, bool) {
+func LoadOrFetchReplyContext(site storage.Site, htmlURL string, ttl time.Duration) (ReplyContextEntry, bool) {
 	// Read-side: lock long enough to read the cache and snapshot the
 	// hit entry. We deliberately copy the value out so we don't hold
 	// the mutex during the TTL parse + fetch.
 	replyCacheMu.Lock()
-	cache := loadReplyContextCache(dataDir)
+	cache := loadReplyContextCache(site)
 	entry, present := cache[htmlURL]
 	replyCacheMu.Unlock()
 
@@ -1761,9 +1820,9 @@ func LoadOrFetchReplyContext(dataDir, htmlURL string, ttl time.Duration) (ReplyC
 		// could overwrite entries written by parallel callers between
 		// our read and write.
 		replyCacheMu.Lock()
-		fresh := loadReplyContextCache(dataDir)
+		fresh := loadReplyContextCache(site)
 		fresh[htmlURL] = got
-		saveReplyContextCache(dataDir, fresh)
+		saveReplyContextCache(site, fresh)
 		replyCacheMu.Unlock()
 		return got, true
 	})
@@ -1787,8 +1846,8 @@ func LoadOrFetchReplyContext(dataDir, htmlURL string, ttl time.Duration) (ReplyC
 // (goldmark + bluemonday) sanitizes the body server-side before it reaches the
 // client, which is the load-bearing guarantee for rendering unblessed remote
 // comments inline.
-func LoadOrFetchCommentHTML(dataDir, commentURL string, ttl time.Duration) (string, bool) {
-	entry, ok := LoadOrFetchReplyContext(dataDir, commentURL, ttl)
+func LoadOrFetchCommentHTML(site storage.Site, commentURL string, ttl time.Duration) (string, bool) {
+	entry, ok := LoadOrFetchReplyContext(site, commentURL, ttl)
 	if !ok || entry.BodyMD == "" {
 		return "", false
 	}
@@ -1814,12 +1873,16 @@ func mountToSourceURL(u string) string {
 
 // resolveReplyContext looks up or fetches metadata for the post a comment replies to.
 // Returns title, excerpt, domain — using cache, fetch, or URL-derived fallback.
-func resolveReplyContext(dataDir, inReplyToURL string, cache replyContextCache) (title, excerpt, domain string) {
+func resolveReplyContext(site storage.Site, inReplyToURL string, cache replyContextCache, offline bool) (title, excerpt, domain string) {
 	domain = extractDomain(inReplyToURL)
 
 	// Check cache first
 	if entry, ok := cache[inReplyToURL]; ok {
 		return entry.Title, entry.Excerpt, entry.Domain
+	}
+	if offline {
+		fallbackTitle, _ := parseInReplyToDisplay(inReplyToURL)
+		return fallbackTitle, "", domain
 	}
 
 	// Try fetching from remote
@@ -1840,4 +1903,34 @@ func resolveReplyContext(dataDir, inReplyToURL string, cache replyContextCache) 
 	// Fallback: URL-derived title, no excerpt
 	fallbackTitle, _ := parseInReplyToDisplay(inReplyToURL)
 	return fallbackTitle, "", domain
+}
+
+// listSiteRecursive lists everything beneath absDir, which is under root. Keys
+// come back relative to root, which is what the render path wants: it addresses
+// content by site-relative path already.
+func listSiteRecursive(site storage.Site, key string) ([]storage.Entry, error) {
+	// ⭐⭐ IT TAKES A KEY NOW, and two layers of round trip came off. This was
+	// storage.NewSite(root) — a store rebuilt on every call because the
+	// function had only a root string — and then RelKey to turn the absolute
+	// path its caller had just BUILT from that same root back into a key.
+	// ⭐ The caller has the key; nothing needs to recover it.
+	return site.Store().List(context.Background(), key, storage.Recursive())
+}
+
+// listSiteDir lists what is directly under absDir, which is under root.
+func listSiteDir(site storage.Site, key string) ([]storage.Entry, error) {
+	// ⭐ See listSiteRecursive: a key in, no round trip.
+	return site.Store().List(context.Background(), key)
+}
+
+// isVersionsKey reports whether key sits inside a .versions directory, which
+// the render walks skip. It replaces a filepath.SkipDir, which has no meaning
+// once a recursive List has already enumerated the tree.
+func isVersionsKey(key string) bool {
+	for _, seg := range strings.Split(key, "/") {
+		if seg == ".versions" {
+			return true
+		}
+	}
+	return false
 }

@@ -3,6 +3,7 @@ package dm
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,30 +13,37 @@ import (
 // back: a newer polis that adds a member to the keyring — possibly key
 // material — must not lose it the first time an older build saves.
 
-func seedKeyring(t *testing.T, fixture string) (dir string, data []byte) {
+// seedKeyring writes a fixture keyring where a site keeps it and returns the
+// site. ⚠️ The fixture is placed with os.WriteFile on purpose: these tests
+// assert BYTES, so the seed must be the exact fixture rather than whatever a
+// Save would produce.
+func seedKeyring(t *testing.T, fixture string) (site storage.Site, data []byte) {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", fixture))
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir = t.TempDir()
-	if err := os.WriteFile(keyringPath(dir), data, 0600); err != nil {
+	site = storage.At(t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(site.Path(keyringKey)), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	return dir, data
+	if err := os.WriteFile(site.Path(keyringKey), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return site, data
 }
 
 // A keyring written by the pre-preservation Save comes back byte-identical.
 func TestAnUntouchedKeyringRoundTripIsByteIdentical(t *testing.T) {
-	dir, golden := seedKeyring(t, "keyring.golden.json")
-	k, err := LoadKeyring(dir)
+	site, golden := seedKeyring(t, "keyring.golden.json")
+	k, err := LoadKeyring(site)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.Save(dir); err != nil {
+	if err := k.Save(site); err != nil {
 		t.Fatal(err)
 	}
-	after, _ := os.ReadFile(keyringPath(dir))
+	after, _ := os.ReadFile(site.Path(keyringKey))
 	if !bytes.Equal(after, golden) {
 		t.Fatalf("an untouched round-trip changed keyring.json:\n--- before\n%s\n--- after\n%s", golden, after)
 	}
@@ -44,16 +52,16 @@ func TestAnUntouchedKeyringRoundTripIsByteIdentical(t *testing.T) {
 // Every unmodelled member, at every nesting level, survives a mutating save
 // with its value byte-identical.
 func TestKeyringSavePreservesUnmodelledMembersAtEveryLevel(t *testing.T) {
-	dir, before := seedKeyring(t, "keyring.future.json")
-	k, err := LoadKeyring(dir)
+	site, before := seedKeyring(t, "keyring.future.json")
+	k, err := LoadKeyring(site)
 	if err != nil {
 		t.Fatal(err)
 	}
 	k.Revision++
-	if err := k.SaveCAS(dir, k.Revision-1); err != nil {
+	if err := k.SaveCAS(site, k.Revision-1); err != nil {
 		t.Fatal(err)
 	}
-	after, _ := os.ReadFile(keyringPath(dir))
+	after, _ := os.ReadFile(site.Path(keyringKey))
 
 	for _, path := range [][]interface{}{
 		{"future_top"},
@@ -82,8 +90,8 @@ func TestKeyringSavePreservesUnmodelledMembersAtEveryLevel(t *testing.T) {
 // ⛔ The browser gets only what this build can classify. An unmodelled member
 // of a keyring may be key material a newer build keeps server-side.
 func TestBrowserViewServesNoUnmodelledMember(t *testing.T) {
-	dir, _ := seedKeyring(t, "keyring.future.json")
-	k, err := LoadKeyring(dir)
+	site, _ := seedKeyring(t, "keyring.future.json")
+	k, err := LoadKeyring(site)
 	if err != nil {
 		t.Fatal(err)
 	}

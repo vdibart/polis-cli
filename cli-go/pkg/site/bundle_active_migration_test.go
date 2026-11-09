@@ -2,6 +2,7 @@ package site
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -55,7 +56,7 @@ func readReg(t *testing.T, siteDir string) map[string]interface{} {
 
 func TestLegacyBundleActiveFieldsExist_NoFiles(t *testing.T) {
 	siteDir := t.TempDir()
-	if LegacyBundleActiveFieldsExist(siteDir) {
+	if LegacyBundleActiveFieldsExist(storage.At(siteDir)) {
 		t.Error("expected false on empty site")
 	}
 }
@@ -71,7 +72,7 @@ func TestLegacyBundleActiveFieldsExist_WellKnownOnly(t *testing.T) {
 			},
 		},
 	})
-	if !LegacyBundleActiveFieldsExist(siteDir) {
+	if !LegacyBundleActiveFieldsExist(storage.At(siteDir)) {
 		t.Error("expected true when well-known has bundles.<name>.active")
 	}
 }
@@ -88,7 +89,7 @@ func TestLegacyBundleActiveFieldsExist_RegistryOnly(t *testing.T) {
 			},
 		},
 	})
-	if !LegacyBundleActiveFieldsExist(siteDir) {
+	if !LegacyBundleActiveFieldsExist(storage.At(siteDir)) {
 		t.Error("expected true when registry has installed_bundles[].active")
 	}
 }
@@ -111,7 +112,7 @@ func TestLegacyBundleActiveFieldsExist_AlreadyClean(t *testing.T) {
 			},
 		},
 	})
-	if LegacyBundleActiveFieldsExist(siteDir) {
+	if LegacyBundleActiveFieldsExist(storage.At(siteDir)) {
 		t.Error("expected false when neither file has the active field")
 	}
 }
@@ -141,7 +142,7 @@ func TestStripBundleActiveFields_StripsBoth(t *testing.T) {
 		},
 	})
 
-	if err := StripBundleActiveFields(siteDir); err != nil {
+	if err := StripBundleActiveFields(storage.At(siteDir)); err != nil {
 		t.Fatalf("Strip: %v", err)
 	}
 
@@ -179,7 +180,7 @@ func TestStripBundleActiveFields_OnlyWellKnown(t *testing.T) {
 		},
 	})
 
-	if err := StripBundleActiveFields(siteDir); err != nil {
+	if err := StripBundleActiveFields(storage.At(siteDir)); err != nil {
 		t.Fatalf("Strip: %v", err)
 	}
 	wk := readWK(t, siteDir)
@@ -197,7 +198,7 @@ func TestStripBundleActiveFields_OnlyRegistry(t *testing.T) {
 		},
 	})
 
-	if err := StripBundleActiveFields(siteDir); err != nil {
+	if err := StripBundleActiveFields(storage.At(siteDir)); err != nil {
 		t.Fatalf("Strip: %v", err)
 	}
 	reg := readReg(t, siteDir)
@@ -220,7 +221,7 @@ func TestStripBundleActiveFields_Idempotent(t *testing.T) {
 		},
 	})
 
-	if err := StripBundleActiveFields(siteDir); err != nil {
+	if err := StripBundleActiveFields(storage.At(siteDir)); err != nil {
 		t.Fatalf("first strip: %v", err)
 	}
 	// Capture mtimes after first strip.
@@ -228,7 +229,7 @@ func TestStripBundleActiveFields_Idempotent(t *testing.T) {
 	regInfo1, _ := os.Stat(filepath.Join(siteDir, ".polis", "bundles", "registry.json"))
 
 	// Second pass should not re-write either file (no-op).
-	if err := StripBundleActiveFields(siteDir); err != nil {
+	if err := StripBundleActiveFields(storage.At(siteDir)); err != nil {
 		t.Fatalf("second strip: %v", err)
 	}
 	wkInfo2, _ := os.Stat(filepath.Join(siteDir, ".well-known", "polis"))
@@ -260,7 +261,7 @@ func TestStripBundleActiveFields_PreservesUnknownFields(t *testing.T) {
 		},
 	})
 
-	if err := StripBundleActiveFields(siteDir); err != nil {
+	if err := StripBundleActiveFields(storage.At(siteDir)); err != nil {
 		t.Fatalf("Strip: %v", err)
 	}
 	wk := readWK(t, siteDir)
@@ -275,7 +276,7 @@ func TestStripBundleActiveFields_PreservesUnknownFields(t *testing.T) {
 
 func TestStripBundleActiveFields_NoFiles(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := StripBundleActiveFields(siteDir); err != nil {
+	if err := StripBundleActiveFields(storage.At(siteDir)); err != nil {
 		t.Fatalf("Strip on empty site: %v", err)
 	}
 }

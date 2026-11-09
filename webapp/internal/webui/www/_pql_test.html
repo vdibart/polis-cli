@@ -145,6 +145,10 @@ assert('parseURL /_/settings (not a PQL path) → null',
     PQL.parseURL({ pathname: '/_/settings' }),
     { pqlState: null });
 
+assert('parseURL /_/kay (not a PQL path) → null',
+    PQL.parseURL({ pathname: '/_/kay' }),
+    { pqlState: null });
+
 assert('parseURL with %-encoded space ("%20")',
     PQL.parseURL({ pathname: '/_/pql/all%20activity%20from%20my%20network' }),
     { pqlState: { qualifier: 'all', type: 'activity', scope: 'my-network', modifier: null } });

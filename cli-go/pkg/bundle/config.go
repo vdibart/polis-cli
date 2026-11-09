@@ -1,14 +1,18 @@
 package bundle
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // BundleRegistry is the per-tenant private bundle config. It records which
@@ -76,23 +80,25 @@ type InstalledBundle struct {
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
-// RegistryPath returns the absolute path to a tenant's bundle registry file.
-func RegistryPath(siteDir string) string {
-	return filepath.Join(siteDir, ".polis", "bundles", "registry.json")
-}
+// RegistryKey is the tenant's bundle registry, relative to the site root.
+//
+// ⭐ A KEY, so every reader and writer addresses it the same way on any
+// backend. It replaced the exported RegistryPath builder.
+const RegistryKey = ".polis/bundles/registry.json"
 
 // LoadRegistry reads the tenant's bundle registry.
 // Returns os.ErrNotExist (wrapped) if the file is missing — callers can use
 // errors.Is to detect and fall through to a legacy-config path.
-func LoadRegistry(siteDir string) (*BundleRegistry, error) {
-	path := RegistryPath(siteDir)
-	data, err := os.ReadFile(path)
+func LoadRegistry(site storage.Site) (*BundleRegistry, error) {
+	// ⚠️ Absence stays fs.ErrNotExist (wrapped): the store's ErrNotFound wraps
+	// it, which is what every caller's errors.Is checks.
+	data, err := site.Store().Get(context.Background(), RegistryKey)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", RegistryKey, err)
 	}
 	var reg BundleRegistry
 	if err := json.Unmarshal(data, &reg); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", RegistryKey, err)
 	}
 	return &reg, nil
 }
@@ -117,8 +123,8 @@ func LoadRegistry(siteDir string) (*BundleRegistry, error) {
 // init/healing paths) should keep using this helper. Callers that need
 // to differentiate missing-vs-broken should call LoadRegistry directly
 // and inspect the error themselves.
-func LoadRegistryOrInit(siteDir string) (*BundleRegistry, error) {
-	reg, err := LoadRegistry(siteDir)
+func LoadRegistryOrInit(site storage.Site) (*BundleRegistry, error) {
+	reg, err := LoadRegistry(site)
 	if err == nil {
 		return reg, nil
 	}
@@ -138,11 +144,10 @@ func LoadRegistryOrInit(siteDir string) (*BundleRegistry, error) {
 // Used by integrity checks (patrol F2) that need to distinguish a malformed
 // registry from an absent one. Legacy helpers that want "assume-absent-on-error"
 // semantics just discard the error.
-func LoadRegistryRaw(siteDir string) (map[string]interface{}, error) {
-	path := RegistryPath(siteDir)
-	data, err := os.ReadFile(path)
+func LoadRegistryRaw(site storage.Site) (map[string]interface{}, error) {
+	data, err := site.Store().Get(context.Background(), RegistryKey)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -157,20 +162,31 @@ func LoadRegistryRaw(siteDir string) (map[string]interface{}, error) {
 // SaveRegistry writes the tenant's bundle registry, creating the parent
 // directory if needed. The file is written atomically (temp + rename) so a
 // crash mid-write doesn't corrupt the file.
-func SaveRegistry(siteDir string, reg *BundleRegistry) error {
+func SaveRegistry(site storage.Site, reg *BundleRegistry) error {
 	if reg == nil {
 		return fmt.Errorf("registry is nil")
-	}
-	path := RegistryPath(siteDir)
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return fmt.Errorf("create parent: %w", err)
 	}
 	data, err := json.MarshalIndent(reg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
 	data = append(data, '\n')
-	return atomicfile.WriteFile(path, data, 0600)
+
+	// ⭐⭐⭐ THROUGH THE SITE, so this works on any backend. It was
+	// atomicfile.WriteFile on a real path, and that made it the one write in
+	// the render path that still needed a filesystem: NewPageRenderer picks a
+	// theme when none is set, persists the choice here, and ⛔ on Vercel the
+	// filesystem is READ-ONLY outside /tmp — so the FIRST RENDER of a new
+	// blob-backed instance failed on it.
+	//
+	// ⚠️ The MkdirAll that used to precede it is gone because the store's Put
+	// creates parent prefixes, and at 0700 under .polis — which is the rule
+	// NewSite carries. On a backend with no directories there is nothing to
+	// create.
+	if err := atomicfile.Write(context.Background(), site, RegistryKey, data, 0600); err != nil {
+		return err
+	}
+	return nil
 }
 
 // DefaultRegistry returns a registry initialized for a fresh site that only
@@ -406,7 +422,7 @@ func QualifyShape(name string) string {
 // calls this and then strips the legacy field through that writer. This
 // package used to write the file itself (site imports bundle, so it could not
 // call the writer) — which put a well-known write outside every guard.
-func AdoptLegacyActiveTheme(siteDir, legacyTheme string) error {
+func AdoptLegacyActiveTheme(site storage.Site, legacyTheme string) error {
 	if legacyTheme == "" {
 		return nil
 	}
@@ -414,7 +430,7 @@ func AdoptLegacyActiveTheme(siteDir, legacyTheme string) error {
 	// file is genuinely missing. Read errors (permission denied) and
 	// parse errors return up so we don't silently overwrite a present-
 	// but-broken registry with defaults.
-	reg, err := LoadRegistryOrInit(siteDir)
+	reg, err := LoadRegistryOrInit(site)
 	if err != nil {
 		return fmt.Errorf("load registry for migration: %w", err)
 	}
@@ -429,7 +445,7 @@ func AdoptLegacyActiveTheme(siteDir, legacyTheme string) error {
 		reg.InstalledBundles = DefaultRegistry().InstalledBundles
 	}
 
-	if err := SaveRegistry(siteDir, reg); err != nil {
+	if err := SaveRegistry(site, reg); err != nil {
 		return fmt.Errorf("save registry: %w", err)
 	}
 
@@ -442,8 +458,8 @@ func AdoptLegacyActiveTheme(siteDir, legacyTheme string) error {
 //
 // This is the function callers should use anywhere they need the active theme
 // name. Centralizing avoids the legacy fallback logic being duplicated.
-func GetActiveThemeName(siteDir string) (string, error) {
-	if reg, err := LoadRegistry(siteDir); err == nil && reg.ActiveTheme != "" {
+func GetActiveThemeName(site storage.Site) (string, error) {
+	if reg, err := LoadRegistry(site); err == nil && reg.ActiveTheme != "" {
 		fqn, err := ParseFQN(reg.ActiveTheme)
 		if err != nil {
 			return "", fmt.Errorf("invalid active_theme in registry: %w", err)
@@ -451,8 +467,7 @@ func GetActiveThemeName(siteDir string) (string, error) {
 		return fqn.Name, nil
 	}
 	// Legacy fallback: read from well-known.
-	wkPath := filepath.Join(siteDir, ".well-known", "polis")
-	data, err := os.ReadFile(wkPath)
+	data, err := site.Store().Get(context.Background(), ".well-known/polis")
 	if err != nil {
 		return "", nil
 	}
@@ -472,16 +487,16 @@ func GetActiveThemeName(siteDir string) (string, error) {
 // Callers in the webapp/CLI theme-switcher path should use this. Pre-existing
 // active_theme entries in .well-known/polis are NOT touched here — that's the
 // migration's job (site.MigrateActiveThemeToRegistry).
-func SetActiveThemeName(siteDir, themeName string) error {
+func SetActiveThemeName(site storage.Site, themeName string) error {
 	if themeName == "" {
 		return fmt.Errorf("theme name is required")
 	}
-	reg, err := LoadRegistryOrInit(siteDir)
+	reg, err := LoadRegistryOrInit(site)
 	if err != nil {
 		return fmt.Errorf("load registry to set active_theme: %w", err)
 	}
 	reg.ActiveTheme = QualifyTheme(themeName)
-	return SaveRegistry(siteDir, reg)
+	return SaveRegistry(site, reg)
 }
 
 // GetActiveShapeName mirrors GetActiveThemeName for the active shape.
@@ -490,8 +505,8 @@ func SetActiveThemeName(siteDir, themeName string) error {
 // default forward — Medic's upgradeActiveShape remediation covers
 // existing tenants with an explicit v3 stamp, and this default covers
 // tenants with no registry at all.)
-func GetActiveShapeName(siteDir string) (string, error) {
-	if reg, err := LoadRegistry(siteDir); err == nil && reg.ActiveShape != "" {
+func GetActiveShapeName(site storage.Site) (string, error) {
+	if reg, err := LoadRegistry(site); err == nil && reg.ActiveShape != "" {
 		fqn, err := ParseFQN(reg.ActiveShape)
 		if err != nil {
 			return "", fmt.Errorf("invalid active_shape in registry: %w", err)
@@ -504,14 +519,14 @@ func GetActiveShapeName(siteDir string) (string, error) {
 // SetActiveShapeName writes the active shape name into the tenant's registry,
 // fully-qualifying as pub.polis.shapes.<name>. Mirrors SetActiveThemeName.
 // Creates the registry if missing.
-func SetActiveShapeName(siteDir, shapeName string) error {
+func SetActiveShapeName(site storage.Site, shapeName string) error {
 	if shapeName == "" {
 		return fmt.Errorf("shape name is required")
 	}
-	reg, err := LoadRegistryOrInit(siteDir)
+	reg, err := LoadRegistryOrInit(site)
 	if err != nil {
 		return fmt.Errorf("load registry to set active_shape: %w", err)
 	}
 	reg.ActiveShape = QualifyShape(shapeName)
-	return SaveRegistry(siteDir, reg)
+	return SaveRegistry(site, reg)
 }

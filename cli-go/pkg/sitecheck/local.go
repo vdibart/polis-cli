@@ -1,19 +1,23 @@
 package sitecheck
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/attestation"
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
+	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
@@ -30,6 +34,9 @@ const noPrivateState = "no .polis/ directory — this is a published copy rather
 // onlyOnTheWire is why a directory cannot check the public licence surfaces
 // (SIGNET epic 44 D6): an intermediary can add to what the edge serves, and a
 // directory never contains it.
+// onlyAServerCanAnswer is why the private-file probe runs only on the wire.
+const onlyAServerCanAnswer = "whether a private file is SERVED is a question about the server in front of the directory, which only a request over the wire can answer; run `polis validate <url>`"
+
 const onlyOnTheWire = "what the edge actually serves — the public robots.txt and rsl.xml, compared with the signed terms — is only visible over the wire; run `polis validate <url>`"
 
 // RunLocal validates a site directory: your own site, or a clone, or any tree
@@ -48,26 +55,35 @@ func RunLocal(siteDir string) *Report {
 // or a test, passes StaticDSKeys. A nil lookup leaves every witness unchecked —
 // reported as such, never as a failure.
 func RunLocalWith(siteDir string, dsKeys DSKeyLookup) *Report {
+	return RunLocalWithThemes(siteDir, dsKeys, "")
+}
+
+// RunLocalWithThemes is RunLocalWith plus the CLI themes directory the renderer
+// falls back to for a theme the site does not hold (a legacy, unmigrated one).
+// polis validate passes the same directory polis render finds, so a theme that
+// renders from there is installed as far as the registry check is concerned.
+// An empty cliThemesDir checks the site alone.
+func RunLocalWithThemes(siteDir string, dsKeys DSKeyLookup, cliThemesDir string) *Report {
 	r := &Report{Target: siteDir, Form: FormLocal, Scope: ScopeSite, dsKeys: dsKeys}
 
-	info, err := os.Stat(siteDir)
+	info, err := storage.NewSite(siteDir).Stat(context.Background(), "")
 	if err != nil {
 		r.FatalError = fmt.Sprintf("cannot read %s: %v", siteDir, err)
 		return r
 	}
-	if !info.IsDir() {
+	if !info.IsDir {
 		r.FatalError = fmt.Sprintf("%s is not a directory", siteDir)
 		return r
 	}
 
-	hasPrivate := isDir(filepath.Join(siteDir, ".polis"))
+	hasPrivate := isDir(siteDir, filepath.Join(siteDir, ".polis"))
 
-	wk, wkErr := site.LoadWellKnown(siteDir)
+	wk, wkErr := site.LoadWellKnown(storage.At(siteDir))
 	pubKey, keyErr := PublishedKey(siteDir)
 	chain, chainNote := localResolvingChain(siteDir, wk)
 
 	checkIdentityLocal(r, siteDir, wk, wkErr, hasPrivate)
-	checkBundlesLocal(r, siteDir, wk, hasPrivate)
+	checkBundlesLocal(r, siteDir, cliThemesDir, wk, hasPrivate)
 	checkIndexLocal(r, siteDir)
 	checkPolicyLocal(r, siteDir, hasPrivate)
 	checkContentLocal(r, siteDir, pubKey, keyErr, chain, chainNote)
@@ -79,7 +95,7 @@ func RunLocalWith(siteDir string, dsKeys DSKeyLookup) *Report {
 
 func checkIdentityLocal(r *Report, siteDir string, wk *site.WellKnown, wkErr error, hasPrivate bool) {
 	switch {
-	case wkErr != nil && os.IsNotExist(wkErr):
+	case wkErr != nil && errors.Is(wkErr, storage.ErrNotFound):
 		r.fail("identity.well_known", FamilyIdentity, ".well-known/polis not found — the site has no identity document", 0)
 	case wkErr != nil:
 		r.fail("identity.well_known", FamilyIdentity, "cannot read .well-known/polis: "+wkErr.Error(), 0)
@@ -93,16 +109,18 @@ func checkIdentityLocal(r *Report, siteDir string, wk *site.WellKnown, wkErr err
 	privPath := filepath.Join(keysDir, "id_ed25519")
 	pubPath := filepath.Join(keysDir, "id_ed25519.pub")
 
+	r.na("identity.private_files_served", FamilyIdentity, onlyAServerCanAnswer)
+
 	if !hasPrivate {
 		r.na("identity.key_files", FamilyIdentity, noPrivateState)
 		r.na("identity.key_perms", FamilyIdentity, noPrivateState)
 		r.na("identity.key_match", FamilyIdentity, noPrivateState+" — the published key cannot be compared with a key file that is not here")
 	} else {
 		var missing []string
-		if !exists(privPath) {
+		if !exists(siteDir, privPath) {
 			missing = append(missing, ".polis/keys/id_ed25519")
 		}
-		if !exists(pubPath) {
+		if !exists(siteDir, pubPath) {
 			missing = append(missing, ".polis/keys/id_ed25519.pub")
 		}
 		if len(missing) > 0 {
@@ -111,13 +129,13 @@ func checkIdentityLocal(r *Report, siteDir string, wk *site.WellKnown, wkErr err
 			r.pass("identity.key_files", FamilyIdentity, "both key files present", 2)
 		}
 
-		if exists(privPath) {
-			r.fromStatus("identity.key_perms", FamilyIdentity, KeyPerms(siteDir))
+		if exists(siteDir, privPath) {
+			r.fromStatus("identity.key_perms", FamilyIdentity, KeyPerms(storage.At(siteDir)))
 		} else {
 			r.na("identity.key_perms", FamilyIdentity, "no private key file to check permissions on")
 		}
 
-		keyFile, readErr := os.ReadFile(pubPath)
+		keyFile, readErr := readSiteFile(siteDir, pubPath)
 		switch {
 		case readErr != nil:
 			r.na("identity.key_match", FamilyIdentity, "no readable public key file to compare against .well-known/polis")
@@ -133,7 +151,7 @@ func checkIdentityLocal(r *Report, siteDir string, wk *site.WellKnown, wkErr err
 	checkDIDDocument(r, siteDir, wk)
 	checkKeyHistoryLocal(r, siteDir, wk)
 	if wkErr == nil {
-		if body, err := os.ReadFile(filepath.Join(siteDir, ".well-known", "polis")); err == nil {
+		if body, err := storage.NewSite(siteDir).Get(context.Background(), ".well-known/polis"); err == nil {
 			reportMessagesKey(r, body)
 		}
 	} else {
@@ -147,7 +165,7 @@ func checkIdentityLocal(r *Report, siteDir string, wk *site.WellKnown, wkErr err
 //
 // ⛔ It also says, out loud, what it did NOT check. See dsParityNotRun.
 func checkKeyHistoryLocal(r *Report, siteDir string, wk *site.WellKnown) {
-	block, err := site.LoadKeyHistory(siteDir)
+	block, err := site.LoadKeyHistory(storage.At(siteDir))
 	if err != nil {
 		r.fail("identity.key_history", FamilyIdentity, "public_key_history is present and does not parse: "+err.Error(), 1)
 		r.na("identity.key_history_head", FamilyIdentity, "the key history could not be read, so its head could not be compared with anything")
@@ -155,7 +173,7 @@ func checkKeyHistoryLocal(r *Report, siteDir string, wk *site.WellKnown) {
 		return
 	}
 	if block == nil {
-		didDoc, _ := os.ReadFile(site.DIDDocumentPath(siteDir))
+		didDoc, _ := readSiteKey(siteDir, site.DIDDocumentKey)
 		if erased := ChainErasure(nil, didDoc); !erased.OK {
 			r.fail("identity.key_history", FamilyIdentity, erased.Message, 1)
 			r.na("identity.key_history_head", FamilyIdentity, "the key history was erased, so there is no head to compare")
@@ -171,7 +189,7 @@ func checkKeyHistoryLocal(r *Report, siteDir string, wk *site.WellKnown) {
 
 	// The domain is inside every transition signature and .well-known/polis
 	// does not record it, so it comes from the site's own DID document.
-	didDoc, _ := os.ReadFile(site.DIDDocumentPath(siteDir))
+	didDoc, _ := readSiteKey(siteDir, site.DIDDocumentKey)
 	domain := DomainFromDIDDocument(didDoc)
 	if domain == "" && len(block.History) > 0 {
 		r.na("identity.key_history", FamilyIdentity,
@@ -216,12 +234,12 @@ func localResolvingChain(siteDir string, wk *site.WellKnown) (*site.KeyHistoryBl
 // publicKey is the key the site publishes; ResolvingChain refuses a chain whose
 // head is anything else.
 func SiteResolvingChain(siteDir, domain, publicKey string) (*site.KeyHistoryBlock, string) {
-	block, err := site.LoadKeyHistory(siteDir)
+	block, err := site.LoadKeyHistory(storage.At(siteDir))
 	if err != nil || block == nil {
 		return nil, ""
 	}
 	if domain == "" {
-		didDoc, _ := os.ReadFile(site.DIDDocumentPath(siteDir))
+		didDoc, _ := readSiteKey(siteDir, site.DIDDocumentKey)
 		domain = DomainFromDIDDocument(didDoc)
 	}
 	return ResolvingChain(block, domain, publicKey)
@@ -240,7 +258,7 @@ func SiteResolvingChain(siteDir, domain, publicKey string) (*site.KeyHistoryBloc
 // document. The host comes from the document's OWN `id`, so this works on a
 // clone of someone else's site, where our own POLIS_BASE_URL would be wrong.
 func checkDIDDocument(r *Report, siteDir string, wk *site.WellKnown) {
-	doc, err := os.ReadFile(site.DIDDocumentPath(siteDir))
+	doc, err := readSiteKey(siteDir, site.DIDDocumentKey)
 	if err != nil {
 		r.na("identity.did_document", FamilyIdentity, "no .well-known/did.json published — most sites publish none, and absence is honest")
 		return
@@ -263,7 +281,7 @@ func checkDIDDocument(r *Report, siteDir string, wk *site.WellKnown) {
 		return
 	}
 
-	stale, _, err := site.DIDDocumentNeedsWrite(siteDir, host)
+	stale, _, err := site.DIDDocumentNeedsWrite(storage.At(siteDir), host)
 	if err != nil {
 		r.na("identity.did_document", FamilyIdentity, "the DID document could not be rebuilt for comparison: "+err.Error())
 		return
@@ -277,7 +295,7 @@ func checkDIDDocument(r *Report, siteDir string, wk *site.WellKnown) {
 
 // ---------- bundle registry health ----------
 
-func checkBundlesLocal(r *Report, siteDir string, wk *site.WellKnown, hasPrivate bool) {
+func checkBundlesLocal(r *Report, siteDir, cliThemesDir string, wk *site.WellKnown, hasPrivate bool) {
 	if wk == nil || len(wk.Bundles) == 0 {
 		r.na("bundle.declared", FamilyBundle, "the identity document declares no bundles, so there is nothing to look for")
 	} else {
@@ -290,7 +308,7 @@ func checkBundlesLocal(r *Report, siteDir string, wk *site.WellKnown, hasPrivate
 		for _, name := range names {
 			// Listing-is-activation: every bundle present in bundles[] is
 			// active and must have a bundle.json where it says it does.
-			if !exists(filepath.Join(siteDir, wk.Bundles[name].Path)) {
+			if !exists(siteDir, filepath.Join(siteDir, wk.Bundles[name].Path)) {
 				missing = append(missing, fmt.Sprintf("%s declares %s, which is not there", name, wk.Bundles[name].Path))
 			}
 		}
@@ -302,7 +320,7 @@ func checkBundlesLocal(r *Report, siteDir string, wk *site.WellKnown, hasPrivate
 	}
 
 	bundlePath := filepath.Join(siteDir, "content", "pub.polis.core", "bundle.json")
-	if !exists(bundlePath) && (wk == nil || len(wk.Bundles) == 0) {
+	if !exists(siteDir, bundlePath) && (wk == nil || len(wk.Bundles) == 0) {
 		r.na("bundle.json", FamilyBundle, "no core bundle.json and none declared — a site from before the bundle refactor")
 	} else {
 		r.fromStatus("bundle.json", FamilyBundle, BundleJSON(siteDir))
@@ -313,8 +331,8 @@ func checkBundlesLocal(r *Report, siteDir string, wk *site.WellKnown, hasPrivate
 		return
 	}
 	regPath := filepath.Join(siteDir, ".polis", "bundles", "registry.json")
-	data, err := os.ReadFile(regPath)
-	if os.IsNotExist(err) {
+	data, err := readSiteFile(siteDir, regPath)
+	if errors.Is(err, storage.ErrNotFound) {
 		r.na("bundle.registry", FamilyBundle, "no .polis/bundles/registry.json — the site has selected no theme or shape yet")
 		return
 	}
@@ -327,14 +345,66 @@ func checkBundlesLocal(r *Report, siteDir string, wk *site.WellKnown, hasPrivate
 		r.fail("bundle.registry", FamilyBundle, "the bundle registry is present and does not parse: "+err.Error(), 1)
 		return
 	}
-	r.pass("bundle.registry", FamilyBundle, "bundle registry present and parseable", 1)
+	if problems := registrySelections(siteDir, cliThemesDir, raw); len(problems) > 0 {
+		r.fail("bundle.registry", FamilyBundle, "the bundle registry selects a theme or shape that is not installed", 1, problems...)
+		return
+	}
+	r.pass("bundle.registry", FamilyBundle, "bundle registry present, parseable, and its active theme and shape are installed", 1)
+}
+
+// registrySelections checks that the registry's active_theme and active_shape,
+// when set, name a theme and a shape this site has installed. A misspelt name
+// used to pass and fail only at render time — or, on the hosted service, be
+// reset by the actors without a word — which left an owner (or an agent
+// editing registry.json for them) nothing to check an edit against.
+//
+// "Installed" is what the renderer can find: theme.ListThemes and
+// theme.ListShapes read the same places theme.LoadShape does, and for a theme
+// that includes the CLI themes directory it falls back to after the site's own
+// two. Without it, a site whose active theme exists only there rendered and
+// failed validation. A reserved theme (sols, stardust) is installed and
+// renders, so it passes: reservation keeps it out of the theme picker, and is
+// not a fault in a registry that names it.
+func registrySelections(siteDir, cliThemesDir string, raw map[string]interface{}) []string {
+	st := storage.At(siteDir)
+	var problems []string
+	check := func(field, kind string, list func() ([]string, error)) {
+		value, _ := raw[field].(string)
+		if value == "" {
+			return
+		}
+		fqn, err := bundle.ParseFQN(value)
+		if err != nil || fqn.Kind != kind {
+			problems = append(problems, fmt.Sprintf("%s %q is not a fully-qualified %s name (e.g. pub.polis.%s.<name>)", field, value, strings.TrimSuffix(kind, "s"), kind))
+			return
+		}
+		installed, err := list()
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s %q: cannot list the installed %s: %v", field, value, kind, err))
+			return
+		}
+		sort.Strings(installed)
+		for _, name := range installed {
+			if name == fqn.Name {
+				return
+			}
+		}
+		have := "none"
+		if len(installed) > 0 {
+			have = strings.Join(installed, ", ")
+		}
+		problems = append(problems, fmt.Sprintf("%s %q names %s %q, which is not installed (installed: %s)", field, value, strings.TrimSuffix(kind, "s"), fqn.Name, have))
+	}
+	check("active_theme", "themes", func() ([]string, error) { return theme.ListThemes(st, cliThemesDir) })
+	check("active_shape", "shapes", func() ([]string, error) { return theme.ListShapes(st) })
+	return problems
 }
 
 // ---------- index consistency ----------
 
 func checkIndexLocal(r *Report, siteDir string) {
 	indexPath := filepath.Join(siteDir, "content", "pub.polis.core", "index.jsonl")
-	if !exists(indexPath) {
+	if !exists(siteDir, indexPath) {
 		r.na("index.consistency", FamilyIndex, "no index.jsonl — the site has published nothing")
 		return
 	}
@@ -344,8 +414,8 @@ func checkIndexLocal(r *Report, siteDir string) {
 // ---------- policy parseability ----------
 
 func checkPolicyLocal(r *Report, siteDir string, hasPrivate bool) {
-	publicPolicies := exists(filepath.Join(siteDir, "policies", "rules.jsonl"))
-	privatePolicies := exists(filepath.Join(siteDir, ".polis", "policies", "rules.jsonl"))
+	publicPolicies := exists(siteDir, filepath.Join(siteDir, "policies", "rules.jsonl"))
+	privatePolicies := exists(siteDir, filepath.Join(siteDir, ".polis", "policies", "rules.jsonl"))
 
 	if !publicPolicies && !privatePolicies {
 		reason := "no policy files — the site has declared no rules"
@@ -404,26 +474,26 @@ func checkContentLocal(r *Report, siteDir string, pubKey []byte, keyErr error, c
 	// PASS reading "unsigned — nothing to verify" about bytes it never read. The
 	// remote form already said NOT CHECKED; the parity guard found the pair
 	// disagreeing.
-	if !exists(following.DefaultPath(siteDir)) {
+	if !exists(siteDir, filepath.Join(siteDir, following.DefaultKey)) {
 		r.na("content.following", FamilyContent, "no following.json — the site follows nobody, or has never written its follow file")
 	} else {
-		followStatus, followErr := following.VerifySite(siteDir)
+		followStatus, followErr := following.VerifySite(storage.At(siteDir))
 		// Re-read for the unrecognised-member list: VerifySite reports a status
 		// and nothing else, and the `valid` row owes the reader the fields the
 		// signature does NOT cover (SIGNET epic 47).
 		var followExtra []string
-		if f, lerr := following.Load(following.DefaultPath(siteDir)); lerr == nil {
+		if f, lerr := following.LoadSite(storage.At(siteDir)); lerr == nil {
 			followExtra = f.UnrecognisedFields()
 		}
 		r.signatureOutcome("content.following", FamilyContent, "following.json", string(followStatus), errText(followErr), followExtra)
 	}
 
-	if !exists(metadata.BlessedPath(siteDir)) {
+	if !exists(siteDir, filepath.Join(siteDir, metadata.BlessedKey)) {
 		r.na("content.blessed", FamilyContent, "no blessed.json — the site has blessed nothing")
 	} else {
-		blessedStatus, blessedErr := metadata.VerifyBlessedSite(siteDir)
+		blessedStatus, blessedErr := metadata.VerifyBlessedSite(storage.At(siteDir))
 		var blessedExtra []string
-		if bc, lerr := metadata.LoadBlessedComments(siteDir); lerr == nil {
+		if bc, lerr := metadata.LoadBlessedComments(storage.At(siteDir)); lerr == nil {
 			blessedExtra = bc.UnrecognisedFields()
 		}
 		r.signatureOutcome("content.blessed", FamilyContent, "blessed.json", string(blessedStatus), errText(blessedErr), blessedExtra)
@@ -450,7 +520,7 @@ func checkContentLocal(r *Report, siteDir string, pubKey []byte, keyErr error, c
 	// the JSON family (epic 32) rides the same read — a record's `version`
 	// already hashes the whole signed record, so a witness binds all of it.
 	attestations := recordTally{statuses: map[string]string{}}
-	records, badRecords, attErr := attestation.Scan(siteDir)
+	records, badRecords, attErr := attestation.Scan(storage.At(siteDir))
 	attestations.err = attErr
 	for _, m := range badRecords {
 		attestations.malformed = append(attestations.malformed, m.Name+": does not parse ("+m.Error+")")
@@ -463,7 +533,7 @@ func checkContentLocal(r *Report, siteDir string, pubKey []byte, keyErr error, c
 	checkRecordSet(r, "content.attestations", "attestation", "the site has issued no attestations", attestations)
 
 	tags := recordTally{statuses: map[string]string{}}
-	tagFiles, badTags, tagErr := tag.ScanTags(siteDir)
+	tagFiles, badTags, tagErr := tag.ScanTags(storage.At(siteDir))
 	tags.err = tagErr
 	for _, m := range badTags {
 		tags.malformed = append(tags.malformed, m.Name+": does not parse ("+m.Error+")")
@@ -500,7 +570,7 @@ func censusTag(c *witnessCensus, tf *tag.TagFile) {
 // history resolves for its claimed signing time (epic 31); a pass that needed
 // that is counted and named, never folded into the plain count.
 func checkContentTree(r *Report, id, siteDir, dir string, pubKey []byte, chain *site.KeyHistoryBlock, chainNote string, typ signing.ObjectType, noun string, census *witnessCensus) {
-	if !isDir(dir) {
+	if !isDir(siteDir, dir) {
 		r.na(id, FamilyContent, fmt.Sprintf("no %s directory — the site has published no %ss", noun, noun))
 		return
 	}
@@ -509,28 +579,36 @@ func checkContentTree(r *Report, id, siteDir, dir string, pubKey []byte, chain *
 	var findings, retiredNotes []string
 	historyConsulted := chain != nil && len(chain.History) > 0
 
-	filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	treeStore := storage.NewSite(siteDir)
+	treeCtx := context.Background()
+	treePrefix, treeErr := storage.RelKey(siteDir, dir)
+	if treeErr != nil {
+		r.na(id, FamilyContent, fmt.Sprintf("no %s directory — the site has published no %ss", noun, noun))
+		return
+	}
+	treeEntries, _ := treeStore.List(treeCtx, treePrefix, storage.Recursive())
+	for _, entry := range treeEntries {
+		key := entry.Key
+		// A recursive List has no SkipDir, so .versions is filtered by key
+		// rather than by refusing to descend. Same outcome, and the filter
+		// has to be explicit because nothing stops the walk any more.
+		if entry.IsDir || strings.Contains(key, "/.versions/") || !strings.HasSuffix(key, ".md") {
+			continue
 		}
-		if d.IsDir() && d.Name() == ".versions" {
-			return filepath.SkipDir
-		}
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
-			return nil
-		}
-		rel, _ := filepath.Rel(siteDir, path)
+		// The key IS site-relative, so this is `rel` already. The walk this
+		// replaced handed out absolute paths and relativised them here.
+		rel := key
 		examined++
 
-		data, err := os.ReadFile(path)
+		data, err := treeStore.Get(treeCtx, key)
 		if err != nil {
 			findings = append(findings, fmt.Sprintf("%s: unreadable — %v", rel, err))
-			return nil
+			continue
 		}
 		res := VerifyContentWithHistory(string(data), pubKey, chain, typ)
 		if res.ParseError != nil {
 			findings = append(findings, fmt.Sprintf("%s: %v", rel, res.ParseError))
-			return nil
+			continue
 		}
 		census.add(rel, filepath.ToSlash(rel), res)
 		switch res.Signature {
@@ -548,8 +626,7 @@ func checkContentTree(r *Report, id, siteDir, dir string, pubKey []byte, chain *
 		if res.Hash == HashMismatch {
 			findings = append(findings, fmt.Sprintf("%s: body does not match its current-version hash", rel))
 		}
-		return nil
-	})
+	}
 
 	if examined == 0 {
 		r.na(id, FamilyContent, fmt.Sprintf("the %s directory holds no files — the site has published no %ss", noun, noun))
@@ -648,14 +725,26 @@ func plural(n int, noun string) string {
 	return fmt.Sprintf("%d %ss", n, noun)
 }
 
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+// exists reports whether absPath, which is under root, is present.
+// It takes the root because the store addresses keys relative to it.
+func exists(root, absPath string) bool {
+	key, err := storage.RelKey(root, absPath)
+	if err != nil {
+		return false
+	}
+	ok, _ := storage.NewPOSIX(root).Exists(context.Background(), key)
+	return ok
 }
 
-func isDir(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
+// isDir reports whether absPath, under root, is a directory — meaning, on a
+// prefix store, that keys exist beneath it.
+func isDir(root, absPath string) bool {
+	key, err := storage.RelKey(root, absPath)
+	if err != nil {
+		return false
+	}
+	info, err := storage.NewPOSIX(root).Stat(context.Background(), key)
+	return err == nil && info.IsDir
 }
 
 func errText(err error) string {
@@ -663,4 +752,20 @@ func errText(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// readSiteKey reads key, relative to root, through the storage interface.
+func readSiteKey(root, key string) ([]byte, error) {
+	return storage.NewSite(root).Get(context.Background(), key)
+}
+
+// readSiteFile reads absPath, which is under root, through the storage
+// interface. It exists because most path helpers in this package return an
+// absolute path and a key is site-relative.
+func readSiteFile(root, absPath string) ([]byte, error) {
+	key, err := storage.RelKey(root, absPath)
+	if err != nil {
+		return nil, err
+	}
+	return storage.NewSite(root).Get(context.Background(), key)
 }

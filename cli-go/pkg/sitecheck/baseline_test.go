@@ -1,6 +1,7 @@
 package sitecheck
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,7 +20,7 @@ import (
 func TestExtractedPredicates_MessagesArePinnedForTheFleet(t *testing.T) {
 	t.Run("KeyPerms", func(t *testing.T) {
 		dir := t.TempDir()
-		if got := KeyPerms(dir); got.OK || got.Message != "private key not found" {
+		if got := KeyPerms(storage.At(dir)); got.OK || got.Message != "private key not found" {
 			t.Errorf("missing key: %+v", got)
 		}
 
@@ -30,16 +31,16 @@ func TestExtractedPredicates_MessagesArePinnedForTheFleet(t *testing.T) {
 		if err := os.WriteFile(keyPath, []byte("k"), 0644); err != nil {
 			t.Fatal(err)
 		}
-		if got := KeyPerms(dir); got.OK || got.Message != "unsafe permissions 0644 (expected 0600 or 0400)" {
+		if got := KeyPerms(storage.At(dir)); got.OK || got.Message != "unsafe permissions 0644 (expected 0600 or 0400)" {
 			t.Errorf("loose perms: %+v", got)
 		}
 
 		os.Chmod(keyPath, 0600)
-		if got := KeyPerms(dir); !got.OK || got.Message != "" {
+		if got := KeyPerms(storage.At(dir)); !got.OK || got.Message != "" {
 			t.Errorf("0600: %+v — a passing check must stay silent, as the fleet expects", got)
 		}
 		os.Chmod(keyPath, 0400)
-		if got := KeyPerms(dir); !got.OK {
+		if got := KeyPerms(storage.At(dir)); !got.OK {
 			t.Errorf("0400: %+v", got)
 		}
 	})

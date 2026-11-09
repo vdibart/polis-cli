@@ -1,11 +1,14 @@
 package template
 
 import (
+	"context"
 	"fmt"
-	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // partialPattern matches {{> path}} or {{> prefix:path}} syntax.
@@ -75,7 +78,7 @@ func (e *Engine) loadPartial(path string) (string, string, string, error) {
 	// _base snippets are always the last fallback before giving up.
 	type lookupEntry struct {
 		source string
-		dir    string
+		src    partialSource
 	}
 
 	var lookupOrder []lookupEntry
@@ -84,28 +87,28 @@ func (e *Engine) loadPartial(path string) (string, string, string, error) {
 	case "theme":
 		// Theme-first, then base, then global
 		lookupOrder = []lookupEntry{
-			{"theme", e.getThemeSnippetsDir()},
-			{"base", e.getBaseSnippetsDir()},
-			{"base", e.getShapeRootDir()},
-			{"global", e.GetGlobalSnippetsDir()},
+			{"theme", e.themeSnippets()},
+			{"base", e.baseSnippets()},
+			{"base", e.shapeRoot()},
+			{"global", e.globalSnippets()},
 		}
 	default: // "global" or no prefix
 		// Global-first, then theme, then base
 		lookupOrder = []lookupEntry{
-			{"global", e.GetGlobalSnippetsDir()},
-			{"theme", e.getThemeSnippetsDir()},
-			{"base", e.getBaseSnippetsDir()},
-			{"base", e.getShapeRootDir()},
+			{"global", e.globalSnippets()},
+			{"theme", e.themeSnippets()},
+			{"base", e.baseSnippets()},
+			{"base", e.shapeRoot()},
 		}
 	}
 
 	// Try each source in order
 	for _, lookup := range lookupOrder {
-		if lookup.dir == "" {
+		if lookup.src.store == nil {
 			continue
 		}
 
-		content, resolved, err := e.loadFromDir(lookup.dir, cleanPath)
+		content, resolved, err := e.loadFrom(lookup.src, cleanPath)
 		if err == nil {
 			return content, resolved, lookup.source, nil
 		}
@@ -114,99 +117,122 @@ func (e *Engine) loadPartial(path string) (string, string, string, error) {
 	return "", "", "", fmt.Errorf("partial not found: %s", path)
 }
 
-// getThemeSnippetsDir returns the theme snippets directory.
+// partialSource is one place a partial may live: a key prefix in a store. The
+// zero value is "no such place".
+//
+// ⭐ A source names its own store, so the chain can mix roots: the site's
+// candidates are in the site's store, and the CLI themes directory, which is
+// not a site, is a POSIX store rooted there and stays a path.
+type partialSource struct {
+	store  storage.Store
+	prefix string
+}
+
+// siteSource returns the site candidate at key when it is present.
+func (e *Engine) siteSource(key string) partialSource {
+	if !e.config.Site.Valid() {
+		return partialSource{}
+	}
+	st := e.config.Site.Store()
+	if present, _ := prefixPresent(st, key); present {
+		return partialSource{store: st, prefix: key}
+	}
+	return partialSource{}
+}
+
+// globalSnippets is the site's global snippets.
+func (e *Engine) globalSnippets() partialSource {
+	return e.siteSource("site/snippets")
+}
+
+// themeSnippets returns the theme snippets source.
 // Tries local theme first, then CLI themes directory.
-func (e *Engine) getThemeSnippetsDir() string {
+func (e *Engine) themeSnippets() partialSource {
 	if e.config.ActiveTheme == "" {
-		return ""
+		return partialSource{}
 	}
 
 	// Try local theme first
-	localDir := filepath.Join(e.config.DataDir, "site", "themes", e.config.ActiveTheme, "snippets")
-	if _, err := os.Stat(localDir); err == nil {
-		return localDir
+	if src := e.siteSource("site/themes/" + e.config.ActiveTheme + "/snippets"); src.store != nil {
+		return src
 	}
 
-	// Fall back to CLI themes
+	// Fall back to CLI themes.
+	//
+	// ⭐ A DIFFERENT ROOT, not an exclusion: CLIThemesDir is outside the site,
+	// but a store rooted there addresses its contents exactly as the site store
+	// addresses the site's. Each candidate names its own store, and the reader
+	// downstream reads from whichever one won.
 	if e.config.CLIThemesDir != "" {
 		cliDir := filepath.Join(e.config.CLIThemesDir, e.config.ActiveTheme, "snippets")
-		if _, err := os.Stat(cliDir); err == nil {
-			return cliDir
+		if present, _ := storage.PathExists(cliDir); present {
+			return partialSource{store: storage.NewPOSIX(cliDir), prefix: ""}
 		}
 	}
 
-	return ""
+	return partialSource{}
 }
 
-// getBaseSnippetsDir returns the snippets directory that serves as the
-// last-resort partial source — post-SHAPE refactor this is the installed shape's
-// snippets/ dir, which carries what used to live under themes/_base/snippets/.
-//
-// Defaults to v3 when ActiveShape is unset (pre-step-02 callers that don't
-// thread the shape name through).
-func (e *Engine) getBaseSnippetsDir() string {
-	shape := e.config.ActiveShape
-	if shape == "" {
-		shape = "v3"
+// activeShape is the shape whose partials are the fallback. Defaults to v3
+// when ActiveShape is unset (pre-step-02 callers that don't thread the shape
+// name through).
+func (e *Engine) activeShape() string {
+	if e.config.ActiveShape == "" {
+		return "v3"
 	}
-	shapeDir := filepath.Join(e.config.DataDir, ".polis", "bundles", "pub.polis.core", "shapes", shape, "snippets")
-	if _, err := os.Stat(shapeDir); err == nil {
-		return shapeDir
-	}
-	return ""
+	return e.config.ActiveShape
 }
 
-// getShapeRootDir returns the active shape's root directory, used as an
-// additional fallback for partial lookup. stream.html references
-// {{> stream-post}} — stream-post.html lives at the shape root (it's an
-// Entry template), not under snippets/. Without this fallback the partial
-// resolver can't find it.
-func (e *Engine) getShapeRootDir() string {
-	shape := e.config.ActiveShape
-	if shape == "" {
-		shape = "v3"
-	}
-	shapeDir := filepath.Join(e.config.DataDir, ".polis", "bundles", "pub.polis.core", "shapes", shape)
-	if _, err := os.Stat(shapeDir); err == nil {
-		return shapeDir
-	}
-	return ""
+// baseSnippets is the last-resort partial source — post-SHAPE refactor this is
+// the installed shape's snippets/ dir, which carries what used to live under
+// themes/_base/snippets/.
+func (e *Engine) baseSnippets() partialSource {
+	return e.siteSource(".polis/bundles/pub.polis.core/shapes/" + e.activeShape() + "/snippets")
 }
 
-// loadFromDir loads a partial from a specific directory.
+// shapeRoot is the active shape's root, used as an additional fallback for
+// partial lookup. stream.html references {{> stream-post}} — stream-post.html
+// lives at the shape root (it's an Entry template), not under snippets/.
+// Without this fallback the partial resolver can't find it.
+func (e *Engine) shapeRoot() partialSource {
+	return e.siteSource(".polis/bundles/pub.polis.core/shapes/" + e.activeShape())
+}
+
+// loadFrom loads a partial from a source.
 // Returns content, resolved path, and error.
-func (e *Engine) loadFromDir(dir, path string) (string, string, error) {
+func (e *Engine) loadFrom(src partialSource, p string) (string, string, error) {
+	ctx := context.Background()
 	// Check if path has explicit extension
-	hasExplicitExt := strings.HasSuffix(path, ".md") || strings.HasSuffix(path, ".html")
+	hasExplicitExt := strings.HasSuffix(p, ".md") || strings.HasSuffix(p, ".html")
 
 	if hasExplicitExt {
 		// Try exact path only
-		fullPath := filepath.Join(dir, path)
-		if !pathUnder(fullPath, dir) {
-			return "", "", fmt.Errorf("partial path escapes lookup dir: %s", path)
+		key, ok := keyUnder(src.prefix, p)
+		if !ok {
+			return "", "", fmt.Errorf("partial path escapes lookup dir: %s", p)
 		}
-		content, err := os.ReadFile(fullPath)
+		content, err := src.store.Get(ctx, key)
 		if err != nil {
 			return "", "", err
 		}
-		return e.processPartialContent(string(content), path), path, nil
+		return e.processPartialContent(string(content), p), p, nil
 	}
 
 	// Resolution order: .md -> .html -> exact
 	extensions := []string{".md", ".html", ""}
 	for _, ext := range extensions {
-		fullPath := filepath.Join(dir, path+ext)
-		if !pathUnder(fullPath, dir) {
-			return "", "", fmt.Errorf("partial path escapes lookup dir: %s", path)
+		key, ok := keyUnder(src.prefix, p+ext)
+		if !ok {
+			return "", "", fmt.Errorf("partial path escapes lookup dir: %s", p)
 		}
-		content, err := os.ReadFile(fullPath)
+		content, err := src.store.Get(ctx, key)
 		if err == nil {
-			resolvedPath := path + ext
+			resolvedPath := p + ext
 			return e.processPartialContent(string(content), resolvedPath), resolvedPath, nil
 		}
 	}
 
-	return "", "", fmt.Errorf("file not found: %s", path)
+	return "", "", fmt.Errorf("file not found: %s", p)
 }
 
 // validatePartialPath rejects partial paths that could escape the lookup
@@ -236,29 +262,22 @@ func validatePartialPath(path string) error {
 	return nil
 }
 
-// pathUnder reports whether the cleaned absolute form of fullPath is the
-// same as or a descendant of dir's cleaned absolute form. Used as a final
-// defense-in-depth check after filepath.Join.
-func pathUnder(fullPath, dir string) bool {
-	absFull, err := filepath.Abs(fullPath)
-	if err != nil {
-		return false
+// keyUnder joins a partial's path onto a source's key prefix and reports
+// whether the result stays under it. Used as a final defense-in-depth check
+// after validatePartialPath: a key that cleans to somewhere outside the
+// prefix is refused, as a path outside the lookup dir always was.
+func keyUnder(prefix, p string) (string, bool) {
+	key, err := storage.CleanKey(path.Join(prefix, filepath.ToSlash(p)))
+	if err != nil || key == "" {
+		return "", false
 	}
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		return false
+	if prefix == "" {
+		return key, true
 	}
-	rel, err := filepath.Rel(absDir, absFull)
-	if err != nil {
-		return false
+	if key == prefix || strings.HasPrefix(key, prefix+"/") {
+		return key, true
 	}
-	if rel == "." {
-		return true
-	}
-	if strings.HasPrefix(rel, "..") {
-		return false
-	}
-	return true
+	return "", false
 }
 
 // processPartialContent processes the content of a loaded partial.
@@ -286,4 +305,21 @@ func parsePartialPrefix(path string) (string, string) {
 		return "theme", strings.TrimPrefix(path, "theme:")
 	}
 	return "", path
+}
+
+// prefixPresent reports whether anything is stored at or under key.
+//
+// ⚠️ On a filesystem this is whether the DIRECTORY exists, as it always was,
+// so an empty one still counts and stops the chain from falling through. A
+// store with no filesystem has no directories: a prefix is present exactly
+// when something is stored under it.
+func prefixPresent(st storage.Store, key string) (bool, error) {
+	if st.Capabilities().RealPath {
+		return st.Exists(context.Background(), key)
+	}
+	entries, err := st.List(context.Background(), key)
+	if err != nil {
+		return false, err
+	}
+	return len(entries) > 0, nil
 }

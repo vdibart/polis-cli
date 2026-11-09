@@ -6,13 +6,15 @@
 package tag
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
+	pathpkg "path"
 	"regexp"
 	"strings"
 	"time"
@@ -20,7 +22,13 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/index"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
-	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	// ⚠️ ALIASED: `site` is the parameter name throughout the site-handle
+	// migration, and an unaliased import of this package shadows it. Aliasing
+	// the import keeps one convention across 154 signatures instead of
+	// renaming the parameter in the few files that import pkg/site.
+	sitepkg "github.com/vdibart/polis-cli/cli-go/pkg/site"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Version is set at startup by the cmd package.
@@ -122,26 +130,62 @@ func NormalizeTagName(name string) (string, error) {
 	return name, nil
 }
 
-// TagPath returns the filesystem path for a tag file.
+// checkInnerTag refuses a file whose own tag field disagrees with the name it is
+// stored under. ⛔ Such a file is either damaged or crafted, and every writer
+// would otherwise act on the name inside it.
+func checkInnerTag(tf *TagFile, name string) error {
+	if tf.Tag != name {
+		return fmt.Errorf("tag file %s.json names a different tag (%q); refusing to act on it", name, tf.Tag)
+	}
+	return nil
+}
+
+// TagKey returns a tag file's key, relative to the site root.
 //
-// The path is a literal on purpose. The CORE bundle's layout is fixed by design
+// The key is a literal on purpose. The CORE bundle's layout is fixed by design
 // and not user-configurable, so `content/pub.polis.core/tag` is correct here
 // and not debt (settled 2026-09-02). The same holds for
 // attestation.Dir. Resolving through the bundle is right only when reading a
 // FOREIGN site's declarations, as `polis clone` does.
-func TagPath(dataDir, tagName string) string {
-	return filepath.Join(dataDir, "content", "pub.polis.core", "tag", tagName+".json")
-}
+//
+// ⭐ A KEY, NOT A PATH. Every reader and writer of a tag addresses it the same
+// way, on any backend. It replaced an exported path builder (TagPath) whose
+// callers read and wrote the file by path, which is the pair that cannot cross
+// a backend boundary.
+func TagKey(tagName string) string { return TagDirKey + "/" + tagName + ".json" }
 
-// tagDir returns the directory containing tag files. A literal for the same
-// reason as TagPath.
-func tagDir(dataDir string) string {
-	return filepath.Join(dataDir, "content", "pub.polis.core", "tag")
+func tagKey(tagName string) string { return TagKey(tagName) }
+
+// TagDirKey is the directory holding a site's tag files, relative to the site
+// root. A literal for the same reason as TagKey.
+const TagDirKey = "content/pub.polis.core/tag"
+
+// LoadTag reads and parses one of a site's tags.
+//
+// ⭐ IT REPLACES THE TagPath+Load PAIR, which every caller used together:
+// build a path, then read the file at it. One call that names what is wanted
+// cannot be split across a backend boundary, and the pair could not survive
+// one — Load took a bare path with no site to resolve it against.
+func LoadTag(site storage.Site, tagName string) (*TagFile, error) {
+	// ⭐ A name that normalisation would change is not a tag name: refusing it
+	// keeps a crafted name from addressing anything outside the tag directory.
+	if n, err := NormalizeTagName(tagName); err != nil || n != tagName {
+		return nil, fmt.Errorf("invalid tag name %q", tagName)
+	}
+	data, err := site.Store().Get(context.Background(), tagKey(tagName))
+	if err != nil {
+		return nil, fmt.Errorf("read tag file: %w", err)
+	}
+	tf, err := Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse tag file: %w", err)
+	}
+	return tf, nil
 }
 
 // Load reads and parses a tag file from disk.
 func Load(path string) (*TagFile, error) {
-	data, err := os.ReadFile(path)
+	data, err := storage.ReadAtPath(path)
 	if err != nil {
 		return nil, fmt.Errorf("read tag file: %w", err)
 	}
@@ -157,8 +201,8 @@ func Load(path string) (*TagFile, error) {
 // ListTags returns all tag files in the site. A malformed file is skipped
 // rather than failing the listing; ScanTags is the same walk and also names
 // what it skipped.
-func ListTags(dataDir string) ([]TagFile, error) {
-	tags, _, err := ScanTags(dataDir)
+func ListTags(site storage.Site) ([]TagFile, error) {
+	tags, _, err := ScanTags(site)
 	return tags, err
 }
 
@@ -173,12 +217,16 @@ type MalformedTag struct {
 // ScanTags is ListTags that also returns the files it skipped because they do
 // not parse, in directory order (Signet epic 44 C2 — a reporter must be able to
 // say what it could not read).
-func ScanTags(dataDir string) ([]TagFile, []MalformedTag, error) {
-	dir := tagDir(dataDir)
-
-	entries, err := os.ReadDir(dir)
+func ScanTags(site storage.Site) ([]TagFile, []MalformedTag, error) {
+	// ⭐ Store.List, not storage.ListDir, and the absence branch below is
+	// UNCHANGED BY THAT. List reports a real failure (an unreadable prefix
+	// comes back "permission denied") and treats only ABSENCE as empty — which
+	// is exactly what the fs.ErrNotExist arm returned anyway. ⚠️ Verified by
+	// probe rather than assumed; the earlier claim that List could not
+	// substitute here was wrong.
+	entries, err := site.Store().List(context.Background(), TagDirKey)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil, nil
 		}
 		return nil, nil, fmt.Errorf("read tag directory: %w", err)
@@ -187,16 +235,16 @@ func ScanTags(dataDir string) ([]TagFile, []MalformedTag, error) {
 	var tags []TagFile
 	var malformed []MalformedTag
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir || !strings.HasSuffix(pathpkg.Base(entry.Key), ".json") {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		raw, err := site.Store().Get(context.Background(), tagKey(strings.TrimSuffix(pathpkg.Base(entry.Key), ".json")))
 		if err != nil {
 			continue // unreadable is not malformed: it says nothing about the bytes
 		}
 		tf, err := Parse(raw)
 		if err != nil {
-			malformed = append(malformed, MalformedTag{Name: entry.Name(), Error: err.Error()})
+			malformed = append(malformed, MalformedTag{Name: pathpkg.Base(entry.Key), Error: err.Error()})
 			continue
 		}
 		tags = append(tags, *tf)
@@ -207,7 +255,7 @@ func ScanTags(dataDir string) ([]TagFile, []MalformedTag, error) {
 
 // ApplyTag adds a target URI to a tag, creating the tag file if it doesn't exist.
 // The file is signed after mutation.
-func ApplyTag(dataDir, tagName, targetURI string, privateKey []byte, generator ...string) (*TagFile, error) {
+func ApplyTag(site storage.Site, tagName, targetURI string, privateKey []byte, generator ...string) (*TagFile, error) {
 	gen := GetGenerator()
 	if len(generator) > 0 && generator[0] != "" {
 		gen = generator[0]
@@ -222,18 +270,21 @@ func ApplyTag(dataDir, tagName, targetURI string, privateKey []byte, generator .
 		return nil, fmt.Errorf("target URI is required")
 	}
 
-	path := TagPath(dataDir, name)
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	var tf *TagFile
 
-	// Load existing or create new
-	if data, err := os.ReadFile(path); err == nil {
+	// Load existing or create new. ⚠️ Absence is the only "create" case: any
+	// other read failure refuses, as it did when this read by path.
+	if data, err := site.Store().Get(context.Background(), tagKey(name)); err == nil {
 		// Through Parse, never a bare json.Unmarshal (Signet epic 47).
 		if tf, err = Parse(data); err != nil {
 			return nil, fmt.Errorf("parse existing tag file: %w", err)
 		}
-	} else if os.IsNotExist(err) {
+		if err := checkInnerTag(tf, name); err != nil {
+			return nil, err
+		}
+	} else if errors.Is(err, fs.ErrNotExist) {
 		tf = &TagFile{
 			Tag:     name,
 			Created: now,
@@ -258,17 +309,17 @@ func ApplyTag(dataDir, tagName, targetURI string, privateKey []byte, generator .
 	tf.Generator = gen
 
 	// Sign and write
-	if err := signAndWrite(tf, path, privateKey); err != nil {
+	if err := signAndWrite(site, tagKey(name), tf, privateKey); err != nil {
 		return nil, err
 	}
-	refreshIndex(dataDir)
+	refreshIndex(site)
 
 	return tf, nil
 }
 
 // RemoveTarget removes a target URI from a tag and re-signs.
 // Returns the updated tag file, or an error if the tag or target doesn't exist.
-func RemoveTarget(dataDir, tagName, targetURI string, privateKey []byte, generator ...string) (*TagFile, error) {
+func RemoveTarget(site storage.Site, tagName, targetURI string, privateKey []byte, generator ...string) (*TagFile, error) {
 	gen := GetGenerator()
 	if len(generator) > 0 && generator[0] != "" {
 		gen = generator[0]
@@ -278,10 +329,12 @@ func RemoveTarget(dataDir, tagName, targetURI string, privateKey []byte, generat
 		return nil, fmt.Errorf("invalid tag name: %w", err)
 	}
 
-	path := TagPath(dataDir, name)
-	tf, err := Load(path)
+	tf, err := LoadTag(site, name)
 	if err != nil {
 		return nil, fmt.Errorf("load tag: %w", err)
+	}
+	if err := checkInnerTag(tf, name); err != nil {
+		return nil, err
 	}
 
 	// Find and remove
@@ -303,31 +356,30 @@ func RemoveTarget(dataDir, tagName, targetURI string, privateKey []byte, generat
 	tf.Updated = time.Now().UTC().Format(time.RFC3339)
 	tf.Generator = gen
 
-	if err := signAndWrite(tf, path, privateKey); err != nil {
+	if err := signAndWrite(site, tagKey(name), tf, privateKey); err != nil {
 		return nil, err
 	}
-	refreshIndex(dataDir)
+	refreshIndex(site)
 
 	return tf, nil
 }
 
 // DeleteTag removes an entire tag file from disk.
-func DeleteTag(dataDir, tagName string) error {
+func DeleteTag(site storage.Site, tagName string) error {
 	name, err := NormalizeTagName(tagName)
 	if err != nil {
 		return fmt.Errorf("invalid tag name: %w", err)
 	}
 
-	path := TagPath(dataDir, name)
-	if err := os.Remove(path); err != nil {
-		if os.IsNotExist(err) {
+	if err := site.Store().Delete(context.Background(), tagKey(name)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("tag %q does not exist", name)
 		}
 		return fmt.Errorf("delete tag file: %w", err)
 	}
 	// A deleted tag must leave the index too, or the site keeps advertising a
 	// file that 404s.
-	refreshIndex(dataDir)
+	refreshIndex(site)
 
 	return nil
 }
@@ -343,8 +395,15 @@ func DeleteTag(dataDir, tagName string) error {
 //
 // ⚠️ Non-fatal: the tag file is already signed and written. Medic heals a missed
 // entry, and `polis rebuild --tags` does by hand.
-func refreshIndex(dataDir string) {
-	if _, err := index.RebuildContentIndex(dataDir, []string{index.EntryTypeTag}); err != nil {
+func refreshIndex(site storage.Site) {
+	// ⚠️ A SCOPE-BOUNDARY CROSSING, and the escape is the cost of the boundary
+	// being drawn where it is. pkg/index is not on the serving path — its entry
+	// points are called only by the CLI and by Medic, Patrol and Tailor — so it
+	// converts when the actors do, and until then it wants a real path.
+	//
+	// ⭐ Censused with that exit stated, rather than converting a package no
+	// serving code calls just to avoid one line here.
+	if _, err := index.RebuildContentIndex(site, []string{index.EntryTypeTag}); err != nil {
 		fmt.Fprintf(os.Stderr, "[!] tag written, but index.jsonl was not updated: %v (run `polis rebuild --tags`)\n", err)
 	}
 }
@@ -352,10 +411,17 @@ func refreshIndex(dataDir string) {
 // signAndWrite computes the signature and writes the tag file to disk.
 //
 // ⛔ It REFUSES to rewrite a tag file carrying members this build does not
-// declare (signing.GuardRewrite): the rewrite would drop them and sign the rest
+// declare (signing.GuardRewriteAt): the rewrite would drop them and sign the rest
 // with the user's key. The way past is RewriteUnsigned.
-func signAndWrite(tf *TagFile, path string, privateKey []byte) error {
-	if err := signing.GuardRewrite("tag file", path, TagFile{}); err != nil {
+//
+// ⛔ KEY IS WHERE THE FILE WAS READ FROM (or will be created), NEVER tagKey(tf.Tag).
+// tf.Tag is the name INSIDE the file, so writing to it let a crafted file
+// redirect the write: a tag value of `../../../.polis/bundles/registry`
+// overwrote registry.json, and a mismatched sibling was overwritten unsigned.
+func signAndWrite(site storage.Site, key string, tf *TagFile, privateKey []byte) error {
+	// ⛔ The guard reads what is actually STORED, never tf — it compares what
+	// this build models against the bytes really there.
+	if err := signing.GuardRewriteAt("tag file", site, key, TagFile{}); err != nil {
 		return err
 	}
 	// Compute canonical JSON for signing (exclude signature and current_version)
@@ -375,20 +441,33 @@ func signAndWrite(tf *TagFile, path string, privateKey []byte) error {
 	}
 	tf.Signature = sig
 
-	return writeTagFile(tf, path)
+	return writeTagFile(site, key, tf)
 }
 
 // RewriteUnsigned is the ESCAPE HATCH for a user stranded by signAndWrite's
-// refusal: it rewrites the tag file at path from the members this build
-// declares, WITHOUT a signature, and returns what it dropped.
+// refusal: it rewrites the tag file named fileName (its name in the tag
+// directory, e.g. "reading.json") from the members this build declares,
+// WITHOUT a signature, and returns what it dropped.
 //
 // ⛔ It never signs — a signature must not cover content the signer's software
 // could not read. current_version is recomputed, because it is a hash of the
 // bytes rather than a claim, and the index is refreshed to match. A file with
 // nothing unrecognised is left untouched.
-func RewriteUnsigned(dataDir, path string) ([]string, error) {
-	tf, err := Load(path)
+func RewriteUnsigned(site storage.Site, fileName string) ([]string, error) {
+	// ⛔ A plain file name in the tag directory, nothing that can walk out of it.
+	if fileName != pathpkg.Base(fileName) || strings.HasPrefix(fileName, ".") || !strings.HasSuffix(fileName, ".json") {
+		return nil, fmt.Errorf("invalid tag file name %q", fileName)
+	}
+	key := TagDirKey + "/" + fileName
+	data, err := site.Store().Get(context.Background(), key)
 	if err != nil {
+		return nil, fmt.Errorf("read tag file: %w", err)
+	}
+	tf, err := Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse tag file: %w", err)
+	}
+	if err := checkInnerTag(tf, strings.TrimSuffix(fileName, ".json")); err != nil {
 		return nil, err
 	}
 	dropped := tf.UnrecognisedFields()
@@ -402,19 +481,22 @@ func RewriteUnsigned(dataDir, path string) ([]string, error) {
 	hash := sha256.Sum256(canonical)
 	tf.Version = "sha256:" + hex.EncodeToString(hash[:])
 	tf.Signature = ""
-	if err := writeTagFile(tf, path); err != nil {
+	if err := writeTagFile(site, key, tf); err != nil {
 		return nil, err
 	}
-	refreshIndex(dataDir)
+	refreshIndex(site)
 	return dropped, nil
 }
 
 // writeTagFile marshals and atomically writes a tag file as-is.
-func writeTagFile(tf *TagFile, path string) error {
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("create tag directory: %w", err)
-	}
+func writeTagFile(site storage.Site, key string, tf *TagFile) error {
+	// NOT the storage interface, and the MkdirAll below is why: this writes
+	// ⭐ The parent is the STORE's job now. atomicfile.Write asks the store to
+	// create it, at the store's own mode rule — which is what the note that
+	// used to be here was working around: Put created parents and atomicfile
+	// did not, so the first tag on a fresh site failed with ENOENT on a .tmp
+	// path. ⛔ Keep that failure in mind before removing the parent step from
+	// atomicfile.Write.
 
 	// Write
 	data, err := json.MarshalIndent(tf, "", "  ")
@@ -426,7 +508,11 @@ func writeTagFile(tf *TagFile, path string) error {
 	// R23-6: write atomically (tmp+rename) so a crash mid-write can't leave a
 	// truncated tag file. Mode stays 0644 — tag files are PUBLIC served content
 	// (content/pub.polis.core/tag/), so don't tighten to 0600 (R11-17 lesson).
-	if err := atomicfile.WriteFile(path, data, 0644); err != nil {
+	// ⭐ Through the site, so a tag lands in whatever the instance stores its
+	// content on. ⚠️ Mode stays 0644 — tag files are PUBLIC served content, so
+	// do not tighten to 0600 (the R11-17 lesson) — and on a backend with no
+	// modes it is ignored by declaration.
+	if err := atomicfile.Write(context.Background(), site, key, data, 0644); err != nil {
 		return fmt.Errorf("write tag file: %w", err)
 	}
 
@@ -534,7 +620,7 @@ func Verify(tf *TagFile, publicKeySSH []byte) (SignatureStatus, error) {
 // chain must already be trusted (sitecheck.ResolvingChain); nil means current key
 // only, which is exactly Verify. retired is the history entry that verified it,
 // nil for the current key.
-func VerifyWithHistory(tf *TagFile, publicKeySSH []byte, chain *site.KeyHistoryBlock) (SignatureStatus, *site.KeyHistoryEntry, error) {
+func VerifyWithHistory(tf *TagFile, publicKeySSH []byte, chain *sitepkg.KeyHistoryBlock) (SignatureStatus, *sitepkg.KeyHistoryEntry, error) {
 	if tf == nil || tf.Signature == "" {
 		return StatusUnsigned, nil, nil
 	}
@@ -545,7 +631,7 @@ func VerifyWithHistory(tf *TagFile, publicKeySSH []byte, chain *site.KeyHistoryB
 	if err != nil {
 		return StatusUnknown, nil, fmt.Errorf("canonical JSON: %w", err)
 	}
-	ok, retired, err := site.VerifyWithHistory(func(key []byte) (bool, error) {
+	ok, retired, err := sitepkg.VerifyWithHistory(func(key []byte) (bool, error) {
 		return signing.VerifySignature(canonical, key, tf.Signature)
 	}, publicKeySSH, chain, tf.Updated, "updated")
 
@@ -575,8 +661,8 @@ func VerifyWithHistory(tf *TagFile, publicKeySSH []byte, chain *site.KeyHistoryB
 //
 // A site with no tags yields an empty map and no error. Having tagged nothing
 // is an ordinary state.
-func VerifySite(siteDir string) (map[string]SignatureStatus, error) {
-	tags, err := ListTags(siteDir)
+func VerifySite(site storage.Site) (map[string]SignatureStatus, error) {
+	tags, err := ListTags(site)
 	if err != nil {
 		return nil, err
 	}
@@ -584,7 +670,7 @@ func VerifySite(siteDir string) (map[string]SignatureStatus, error) {
 		return map[string]SignatureStatus{}, nil
 	}
 
-	data, err := os.ReadFile(filepath.Join(siteDir, ".well-known", "polis"))
+	data, err := site.Store().Get(context.Background(), ".well-known/polis")
 	if err != nil {
 		return nil, fmt.Errorf("no .well-known/polis to verify against")
 	}

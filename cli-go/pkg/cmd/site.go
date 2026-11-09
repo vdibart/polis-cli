@@ -3,8 +3,10 @@ package cmd
 import (
 	"flag"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/actor"
 	"github.com/vdibart/polis-cli/cli-go/pkg/attestation"
@@ -49,7 +51,7 @@ func handleSiteSet(args []string) {
 		if len(args) != 2 {
 			exitError("Usage: polis site set author-name <name>")
 		}
-		name, err := site.SetAuthorName(dir, args[1])
+		name, err := site.SetAuthorName(getSite(), args[1])
 		if err != nil {
 			exitError("Failed to set author name: %v", err)
 		}
@@ -77,7 +79,7 @@ func handleSiteSet(args []string) {
 
 		var avatar *site.AvatarConfig
 		if !*clearAvatar {
-			wk, err := site.LoadWellKnown(dir)
+			wk, err := site.LoadWellKnown(getSite())
 			if err != nil {
 				exitError("Failed to load .well-known/polis: %v", err)
 			}
@@ -107,7 +109,7 @@ func handleSiteSet(args []string) {
 				avatar.PatternColor = *patternColor
 			}
 		}
-		faviconErr, err := site.SetAvatar(dir, avatar)
+		faviconErr, err := site.SetAvatar(getSite(), avatar)
 		if err != nil {
 			exitError("Failed to set avatar: %v", err)
 		}
@@ -181,17 +183,21 @@ func unsignedRewriterFor(dataDir, path string) (string, func() ([]string, error)
 	}
 	switch {
 	case path == abs(filepath.Join(dataDir, metadata.BundleContentDir, "comment", metadata.BlessedCommentsFilename)):
-		return metadata.BlessedCommentsFilename, func() ([]string, error) { return metadata.RewriteBlessedUnsigned(dataDir) }
-	case path == abs(following.DefaultPath(dataDir)):
-		return "following.json", func() ([]string, error) { return following.RewriteUnsigned(path) }
-	case path == abs(site.LicensePath(dataDir)):
-		return "license.json", func() ([]string, error) { return license.RewriteUnsigned(path) }
+		return metadata.BlessedCommentsFilename, func() ([]string, error) { return metadata.RewriteBlessedUnsigned(storage.At(dataDir)) }
+	case path == abs(filepath.Join(dataDir, following.DefaultKey)):
+		return "following.json", func() ([]string, error) { return following.RewriteUnsigned(storage.At(dataDir)) }
+	case path == abs(filepath.Join(dataDir, filepath.FromSlash(site.LicenseKey(storage.At(dataDir))))):
+		return "license.json", func() ([]string, error) {
+			return license.RewriteUnsigned(storage.At(dataDir), site.LicenseKey(storage.At(dataDir)))
+		}
 	case path == abs(actor.RegistryPath(dataDir)):
 		return "actor registry", func() ([]string, error) { return actor.RewriteUnsigned(path) }
-	case filepath.Dir(path) == abs(filepath.Dir(tag.TagPath(dataDir, "x"))):
-		return "tag file", func() ([]string, error) { return tag.RewriteUnsigned(dataDir, path) }
-	case filepath.Dir(path) == abs(attestation.Dir(dataDir)):
-		return "attestation", func() ([]string, error) { return attestation.RewriteUnsigned(path) }
+	case filepath.Dir(path) == abs(filepath.Join(dataDir, filepath.FromSlash(tag.TagDirKey))):
+		return "tag file", func() ([]string, error) { return tag.RewriteUnsigned(storage.At(dataDir), filepath.Base(path)) }
+	case filepath.Dir(path) == abs(filepath.Join(dataDir, filepath.FromSlash(attestation.DirKey))):
+		return "attestation", func() ([]string, error) {
+			return attestation.RewriteUnsigned(storage.At(dataDir), strings.TrimSuffix(filepath.Base(path), ".json"))
+		}
 	}
 	return "", nil
 }

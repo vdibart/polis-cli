@@ -279,9 +279,12 @@ func TestHandleContentListSuccess(t *testing.T) {
 }
 
 func TestHandleContentListUnknownType(t *testing.T) {
-	mux, _, _ := testSetup(t)
+	mux, _, apiKey := testSetup(t)
 
+	// An unknown type requires auth like a private one (fail closed); with
+	// it, the owner learns the type does not exist.
 	req := httptest.NewRequest(http.MethodGet, "/v1/content/nonexistent", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 

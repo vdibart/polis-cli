@@ -1,6 +1,7 @@
 package tailor
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,7 @@ import (
 // not just that one check, so a short-circuit anywhere is caught.
 func TestTailorRunsEveryCheckOnASiteWithNoPostsDirectory(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := site.Init(dir, site.InitOptions{BaseURL: "https://maya.example", SiteTitle: "maya"}); err != nil {
+	if _, err := site.Init(storage.At(dir), site.InitOptions{BaseURL: "https://maya.example", SiteTitle: "maya"}); err != nil {
 		t.Fatal(err)
 	}
 	core := filepath.Join(dir, "content", "pub.polis.core")

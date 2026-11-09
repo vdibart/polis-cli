@@ -5,10 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/csp"
 )
 
 // publicContentLimiter is a per-IP fixed-window rate limiter for public
@@ -107,13 +110,51 @@ func CleanupSharedPublicContentLimiter() int {
 // by the client; behind Fly we trust it absolutely. This mirrors the
 // posture in webapp/internal/hosted/hosted.go:clientIP.
 //
-// ⛔ Both headers are trusted ONLY when trustProxy is set (hosted, behind
-// Fly's proxy; Server.BehindTrustedProxy). With no proxy in front, a client
-// sets them itself, so a self-hosted server exposed directly would let it pick
-// a fresh IP per request and walk past the limit. Localhost and self-hosted
-// mode therefore always read RemoteAddr's host portion.
-func remoteIP(r *http.Request, trustProxy bool) string {
-	if trustProxy {
+// ⛔ Both headers are trusted ONLY behind Fly's proxy (ProxyFly: hosted;
+// Server.Proxy). With no proxy in front, a client sets them itself, so a
+// self-hosted server exposed directly would let it pick a fresh IP per request
+// and walk past the limit. Localhost and self-hosted mode therefore always read
+// RemoteAddr's host portion.
+//
+// ⭐ Behind Vercel's proxy (ProxyVercel: the network handler) the client IP is
+// X-Real-IP, which Vercel OVERWRITES: a client-sent value never arrives (it
+// sets X-Forwarded-For the same way, single-valued). ⛔ Fly-Client-IP and
+// X-Forwarded-For are NOT read there: nothing in front of a Vercel function
+// sets the first, so a client could.
+//
+// ⭐ Whatever the peer turns out to be, a Cloudflare peer is then swapped for
+// the visitor it names in CF-Connecting-IP (visitorBehindCloudflare). polis.pub
+// is behind Cloudflare, so without this every client was a Cloudflare edge. The
+// header is believed only from a Cloudflare address, so it cannot be used to
+// pick an IP by anyone who reaches the server another way.
+func remoteIP(r *http.Request, proxy ProxyKind) string {
+	return visitorBehindCloudflare(r, peerIP(r, proxy))
+}
+
+// ProxyKind names the platform proxy in front of a server, which decides the
+// one header the client IP may be read from.
+type ProxyKind int
+
+const (
+	// ProxyNone: no proxy is guaranteed; the IP is the socket's peer.
+	ProxyNone ProxyKind = iota
+	// ProxyFly: Fly's proxy (hosted). Fly-Client-IP, then the rightmost
+	// X-Forwarded-For.
+	ProxyFly
+	// ProxyVercel: Vercel's proxy (the network handler). X-Real-IP.
+	ProxyVercel
+)
+
+// peerIP is the address of whoever handed us the request: the client the
+// platform proxy reports, otherwise the socket's peer.
+func peerIP(r *http.Request, proxy ProxyKind) string {
+	if proxy == ProxyVercel {
+		// Vercel overwrites this; a client cannot choose it.
+		if ip := strings.TrimSpace(r.Header.Get("X-Real-IP")); ip != "" {
+			return ip
+		}
+	}
+	if proxy == ProxyFly {
 		// Fly's proxy sets this directly; cannot be spoofed by the client.
 		if flyIP := r.Header.Get("Fly-Client-IP"); flyIP != "" {
 			return strings.TrimSpace(flyIP)
@@ -128,6 +169,9 @@ func remoteIP(r *http.Request, trustProxy bool) string {
 		}
 	}
 	addr := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
 	if i := strings.LastIndex(addr, ":"); i >= 0 {
 		return addr[:i]
 	}
@@ -140,16 +184,20 @@ func remoteIP(r *http.Request, trustProxy bool) string {
 // cross-origin (the v4 lazy-fetch path in the controller relies on this).
 // Rate limiting protects against bursty/abusive clients while leaving
 // generous headroom for legitimate scroll sessions.
-func publicContentMiddleware(limiter *publicContentLimiter, trustProxy bool, next http.HandlerFunc) http.HandlerFunc {
+func publicContentMiddleware(limiter *publicContentLimiter, proxy ProxyKind, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// ⛔ Never a wildcard origin on owner-private content: it would let any
+		// page read the response. Public scopes keep their CORS.
+		if !(strings.HasPrefix(r.URL.Path, "/pql/") && PQLRequiresOwner(r)) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		ip := remoteIP(r, trustProxy)
+		ip := remoteIP(r, proxy)
 		if allowed, retry := limiter.Allow(ip); !allowed {
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
@@ -268,46 +316,10 @@ func GenerateCSPNonce() string {
 }
 
 // CSPTenantContent returns the CSP header value for tenant-served public
-// HTML (rendered posts, comments, root pages). Allows the polis-apex
-// widget JS plus Google Fonts (loaded by every shape + theme); blocks
-// everything else.
-func CSPTenantContent() string {
-	return strings.Join([]string{
-		"default-src 'self'",
-		"script-src 'self' https://polis.pub",
-		// Google Fonts CSS is loaded via <link rel="stylesheet"> in every
-		// shape + theme (v3/v4 stream, studio13-nk, etc.). 'unsafe-inline'
-		// permits inline <style> blocks and style="" attributes that
-		// theme rendering relies on.
-		"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-		"img-src 'self' data: https:",
-		// Google Fonts serves the actual font files (woff2) from gstatic.
-		"font-src 'self' data: https://fonts.gstatic.com",
-		// connect-src must include *.polis.pub so cross-tenant client
-		// scripts can fetch sibling tenants' public surfaces. Two
-		// known consumers: (a) nav.js fetches the visitor's own
-		// /api/nav/state to hydrate the cross-visit nav widget;
-		// (b) widget.js (the inline comment widget) reads the
-		// visitor's following.json to decide its auth-aware mount
-		// state. Both targets are public/auth-gated APIs on a polis
-		// tenant — the same trust surface frame-ancestors already
-		// admits via the *.polis.pub allow-list below.
-		"connect-src 'self' https://polis.pub https://*.polis.pub",
-		"frame-src 'none'",
-		// R20-D-S1 (2026-05-18): bound who can iframe tenant content.
-		// Without `frame-ancestors`, only `X-Frame-Options` would stop
-		// clickjacking — but hosted only sets that header for /_/*
-		// (admin SPA), not for tenant public pages. An attacker iframes
-		// `victim.polis.pub/posts/x.html` invisibly under their own UI
-		// and clicks through to the widget auth controls. Allowing self
-		// + polis.pub + any *.polis.pub keeps the widget's legitimate
-		// embed pattern working.
-		"frame-ancestors 'self' https://polis.pub https://*.polis.pub",
-		"object-src 'none'",
-		"base-uri 'self'",
-		"form-action 'self'",
-	}, "; ")
-}
+// HTML (rendered posts, comments, root pages). ⭐ The policy itself is
+// csp.TenantContent, because a deployment's static pages carry it too and the
+// provisioner that writes their routing cannot import this package.
+func CSPTenantContent() string { return csp.TenantContent() }
 
 // CSPAdminSPA returns the CSP header value for the admin SPA (the
 // authenticated owner's dashboard). Permits the per-response inline-

@@ -12,12 +12,16 @@
 package serve
 
 import (
+	"context"
 	"io/fs"
 	"net/http"
+	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	"github.com/vdibart/polis-cli/cli-go/pkg/privatepath"
+	"github.com/vdibart/polis-cli/cli-go/pkg/publicfile"
 )
 
 // Storage abstracts tenant file I/O for the public-content handler. The
@@ -35,6 +39,22 @@ type Storage interface {
 // callers pass nil.
 type PostProcessFunc func(content []byte, r *http.Request) []byte
 
+type personalisedKey struct{}
+
+// Personalised marks a request whose HTML response will carry something about
+// the person asking (the hosted nav for a signed-in visitor). ⛔ Such a response
+// is never stored by a shared cache, nor kept by the browser: it is the page
+// for one person, and a cached copy could be shown to the next.
+func Personalised(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), personalisedKey{}, true))
+}
+
+// IsPersonalised reports whether Personalised marked r.
+func IsPersonalised(r *http.Request) bool {
+	v, _ := r.Context().Value(personalisedKey{}).(bool)
+	return v
+}
+
 // rootFiles are files served at the tenant root by EXACT NAME, mapped to the
 // content type each one's specification requires.
 //
@@ -50,9 +70,7 @@ type PostProcessFunc func(content []byte, r *http.Request) []byte
 // directive — the licence's only surfaces a static self-hoster can publish —
 // reached nobody, while Cloudflare's managed robots.txt filled the gap
 // plausibly enough that nothing looked broken.
-var rootFiles = map[string]string{
-	"robots.txt": "text/plain; charset=utf-8",
-}
+var rootFiles = publicfile.RootFiles
 
 // crossOriginRootFiles are root files other origins read by name: the licence
 // surfaces a browser-side reader fetches beside .well-known/polis. Named for
@@ -82,6 +100,19 @@ func setCrossOrigin(w http.ResponseWriter, clean string) {
 	}
 }
 
+// The handler's two denials, as variables only so the fault-injection test in
+// this package can switch them off and show the outside-in probe catching the
+// exposure; nothing else assigns them.
+//
+// denied refuses a private name in any segment (privatepath). It does not
+// see an extensionless file, and most private files have no extension (id_rsa,
+// .git/HEAD, .polis/keys/id_ed25519), so extensionlessServed is the second
+// layer: an existing extensionless file is served only where it says.
+var (
+	denied              = privatepath.Denied
+	extensionlessServed = publicfile.ExtensionlessServed
+)
+
 // ServeTenantPublic serves rendered public content for a tenant.
 //
 // URL → file mapping:
@@ -90,8 +121,11 @@ func setCrossOrigin(w http.ResponseWriter, clean string) {
 //   - /styles.css    → styles.css
 //   - /posts/x.md    → raw markdown (for programmability)
 //   - /robots.txt   → served by exact name (see rootFiles)
-//   - /.well-known/* → allowed (protocol requirement)
-//   - /.polis/*      → blocked (private data)
+//   - /.well-known/* → allowed (protocol requirement); the only place an
+//     extensionless file is served
+//   - a private name in ANY segment (.polis, .env, .git, .ssh, key files,
+//     editor backups; see privatepath.Entries) → 404. .versions is a stated
+//     exception: version history is public.
 //   - paths with ..  → blocked (traversal)
 //
 // CORS: posts/, comments/, content/, .well-known/, and the root robots.txt
@@ -105,12 +139,78 @@ func setCrossOrigin(w http.ResponseWriter, clean string) {
 //
 // handle is empty in single-tenant mode (Storage adapters that ignore it).
 // postProcess may be nil when the caller has no HTML rewrites to apply.
+
+// ServedExtensions is the set of file extensions ServeTenantPublic will return
+// from a tenant's own data directory.
+//
+// `.js` is here because the v4 SHAPE installs `/stream.js` at the tenant data
+// dir root (theme.CopyStreamController copies it from the bundle so v4 pages'
+// <script src="/stream.js" defer> resolve to a 200). Without it the controller
+// never loads and the filter dropdowns, comment panel and pagination all
+// silently no-op. Bug present since 5.a's extraction (2026-04-27); caught
+// during step-05/5.i Phase B local testing on 2026-04-28.
+var ServedExtensions = publicfile.ServedExtensions
+
+// ScriptCapableExtensions are the members of ServedExtensions a browser may
+// execute as script from a tenant's own origin.
+//
+// ⛔ THIS IS LOAD-BEARING FOR CROSS-TENANT ISOLATION, AND NOT OBVIOUSLY SO.
+// Tenant content is served under `script-src 'self' https://polis.pub`
+// (server.CSPTenantContent), and `'self'` is the TENANT'S OWN SUBDOMAIN. So the
+// CSP stops a tenant executing script on its own pages only for as long as a
+// tenant cannot get a file with one of these extensions into its data dir.
+// That, in turn, is the only thing keeping the cross-tenant `polis_widget_token`
+// cookie unreadable — the cookie is deliberately JS-readable and shared across
+// `*.polis.pub`.
+//
+// Nothing in the write paths was designed as a control: snippets land as
+// `.html`/`.md` because of how snippet resolution works, drafts are `.md` and
+// hooks are `.sh` under `.polis/` (which this file refuses as a dot-path), and
+// post bodies go through bluemonday. The guarantee is real but incidental, so
+// it is asserted in static_execution_test.go rather than left to be rediscovered.
+//
+// ⚠️ `.svg` counts. It is served as `image/svg+xml` and an SVG can carry script.
+var ScriptCapableExtensions = map[string]bool{".js": true, ".svg": true}
+
 func ServeTenantPublic(
 	w http.ResponseWriter, r *http.Request,
 	storage Storage, handle string,
 	postProcess PostProcessFunc,
 ) {
+	ServeTenantPublicGated(w, r, storage, handle, postProcess, nil)
+}
+
+// GateFunc lets the caller refuse a response after the file to be served is
+// known and before any of it is written. clean is the resolved, slash-less
+// path; contentUsage is the Content-Usage value derived from the bytes being
+// served ("" when the resource carries no terms). It returns true when it has
+// written the response itself.
+//
+// The hosted service uses it to hold AI training crawlers to a site's own
+// terms. The self-hosted server passes nil: a self-hoster's access control is
+// their own web server's business.
+type GateFunc func(w http.ResponseWriter, r *http.Request, clean, contentUsage string) bool
+
+// ServeTenantPublicGated is ServeTenantPublic with an optional gate.
+//
+// ⚠️ robots.txt is served before the gate is ever consulted, on purpose: it is
+// where a site's terms are published, and a crawler has to be able to read
+// them to obey them.
+func ServeTenantPublicGated(
+	w http.ResponseWriter, r *http.Request,
+	storage Storage, handle string,
+	postProcess PostProcessFunc,
+	gate GateFunc,
+) {
 	urlPath := r.URL.Path
+
+	// A path of slashes alone ("//", from a crawler joining a base URL that
+	// ends in "/" to a path that starts with one) is the root. Without this,
+	// stripping one slash below left "/", which the storage refuses as
+	// absolute and logs as path traversal: a false security alarm.
+	if strings.TrimLeft(urlPath, "/") == "" {
+		urlPath = "/"
+	}
 
 	// Map root to index.html
 	if urlPath == "/" || urlPath == "" || urlPath == "/index.html" {
@@ -129,14 +229,19 @@ func ServeTenantPublic(
 	}
 
 	// Clean the path and block traversal
-	clean := filepath.Clean(strings.TrimPrefix(urlPath, "/"))
+	// ⭐ path.Clean, not filepath.Clean: forward slashes on every OS, so the
+	// private-name check below sees the same segments on Windows as here.
+	// ⭐ TrimLeft, not TrimPrefix: "//posts/x.html" is "posts/x.html", never
+	// the absolute "/posts/x.html".
+	clean := path.Clean(strings.TrimLeft(urlPath, "/"))
 	if strings.Contains(clean, "..") {
 		http.NotFound(w, r)
 		return
 	}
 
-	// Block dot-paths except .well-known/
-	if strings.HasPrefix(clean, ".") && !strings.HasPrefix(clean, ".well-known") {
+	// Private names, in any segment (see privatepath). A plain 404, so a
+	// refused path looks like an absent one.
+	if denied(clean) {
 		http.NotFound(w, r)
 		return
 	}
@@ -218,16 +323,21 @@ func ServeTenantPublic(
 					http.NotFound(w, r)
 					return
 				}
-			} else {
-				// Exact file match — serve as JSON for .well-known, otherwise octet-stream
+			} else if extensionlessServed(clean) {
+				// Exact file match. Only .well-known/ serves extensionless
+				// files (.well-known/polis); anywhere else an extensionless
+				// file is a key, a git internal or a dotfile far more often
+				// than it is content, and ServedExtensions cannot see it. It
+				// falls through to the .html lookup below instead.
 				data, err := storage.ReadPublicFile(handle, clean)
 				if err != nil {
 					http.NotFound(w, r)
 					return
 				}
-				if strings.HasPrefix(clean, ".well-known") {
-					w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				if gate != nil && gate(w, r, clean, "") {
+					return
 				}
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
 				setCrossOrigin(w, clean)
 				w.Write(data)
 				return
@@ -239,18 +349,8 @@ func ServeTenantPublic(
 		}
 	}
 
-	// Only allow safe extensions. `.js` is in the allow-list because
-	// the v4 SHAPE installs `/stream.js` at the tenant data dir root
-	// (theme.CopyStreamController copies it from the bundle into the
-	// tenant root so v4 pages' <script src="/stream.js" defer> resolve
-	// to a 200). Without `.js` here, the controller never loads and
-	// the filter dropdowns + comment panel + pagination all silently
-	// no-op. Bug present since 5.a's extraction (2026-04-27); caught
-	// during step-05/5.i Phase B local testing on 2026-04-28.
-	switch ext {
-	case ".html", ".css", ".js", ".json", ".jsonl", ".md", ".svg", ".xml":
-		// allowed
-	default:
+	// Only allow safe extensions — see ServedExtensions.
+	if !ServedExtensions[ext] {
 		http.NotFound(w, r)
 		return
 	}
@@ -294,6 +394,12 @@ func ServeTenantPublic(
 	// disagree with the document they are attached to.
 	setLicenseHeaders(w, ext, data)
 
+	// The gate reads the terms off the header just derived, so its decision
+	// and the header on this response come from the same bytes.
+	if gate != nil && gate(w, r, clean, w.Header().Get("Content-Usage")) {
+		return
+	}
+
 	// Cache-Control:
 	//   - Rendered .html: short browser TTL (5 min) so the v4 stream's
 	//     lazy-fetch flow doesn't re-revalidate every per-post page on
@@ -308,7 +414,10 @@ func ServeTenantPublic(
 	//     tenant's content; no-cache + the version query param on
 	//     /stream.js?v=X.Y.Z gives ETag-style revalidation without
 	//     stale-bundle risk.
-	if ext == ".html" {
+	if ext == ".html" && IsPersonalised(r) {
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Add("Vary", "Cookie")
+	} else if ext == ".html" {
 		w.Header().Set("Cache-Control", "public, max-age=300")
 	} else {
 		w.Header().Set("Cache-Control", "no-cache")

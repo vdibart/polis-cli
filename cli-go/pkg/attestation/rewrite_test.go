@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,16 +22,16 @@ func recordWithFutureMember(t *testing.T) (dir, id string, patched, priv []byte)
 	dir = t.TempDir()
 	priv, pub := newTestKeys(t)
 	writeWellKnown(t, dir, pub)
-	id, err := Issue(dir, custodyGrant(), priv)
+	id, err := Issue(storage.At(dir), custodyGrant(), priv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := os.ReadFile(Path(dir, id))
+	raw, _ := os.ReadFile(filepath.Join(dir, filepath.FromSlash(Key(id))))
 	var m map[string]interface{}
 	_ = json.Unmarshal(raw, &m)
 	m["superseded_by"] = "https://alice.polis.pub/content/pub.polis.core/attestation/x.json"
 	patched, _ = json.MarshalIndent(m, "", "  ")
-	if err := os.WriteFile(Path(dir, id), patched, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(Key(id))), patched, 0644); err != nil {
 		t.Fatal(err)
 	}
 	return dir, id, patched, priv
@@ -37,14 +39,14 @@ func recordWithFutureMember(t *testing.T) (dir, id string, patched, priv []byte)
 
 func TestTheRecordWriterRefusesARecordWithAnUnknownMember(t *testing.T) {
 	dir, id, patched, _ := recordWithFutureMember(t)
-	r, _ := Load(Path(dir, id))
+	r, _ := Load(storage.At(dir), id)
 	r.WithdrawnBy = "https://alice.polis.pub/content/pub.polis.core/attestation/w.json"
-	err := write(Path(dir, id), r)
+	err := write(storage.At(dir), Key(id), r)
 	var refusal *signing.RewriteRefusedError
 	if !errors.As(err, &refusal) || strings.Join(refusal.Fields, ",") != "superseded_by" {
 		t.Fatalf("want a refusal naming superseded_by, got %v", err)
 	}
-	if after, _ := os.ReadFile(Path(dir, id)); !bytes.Equal(after, patched) {
+	if after, _ := os.ReadFile(filepath.Join(dir, filepath.FromSlash(Key(id)))); !bytes.Equal(after, patched) {
 		t.Fatal("a refused write changed the record")
 	}
 }
@@ -54,25 +56,25 @@ func TestTheRecordWriterRefusesARecordWithAnUnknownMember(t *testing.T) {
 // already treats as non-fatal discovery rather than proof.
 func TestWithdrawingARecordWithAnUnknownMemberLeavesItUntouched(t *testing.T) {
 	dir, id, patched, priv := recordWithFutureMember(t)
-	wID, err := Withdraw(dir, id, priv)
+	wID, err := Withdraw(storage.At(dir), id, priv)
 	if err != nil {
 		t.Fatalf("the withdrawal must still be issued: %v", err)
 	}
-	if _, err := Load(Path(dir, wID)); err != nil {
+	if _, err := Load(storage.At(dir), wID); err != nil {
 		t.Fatalf("no withdrawal record on disk: %v", err)
 	}
-	if after, _ := os.ReadFile(Path(dir, id)); !bytes.Equal(after, patched) {
+	if after, _ := os.ReadFile(filepath.Join(dir, filepath.FromSlash(Key(id)))); !bytes.Equal(after, patched) {
 		t.Fatal("the forward reference was written over a record this build could not read")
 	}
 }
 
 func TestRecordRewriteUnsignedIsTheOnlyWayPast(t *testing.T) {
 	dir, id, _, _ := recordWithFutureMember(t)
-	dropped, err := RewriteUnsigned(Path(dir, id))
+	dropped, err := RewriteUnsigned(storage.At(dir), id)
 	if err != nil || strings.Join(dropped, ",") != "superseded_by" {
 		t.Fatalf("RewriteUnsigned = %v, %v", dropped, err)
 	}
-	r, _ := Load(Path(dir, id))
+	r, _ := Load(storage.At(dir), id)
 	if r.Signature != "" {
 		t.Fatal("⛔ the escape hatch signed")
 	}

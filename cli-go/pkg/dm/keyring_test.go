@@ -1,13 +1,16 @@
 package dm
 
 import (
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
 func TestKeyringRoundTrip(t *testing.T) {
-	dir := t.TempDir()
+	site := storage.At(t.TempDir())
 	k := &Keyring{
 		Epochs: []Epoch{
 			{ID: 0, Kind: EpochKindBootstrap, PublicKeyMessages: "AAAA", ServerHeld: true, CreatedAt: "2026-01-01T00:00:00Z"},
@@ -19,7 +22,7 @@ func TestKeyringRoundTrip(t *testing.T) {
 		},
 		Current: 1,
 	}
-	if err := k.Save(dir); err != nil {
+	if err := k.Save(site); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
@@ -32,7 +35,7 @@ func TestKeyringRoundTrip(t *testing.T) {
 	}
 
 	// keyring.json is written 0600.
-	fi, err := os.Stat(filepath.Join(dir, keyringFile))
+	fi, err := os.Stat(site.Path(keyringKey))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +43,7 @@ func TestKeyringRoundTrip(t *testing.T) {
 		t.Errorf("keyring.json perm = %o, want 600", perm)
 	}
 
-	got, err := LoadKeyring(dir)
+	got, err := LoadKeyring(site)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -60,7 +63,7 @@ func TestKeyringRoundTrip(t *testing.T) {
 }
 
 func TestLoadKeyringMissing(t *testing.T) {
-	if _, err := LoadKeyring(t.TempDir()); !os.IsNotExist(err) {
+	if _, err := LoadKeyring(storage.At(t.TempDir())); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("want os.IsNotExist, got %v", err)
 	}
 }
@@ -77,14 +80,17 @@ func TestKeyringAccessors(t *testing.T) {
 }
 
 func TestKeyringUnknownFieldTolerance(t *testing.T) {
-	dir := t.TempDir()
+	site := storage.At(t.TempDir())
 	raw := `{"schema_version":1,"revision":3,"epochs":[` +
 		`{"id":0,"kind":"bootstrap","public_key_messages":"AA","server_held":true,"created_at":"x","future_field":"ignored"}],` +
 		`"current":0,"another_future_field":42}`
-	if err := os.WriteFile(filepath.Join(dir, keyringFile), []byte(raw), 0o600); err != nil {
+	if err := os.MkdirAll(filepath.Dir(site.Path(keyringKey)), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	k, err := LoadKeyring(dir)
+	if err := os.WriteFile(site.Path(keyringKey), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k, err := LoadKeyring(site)
 	if err != nil {
 		t.Fatalf("unknown fields should be tolerated, got %v", err)
 	}

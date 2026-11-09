@@ -1,29 +1,31 @@
 package site
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/did"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
-// DIDDocumentPath is where a did:web DID Document must live for the no-path
-// form of the method: https://<host>/.well-known/did.json.
+// DIDDocumentKey is where a did:web DID Document must live for the no-path
+// form of the method: https://<host>/.well-known/did.json, relative to the
+// site root.
 //
-// ⚠️ THIS PATH IS NOT DISCOVERED BY A POINTER, AND THAT IS NOT AN
+// ⚠️ THIS LOCATION IS NOT DISCOVERED BY A POINTER, AND THAT IS NOT AN
 // INCONSISTENCY. The licence is found through a `license` field in
 // .well-known/polis because polis chose that file's location and a site's
 // layout is user-configurable. This location is chosen by an external
 // standard: did:web resolution IS defined as `/.well-known/did.json`, so a
 // pointer would be inert — no resolver would read it — and adding one would
 // create a second source of truth for a location nobody can vary.
-func DIDDocumentPath(siteDir string) string {
-	return filepath.Join(siteDir, ".well-known", "did.json")
-}
+const DIDDocumentKey = ".well-known/did.json"
 
 // BuildDIDDocument renders the site's DID Document without writing it.
 //
@@ -45,8 +47,8 @@ func DIDDocumentPath(siteDir string) string {
 // publish that because an old entry will not parse would trade a complete
 // document for none at all. The chain's own verifier is where a bad entry is
 // reported.
-func BuildDIDDocument(siteDir, host string) ([]byte, error) {
-	wk, err := LoadWellKnown(siteDir)
+func BuildDIDDocument(site storage.Site, host string) ([]byte, error) {
+	wk, err := LoadWellKnown(site)
 	if err != nil {
 		return nil, fmt.Errorf("load well-known: %w", err)
 	}
@@ -58,7 +60,7 @@ func BuildDIDDocument(siteDir, host string) ([]byte, error) {
 		return nil, fmt.Errorf("parse public key: %w", err)
 	}
 
-	epoch, retired := didKeyHistory(siteDir, wk.PublicKey)
+	epoch, retired := didKeyHistory(site, wk.PublicKey)
 	return did.BuildWithHistory(host, pub, epoch, retired)
 }
 
@@ -72,8 +74,8 @@ func BuildDIDDocument(siteDir, host string) ([]byte, error) {
 // disagreeing is a real finding, and Judge's head-agreement check is where it
 // gets reported. Building a document from a chain the site's own public_key
 // contradicts would bury that finding under a plausible-looking file.
-func didKeyHistory(siteDir, publicKey string) (int, []did.RetiredKey) {
-	block, err := LoadKeyHistory(siteDir)
+func didKeyHistory(site storage.Site, publicKey string) (int, []did.RetiredKey) {
+	block, err := LoadKeyHistory(site)
 	if err != nil || block == nil {
 		return 0, nil
 	}
@@ -91,7 +93,7 @@ func didKeyHistory(siteDir, publicKey string) (int, []did.RetiredKey) {
 	return block.Current.Epoch, retired
 }
 
-// PublishDIDDocument writes <siteDir>/.well-known/did.json from the site's own
+// PublishDIDDocument writes the site root/.well-known/did.json from the site's own
 // published key. Mirrors PublishMessagesKey: derive from what the site already
 // holds, write it into the well-known directory, and stay idempotent.
 //
@@ -104,16 +106,15 @@ func didKeyHistory(siteDir, publicKey string) (int, []did.RetiredKey) {
 // host is the site's canonical host ("alice.polis.pub"), passed explicitly
 // rather than read from a global: the caller is the only party that knows where
 // this site is actually served.
-func PublishDIDDocument(siteDir, host string) error {
-	data, err := BuildDIDDocument(siteDir, host)
+func PublishDIDDocument(site storage.Site, host string) error {
+	data, err := BuildDIDDocument(site, host)
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(siteDir, ".well-known")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	return atomicfile.WriteFile(DIDDocumentPath(siteDir), data, 0644)
+	// ⭐ Through the site: did.json is a served artifact and belongs wherever
+	// the instance stores its content. The MkdirAll is gone because
+	// atomicfile.Write has the store create the parent at its own mode rule.
+	return atomicfile.Write(context.Background(), site, DIDDocumentKey, data, 0644)
 }
 
 // DIDDocumentKeyCount is how many keys a did.json names in verificationMethod —
@@ -142,14 +143,14 @@ func DIDDocumentKeyCount(didDoc []byte) int {
 // It is a plain byte comparison because did.Marshal is deterministic. That is
 // what lets Medic heal tampering without a stored baseline: the correct
 // content is recomputable from the site itself at any moment.
-func DIDDocumentNeedsWrite(siteDir, host string) (bool, []byte, error) {
-	want, err := BuildDIDDocument(siteDir, host)
+func DIDDocumentNeedsWrite(site storage.Site, host string) (bool, []byte, error) {
+	want, err := BuildDIDDocument(site, host)
 	if err != nil {
 		return false, nil, err
 	}
-	got, err := os.ReadFile(DIDDocumentPath(siteDir))
+	got, err := site.Store().Get(context.Background(), DIDDocumentKey)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return true, want, nil
 		}
 		return false, nil, err

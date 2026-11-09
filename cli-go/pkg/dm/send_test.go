@@ -3,6 +3,7 @@ package dm
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,11 +27,11 @@ func testSender(t *testing.T) (*Sender, string) {
 	if _, err := kr.AddBootstrapEpoch(); err != nil {
 		t.Fatalf("bootstrap epoch: %v", err)
 	}
-	if err := kr.Save(DMDir(siteDir)); err != nil {
+	if err := kr.Save(storage.At(siteDir)); err != nil {
 		t.Fatalf("save keyring: %v", err)
 	}
 
-	sender := NewSender(privPEM, pubSSH, "alice.example.com", siteDir)
+	sender := NewSender(privPEM, pubSSH, "alice.example.com", storage.At(siteDir))
 	return sender, siteDir
 }
 
@@ -38,7 +39,7 @@ func testSender(t *testing.T) (*Sender, string) {
 // copies from the mailbox in assertions.
 func senderDEKs(t *testing.T, s *Sender) map[int][32]byte {
 	t.Helper()
-	kr, err := LoadKeyring(DMDir(s.SiteDir))
+	kr, err := LoadKeyring(s.Site)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func TestSendMessage_DeliverySuccess(t *testing.T) {
 
 	// Verify the sent copy is stored in the mailbox and opens with our own epoch DEK.
 	peer := ExtractDomainFromURL(srv.URL)
-	conv, err := NewMailbox(DMDir(sender.SiteDir)).ReadConversation(peer, senderDEKs(t, sender))
+	conv, err := NewMailbox(sender.Site).ReadConversation(peer, senderDEKs(t, sender))
 	if err != nil {
 		t.Fatalf("read conversation: %v", err)
 	}
@@ -201,7 +202,7 @@ func TestSendMessage_DeliveryFailure_SavesUnsent(t *testing.T) {
 	}
 
 	// Verify it's in the mailbox as unsent
-	unsent, _ := NewMailbox(DMDir(sender.SiteDir)).UnsentMessages()
+	unsent, _ := NewMailbox(sender.Site).UnsentMessages()
 	if len(unsent) != 1 {
 		t.Errorf("expected 1 unsent message, got %d", len(unsent))
 	}
@@ -277,7 +278,7 @@ func TestSendMessage_WithReplyToID(t *testing.T) {
 	}
 
 	peer := ExtractDomainFromURL(srv.URL)
-	conv, _ := NewMailbox(DMDir(sender.SiteDir)).ReadConversation(peer, senderDEKs(t, sender))
+	conv, _ := NewMailbox(sender.Site).ReadConversation(peer, senderDEKs(t, sender))
 	if len(conv) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(conv))
 	}
@@ -546,7 +547,7 @@ func TestNewSenderWithHTTP_Nil(t *testing.T) {
 	privPEM, pubSSH, _ := signing.GenerateKeypair()
 	siteDir := t.TempDir()
 	os.MkdirAll(filepath.Join(siteDir, ".polis"), 0700)
-	s := NewSenderWithHTTP(privPEM, pubSSH, "Test.Local", siteDir, nil)
+	s := NewSenderWithHTTP(privPEM, pubSSH, "Test.Local", storage.At(siteDir), nil)
 	if s == nil {
 		t.Fatal("returned nil")
 	}
@@ -563,7 +564,7 @@ func TestNewSenderWithHTTP_Shared(t *testing.T) {
 	siteDir := t.TempDir()
 	os.MkdirAll(filepath.Join(siteDir, ".polis"), 0700)
 	shared := &http.Client{}
-	s := NewSenderWithHTTP(privPEM, pubSSH, "test.local", siteDir, shared)
+	s := NewSenderWithHTTP(privPEM, pubSSH, "test.local", storage.At(siteDir), shared)
 	if s.httpClient != shared {
 		t.Error("expected shared httpClient")
 	}

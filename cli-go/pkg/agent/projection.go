@@ -1,17 +1,22 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"html"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/attestation"
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
-	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	// ⚠️ ALIASED: `site` is the parameter name in the site-handle migration.
+	sitepkg "github.com/vdibart/polis-cli/cli-go/pkg/site"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // What an agent is to this site — the PROJECTION (epic 11 D8, epic 46 R12).
@@ -40,8 +45,8 @@ const (
 
 // MountDir returns the site-relative directory the projection is written under
 // — the attestation type's mount, honouring the site's bundle.
-func MountDir(siteDir string) string {
-	b, err := bundle.LoadBundle(filepath.Join(siteDir, "content", "pub.polis.core", "bundle.json"))
+func MountDir(site storage.Site) string {
+	b, err := bundle.LoadBundleAt(site, "content/pub.polis.core/bundle.json")
 	if err == nil {
 		if dir, err := b.MountDir(attestation.TypeName); err == nil {
 			return dir
@@ -51,8 +56,8 @@ func MountDir(siteDir string) string {
 }
 
 // PointerValue is the site-relative URL the `agents` pointer carries.
-func PointerValue(siteDir string) string {
-	return "/" + filepath.ToSlash(filepath.Join(MountDir(siteDir), AgentsFilename))
+func PointerValue(site storage.Site) string {
+	return "/" + filepath.ToSlash(filepath.Join(MountDir(site), AgentsFilename))
 }
 
 // Projection is the agents.json document.
@@ -84,21 +89,32 @@ const projectionNote = "Generated from this site's grant records. Cite a grant's
 // ⚠️ The pointer is written only when it CHANGES. `.well-known/polis` is tracked
 // by Patrol (mtime) and Judge (hash), so rewriting an identical value on every
 // grant would turn each refresh into a finding.
-func RefreshProjections(siteDir string) error {
-	grants, err := attestation.Grants(siteDir, "")
+func RefreshProjections(site storage.Site) error {
+	grants, err := attestation.Grants(site, "")
 	if err != nil {
 		return fmt.Errorf("read grants: %w", err)
 	}
-	mount := filepath.Join(siteDir, MountDir(siteDir))
-	jsonPath := filepath.Join(mount, AgentsFilename)
-	pagePath := filepath.Join(mount, AgentsPageDir, "index.html")
+	// ⭐ KEYS, so the projection lands wherever the site is stored. The mount is
+	// user-configurable, so it is normalised rather than assumed clean.
+	ctx := context.Background()
+	mountKey := strings.Trim(filepath.ToSlash(MountDir(site)), "/")
+	jsonKey := path.Join(mountKey, AgentsFilename)
+	pageKey := path.Join(mountKey, AgentsPageDir, "index.html")
 
 	if len(grants) == 0 {
-		_ = os.Remove(jsonPath)
-		_ = os.Remove(pagePath)
-		_ = os.Remove(filepath.Dir(pagePath))
-		if site.AgentsPointer(siteDir) != "" {
-			return site.SetAgentsPointer(siteDir, "")
+		_ = site.Store().Delete(ctx, jsonKey, storage.IgnoreMissing())
+		_ = site.Store().Delete(ctx, pageKey, storage.IgnoreMissing())
+		// NOT the storage interface: remove-if-empty. os.Remove on a directory FAILS
+		// while siblings remain, and that failure is the logic. A prefix store has no
+		// empty directory to remove, so on another backend there is nothing to do,
+		// and the real path is asked for only where the store has one.
+		if st := site.Store(); st.Capabilities().RealPath {
+			if dir, err := st.RealPath(path.Dir(pageKey)); err == nil {
+				_ = os.Remove(dir)
+			}
+		}
+		if sitepkg.AgentsPointer(site) != "" {
+			return sitepkg.SetAgentsPointer(site, "")
 		}
 		return nil
 	}
@@ -122,17 +138,15 @@ func RefreshProjections(siteDir string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(pagePath), 0755); err != nil {
-		return fmt.Errorf("create projection dir: %w", err)
-	}
-	if err := atomicfile.WriteFile(jsonPath, append(data, '\n'), 0644); err != nil {
+	// ⭐ No MkdirAll: atomicfile.Write has the store create the parent.
+	if err := atomicfile.Write(ctx, site, jsonKey, append(data, '\n'), 0644); err != nil {
 		return fmt.Errorf("write %s: %w", AgentsFilename, err)
 	}
-	if err := atomicfile.WriteFile(pagePath, renderPage(p), 0644); err != nil {
+	if err := atomicfile.Write(ctx, site, pageKey, renderPage(p), 0644); err != nil {
 		return fmt.Errorf("write agents page: %w", err)
 	}
-	if want := PointerValue(siteDir); site.AgentsPointer(siteDir) != want {
-		return site.SetAgentsPointer(siteDir, want)
+	if want := PointerValue(site); sitepkg.AgentsPointer(site) != want {
+		return sitepkg.SetAgentsPointer(site, want)
 	}
 	return nil
 }

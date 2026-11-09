@@ -2,6 +2,7 @@ package publish
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,7 +28,7 @@ func TestUpdateIndexEntryKeepsOtherLinesBytesAndTheMatchedLinesMembers(t *testin
 	if err := os.WriteFile(indexPath, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := UpdateIndexEntry(dir, "p/a.md", "A renamed", "sha256:2"); err != nil {
+	if err := UpdateIndexEntry(storage.At(dir), "p/a.md", "A renamed", "sha256:2"); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(indexPath)

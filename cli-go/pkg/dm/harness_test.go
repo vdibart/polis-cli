@@ -2,6 +2,7 @@ package dm
 
 import (
 	"bytes"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"testing"
 )
 
@@ -24,7 +25,7 @@ func TestPhase1EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.SaveCAS(dir, 0); err != nil { // first write
+	if err := k.SaveCAS(storage.At(dir), 0); err != nil { // first write
 		t.Fatalf("save keyring: %v", err)
 	}
 	pub1, err := publicFromDEK(dek1[:])
@@ -37,7 +38,7 @@ func TestPhase1EndToEnd(t *testing.T) {
 	}
 
 	// 2) Store messages: a sent (epoch 1, sealed to self) + a received under each epoch.
-	mb := NewMailbox(dir)
+	mb := NewMailbox(storage.At(dir))
 	if _, err := mb.AppendSent(peer, "me.polis.pub", "picking this back up — got a new password now", 1, pub1, dek1, "", "sent"); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +96,7 @@ func TestPhase1EndToEnd(t *testing.T) {
 
 	// 4) Change password, then reload from disk and unlock with the NEW password.
 	const newPw = "a fresh password entirely"
-	reloaded, err := LoadKeyring(dir)
+	reloaded, err := LoadKeyring(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,11 +104,11 @@ func TestPhase1EndToEnd(t *testing.T) {
 	if err := reloaded.ChangePassword([]byte(pw), []byte(newPw)); err != nil {
 		t.Fatal(err)
 	}
-	if err := reloaded.SaveCAS(dir, baseRev); err != nil {
+	if err := reloaded.SaveCAS(storage.At(dir), baseRev); err != nil {
 		t.Fatalf("CAS save after change-password: %v", err)
 	}
 
-	final, err := LoadKeyring(dir)
+	final, err := LoadKeyring(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}

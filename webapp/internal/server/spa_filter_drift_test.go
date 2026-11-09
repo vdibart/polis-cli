@@ -535,6 +535,74 @@ func TestSPA_AvatarMenuStructure(t *testing.T) {
 	if !strings.Contains(menu, "App.navigateTo('/settings')") {
 		t.Errorf("avatar menu lost Settings entry — regression")
 	}
+	// ⭐ Kay sits beside Settings, in the avatar menu and the mobile drawer.
+	if !strings.Contains(menu, "App.navigateTo('/kay')") || !strings.Contains(menu, ">Kay</div>") {
+		t.Errorf("avatar menu lost the Kay entry")
+	}
+	if !strings.Contains(idx, `data-action="kay"`) {
+		t.Errorf("the mobile drawer lost the Kay entry")
+	}
+}
+
+// ⭐ /_/kay is a static SPA route beside /_/settings, its view is rendered by
+// kay.js, and the drawer's kay action navigates there.
+func TestSPA_KayPageIsWired(t *testing.T) {
+	read := func(name string) string {
+		t.Helper()
+		b, err := fs.ReadFile(webui.Assets, "www/"+name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return string(b)
+	}
+	app, idx, extras, kay := read("app.js"), read("index.html"), read("owner-extras.js"), read("kay.js")
+	for _, want := range []string{`['/kay',`, `view: 'kay'`, `'kay':                 '/kay'`, `window.PolisKay.render(contentList)`} {
+		if !strings.Contains(app, want) {
+			t.Errorf("app.js lacks %q", want)
+		}
+	}
+	if !strings.Contains(idx, `<script src="/kay.js" defer></script>`) {
+		t.Error("index.html does not load kay.js")
+	}
+	if !strings.Contains(extras, `action === 'kay'`) {
+		t.Error("owner-extras.js does not route the drawer's kay action")
+	}
+	if !strings.Contains(kay, "window.PolisKay = { render") {
+		t.Error("kay.js does not define window.PolisKay.render")
+	}
+	// ⛔ The page talks only to its own origin: every fetch path is /api/kay.
+	for _, m := range regexp.MustCompile(`call\('[A-Z]+', '([^']+)'`).FindAllStringSubmatch(kay, -1) {
+		if !strings.HasPrefix(m[1], "/api/kay") {
+			t.Errorf("kay.js calls %s, outside /api/kay", m[1])
+		}
+	}
+	if strings.Contains(kay, "https://api.v0") {
+		t.Error("kay.js reaches v0 directly; only the instance talks to v0")
+	}
+	// ⭐ The app and the public site stay on one theme: Kay's set_theme moves
+	// the app through the same applySiteTheme as Settings and first load.
+	if !strings.Contains(kay, "c.tool !== 'set_theme'") || !strings.Contains(kay, "window.App.applySiteTheme(theme)") {
+		t.Error("kay.js no longer moves the app to the theme Kay switched the site to")
+	}
+	// ⚠️ The app's start-up can load the view again after the owner arrives:
+	// a re-render keeps the draft being typed and follows a turn in progress.
+	if !strings.Contains(kay, "state.root === container && container.querySelector('.kay-composer')") ||
+		!strings.Contains(kay, "const draft = box ? box.value : ''") || !strings.Contains(kay, "if (wasBusy)") {
+		t.Error("kay.js loses the owner's draft, or the turn in progress, when the page renders again")
+	}
+	// ⭐ …and the site's own CSS: a set_custom_css moves the app's palette too.
+	if !strings.Contains(kay, "c.tool === 'set_custom_css'") || !strings.Contains(kay, "window.App.followSiteLook()") {
+		t.Error("kay.js no longer moves the app when Kay writes the site's own CSS")
+	}
+	if !strings.Contains(app, "async followSiteLook()") || !strings.Contains(app, "/api/site/palette") {
+		t.Error("app.js no longer follows the site's own CSS")
+	}
+	if strings.Count(app, "this.applySiteTheme(") < 2 || !strings.Contains(app, "applySiteTheme(name, opts = {})") {
+		t.Error("app.js does not route Settings and first load through applySiteTheme")
+	}
+	if strings.Count(app, "dataset.siteTheme = ") != 1 {
+		t.Errorf("app.js sets data-site-theme in %d places; want only applySiteTheme", strings.Count(app, "dataset.siteTheme = "))
+	}
 }
 
 // TestSPA_OwnerExtrasStreamItemDecorators — step-06/6.i. owner-extras.js
@@ -612,5 +680,69 @@ func TestSPA_StreamCSSHasEntryActions(t *testing.T) {
 	}
 	if !strings.Contains(src, "body.is-owner .entry:hover") {
 		t.Errorf("stream.css missing body.is-owner .entry:hover rule — chrome won't reveal on hover")
+	}
+}
+
+// ⭐ The stream mark and the nav shortcuts are drawn by shipped code from data
+// the server validated: a decorator reading meta.mark, CSS for the "!", and a
+// container the shortcuts render into, with the label inserted as text.
+func TestSPA_StreamMarkAndNavShortcutsAreWired(t *testing.T) {
+	read := func(name string) string {
+		t.Helper()
+		b, err := fs.ReadFile(webui.Assets, "www/"+name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return string(b)
+	}
+	app, idx, extras, kay, css := read("app.js"), read("index.html"), read("owner-extras.js"), read("kay.js"), read("style.css")
+	if !strings.Contains(extras, "stream.afterRender('post', decorateMark)") || !strings.Contains(extras, "meta.mark !== 'alert'") {
+		t.Error("owner-extras no longer draws the stream mark from meta.mark")
+	}
+	if !strings.Contains(css, ".entry--marked .entry-rail > .timeline-dot::after") {
+		t.Error("style.css no longer draws the mark's \"!\"")
+	}
+	if !strings.Contains(idx, `<span id="nav-shortcuts" class="nav-shortcuts"></span>`) {
+		t.Error("index.html lost the nav shortcuts container")
+	}
+	if !strings.Contains(app, "async renderNavShortcuts()") || !strings.Contains(app, "btn.setAttribute('data-tip', sc.label)") ||
+		strings.Contains(app, "${sc.label}") {
+		t.Error("app.js no longer draws the shortcuts with the label as text only")
+	}
+	if !strings.Contains(kay, "c.tool === 'set_nav_shortcuts'") {
+		t.Error("the Kay page no longer redraws the nav when Kay sets a shortcut")
+	}
+}
+
+// ⭐ Point and ask: the shell loads kay-point.js and its stylesheet, which
+// start only when the instance says point and ask is on, talk only to
+// /api/kay, and leave the shared in-place refresh to kay.js.
+func TestSPA_PointAndAskIsWired(t *testing.T) {
+	read := func(name string) string {
+		t.Helper()
+		b, err := fs.ReadFile(webui.Assets, "www/"+name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return string(b)
+	}
+	idx, kp, kay := read("index.html"), read("kay-point.js"), read("kay.js")
+	read("kay-point.css")
+	if !strings.Contains(idx, `<script src="/kay-point.js" defer></script>`) || !strings.Contains(idx, `<link rel="stylesheet" href="/kay-point.css">`) {
+		t.Error("index.html does not load kay-point.js and kay-point.css")
+	}
+	if !strings.Contains(kp, "call('GET', '/api/kay/components')") || !strings.Contains(kp, "if (!res.enabled) return;") {
+		t.Error("kay-point.js does not wait for the instance to say point and ask is on")
+	}
+	for _, m := range regexp.MustCompile(`call\('[A-Z]+', '([^']+)'`).FindAllStringSubmatch(kp, -1) {
+		if !strings.HasPrefix(m[1], "/api/kay") {
+			t.Errorf("kay-point.js calls %s, outside /api/kay", m[1])
+		}
+	}
+	if strings.Contains(kp, "https://api.v0") || strings.Contains(kp, "innerHTML = text") {
+		t.Error("kay-point.js reaches v0 directly, or writes v0's text as markup")
+	}
+	if !strings.Contains(kay, "window.PolisKay = { render, stop: stopPolling, applyCalls }") || !strings.Contains(kp, "window.PolisKay.applyCalls(") {
+		t.Error("point and ask no longer shares the Kay page's in-place refresh")
 	}
 }

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 func handlePublish(args []string) {
@@ -33,7 +35,9 @@ func handlePublish(args []string) {
 		exitError("Not a polis site directory (no .well-known/polis found)")
 	}
 
-	// Read the input file
+	// NOT the storage interface: inputFile is the path the user typed on the
+	// command line and may be anywhere on their disk. The store addresses
+	// keys inside the site and refuses absolute paths by design.
 	content, err := os.ReadFile(inputFile)
 	if err != nil {
 		exitError("Failed to read file: %v", err)
@@ -63,19 +67,18 @@ func handlePublish(args []string) {
 	// Publish the post
 	dsCfg := &publish.DiscoveryConfig{
 		DiscoveryURL:   discoveryURL,
-		DiscoveryKey:   discoveryKey,
 		BaseURL:        baseURL,
 		Generator:      generator,
 		LicenseProfile: authoredLicense,
 	}
-	result, err := publish.PublishPost(dir, markdown, *filename, privKey, dsCfg)
+	result, err := publish.PublishPost(storage.At(dir), markdown, *filename, privKey, dsCfg)
 	if err != nil {
 		exitError("Failed to publish: %v", err)
 	}
 
 	// v4 incremental render: cascade siblings + index. v3 path unchanged
 	// (CLI publish has never auto-rendered for v3, and continues not to).
-	if shape, err := bundle.GetActiveShapeName(dir); err == nil && shape == "v4" {
+	if shape, err := bundle.GetActiveShapeName(storage.At(dir)); err == nil && shape == "v4" {
 		if err := publishStreamCascade(dir, result.Path, false); err != nil && !jsonOutput {
 			fmt.Fprintf(os.Stderr, "[!] v4 cascade render failed: %v\n", err)
 		}
@@ -85,6 +88,8 @@ func handlePublish(args []string) {
 	inputAbs, err1 := filepath.Abs(inputFile)
 	postAbs, err2 := filepath.Abs(filepath.Join(dir, result.Path))
 	if err1 == nil && err2 == nil && inputAbs != postAbs {
+		// NOT the storage interface: inputAbs is the user's original file,
+		// outside the site, being cleaned up after the post was copied in.
 		if err := os.Remove(inputAbs); err != nil {
 			if !jsonOutput {
 				fmt.Fprintf(os.Stderr, "[!] Could not remove original file: %v\n", err)
@@ -161,7 +166,7 @@ func handleRepublish(args []string) {
 	// Name the path we actually tried. The previous message ("must be under
 	// posts/ directory") pointed at the one directory where the .md is NOT —
 	// posts/ is the render mount and holds .html.
-	if _, err := os.Stat(filepath.Join(dir, postPath)); err != nil {
+	if present, _ := storage.NewPOSIX(dir).Exists(context.Background(), filepath.ToSlash(postPath)); !present {
 		exitError("Post not found at %s", postPath)
 	}
 
@@ -174,7 +179,8 @@ func handleRepublish(args []string) {
 	// Read the post content (either from second arg or from the post itself)
 	var markdown string
 	if len(remaining) > 1 {
-		// Read from provided file
+		// Read from provided file. NOT the storage interface: a path the
+		// user typed, which may be anywhere.
 		content, err := os.ReadFile(remaining[1])
 		if err != nil {
 			exitError("Failed to read file: %v", err)
@@ -182,8 +188,7 @@ func handleRepublish(args []string) {
 		markdown = string(content)
 	} else {
 		// Read from the existing post
-		fullPath := filepath.Join(dir, postPath)
-		content, err := os.ReadFile(fullPath)
+		content, err := storage.NewPOSIX(dir).Get(context.Background(), filepath.ToSlash(postPath))
 		if err != nil {
 			exitError("Failed to read post: %v", err)
 		}
@@ -198,18 +203,17 @@ func handleRepublish(args []string) {
 	// Republish the post
 	dsCfg := &publish.DiscoveryConfig{
 		DiscoveryURL: discoveryURL,
-		DiscoveryKey: discoveryKey,
 		BaseURL:      baseURL,
 		Generator:    generator,
 	}
-	result, err := publish.RepublishPost(dir, postPath, markdown, privKey, dsCfg)
+	result, err := publish.RepublishPost(storage.At(dir), postPath, markdown, privKey, dsCfg)
 	if err != nil {
 		exitError("Failed to republish: %v", err)
 	}
 
 	// v4 incremental cascade. RepublishPost preserves the post's path/position;
 	// PublishStream handles republish identically (same lookup, same cascade).
-	if shape, err := bundle.GetActiveShapeName(dir); err == nil && shape == "v4" {
+	if shape, err := bundle.GetActiveShapeName(storage.At(dir)); err == nil && shape == "v4" {
 		if err := publishStreamCascade(dir, result.Path, true); err != nil && !jsonOutput {
 			fmt.Fprintf(os.Stderr, "[!] v4 cascade render failed: %v\n", err)
 		}
@@ -256,8 +260,8 @@ func handleRepublishComment(dir, rawPath string, remaining []string) {
 	// was wrong for any bundle declaring a different dir or mount.
 	contentPath := loadOrDefaultBundle(dir).MountToSourcePath(rawPath)
 
-	fullPath := filepath.Join(dir, contentPath)
-	if _, err := os.Stat(fullPath); err != nil {
+	commentKey := filepath.ToSlash(contentPath)
+	if present, _ := storage.NewPOSIX(dir).Exists(context.Background(), commentKey); !present {
 		exitError("Comment not found at %s", contentPath)
 	}
 
@@ -269,13 +273,15 @@ func handleRepublishComment(dir, rawPath string, remaining []string) {
 	// New body: from the optional second arg, else the existing comment's body.
 	var markdown string
 	if len(remaining) > 1 {
+		// NOT the storage interface: a path the user typed, which may be
+		// anywhere on their disk.
 		content, err := os.ReadFile(remaining[1])
 		if err != nil {
 			exitError("Failed to read file: %v", err)
 		}
 		markdown = comment.StripFrontmatter(string(content))
 	} else {
-		content, err := os.ReadFile(fullPath)
+		content, err := storage.NewPOSIX(dir).Get(context.Background(), commentKey)
 		if err != nil {
 			exitError("Failed to read comment: %v", err)
 		}
@@ -283,7 +289,7 @@ func handleRepublishComment(dir, rawPath string, remaining []string) {
 	}
 
 	// DS config comes from the comment package globals set in root.go Execute().
-	result, err := comment.RepublishComment(dir, contentPath, markdown, privKey)
+	result, err := comment.RepublishComment(storage.At(dir), contentPath, markdown, privKey)
 	if err != nil {
 		exitError("Failed to republish comment: %v", err)
 	}
@@ -315,8 +321,7 @@ func handleRepublishComment(dir, rawPath string, remaining []string) {
 }
 
 func loadPrivateKey(dir string) ([]byte, error) {
-	privKeyPath := filepath.Join(dir, ".polis", "keys", "id_ed25519")
-	return os.ReadFile(privKeyPath)
+	return storage.NewPOSIX(dir).Get(context.Background(), ".polis/keys/id_ed25519")
 }
 
 // publishStreamCascade constructs a PageRenderer and dispatches the v4 incremental
@@ -337,7 +342,7 @@ func publishStreamCascade(dir, postPath string, isRepublish bool) error {
 	commentsMountDir, _ := coreBundle.MountDir("pub.polis.comment")
 
 	renderer, err := render.NewPageRenderer(render.PageConfig{
-		DataDir:           dir,
+		Site:              storage.At(dir),
 		CLIThemesDir:      findCLIThemesDir(),
 		BaseURL:           url,
 		PostsSourceDir:    postsSource,

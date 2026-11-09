@@ -2,6 +2,7 @@ package site
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +14,7 @@ import (
 func TestInit_BundleLayout(t *testing.T) {
 	dir := t.TempDir()
 
-	result, err := Init(dir, InitOptions{})
+	result, err := Init(storage.At(dir), InitOptions{})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -54,7 +55,7 @@ func TestInit_BundleLayout(t *testing.T) {
 	}
 
 	// Verify .well-known/polis has bundle registry
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatalf("Failed to load .well-known/polis: %v", err)
 	}
@@ -72,7 +73,7 @@ func TestInit_BundleLayout(t *testing.T) {
 	// themes) and persisted in the registry — no half-initialized state
 	// between init and first render.
 	_ = wk
-	activeTheme := GetActiveTheme(dir)
+	activeTheme := GetActiveTheme(storage.At(dir))
 	if activeTheme == "" {
 		t.Error("active theme should be set after init (random pick from bundle themes)")
 	}
@@ -126,7 +127,7 @@ func TestInit_BundleLayout(t *testing.T) {
 func TestInit_BundleJsonIsValid(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Init(dir, InitOptions{})
+	_, err := Init(storage.At(dir), InitOptions{})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -163,12 +164,12 @@ func TestInit_BundleJsonIsValid(t *testing.T) {
 func TestInit_SiteTitle(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Init(dir, InitOptions{SiteTitle: "My Custom Site"})
+	_, err := Init(storage.At(dir), InitOptions{SiteTitle: "My Custom Site"})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatalf("Failed to load .well-known/polis: %v", err)
 	}
@@ -183,12 +184,12 @@ func TestInit_SiteTitle(t *testing.T) {
 func TestInit_DefaultSiteTitleFromAuthor(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Init(dir, InitOptions{Author: "Alice"})
+	_, err := Init(storage.At(dir), InitOptions{Author: "Alice"})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatalf("Failed to load .well-known/polis: %v", err)
 	}
@@ -200,16 +201,16 @@ func TestInit_DefaultSiteTitleFromAuthor(t *testing.T) {
 func TestInit_CustomTheme(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Init(dir, InitOptions{Theme: "turbo"})
+	_, err := Init(storage.At(dir), InitOptions{Theme: "turbo"})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 
-	if _, err := LoadWellKnown(dir); err != nil {
+	if _, err := LoadWellKnown(storage.At(dir)); err != nil {
 		t.Fatalf("Failed to load .well-known/polis: %v", err)
 	}
 	// Active theme now lives in the registry, not well-known.
-	activeTheme := GetActiveTheme(dir)
+	activeTheme := GetActiveTheme(storage.At(dir))
 	if activeTheme != "turbo" {
 		t.Errorf("active theme = %q, want turbo", activeTheme)
 	}
@@ -222,11 +223,11 @@ func TestInit_CustomTheme(t *testing.T) {
 func TestInit_SelectsRandomThemeByDefault(t *testing.T) {
 	dir := t.TempDir()
 
-	if _, err := Init(dir, InitOptions{}); err != nil {
+	if _, err := Init(storage.At(dir), InitOptions{}); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 
-	activeTheme := GetActiveTheme(dir)
+	activeTheme := GetActiveTheme(storage.At(dir))
 	if activeTheme == "" {
 		t.Fatal("active theme should be picked at init, got empty")
 	}
@@ -244,11 +245,11 @@ func TestInit_SelectsRandomThemeByDefault(t *testing.T) {
 func TestInit_PreservesVersionStamps(t *testing.T) {
 	dir := t.TempDir()
 
-	if _, err := Init(dir, InitOptions{}); err != nil {
+	if _, err := Init(storage.At(dir), InitOptions{}); err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 
-	reg, err := bundle.LoadRegistry(dir)
+	reg, err := bundle.LoadRegistry(storage.At(dir))
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
@@ -278,12 +279,12 @@ func TestInit_PreservesVersionStamps(t *testing.T) {
 func TestInit_RefusesOverwrite(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Init(dir, InitOptions{})
+	_, err := Init(storage.At(dir), InitOptions{})
 	if err != nil {
 		t.Fatalf("First init failed: %v", err)
 	}
 
-	_, err = Init(dir, InitOptions{})
+	_, err = Init(storage.At(dir), InitOptions{})
 	if err == nil {
 		t.Fatal("Second init should fail (refusing to overwrite)")
 	}
@@ -299,7 +300,7 @@ func TestInit_VersionPropagation(t *testing.T) {
 	defer func() { Version = oldVersion }()
 	Version = "0.57.0"
 
-	result, err := Init(dir, InitOptions{})
+	result, err := Init(storage.At(dir), InitOptions{})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -309,7 +310,7 @@ func TestInit_VersionPropagation(t *testing.T) {
 
 	expected := "polis-cli-go/0.57.0"
 
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatalf("Failed to load .well-known/polis: %v", err)
 	}
@@ -343,7 +344,7 @@ func TestInit_VersionPropagation(t *testing.T) {
 func TestInit_CreatesWebappConfig(t *testing.T) {
 	dir := t.TempDir()
 
-	result, err := Init(dir, InitOptions{})
+	result, err := Init(storage.At(dir), InitOptions{})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -380,12 +381,12 @@ func TestInit_CreatesWebappConfig(t *testing.T) {
 func TestInit_NoEmailByDefault(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Init(dir, InitOptions{})
+	_, err := Init(storage.At(dir), InitOptions{})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatalf("Failed to load .well-known/polis: %v", err)
 	}
@@ -402,12 +403,12 @@ func TestInit_NoEmailByDefault(t *testing.T) {
 func TestInit_ExplicitEmailIsWritten(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Init(dir, InitOptions{Email: "alice@example.com"})
+	_, err := Init(storage.At(dir), InitOptions{Email: "alice@example.com"})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatalf("Failed to load .well-known/polis: %v", err)
 	}
@@ -419,7 +420,7 @@ func TestInit_ExplicitEmailIsWritten(t *testing.T) {
 func TestInit_CreatesAboutSnippet(t *testing.T) {
 	dir := t.TempDir()
 
-	result, err := Init(dir, InitOptions{})
+	result, err := Init(storage.At(dir), InitOptions{})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -444,7 +445,7 @@ func TestInit_CreatesAboutSnippet(t *testing.T) {
 func TestInit_GitignoreContents(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Init(dir, InitOptions{})
+	_, err := Init(storage.At(dir), InitOptions{})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -465,7 +466,7 @@ func TestInit_GitignoreContents(t *testing.T) {
 func TestInit_EmptyIndexFile(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Init(dir, InitOptions{})
+	_, err := Init(storage.At(dir), InitOptions{})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -483,7 +484,7 @@ func TestInit_EmptyIndexFile(t *testing.T) {
 func TestInit_PassesAllPatrolChecks(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Init(dir, InitOptions{})
+	_, err := Init(storage.At(dir), InitOptions{})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -540,12 +541,12 @@ func TestInit_PassesAllPatrolChecks(t *testing.T) {
 func TestInit_CreatesDefaultAvatar(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Init(dir, InitOptions{})
+	_, err := Init(storage.At(dir), InitOptions{})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
 
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatalf("Failed to load .well-known/polis: %v", err)
 	}
@@ -566,7 +567,7 @@ func TestInit_CreatesDefaultAvatar(t *testing.T) {
 func TestInit_OldDirsNotCreated(t *testing.T) {
 	dir := t.TempDir()
 
-	_, err := Init(dir, InitOptions{})
+	_, err := Init(storage.At(dir), InitOptions{})
 	if err != nil {
 		t.Fatalf("Init failed: %v", err)
 	}
@@ -586,5 +587,29 @@ func TestInit_OldDirsNotCreated(t *testing.T) {
 		if _, err := os.Stat(path); err == nil {
 			t.Errorf("Old directory %s should NOT exist in new layout", d)
 		}
+	}
+}
+
+// ⛔ .polis MUST NOT BE WORLD-READABLE, and nothing tested this directory until
+// a conversion nearly broke it.
+//
+// ⚠️ THE NEAR-MISS IS THE REASON THIS EXISTS. Moving the DM-rules write onto
+// storage.AppendAtPath dropped an explicit MkdirAll(…, 0700). AppendAtPath
+// reaches a file through a store rooted at the file's own DIRECTORY, so a
+// parent it creates gets that store's default mode — 0755 — and
+// .polis/policies would have become world-readable on a fresh init. Every
+// existing test still passed.
+func TestPrivatePolicyDirectoryIsNotWorldReadable(t *testing.T) {
+	siteDir := t.TempDir()
+	if err := EnsureDMPolicies(filepath.Join(siteDir, ".polis", "policies", "rules.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(siteDir, ".polis", "policies"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf(".polis/policies permissions = %04o, want 0700 — keys, drafts and DM state "+
+			"live under .polis and a shared host must not expose them", perm)
 	}
 }

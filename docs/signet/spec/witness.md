@@ -87,7 +87,7 @@ the evidence that the key that made it was the DS's key at the time.
 | **Site registration** (`service_attestation`) | the registration payload the site signed | `JSON.stringify({version, action, domain})` — **insertion order, not sorted** | the site's `.polis/ds/<ds>/registration.json` and the DS's `ds_registered_sites` row |
 | **Autobless decision** (`ds_attestation`) — ⚠️ **historical** | the DS's own blessing decision, from when a DS granted blessings itself | sorted: `{action:"autobless", comment_url, ds_key_id, policy_rule, policy_source, target_url, type:"pub.polis.comment.blessing"}` | `pub.polis.comment.blessing.granted` stream events written before the change |
 | **Signed response** (`ds_signature`) | a query **response**, minus `ds_signature` / `ds_key_id` | sorted keys at every level | nothing — a new one is minted per request |
-| ⭐ **Witness** | an **observation**: a content registration, a key rotation, or a post author's blessing decision | §4 | carried by the site beside the thing witnessed (§5); a decision's, on its stream event (§4.1) |
+| ⭐ **Witness** | an **observation**: a content registration, a key rotation, a post author's blessing decision, or a site announcing it branched | §4 | carried by the site beside the thing witnessed (§5); a decision's, on its stream event (§4.1); a branch's, kept by the announcing site (§4.2) |
 
 ⚠️ **The autobless decision is no longer made.** A discovery service records blessing requests and decides
 nothing for a user: the post author's own software decides and signs ([delegation](delegation.md) §7).
@@ -171,6 +171,38 @@ The record is **returned in the response and carried on the `blessing.granted` /
 
 ```
 {"action":"relationship-update","actor":"alice.polis.pub","agent":"rosie","decision":"grant","ds":"https://ds.example","ds_key_id":"ds-primary","grant":"https://alice.polis.pub/content/pub.polis.core/attestation/20260915T120000Z-0123456789abcdef.json","grant_state":"live","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample","source_url":"https://bob.polis.pub/content/pub.polis.core/comment/20260915/re.md","target_url":"https://alice.polis.pub/content/pub.polis.core/post/20260915/hello.md","timestamp":"2026-09-15T12:00:00Z","type":"pub.polis.comment.blessing","witnessed_at":"2026-09-15T12:00:00.789Z"}
+```
+
+### 4.2 A branch announcement — `site-branched`
+
+A site announcing that it branched from another, as `POST /v1/sites/branched` presented it and the DS
+verified it. The announcing site (the **destination**) presents the **handover** from its own key history:
+the source's key signing over to the destination's key, under the source's domain, in the key-rotation
+canonical form. The DS checks that the handover's old key is the key it witnessed the source holding at the
+handover's `timestamp`, that the handover verifies against it, that the new key is the key the destination
+registered with, and that the request is signed by the destination's current key. ⛔ It also refuses a handover
+signed by a key the source has since rotated away from, and one dated more than 30 days before the destination
+registered, so a retired (perhaps leaked) key cannot buy a witnessed descent for an unrelated domain.
+
+| Field | Value |
+|---|---|
+| `action` | `"site-branched"` |
+| `domain` | the destination, the site that announced |
+| `source_domain` | the site it branched from |
+| `old_key` · `new_key` · `timestamp` · `transition_sig` | the handover, verbatim. ⚠️ `timestamp` is the handover's `valid_from`: when the branch was made, possibly long before the announcement |
+| `ds` · `ds_key_id` · `witnessed_at` · `signature` | as above. `witnessed_at` dates the **announcement**, never the handover |
+
+⛔ **It witnesses descent, never consent.** Whoever held the source's key at that instant signed the
+handover; the record says nothing about whether the source's owner agrees, or whether the source still
+publishes. That is a same-as both sites sign. ⛔ **Nothing requires one**: a branch is valid with no
+announcement and no registration. The record is **returned in the response**; the announcing site keeps it
+at `.polis/ds/<ds host>/branched.json`. The `pub.polis.site.branched` stream event carries the request's
+signature, with `actor` the destination and the source in its payload.
+
+**Site branched:**
+
+```
+{"action":"site-branched","domain":"polis-branch.vercel.app","ds":"https://ds.example","ds_key_id":"ds-primary","new_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINew","old_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOld","source_domain":"alice.polis.pub","timestamp":"2026-10-17T04:00:00Z","transition_sig":"-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----","witnessed_at":"2026-11-08T12:00:00.789Z"}
 ```
 
 ## 5 Where a site carries witnesses

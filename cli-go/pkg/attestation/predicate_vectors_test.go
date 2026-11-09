@@ -2,6 +2,8 @@ package attestation
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,7 +25,7 @@ func TestPredicateAndPinFormatsMatchTheSharedVectors(t *testing.T) {
 		"discovery-service", "core", "contract-fixtures", "attestation-predicate-vectors.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if _, derr := os.Stat(filepath.Join(filepath.Dir(file), "..", "..", "..", "discovery-service")); os.IsNotExist(derr) {
+		if _, derr := os.Stat(filepath.Join(filepath.Dir(file), "..", "..", "..", "discovery-service")); errors.Is(derr, fs.ErrNotExist) {
 			t.Skip("the shared contract fixtures live with the discovery service source, which is not in this repository")
 		}
 		t.Fatalf("read shared vectors: %v", err)
@@ -35,12 +37,14 @@ func TestPredicateAndPinFormatsMatchTheSharedVectors(t *testing.T) {
 	var v struct {
 		Predicate      set `json:"predicate"`
 		SubjectVersion set `json:"subject_version"`
+		VersionHash    set `json:"version_hash"`
 	}
 	if err := json.Unmarshal(data, &v); err != nil {
 		t.Fatalf("parse shared vectors: %v", err)
 	}
 	if len(v.Predicate.Valid) == 0 || len(v.Predicate.Invalid) == 0 ||
-		len(v.SubjectVersion.Valid) == 0 || len(v.SubjectVersion.Invalid) == 0 {
+		len(v.SubjectVersion.Valid) == 0 || len(v.SubjectVersion.Invalid) == 0 ||
+		len(v.VersionHash.Valid) == 0 || len(v.VersionHash.Invalid) == 0 {
 		t.Fatal("shared vector file has an empty section; the test would pass vacuously")
 	}
 	for _, s := range v.Predicate.Valid {
@@ -61,6 +65,18 @@ func TestPredicateAndPinFormatsMatchTheSharedVectors(t *testing.T) {
 	for _, s := range v.SubjectVersion.Invalid {
 		if versionPinRe.MatchString(s) {
 			t.Errorf("subject_version %q: shared vectors say invalid, versionPinRe accepts it", s)
+		}
+	}
+	// version_hash is the DS's isValidVersionHash (every registration's
+	// version). The Go writer's version format is versionPinRe, lower-case hex.
+	for _, s := range v.VersionHash.Valid {
+		if !versionPinRe.MatchString(s) {
+			t.Errorf("version_hash %q: shared vectors say valid, versionPinRe refuses it", s)
+		}
+	}
+	for _, s := range v.VersionHash.Invalid {
+		if versionPinRe.MatchString(s) {
+			t.Errorf("version_hash %q: shared vectors say invalid, versionPinRe accepts it", s)
 		}
 	}
 }

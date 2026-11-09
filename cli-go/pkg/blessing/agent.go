@@ -7,6 +7,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/attestation"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // A user agent's blessing decisions (Signet epic 11).
@@ -27,11 +28,12 @@ func markerFor(g *attestation.LiveGrant) discovery.AgentMarker {
 }
 
 // GrantAsAgent approves a blessing request as a user agent under a live grant.
-func GrantAsAgent(siteDir string, request *IncomingRequest, client *discovery.Client, hookConfig *hooks.HookConfig, privateKey []byte, live *attestation.LiveGrant) (*GrantResult, error) {
+// It takes the site handle: its caller (Rosie, in the server) holds one.
+func GrantAsAgent(site storage.Site, request *IncomingRequest, client *discovery.Client, hookConfig *hooks.HookConfig, privateKey []byte, live *attestation.LiveGrant) (*GrantResult, error) {
 	if !live.Valid() {
 		return nil, agent.ErrNoLiveGrant
 	}
-	return grant(siteDir, request, client, hookConfig, privateKey, markerFor(live))
+	return grant(site, request, client, hookConfig, privateKey, markerFor(live))
 }
 
 // DenyAsAgent turns a blessing request away as a user agent under a live grant.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"testing"
 )
 
@@ -199,10 +200,10 @@ func TestKeyringPersistThenUnlock(t *testing.T) {
 	const pw = "persisted password"
 	dir := t.TempDir()
 	k, phrase, dek := bootstrapThenPassword(t, pw)
-	if err := k.Save(dir); err != nil {
+	if err := k.Save(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
-	reloaded, err := LoadKeyring(dir)
+	reloaded, err := LoadKeyring(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}

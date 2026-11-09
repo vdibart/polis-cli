@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -176,7 +177,7 @@ func TestHandleStreamFocusComment_OwnPostFallsBackToLocalBlessed(t *testing.T) {
 	// grant/sync flow + Rosie put it); a foreign comment is never read from a
 	// public path.
 	md := "---\ntimestamp: 2026-05-26T00:00:00Z\n---\n\nThe blessed reply body.\n"
-	if err := cache.StoreBlessed(s.DataDir, "ds.polis.pub", cache.BlessedSidecar{SourceURL: "https://vdibart.polis.pub/comments/20260526/reply.md", FetchedAt: "t"}, []byte(md)); err != nil {
+	if err := cache.StoreBlessed(storage.At(s.DataDir), "ds.polis.pub", cache.BlessedSidecar{SourceURL: "https://vdibart.polis.pub/comments/20260526/reply.md", FetchedAt: "t"}, []byte(md)); err != nil {
 		t.Fatal(err)
 	}
 

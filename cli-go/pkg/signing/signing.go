@@ -46,6 +46,18 @@ func GenerateKeypair() ([]byte, []byte, error) {
 	return privPEM, pubSSH, nil
 }
 
+// PublicKeyFromPrivate returns the OpenSSH public key for an OpenSSH PEM
+// private key. ⭐ The public half is a pure function of the private one, so a
+// writer that derives it can never publish a public key that disagrees with
+// the key that signs.
+func PublicKeyFromPrivate(privPEM []byte) ([]byte, error) {
+	priv, err := parsePrivateKey(privPEM)
+	if err != nil {
+		return nil, err
+	}
+	return encodePublicKey(priv.Public().(ed25519.PublicKey)), nil
+}
+
 // ValidatePrivateKey checks whether pemData contains a valid Ed25519 private key.
 // Returns nil if valid, an error otherwise. The parsed key is not retained.
 func ValidatePrivateKey(pemData []byte) error {
@@ -90,14 +102,17 @@ func SignContent(content, privateKeyPEM []byte) (string, error) {
 
 // buildSigningBlob creates the blob that SSH signature verification expects.
 // This matches what ssh-keygen -Y sign creates internally.
-func buildSigningBlob(content []byte) []byte {
+func buildSigningBlob(content []byte) []byte { return buildSigningBlobNS(content, sshNamespace) }
+
+// buildSigningBlobNS is buildSigningBlob under a given SSHSIG namespace.
+func buildSigningBlobNS(content []byte, namespace string) []byte {
 	var blob []byte
 
 	// Magic preamble (literal bytes, not length-prefixed)
 	blob = append(blob, []byte(sshSigMagic)...)
 
 	// Namespace (length-prefixed string)
-	blob = appendString(blob, sshNamespace)
+	blob = appendString(blob, namespace)
 
 	// Reserved (length-prefixed empty string)
 	blob = appendString(blob, "")
@@ -403,6 +418,11 @@ func parsePublicKey(sshData []byte) (ed25519.PublicKey, error) {
 
 // formatSSHSignature creates an SSH signature in the standard format.
 func formatSSHSignature(pubKey ed25519.PublicKey, sig []byte) (string, error) {
+	return formatSSHSignatureNS(pubKey, sig, sshNamespace)
+}
+
+// formatSSHSignatureNS is formatSSHSignature under a given SSHSIG namespace.
+func formatSSHSignatureNS(pubKey ed25519.PublicKey, sig []byte, namespace string) (string, error) {
 	var blob []byte
 
 	// Magic preamble
@@ -416,7 +436,7 @@ func formatSSHSignature(pubKey ed25519.PublicKey, sig []byte) (string, error) {
 	blob = appendBytes(blob, pubBlob)
 
 	// Namespace
-	blob = appendString(blob, sshNamespace)
+	blob = appendString(blob, namespace)
 
 	// Reserved (empty)
 	blob = appendString(blob, "")
@@ -641,4 +661,36 @@ func splitSSHKey(s string) []string {
 		parts = append(parts, string(current))
 	}
 	return parts
+}
+
+// SignContentNS signs content under a given SSHSIG namespace.
+//
+// ⛔⛔ CONTENT USES "file" (SignContent) AND THAT NEVER CHANGES: every
+// existing signature was made under it, and none can be re-signed. A NEW
+// artifact type that must not be confusable with content — a recovery proof —
+// takes its own namespace here, so a content signature over the same bytes can
+// never be presented as one. Additive only.
+func SignContentNS(content, privateKeyPEM []byte, namespace string) (string, error) {
+	privKey, err := parsePrivateKey(privateKeyPEM)
+	if err != nil {
+		return "", err
+	}
+	sig := ed25519.Sign(privKey, buildSigningBlobNS(content, namespace))
+	pubKey := privKey.Public().(ed25519.PublicKey)
+	ZeroKey(privKey)
+	return formatSSHSignatureNS(pubKey, sig, namespace)
+}
+
+// VerifySignatureNS verifies a signature made under the given namespace. A
+// signature made under any other namespace does not verify.
+func VerifySignatureNS(content, publicKeySSH []byte, signature, namespace string) (bool, error) {
+	pubKey, err := parsePublicKey(publicKeySSH)
+	if err != nil {
+		return false, err
+	}
+	sig, err := parseSSHSignature(signature)
+	if err != nil {
+		return false, err
+	}
+	return ed25519.Verify(pubKey, buildSigningBlobNS(content, namespace), sig), nil
 }

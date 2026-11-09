@@ -1,6 +1,7 @@
 package publish
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,7 @@ import (
 func licensedSite(t *testing.T, choice string) (dir string, priv, pub []byte) {
 	t.Helper()
 	dir = t.TempDir()
-	if _, err := site.Init(dir, site.InitOptions{
+	if _, err := site.Init(storage.At(dir), site.InitOptions{
 		License: choice,
 		BaseURL: "https://maya.example",
 	}); err != nil {
@@ -77,7 +78,7 @@ func TestPublishedPostCarriesTermsInsideTheSignature(t *testing.T) {
 	// the signed payload, not beside it.
 	dir, priv, pub := licensedSite(t, "reserved")
 
-	res, err := PublishPost(dir, "# Hello\n\nBody text.\n", "hello", priv, cfg())
+	res, err := PublishPost(storage.At(dir), "# Hello\n\nBody text.\n", "hello", priv, cfg())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +108,7 @@ func TestLicenceKeysAreSignedNotStripped(t *testing.T) {
 	// inside it — which is the entire property being claimed.
 	dir, priv, _ := licensedSite(t, "reserved")
 
-	res, err := PublishPost(dir, "# Hello\n\nBody.\n", "hello", priv, cfg())
+	res, err := PublishPost(storage.At(dir), "# Hello\n\nBody.\n", "hello", priv, cfg())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +133,7 @@ func TestAWorkOverridesTheSiteDefault(t *testing.T) {
 
 	c := cfg()
 	c.LicenseProfile = "open"
-	res, err := PublishPost(dir, "# Open post\n\nTake it.\n", "open-post", priv, c)
+	res, err := PublishPost(storage.At(dir), "# Open post\n\nTake it.\n", "open-post", priv, c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +155,7 @@ func TestAWorkCanOptOutOfTheSiteDefault(t *testing.T) {
 
 	c := cfg()
 	c.LicenseProfile = "none"
-	res, err := PublishPost(dir, "# Quiet post\n\nNo terms here.\n", "quiet", priv, c)
+	res, err := PublishPost(storage.At(dir), "# Quiet post\n\nNo terms here.\n", "quiet", priv, c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +173,7 @@ func TestASiteWithNoTermsPublishesExactlyAsBefore(t *testing.T) {
 	// byte-identical to what they were before this feature existed.
 	dir, priv, pub := licensedSite(t, "")
 
-	res, err := PublishPost(dir, "# Hello\n\nBody.\n", "hello", priv, cfg())
+	res, err := PublishPost(storage.At(dir), "# Hello\n\nBody.\n", "hello", priv, cfg())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +191,7 @@ func TestEditingTheSiteLicenceDoesNotAlterPublishedWorks(t *testing.T) {
 	// reaches back into an older grant.
 	dir, priv, pub := licensedSite(t, "reserved")
 
-	res, err := PublishPost(dir, "# March post\n\nWritten under reserved terms.\n", "march", priv, cfg())
+	res, err := PublishPost(storage.At(dir), "# March post\n\nWritten under reserved terms.\n", "march", priv, cfg())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,10 +203,10 @@ func TestEditingTheSiteLicenceDoesNotAlterPublishedWorks(t *testing.T) {
 	}
 
 	// The author changes her mind and opens everything up.
-	if _, err := site.StateLicense(dir, "open", "https://maya.example", priv); err != nil {
+	if _, err := site.StateLicense(storage.At(dir), "open", "https://maya.example", priv); err != nil {
 		t.Fatal(err)
 	}
-	nowTerms, err := site.SiteTerms(dir)
+	nowTerms, err := site.SiteTerms(storage.At(dir))
 	if err != nil || nowTerms.Profile != license.ProfileOpen {
 		t.Fatalf("setup: site licence did not change: %v %+v", err, nowTerms)
 	}
@@ -229,12 +230,12 @@ func TestEditingTheSiteLicenceDoesNotAlterPublishedWorks(t *testing.T) {
 func TestRepublishRestampsTermsAndStillVerifies(t *testing.T) {
 	dir, priv, pub := licensedSite(t, "reserved")
 
-	res, err := PublishPost(dir, "# Draft\n\nFirst take.\n", "draft", priv, cfg())
+	res, err := PublishPost(storage.At(dir), "# Draft\n\nFirst take.\n", "draft", priv, cfg())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	res2, err := RepublishPost(dir, res.Path, "# Draft\n\nSecond take, revised.\n", priv, cfg())
+	res2, err := RepublishPost(storage.At(dir), res.Path, "# Draft\n\nSecond take, revised.\n", priv, cfg())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +253,7 @@ func TestRepublishRestampsTermsAndStillVerifies(t *testing.T) {
 
 	// The index line is a projection of those bytes, so it follows them rather
 	// than lagging until a rebuild.
-	entries, _ := metadata.LoadPublicIndex(dir)
+	entries, _ := metadata.LoadPublicIndex(storage.At(dir))
 	entry := findEntry(t, entries, res2.Path)
 	if entry.License == nil || *entry.License != *terms {
 		t.Errorf("index terms did not follow the republished file:\n index: %+v\n  file: %+v", entry.License, terms)
@@ -264,10 +265,10 @@ func TestPublishFailsRatherThanSilentlyWideningTheGrant(t *testing.T) {
 	// terms — that would widen the grant without the author doing anything.
 	dir, priv, _ := licensedSite(t, "reserved")
 
-	if err := os.WriteFile(site.LicensePath(dir), []byte("{ not json"), 0644); err != nil {
+	if err := os.WriteFile(storage.At(dir).Path(site.LicenseKey(storage.At(dir))), []byte("{ not json"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PublishPost(dir, "# Hello\n\nBody.\n", "hello", priv, cfg()); err == nil {
+	if _, err := PublishPost(storage.At(dir), "# Hello\n\nBody.\n", "hello", priv, cfg()); err == nil {
 		t.Error("publish succeeded with an unreadable licence, silently dropping the terms")
 	}
 }
@@ -279,12 +280,12 @@ func TestPublishFailsRatherThanSilentlyWideningTheGrant(t *testing.T) {
 func TestAPublishedPostReachesTheIndexWithItsTerms(t *testing.T) {
 	dir, priv, _ := licensedSite(t, "reserved")
 
-	res, err := PublishPost(dir, "# Hello\n\nBody text.\n", "hello", priv, cfg())
+	res, err := PublishPost(storage.At(dir), "# Hello\n\nBody text.\n", "hello", priv, cfg())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	entries, err := metadata.LoadPublicIndex(dir)
+	entries, err := metadata.LoadPublicIndex(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,13 +310,13 @@ func TestAPublishedPostReachesTheIndexWithItsTerms(t *testing.T) {
 func TestTheIndexTakesTermsFromTheFileNotTheCaller(t *testing.T) {
 	dir, priv, _ := licensedSite(t, "reserved")
 
-	res, err := PublishPost(dir, "# Hello\n\nBody text.\n", "hello", priv, cfg())
+	res, err := PublishPost(storage.At(dir), "# Hello\n\nBody text.\n", "hello", priv, cfg())
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// A caller re-indexing the same work while claiming it may be trained on.
-	if err := metadata.AppendToPublicIndex(dir, &metadata.IndexEntry{
+	if err := metadata.AppendToPublicIndex(storage.At(dir), &metadata.IndexEntry{
 		Type:           "post",
 		Path:           res.Path,
 		Title:          "Hello",
@@ -326,7 +327,7 @@ func TestTheIndexTakesTermsFromTheFileNotTheCaller(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries, _ := metadata.LoadPublicIndex(dir)
+	entries, _ := metadata.LoadPublicIndex(storage.At(dir))
 	entry := findEntry(t, entries, res.Path)
 	if entry.License == nil || entry.License.TrainAI != license.Disallow {
 		t.Errorf("the index published terms the author never signed: %+v", entry.License)
@@ -338,12 +339,12 @@ func TestTheIndexTakesTermsFromTheFileNotTheCaller(t *testing.T) {
 func TestAnUnstatedSiteIndexesNoTerms(t *testing.T) {
 	dir, priv, _ := licensedSite(t, "none")
 
-	res, err := PublishPost(dir, "# Hello\n\nBody text.\n", "hello", priv, cfg())
+	res, err := PublishPost(storage.At(dir), "# Hello\n\nBody text.\n", "hello", priv, cfg())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	entries, _ := metadata.LoadPublicIndex(dir)
+	entries, _ := metadata.LoadPublicIndex(storage.At(dir))
 	if entry := findEntry(t, entries, res.Path); entry.License != nil {
 		t.Errorf("terms appeared for a site that stated none: %+v", entry.License)
 	}

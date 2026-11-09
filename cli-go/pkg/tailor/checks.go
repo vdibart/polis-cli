@@ -1,12 +1,16 @@
 package tailor
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net/http"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -22,6 +26,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/sitecheck"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 )
 
@@ -41,7 +46,7 @@ func checkWellKnownVersion(ctx *runContext) CheckResult {
 	const reason = "CLI v0.50.0 changed the version field to generator format (polis-cli-go/X.Y.Z) for tool identification"
 
 	wkPath := filepath.Join(ctx.siteDir, ".well-known", "polis")
-	data, err := os.ReadFile(wkPath)
+	data, err := storage.ReadAtPath(wkPath)
 	if err != nil {
 		return skip(name, "Cannot read .well-known/polis", reason)
 	}
@@ -74,7 +79,7 @@ func checkWellKnownVersion(ctx *runContext) CheckResult {
 	}
 
 	backupFile(ctx.siteDir, "", ".well-known/polis") // best-effort
-	if err := site.SaveWellKnownRaw(ctx.siteDir, raw); err != nil {
+	if err := site.SaveWellKnownRaw(storage.At(ctx.siteDir), raw); err != nil {
 		return fail(name, fmt.Sprintf("Failed to update: %v", err), reason, actions)
 	}
 	return CheckResult{Name: name, Status: StatusFail, Message: fmt.Sprintf("Updated %q → %q", version, ctx.generator), Reason: reason, Actions: actions}
@@ -109,7 +114,7 @@ func checkAuthorFieldMigration(ctx *runContext) CheckResult {
 	if ctx.dryRun {
 		return fail(name, "legacy `author` field present; should rename to `author_name`", reason, []Action{action})
 	}
-	if err := site.MigrateAuthorField(ctx.siteDir); err != nil {
+	if err := site.MigrateAuthorField(storage.At(ctx.siteDir)); err != nil {
 		return fail(name, fmt.Sprintf("MigrateAuthorField failed: %v", err), reason, []Action{action})
 	}
 	return CheckResult{Name: name, Status: StatusFail, Reason: reason,
@@ -123,7 +128,7 @@ func checkWellKnownLegacyConfig(ctx *runContext) CheckResult {
 	const reason = "CLI v0.50.0 removed per-site directory config from .well-known/polis — paths are now defined by the bundle system"
 
 	wkPath := filepath.Join(ctx.siteDir, ".well-known", "polis")
-	data, err := os.ReadFile(wkPath)
+	data, err := storage.ReadAtPath(wkPath)
 	if err != nil {
 		return skip(name, "Cannot read .well-known/polis", reason)
 	}
@@ -155,7 +160,7 @@ func checkWellKnownLegacyConfig(ctx *runContext) CheckResult {
 		return fail(name, fmt.Sprintf("Legacy keys found: %s", strings.Join(removed, ", ")), reason, actions)
 	}
 
-	if err := site.SaveWellKnownRaw(ctx.siteDir, raw); err != nil {
+	if err := site.SaveWellKnownRaw(storage.At(ctx.siteDir), raw); err != nil {
 		return fail(name, fmt.Sprintf("Failed to update: %v", err), reason, actions)
 	}
 	return CheckResult{Name: name, Status: StatusFail, Message: fmt.Sprintf("Removed legacy keys: %s", strings.Join(removed, ", ")), Reason: reason, Actions: actions}
@@ -167,7 +172,7 @@ func checkWellKnownBundles(ctx *runContext) CheckResult {
 	const reason = "CLI v0.58.0 introduced the bundle system — .well-known/polis must declare installed bundles for the CLI to locate content"
 
 	wkPath := filepath.Join(ctx.siteDir, ".well-known", "polis")
-	data, err := os.ReadFile(wkPath)
+	data, err := storage.ReadAtPath(wkPath)
 	if err != nil {
 		return skip(name, "Cannot read .well-known/polis", reason)
 	}
@@ -195,7 +200,7 @@ func checkWellKnownBundles(ctx *runContext) CheckResult {
 		},
 	}
 
-	if err := site.SaveWellKnownRaw(ctx.siteDir, raw); err != nil {
+	if err := site.SaveWellKnownRaw(storage.At(ctx.siteDir), raw); err != nil {
 		return fail(name, fmt.Sprintf("Failed to update: %v", err), reason, actions)
 	}
 	return CheckResult{Name: name, Status: StatusFail, Message: "Added bundles registry with pub.polis.core", Reason: reason, Actions: actions}
@@ -238,9 +243,6 @@ func checkBundleJSON(ctx *runContext) CheckResult {
 	}
 
 	coreBundle := bundle.DefaultCoreBundle()
-	if err := os.MkdirAll(filepath.Dir(bundlePath), 0755); err != nil {
-		return fail(name, fmt.Sprintf("Failed to create directory: %v", err), reason, actions)
-	}
 	if err := bundle.SaveBundle(bundlePath, coreBundle); err != nil {
 		return fail(name, fmt.Sprintf("Failed to create bundle.json: %v", err), reason, actions)
 	}
@@ -263,23 +265,23 @@ func checkLayoutPosts(ctx *runContext) CheckResult {
 	var actions []Action
 	mdCount := 0
 
-	dateDirs, err := os.ReadDir(oldPostsDir)
+	dateDirs, err := storage.ListDir(oldPostsDir)
 	if err != nil {
 		return skip(name, fmt.Sprintf("Cannot read posts/: %v", err), reason)
 	}
 
 	for _, dateEntry := range dateDirs {
-		if !dateEntry.IsDir() {
+		if !dateEntry.IsDir {
 			continue
 		}
-		dateDir := dateEntry.Name()
+		dateDir := pathpkg.Base(dateEntry.Key)
 		oldDatePath := filepath.Join(oldPostsDir, dateDir)
 		newDatePath := filepath.Join(ctx.siteDir, "content", "pub.polis.core", "post", dateDir)
 
 		// Check for .md files in this date dir
-		files, _ := os.ReadDir(oldDatePath)
+		files, _ := storage.ListDir(oldDatePath)
 		for _, f := range files {
-			if f.IsDir() && f.Name() == ".versions" {
+			if f.IsDir && pathpkg.Base(f.Key) == ".versions" {
 				// Move .versions/ directory
 				oldVersions := filepath.Join(oldDatePath, ".versions")
 				newVersions := filepath.Join(newDatePath, ".versions")
@@ -295,23 +297,23 @@ func checkLayoutPosts(ctx *runContext) CheckResult {
 				}
 				continue
 			}
-			if f.IsDir() {
+			if f.IsDir {
 				continue // Skip other dirs (.obsidian, etc.)
 			}
-			if !strings.HasSuffix(f.Name(), ".md") {
+			if !strings.HasSuffix(pathpkg.Base(f.Key), ".md") {
 				continue // Only move .md files
 			}
 
-			oldPath := filepath.Join(oldDatePath, f.Name())
-			newPath := filepath.Join(newDatePath, f.Name())
+			oldPath := filepath.Join(oldDatePath, pathpkg.Base(f.Key))
+			newPath := filepath.Join(newDatePath, pathpkg.Base(f.Key))
 			if fileExists(newPath) {
 				continue // Already migrated, skip
 			}
 			mdCount++
 			actions = append(actions, Action{
 				Op:   "move",
-				Path: filepath.ToSlash(filepath.Join("posts", dateDir, f.Name())),
-				Dest: filepath.ToSlash(filepath.Join("content/pub.polis.core/post", dateDir, f.Name())),
+				Path: filepath.ToSlash(filepath.Join("posts", dateDir, pathpkg.Base(f.Key))),
+				Dest: filepath.ToSlash(filepath.Join("content/pub.polis.core/post", dateDir, pathpkg.Base(f.Key))),
 			})
 			if !ctx.dryRun {
 				moveFile(oldPath, newPath)
@@ -343,18 +345,19 @@ func checkLayoutComments(ctx *runContext) CheckResult {
 	var actions []Action
 	mdCount := 0
 
-	err := filepath.Walk(oldCommentsDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
+	// ⭐ The keys are already relative to oldCommentsDir, which is what rel was.
+	// The error is ignored on purpose: the walk this replaced skipped an entry it
+	// could not read and never returned an error, so neither does this.
+	entries, _ := storage.NewPOSIX(oldCommentsDir).List(context.Background(), "", storage.Recursive())
+	for _, e := range entries {
+		if e.IsDir || !strings.HasSuffix(e.Key, ".md") {
+			continue
 		}
-		if !strings.HasSuffix(info.Name(), ".md") {
-			return nil
-		}
-
-		rel, _ := filepath.Rel(oldCommentsDir, path)
+		rel := e.Key
+		path := filepath.Join(oldCommentsDir, rel)
 		newPath := filepath.Join(ctx.siteDir, "content", "pub.polis.core", "comment", rel)
 		if fileExists(newPath) {
-			return nil
+			continue
 		}
 
 		mdCount++
@@ -366,12 +369,7 @@ func checkLayoutComments(ctx *runContext) CheckResult {
 		if !ctx.dryRun {
 			moveFile(path, newPath)
 		}
-		return nil
-	})
-	if err != nil {
-		return skip(name, fmt.Sprintf("Error scanning comments/: %v", err), reason)
 	}
-
 	if len(actions) == 0 {
 		return pass(name, "No comments to migrate")
 	}
@@ -477,7 +475,7 @@ func checkPathSeparators(ctx *runContext) CheckResult {
 	fixCount := 0
 
 	for _, path := range filesToCheck {
-		data, err := os.ReadFile(path)
+		data, err := storage.ReadAtPath(path)
 		if err != nil {
 			continue
 		}
@@ -497,7 +495,7 @@ func checkPathSeparators(ctx *runContext) CheckResult {
 		actions = append(actions, Action{Op: "update", Path: rel, Detail: "fix backslash path separators"})
 
 		if !ctx.dryRun {
-			os.WriteFile(path, []byte(fixed), 0644)
+			storage.WriteAtPath(path, []byte(fixed))
 		}
 	}
 
@@ -530,13 +528,13 @@ func checkIndexRebuild(ctx *runContext) CheckResult {
 	const name = "index-rebuild"
 	const reason = "The content index must reference current paths — rebuilding from post frontmatter ensures consistency after layout migration"
 
-	indexPath := index.IndexPath(ctx.siteDir)
+	indexPath := filepath.Join(ctx.siteDir, filepath.FromSlash(index.IndexKey(storage.At(ctx.siteDir))))
 	indexRel := relPath(ctx.siteDir, indexPath)
 
 	// Also check for old index location
 	oldIndexPath := filepath.Join(ctx.siteDir, "metadata", "public.jsonl")
 
-	_, plan, planErr := index.PlanContentIndex(ctx.siteDir, nil)
+	_, plan, planErr := index.PlanContentIndex(storage.At(ctx.siteDir), nil)
 	if planErr != nil {
 		return skip(name, fmt.Sprintf("cannot plan content index: %v", planErr), reason)
 	}
@@ -552,8 +550,7 @@ func checkIndexRebuild(ctx *runContext) CheckResult {
 			if ctx.dryRun {
 				return fail(name, "Missing content index", reason, actions)
 			}
-			os.MkdirAll(filepath.Dir(indexPath), 0755)
-			os.WriteFile(indexPath, []byte{}, 0644)
+			_ = storage.WriteAtPath(indexPath, []byte{})
 			return CheckResult{Name: name, Status: StatusFail, Message: "Created empty content index", Reason: reason, Actions: actions}
 		}
 		return pass(name, "Content index exists (nothing to index)")
@@ -566,7 +563,7 @@ func checkIndexRebuild(ctx *runContext) CheckResult {
 	if fileExists(oldIndexPath) {
 		actions = append(actions, Action{Op: "remove", Path: "metadata/public.jsonl"})
 		if !ctx.dryRun {
-			os.Remove(oldIndexPath)
+			_ = storage.DeleteAtPath(oldIndexPath, storage.IgnoreMissing())
 		}
 		needsRebuild = true
 	}
@@ -581,7 +578,7 @@ func checkIndexRebuild(ctx *runContext) CheckResult {
 		return fail(name, fmt.Sprintf("Content index needs rebuild (%d posts)", plan.Rebuilt[index.EntryTypePost]), reason, actions)
 	}
 
-	result, err := index.RebuildContentIndex(ctx.siteDir, nil)
+	result, err := index.RebuildContentIndex(storage.At(ctx.siteDir), nil)
 	if err != nil {
 		return fail(name, fmt.Sprintf("Failed to rebuild content index: %v", err), reason, actions)
 	}
@@ -630,7 +627,7 @@ func checkRenderSite(ctx *runContext) CheckResult {
 
 	// Create renderer — theme is required
 	renderer, err := render.NewPageRenderer(render.PageConfig{
-		DataDir:           ctx.siteDir,
+		Site:              storage.At(ctx.siteDir),
 		BaseURL:           ctx.baseURL,
 		RenderMarkers:     false,
 		PostsSourceDir:    postsSource,
@@ -691,8 +688,7 @@ func checkPoliciesPublic(ctx *runContext) CheckResult {
 		return fail(name, "Missing public policy file", reason, actions)
 	}
 
-	os.MkdirAll(filepath.Dir(policyPath), 0755)
-	if err := os.WriteFile(policyPath, []byte(policy.DefaultPublicPolicyContent()), 0644); err != nil {
+	if err := storage.WriteAtPath(policyPath, []byte(policy.DefaultPublicPolicyContent())); err != nil {
 		return fail(name, fmt.Sprintf("Failed to create: %v", err), reason, actions)
 	}
 	return CheckResult{Name: name, Status: StatusFail, Message: "Created default public policy file", Reason: reason, Actions: actions}
@@ -715,8 +711,10 @@ func checkPoliciesPrivate(ctx *runContext) CheckResult {
 		return fail(name, "Missing private policy file", reason, actions)
 	}
 
-	os.MkdirAll(filepath.Dir(policyPath), 0700)
-	if err := os.WriteFile(policyPath, []byte(policy.DefaultPrivatePolicyContent()), 0600); err != nil {
+	// ⛔ A SITE STORE, not storage.WriteAtPath: this writes under .polis, and
+	// WriteAtPath builds a plain POSIX store rooted at the file's parent, which
+	// creates parents at 0755. NewSite declares .polis private at 0700.
+	if err := writeSiteKey(ctx.siteDir, policyPath, []byte(policy.DefaultPrivatePolicyContent()), 0600); err != nil {
 		return fail(name, fmt.Sprintf("Failed to create: %v", err), reason, actions)
 	}
 	return CheckResult{Name: name, Status: StatusFail, Message: "Created default private policy file", Reason: reason, Actions: actions}
@@ -739,6 +737,7 @@ func checkTagDirectory(ctx *runContext) CheckResult {
 		return fail(name, "Missing tag directory", reason, actions)
 	}
 
+	// Stays: creates the tag directory, which is legitimately empty on a site with no tags.
 	if err := os.MkdirAll(tagDir, 0755); err != nil {
 		return fail(name, fmt.Sprintf("Failed to create: %v", err), reason, actions)
 	}
@@ -794,7 +793,7 @@ func checkManifestObsolete(ctx *runContext) CheckResult {
 		return fail(name, "Obsolete manifest.json found", reason, actions)
 	}
 
-	os.Remove(manifestPath)
+	_ = storage.DeleteAtPath(manifestPath, storage.IgnoreMissing())
 	return CheckResult{Name: name, Status: StatusFail, Message: "Removed obsolete manifest.json", Reason: reason, Actions: actions}
 }
 
@@ -819,7 +818,7 @@ func checkEmptyMetadataDir(ctx *runContext) CheckResult {
 		return fail(name, "Empty metadata/ directory", reason, actions)
 	}
 
-	os.Remove(metadataDir)
+	_ = storage.DeleteAtPath(metadataDir, storage.IgnoreMissing())
 	return CheckResult{Name: name, Status: StatusFail, Message: "Removed empty metadata/ directory", Reason: reason, Actions: actions}
 }
 
@@ -834,10 +833,11 @@ func checkCLIUpdate(ctx *runContext) CheckResult {
 	binaryPatterns := []string{"polis", "polis.exe", "polis-full*", "polis-server*"}
 	var foundBinaries []string
 	for _, pattern := range binaryPatterns {
+		// NOT the storage interface: a shell-style pattern match, which is neither an exact key nor a prefix.
 		matches, _ := filepath.Glob(filepath.Join(ctx.siteDir, pattern))
 		for _, m := range matches {
-			info, err := os.Stat(m)
-			if err == nil && !info.IsDir() {
+			info, err := storage.StatAtPath(m)
+			if err == nil && !info.IsDir {
 				foundBinaries = append(foundBinaries, filepath.Base(m))
 			}
 		}
@@ -883,13 +883,17 @@ func checkCLIUpdate(ctx *runContext) CheckResult {
 	}
 
 	// Save to .polis/bin/
+	// Stays: and the earlier reason given here was WRONG: the body is read with
+	// io.ReadAll, not streamed. The real reason is the MODE — this writes into
+	// .polis/bin/, and storage.WriteAtPath roots a plain POSIX store whose parents
+	// come out 0755.
 	os.MkdirAll(filepath.Dir(fullDestPath), 0700)
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return skip(name, fmt.Sprintf("Download error: %v", err), reason)
 	}
 
-	if err := os.WriteFile(fullDestPath, data, 0755); err != nil {
+	if err := storage.WriteAtPath(fullDestPath, data, storage.WithMode(0755)); err != nil {
 		return fail(name, fmt.Sprintf("Failed to save binary: %v", err), reason, actions)
 	}
 
@@ -916,7 +920,7 @@ func loadOrDefaultBundle(siteDir string) *bundle.Bundle {
 
 // updateJSONVersion updates the "version" field in a JSON file to the current generator.
 func updateJSONVersion(path, generator string) {
-	data, err := os.ReadFile(path)
+	data, err := storage.ReadAtPath(path)
 	if err != nil {
 		return
 	}
@@ -931,7 +935,7 @@ func updateJSONVersion(path, generator string) {
 			return
 		}
 		out = append(out, '\n')
-		os.WriteFile(path, out, 0644)
+		storage.WriteAtPath(path, out)
 	}
 }
 
@@ -991,21 +995,14 @@ func stripFrontmatter(content string) string {
 // countMDFiles counts .md files in a directory tree, skipping .versions/ dirs.
 func countMDFiles(dir string) int {
 	count := 0
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info == nil {
-			return nil
+	entries, _ := storage.NewPOSIX(dir).List(context.Background(), "", storage.Recursive())
+	for _, e := range entries {
+		// SkipDir on .versions becomes a key filter.
+		if e.IsDir || hasSegment(e.Key, ".versions") || !strings.HasSuffix(e.Key, ".md") {
+			continue
 		}
-		if info.IsDir() {
-			if info.Name() == ".versions" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if strings.HasSuffix(info.Name(), ".md") {
-			count++
-		}
-		return nil
-	})
+		count++
+	}
 	return count
 }
 
@@ -1030,23 +1027,23 @@ func checkThemeConsolidation(ctx *runContext) CheckResult {
 		return pass(name, "_base not installed — skipping stale file check")
 	}
 
-	entries, err := os.ReadDir(themesDir)
+	entries, err := storage.ListDir(themesDir)
 	if err != nil {
 		return pass(name, "cannot read themes directory")
 	}
 
 	var actions []Action
 	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == "_base" {
+		if !entry.IsDir || pathpkg.Base(entry.Key) == "_base" {
 			continue
 		}
-		themeDir := filepath.Join(themesDir, entry.Name())
+		themeDir := filepath.Join(themesDir, pathpkg.Base(entry.Key))
 		staleFiles := theme.StaleThemeFiles(themeDir, baseDir)
 		for _, sf := range staleFiles {
-			relP := filepath.Join("site", "themes", entry.Name(), sf)
+			relP := filepath.Join("site", "themes", pathpkg.Base(entry.Key), sf)
 			if !ctx.dryRun {
 				backupFile(ctx.siteDir, "", relP) // backup handled by tailor framework
-				os.Remove(filepath.Join(themeDir, sf))
+				_ = storage.DeleteAtPath(filepath.Join(themeDir, sf), storage.IgnoreMissing())
 			}
 			actions = append(actions, Action{
 				Op:     "remove",
@@ -1058,7 +1055,7 @@ func checkThemeConsolidation(ctx *runContext) CheckResult {
 		if !ctx.dryRun {
 			snippetsDir := filepath.Join(themeDir, "snippets")
 			if dirExists(snippetsDir) && isDirEmpty(snippetsDir) {
-				os.Remove(snippetsDir)
+				_ = storage.DeleteAtPath(snippetsDir, storage.IgnoreMissing())
 			}
 		}
 	}
@@ -1081,7 +1078,7 @@ func checkAvatarConfig(ctx *runContext) CheckResult {
 	const name = "avatar-config"
 	const reason = "Avatar support was added for visual identity in the webapp and discovery service"
 
-	wk, err := site.LoadWellKnown(ctx.siteDir)
+	wk, err := site.LoadWellKnown(storage.At(ctx.siteDir))
 	if err != nil {
 		return skip(name, "Cannot load .well-known/polis", reason)
 	}
@@ -1099,7 +1096,7 @@ func checkAvatarConfig(ctx *runContext) CheckResult {
 	wk.Avatar = site.GenerateDefaultAvatar()
 	// SaveWellKnown is lossless: public_key_messages and every other member the
 	// struct does not model ride through in wk.Extra.
-	if err := site.SaveWellKnown(ctx.siteDir, wk); err != nil {
+	if err := site.SaveWellKnown(storage.At(ctx.siteDir), wk); err != nil {
 		return fail(name, fmt.Sprintf("Failed to save: %v", err), reason, actions)
 	}
 	return CheckResult{Name: name, Status: StatusFail, Message: "Generated default avatar config", Reason: reason, Actions: actions}
@@ -1124,7 +1121,7 @@ func checkStorageSalt(ctx *runContext) CheckResult {
 		return fail(name, "Missing storage salt", reason, actions)
 	}
 
-	if err := dm.EnsureSalt(ctx.siteDir); err != nil {
+	if err := dm.EnsureSalt(storage.At(ctx.siteDir)); err != nil {
 		return fail(name, fmt.Sprintf("Failed to create salt: %v", err), reason, actions)
 	}
 	return CheckResult{Name: name, Status: StatusFail, Message: "Created storage salt", Reason: reason, Actions: actions}
@@ -1137,7 +1134,7 @@ func checkDMKeyring(ctx *runContext) CheckResult {
 	const name = "dm-keyring"
 	const reason = "Encrypted DM requires an epoch-0 keyring (.polis/bundles/pub.polis.core/dm/keyring.json) with a published public_key_messages block"
 
-	kr, err := dm.LoadKeyring(dm.DMDir(ctx.siteDir))
+	kr, err := dm.LoadKeyring(storage.At(ctx.siteDir))
 	if err == nil && len(kr.Epochs) > 0 && kr.SchemaVersion >= dm.KeyringSchemaVersion {
 		return pass(name, "DM keyring present")
 	}
@@ -1147,11 +1144,11 @@ func checkDMKeyring(ctx *runContext) CheckResult {
 		return fail(name, "Missing epoch-0 DM keyring", reason, actions)
 	}
 
-	privPEM, err := os.ReadFile(filepath.Join(ctx.siteDir, ".polis", "keys", "id_ed25519"))
+	privPEM, err := storage.ReadAtPath(filepath.Join(ctx.siteDir, ".polis", "keys", "id_ed25519"))
 	if err != nil {
 		return skip(name, "Cannot read private key to provision DM keyring", reason)
 	}
-	if err := site.ProvisionAndPublishMessagesKey(ctx.siteDir, privPEM); err != nil {
+	if err := site.ProvisionAndPublishMessagesKey(storage.At(ctx.siteDir), privPEM); err != nil {
 		return skip(name, fmt.Sprintf("Failed to provision DM keyring: %v", err), reason)
 	}
 	return CheckResult{Name: name, Status: StatusFail, Message: "Created epoch-0 DM keyring", Reason: reason, Actions: actions}
@@ -1164,15 +1161,17 @@ func checkDMDirectories(ctx *runContext) CheckResult {
 
 	convPath := sitecheck.DMConversationsDir(ctx.siteDir)
 
-	if info, err := sitecheck.DMConversations(ctx.siteDir); err == nil && info.IsDir() {
+	if info, err := sitecheck.DMConversations(ctx.siteDir); err == nil && info.IsDir {
 		// Check permissions
-		if info.Mode().Perm() != 0700 {
-			actions := []Action{{Op: "update", Path: ".polis/bundles/pub.polis.core/dm/conversations", Detail: fmt.Sprintf("chmod %o → 0700", info.Mode().Perm())}}
+		if info.Mode.Perm() != 0700 {
+			actions := []Action{{Op: "update", Path: ".polis/bundles/pub.polis.core/dm/conversations", Detail: fmt.Sprintf("chmod %o → 0700", info.Mode.Perm())}}
 			if ctx.dryRun {
-				return fail(name, fmt.Sprintf("DM directory has unsafe permissions: %o", info.Mode().Perm()), reason, actions)
+				return fail(name, fmt.Sprintf("DM directory has unsafe permissions: %o", info.Mode.Perm()), reason, actions)
 			}
+			// NOT the storage interface: Chmod on an EXISTING file. WithMode applies at Put,
+			// so there is nothing to express a mode change on a file already written.
 			os.Chmod(convPath, 0700)
-			return CheckResult{Name: name, Status: StatusFail, Message: fmt.Sprintf("Fixed DM directory permissions: %o → 0700", info.Mode().Perm()), Reason: reason, Actions: actions}
+			return CheckResult{Name: name, Status: StatusFail, Message: fmt.Sprintf("Fixed DM directory permissions: %o → 0700", info.Mode.Perm()), Reason: reason, Actions: actions}
 		}
 		return pass(name, "DM directories present with correct permissions")
 	}
@@ -1183,6 +1182,7 @@ func checkDMDirectories(ctx *runContext) CheckResult {
 		return fail(name, "Missing DM directories", reason, actions)
 	}
 
+	// Stays: creates a conversation directory that is empty until a message lands, and 0700 because it is private.
 	if err := os.MkdirAll(convPath, 0700); err != nil {
 		return fail(name, fmt.Sprintf("Failed to create: %v", err), reason, actions)
 	}
@@ -1191,65 +1191,98 @@ func checkDMDirectories(ctx *runContext) CheckResult {
 
 // ── Phase 6 (cont): Policy content convergence ──────────────────────
 
-// checkPolicyContentConverge overwrites both policy files with the canonical
-// templates if their content has drifted. Tenants cannot customize policy
-// files, so all existing files should match the defaults.
-// checkPolicyContentConverge overwrites drifted policy files with the
-// canonical default content. This single check subsumes two distinct
-// remediation needs on the Tailor side:
+// checkPolicyContentConverge upgrades a policy file that still holds a default
+// an earlier build wrote, and reports — never overwrites — one that holds the
+// site's own rules or does not parse.
 //
-//  1. R21-1 (DM policy auto-remediation gap). Legacy tenants missing
-//     the DM `allow` rule in private rules.jsonl: their file won't
-//     match DefaultPrivatePolicyContent() so this converge overwrites,
-//     restoring the rule. Hosted, the same case needs no heal: Patrol's
-//     DM-policy check accepts the rules in either the public or the
-//     private file, and the public default carries them.
+// A site's owner may edit either policy file (the policy docs give recipes),
+// so drift from the current default is not by itself a reason to write. The
+// file's content decides, through policy.Classify and its list of past
+// defaults (policy.PastDefaults, which Medic reads too):
 //
-//  2. Policy v1 → v2 silent upgrade (commit 26acb46b). v1 files differ
-//     from the v2 canonical content so this same converge upgrades.
-//     Medic has a distinct PolicyFormatVersion check + dedicated upgrade
-//     message for observability; Tailor doesn't need the distinction
-//     because it's a single-pass user-invoked tool.
-//
-// Assumes per-tenant policy customization is not yet supported; when
-// it lands this needs a translator instead of overwrite.
+//   - a past default is replaced with the current default. This is how a v1
+//     file becomes v2, and how a legacy site whose defaults predate the DM
+//     rules gets `allow pub.polis.dm from following` back;
+//   - the site's own rules are left exactly as they are and flagged, with the
+//     check still passing: a customised policy is not a fault;
+//   - a file that does not parse is left as it is and fails the check: it may
+//     be damaged or mid-edit, and it is the only copy.
 func checkPolicyContentConverge(ctx *runContext) CheckResult {
 	const name = "policy-content-converge"
-	const reason = "Policy files must match the canonical templates for consistent behavior"
+	const reason = "A policy file still holding a default an earlier release wrote is upgraded to the current default; one holding the site's own rules is never overwritten"
 
-	privPath := filepath.Join(ctx.siteDir, ".polis", "policies", "rules.jsonl")
-	pubPath := filepath.Join(ctx.siteDir, "policies", "rules.jsonl")
-
-	drifted := sitecheck.PolicyContentDrift(ctx.siteDir)
+	var converge []policy.File
 	var actions []Action
-	for _, d := range drifted {
-		rel := "policies/rules.jsonl"
-		if d == "private" {
-			rel = ".polis/policies/rules.jsonl"
+	var authored, unparseable []string
+	for _, f := range []policy.File{policy.PrivateFile, policy.PublicFile} {
+		class, _, err := sitecheck.ClassifyPolicyFile(ctx.siteDir, f)
+		if err != nil {
+			continue // missing: the presence checks provision it
 		}
-		actions = append(actions, Action{Op: "update", Path: rel, Detail: "converge to canonical template"})
+		switch class {
+		case policy.PastDefault:
+			converge = append(converge, f)
+			actions = append(actions, Action{Op: "update", Path: f.RelPath(), Detail: "upgrade a past default to the current default"})
+		case policy.Authored:
+			authored = append(authored, string(f))
+			actions = append(actions, Action{Op: "flag", Path: f.RelPath(), Detail: "the site's own rules (matches no default polis has shipped); left untouched"})
+		case policy.Unparseable:
+			unparseable = append(unparseable, string(f))
+			actions = append(actions, Action{Op: "flag", Path: f.RelPath(), Detail: "does not parse; left untouched — fix or restore it by hand"})
+		}
 	}
 
-	if len(drifted) == 0 {
+	var notes []string
+	if len(authored) > 0 {
+		notes = append(notes, "left as the site's own rules: "+strings.Join(authored, ", "))
+	}
+	if len(unparseable) > 0 {
+		notes = append(notes, "does not parse, left untouched: "+strings.Join(unparseable, ", "))
+	}
+
+	if len(converge) == 0 {
+		if len(unparseable) > 0 {
+			return fail(name, "Policy file "+strings.Join(notes, "; "), reason, actions)
+		}
+		if len(authored) > 0 {
+			return CheckResult{Name: name, Status: StatusPass, Message: "Policy files " + strings.Join(notes, "; "), Reason: reason, Actions: actions}
+		}
 		return pass(name, "Policy files match canonical templates")
 	}
 
+	var names []string
+	for _, f := range converge {
+		names = append(names, string(f))
+	}
+	msg := "Policy content drift: " + strings.Join(names, ", ")
 	if ctx.dryRun {
-		return fail(name, "Policy content drift: "+strings.Join(drifted, ", "), reason, actions)
+		if len(notes) > 0 {
+			msg += "; " + strings.Join(notes, "; ")
+		}
+		return fail(name, msg, reason, actions)
 	}
 
-	for _, d := range drifted {
-		switch d {
-		case "private":
-			os.MkdirAll(filepath.Dir(privPath), 0700)
-			os.WriteFile(privPath, []byte(policy.DefaultPrivatePolicyContent()), 0600)
-		case "public":
-			os.MkdirAll(filepath.Dir(pubPath), 0755)
-			os.WriteFile(pubPath, []byte(policy.DefaultPublicPolicyContent()), 0644)
+	for _, f := range converge {
+		path := filepath.Join(ctx.siteDir, filepath.FromSlash(f.RelPath()))
+		dirMode, fileMode := os.FileMode(0755), os.FileMode(0644)
+		if f == policy.PrivateFile {
+			dirMode, fileMode = 0700, 0600
+		}
+		// ⛔ A SITE STORE: this loop writes BOTH trees, and the private arm lands
+		// under .polis. dirMode is now carried by NewSite rather than by the caller,
+		// which is why it is no longer passed — see the guards in pkg/site and
+		// pkg/medic that enforce it.
+		_ = dirMode
+		if err := writeSiteKey(ctx.siteDir, path, []byte(f.DefaultContent()), fileMode); err != nil {
+			return fail(name, fmt.Sprintf("Failed to converge %s policies: %v", f, err), reason, actions)
 		}
 	}
 
-	return CheckResult{Name: name, Status: StatusFail, Message: "Converged policy files: " + strings.Join(drifted, ", "), Reason: reason, Actions: actions}
+	msg = "Converged policy files: " + strings.Join(names, ", ")
+	if len(notes) > 0 {
+		msg += "; " + strings.Join(notes, "; ")
+	}
+	return CheckResult{Name: name, Status: StatusFail, Message: msg, Reason: reason, Actions: actions}
 }
 
 // ── Phase 7 (cont): Webapp config cleanup ──────────────────────────
@@ -1294,24 +1327,24 @@ func checkWebappViewMode(ctx *runContext) CheckResult {
 
 // appendPolicyRule appends a JSONL rule line to a policy file.
 func appendPolicyRule(path, ruleLine string) error {
-	existing, err := os.ReadFile(path)
+	existing, err := storage.ReadAtPath(path)
 	if err != nil {
 		return err
 	}
 
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
+	// ⭐ A policy rule is added to whatever is already in the file. It now goes
+	// through the storage seam, which is one behaviour on every backend —
+	// an object store has no append to fall back to.
+	//
+	// ⚠️ THE NEWLINE GUARD IS PART OF THE OPERATION, not decoration. A rules
+	// file that does not end in a newline would otherwise gain a JOINED LINE:
+	// two rules concatenated into one unparseable entry, in a file that
+	// decides who may comment.
+	var prefix []byte
 	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
-		if _, err := f.WriteString("\n"); err != nil {
-			return err
-		}
+		prefix = []byte("\n")
 	}
-	_, err = f.WriteString(ruleLine + "\n")
-	return err
+	return storage.AppendAtPath(path, append(prefix, []byte(ruleLine+"\n")...), storage.WithMode(0600))
 }
 
 // checkForeignContentInPublicPath enforces the core principle that no content
@@ -1342,16 +1375,16 @@ func checkForeignContentInPublicPath(ctx *runContext) CheckResult {
 		author := f.Author
 		if !ctx.dryRun {
 			backupFile(ctx.siteDir, ctx.backupDir, rel)
-			os.Remove(filepath.Join(ctx.siteDir, f.Path))
+			_ = storage.DeleteAtPath(filepath.Join(ctx.siteDir, f.Path), storage.IgnoreMissing())
 		}
 		actions = append(actions, Action{Op: "remove", Path: rel, Detail: fmt.Sprintf("foreign content in public path (author=%s)", author)})
 
 		// Rendered mount sibling (no frontmatter to scan) — remove by association.
 		mountRel := mounts[f.Type] + "/" + strings.TrimSuffix(strings.TrimPrefix(rel, srcPrefix), ".md") + ".html"
-		if _, e := os.Stat(filepath.Join(ctx.siteDir, mountRel)); e == nil {
+		if _, e := storage.StatAtPath(filepath.Join(ctx.siteDir, mountRel)); e == nil {
 			if !ctx.dryRun {
 				backupFile(ctx.siteDir, ctx.backupDir, mountRel)
-				os.Remove(filepath.Join(ctx.siteDir, mountRel))
+				_ = storage.DeleteAtPath(filepath.Join(ctx.siteDir, mountRel), storage.IgnoreMissing())
 			}
 			actions = append(actions, Action{Op: "remove", Path: mountRel, Detail: fmt.Sprintf("foreign content in public path, rendered mount (author=%s)", author)})
 		}
@@ -1393,39 +1426,40 @@ func checkBlessedCacheGC(ctx *runContext) CheckResult {
 	reason := "an orphan blessed-comment cache body (no provenance sidecar) is unsafe to display and regenerable; the hosted cache upkeep GCs them"
 
 	dsDir := filepath.Join(ctx.siteDir, ".polis", "ds")
-	entries, err := os.ReadDir(dsDir)
+	entries, err := storage.ListDir(dsDir)
 	if err != nil {
 		return CheckResult{Name: name, Status: StatusPass, Message: "no DS directory"}
 	}
 
 	var actions []Action
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir {
 			continue
 		}
-		blessedRoot := filepath.Join(dsDir, entry.Name(), "pub.polis.core", "cache", "blessed")
-		filepath.WalkDir(blessedRoot, func(path string, d os.DirEntry, werr error) error {
-			if werr != nil || d.IsDir() {
-				return nil
+		blessedRoot := filepath.Join(dsDir, pathpkg.Base(entry.Key), "pub.polis.core", "cache", "blessed")
+		bEntries, _ := storage.NewPOSIX(blessedRoot).List(context.Background(), "", storage.Recursive())
+		for _, be := range bEntries {
+			path := filepath.Join(blessedRoot, be.Key)
+			if be.IsDir {
+				continue
 			}
-			if !strings.HasSuffix(d.Name(), ".md") || strings.HasSuffix(d.Name(), ".meta.json") {
-				return nil
+			if !strings.HasSuffix(be.Key, ".md") || strings.HasSuffix(be.Key, ".meta.json") {
+				continue
 			}
 			// Orphan = body whose sidecar is missing or unreadable.
-			if data, e := os.ReadFile(path + ".meta.json"); e == nil {
+			if data, e := storage.ReadAtPath(path + ".meta.json"); e == nil {
 				var probe map[string]any
 				if json.Unmarshal(data, &probe) == nil {
-					return nil // healthy
+					continue // healthy
 				}
 			}
 			relPath, _ := filepath.Rel(ctx.siteDir, path)
 			if !ctx.dryRun {
-				os.Remove(path)
-				os.Remove(path + ".meta.json")
+				_ = storage.DeleteAtPath(path, storage.IgnoreMissing())
+				_ = storage.DeleteAtPath(path+".meta.json", storage.IgnoreMissing())
 			}
 			actions = append(actions, Action{Op: "remove", Path: relPath, Detail: "orphan blessed-cache body (no sidecar)"})
-			return nil
-		})
+		}
 	}
 
 	if len(actions) == 0 {
@@ -1455,7 +1489,7 @@ func checkStaleScopedFeed(ctx *runContext) CheckResult {
 	for _, p := range files {
 		relPath, _ := filepath.Rel(ctx.siteDir, p)
 		if !ctx.dryRun {
-			os.Remove(p)
+			_ = storage.DeleteAtPath(p, storage.IgnoreMissing())
 		}
 		actions = append(actions, Action{
 			Op:     "remove",
@@ -1517,7 +1551,7 @@ func checkStaleFeedViewedAt(ctx *runContext) CheckResult {
 // removeViewedAtCursor deletes pub.polis.feed.viewed_at from a cursors.json
 // that sitecheck.StaleFeedViewedAtFiles found carrying it, rewriting the rest.
 func removeViewedAtCursor(cursorsPath string) {
-	data, err := os.ReadFile(cursorsPath)
+	data, err := storage.ReadAtPath(cursorsPath)
 	if err != nil {
 		return
 	}
@@ -1531,7 +1565,12 @@ func removeViewedAtCursor(cursorsPath string) {
 	}
 	delete(cursors, "pub.polis.feed.viewed_at")
 	if out, err := json.MarshalIndent(raw, "", "  "); err == nil {
-		os.WriteFile(cursorsPath, append(out, '\n'), 0644)
+		// ⭐ A store rooted at the file's own directory is safe here even though this
+		// is under .polis: the file was just READ, so its parent exists and nothing
+		// is created. WithDirMode is passed anyway so a future caller that writes a
+		// NEW cursors file cannot widen the tree by accident.
+		_ = storage.NewPOSIX(filepath.Dir(cursorsPath), storage.WithDirMode(0o700)).
+			Put(context.Background(), filepath.Base(cursorsPath), append(out, '\n'))
 	}
 }
 
@@ -1552,10 +1591,10 @@ func checkLegacyFeedScaffolding(ctx *runContext) CheckResult {
 
 	dirRel := filepath.Join("content", "pub.polis.core", "feed")
 	dirFull := filepath.Join(ctx.siteDir, dirRel)
-	if entries, err := os.ReadDir(dirFull); err == nil {
+	if entries, err := storage.ListDir(dirFull); err == nil {
 		if len(entries) == 0 {
 			if !ctx.dryRun {
-				os.Remove(dirFull)
+				_ = storage.DeleteAtPath(dirFull, storage.IgnoreMissing())
 			}
 			actions = append(actions, Action{
 				Op:     "remove",
@@ -1663,6 +1702,37 @@ func checkUnpublishedEmitsMigration(ctx *runContext) CheckResult {
 	return fail(name, "declared "+strings.Join(added, ", "), reason, []Action{action})
 }
 
+// checkThemeShapesMigration is the self-hosted twin of medic's
+// migrateThemeShapes: it adds to each core theme the site's bundle.json
+// declares every compatible shape the default bundle declares for it
+// (bundle.UnionThemeShapes). Add only — a shape the site lists that the
+// defaults do not is kept, and no other theme field is touched. Idempotent.
+func checkThemeShapesMigration(ctx *runContext) CheckResult {
+	const name = "theme-shapes-migration"
+	const reason = "sites created before the stream shape existed declare their core themes as blog-only, and merging defaults never updates a theme already declared; the missing shapes are added, and none the site lists is removed"
+
+	path := filepath.Join(ctx.siteDir, "content", "pub.polis.core", "bundle.json")
+	b, err := bundle.LoadBundle(path)
+	if err != nil {
+		return skip(name, fmt.Sprintf("cannot load bundle.json: %v", err), reason)
+	}
+	changed := b.UnionThemeShapes(bundle.DefaultCoreBundle())
+	if len(changed) == 0 {
+		return pass(name, "theme compatible shapes include the defaults")
+	}
+	action := Action{Op: "update", Path: "content/pub.polis.core/bundle.json",
+		Detail: "add default compatible shapes to themes " + strings.Join(changed, ", ")}
+	if !ctx.dryRun {
+		if err := backupFile(ctx.siteDir, ctx.backupDir, filepath.Join("content", "pub.polis.core", "bundle.json")); err != nil {
+			return fail(name, fmt.Sprintf("backup bundle.json: %v", err), reason, []Action{action})
+		}
+		if err := bundle.SaveBundle(path, b); err != nil {
+			return fail(name, fmt.Sprintf("save bundle.json: %v", err), reason, []Action{action})
+		}
+	}
+	return fail(name, "added default compatible shapes to themes "+strings.Join(changed, ", "), reason, []Action{action})
+}
+
 // checkStudio13RenameMigration detects self-hosted tenants still pointing at
 // the pre-rename studio13 theme FQN and rewrites active_theme to
 // pub.polis.themes.studio13-nk. Mirror of medic.healRegistryIntegrity's
@@ -1678,7 +1748,7 @@ func checkStudio13RenameMigration(ctx *runContext) CheckResult {
 	name := "studio13-rename-migration"
 	reason := "step-02/2.0 renamed the old studio13 theme to studio13-nk to free the studio13 name for a future v4-era CSS-only theme; blog-shape tenants on pre-rename studio13 need to migrate to preserve their visual identity"
 
-	raw, err := bundle.LoadRegistryRaw(ctx.siteDir)
+	raw, err := bundle.LoadRegistryRaw(storage.At(ctx.siteDir))
 	if err != nil || raw == nil {
 		return pass(name, "no registry to migrate")
 	}
@@ -1705,7 +1775,7 @@ func checkStudio13RenameMigration(ctx *runContext) CheckResult {
 		return fail(name, "active_theme needs migration to studio13-nk", reason, []Action{action})
 	}
 
-	if err := bundle.SetActiveThemeName(ctx.siteDir, "studio13-nk"); err != nil {
+	if err := bundle.SetActiveThemeName(storage.At(ctx.siteDir), "studio13-nk"); err != nil {
 		return fail(name, fmt.Sprintf("SetActiveThemeName failed: %v", err), reason, []Action{action})
 	}
 
@@ -1765,6 +1835,10 @@ func checkOrphanedThemeDirs(ctx *runContext) CheckResult {
 	var failures []string
 	for _, o := range orphans {
 		orphanDir := filepath.Join(themesDir, o)
+		// NOT the storage interface: removing a whole legacy theme tree. The store
+		// CAN express a recursive delete, but it cannot remove the directory itself
+		// once empty — a prefix store has no empty directories — and leaving an
+		// empty themes/<name>/ behind is what the orphan check would report again.
 		if err := os.RemoveAll(orphanDir); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", o, err))
 		}
@@ -1799,7 +1873,7 @@ func checkBundleReferencePayload(ctx *runContext) CheckResult {
 	const name = "bundle-reference-payload"
 	const reason = "step-01 (SHAPE/BUNDLE/THEME refactor) — the reference payload (shapes + themes) ships embedded in the binary and is installed per-tenant at .polis/bundles/pub.polis.core/; version-gated refresh on each upgrade"
 
-	reg, err := bundle.LoadRegistry(ctx.siteDir)
+	reg, err := bundle.LoadRegistry(storage.At(ctx.siteDir))
 	if err != nil || reg == nil || reg.NeedsRefresh(bundle.DefaultCoreBundle()) {
 		action := Action{
 			Op:     "update",
@@ -1809,7 +1883,7 @@ func checkBundleReferencePayload(ctx *runContext) CheckResult {
 		if ctx.dryRun {
 			return fail(name, "reference payload needs install or refresh", reason, []Action{action})
 		}
-		if err := bundle.EnsureReferencePayload(ctx.siteDir, "pub.polis.core"); err != nil {
+		if err := bundle.EnsureReferencePayload(storage.At(ctx.siteDir), "pub.polis.core"); err != nil {
 			return fail(name, fmt.Sprintf("EnsureReferencePayload failed: %v", err), reason, []Action{action})
 		}
 		return CheckResult{
@@ -1834,7 +1908,7 @@ func checkLegacyContentPath(ctx *runContext) CheckResult {
 	const name = "legacy-content-path"
 	const reason = "step-01 (SHAPE/BUNDLE/THEME refactor) — private bundle state moved from .polis/content/<bundle>/ to .polis/bundles/<bundle>/"
 
-	if !site.LegacyPrivateContentExists(ctx.siteDir) {
+	if !site.LegacyPrivateContentExists(storage.At(ctx.siteDir)) {
 		return pass(name, "no legacy .polis/content/ tree")
 	}
 	action := Action{
@@ -1846,7 +1920,7 @@ func checkLegacyContentPath(ctx *runContext) CheckResult {
 	if ctx.dryRun {
 		return fail(name, ".polis/content/ exists; should be migrated to .polis/bundles/", reason, []Action{action})
 	}
-	if err := site.MigratePrivateBundlesPath(ctx.siteDir); err != nil {
+	if err := site.MigratePrivateBundlesPath(storage.At(ctx.siteDir)); err != nil {
 		return fail(name, fmt.Sprintf("MigratePrivateBundlesPath failed: %v", err), reason, []Action{action})
 	}
 	return CheckResult{
@@ -1867,7 +1941,7 @@ func checkRegistryMigration(ctx *runContext) CheckResult {
 	const name = "registry-migration"
 	const reason = "step-01 (SHAPE/BUNDLE/THEME refactor) — active_theme moved from .well-known/polis to .polis/bundles/registry.json (with FQN qualification, e.g. vice → pub.polis.themes.vice)"
 
-	if !site.LegacyActiveThemeInWellKnown(ctx.siteDir) {
+	if !site.LegacyActiveThemeInWellKnown(storage.At(ctx.siteDir)) {
 		return pass(name, "active_theme already migrated out of .well-known/polis")
 	}
 	action := Action{
@@ -1879,7 +1953,7 @@ func checkRegistryMigration(ctx *runContext) CheckResult {
 	if ctx.dryRun {
 		return fail(name, ".well-known/polis has active_theme; should migrate to registry.json", reason, []Action{action})
 	}
-	if err := site.MigrateActiveThemeToRegistry(ctx.siteDir); err != nil {
+	if err := site.MigrateActiveThemeToRegistry(storage.At(ctx.siteDir)); err != nil {
 		return fail(name, fmt.Sprintf("MigrateActiveThemeToRegistry failed: %v", err), reason, []Action{action})
 	}
 	return CheckResult{
@@ -1901,7 +1975,7 @@ func checkLegacyThemeLocations(ctx *runContext) CheckResult {
 	const name = "legacy-theme-locations"
 	const reason = "step-01 (SHAPE/BUNDLE/THEME refactor) — themes now live at .polis/bundles/<bundle>/themes/; the legacy site/themes/ and .polis/themes/ trees are stripped on upgrade (forced-upgrade policy)"
 
-	if !theme.LegacyThemeLocationsExist(ctx.siteDir) {
+	if !theme.LegacyThemeLocationsExist(storage.At(ctx.siteDir)) {
 		return pass(name, "no legacy theme locations")
 	}
 	action := Action{
@@ -1912,7 +1986,7 @@ func checkLegacyThemeLocations(ctx *runContext) CheckResult {
 	if ctx.dryRun {
 		return fail(name, "legacy theme dirs exist; should be removed", reason, []Action{action})
 	}
-	if err := theme.RemoveLegacyThemeLocations(ctx.siteDir); err != nil {
+	if err := theme.RemoveLegacyThemeLocations(storage.At(ctx.siteDir)); err != nil {
 		return fail(name, fmt.Sprintf("RemoveLegacyThemeLocations failed: %v", err), reason, []Action{action})
 	}
 	return CheckResult{
@@ -1934,7 +2008,7 @@ func checkBundleActiveFields(ctx *runContext) CheckResult {
 	const name = "bundle-active-fields"
 	const reason = "step-01 cleanup C1+C4 — the legacy 'active' boolean on bundles was always true and unread; removed from the struct, must be stripped from existing tenant files"
 
-	if !site.LegacyBundleActiveFieldsExist(ctx.siteDir) {
+	if !site.LegacyBundleActiveFieldsExist(storage.At(ctx.siteDir)) {
 		return pass(name, "no legacy 'active' field present")
 	}
 	action := Action{
@@ -1945,7 +2019,7 @@ func checkBundleActiveFields(ctx *runContext) CheckResult {
 	if ctx.dryRun {
 		return fail(name, "legacy 'active' field present; should be stripped", reason, []Action{action})
 	}
-	if err := site.StripBundleActiveFields(ctx.siteDir); err != nil {
+	if err := site.StripBundleActiveFields(storage.At(ctx.siteDir)); err != nil {
 		return fail(name, fmt.Sprintf("StripBundleActiveFields failed: %v", err), reason, []Action{action})
 	}
 	return CheckResult{
@@ -1978,7 +2052,7 @@ func checkNotificationRulesMigration(ctx *runContext) CheckResult {
 	const name = "notification-rules-migration"
 	const reason = "step-06/6.f.1 — notification rule declarations moved from public bundle.json (per content type) to private registry.json (flat top-level list) for privacy and bundle-agnosticism"
 
-	if !bundle.NotificationRulesNeedMigration(ctx.siteDir) {
+	if !bundle.NotificationRulesNeedMigration(storage.At(ctx.siteDir)) {
 		return pass(name, "no per-content-type notification rules in bundle.json")
 	}
 	action := Action{
@@ -1990,7 +2064,7 @@ func checkNotificationRulesMigration(ctx *runContext) CheckResult {
 	if ctx.dryRun {
 		return fail(name, "bundle.json carries per-type notification rules; should be relocated to registry.json", reason, []Action{action})
 	}
-	migrated, removed, err := bundle.MigrateNotificationRulesToRegistry(ctx.siteDir)
+	migrated, removed, err := bundle.MigrateNotificationRulesToRegistry(storage.At(ctx.siteDir))
 	if err != nil {
 		return fail(name, fmt.Sprintf("MigrateNotificationRulesToRegistry failed: %v", err), reason, []Action{action})
 	}
@@ -2016,7 +2090,7 @@ func checkActiveShapeUpgrade(ctx *runContext) CheckResult {
 	const name = "active-shape-upgrade"
 	const reason = "v3 → v4 SHAPE cutover — registry.json's active_shape is flipped from pub.polis.shapes.v3 to pub.polis.shapes.v4 so render dispatches produce v4 chrome; pairs with the v3-archive cleanup below"
 
-	reg, err := bundle.LoadRegistry(ctx.siteDir)
+	reg, err := bundle.LoadRegistry(storage.At(ctx.siteDir))
 	if err != nil || reg == nil {
 		return pass(name, "no registry to upgrade")
 	}
@@ -2031,7 +2105,7 @@ func checkActiveShapeUpgrade(ctx *runContext) CheckResult {
 	if ctx.dryRun {
 		return fail(name, "active_shape is on legacy v3; should be flipped to v4", reason, []Action{action})
 	}
-	flipped, err := bundle.UpgradeActiveShape(ctx.siteDir)
+	flipped, err := bundle.UpgradeActiveShape(storage.At(ctx.siteDir))
 	if err != nil {
 		return fail(name, fmt.Sprintf("UpgradeActiveShape failed: %v", err), reason, []Action{action})
 	}
@@ -2061,7 +2135,7 @@ func checkV3LegacyArchives(ctx *runContext) CheckResult {
 	const name = "v3-legacy-archives"
 	const reason = "R17-2 — pre-migration tenants accumulated v3 SHAPE archive HTML (posts/index.html, comments/index.html, tag/index.html, comment/index.html); v4's renderStreamAll doesn't emit or delete them, so static-file fallthrough serves stale content with HTTP 200"
 
-	if !site.V3LegacyArchivesExist(ctx.siteDir) {
+	if !site.V3LegacyArchivesExist(storage.At(ctx.siteDir)) {
 		return pass(name, "no stale v3 archive files (or tenant not on v4)")
 	}
 	action := Action{
@@ -2072,7 +2146,7 @@ func checkV3LegacyArchives(ctx *runContext) CheckResult {
 	if ctx.dryRun {
 		return fail(name, "stale v3 archive files present on v4 tenant", reason, []Action{action})
 	}
-	removed := site.CleanV3LegacyArchives(ctx.siteDir)
+	removed := site.CleanV3LegacyArchives(storage.At(ctx.siteDir))
 	if len(removed) == 0 {
 		// V3LegacyArchivesExist said yes, but CleanV3LegacyArchives says no — race
 		// or permission error; flag for manual review on next pass.
@@ -2132,7 +2206,7 @@ func checkReferencePayloadIntegrity(ctx *runContext) CheckResult {
 	if ctx.dryRun {
 		return fail(name, fmt.Sprintf("reference payload drift: %d file(s) differ", len(mismatches)), reason, []Action{action})
 	}
-	if err := bundle.EnsureReferencePayload(ctx.siteDir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(ctx.siteDir), "pub.polis.core"); err != nil {
 		return fail(name, fmt.Sprintf("EnsureReferencePayload failed: %v", err), reason, []Action{action})
 	}
 	return CheckResult{
@@ -2206,7 +2280,7 @@ func checkRegistryIntegrity(ctx *runContext) CheckResult {
 					if ctx.dryRun {
 						return fail(name, fmt.Sprintf("active_theme %q is a bare name; should be FQN-qualified", at), reason, []Action{action})
 					}
-					if err := bundle.SetActiveThemeName(ctx.siteDir, at); err != nil {
+					if err := bundle.SetActiveThemeName(storage.At(ctx.siteDir), at); err != nil {
 						return fail(name, fmt.Sprintf("SetActiveThemeName failed: %v", err), reason, []Action{action})
 					}
 					return CheckResult{Name: name, Status: StatusFail, Reason: reason,
@@ -2220,7 +2294,7 @@ func checkRegistryIntegrity(ctx *runContext) CheckResult {
 			if ctx.dryRun {
 				return fail(name, fmt.Sprintf("active_theme %q is not a valid FQN and not a known bare name", at), reason, []Action{action})
 			}
-			if _, err := theme.SelectRandomTheme(ctx.siteDir, ""); err != nil {
+			if _, err := theme.SelectRandomTheme(storage.At(ctx.siteDir), ""); err != nil {
 				return fail(name, fmt.Sprintf("SelectRandomTheme failed: %v", err), reason, []Action{action})
 			}
 			return CheckResult{Name: name, Status: StatusFail, Reason: reason,
@@ -2234,7 +2308,7 @@ func checkRegistryIntegrity(ctx *runContext) CheckResult {
 			if ctx.dryRun {
 				return fail(name, fmt.Sprintf("active_theme %q not declared in bundle", at), reason, []Action{action})
 			}
-			if _, err := theme.SelectRandomTheme(ctx.siteDir, ""); err != nil {
+			if _, err := theme.SelectRandomTheme(storage.At(ctx.siteDir), ""); err != nil {
 				return fail(name, fmt.Sprintf("SelectRandomTheme failed: %v", err), reason, []Action{action})
 			}
 			return CheckResult{Name: name, Status: StatusFail, Reason: reason,
@@ -2248,7 +2322,7 @@ func checkRegistryIntegrity(ctx *runContext) CheckResult {
 		if ctx.dryRun {
 			return fail(name, "active_theme empty", reason, []Action{action})
 		}
-		if _, err := theme.SelectRandomTheme(ctx.siteDir, ""); err != nil {
+		if _, err := theme.SelectRandomTheme(storage.At(ctx.siteDir), ""); err != nil {
 			return fail(name, fmt.Sprintf("SelectRandomTheme failed: %v", err), reason, []Action{action})
 		}
 		return CheckResult{Name: name, Status: StatusFail, Reason: reason,
@@ -2266,7 +2340,7 @@ func checkRegistryIntegrity(ctx *runContext) CheckResult {
 					if ctx.dryRun {
 						return fail(name, fmt.Sprintf("active_shape %q is a bare name; should be FQN-qualified", as), reason, []Action{action})
 					}
-					if err := bundle.SetActiveShapeName(ctx.siteDir, as); err != nil {
+					if err := bundle.SetActiveShapeName(storage.At(ctx.siteDir), as); err != nil {
 						return fail(name, fmt.Sprintf("SetActiveShapeName failed: %v", err), reason, []Action{action})
 					}
 					return CheckResult{Name: name, Status: StatusFail, Reason: reason,
@@ -2279,7 +2353,7 @@ func checkRegistryIntegrity(ctx *runContext) CheckResult {
 			if ctx.dryRun {
 				return fail(name, fmt.Sprintf("active_shape %q is not a valid FQN", as), reason, []Action{action})
 			}
-			if err := bundle.SetActiveShapeName(ctx.siteDir, "v4"); err != nil {
+			if err := bundle.SetActiveShapeName(storage.At(ctx.siteDir), "v4"); err != nil {
 				return fail(name, fmt.Sprintf("SetActiveShapeName failed: %v", err), reason, []Action{action})
 			}
 			return CheckResult{Name: name, Status: StatusFail, Reason: reason,
@@ -2292,7 +2366,7 @@ func checkRegistryIntegrity(ctx *runContext) CheckResult {
 			if ctx.dryRun {
 				return fail(name, fmt.Sprintf("active_shape %q not declared in bundle", as), reason, []Action{action})
 			}
-			if err := bundle.SetActiveShapeName(ctx.siteDir, "v4"); err != nil {
+			if err := bundle.SetActiveShapeName(storage.At(ctx.siteDir), "v4"); err != nil {
 				return fail(name, fmt.Sprintf("SetActiveShapeName failed: %v", err), reason, []Action{action})
 			}
 			return CheckResult{Name: name, Status: StatusFail, Reason: reason,
@@ -2320,7 +2394,7 @@ func checkKeyConsistency(ctx *runContext) CheckResult {
 
 	st := sitecheck.KeyConsistency(ctx.siteDir)
 	if err := st.KeyErr; err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, storage.ErrNotFound) {
 			return fail(name, "public key file missing at .polis/keys/id_ed25519.pub", reason,
 				[]Action{{Op: "flag", Path: ".polis/keys/id_ed25519.pub", Detail: "missing public key file"}})
 		}
@@ -2356,7 +2430,7 @@ func checkBundlePathIntegrity(ctx *runContext) CheckResult {
 	const name = "bundle-path-integrity"
 	const reason = "F4 content-aware integrity — every declared bundle's path must point at a readable bundle.json; pub.polis.core is repairable to a canonical path, non-core bundles need operator review. F9 — empty author_name breaks identity for rendered pages"
 
-	wk, err := site.LoadWellKnown(ctx.siteDir)
+	wk, err := site.LoadWellKnown(storage.At(ctx.siteDir))
 	if err != nil {
 		return skip(name, fmt.Sprintf("cannot load .well-known/polis: %v", err), reason)
 	}
@@ -2376,7 +2450,7 @@ func checkBundlePathIntegrity(ctx *runContext) CheckResult {
 			if ctx.dryRun {
 				return fail(name, problem, reason, []Action{action})
 			}
-			raw, rerr := site.LoadWellKnownRaw(ctx.siteDir)
+			raw, rerr := site.LoadWellKnownRaw(storage.At(ctx.siteDir))
 			if rerr != nil || raw == nil {
 				return fail(name, fmt.Sprintf("load well-known raw: %v", rerr), reason, []Action{action})
 			}
@@ -2391,7 +2465,7 @@ func checkBundlePathIntegrity(ctx *runContext) CheckResult {
 			}
 			core["path"] = canonicalCorePath
 			bundles["pub.polis.core"] = core
-			if err := site.SaveWellKnownRaw(ctx.siteDir, raw); err != nil {
+			if err := site.SaveWellKnownRaw(storage.At(ctx.siteDir), raw); err != nil {
 				return fail(name, fmt.Sprintf("save well-known: %v", err), reason, []Action{action})
 			}
 			return CheckResult{Name: name, Status: StatusFail, Reason: reason,
@@ -2501,8 +2575,8 @@ func checkIndexEntries(ctx *runContext) CheckResult {
 	// gets its index checked.
 	// A line may run to 1 MiB here; Patrol keeps bufio's 64 KiB (recorded on
 	// sitecheck.IndexEntryProblems, not aligned).
-	scan := sitecheck.IndexEntryProblems(index.IndexPath(ctx.siteDir), 1024*1024)
-	if os.IsNotExist(scan.OpenErr) {
+	scan := sitecheck.IndexEntryProblems(ctx.siteDir, filepath.Join(ctx.siteDir, filepath.FromSlash(index.IndexKey(storage.At(ctx.siteDir)))), sitecheck.IndexMaxLine)
+	if errors.Is(scan.OpenErr, fs.ErrNotExist) {
 		return pass(name, "no index.jsonl")
 	}
 	if scan.OpenErr != nil {
@@ -2553,17 +2627,17 @@ func checkBlessedFollowingStructure(ctx *runContext) CheckResult {
 
 	// blessed.json
 	blessedPath := filepath.Join(ctx.siteDir, "content", "pub.polis.core", "comment", "blessed.json")
-	if data, err := os.ReadFile(blessedPath); err == nil {
+	if data, err := storage.ReadAtPath(blessedPath); err == nil {
 		problems = append(problems, validateBlessedJSON(data)...)
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		problems = append(problems, fmt.Sprintf("blessed.json: read failed: %v", err))
 	}
 
 	// following.json
 	followingPath := filepath.Join(ctx.siteDir, "content", "pub.polis.core", "follow", "following.json")
-	if data, err := os.ReadFile(followingPath); err == nil {
+	if data, err := storage.ReadAtPath(followingPath); err == nil {
 		problems = append(problems, validateFollowingJSON(data)...)
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		problems = append(problems, fmt.Sprintf("following.json: read failed: %v", err))
 	}
 
@@ -2629,7 +2703,7 @@ func checkActiveThemeUnset(ctx *runContext) CheckResult {
 	const name = "active-theme-unset"
 	const reason = "self-hosted tenants without an active_theme set in registry.json never auto-recover (hosted tenants self-heal via render/page.go's fallback); Tailor explicitly picks one so post-tailor sites are render-ready"
 
-	at, err := bundle.GetActiveThemeName(ctx.siteDir)
+	at, err := bundle.GetActiveThemeName(storage.At(ctx.siteDir))
 	if err != nil {
 		// No registry yet — checkBundleReferencePayload installs it earlier
 		// in the run; on a second pass active_theme should be populated.
@@ -2643,7 +2717,7 @@ func checkActiveThemeUnset(ctx *runContext) CheckResult {
 	if ctx.dryRun {
 		return fail(name, "active_theme empty in registry", reason, []Action{action})
 	}
-	picked, err := theme.SelectRandomTheme(ctx.siteDir, "")
+	picked, err := theme.SelectRandomTheme(storage.At(ctx.siteDir), "")
 	if err != nil {
 		return fail(name, fmt.Sprintf("SelectRandomTheme failed: %v", err), reason, []Action{action})
 	}
@@ -2666,7 +2740,7 @@ func checkRegistrySchemaVersion(ctx *runContext) CheckResult {
 	const name = "registry-schema-version"
 	const reason = "registry.json carries schema_version; older versions need forward-migration on binary upgrade. Stub today (schema_version: 2 is current); future bumps land their migration logic here"
 
-	raw, err := bundle.LoadRegistryRaw(ctx.siteDir)
+	raw, err := bundle.LoadRegistryRaw(storage.At(ctx.siteDir))
 	if err != nil || raw == nil {
 		return pass(name, "no registry (deferred)")
 	}
@@ -2709,7 +2783,7 @@ func checkRegistryFQNSanity(ctx *runContext) CheckResult {
 	const name = "registry-fqn-sanity"
 	const reason = "active_theme and active_shape must be valid FQNs (pub.polis.themes.<name>, pub.polis.shapes.<name>) for the render pipeline to dispatch correctly; bare names like 'vice' are auto-corrected, unrecognized names are flagged"
 
-	raw, err := bundle.LoadRegistryRaw(ctx.siteDir)
+	raw, err := bundle.LoadRegistryRaw(storage.At(ctx.siteDir))
 	if err != nil || raw == nil {
 		return pass(name, "no registry to check")
 	}
@@ -2775,4 +2849,30 @@ func validateFollowingJSON(data []byte) []string {
 		out = append(out, "following.json: "+msg)
 	}
 	return out
+}
+
+// hasSegment reports whether key contains name as a whole path segment. It
+// replaces a filepath.SkipDir, which has no meaning once a recursive List has
+// already enumerated the tree.
+func hasSegment(key, name string) bool {
+	for _, seg := range strings.Split(key, "/") {
+		if seg == name {
+			return true
+		}
+	}
+	return false
+}
+
+// writeSiteKey writes absPath, which is under siteDir, through a SITE store so
+// that .polis stays private at 0700.
+//
+// ⛔ It exists because storage.WriteAtPath roots a plain POSIX store at the
+// file's parent, which creates parent directories at 0755 — fine for served
+// content, wrong for anything under .polis.
+func writeSiteKey(siteDir, absPath string, data []byte, perm os.FileMode) error {
+	key, err := storage.RelKey(siteDir, absPath)
+	if err != nil {
+		return err
+	}
+	return storage.NewSite(siteDir).Put(context.Background(), key, data, storage.WithMode(perm))
 }

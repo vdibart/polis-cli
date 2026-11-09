@@ -154,10 +154,10 @@ at parse time to their v2 equivalent — `bless pub.polis.comment from
 <scope>` — and evaluated accordingly. Writers (new policy files, Medic
 rewrites) never produce the legacy form.
 
-On the hosted service, if Patrol detects a v1 file (`version:1` header),
-Medic silently rewrites it with the canonical v2 defaults on the next
-healing sweep. The same sweep converges **any** difference from the
-defaults — see the note under *Common recipes*.
+If a policy file still holds a default an earlier release wrote (a v1 file
+among them), Medic on the hosted service and `tailor --apply` on your own
+site replace it with the current v2 default. A file holding your own rules is
+never replaced, whatever its version — see the note under *Common recipes*.
 
 ## System behaviors
 
@@ -190,9 +190,13 @@ policy.
 ## Common recipes
 
 ⚠️ **These recipes are for a site you run yourself.** On the polis.pub hosted
-service there is no way to edit either policy file, and the maintenance sweep
-(Patrol and Medic) resets both files to the defaults above whenever they
-differ from them.
+service there is no way to edit either policy file yet.
+
+Your edits are yours to keep. `tailor --apply` replaces a policy file only
+when it still holds a default an earlier release of polis wrote; a file with
+your own rules in it is left exactly as it is, and `tailor` says so. So is a
+file that does not parse, which `tailor` reports so you can fix it. To go back
+to the defaults, copy them from above over the file yourself.
 
 ### Block a domain
 
@@ -236,14 +240,21 @@ Set `active` to `false`:
 The first line of each policy file is a version header:
 
 ```jsonl
-{"version":2,"generator":"polis-cli-go/0.63.0"}
+{"version":2,"generator":"polis-cli-go/0.70.0"}
 ```
 
 Version `2` is the current format (introduced with the decision-verb
-refactor). Version `1` files are automatically upgraded by Patrol + Medic
-on hosted deployments — no action required. The `generator` in a new file
-reads `polis-cli-go/0.63.0` whatever version wrote it: the string is fixed
-in the code rather than taken from the running CLI.
+refactor). The `generator` names the build that wrote the file; it is
+ignored when a file is compared with a default.
+
+A version `1` file is upgraded **only when it still holds a default an
+earlier release wrote**: Patrol flags it, and Medic (on hosted) or
+`tailor --apply` (self-hosted) replaces it with the current default. A file
+holding **your own rules** is never rewritten, whatever its version: it is
+reported and left exactly as it is. Its legacy
+`emit pub.polis.comment.blessing` rules keep working, because the parser
+translates them. To move to the current defaults, copy them over the file
+yourself. See [Detecting and upgrading v1 files](../../general/reference/policy-grammar.md#detecting-and-upgrading-v1-files).
 
 ## DS operator policies
 

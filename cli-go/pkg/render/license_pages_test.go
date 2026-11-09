@@ -1,6 +1,9 @@
 package render
 
 import (
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,7 +30,7 @@ func TestRenderedProjectionsAreExactlyTheSharedGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateKeypair: %v", err)
 	}
-	if stated, err := site.StateLicense(dir, "reserved", "https://example.com", priv); err != nil || !stated {
+	if stated, err := site.StateLicense(storage.At(dir), "reserved", "https://example.com", priv); err != nil || !stated {
 		t.Fatalf("StateLicense: stated=%v err=%v", stated, err)
 	}
 
@@ -44,7 +47,7 @@ func TestRenderedProjectionsAreExactlyTheSharedGeneration(t *testing.T) {
 			"  asserted: 2026-08-28T12:00:00Z\n---\n\nBody.\n"), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir:        dir,
+		Site:           storage.At(dir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -56,7 +59,7 @@ func TestRenderedProjectionsAreExactlyTheSharedGeneration(t *testing.T) {
 		t.Fatalf("RenderLicenseSurfaces: %v", err)
 	}
 
-	wantRobots, wantRSL, err := site.LicenseProjections(dir, "https://example.com")
+	wantRobots, wantRSL, err := site.LicenseProjections(storage.At(dir), "https://example.com")
 	if err != nil {
 		t.Fatalf("LicenseProjections: %v", err)
 	}
@@ -93,7 +96,7 @@ func TestUnstatedSiteRendersNoLicenceSurfaces(t *testing.T) {
 	dir := t.TempDir()
 	setupTestSite(t, dir)
 
-	renderer, err := NewPageRenderer(PageConfig{DataDir: dir, BaseURL: "https://example.com"})
+	renderer, err := NewPageRenderer(PageConfig{Site: storage.At(dir), BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatalf("NewPageRenderer: %v", err)
 	}
@@ -102,7 +105,7 @@ func TestUnstatedSiteRendersNoLicenceSurfaces(t *testing.T) {
 	}
 
 	for _, rel := range []string{"robots.txt", "rsl.xml"} {
-		if _, err := os.Stat(filepath.Join(dir, rel)); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(dir, rel)); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s was written for a site that stated no terms", rel)
 		}
 	}
@@ -125,11 +128,11 @@ func TestZeroPostStreamSiteRendersItsTermsPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateKeypair: %v", err)
 	}
-	if stated, err := site.StateLicense(dir, "reserved", "https://example.com", priv); err != nil || !stated {
+	if stated, err := site.StateLicense(storage.At(dir), "reserved", "https://example.com", priv); err != nil || !stated {
 		t.Fatalf("StateLicense: stated=%v err=%v", stated, err)
 	}
 
-	renderer, err := NewPageRenderer(PageConfig{DataDir: dir, BaseURL: "https://example.com"})
+	renderer, err := NewPageRenderer(PageConfig{Site: storage.At(dir), BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatalf("NewPageRenderer: %v", err)
 	}
@@ -141,7 +144,7 @@ func TestZeroPostStreamSiteRendersItsTermsPage(t *testing.T) {
 		t.Fatalf("fixture is not zero-post: %d posts rendered", stats.PostsRendered)
 	}
 
-	mount := site.LicenseMountDir(dir)
+	mount := site.LicenseMountDir(storage.At(dir))
 	for _, rel := range []string{
 		filepath.Join(mount, "index.html"),
 		filepath.Join(mount, "reserved-1.html"),
@@ -174,10 +177,10 @@ func TestWithdrawalLeavesNoProjectionBehind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateKeypair: %v", err)
 	}
-	if stated, err := site.StateLicense(dir, "reserved", "https://example.com", priv); err != nil || !stated {
+	if stated, err := site.StateLicense(storage.At(dir), "reserved", "https://example.com", priv); err != nil || !stated {
 		t.Fatalf("StateLicense: stated=%v err=%v", stated, err)
 	}
-	renderer, err := NewPageRenderer(PageConfig{DataDir: dir, BaseURL: "https://example.com"})
+	renderer, err := NewPageRenderer(PageConfig{Site: storage.At(dir), BaseURL: "https://example.com"})
 	if err != nil {
 		t.Fatalf("NewPageRenderer: %v", err)
 	}
@@ -185,7 +188,7 @@ func TestWithdrawalLeavesNoProjectionBehind(t *testing.T) {
 		t.Fatalf("RenderLicenseSurfaces: %v", err)
 	}
 
-	mount := site.LicenseMountDir(dir)
+	mount := site.LicenseMountDir(storage.At(dir))
 	// Sanity: the surfaces we are about to withdraw actually exist.
 	for _, rel := range []string{filepath.Join(mount, "index.html"), "robots.txt", "rsl.xml"} {
 		if _, err := os.Stat(filepath.Join(dir, rel)); err != nil {
@@ -193,7 +196,7 @@ func TestWithdrawalLeavesNoProjectionBehind(t *testing.T) {
 		}
 	}
 
-	if err := site.WithdrawLicense(dir); err != nil {
+	if err := site.WithdrawLicense(storage.At(dir)); err != nil {
 		t.Fatalf("WithdrawLicense: %v", err)
 	}
 
@@ -204,11 +207,11 @@ func TestWithdrawalLeavesNoProjectionBehind(t *testing.T) {
 		filepath.Join(mount, "reserved-1.html"),
 		mount,
 	} {
-		if _, err := os.Stat(filepath.Join(dir, rel)); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(dir, rel)); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s survived withdrawal — the site still asserts terms it no longer states", rel)
 		}
 	}
-	terms, err := site.SiteTerms(dir)
+	terms, err := site.SiteTerms(storage.At(dir))
 	if err != nil || terms != nil {
 		t.Errorf("after withdrawal SiteTerms = %v, %v; want nil, nil", terms, err)
 	}
@@ -221,27 +224,27 @@ func TestWithdrawalSparesAuthorFilesInTheMount(t *testing.T) {
 	setupStreamTestSite(t, dir)
 
 	priv, _, _ := signing.GenerateKeypair()
-	if stated, err := site.StateLicense(dir, "reserved", "https://example.com", priv); err != nil || !stated {
+	if stated, err := site.StateLicense(storage.At(dir), "reserved", "https://example.com", priv); err != nil || !stated {
 		t.Fatalf("StateLicense: stated=%v err=%v", stated, err)
 	}
-	renderer, _ := NewPageRenderer(PageConfig{DataDir: dir, BaseURL: "https://example.com"})
+	renderer, _ := NewPageRenderer(PageConfig{Site: storage.At(dir), BaseURL: "https://example.com"})
 	if err := renderer.RenderLicenseSurfaces(); err != nil {
 		t.Fatalf("RenderLicenseSurfaces: %v", err)
 	}
 
-	mount := site.LicenseMountDir(dir)
+	mount := site.LicenseMountDir(storage.At(dir))
 	keep := filepath.Join(dir, mount, "NOTES.txt")
 	if err := os.WriteFile(keep, []byte("mine\n"), 0644); err != nil {
 		t.Fatalf("write author file: %v", err)
 	}
 
-	if err := site.WithdrawLicense(dir); err != nil {
+	if err := site.WithdrawLicense(storage.At(dir)); err != nil {
 		t.Fatalf("WithdrawLicense: %v", err)
 	}
 	if _, err := os.Stat(keep); err != nil {
 		t.Errorf("an author's own file in the licence mount was deleted: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, mount, "index.html")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, mount, "index.html")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("the generated terms page survived withdrawal")
 	}
 }
@@ -252,7 +255,7 @@ func TestWithdrawalOnAnUnstatedSiteIsHarmless(t *testing.T) {
 	dir := t.TempDir()
 	setupStreamTestSite(t, dir)
 
-	if err := site.WithdrawLicense(dir); err != nil {
+	if err := site.WithdrawLicense(storage.At(dir)); err != nil {
 		t.Fatalf("WithdrawLicense on an unstated site: %v", err)
 	}
 }

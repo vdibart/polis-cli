@@ -2,6 +2,7 @@ package sitecheck
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,11 +43,11 @@ func khSite(t *testing.T, k kp, withDID bool) string {
 	if err := os.WriteFile(filepath.Join(dir, ".well-known", "polis"), append(data, '\n'), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := site.WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := site.WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	if withDID {
-		if err := site.PublishDIDDocument(dir, "alice.polis.pub"); err != nil {
+		if err := site.PublishDIDDocument(storage.At(dir), "alice.polis.pub"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -63,14 +64,14 @@ func khRotate(t *testing.T, dir, domain string, from, to kp, ts string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := site.RecordKeyRotation(dir, to.pub, sig, ts); err != nil {
+	if err := site.RecordKeyRotation(storage.At(dir), to.pub, sig, ts, ""); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func loadChain(t *testing.T, dir string) *site.KeyHistoryBlock {
 	t.Helper()
-	b, err := site.LoadKeyHistory(dir)
+	b, err := site.LoadKeyHistory(storage.At(dir))
 	if err != nil || b == nil {
 		t.Fatalf("no chain: %v", err)
 	}
@@ -150,11 +151,11 @@ func TestChainHeadFollowsAssertionMethodRatherThanTheFirstKey(t *testing.T) {
 	k0, k1 := genKey(t), genKey(t)
 	dir := khSite(t, k0, true)
 	khRotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")
-	if err := site.PublishDIDDocument(dir, "alice.polis.pub"); err != nil {
+	if err := site.PublishDIDDocument(storage.At(dir), "alice.polis.pub"); err != nil {
 		t.Fatal(err)
 	}
 	block := loadChain(t, dir)
-	didDoc, err := os.ReadFile(site.DIDDocumentPath(dir))
+	didDoc, err := os.ReadFile(storage.At(dir).Path(site.DIDDocumentKey))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +209,7 @@ func TestDomainComesFromTheSitesOwnDIDDocument(t *testing.T) {
 	// site, where our own environment would name the wrong host.
 	k0 := genKey(t)
 	dir := khSite(t, k0, true)
-	doc, err := os.ReadFile(site.DIDDocumentPath(dir))
+	doc, err := os.ReadFile(storage.At(dir).Path(site.DIDDocumentKey))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,12 +279,12 @@ func TestValidateFailsATamperedChain(t *testing.T) {
 	k0, k1 := genKey(t), genKey(t)
 	dir := khSite(t, k0, true)
 	khRotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")
-	if err := site.PublishDIDDocument(dir, "alice.polis.pub"); err != nil {
+	if err := site.PublishDIDDocument(storage.At(dir), "alice.polis.pub"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Backdate the rotation. valid_from is inside the signature.
-	raw, err := site.LoadWellKnownRaw(dir)
+	raw, err := site.LoadWellKnownRaw(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +292,7 @@ func TestValidateFailsATamperedChain(t *testing.T) {
 	block.Current.ValidFrom = "2026-01-01T00:00:00Z"
 	block.History[0].ValidUntil = "2026-01-01T00:00:00Z"
 	raw["public_key_history"] = block
-	if err := site.SaveWellKnownRaw(dir, raw, site.ChangeKeyHistory); err != nil {
+	if err := site.SaveWellKnownRaw(storage.At(dir), raw, site.ChangeKeyHistory); err != nil {
 		t.Fatal(err)
 	}
 

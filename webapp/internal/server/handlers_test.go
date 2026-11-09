@@ -5,7 +5,12 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/mode"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"github.com/vdibart/polis-cli/webapp/internal/webui"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,7 +37,7 @@ func markAsRegistered(t *testing.T, s *Server) {
 	if s.DiscoveryURL == "" {
 		t.Fatal("markAsRegistered: DiscoveryURL must be set first")
 	}
-	if err := discovery.WriteRegistrationMarker(s.DataDir, s.DiscoveryURL, "test.polis.pub", ""); err != nil {
+	if err := discovery.WriteRegistrationMarker(s.Site(), s.DiscoveryURL, "test.polis.pub", ""); err != nil {
 		t.Fatalf("markAsRegistered: %v", err)
 	}
 }
@@ -309,24 +314,24 @@ func TestHandleInit_Success(t *testing.T) {
 
 	// Verify keys were created
 	privKeyPath := filepath.Join(s.DataDir, ".polis", "keys", "id_ed25519")
-	if _, err := os.Stat(privKeyPath); os.IsNotExist(err) {
+	if _, err := os.Stat(privKeyPath); errors.Is(err, fs.ErrNotExist) {
 		t.Error("private key file was not created")
 	}
 
 	pubKeyPath := filepath.Join(s.DataDir, ".polis", "keys", "id_ed25519.pub")
-	if _, err := os.Stat(pubKeyPath); os.IsNotExist(err) {
+	if _, err := os.Stat(pubKeyPath); errors.Is(err, fs.ErrNotExist) {
 		t.Error("public key file was not created")
 	}
 
 	// Verify .well-known/polis was created
 	wellKnownPath := filepath.Join(s.DataDir, ".well-known", "polis")
-	if _, err := os.Stat(wellKnownPath); os.IsNotExist(err) {
+	if _, err := os.Stat(wellKnownPath); errors.Is(err, fs.ErrNotExist) {
 		t.Error(".well-known/polis was not created")
 	}
 
 	// Verify content directory was created
 	contentDir := filepath.Join(s.DataDir, "content", "pub.polis.core")
-	if _, err := os.Stat(contentDir); os.IsNotExist(err) {
+	if _, err := os.Stat(contentDir); errors.Is(err, fs.ErrNotExist) {
 		t.Error("content/pub.polis.core directory was not created")
 	}
 }
@@ -364,107 +369,6 @@ func TestHandleInit_MethodNotAllowed(t *testing.T) {
 }
 
 // ============================================================================
-// handleLink Tests
-// ============================================================================
-
-func TestHandleLink_Success(t *testing.T) {
-	// Create a "source" polis site
-	sourceDir := t.TempDir()
-	sourceSrv := &Server{DataDir: sourceDir}
-
-	// Initialize the source site with all required directories
-	dirs := []string{
-		filepath.Join(sourceDir, ".polis", "keys"),
-		filepath.Join(sourceDir, ".well-known"),
-		filepath.Join(sourceDir, "content", "pub.polis.core"),
-	}
-	for _, dir := range dirs {
-		os.MkdirAll(dir, 0755)
-	}
-
-	// Generate keys and create .well-known/polis
-	privKey, pubKey, _ := signing.GenerateKeypair()
-	os.WriteFile(filepath.Join(sourceDir, ".polis", "keys", "id_ed25519"), privKey, 0600)
-	os.WriteFile(filepath.Join(sourceDir, ".polis", "keys", "id_ed25519.pub"), pubKey, 0644)
-	wellKnown := map[string]interface{}{
-		"base_url":   "https://test.example.com",
-		"public_key": string(pubKey),
-	}
-	wellKnownData, _ := json.MarshalIndent(wellKnown, "", "  ")
-	os.WriteFile(filepath.Join(sourceDir, ".well-known", "polis"), wellKnownData, 0644)
-
-	// Create a target server with empty data dir
-	targetDir := t.TempDir()
-	targetDataDir := filepath.Join(targetDir, "data")
-	os.MkdirAll(targetDataDir, 0755)
-	_ = sourceSrv // suppress unused warning
-
-	// For this test, we need to create a mock server setup
-	// Since handleLink uses os.Executable(), we'll test the validation part
-	s := newTestServer(t)
-
-	body := jsonBody(t, map[string]string{"path": sourceDir})
-	req := httptest.NewRequest(http.MethodPost, "/api/link", body)
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-
-	s.handleLink(rr, req)
-
-	// The test may fail due to symlink creation issues in test environment
-	// but we verify the validation works
-	if rr.Code == http.StatusOK {
-		var resp map[string]interface{}
-		json.Unmarshal(rr.Body.Bytes(), &resp)
-		if resp["success"] != true {
-			t.Errorf("expected success=true, got %v", resp["success"])
-		}
-	}
-}
-
-func TestHandleLink_InvalidPath(t *testing.T) {
-	s := newTestServer(t)
-
-	body := jsonBody(t, map[string]string{"path": "/nonexistent/path"})
-	req := httptest.NewRequest(http.MethodPost, "/api/link", body)
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-
-	s.handleLink(rr, req)
-
-	if rr.Code != http.StatusBadRequest {
-		t.Errorf("expected status 400, got %d", rr.Code)
-	}
-}
-
-func TestHandleLink_EmptyPath(t *testing.T) {
-	s := newTestServer(t)
-
-	body := jsonBody(t, map[string]string{"path": ""})
-	req := httptest.NewRequest(http.MethodPost, "/api/link", body)
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-
-	s.handleLink(rr, req)
-
-	if rr.Code != http.StatusBadRequest {
-		t.Errorf("expected status 400, got %d", rr.Code)
-	}
-}
-
-func TestHandleLink_MethodNotAllowed(t *testing.T) {
-	s := newTestServer(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/link", nil)
-	rr := httptest.NewRecorder()
-
-	s.handleLink(rr, req)
-
-	if rr.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected status 405, got %d", rr.Code)
-	}
-}
-
-// ============================================================================
 // handleRender Tests
 // ============================================================================
 
@@ -493,9 +397,10 @@ func TestHandleRender_Success(t *testing.T) {
 		t.Errorf("expected HTML with h1 tag, got %s", html)
 	}
 
-	signature, ok := resp["signature"].(string)
-	if !ok || signature == "" {
-		t.Error("expected non-empty signature field")
+	// ⛔ A preview carries no signature: signing whatever it was given made it
+	// a signing oracle for the owner's key.
+	if _, ok := resp["signature"]; ok {
+		t.Error("the render preview returned a signature")
 	}
 }
 
@@ -705,7 +610,7 @@ func TestHandleDrafts_SaveSanitizesID(t *testing.T) {
 
 	// Verify file is in drafts directory, not elsewhere
 	draftPath := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", id+".md")
-	if _, err := os.Stat(draftPath); os.IsNotExist(err) {
+	if _, err := os.Stat(draftPath); errors.Is(err, fs.ErrNotExist) {
 		t.Error("draft should be created in drafts directory")
 	}
 
@@ -817,7 +722,7 @@ func TestHandleDraft_Delete(t *testing.T) {
 	}
 
 	// Verify file was deleted
-	if _, err := os.Stat(draftPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(draftPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("draft file should be deleted")
 	}
 }
@@ -1043,7 +948,7 @@ func TestHandlePublish_DeletesDraftOnPublish(t *testing.T) {
 	}
 
 	// Verify draft was deleted
-	if _, err := os.Stat(draftPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(draftPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("draft file should be deleted after publish")
 	}
 }
@@ -1586,7 +1491,6 @@ func TestHandleCommentsSync_DiscoveryNotConfigured(t *testing.T) {
 func TestHandleCommentsSync_PrivateKeyNotConfigured(t *testing.T) {
 	s := newTestServer(t)
 	s.DiscoveryURL = "https://discovery.example.com"
-	s.DiscoveryKey = "test-key"
 
 	req := httptest.NewRequest(http.MethodPost, "/api/comments/sync", nil)
 	rr := httptest.NewRecorder()
@@ -1631,7 +1535,6 @@ func TestHandleBlessingRequests_DiscoveryNotConfigured(t *testing.T) {
 func TestHandleBlessingRequests_PrivateKeyNotConfigured(t *testing.T) {
 	s := newTestServer(t)
 	s.DiscoveryURL = "https://discovery.example.com"
-	s.DiscoveryKey = "test-key"
 
 	req := httptest.NewRequest(http.MethodGet, "/api/blessing/requests", nil)
 	rr := httptest.NewRecorder()
@@ -1678,7 +1581,6 @@ func TestHandleBlessingGrant_DiscoveryNotConfigured(t *testing.T) {
 func TestHandleBlessingGrant_PrivateKeyNotConfigured(t *testing.T) {
 	s := newTestServer(t)
 	s.DiscoveryURL = "https://discovery.example.com"
-	s.DiscoveryKey = "test-key"
 	markAsRegistered(t, s)
 
 	body := jsonBody(t, map[string]string{"comment_version": "abc123"})
@@ -1696,7 +1598,6 @@ func TestHandleBlessingGrant_PrivateKeyNotConfigured(t *testing.T) {
 func TestHandleBlessingGrant_MissingCommentURL(t *testing.T) {
 	s := newConfiguredServer(t)
 	s.DiscoveryURL = "https://discovery.example.com"
-	s.DiscoveryKey = "test-key"
 	markAsRegistered(t, s)
 
 	body := jsonBody(t, map[string]string{})
@@ -1731,7 +1632,6 @@ func TestHandleBlessingDeny_MethodNotAllowed(t *testing.T) {
 func TestHandleBlessingDeny_MissingCommentVersion(t *testing.T) {
 	s := newConfiguredServer(t)
 	s.DiscoveryURL = "https://discovery.example.com"
-	s.DiscoveryKey = "test-key"
 	markAsRegistered(t, s)
 
 	body := jsonBody(t, map[string]string{})
@@ -1847,7 +1747,6 @@ func TestHandleSettings_Unconfigured(t *testing.T) {
 func TestHandleSettings_Configured(t *testing.T) {
 	s := newConfiguredServer(t)
 	s.DiscoveryURL = "https://discovery.example.com"
-	s.DiscoveryKey = "test-key"
 
 	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
 	rr := httptest.NewRecorder()
@@ -1996,7 +1895,7 @@ func TestHandleAutomations_CreateWithScript(t *testing.T) {
 
 	// Verify script was created
 	scriptPath := filepath.Join(s.DataDir, ".polis", "webapp", "hooks", "post-publish.sh")
-	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+	if _, err := os.Stat(scriptPath); errors.Is(err, fs.ErrNotExist) {
 		t.Error("hook script was not created")
 	}
 }
@@ -2273,7 +2172,6 @@ func TestHandleCommentBeseech_DiscoveryNotConfigured(t *testing.T) {
 func TestHandleCommentBeseech_MissingCommentID(t *testing.T) {
 	s := newTestServer(t)
 	s.DiscoveryURL = "https://discovery.example.com"
-	s.DiscoveryKey = "test-key"
 
 	body := jsonBody(t, map[string]string{})
 	req := httptest.NewRequest(http.MethodPost, "/api/comments/beseech", body)
@@ -2488,7 +2386,7 @@ func TestLoadEnv_DataDirFile(t *testing.T) {
 
 	// Create .env in data directory
 	envContent := `DISCOVERY_SERVICE_URL=https://test-discovery.com
-DISCOVERY_SERVICE_KEY=test-api-key`
+POLIS_BASE_URL=https://test-api-key.example`
 	envPath := filepath.Join(s.DataDir, ".env")
 	os.WriteFile(envPath, []byte(envContent), 0644)
 
@@ -2497,8 +2395,8 @@ DISCOVERY_SERVICE_KEY=test-api-key`
 	if s.DiscoveryURL != "https://test-discovery.com" {
 		t.Errorf("expected DiscoveryURL from .env, got %s", s.DiscoveryURL)
 	}
-	if s.DiscoveryKey != "test-api-key" {
-		t.Errorf("expected DiscoveryKey from .env, got %s", s.DiscoveryKey)
+	if s.BaseURL != "https://test-api-key.example" {
+		t.Errorf("expected BaseURL from .env, got %s", s.BaseURL)
 	}
 }
 
@@ -2507,7 +2405,7 @@ func TestLoadEnv_QuotedValues(t *testing.T) {
 
 	// Create .env with quoted values
 	envContent := `DISCOVERY_SERVICE_URL="https://quoted.com"
-DISCOVERY_SERVICE_KEY='single-quoted-key'`
+POLIS_BASE_URL='https://single-quoted-key.example'`
 	envPath := filepath.Join(s.DataDir, ".env")
 	os.WriteFile(envPath, []byte(envContent), 0644)
 
@@ -2516,8 +2414,8 @@ DISCOVERY_SERVICE_KEY='single-quoted-key'`
 	if s.DiscoveryURL != "https://quoted.com" {
 		t.Errorf("expected quotes stripped from URL, got %s", s.DiscoveryURL)
 	}
-	if s.DiscoveryKey != "single-quoted-key" {
-		t.Errorf("expected quotes stripped from key, got %s", s.DiscoveryKey)
+	if s.BaseURL != "https://single-quoted-key.example" {
+		t.Errorf("expected quotes stripped from base URL, got %s", s.BaseURL)
 	}
 }
 
@@ -2528,8 +2426,8 @@ func TestLoadEnv_Comments(t *testing.T) {
 	envContent := `# This is a comment
 DISCOVERY_SERVICE_URL=https://actual-url.com
 # Another comment
-# DISCOVERY_SERVICE_KEY=commented-out
-DISCOVERY_SERVICE_KEY=actual-key`
+# POLIS_BASE_URL=https://commented-out.example
+POLIS_BASE_URL=https://actual-key.example`
 	envPath := filepath.Join(s.DataDir, ".env")
 	os.WriteFile(envPath, []byte(envContent), 0644)
 
@@ -2538,8 +2436,8 @@ DISCOVERY_SERVICE_KEY=actual-key`
 	if s.DiscoveryURL != "https://actual-url.com" {
 		t.Errorf("expected non-comment URL, got %s", s.DiscoveryURL)
 	}
-	if s.DiscoveryKey != "actual-key" {
-		t.Errorf("expected non-comment key, got %s", s.DiscoveryKey)
+	if s.BaseURL != "https://actual-key.example" {
+		t.Errorf("expected non-comment base URL, got %s", s.BaseURL)
 	}
 }
 
@@ -2551,7 +2449,7 @@ func TestLoadEnv_EmptyLines(t *testing.T) {
 
 DISCOVERY_SERVICE_URL=https://test.com
 
-DISCOVERY_SERVICE_KEY=test-key
+POLIS_BASE_URL=https://test-key.example
 
 `
 	envPath := filepath.Join(s.DataDir, ".env")
@@ -2570,7 +2468,7 @@ func TestLoadEnv_MalformedLines(t *testing.T) {
 	// Create .env with malformed lines
 	envContent := `DISCOVERY_SERVICE_URL=https://valid.com
 no-equals-sign
-DISCOVERY_SERVICE_KEY=valid-key
+POLIS_BASE_URL=https://valid-key.example
 =value-with-no-key`
 	envPath := filepath.Join(s.DataDir, ".env")
 	os.WriteFile(envPath, []byte(envContent), 0644)
@@ -2581,8 +2479,8 @@ DISCOVERY_SERVICE_KEY=valid-key
 	if s.DiscoveryURL != "https://valid.com" {
 		t.Errorf("expected valid URL, got %s", s.DiscoveryURL)
 	}
-	if s.DiscoveryKey != "valid-key" {
-		t.Errorf("expected valid key, got %s", s.DiscoveryKey)
+	if s.BaseURL != "https://valid-key.example" {
+		t.Errorf("expected valid base URL, got %s", s.BaseURL)
 	}
 }
 
@@ -2594,11 +2492,11 @@ func TestLoadEnv_OverridesConfig(t *testing.T) {
 		Subdomain: "existing-site",
 	}
 	s.DiscoveryURL = "https://old-discovery.com"
-	s.DiscoveryKey = "old-key"
+	s.BaseURL = "https://old-key.example"
 
 	// Create .env with new values
 	envContent := `DISCOVERY_SERVICE_URL=https://new-discovery.com
-DISCOVERY_SERVICE_KEY=new-key`
+POLIS_BASE_URL=https://new-key.example`
 	envPath := filepath.Join(s.DataDir, ".env")
 	os.WriteFile(envPath, []byte(envContent), 0644)
 
@@ -2608,8 +2506,8 @@ DISCOVERY_SERVICE_KEY=new-key`
 	if s.DiscoveryURL != "https://new-discovery.com" {
 		t.Errorf("expected .env to override URL, got %s", s.DiscoveryURL)
 	}
-	if s.DiscoveryKey != "new-key" {
-		t.Errorf("expected .env to override key, got %s", s.DiscoveryKey)
+	if s.BaseURL != "https://new-key.example" {
+		t.Errorf("expected .env to override base URL, got %s", s.BaseURL)
 	}
 	// Non-overridden values should remain
 	if s.Config.Subdomain != "existing-site" {
@@ -3162,7 +3060,7 @@ func TestAutomation_DeletePathTraversal(t *testing.T) {
 		}
 
 		// Important file should still exist
-		if _, err := os.Stat(importantFile); os.IsNotExist(err) {
+		if _, err := os.Stat(importantFile); errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("path traversal deleted important file with ID: %s", maliciousID)
 		}
 	}
@@ -3188,7 +3086,7 @@ func TestDraft_DeletePathTraversal(t *testing.T) {
 		s.handleDraft(rr, req)
 
 		// Important file should still exist
-		if _, err := os.Stat(importantFile); os.IsNotExist(err) {
+		if _, err := os.Stat(importantFile); errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("path traversal deleted important file with ID: %s", maliciousID)
 		}
 	}
@@ -3347,7 +3245,7 @@ func TestDirectoryCreation_Safe(t *testing.T) {
 
 	// Verify directory structure was created
 	postsDir := filepath.Join(s.DataDir, "content", "pub.polis.core", "post")
-	if _, err := os.Stat(postsDir); os.IsNotExist(err) {
+	if _, err := os.Stat(postsDir); errors.Is(err, fs.ErrNotExist) {
 		t.Error("content/pub.polis.core/post directory should be created")
 	}
 }
@@ -3452,7 +3350,7 @@ func TestHandleSnippet_SaveGlobalSource(t *testing.T) {
 
 	// Verify it was NOT saved to theme directory
 	themePath := filepath.Join(s.DataDir, "site", "themes", "turbo", "snippets", "about.html")
-	if _, err := os.Stat(themePath); !os.IsNotExist(err) {
+	if _, err := os.Stat(themePath); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("snippet should not exist in theme directory when source=global")
 	}
 }
@@ -3495,7 +3393,7 @@ func TestHandleSnippet_SaveThemeSource(t *testing.T) {
 
 	// Verify it was NOT saved to global directory
 	globalPath := filepath.Join(s.DataDir, "site", "snippets", "about.html")
-	if _, err := os.Stat(globalPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(globalPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("snippet should not exist in global directory when source=theme")
 	}
 }
@@ -3637,7 +3535,7 @@ func TestPublishHookNotCalledOnError(t *testing.T) {
 	}
 
 	// Hook marker should NOT exist
-	if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
+	if _, err := os.Stat(markerFile); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("hook should not have been called on publish error")
 	}
 }
@@ -3667,7 +3565,7 @@ func TestRepublishHookNotCalledOnError(t *testing.T) {
 	}
 
 	// Hook marker should NOT exist
-	if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
+	if _, err := os.Stat(markerFile); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("hook should not have been called on republish error")
 	}
 }
@@ -3700,7 +3598,7 @@ func TestBlessingGrantHookNotCalledOnError(t *testing.T) {
 	}
 
 	// Hook marker should NOT exist
-	if _, err := os.Stat(markerFile); !os.IsNotExist(err) {
+	if _, err := os.Stat(markerFile); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("hook should not have been called on blessing grant error")
 	}
 }
@@ -3721,13 +3619,13 @@ func TestMigrateDraftsDir_OldToNew(t *testing.T) {
 	s.migrateDraftsDir()
 
 	// Old dir should be gone
-	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+	if _, err := os.Stat(oldDir); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected old drafts dir to be removed after migration")
 	}
 
 	// New dir should exist with the file
 	newDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
-	if _, err := os.Stat(newDir); os.IsNotExist(err) {
+	if _, err := os.Stat(newDir); errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("expected new drafts dir to exist")
 	}
 	content, err := os.ReadFile(filepath.Join(newDir, "test-draft.md"))
@@ -3747,7 +3645,7 @@ func TestMigrateDraftsDir_NoOldDir(t *testing.T) {
 	s.migrateDraftsDir()
 
 	newDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
-	if _, err := os.Stat(newDir); !os.IsNotExist(err) {
+	if _, err := os.Stat(newDir); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected new dir not to be created when no old dir exists")
 	}
 }
@@ -3767,7 +3665,7 @@ func TestMigrateDraftsDir_NewAlreadyExists(t *testing.T) {
 	s.migrateDraftsDir()
 
 	// Old dir should still exist (migration skipped)
-	if _, err := os.Stat(oldDir); os.IsNotExist(err) {
+	if _, err := os.Stat(oldDir); errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected old dir to be preserved when new dir already exists")
 	}
 	// New dir file should be intact
@@ -4211,7 +4109,7 @@ func TestHandleFeed_WithTypeFilter(t *testing.T) {
 	s := newTestServer(t)
 
 	now := time.Now().UTC()
-	cm := feed.NewCacheManager(s.DataDir, "default")
+	cm := feed.NewCacheManager(s.Site(), "default")
 	cm.MergeItems([]feed.FeedItem{
 		{Type: "post", Title: "A Post", URL: "posts/a.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 		{Type: "comment", Title: "A Comment", URL: "comments/b.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
@@ -4238,7 +4136,7 @@ func TestHandleFeed_SortOrder(t *testing.T) {
 
 	// Use dates relative to now so items don't get pruned by the 90-day max age
 	now := time.Now().UTC()
-	cm := feed.NewCacheManager(s.DataDir, "default")
+	cm := feed.NewCacheManager(s.Site(), "default")
 	cm.MergeItems([]feed.FeedItem{
 		{Type: "post", Title: "Oldest", URL: "posts/old.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 		{Type: "post", Title: "Newest", URL: "posts/new.md", Published: now.Format(time.RFC3339), AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
@@ -4280,7 +4178,7 @@ func TestHandleFeed_SpecialCharacterTitles(t *testing.T) {
 	// Dates relative to now so items don't get pruned by the 90-day max age —
 	// hardcoded calendar dates here time-bombed previously.
 	now := time.Now().UTC()
-	cm := feed.NewCacheManager(s.DataDir, "default")
+	cm := feed.NewCacheManager(s.Site(), "default")
 	cm.MergeItems([]feed.FeedItem{
 		{Type: "post", Title: "It's Not Beyond Our Reach", URL: "posts/its-not.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 		{Type: "post", Title: `She said "hello" & waved`, URL: "posts/she-said.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
@@ -4326,7 +4224,7 @@ func TestHandleFeed_UnreadCount(t *testing.T) {
 	s := newTestServer(t)
 
 	now := time.Now().UTC()
-	cm := feed.NewCacheManager(s.DataDir, "default")
+	cm := feed.NewCacheManager(s.Site(), "default")
 	cm.MergeItems([]feed.FeedItem{
 		{Type: "post", Title: "A", URL: "posts/a.md", Published: now.Add(-72 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 		{Type: "post", Title: "B", URL: "posts/b.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
@@ -4385,7 +4283,7 @@ func TestHandleFeed_NotStaleAfterCursorRefresh(t *testing.T) {
 	discoveryDomain := s.GetDiscoveryDomain()
 
 	// Set a cursor with a backdated timestamp to simulate a stale cache
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := feed.NewCacheManager(s.Site(), discoveryDomain)
 	cm.SetCursor("100")
 
 	cursorsPath := filepath.Join(s.DataDir, ".polis", "ds", discoveryDomain, "pub.polis.core", "state", "cursors.json")
@@ -4469,7 +4367,7 @@ func TestHandleFeedRead_MarkRead(t *testing.T) {
 	s := newTestServer(t)
 
 	now := time.Now().UTC()
-	cm := feed.NewCacheManager(s.DataDir, "default")
+	cm := feed.NewCacheManager(s.Site(), "default")
 	cm.MergeItems([]feed.FeedItem{
 		{Type: "post", Title: "Test", URL: "posts/test.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 	})
@@ -4555,7 +4453,7 @@ func TestHandleFeedViewed_SetsCursor(t *testing.T) {
 	// (e.g. own-post-only syncs advanced it). handleFeedViewed must catch the
 	// viewed cursor up to the CONTENT cursor (100), not the sync cursor.
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 	_ = store.SetCursor("pub.polis.feed.content", "100")
 	_ = store.SetCursor("pub.polis.sync", "999")
 
@@ -4590,7 +4488,7 @@ func TestHandleFeedViewed_DoesNotSetViewedAt(t *testing.T) {
 	s := newConfiguredServer(t)
 
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 	_ = store.SetCursor("pub.polis.sync", "50")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/feed/viewed", nil)
@@ -4612,7 +4510,7 @@ func TestComputeAllCounts_HasNewFeed(t *testing.T) {
 	s := newConfiguredServer(t)
 
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 
 	// No feed-content cursor — should not show has_new_feed
 	counts := s.computeAllCounts()
@@ -4671,7 +4569,7 @@ func TestComputeAllCounts_HasNewBlessingInbox(t *testing.T) {
 	s := newConfiguredServer(t)
 
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 
 	// Cold start (no cursors) — false.
 	if counts := s.computeAllCounts(); counts.HasNewBlessingInbox {
@@ -4754,7 +4652,7 @@ func TestHandleFeedCounts_WithItems(t *testing.T) {
 	s := newTestServer(t)
 
 	now := time.Now().UTC()
-	cm := feed.NewCacheManager(s.DataDir, "default")
+	cm := feed.NewCacheManager(s.Site(), "default")
 	cm.MergeItems([]feed.FeedItem{
 		{Type: "post", Title: "A", URL: "posts/a.md", Published: now.Add(-48 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
 		{Type: "post", Title: "B", URL: "posts/b.md", Published: now.Add(-24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
@@ -5060,7 +4958,7 @@ func TestHandleConversations_WithData(t *testing.T) {
 	discoveryDomain := s.GetDiscoveryDomain()
 
 	// Seed feed cache with comment items
-	cacheFile := feed.CacheFile(s.DataDir, discoveryDomain)
+	cacheFile := s.Site().Path(feed.CacheKey(discoveryDomain))
 	os.MkdirAll(filepath.Dir(cacheFile), 0755)
 
 	items := []feed.CachedFeedItem{
@@ -5116,7 +5014,7 @@ func TestHandleConversations_WithData(t *testing.T) {
 	os.WriteFile(cacheFile, buf.Bytes(), 0644)
 
 	// Write blessing state
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 	blessingState := stream.BlessingState{
 		Blessings: []stream.BlessingEntry{
 			{
@@ -5239,15 +5137,14 @@ func TestHandlePulse_WithFeedData(t *testing.T) {
 	s := newConfiguredServer(t)
 
 	// Add a following entry
-	followingPath := following.DefaultPath(s.DataDir)
-	f, _ := following.Load(followingPath)
+	f, _ := following.LoadSite(storage.At(s.DataDir))
 	f.Add("https://alice.example.com")
 	f.Add("https://bob.example.com")
-	following.Save(followingPath, f)
+	following.Save(s.Site(), f)
 
 	// Write feed cache items (JSONL format)
 	discoveryDomain := s.GetDiscoveryDomain()
-	cacheFile := feed.CacheFile(s.DataDir, discoveryDomain)
+	cacheFile := s.Site().Path(feed.CacheKey(discoveryDomain))
 	os.MkdirAll(filepath.Dir(cacheFile), 0755)
 
 	now := time.Now()
@@ -6647,7 +6544,6 @@ func TestHandleDownloadSite_MethodNotAllowed(t *testing.T) {
 func TestHandleSiteUnregister_BlocksPolisPub(t *testing.T) {
 	s := newConfiguredServer(t)
 	s.DiscoveryURL = "https://ds.polis.pub"
-	s.DiscoveryKey = "test-key"
 	s.BaseURL = "https://mysite.polis.pub"
 
 	req := httptest.NewRequest(http.MethodPost, "/api/site/unregister", nil)
@@ -6946,7 +6842,7 @@ func TestHandleFeedGrouped_Empty(t *testing.T) {
 func TestHandleFeedGrouped_PostOnly(t *testing.T) {
 	s := newTestServer(t)
 	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := feed.NewCacheManager(s.Site(), discoveryDomain)
 
 	now := time.Now().UTC()
 	cm.MergeItems([]feed.FeedItem{
@@ -6991,7 +6887,7 @@ func TestHandleFeedGrouped_PostOnly(t *testing.T) {
 func TestHandleFeedGrouped_CommentsGroupByTarget(t *testing.T) {
 	s := newTestServer(t)
 	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := feed.NewCacheManager(s.Site(), discoveryDomain)
 
 	now := time.Now().UTC()
 	postTime := now.Add(-26 * time.Hour).Format(time.RFC3339)
@@ -7058,17 +6954,16 @@ func TestHandleFeedGrouped_CommentsGroupByTarget(t *testing.T) {
 func TestHandleFeedGrouped_NetworkClassification(t *testing.T) {
 	s := newTestServer(t)
 	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := feed.NewCacheManager(s.Site(), discoveryDomain)
 
 	// Create following.json with bob as followed
-	followingPath := following.DefaultPath(s.DataDir)
 	f := &following.FollowingFile{
 		Version: "1.0",
 		Following: []following.FollowingEntry{
 			{URL: "https://bob.polis.pub", AddedAt: "2026-01-01T00:00:00Z"},
 		},
 	}
-	following.Save(followingPath, f)
+	following.Save(storage.At(s.DataDir), f)
 
 	now := time.Now().UTC()
 	postURL := "https://alice.polis.pub/posts/hello.md"
@@ -7125,7 +7020,7 @@ func TestHandleFeedGrouped_NetworkClassification(t *testing.T) {
 func TestHandleFeedGrouped_SortByLastActivity(t *testing.T) {
 	s := newTestServer(t)
 	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := feed.NewCacheManager(s.Site(), discoveryDomain)
 
 	now := time.Now().UTC()
 	cm.MergeItems([]feed.FeedItem{
@@ -7178,7 +7073,7 @@ func TestHandleFeedGrouped_SortByLastActivity(t *testing.T) {
 func TestHandleFeedGrouped_OrphanComments(t *testing.T) {
 	s := newTestServer(t)
 	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := feed.NewCacheManager(s.Site(), discoveryDomain)
 
 	now := time.Now().UTC()
 	cm.MergeItems([]feed.FeedItem{
@@ -7219,7 +7114,7 @@ func TestHandleFeedGrouped_BlessedCommentCountsAsReply(t *testing.T) {
 	// count in total_comments for the target post's feed group.
 	s := newTestServer(t)
 	discoveryDomain := s.GetDiscoveryDomain()
-	cm := feed.NewCacheManager(s.DataDir, discoveryDomain)
+	cm := feed.NewCacheManager(s.Site(), discoveryDomain)
 
 	now := time.Now().UTC()
 	postTime := now.Add(-48 * time.Hour).Format(time.RFC3339)
@@ -7695,7 +7590,7 @@ func TestHandleUnpublish_Success(t *testing.T) {
 	}
 
 	// Verify the post file was deleted
-	if _, err := os.Stat(postPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(postPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected post file to be deleted, but it still exists")
 	}
 
@@ -7835,10 +7730,11 @@ func TestHandleRotateKey_Success(t *testing.T) {
 
 	s.handleRotateKey(w, req)
 
-	// DS call will fail since there's no real discovery service
-	// This tests the DS-failure path (502 Bad Gateway)
-	if w.Code != http.StatusBadGateway {
-		t.Errorf("expected 502 (DS unavailable), got %d: %s", w.Code, w.Body.String())
+	// DS call will fail since there's no real discovery service. ⛔ No answer
+	// is not a refusal: it is unknown whether the DS took the key, so the
+	// rotation is pending (503) and the staged key is kept.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 (DS answer lost), got %d: %s", w.Code, w.Body.String())
 	}
 
 	// Verify keys were NOT changed (DS failed, so local swap should not proceed)
@@ -7889,12 +7785,12 @@ func TestHandleRotateKey_KeysChangedOnDisk(t *testing.T) {
 	}
 
 	// Update .well-known/polis
-	wk, err := site.LoadWellKnown(s.DataDir)
+	wk, err := site.LoadWellKnown(s.Site())
 	if err != nil {
 		t.Fatalf("failed to load well-known: %v", err)
 	}
 	wk.PublicKey = newPubKey
-	if err := site.SaveWellKnown(s.DataDir, wk, site.ChangePublicKey); err != nil {
+	if err := site.SaveWellKnown(s.Site(), wk, site.ChangePublicKey); err != nil {
 		t.Fatalf("failed to save well-known: %v", err)
 	}
 
@@ -7939,7 +7835,7 @@ func TestHandleRotateKey_KeysChangedOnDisk(t *testing.T) {
 	}
 
 	// Verify .well-known/polis updated
-	wk2, err := site.LoadWellKnown(s.DataDir)
+	wk2, err := site.LoadWellKnown(s.Site())
 	if err != nil {
 		t.Fatalf("failed to reload well-known: %v", err)
 	}
@@ -8040,7 +7936,7 @@ func TestHandleDMKeyring(t *testing.T) {
 	if _, _, err := kr.SetPassword([]byte("pw")); err != nil {
 		t.Fatal(err)
 	}
-	if err := kr.Save(dm.DMDir(s.DataDir)); err != nil {
+	if err := kr.Save(s.Site()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -8070,7 +7966,7 @@ func TestHandleDMSetPassword(t *testing.T) {
 	if _, err := kr.AddBootstrapEpoch(); err != nil {
 		t.Fatal(err)
 	}
-	if err := kr.Save(dm.DMDir(s.DataDir)); err != nil {
+	if err := kr.Save(s.Site()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -8098,7 +7994,7 @@ func TestHandleDMSetPassword(t *testing.T) {
 	}
 
 	// Keyring now has the password epoch as current.
-	reloaded, err := dm.LoadKeyring(dm.DMDir(s.DataDir))
+	reloaded, err := dm.LoadKeyring(s.Site())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8138,14 +8034,13 @@ func TestHandleDMSetPassword(t *testing.T) {
 // no password epoch yet.
 func TestHandleDMRewrapPassword(t *testing.T) {
 	s := newConfiguredServer(t)
-	dmDir := dm.DMDir(s.DataDir)
 
 	// Re-wrap before any password epoch exists → 400.
 	earlyKr := &dm.Keyring{}
 	if _, err := earlyKr.AddBootstrapEpoch(); err != nil {
 		t.Fatal(err)
 	}
-	if err := earlyKr.Save(dmDir); err != nil {
+	if err := earlyKr.Save(s.Site()); err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/dm/password/rewrap", jsonBody(t, map[string]interface{}{
@@ -8164,10 +8059,10 @@ func TestHandleDMRewrapPassword(t *testing.T) {
 		dm.KDFParams{Algo: "hkdf-sha256", Salt: "b2xkLXJlYy1zYWx0"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := earlyKr.Save(dmDir); err != nil {
+	if err := earlyKr.Save(s.Site()); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := dm.LoadKeyring(dmDir)
+	before, _ := dm.LoadKeyring(s.Site())
 	revBefore := before.Revision
 
 	// Change-password re-wrap: new wrapped_dek + kdf only (recovery untouched).
@@ -8181,7 +8076,7 @@ func TestHandleDMRewrapPassword(t *testing.T) {
 		t.Fatalf("rewrap should be 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	after, err := dm.LoadKeyring(dmDir)
+	after, err := dm.LoadKeyring(s.Site())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8372,7 +8267,6 @@ func TestHandleDMRecipients_PolicyCheck(t *testing.T) {
 	s.DiscoveryURL = "https://ds.test.polis.pub"
 
 	// Write following.json with the two mock sites
-	followingPath := following.DefaultPath(s.DataDir)
 	f := &following.FollowingFile{
 		Version: "test",
 		Following: []following.FollowingEntry{
@@ -8380,7 +8274,7 @@ func TestHandleDMRecipients_PolicyCheck(t *testing.T) {
 			{URL: denySite.URL, AuthorName: "Bob"},
 		},
 	}
-	following.Save(followingPath, f)
+	following.Save(storage.At(s.DataDir), f)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/dm/recipients", nil)
 	w := httptest.NewRecorder()
@@ -8472,16 +8366,15 @@ func TestHandleDMRecipients_FollowerStateCorrection(t *testing.T) {
 	}))
 	defer remoteSite.Close()
 
-	followingPath := following.DefaultPath(s.DataDir)
 	f := &following.FollowingFile{
 		Version: "test",
 		Following: []following.FollowingEntry{
 			{URL: remoteSite.URL, AuthorName: "RemotePeer"},
 		},
 	}
-	following.Save(followingPath, f)
+	following.Save(storage.At(s.DataDir), f)
 
-	store := stream.NewStore(s.DataDir, "ds.test.polis.pub", "pub.polis.core")
+	store := stream.NewStore(s.Site(), "ds.test.polis.pub", "pub.polis.core")
 	store.SaveState("pub.polis.follow", &stream.FollowerState{
 		Followers: []string{},
 		Count:     0,
@@ -8560,7 +8453,6 @@ func TestHandleDMRecipients_MutualFollowFallback(t *testing.T) {
 	}))
 	defer noFollowSite.Close()
 
-	followingPath := following.DefaultPath(s.DataDir)
 	f := &following.FollowingFile{
 		Version: "test",
 		Following: []following.FollowingEntry{
@@ -8568,7 +8460,7 @@ func TestHandleDMRecipients_MutualFollowFallback(t *testing.T) {
 			{URL: noFollowSite.URL, AuthorName: "OneWay"},
 		},
 	}
-	following.Save(followingPath, f)
+	following.Save(storage.At(s.DataDir), f)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/dm/recipients", nil)
 	w := httptest.NewRecorder()
@@ -8649,7 +8541,6 @@ func TestCommentSourceURL(t *testing.T) {
 func TestHandleSettings_NoDataDir(t *testing.T) {
 	s := newConfiguredServer(t)
 	s.DiscoveryURL = "https://discovery.example.com"
-	s.DiscoveryKey = "test-key"
 
 	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
 	rr := httptest.NewRecorder()
@@ -8879,7 +8770,7 @@ func TestSpaHandler_CSPNonceInjection(t *testing.T) {
 		},
 	}
 	tmp := t.TempDir()
-	handler := spaHandler(fsys, tmp, false)
+	handler := spaHandler(fsys, storage.At(tmp))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -9346,7 +9237,7 @@ func TestHandleDMSendSealed_StoresBoxAndDelivers(t *testing.T) {
 	}
 
 	peer := dm.ExtractDomainFromURL(recipient.URL)
-	msgs, err := dm.NewMailbox(dm.DMDir(s.DataDir)).LoadMessages(peer)
+	msgs, err := dm.NewMailbox(s.Site()).LoadMessages(peer)
 	if err != nil {
 		t.Fatalf("LoadMessages: %v", err)
 	}
@@ -9485,7 +9376,6 @@ func TestHandleDMProtectionStatus(t *testing.T) {
 // new epoch's DEK and the bootstrap key is gone.
 func TestHandleDMSetPassword_ClosesBootstrapWindow(t *testing.T) {
 	s := newConfiguredServer(t)
-	dmDir := dm.DMDir(s.DataDir)
 	const peer = "alice.example.com"
 	const secret = "see you in the window"
 
@@ -9495,10 +9385,10 @@ func TestHandleDMSetPassword_ClosesBootstrapWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := kr.Save(dmDir); err != nil {
+	if err := kr.Save(s.Site()); err != nil {
 		t.Fatal(err)
 	}
-	reloaded, _ := dm.LoadKeyring(dmDir)
+	reloaded, _ := dm.LoadKeyring(s.Site())
 	bootPubRaw, _ := base64.StdEncoding.DecodeString(reloaded.Epochs[0].PublicKeyMessages)
 	var bootPub [32]byte
 	copy(bootPub[:], bootPubRaw)
@@ -9506,7 +9396,7 @@ func TestHandleDMSetPassword_ClosesBootstrapWindow(t *testing.T) {
 	// Store a bootstrap-epoch received message (sealed to our bootstrap pubkey).
 	ephPub, ephSK, _ := dm.NewEpochKeypair()
 	ct, nonce, _ := dm.Encrypt([]byte(secret), &bootPub, &ephSK)
-	mb := dm.NewMailbox(dmDir)
+	mb := dm.NewMailbox(s.Site())
 	if _, err := mb.AppendReceived(peer, peer, 0, ct, nonce, ephPub, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -9528,7 +9418,7 @@ func TestHandleDMSetPassword_ClosesBootstrapWindow(t *testing.T) {
 	}
 
 	// Bootstrap server_dek must be cleared.
-	after, _ := dm.LoadKeyring(dmDir)
+	after, _ := dm.LoadKeyring(s.Site())
 	if after.Epochs[0].ServerDEK != "" {
 		t.Error("bootstrap server_dek must be cleared after set-password")
 	}
@@ -9560,12 +9450,35 @@ func TestHookRoutesGatedByEnableHooks(t *testing.T) {
 	}
 
 	// Hosted-style: hooks disabled → route not registered → 404.
+	//
+	// ⚠️ THE SERVER MUST BE AUTHORISED FOR THIS ASSERTION TO MEAN WHAT IT SAYS.
+	// The owner gate runs before the mux, so an unauthorised caller is refused
+	// by the gate and never reaches the 404 — which would make this test pass
+	// or fail for the wrong reason. Authorising it keeps the original
+	// property under test: with hooks off, the route is ABSENT, not merely
+	// forbidden.
 	s := newConfiguredServer(t)
 	s.EnableHooks = false
+	s.BoundToLoopback = true
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/automations", body()))
 	if w.Code != http.StatusNotFound {
 		t.Errorf("hooks disabled: expected 404 (route absent), got %d", w.Code)
+	}
+
+	// ⭐ AND THE NEW PROPERTY, DECLARED RATHER THAN DISCOVERED: on an instance
+	// with no provider enrolled, the gate masks route existence. An
+	// unauthorised caller cannot tell an absent route from a present one,
+	// which is strictly more than the old behaviour gave — the 404 above
+	// previously told any stranger exactly which routes this build registers.
+	locked := newConfiguredServer(t)
+	locked.EnableHooks = false
+	locked.Mode = mode.RemoteServerSigned
+	w = httptest.NewRecorder()
+	locked.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/automations", body()))
+	if w.Code == http.StatusNotFound {
+		t.Error("a locked-down instance revealed that /api/automations is unregistered; " +
+			"the gate should mask route existence from an unauthorised caller")
 	}
 
 	// Localhost: hooks enabled → route registered → reaches handler (not 404).
@@ -9575,5 +9488,49 @@ func TestHookRoutesGatedByEnableHooks(t *testing.T) {
 	s2.Handler().ServeHTTP(w2, httptest.NewRequest(http.MethodPost, "/api/automations", body()))
 	if w2.Code == http.StatusNotFound {
 		t.Error("hooks enabled: route should be registered, got 404")
+	}
+}
+
+// noFlushWriter is a response writer that cannot stream, as a platform that
+// buffers a function's whole response hands the handler.
+type noFlushWriter struct{ http.ResponseWriter }
+
+// ⭐ Where the writer cannot stream, the live-update stream answers 204, which
+// the SSE spec makes "stop reconnecting", never a 500 the app retries forever.
+func TestHandleSSE_NoStreamingAnswers204(t *testing.T) {
+	s := newTestServer(t)
+	s.sseClients = make(map[chan SSEEvent]struct{})
+	rec := httptest.NewRecorder()
+	s.handleSSE(noFlushWriter{rec}, httptest.NewRequest(http.MethodGet, "/api/sse", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("status = %d; want 204 where the writer cannot stream", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q; want none", rec.Body.String())
+	}
+}
+
+// ⛔ The SPA does not reopen a stream that closed without ever opening (a
+// refusal), and keeps polling counts; a stream that opened and dropped is
+// retried with backoff.
+func TestTheSPAStopsReopeningARefusedLiveUpdateStream(t *testing.T) {
+	b, err := fs.ReadFile(webui.Assets, "www/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(b)
+	start := strings.Index(js, "initSSE() {")
+	end := strings.Index(js, "_startCountsPolling() {")
+	if start < 0 || end < start {
+		t.Fatal("initSSE not found in app.js")
+	}
+	body := js[start:end]
+	for _, want := range []string{"addEventListener('open'", "if (!opened) {", "this._startCountsPolling();"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("initSSE lacks %q", want)
+		}
+	}
+	if strings.Contains(body, "setTimeout(() => this.initSSE(), 5000)") {
+		t.Error("initSSE still reopens the stream every 5 s whatever closed it")
 	}
 }

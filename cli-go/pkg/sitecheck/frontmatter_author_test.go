@@ -35,11 +35,11 @@ func TestFrontmatterAuthor_Pinned(t *testing.T) {
 		if err := os.WriteFile(p, []byte(c.body), 0644); err != nil {
 			t.Fatal(err)
 		}
-		if got := FrontmatterAuthor(p); got != c.want {
+		if got := FrontmatterAuthor(dir, p); got != c.want {
 			t.Errorf("%s: got %q, want %q", name, got, c.want)
 		}
 	}
-	if got := FrontmatterAuthor(filepath.Join(dir, "missing.md")); got != "" {
+	if got := FrontmatterAuthor(dir, filepath.Join(dir, "missing.md")); got != "" {
 		t.Errorf("missing file: got %q", got)
 	}
 }

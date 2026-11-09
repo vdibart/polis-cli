@@ -3,10 +3,10 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
+	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 )
@@ -29,19 +29,11 @@ func handleFollow(args []string) {
 	}
 
 	// Get our author email for blessing operations
-	wk, err := site.LoadWellKnown(dir)
+	wk, err := site.LoadWellKnown(getSite())
 	if err != nil {
 		exitError("Failed to load .well-known/polis: %v", err)
 	}
 	blessedBy := wk.Email
-
-	// Fetch author info from their site
-	remoteClient := remote.NewClient()
-	remoteWK, err := remoteClient.FetchWellKnown(authorURL)
-	if err != nil {
-		exitError("Failed to fetch author information: %v", err)
-	}
-	authorEmail := remoteWK.Email
 
 	// Load private key for signing
 	privKey, err := loadPrivateKey(dir)
@@ -49,75 +41,28 @@ func handleFollow(args []string) {
 		exitError("Failed to load private key: %v", err)
 	}
 
-	// Load discovery client (authenticated for pending/denied queries)
+	// The site's own rules decide which waiting comments a follow blesses, as
+	// they do in the web app. This command used to grant every pending AND
+	// denied comment from the author unconditionally, overturning a deny the
+	// user had made, with no rule saying so.
+	policies, err := policy.LoadPolicies(getSite())
+	if err != nil {
+		exitError("Failed to load policies: %v", err)
+	}
+
+	// Authenticated discovery client (pending/denied queries need it)
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	if discoveryURL == "" {
 		discoveryURL = "https://ds.polis.pub"
 	}
-	apiKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	baseURL := os.Getenv("POLIS_BASE_URL")
 	myDomain := discovery.ExtractDomainFromURL(baseURL)
-	client := discovery.NewAuthenticatedClient(discoveryURL, apiKey, myDomain, privKey)
+	client := discovery.NewAuthenticatedClient(discoveryURL, myDomain, privKey)
 
-	// Fetch unblessed comments from this author on our posts via relationship-query
-	authorDomain := discovery.ExtractDomainFromURL(authorURL)
-
-	pendingResp, err := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
-		"status": "pending",
-	})
+	result, err := following.FollowWithBlessing(getSite(), authorURL, client, remote.NewClient(), privKey, policies,
+		&following.FollowConfig{DiscoveryURL: discoveryURL, BaseURL: baseURL})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[!] Could not check pending blessings: %v\n", err)
-	}
-	deniedResp, err := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
-		"status": "denied",
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[!] Could not check denied blessings: %v\n", err)
-	}
-
-	// Filter to relationships where source is from the author's domain
-	var allUnblessed []discovery.RelationshipRecord
-	if pendingResp != nil {
-		for _, r := range pendingResp.Records {
-			if discovery.ExtractDomainFromURL(r.SourceURL) == authorDomain {
-				allUnblessed = append(allUnblessed, r)
-			}
-		}
-	}
-	if deniedResp != nil {
-		for _, r := range deniedResp.Records {
-			if discovery.ExtractDomainFromURL(r.SourceURL) == authorDomain {
-				allUnblessed = append(allUnblessed, r)
-			}
-		}
-	}
-
-	// Bless all unblessed comments
-	blessedCount := 0
-	failedCount := 0
-
-	for _, rel := range allUnblessed {
-		// Grant blessing via relationship-update
-		if err := client.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "grant", privKey); err != nil {
-			failedCount++
-			continue
-		}
-		blessedCount++
-	}
-
-	// Add to following.json
-	followingPath := filepath.Join(dir, "content", "pub.polis.core", "follow", "following.json")
-	f, err := following.Load(followingPath)
-	if err != nil {
-		exitError("Failed to load following.json: %v", err)
-	}
-
-	f.Add(authorURL)
-
-	// SIGNET epic 02: the user acted, so the file they authored is signed with
-	// their key. No migration needed — the write path is the migration.
-	if err := following.SaveSigned(followingPath, f, privKey); err != nil {
-		exitError("Failed to save following.json: %v", err)
+		exitError("Failed to follow %s: %v", authorURL, err)
 	}
 
 	if jsonOutput {
@@ -126,26 +71,33 @@ func handleFollow(args []string) {
 			"command": "follow",
 			"data": map[string]interface{}{
 				"author_url":         authorURL,
-				"author_email":       authorEmail,
+				"author_email":       result.AuthorEmail,
 				"blessed_by":         blessedBy,
-				"comments_found":     len(allUnblessed),
-				"comments_blessed":   blessedCount,
+				"comments_found":     result.CommentsFound,
+				"comments_blessed":   result.CommentsBlessed,
+				"comments_failed":    result.CommentsFailed,
+				"blessed_comments":   result.BlessedComments,
+				"already_followed":   result.AlreadyFollowed,
 				"added_to_following": true,
 			},
 		})
-	} else {
-		fmt.Println()
-		fmt.Printf("[✓] Successfully followed %s\n", authorURL)
-		fmt.Printf("  - Added to following.json\n")
-		if len(allUnblessed) > 0 {
-			if failedCount == 0 {
-				fmt.Printf("  - Blessed %d comment(s)\n", blessedCount)
-			} else {
-				fmt.Printf("  - Blessed %d/%d comment(s) (%d failed)\n", blessedCount, len(allUnblessed), failedCount)
-			}
-		}
+		return
 	}
 
-	// Suppress unused variable warning
-	_ = blessedBy
+	fmt.Println()
+	if result.AlreadyFollowed {
+		fmt.Printf("[i] Already following %s\n", authorURL)
+	} else {
+		fmt.Printf("[✓] Successfully followed %s\n", authorURL)
+		fmt.Printf("  - Added to following.json\n")
+	}
+	switch {
+	case result.CommentsFailed > 0:
+		fmt.Printf("  - Blessed %d comment(s) your policies allow (%d failed)\n", result.CommentsBlessed, result.CommentsFailed)
+	case result.CommentsBlessed > 0:
+		fmt.Printf("  - Blessed %d comment(s) your policies allow\n", result.CommentsBlessed)
+	}
+	for _, u := range result.BlessedComments {
+		fmt.Printf("      %s\n", u)
+	}
 }

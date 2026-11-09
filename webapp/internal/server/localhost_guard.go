@@ -85,6 +85,20 @@ func CrossSiteWrite(r *http.Request) bool {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return false
 	}
+	return crossSiteRequest(r)
+}
+
+// crossSiteRequest reports whether a browser sent r from a page that is not
+// this origin's own, whatever the method: its Origin is present and is not the
+// request's own ("null" included), or its Sec-Fetch-Site is present and is
+// neither "same-origin" nor "none".
+//
+// ⛔ "same-site" IS CROSS-SITE HERE. A sibling subdomain, or another port on
+// localhost, is same-SITE to a browser and is exactly the page this refuses:
+// on hosted every tenant is same-site with every other, and on a laptop any
+// other local server is. Either header alone is enough to refuse, and neither
+// can talk the other out of it.
+func crossSiteRequest(r *http.Request) bool {
 	if origin := r.Header.Get("Origin"); origin != "" && !sameOrigin(origin, r.Host) {
 		return true
 	}
@@ -92,6 +106,21 @@ func CrossSiteWrite(r *http.Request) bool {
 		return true
 	}
 	return false
+}
+
+// CrossOriginAPIRoute reports whether an /api/ path is one a browser may call
+// from another site, and so is exempt from the cross-site write refusal.
+// Exactly the widget-token routes: /api/widget/* other than connect and token.
+// A visitor's widget, embedded on someone else's site, calls its own home with
+// `Authorization: Bearer <widget token>`, never the cookie. connect and token
+// authenticate by the session cookie, so they stay guarded. ⛔ The exemption
+// is safe only behind an edge that checks the widget token (hosted's); the
+// owner gate applies it only where an operator runs the instance.
+func CrossOriginAPIRoute(path string) bool {
+	if !strings.HasPrefix(path, "/api/widget/") {
+		return false
+	}
+	return path != "/api/widget/connect" && path != "/api/widget/token"
 }
 
 // sameOrigin reports whether an Origin header names the host the request was

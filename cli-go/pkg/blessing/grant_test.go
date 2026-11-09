@@ -2,6 +2,7 @@ package blessing
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -128,7 +129,7 @@ func TestGrant_Success(t *testing.T) {
 	}
 
 	// Verify blessed-comments.json was created with the comment
-	bc, err := metadata.LoadBlessedComments(siteDir)
+	bc, err := metadata.LoadBlessedComments(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
 	}
@@ -195,7 +196,7 @@ func TestGrantByVersion(t *testing.T) {
 	}
 
 	result, err := GrantByVersion(
-		siteDir,
+		storage.At(siteDir),
 		"v1abc",
 		"https://alice.com/comments/reply.md",
 		"https://bob.com/posts/20260127/hello.md",
@@ -311,11 +312,11 @@ func TestGrantSignsTheBlessingList(t *testing.T) {
 	// Twice: the second grant must re-sign over the CHANGED list, not leave the
 	// first signature covering bytes that no longer exist.
 	grant("https://alice.com/comments/one.md")
-	if status, err := metadata.VerifyBlessedSite(siteDir); status != metadata.StatusValid {
+	if status, err := metadata.VerifyBlessedSite(storage.At(siteDir)); status != metadata.StatusValid {
 		t.Fatalf("after one grant: status = %q (%v), want %q", status, err, metadata.StatusValid)
 	}
 	grant("https://carol.com/comments/two.md")
-	if status, err := metadata.VerifyBlessedSite(siteDir); status != metadata.StatusValid {
+	if status, err := metadata.VerifyBlessedSite(storage.At(siteDir)); status != metadata.StatusValid {
 		t.Errorf("after two grants: status = %q (%v), want %q", status, err, metadata.StatusValid)
 	}
 }

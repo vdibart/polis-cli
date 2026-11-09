@@ -2,6 +2,7 @@ package site
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,14 +61,14 @@ func rotate(t *testing.T, dir, domain string, from keypair, to keypair, timestam
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	if err := RecordKeyRotation(dir, to.pub, sig, timestamp); err != nil {
+	if err := RecordKeyRotation(storage.At(dir), to.pub, sig, timestamp, ""); err != nil {
 		t.Fatalf("RecordKeyRotation: %v", err)
 	}
 }
 
 func mustLoad(t *testing.T, dir string) *KeyHistoryBlock {
 	t.Helper()
-	b, err := LoadKeyHistory(dir)
+	b, err := LoadKeyHistory(storage.At(dir))
 	if err != nil {
 		t.Fatalf("LoadKeyHistory: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestWriteGenesisUsesTheSitesOwnCreatedAndPreservesOtherFields(t *testing.T)
 	kp := newKeypair(t)
 	dir := writeSite(t, kp.pub, "2026-03-03T05:35:09Z")
 
-	wrote, err := WriteGenesisKeyHistory(dir)
+	wrote, err := WriteGenesisKeyHistory(storage.At(dir))
 	if err != nil {
 		t.Fatalf("WriteGenesisKeyHistory: %v", err)
 	}
@@ -125,7 +126,7 @@ func TestWriteGenesisUsesTheSitesOwnCreatedAndPreservesOtherFields(t *testing.T)
 		t.Errorf("genesis history must be empty, got %d", len(b.History))
 	}
 
-	raw, err := LoadWellKnownRaw(dir)
+	raw, err := LoadWellKnownRaw(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,12 +140,12 @@ func TestWriteGenesisNeverOverwritesAChain(t *testing.T) {
 	// silently discard every rotation it records.
 	k0, k1 := newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	rotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")
 
-	wrote, err := WriteGenesisKeyHistory(dir)
+	wrote, err := WriteGenesisKeyHistory(storage.At(dir))
 	if err != nil {
 		t.Fatalf("WriteGenesisKeyHistory: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestWriteGenesisNeverOverwritesAChain(t *testing.T) {
 func TestWriteGenesisRefusesWithoutACreatedTimestamp(t *testing.T) {
 	kp := newKeypair(t)
 	dir := writeSite(t, kp.pub, "")
-	if _, err := WriteGenesisKeyHistory(dir); err == nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err == nil {
 		t.Fatal("expected a refusal: without `created` there is no honest valid_from")
 	}
 }
@@ -169,13 +170,13 @@ func TestWriteGenesisRefusesWithoutACreatedTimestamp(t *testing.T) {
 func TestRecordKeyRotationMovesPublicKeyAndChainHeadTogether(t *testing.T) {
 	k0, k1 := newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 
 	rotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")
 
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +206,7 @@ func TestRecordKeyRotationStoresValidFromByteIdentically(t *testing.T) {
 	// AND the signed timestamp. Any reformatting breaks every signature.
 	k0, k1 := newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	const ts = "2026-09-15T10:22:03Z"
@@ -253,7 +254,7 @@ func TestVerifyChainAcceptsGenesisOnlyWithoutADomain(t *testing.T) {
 func TestVerifyChainWalksRotationsBackToGenesis(t *testing.T) {
 	k0, k1, k2 := newKeypair(t), newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	rotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")
@@ -273,7 +274,7 @@ func TestVerifyChainRejectsAForeignDomain(t *testing.T) {
 	// onto another host does not verify there.
 	k0, k1 := newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	rotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")
@@ -288,7 +289,7 @@ func TestVerifyChainRejectsATamperedTimestamp(t *testing.T) {
 	// artifact look covered breaks the transition signature.
 	k0, k1 := newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	rotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")
@@ -306,7 +307,7 @@ func TestVerifyChainRejectsAnOmittedEntry(t *testing.T) {
 	// gap and the broken signature both catch it.
 	k0, k1, k2 := newKeypair(t), newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	rotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")
@@ -341,7 +342,7 @@ func TestVerifyChainRejectsRotationsWhenTheDomainIsUnknown(t *testing.T) {
 	// never that the chain passed.
 	k0, k1 := newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	rotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")
@@ -356,7 +357,7 @@ func TestVerifyChainRejectsRotationsWhenTheDomainIsUnknown(t *testing.T) {
 func TestKeyAtResolvesToTheKeyThatWasCurrentWhenSomethingWasSigned(t *testing.T) {
 	k0, k1, k2 := newKeypair(t), newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	rotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")
@@ -396,7 +397,7 @@ func TestKeysReturnsTheSequenceOldestFirst(t *testing.T) {
 	// positive.
 	k0, k1 := newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	rotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")
@@ -410,14 +411,14 @@ func TestKeysReturnsTheSequenceOldestFirst(t *testing.T) {
 func TestLoadKeyHistoryReportsAbsenceWithoutAnError(t *testing.T) {
 	kp := newKeypair(t)
 	dir := writeSite(t, kp.pub, "2026-03-03T05:35:09Z")
-	b, err := LoadKeyHistory(dir)
+	b, err := LoadKeyHistory(storage.At(dir))
 	if err != nil {
 		t.Fatalf("absence must not be an error: %v", err)
 	}
 	if b != nil {
 		t.Fatal("expected no key history")
 	}
-	if HasKeyHistory(dir) {
+	if HasKeyHistory(storage.At(dir)) {
 		t.Error("HasKeyHistory must be false before provisioning")
 	}
 }
@@ -471,13 +472,13 @@ func TestChainProducedByTheBashCLIVerifiesHere(t *testing.T) {
 func TestDIDDocumentCarriesTheHistoryAfterARotation(t *testing.T) {
 	k0, k1 := newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 
 	// Before the rotation the document is the single-key one polis has always
 	// published — no churn for the 32 tenants that have never rotated.
-	before, err := BuildDIDDocument(dir, "alice.polis.pub")
+	before, err := BuildDIDDocument(storage.At(dir), "alice.polis.pub")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +496,7 @@ func TestDIDDocumentCarriesTheHistoryAfterARotation(t *testing.T) {
 
 	rotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")
 
-	after, err := BuildDIDDocument(dir, "alice.polis.pub")
+	after, err := BuildDIDDocument(storage.At(dir), "alice.polis.pub")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,22 +540,22 @@ func TestDIDDocumentIgnoresAChainItsOwnPublicKeyContradicts(t *testing.T) {
 	// plausible-looking document from the losing side would bury it.
 	k0, k1 := newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	rotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")
 
 	// Someone edits public_key back without touching the chain.
-	raw, err := LoadWellKnownRaw(dir)
+	raw, err := LoadWellKnownRaw(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
 	raw["public_key"] = k0.pub
-	if err := SaveWellKnownRaw(dir, raw, ChangePublicKey); err != nil {
+	if err := SaveWellKnownRaw(storage.At(dir), raw, ChangePublicKey); err != nil {
 		t.Fatal(err)
 	}
 
-	data, err := BuildDIDDocument(dir, "alice.polis.pub")
+	data, err := BuildDIDDocument(storage.At(dir), "alice.polis.pub")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,7 +588,7 @@ func TestDIDDocumentIgnoresAChainItsOwnPublicKeyContradicts(t *testing.T) {
 func TestAnArtifactSignedBeforeARotationStillVerifiesFromTheSiteAlone(t *testing.T) {
 	k0, k1, k2 := newKeypair(t), newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -611,7 +612,7 @@ func TestAnArtifactSignedBeforeARotationStillVerifiesFromTheSiteAlone(t *testing
 	// …the key the site PUBLISHES no longer verifies it. This is the failure
 	// the epic exists to fix, and it must still be true — otherwise the test
 	// below proves nothing.
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +621,7 @@ func TestAnArtifactSignedBeforeARotationStillVerifiesFromTheSiteAlone(t *testing
 	}
 
 	// A stranger with nothing but this site's .well-known/polis:
-	block, err := LoadKeyHistory(dir)
+	block, err := LoadKeyHistory(storage.At(dir))
 	if err != nil || block == nil {
 		t.Fatalf("the site publishes no history: %v", err)
 	}
@@ -662,7 +663,7 @@ func TestAnArtifactSignedBeforeARotationStillVerifiesFromTheSiteAlone(t *testing
 func TestEntryAtNamesTheEpochEvenWhenAKeyComesBack(t *testing.T) {
 	k0, k1 := newKeypair(t), newKeypair(t)
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	rotate(t, dir, "alice.polis.pub", k0, k1, "2026-09-15T10:22:03Z")

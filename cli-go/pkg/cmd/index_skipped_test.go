@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"os"
 	"strings"
@@ -15,12 +16,12 @@ import (
 // the rest as the whole index.
 func TestIndexCommand_ReportsSkippedLines(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := site.Init(dir, site.InitOptions{BaseURL: "https://maya.example", SiteTitle: "maya"}); err != nil {
+	if _, err := site.Init(storage.At(dir), site.InitOptions{BaseURL: "https://maya.example", SiteTitle: "maya"}); err != nil {
 		t.Fatal(err)
 	}
 	// `null` parses, and would otherwise be listed as an empty entry (R1-5).
 	body := "{\"type\":\"post\",\"path\":\"a.md\"}\ngarbage\n{\"type\":\"post\",\"path\":\"b.md\"}\nnull\n"
-	if err := os.WriteFile(index.IndexPath(dir), []byte(body), 0644); err != nil {
+	if err := os.WriteFile(storage.At(dir).Path(index.IndexKey(storage.At(dir))), []byte(body), 0644); err != nil {
 		t.Fatal(err)
 	}
 

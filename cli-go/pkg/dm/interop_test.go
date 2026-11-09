@@ -2,6 +2,7 @@ package dm
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,7 +24,7 @@ func provisionSite(t *testing.T) (siteDir string, privPEM, pubSSH []byte) {
 	if _, err := kr.AddBootstrapEpoch(); err != nil {
 		t.Fatal(err)
 	}
-	if err := kr.Save(DMDir(siteDir)); err != nil {
+	if err := kr.Save(storage.At(siteDir)); err != nil {
 		t.Fatal(err)
 	}
 	return siteDir, privPEM, pubSSH
@@ -42,7 +43,7 @@ func TestInteropTwoInstances(t *testing.T) {
 	siteB, bPriv, bPub := provisionSite(t)
 
 	// B advertises its identity key + signed messages-key block, and accepts DMs from all.
-	bKeyring, err := LoadKeyring(DMDir(siteB))
+	bKeyring, err := LoadKeyring(storage.At(siteB))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,11 +56,11 @@ func TestInteropTwoInstances(t *testing.T) {
 
 	// B's receiver, behind its deliver endpoint. The test's deliver handler skips the
 	// signed-request header check (covered elsewhere) and exercises the crypto/storage path.
-	bReceiver := NewReceiver(bPriv, bPub, "b.example.com", siteB, NewRateLimiter(1000, 1000))
+	bReceiver := NewReceiver(bPriv, bPub, "b.example.com", storage.At(siteB), NewRateLimiter(1000, 1000))
 
 	// DM-1: B authenticates A's box_pub against A's published messages block. Return A's
 	// real signed block (built from A's keyring) so the authentic end-to-end path is exercised.
-	aKeyring, err := LoadKeyring(DMDir(siteA))
+	aKeyring, err := LoadKeyring(storage.At(siteA))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +98,7 @@ func TestInteropTwoInstances(t *testing.T) {
 	defer srv.Close()
 
 	// A sends.
-	sender := NewSender(aPriv, aPub, "a.example.com", siteA)
+	sender := NewSender(aPriv, aPub, "a.example.com", storage.At(siteA))
 	sent, err := sender.SendMessage(srv.URL, content, "")
 	if err != nil {
 		t.Fatalf("SendMessage: %v", err)
@@ -107,11 +108,11 @@ func TestInteropTwoInstances(t *testing.T) {
 	}
 
 	// B opens the delivered box with its own bootstrap DEK.
-	bDEKs, err := LoadAvailableDEKs(siteB)
+	bDEKs, err := LoadAvailableDEKs(storage.At(siteB))
 	if err != nil {
 		t.Fatal(err)
 	}
-	bMsgs, err := NewMailbox(DMDir(siteB)).ReadConversation("a.example.com", bDEKs)
+	bMsgs, err := NewMailbox(storage.At(siteB)).ReadConversation("a.example.com", bDEKs)
 	if err != nil {
 		t.Fatalf("B read: %v", err)
 	}
@@ -129,8 +130,8 @@ func TestInteropTwoInstances(t *testing.T) {
 	}
 
 	// A re-reads its own sent copy.
-	aDEKs, _ := LoadAvailableDEKs(siteA)
-	aMsgs, err := NewMailbox(DMDir(siteA)).ReadConversation(ExtractDomainFromURL(srv.URL), aDEKs)
+	aDEKs, _ := LoadAvailableDEKs(storage.At(siteA))
+	aMsgs, err := NewMailbox(storage.At(siteA)).ReadConversation(ExtractDomainFromURL(srv.URL), aDEKs)
 	if err != nil {
 		t.Fatalf("A read: %v", err)
 	}

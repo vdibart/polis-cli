@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -75,7 +76,11 @@ func (s *Site) Path(rel string) string { return filepath.Join(s.Dir, filepath.Fr
 func (s *Site) Write(t testing.TB, rel, content string, perm os.FileMode) {
 	t.Helper()
 	p := s.Path(rel)
-	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+	// Parents follow the site rule — 0700 at or under .polis, 0755 elsewhere —
+	// as every real writer must. A flat 0755 here once made every fixture that
+	// wrote under .polis fail the directory-exposure walk by accident.
+	parent := filepath.Dir(p)
+	if err := site.MkdirAllPrivate(storage.At(s.Dir), parent); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(p, []byte(content), perm); err != nil {
@@ -205,7 +210,7 @@ func Healthy(t testing.TB, dir string) *Site {
 		t.Fatal(err)
 	}
 	s := &Site{Dir: dir, Handle: filepath.Base(dir)}
-	if _, err := site.Init(dir, site.InitOptions{
+	if _, err := site.Init(storage.At(dir), site.InitOptions{
 		Author:    "Fixture " + s.Handle,
 		SiteTitle: s.Handle,
 		Theme:     "vice",
@@ -299,12 +304,20 @@ func Normalize(s string, dirs map[string]string) string {
 	return s
 }
 
-var generatedAt = regexp.MustCompile(`"generated_at": "[^"]*"`)
+var (
+	generatedAt = regexp.MustCompile(`"generated_at": "[^"]*"`)
+	verifiedKey = regexp.MustCompile(`"verified_key": "[0-9a-f]{64}"`)
+	postSHA256  = regexp.MustCompile(`"sha256": "[0-9a-f]{64}"`)
+)
 
 // NormalizeSnapshot blanks snapshot.json's generated_at — the one field that is
-// the wall clock — and leaves every other byte alone.
+// the wall clock — and the verified-content record's hashes, which cover keys
+// and signatures the fleet generates fresh on every run. It leaves every other
+// byte alone, so the golden still pins WHICH posts are recorded and when.
 func NormalizeSnapshot(b []byte) []byte {
-	return generatedAt.ReplaceAll(b, []byte(`"generated_at": "<now>"`))
+	b = generatedAt.ReplaceAll(b, []byte(`"generated_at": "<now>"`))
+	b = verifiedKey.ReplaceAll(b, []byte(`"verified_key": "<sha256>"`))
+	return postSHA256.ReplaceAll(b, []byte(`"sha256": "<sha256>"`))
 }
 
 // zeroedEnvelope turns a bare signature into the 0.59.0 defect: the same

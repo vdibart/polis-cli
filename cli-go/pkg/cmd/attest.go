@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"strings"
 
@@ -219,7 +220,7 @@ func handleAttestIssue(args []string) {
 		Asserted: f.asserted,
 	}
 
-	id, err := attestation.Issue(dataDir, rec, privKey)
+	id, err := attestation.Issue(storage.At(dataDir), rec, privKey)
 	if err != nil {
 		exitError("Failed to issue attestation: %v", err)
 	}
@@ -231,9 +232,8 @@ func handleAttestIssue(args []string) {
 	if discoveryURL != "" && baseURL != "" {
 		cfg := &attestation.DiscoveryConfig{
 			DiscoveryURL: discoveryURL,
-			DiscoveryKey: discoveryKey,
 			BaseURL:      baseURL,
-			DataDir:      dataDir,
+			Site:         storage.At(dataDir),
 		}
 		if err := attestation.Register(rec, id, privKey, cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "[!] Discovery registration skipped: %v\n", err)
@@ -266,7 +266,7 @@ func handleAttestIssue(args []string) {
 func handleAttestList() {
 	dataDir := getDataDir()
 
-	records, err := attestation.List(dataDir)
+	records, err := attestation.List(storage.At(dataDir))
 	if err != nil {
 		exitError("Failed to list attestations: %v", err)
 	}
@@ -304,7 +304,7 @@ func handleAttestList() {
 func handleAttestShow(id string) {
 	dataDir := getDataDir()
 
-	r, err := attestation.Load(attestation.Path(dataDir, id))
+	r, err := attestation.Load(storage.At(dataDir), id)
 	if err != nil {
 		exitError("Failed to load attestation %q: %v", id, err)
 	}
@@ -385,7 +385,7 @@ func handleAttestVerify(args []string) {
 
 	if len(args) > 0 {
 		id := args[0]
-		r, err := attestation.Load(attestation.Path(dataDir, id))
+		r, err := attestation.Load(storage.At(dataDir), id)
 		if err != nil {
 			reportAttestVerify(map[string]attestation.SignatureStatus{id: attestation.StatusUnknown}, nil, err)
 			return
@@ -395,7 +395,7 @@ func handleAttestVerify(args []string) {
 		return
 	}
 
-	records, err := attestation.List(dataDir)
+	records, err := attestation.List(storage.At(dataDir))
 	if err != nil {
 		exitError("Failed to verify attestations: %v", err)
 	}
@@ -540,17 +540,17 @@ func handleAttestWithdraw(id string) {
 	}
 	defer signing.ZeroKey(privKey)
 
-	target, err := attestation.Load(attestation.Path(dataDir, id))
+	target, err := attestation.Load(storage.At(dataDir), id)
 	if err != nil {
 		exitError("No attestation %q to withdraw: %v", id, err)
 	}
 
-	newID, err := attestation.Withdraw(dataDir, id, privKey)
+	newID, err := attestation.Withdraw(storage.At(dataDir), id, privKey)
 	if err != nil {
 		exitError("Failed to withdraw: %v", err)
 	}
 
-	rec, err := attestation.Load(attestation.Path(dataDir, newID))
+	rec, err := attestation.Load(storage.At(dataDir), newID)
 	if err != nil {
 		exitError("Failed to read back the withdrawal: %v", err)
 	}
@@ -561,9 +561,8 @@ func handleAttestWithdraw(id string) {
 	if discoveryURL != "" && baseURL != "" {
 		cfg := &attestation.DiscoveryConfig{
 			DiscoveryURL: discoveryURL,
-			DiscoveryKey: discoveryKey,
 			BaseURL:      baseURL,
-			DataDir:      dataDir,
+			Site:         storage.At(dataDir),
 		}
 		if err := attestation.Register(rec, newID, privKey, cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "[!] Discovery registration skipped: %v\n", err)
@@ -610,11 +609,10 @@ func handleAttestRegister(id string) {
 	}
 	defer signing.ZeroKey(privKey)
 
-	rec, err := attestation.RegisterIssued(dataDir, id, privKey, &attestation.DiscoveryConfig{
+	rec, err := attestation.RegisterIssued(storage.At(dataDir), id, privKey, &attestation.DiscoveryConfig{
 		DiscoveryURL: discoveryURL,
-		DiscoveryKey: discoveryKey,
 		BaseURL:      baseURL,
-		DataDir:      dataDir,
+		Site:         storage.At(dataDir),
 	})
 	if err != nil {
 		exitError("Not registered: %v", err)

@@ -30,7 +30,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
+	"net/url"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -45,6 +46,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	"github.com/vdibart/polis-cli/cli-go/pkg/template"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
@@ -158,6 +160,12 @@ type streamItemResponse struct {
 	// snake_case (bg/fg/border/border_w/pattern/pattern_color) to match the
 	// JS buildAvatar consumer.
 	AuthorAvatar *render.AvatarConfig `json:"author_avatar,omitempty"`
+
+	// Mark is the owner's stream mark for a post a rule picked out
+	// (streammark: "alert", drawn as a "!" in the timeline dot); empty when
+	// no rule matches. Computed here, on the server, so a rule is never
+	// interpreted in the browser.
+	Mark string `json:"mark,omitempty"`
 }
 
 // blessedCommentResponse is the JSON shape the stream emits per blessed
@@ -673,7 +681,8 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No explicit auth gate — owner-trust model (see header comment).
+	// No auth check here: the owner gate refuses an owner-private scope
+	// before this handler runs (ownerGateMiddleware, PQLRequiresOwner).
 
 	// Short-circuit types with no feed-cache representation today
 	// (mentions). The endpoint contract is uniform — same validation
@@ -846,6 +855,10 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 			items = s.populateCommentCountsAndOptionallyFilter(items, withParam == "comments")
 		}
 	} else {
+		// These scopes read the network feed cache (all-polis unions it), which
+		// on a backend that starts on request nothing else refills
+		// (sync_on_request.go).
+		s.syncNetworkOnRequest()
 		cm, opts, err := s.streamCacheForScope(scopeKind, scopeArg)
 		if err != nil {
 			writeStreamError(w, http.StatusBadRequest, err.Error())
@@ -1127,8 +1140,10 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 	// text, so only the commenter needs an avatar here.
 	authorAvatars := s.buildAuthorAvatars(page)
 
+	out := toStreamItemResponses(page, enrich, postComments, titleRedundant, sourcePaths, postBodies, authorAvatars)
+	s.applyStreamMarks(out)
 	resp := map[string]interface{}{
-		"items": toStreamItemResponses(page, enrich, postComments, titleRedundant, sourcePaths, postBodies, authorAvatars),
+		"items": out,
 	}
 	if nextCursor != "" {
 		resp["next_cursor"] = nextCursor
@@ -1193,10 +1208,19 @@ func (s *Server) handleStreamItemsDrafts(w http.ResponseWriter, sortBy string, l
 
 	myDomain := extractDomainFromURL(s.GetBaseURL())
 
-	draftsDir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
-	entries, err := os.ReadDir(draftsDir)
+	const draftsPrefix = ".polis/bundles/pub.polis.core/posts/drafts"
+	st := s.Site().Store()
+	// ⭐ A missing directory is zero drafts, and serves [] where this endpoint
+	// has always served []. List returns empty with no error for a missing
+	// prefix, and items below starts non-nil, so the missing case and the empty
+	// case come out the same without asking about absence separately. A FAILED
+	// listing takes the early return, which serves [] too, as it always has.
+	//
+	// ⚠️ The store stays rooted at the SITE: ListDir's keys are relative to the
+	// directory, and the loop below wants them relative to the site (swapping it
+	// in returned zero drafts for a populated directory, which the tests caught).
+	entries, err := st.List(context.Background(), draftsPrefix)
 	if err != nil {
-		// Missing directory == zero drafts. Same fall-through as /api/drafts.
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1205,17 +1229,25 @@ func (s *Server) handleStreamItemsDrafts(w http.ResponseWriter, sortBy string, l
 		return
 	}
 
-	var items []draftItem
+	// ⭐ Non-nil, so a missing or an empty directory serialises [] rather than
+	// null.
+	items := []draftItem{}
 	for _, ent := range entries {
-		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".md") {
+		if ent.IsDir || !strings.HasSuffix(ent.Key, ".md") {
 			continue
 		}
-		info, err := ent.Info()
+		// ⚠️ A separate Stat per entry, where ReadDir handed one back with
+		// the listing. On a filesystem that is free; on an object store it
+		// is one request per draft. Acceptable for a drafts folder, and the
+		// reason List does not carry metadata is that most callers never
+		// read it. ⚠️ Depends on ModTimes: a draft's mtime IS its displayed
+		// date, so a backend without one shows nothing useful here.
+		info, err := st.Stat(context.Background(), ent.Key)
 		if err != nil {
 			continue
 		}
-		id := strings.TrimSuffix(ent.Name(), ".md")
-		mtime := info.ModTime()
+		id := strings.TrimSuffix(pathpkg.Base(ent.Key), ".md")
+		mtime := info.ModTime
 		item := draftItem{
 			ID:             id,
 			Type:           "post",
@@ -1226,7 +1258,7 @@ func (s *Server) handleStreamItemsDrafts(w http.ResponseWriter, sortBy string, l
 			AuthorDomain:   myDomain,
 		}
 		// Title + excerpt extraction mirrors handleDrafts (handlers.go:500-533).
-		if content, rErr := os.ReadFile(filepath.Join(draftsDir, ent.Name())); rErr == nil {
+		if content, rErr := st.Get(context.Background(), ent.Key); rErr == nil {
 			lines := strings.Split(string(content), "\n")
 			bodyStart := 0
 			for i, line := range lines {
@@ -1789,19 +1821,22 @@ func (s *Server) streamCacheForScope(kind, arg string) (*feed.CacheManager, feed
 // for the duration of the recompute so the second caller gets the
 // freshly-cached value rather than recomputing in parallel.
 func (s *Server) computeMutualsSet() map[string]bool {
-	outboundPath := following.DefaultPath(s.DataDir)
-	store := stream.NewStore(s.DataDir, s.GetDiscoveryDomain(), "pub.polis.core")
-	inboundPath := store.StatePath("pub.polis.follow")
+	store := stream.NewStore(s.Site(), s.GetDiscoveryDomain(), "pub.polis.core")
+	inboundKey := store.StateKey("pub.polis.follow")
 
 	// Stat both source files. If either is missing, the call falls
 	// through to the recompute path (which honestly returns nil).
 	// nil time.Time on stat-error → cache check fails closed.
 	var outboundMt, inboundMt time.Time
-	if info, err := os.Stat(outboundPath); err == nil {
-		outboundMt = info.ModTime()
+	// ⚠️ Depends on ModTimes: this cache is invalidated by comparing stored
+	// mtimes, so a backend that cannot report one leaves both zero and the
+	// cache check fails closed — correct, but it recomputes every time.
+	mutualsStore := s.Site().Store()
+	if info, err := mutualsStore.Stat(context.Background(), following.DefaultKey); err == nil {
+		outboundMt = info.ModTime
 	}
-	if info, err := os.Stat(inboundPath); err == nil {
-		inboundMt = info.ModTime()
+	if info, err := mutualsStore.Stat(context.Background(), inboundKey); err == nil {
+		inboundMt = info.ModTime
 	}
 
 	s.mutualsCacheMu.Lock()
@@ -1831,7 +1866,7 @@ func (s *Server) computeMutualsSet() map[string]bool {
 func (s *Server) computeMutualsSetUncached() map[string]bool {
 	// Outbound (who I follow).
 	outbound := make(map[string]bool)
-	if ff, err := following.Load(following.DefaultPath(s.DataDir)); err == nil && ff != nil {
+	if ff, err := following.LoadSite(s.Site()); err == nil && ff != nil {
 		for _, e := range ff.All() {
 			d := strings.ToLower(extractDomainFromURL(e.URL))
 			if d != "" {
@@ -1844,7 +1879,7 @@ func (s *Server) computeMutualsSetUncached() map[string]bool {
 	}
 
 	// Inbound (who follows me) — load via the stream package's Store.
-	store := stream.NewStore(s.DataDir, s.GetDiscoveryDomain(), "pub.polis.core")
+	store := stream.NewStore(s.Site(), s.GetDiscoveryDomain(), "pub.polis.core")
 	var fs stream.FollowerState
 	if err := store.LoadState("pub.polis.follow", &fs); err != nil {
 		// Missing/empty projection means we have no recorded followers yet.
@@ -1879,7 +1914,7 @@ func (s *Server) computeMutualsSetUncached() map[string]bool {
 // URL is path-only ("/posts/...") matching feed-cache items, so the
 // before_url cursor lookup compares apples to apples.
 func (s *Server) loadOwnContentAsFeedItems(feedType string) ([]feed.CachedFeedItem, map[string]string, error) {
-	entries, err := metadata.LoadPublicIndex(s.DataDir)
+	entries, err := metadata.LoadPublicIndex(s.Site())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1914,7 +1949,7 @@ func (s *Server) loadOwnContentAsFeedItems(feedType string) ([]feed.CachedFeedIt
 		// Failure is non-fatal — empty excerpt is acceptable, the entry still
 		// renders with title + date.
 		var excerpt string
-		if raw, rErr := os.ReadFile(filepath.Join(s.DataDir, e.Path)); rErr == nil {
+		if raw, rErr := s.Site().Store().Get(context.Background(), filepath.ToSlash(e.Path)); rErr == nil {
 			excerpt = makeExcerpt(stripFrontmatter(string(raw)), feed.ExcerptCharCap)
 		}
 		item := feed.CachedFeedItem{
@@ -1959,7 +1994,7 @@ func (s *Server) loadOwnFollowsAsFeedItems(myDomain string) ([]feed.CachedFeedIt
 	out := []feed.CachedFeedItem{}
 
 	// Outbound: who I follow.
-	followFile, err := following.Load(following.DefaultPath(s.DataDir))
+	followFile, err := following.LoadSite(s.Site())
 	if err == nil && followFile != nil {
 		for _, e := range followFile.All() {
 			targetDomain := extractDomainFromURL(e.URL)
@@ -1982,7 +2017,7 @@ func (s *Server) loadOwnFollowsAsFeedItems(myDomain string) ([]feed.CachedFeedIt
 	// no error (fresh tenants have no projection yet).
 	discoveryDomain := s.GetDiscoveryDomain()
 	if discoveryDomain != "" {
-		store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+		store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 		var fs stream.FollowerState
 		if err := store.LoadState("pub.polis.follow", &fs); err == nil {
 			for _, follower := range fs.Followers {
@@ -2104,7 +2139,7 @@ func (s *Server) buildCommentThreadEnrichments(items []feed.CachedFeedItem) map[
 		// reverse mapping that mirrors loadOwnContentAsFeedItems.
 		// Returns "" for remote comments (no local file); the cached
 		// excerpt covers that case in the render branch below.
-		commentBodyMD := readLocalCommentBody(s.DataDir, it.URL)
+		commentBodyMD := readLocalCommentBody(s.Site(), polisurl.ExtractDomain(s.GetBaseURL()), it.URL)
 		infos = append(infos, itemInfo{
 			commentURL:     it.URL,
 			commentMD:      commentBodyMD,
@@ -2134,7 +2169,7 @@ func (s *Server) buildCommentThreadEnrichments(items []feed.CachedFeedItem) map[
 		go func(u string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			entry, ok := render.LoadOrFetchReplyContext(s.DataDir, u, ttl)
+			entry, ok := render.LoadOrFetchReplyContext(s.Site(), u, ttl)
 			results <- fetchResult{url: u, entry: entry, ok: ok}
 		}(targetURL)
 	}
@@ -2240,7 +2275,7 @@ func (s *Server) buildPostCommentEnrichments(items []feed.CachedFeedItem) map[st
 		return out
 	}
 
-	bc, err := metadata.LoadBlessedComments(s.DataDir)
+	bc, err := metadata.LoadBlessedComments(s.Site())
 	if err != nil {
 		return out
 	}
@@ -2263,7 +2298,7 @@ func (s *Server) buildPostCommentEnrichments(items []feed.CachedFeedItem) map[st
 		}
 		rendered := make([]blessedCommentResponse, 0, len(blessed))
 		for _, b := range blessed {
-			html := render.LoadLocalCommentContent(s.DataDir, b.URL)
+			html := render.LoadLocalCommentContent(s.Site(), b.URL)
 			authorName := extractDomainFromURL(b.URL)
 			// Display URL: mount-path .html so the link resolves to a
 			// browsable per-comment page (same convention as
@@ -2313,8 +2348,7 @@ func (s *Server) buildPostTitleRedundancy(items []feed.CachedFeedItem) map[strin
 		}
 		rel := strings.TrimPrefix(it.URL, "/posts/")
 		rel = strings.TrimSuffix(rel, ".html") + ".md"
-		srcPath := filepath.Join(s.DataDir, "content", "pub.polis.core", "post", rel)
-		raw, err := os.ReadFile(srcPath)
+		raw, err := s.Site().Store().Get(context.Background(), "content/pub.polis.core/post/"+filepath.ToSlash(rel))
 		if err != nil {
 			continue
 		}
@@ -2362,7 +2396,7 @@ func (s *Server) buildPostBodies(items []feed.CachedFeedItem, ownDomain string, 
 		if !ok || srcPath == "" {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(s.DataDir, srcPath))
+		raw, err := s.Site().Store().Get(context.Background(), filepath.ToSlash(srcPath))
 		if err != nil {
 			continue
 		}
@@ -2391,13 +2425,35 @@ func (s *Server) buildPostBodies(items []feed.CachedFeedItem, ownDomain string, 
 // the canonical source form (/content/pub.polis.core/comment/…) so it keeps
 // working as the comment URL is canonicalized (Defect 1). Returns the body
 // markdown (frontmatter stripped) or "" on failure.
-func readLocalCommentBody(dataDir, commentURL string) string {
-	rel := polisurl.CommentURLToContentRel(commentURL)
-	if rel == "" {
+// commentURLHost is the host a comment URL names, or "" for a site-relative
+// URL. ⛔ Parsed, never sliced: a string helper reads the first path segment of
+// a relative URL as its "domain".
+func commentURLHost(commentURL string) string {
+	u, err := url.Parse(commentURL)
+	if err != nil {
+		return "\x00unparseable"
+	}
+	return u.Hostname()
+}
+
+func readLocalCommentBody(site storage.Site, ownDomain, commentURL string) string {
+	// ⛔⛔ ONLY THIS SITE'S OWN COMMENTS ARE READ FROM LOCAL STORAGE. The URL
+	// comes from a feed event another site published; reading a local file for
+	// a foreign URL is how a crafted comment URL read a tenant's drafts
+	// anonymously. A foreign comment's body is the cached excerpt, never a
+	// local file.
+	// ⭐ A URL with no host is site-relative: it comes from this site's own
+	// content index and can only name this site. A URL WITH a host must be this
+	// site's. Either way the key is still checked below, so a relative URL
+	// cannot walk out of the comment tree.
+	if host := commentURLHost(commentURL); host != "" && (ownDomain == "" || !strings.EqualFold(host, ownDomain)) {
 		return ""
 	}
-	srcPath := filepath.Join(dataDir, filepath.FromSlash(rel))
-	raw, err := os.ReadFile(srcPath)
+	rel := polisurl.CommentURLToContentRel(commentURL)
+	if rel == "" || !storage.Within(rel, "content/pub.polis.core/comment") {
+		return ""
+	}
+	raw, err := site.Store().Get(context.Background(), rel)
 	if err != nil {
 		return ""
 	}
@@ -2413,7 +2469,7 @@ func readLocalCommentBody(dataDir, commentURL string) string {
 // slice and returns a possibly-filtered slice; non-post items pass through
 // untouched (CommentCount stays zero, item kept).
 func (s *Server) populateCommentCountsAndOptionallyFilter(items []feed.CachedFeedItem, filterWithComments bool) []feed.CachedFeedItem {
-	bc, err := metadata.LoadBlessedComments(s.DataDir)
+	bc, err := metadata.LoadBlessedComments(s.Site())
 	if err != nil {
 		// No blessed.json → no posts have comments. With filter on,
 		// return only non-post items (which means an empty list when
@@ -2831,9 +2887,9 @@ func (s *Server) handleStreamFocusComment(w http.ResponseWriter, r *http.Request
 		if lc.AuthorDomain != "" && lc.AuthorDomain == myDomain {
 			// Owner's OWN comment → its canonical content lives in the owner's
 			// public path (legitimate, not a foreign-content violation).
-			contentHTML = render.LoadOwnCommentContent(s.DataDir, lc.URL)
+			contentHTML = render.LoadOwnCommentContent(s.Site(), lc.URL)
 		} else {
-			contentHTML, _ = render.LoadOrFetchCommentHTML(s.DataDir, lc.URL, 24*time.Hour)
+			contentHTML, _ = render.LoadOrFetchCommentHTML(s.Site(), lc.URL, 24*time.Hour)
 		}
 
 		// Display URL: mount-path .html so the link resolves to a browsable
@@ -2927,7 +2983,7 @@ func (s *Server) handleStreamBody(w http.ResponseWriter, r *http.Request) {
 	// owner's own posts are same-origin (the SPA never proxies them — they
 	// ship body_html inline and are already expanded), so this path is
 	// effectively cross-tenant only.
-	entry, ok := render.LoadOrFetchReplyContext(s.DataDir, postURL, 24*time.Hour)
+	entry, ok := render.LoadOrFetchReplyContext(s.Site(), postURL, 24*time.Hour)
 	resp := streamBodyResponse{HasBody: false}
 	if ok && entry.BodyMD != "" {
 		// Strip the leading title heading (the entry already shows the title)
@@ -2957,7 +3013,7 @@ func (s *Server) handleStreamBody(w http.ResponseWriter, r *http.Request) {
 // MatchesPostPath tolerates the mount-URL / source-path / .html-.md variations,
 // so the absolutized post URL matches the stored post path directly.
 func (s *Server) localFocusComment(postURL string) focusCommentResponse {
-	blessed, err := metadata.GetBlessedCommentsForPost(s.DataDir, postURL)
+	blessed, err := metadata.GetBlessedCommentsForPost(s.Site(), postURL)
 	if err != nil || len(blessed) == 0 {
 		return focusCommentResponse{HasComment: false}
 	}
@@ -2985,7 +3041,7 @@ func (s *Server) localFocusComment(postURL string) focusCommentResponse {
 			AuthorAvatar:   s.commentAuthorAvatar(authorDomain),
 			Published:      latest.BlessedAt,
 			PublishedHuman: template.StripYear(template.FormatHumanDateTime(latest.BlessedAt)),
-			ContentHTML:    render.LoadLocalCommentContent(s.DataDir, latest.URL),
+			ContentHTML:    render.LoadLocalCommentContent(s.Site(), latest.URL),
 		},
 	}
 }
@@ -3241,7 +3297,7 @@ func (s *Server) handleNotificationRules(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	reg, err := bundle.LoadRegistryOrInit(s.DataDir)
+	reg, err := bundle.LoadRegistryOrInit(s.Site())
 	if err != nil {
 		s.LogError("notification rules: load registry: %v", err)
 		writeStreamError(w, http.StatusInternalServerError, "registry unavailable")
@@ -3330,10 +3386,8 @@ func validateClientEventFields(eventName string, in map[string]interface{}) map[
 // reaching s.LogEvent. Prevents log pollution from arbitrary nested
 // structures or unbounded string values.
 //
-// No auth gate today (matches the owner-trust model used by other
-// SPA endpoints — assumes localhost or cookie-bound visitor). Once
-// 6.k auth-aware nav lands, this endpoint should likely gate on the
-// same auth signal. Tracked for 6.p hardening.
+// No auth check here: the route is not on the owner gate's public list,
+// so the gate refuses anyone it does not recognise as the owner.
 func (s *Server) handleClientEvent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

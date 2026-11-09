@@ -1,6 +1,7 @@
 package fleettest
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"strings"
 	"testing"
@@ -99,6 +100,13 @@ func Tenants() []Tenant {
 			s.SignedMarkdown(t, "content/pub.polis.core/post/20260115/hello.md", s.PrivateKey(t), "Hello.\n", published, "", false)
 			s.SignedMarkdown(t, "content/pub.polis.core/comment/20260115/reply.md", s.PrivateKey(t), "A reply.\n", published, s.Domain(), true)
 		}},
+		// posts-ok with no key file: content is verified against the PUBLISHED
+		// key, as the licence is, so a missing key file changes nothing about it.
+		{Name: "posts-key-file-missing", Break: func(t testing.TB, s *Site) {
+			s.SignedMarkdown(t, "content/pub.polis.core/post/20260115/hello.md", s.PrivateKey(t), "Hello.\n", published, "", false)
+			s.SignedMarkdown(t, "content/pub.polis.core/comment/20260115/reply.md", s.PrivateKey(t), "A reply.\n", published, s.Domain(), true)
+			s.Remove(t, ".polis/keys/id_ed25519.pub")
+		}},
 		{Name: "post-tampered", Break: func(t testing.TB, s *Site) {
 			rel := "content/pub.polis.core/post/20260115/hello.md"
 			s.SignedMarkdown(t, rel, s.PrivateKey(t), "Hello.\n", published, "", false)
@@ -176,12 +184,12 @@ func Tenants() []Tenant {
 		{Name: "license-intact", Break: func(t testing.TB, s *Site) { stateLicense(t, s, true) }},
 		{Name: "license-tampered", Break: func(t testing.TB, s *Site) {
 			stateLicense(t, s, true)
-			rel := relTo(t, s, site.LicensePath(s.Dir))
+			rel := site.LicenseKey(storage.At(s.Dir))
 			s.Write(t, rel, strings.Replace(s.Read(t, rel), `"train-ai": "n"`, `"train-ai": "y"`, 1), 0644)
 		}},
 		{Name: "license-dangling", Break: func(t testing.TB, s *Site) {
 			stateLicense(t, s, true)
-			s.Remove(t, relTo(t, s, site.LicensePath(s.Dir)))
+			s.Remove(t, site.LicenseKey(storage.At(s.Dir)))
 		}},
 		{Name: "license-no-pages", Break: func(t testing.TB, s *Site) { stateLicense(t, s, false) }},
 		// Two further states of the published-key change: the licence is
@@ -318,7 +326,7 @@ func Tenants() []Tenant {
 			rel := ".polis/bundles/pub.polis.core/shapes/v4/stream.css"
 			s.Write(t, rel, s.Read(t, rel)+"/* hand edit */\n", 0644)
 		}},
-		{Name: "orphan-theme-dir", Break: func(t testing.TB, s *Site) { s.Mkdir(t, themesDir+"/retired", 0755) }},
+		{Name: "orphan-theme-dir", Break: func(t testing.TB, s *Site) { s.Mkdir(t, themesDir+"/retired", 0700) }},
 		{Name: "legacy-content-path", Break: func(t testing.TB, s *Site) {
 			s.Mkdir(t, ".polis/content/pub.polis.core", 0700)
 		}},
@@ -361,23 +369,14 @@ func typeOf(bundle map[string]any, name string) map[string]any {
 // withPages, publishes the two pages the terms point at.
 func stateLicense(t testing.TB, s *Site, withPages bool) {
 	t.Helper()
-	if _, err := site.StateLicense(s.Dir, "reserved", "https://"+s.Domain(), s.PrivateKey(t)); err != nil {
+	if _, err := site.StateLicense(storage.At(s.Dir), "reserved", "https://"+s.Domain(), s.PrivateKey(t)); err != nil {
 		t.Fatalf("state licence: %v", err)
 	}
 	if !withPages {
 		return
 	}
-	mount := site.LicenseMountDir(s.Dir)
+	mount := site.LicenseMountDir(storage.At(s.Dir))
 	for _, name := range []string{"index.html", "reserved-1.html"} {
 		s.Write(t, mount+"/"+name, "<html></html>\n", 0644)
 	}
-}
-
-func relTo(t testing.TB, s *Site, abs string) string {
-	t.Helper()
-	rel := strings.TrimPrefix(abs, s.Dir+string(os.PathSeparator))
-	if rel == abs {
-		t.Fatalf("%s is not under %s", abs, s.Dir)
-	}
-	return rel
 }

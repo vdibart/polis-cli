@@ -2,13 +2,13 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/agent"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // PromptForRosie asks whether to switch Rosie on, and returns true only for an
@@ -48,15 +48,22 @@ func switchRosieOnAtInit(dir, base, privateKeyPath string) {
 		fmt.Println("    Set POLIS_BASE_URL, then switch her on in the web app (`polis-full serve` or `polis-server`): Settings → Rosie.")
 		return
 	}
-	key, err := os.ReadFile(privateKeyPath)
+	st := storage.NewPOSIX(dir)
+	ctx := context.Background()
+	keyKey, kerr := storage.RelKey(dir, privateKeyPath)
+	var key []byte
+	err := kerr
+	if err == nil {
+		key, err = st.Get(ctx, keyKey)
+	}
 	if err != nil {
-		key, err = os.ReadFile(filepath.Join(dir, ".polis", "keys", "id_ed25519"))
+		key, err = st.Get(ctx, ".polis/keys/id_ed25519")
 	}
 	if err != nil {
 		fmt.Printf("[!] Rosie: not switched on — could not read the site key: %v\n", err)
 		return
 	}
-	w, _, err := agent.Enable(agent.Config{SiteDir: dir, BaseURL: base, PrivateKey: key})
+	w, _, err := agent.Enable(agent.Config{Site: storage.At(dir), BaseURL: base, PrivateKey: key})
 	if err != nil {
 		fmt.Printf("[!] Rosie: not switched on: %v\n", err)
 		return

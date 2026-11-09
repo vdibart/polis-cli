@@ -11,6 +11,10 @@ has not solved. Each section names the detailed page, and most show a live examp
 yourself. Where there is nothing live to point at, a short excerpt stands in and says where it comes
 from.
 
+> **Wanted the shorter way round?** The [illustrated guide](https://polis.pub/for/trust) covers the
+> same ground as a story — one person, seven short chapters — and assumes none of the vocabulary
+> this page takes for granted.
+
 > **About the examples.** Excerpts were fetched from live sites on 2026-09-16 and are abridged:
 > signatures and long keys are cut short with `…`. The linked files are the record. If an excerpt
 > and its link disagree, the link is right and this page is out of date.

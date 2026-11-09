@@ -3,6 +3,7 @@ package sitecheck
 import (
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,7 +83,7 @@ func witnessedSite(t *testing.T, ds kp, keyID string) (dir string, k kp, post st
 	post = signedAt(t, k.priv, "Seen by a witness.\n", "2026-09-13T12:00:00Z", false)
 	writeFile(t, dir, testPostRel, post)
 	w := contentWitnessFor(t, post, testPostURL, k, ds, keyID, "2026-09-13T12:00:01.500Z")
-	if _, err := site.RecordWitness(dir, testPostURL, w); err != nil {
+	if _, err := site.RecordWitness(storage.At(dir), testPostURL, w); err != nil {
 		t.Fatal(err)
 	}
 	return dir, k, post
@@ -131,7 +132,7 @@ func TestAnUncountersignedArtifactStillVerifies(t *testing.T) {
 	// counted, still clean.
 	other := contentWitnessFor(t, signedAt(t, k.priv, "Another post.\n", "2026-09-13T12:00:00Z", false),
 		"https://alice.polis.pub/content/pub.polis.core/post/20260913/other.md", k, genKey(t), "ds-x", "2026-09-13T12:00:02.000Z")
-	if _, err := site.RecordWitness(dir, other.URL, other); err != nil {
+	if _, err := site.RecordWitness(storage.At(dir), other.URL, other); err != nil {
 		t.Fatal(err)
 	}
 	r = RunLocalWith(dir, nil)
@@ -212,7 +213,7 @@ func TestATamperedArtifactWhoseWitnessIsIntactIsNotWitnessed(t *testing.T) {
 		t.Fatalf("the intact witness binds the ORIGINAL signed artifact and must not apply to the rewrite: %+v", c)
 	}
 
-	f, _ := site.LoadWitnesses(dir)
+	f, _ := site.LoadWitnesses(storage.At(dir))
 	got := CheckContentWitnesses(f.For(testPostURL), resBack.ArtifactHash, resBack.CurrentVersion, pinned(ds, "ds-2026"))
 	if got.State != WitnessUnwitnessed || len(got.Checks) != 1 || got.Checks[0].Status != WitnessOtherBytes {
 		t.Fatalf("the witness must be reported as covering other bytes: %+v", got)
@@ -264,7 +265,7 @@ func TestAForgedWitnessFails(t *testing.T) {
 	post := signedAt(t, k.priv, "Forged testimony.\n", "2026-09-13T12:00:00Z", false)
 	writeFile(t, dir, testPostRel, post)
 	w := contentWitnessFor(t, post, testPostURL, k, forger, "ds-2026", "2020-01-01T00:00:00.000Z")
-	if _, err := site.RecordWitness(dir, testPostURL, w); err != nil {
+	if _, err := site.RecordWitness(storage.At(dir), testPostURL, w); err != nil {
 		t.Fatal(err)
 	}
 	r := RunLocalWith(dir, pinned(ds, "ds-2026"))
@@ -311,7 +312,7 @@ func TestAWitnessOfOtherBytesNeverFails(t *testing.T) {
 	// bytes — it does not apply to this artifact at all.
 	stale := signedAt(t, k.priv, "An earlier version.\n", "2026-09-12T12:00:00Z", false)
 	old := contentWitnessFor(t, stale, testPostURL, k, forger, "ds-2026", "2026-09-12T12:00:01.000Z")
-	if _, err := site.RecordWitness(dir, testPostURL, old); err != nil {
+	if _, err := site.RecordWitness(storage.At(dir), testPostURL, old); err != nil {
 		t.Fatal(err)
 	}
 	r := RunLocalWith(dir, pinned(ds, "ds-2026"))
@@ -338,10 +339,10 @@ func TestAForgedRotationWitnessFailsTheKeyHistoryWitnessCheck(t *testing.T) {
 		OldKey: k0.pub, NewKey: k1.pub, Timestamp: ts, TransitionSig: sig,
 		DS: testDS, DSKeyID: "ds-2026", WitnessedAt: "2026-09-15T10:22:03.417Z",
 	}, forger)
-	if err := site.RecordKeyRotation(dir, k1.pub, sig, ts, w); err != nil {
+	if err := site.RecordKeyRotation(storage.At(dir), k1.pub, sig, ts, "", w); err != nil {
 		t.Fatal(err)
 	}
-	if err := site.PublishDIDDocument(dir, "alice.polis.pub"); err != nil {
+	if err := site.PublishDIDDocument(storage.At(dir), "alice.polis.pub"); err != nil {
 		t.Fatal(err)
 	}
 	r := RunLocalWith(dir, pinned(ds, "ds-2026"))
@@ -407,10 +408,10 @@ func TestAWitnessedRotationFillsTheKeyHistoryWitnessCheck(t *testing.T) {
 		OldKey: k0.pub, NewKey: k1.pub, Timestamp: ts, TransitionSig: sig,
 		DS: testDS, DSKeyID: "ds-2026", WitnessedAt: "2026-09-15T10:22:03.417Z",
 	}, ds)
-	if err := site.RecordKeyRotation(dir, k1.pub, sig, ts, w); err != nil {
+	if err := site.RecordKeyRotation(storage.At(dir), k1.pub, sig, ts, "", w); err != nil {
 		t.Fatal(err)
 	}
-	if err := site.PublishDIDDocument(dir, "alice.polis.pub"); err != nil {
+	if err := site.PublishDIDDocument(storage.At(dir), "alice.polis.pub"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -453,10 +454,10 @@ func TestARotationWitnessFarFromValidFromIsReported(t *testing.T) {
 		OldKey: k0.pub, NewKey: k1.pub, Timestamp: ts, TransitionSig: sig,
 		DS: testDS, DSKeyID: "ds-2026", WitnessedAt: "2026-09-16T10:22:03.000Z",
 	}, ds)
-	if err := site.RecordKeyRotation(dir, k1.pub, sig, ts, w); err != nil {
+	if err := site.RecordKeyRotation(storage.At(dir), k1.pub, sig, ts, "", w); err != nil {
 		t.Fatal(err)
 	}
-	site.PublishDIDDocument(dir, "alice.polis.pub")
+	site.PublishDIDDocument(storage.At(dir), "alice.polis.pub")
 	c := findCheck(t, RunLocalWith(dir, pinned(ds, "ds-2026")), "identity.key_history_witness")
 	if c.Outcome != OutcomePassed || len(c.Findings) != 1 || !strings.Contains(c.Findings[0], "24h0m0s from the chain's valid_from") {
 		t.Fatalf("a day between the witness and valid_from must be reported, not judged: %+v", c)

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -119,7 +120,7 @@ func rosieServer(t *testing.T, rule string) (*Server, *fakeDS) {
 	s.Logger = NewLogger(LogLevelBasic, t.TempDir())
 	s.Logger.jsonOutput = true
 
-	_, pub := policy.DefaultPaths(s.DataDir)
+	pub := filepath.Join(s.DataDir, filepath.FromSlash(policy.PublicRulesKey))
 	if err := os.MkdirAll(filepath.Dir(pub), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +241,7 @@ func TestRosieWithNoLiveGrantMakesNoAutoDecision(t *testing.T) {
 func TestRosieAutoGrantIsSignedWithTheUsersKeyAndMarkedInBothPlaces(t *testing.T) {
 	s, ds := rosieServer(t, "bless pub.polis.comment from all")
 	switchRosieOnByDefault(t, s)
-	live, _ := agent.LiveRosieGrant(s.DataDir)
+	live, _ := agent.LiveRosieGrant(s.Site())
 
 	events := captureEvents(t, func() {
 		(&blessingSyncHandler{server: s}).Process([]discovery.StreamEvent{requestedEvent()})
@@ -254,7 +255,7 @@ func TestRosieAutoGrantIsSignedWithTheUsersKeyAndMarkedInBothPlaces(t *testing.T
 		t.Fatalf("relationship request = %+v", req)
 	}
 
-	bc, err := metadata.LoadBlessedComments(s.DataDir)
+	bc, err := metadata.LoadBlessedComments(storage.At(s.DataDir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +270,7 @@ func TestRosieAutoGrantIsSignedWithTheUsersKeyAndMarkedInBothPlaces(t *testing.T
 	if entry == nil || entry.Agent != agent.Rosie || entry.Grant != live.URL() {
 		t.Fatalf("blessed.json entry = %+v", entry)
 	}
-	if st, verr := metadata.VerifyBlessedSite(s.DataDir); st != metadata.StatusValid {
+	if st, verr := metadata.VerifyBlessedSite(storage.At(s.DataDir)); st != metadata.StatusValid {
 		t.Fatalf("blessed.json status = %s (%v), want valid", st, verr)
 	}
 
@@ -282,7 +283,7 @@ func TestRosieAutoGrantIsSignedWithTheUsersKeyAndMarkedInBothPlaces(t *testing.T
 func TestRosieAutoDenyIsMarked(t *testing.T) {
 	s, ds := rosieServer(t, "deny pub.polis.comment from all")
 	switchRosieOnByDefault(t, s)
-	live, _ := agent.LiveRosieGrant(s.DataDir)
+	live, _ := agent.LiveRosieGrant(s.Site())
 	events := captureEvents(t, func() {
 		(&blessingSyncHandler{server: s}).Process([]discovery.StreamEvent{requestedEvent()})
 	})
@@ -311,9 +312,9 @@ func TestReachingTheSigningCallWithoutAGrantSignsNothing(t *testing.T) {
 	if s.PrivateKey == nil || !s.RestrictDMEgress {
 		t.Fatal("fixture is not the hosted shape")
 	}
-	before, _ := os.ReadFile(metadata.BlessedPath(s.DataDir))
+	before, _ := os.ReadFile(filepath.Join(s.DataDir, metadata.BlessedKey))
 	req := rosieRequest{CommentURL: rosieCommentURL, InReplyTo: rosiePostURL, TargetDomain: "test-site.polis.pub", Actor: "bob.polis.pub"}
-	client := discovery.NewClient(ds.srv.URL, "")
+	client := discovery.NewClient(ds.srv.URL)
 
 	for _, decision := range []policy.Decision{policy.Bless, policy.Deny} {
 		var signed bool
@@ -331,7 +332,7 @@ func TestReachingTheSigningCallWithoutAGrantSignsNothing(t *testing.T) {
 	if ds.writeCount() != 0 {
 		t.Fatalf("%d relationship requests sent", ds.writeCount())
 	}
-	if after, _ := os.ReadFile(metadata.BlessedPath(s.DataDir)); string(after) != string(before) {
+	if after, _ := os.ReadFile(filepath.Join(s.DataDir, metadata.BlessedKey)); string(after) != string(before) {
 		t.Fatal("blessed.json changed")
 	}
 }
@@ -412,7 +413,7 @@ func TestRosiesOwnEchoLeavesTheListSignedAndMarked(t *testing.T) {
 	switchRosieOnByDefault(t, s)
 	h := &blessingSyncHandler{server: s}
 	h.Process([]discovery.StreamEvent{requestedEvent()})
-	before, _ := os.ReadFile(metadata.BlessedPath(s.DataDir))
+	before, _ := os.ReadFile(filepath.Join(s.DataDir, metadata.BlessedKey))
 
 	h.Process([]discovery.StreamEvent{{
 		Type:  "pub.polis.comment.blessing.granted",
@@ -423,11 +424,11 @@ func TestRosiesOwnEchoLeavesTheListSignedAndMarked(t *testing.T) {
 			"target_url":    rosiePostURL,
 		},
 	}})
-	after, _ := os.ReadFile(metadata.BlessedPath(s.DataDir))
+	after, _ := os.ReadFile(filepath.Join(s.DataDir, metadata.BlessedKey))
 	if string(before) != string(after) {
 		t.Fatalf("the echo rewrote blessed.json:\nbefore: %s\nafter:  %s", before, after)
 	}
-	if st, _ := metadata.VerifyBlessedSite(s.DataDir); st != metadata.StatusValid {
+	if st, _ := metadata.VerifyBlessedSite(storage.At(s.DataDir)); st != metadata.StatusValid {
 		t.Fatalf("list status after the echo = %s", st)
 	}
 }

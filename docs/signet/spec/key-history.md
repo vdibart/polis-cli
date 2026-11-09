@@ -80,6 +80,7 @@ It mirrors `public_key_messages`, the block that already publishes the DM messag
 | `valid_until` | When it stopped. **Absent on `current`: being current IS the absence of an end.** |
 | `transition_sig` | The **predecessor** key's signature over the canonical rotation message that handed authority to this key. **`null` on genesis** — nothing preceded the first key, and that is the honest value, not a placeholder. |
 | `witnesses` | **Optional.** Discovery-service countersignatures over the rotation that made this key current — the date the chain cannot supply for itself. Record format: [witness §4–5](witness.md). **Absent means unwitnessed, never invalid.** Not covered by `transition_sig`. |
+| `signing_domain` | **Optional.** The domain that went into this entry's canonical rotation message — the domain the predecessor key signed the handover under. **Absent means the domain the chain is read from**, which is what every entry meant before this field existed. **Never on genesis** (nothing was signed). Not covered by `transition_sig`: it is an input to the signed message, not part of the entry that is signed. ⚠️ **It does not say where this key is published.** See §4, *`domain`*. |
 
 **Three things the JSON encoding must get right:**
 
@@ -89,6 +90,8 @@ It mirrors `public_key_messages`, the block that already publishes the DM messag
   *"This document does not model history"* is a different one.
 - ⚠️ **`witnesses` is the opposite: omitted entirely when there are none.** A site that never rotated,
   or rotated before its discovery service witnessed rotations, publishes a byte-identical document.
+- ⚠️ **So is `signing_domain`: omitted when absent.** Every chain written before it existed — and every
+  entry written by the feature-frozen bash CLI, which does not record it — is byte-identical.
 
 **Order:** `history` is **oldest-first**, so `history[last]` is the key `current` succeeded.
 
@@ -110,6 +113,16 @@ key is authoritative*; a signature made by the key under question proves nothing
 The per-entry `transition_sig` is the right proof, and both rotation paths already produce it: each
 entry is signed by the key it succeeds, so the chain proves itself link by link.
 
+⛔ **So a writer signs each handover with the chain's head, or does not rotate.** The head is the key
+`.well-known/polis` publishes. A handover signed by any other key appends an entry that never verifies,
+and a chain is never rebuilt. Every polis rotation path therefore refuses to start when the key on disk
+is not the published one, judging the key on disk by the **private** key, not only by `id_ed25519.pub`:
+the install writes the private key first, so after a crash between the two writes the `.pub` still names
+the old key. And it keeps the retired private key (`.polis/keys/id_ed25519.prev`), and the
+staged new one (`id_ed25519.new`), from the moment the new key is installed until the handover is
+recorded. Then a rotation interrupted in between is **finished** by the next run, which signs the
+handover with the retired key. Both files are removed once the entry is written.
+
 ⭐ **And `.well-known/polis` being unsigned is a feature here, not a gap.** It is the trust root. You
 verify it by fetching it from the domain over TLS, which is the same act that establishes the domain
 is the domain. Signing it would mean signing with a key the document exists to publish.
@@ -124,7 +137,7 @@ entry.transition_sig  must verify against  <the previous entry>.key
 over the canonical JSON:
 
   {"action":"key-rotation",
-   "domain":"<site host>",
+   "domain":"<entry.signing_domain, or the site host when absent>",
    "new_key":"<entry.key>",
    "old_key":"<previous entry.key>",
    "timestamp":"<entry.valid_from>"}
@@ -150,8 +163,27 @@ lexicographic comparison equal time comparison.)
 
 ### `domain`
 
-The domain is **inside** the signature and is **not** recorded anywhere in `.well-known/polis`. A
-verifier gets it from context:
+The domain is **inside** the signature. **It is per entry:** a verifier rebuilds each entry's message
+with that entry's own `signing_domain` when it carries one, and with the domain the chain is read from
+when it does not. An absent `signing_domain` is therefore today's behaviour, and correct for every
+handover signed where the chain is now published.
+
+⚠️ **On a branched site the current entry names the OLD domain.** Moving a site to a new address
+rotates its key, and the handover is signed under the domain the site is leaving; the chain is then
+published at the new one. So `signing_domain` on `current` names where the site **was**, not where
+the key is published — and a reader who takes it for the key's address has it backwards. Where the
+key is published is wherever `.well-known/polis` was fetched from. Without the field, every handover
+signed at the old address would fail at the new one, and a chain is never re-signed.
+
+⭐ **Announcing the branch to the network is optional and separate.** A branched site may present
+that handover to its discovery service (`POST /v1/sites/branched`, `polis branch announce`), which checks
+it against the key it witnessed the source holding at the handover's `valid_from` and emits
+`pub.polis.site.branched`. ⛔ **The event shows descent, never consent:** anyone holding the source's
+key at that instant could have signed the handover, and the event says nothing about whether the
+source's owner agrees or whether the source still publishes. It changes nothing of the source's, and
+the chain verifies the same with or without it. Its witness record is [witness](witness.md) §4.2.
+
+When an entry carries no `signing_domain`, the verifier gets the domain from context:
 
 | Verifier | Where the domain comes from |
 |---|---|
@@ -161,7 +193,7 @@ verifier gets it from context:
 
 ⛔ **A verifier that cannot determine the domain must report that it could not check a chain with
 rotations — never that the chain passed.** A genesis-only chain has nothing signed and verifies
-without a domain.
+without a domain, and so does a chain whose every handover names its `signing_domain`.
 
 ### What else to check
 
@@ -218,8 +250,11 @@ JSON types. For a post or comment served by a site:
 **The same walk, for the signed JSON types.** Only the claimed signing time `t` changes: an
 attestation's `asserted`, a tag file's or a licence's `updated` — each inside its own signature.
 ⚠️ **The follow file and the blessing list carry no signing time**, so there is no `t` to resolve and
-they verify against the **current key only**: one signed before a rotation reads `invalid` until its
-author's next write re-signs it ([`attestation.md`](attestation.md), each file's *Verifying*).
+they verify against the **current key only**. The author's rotation therefore re-signs both with the
+new key, but ⛔ **only a file that verified under the old one**: anything else is left exactly as it
+was, so a rotation never turns a failing file into a valid one. A file signed under a retired key by
+some other route reads `invalid` until its author's next write re-signs it
+([`attestation.md`](attestation.md), each file's *Verifying*).
 
 ⛔ **What a retired-key pass means, stated precisely:**
 
@@ -341,7 +376,9 @@ Regenerate the document from the block; never author it.
 `public_key` and the chain head must move **in one write**. A site whose published key its own history
 never learned about is exactly the failure this document exists to prevent, and it is what happens
 when two independent rotation implementations drift. polis routes all three of its rotation paths — the
-Go CLI, the webapp handler, and the bash CLI — through a single append.
+Go CLI, the webapp handler, and the bash CLI — through a single append. The two Go paths record
+`signing_domain` on every entry they append; the bash CLI records none, which reads as the domain the
+chain is published at — the domain bash signed under.
 
 **Genesis** is written once, from facts the site already publishes:
 

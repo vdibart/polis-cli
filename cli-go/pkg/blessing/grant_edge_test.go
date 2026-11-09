@@ -2,6 +2,7 @@ package blessing
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -231,7 +232,7 @@ func TestGrant_ConcurrentGrants_AllEntriesLandInIndex(t *testing.T) {
 	// writes. If this assertion ever fails again, the mutex was
 	// bypassed — check for new call sites that use SaveBlessedComments
 	// directly without going through Add/Remove.
-	bc, err := metadata.LoadBlessedComments(siteDir)
+	bc, err := metadata.LoadBlessedComments(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
 	}

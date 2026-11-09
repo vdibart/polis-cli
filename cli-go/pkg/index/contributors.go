@@ -1,10 +1,12 @@
 package index
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,6 +15,8 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // ⛔ This package does NOT import pkg/attestation or pkg/tag, and must not.
@@ -116,36 +120,39 @@ func ContributorFor(entryType string) (Contributor, bool) {
 // hardcoded content/pub.polis.core would be wrong on any site that moved one.
 //
 // Same shape as clone's dirResolver (epic 20), for the same reason.
+//
+// ⭐ Everything it returns is a KEY, read through the site's store, so a
+// rebuild runs the same on a site with no filesystem.
 type siteDirs struct {
-	siteDir string
+	site    storage.Site
 	bundles []*bundle.Bundle
-	root    string // site-relative dir holding the core bundle's content
+	root    string // site-relative key prefix holding the core bundle's content
 }
 
-func newSiteDirs(siteDir string) *siteDirs {
-	d := &siteDirs{siteDir: siteDir}
+func newSiteDirs(site storage.Site) *siteDirs {
+	d := &siteDirs{site: site}
 
-	for name, rel := range bundlePointers(siteDir) {
-		b, err := bundle.LoadBundle(filepath.Join(siteDir, rel))
+	for name, key := range bundlePointers(site) {
+		b, err := bundle.LoadBundleAt(site, key)
 		if err != nil {
 			continue
 		}
 		d.bundles = append(d.bundles, b)
 		if name == "pub.polis.core" || b.Name == "pub.polis.core" {
-			d.root = filepath.ToSlash(filepath.Dir(rel))
+			d.root = path.Dir(key)
 		}
 	}
 
 	// No pointer, or nothing it named could be loaded: fall back to the
 	// default layout, which is what an un-customised site has anyway.
 	if len(d.bundles) == 0 {
-		if b, err := bundle.LoadBundle(filepath.Join(siteDir, "content", "pub.polis.core", "bundle.json")); err == nil {
+		if b, err := bundle.LoadBundleAt(site, "content/pub.polis.core/bundle.json"); err == nil {
 			d.bundles = append(d.bundles, b)
 		} else {
 			d.bundles = append(d.bundles, bundle.DefaultCoreBundle())
 		}
 	}
-	if d.root == "" {
+	if d.root == "" || d.root == "." {
 		d.root = "content/pub.polis.core"
 	}
 
@@ -156,11 +163,16 @@ func newSiteDirs(siteDir string) *siteDirs {
 }
 
 // bundlePointers reads the `bundles` block of .well-known/polis as
-// name → site-relative path of its bundle.json. A minimal local read, like
-// clone's: the full identity document has many fields this has no business
-// modelling.
-func bundlePointers(siteDir string) map[string]string {
-	data, err := os.ReadFile(filepath.Join(siteDir, ".well-known", "polis"))
+// name → key of its bundle.json. A minimal local read, like clone's: the full
+// identity document has many fields this has no business modelling.
+//
+// ⚠️ A pointer that does not clean to a key inside the site is dropped, as one
+// naming a missing file is: the default layout is the fallback for both.
+func bundlePointers(site storage.Site) map[string]string {
+	if !site.Valid() {
+		return nil
+	}
+	data, err := site.Store().Get(context.Background(), ".well-known/polis")
 	if err != nil {
 		return nil
 	}
@@ -174,65 +186,118 @@ func bundlePointers(siteDir string) map[string]string {
 	}
 	out := map[string]string{}
 	for name, entry := range wk.Bundles {
-		if entry.Path != "" {
-			out[name] = filepath.FromSlash(strings.TrimPrefix(entry.Path, "/"))
+		if entry.Path == "" {
+			continue
 		}
+		key, err := storage.CleanKey(strings.TrimPrefix(filepath.ToSlash(entry.Path), "/"))
+		if err != nil || key == "" {
+			continue
+		}
+		out[name] = key
 	}
 	return out
 }
 
-// contentRel returns the site-relative source directory for a content type,
+// contentKey returns the site-relative source key prefix for a content type,
 // falling back to the default layout leaf when nothing declares it.
-func (d *siteDirs) contentRel(typeName, fallbackLeaf string) string {
+func (d *siteDirs) contentKey(typeName, fallbackLeaf string) string {
 	for _, b := range d.bundles {
 		if dir, err := b.ContentDir(typeName); err == nil {
-			return filepath.ToSlash(dir)
+			return strings.TrimSuffix(filepath.ToSlash(dir), "/")
 		}
 	}
 	return d.root + "/" + fallbackLeaf
 }
 
-// contentAbs is contentRel rooted at the site directory.
-func (d *siteDirs) contentAbs(typeName, fallbackLeaf string) string {
-	return filepath.Join(d.siteDir, filepath.FromSlash(d.contentRel(typeName, fallbackLeaf)))
+// IndexKey returns the key of index.jsonl for a site, resolved through the
+// bundle pointer rather than assumed.
+func IndexKey(site storage.Site) string {
+	return newSiteDirs(site).indexKey()
 }
 
-// IndexPath returns the absolute path of index.jsonl for a site, resolved
-// through the bundle pointer rather than assumed.
-func IndexPath(siteDir string) string {
-	return newSiteDirs(siteDir).indexPath()
-}
-
-func (d *siteDirs) indexPath() string {
-	return filepath.Join(d.siteDir, filepath.FromSlash(d.root), metadata.PublicIndexFilename)
-}
-
-// relPath converts an absolute path under the site into the slash-separated
-// site-relative form every index entry uses.
-func (d *siteDirs) relPath(abs string) string {
-	rel, err := filepath.Rel(d.siteDir, abs)
-	if err != nil {
-		return filepath.ToSlash(abs)
-	}
-	return filepath.ToSlash(rel)
+func (d *siteDirs) indexKey() string {
+	return d.root + "/" + metadata.PublicIndexFilename
 }
 
 // ─── the contributors ───────────────────────────────────────────────
 
-// walkFiles visits every non-directory file under dir with the given suffix,
-// skipping version snapshots. A missing directory yields nothing and is not an
+// walkFiles visits the key of every file under prefix with the given suffix,
+// skipping version snapshots. A missing prefix yields nothing and is not an
 // error: a site with no attestations is not a broken site.
-func walkFiles(dir, suffix string, visit func(path string)) error {
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
+//
+// ⛔ TWO WALKS, AND THE FIRST IS NOT A LEFTOVER. On a store with a real path
+// the walk is filepath.Walk, because its ERROR HANDLING is the feature: an
+// unreadable entry is handed to the visitor so the skip gets counted rather
+// than silently dropped, and a recursive List cannot express "this one entry
+// could not be read" — it fails the whole call or returns nothing. Replacing
+// it would turn a counted skip into a vanished one.
+//
+// ⭐ On a store with no filesystem there are no unreadable directory entries
+// to count: an object is listed or the listing fails. So there the walk is a
+// recursive List, whose error is returned — "could not look" — and a missing
+// prefix lists empty, which is "nothing there".
+func walkFiles(site storage.Site, prefix, suffix string, visit func(key string)) error {
+	st := site.Store()
+	if st.Capabilities().RealPath {
+		dir, err := st.RealPath(prefix)
+		if err != nil {
+			return err
+		}
+		root, err := st.RealPath("")
+		if err != nil {
+			return err
+		}
+		return walkDir(root, dir, suffix, visit)
+	}
+
+	entries, err := st.List(context.Background(), prefix, storage.Recursive())
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir || !strings.HasSuffix(e.Key, suffix) {
+			continue
+		}
+		if inVersions(strings.TrimPrefix(e.Key, prefix+"/")) {
+			continue
+		}
+		visit(e.Key)
+	}
+	return nil
+}
+
+// inVersions reports whether a key below the walked prefix sits inside a
+// .versions directory, which holds snapshots rather than content.
+func inVersions(rel string) bool {
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == ".versions" {
+			return true
+		}
+	}
+	return false
+}
+
+// walkDir is the filesystem walk: see walkFiles for why it stays one.
+func walkDir(root, dir, suffix string, visit func(key string)) error {
+	if absent, _ := storage.PathAbsent(dir); absent {
 		return nil
 	}
-	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	keyOf := func(p string) string {
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return filepath.ToSlash(p)
+		}
+		return filepath.ToSlash(rel)
+	}
+	// NOT the storage interface, for this walk: its ERROR HANDLING is the
+	// feature (see walkFiles).
+	return filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			// Unreadable entry: don't abort the walk, and don't lose it either —
 			// hand it to the contributor, whose read fails and COUNTS the skip.
 			// A subdirectory that cannot be listed is counted once.
-			if info == nil || info.IsDir() || strings.HasSuffix(path, suffix) {
-				visit(path)
+			if info == nil || info.IsDir() || strings.HasSuffix(p, suffix) {
+				visit(keyOf(p))
 			}
 			return nil
 		}
@@ -245,9 +310,14 @@ func walkFiles(dir, suffix string, visit func(path string)) error {
 		if !strings.HasSuffix(info.Name(), suffix) {
 			return nil
 		}
-		visit(path)
+		visit(keyOf(p))
 		return nil
 	})
+}
+
+// read returns the bytes at key.
+func (d *siteDirs) read(key string) ([]byte, error) {
+	return d.site.Store().Get(context.Background(), key)
 }
 
 // postEntries indexes the markdown under the post type's directory.
@@ -259,19 +329,19 @@ func walkFiles(dir, suffix string, visit func(path string)) error {
 // unconditionally, which is one of the ways its lines stopped matching
 // publish's.
 func postEntries(d *siteDirs) ([]metadata.IndexEntry, int, error) {
-	return markdownEntries(d, EntryTypePost, d.contentAbs("pub.polis.post", "post"), false)
+	return markdownEntries(d, EntryTypePost, d.contentKey("pub.polis.post", "post"), false)
 }
 
 // commentEntries indexes the markdown under the comment type's directory.
 func commentEntries(d *siteDirs) ([]metadata.IndexEntry, int, error) {
-	return markdownEntries(d, EntryTypeComment, d.contentAbs("pub.polis.comment", "comment"), true)
+	return markdownEntries(d, EntryTypeComment, d.contentKey("pub.polis.comment", "comment"), true)
 }
 
 func markdownEntries(d *siteDirs, entryType, dir string, withReply bool) ([]metadata.IndexEntry, int, error) {
 	var entries []metadata.IndexEntry
 	skipped := 0
-	err := walkFiles(dir, ".md", func(path string) {
-		data, err := os.ReadFile(path)
+	err := walkFiles(d.site, dir, ".md", func(key string) {
+		data, err := d.read(key)
 		if err != nil {
 			// Walked and not indexed: counted like every other skip, never
 			// dropped in silence (close-out F15).
@@ -310,7 +380,7 @@ func markdownEntries(d *siteDirs, entryType, dir string, withReply bool) ([]meta
 
 		entry := metadata.IndexEntry{
 			Type:           entryType,
-			Path:           d.relPath(path),
+			Path:           key,
 			Title:          fm["title"],
 			Published:      published,
 			CurrentVersion: version,
@@ -334,7 +404,7 @@ func markdownEntries(d *siteDirs, entryType, dir string, withReply bool) ([]meta
 func tagEntries(d *siteDirs) ([]metadata.IndexEntry, int, error) {
 	var entries []metadata.IndexEntry
 	skipped := 0
-	err := walkFiles(d.contentAbs("pub.polis.tag", "tag"), ".json", func(path string) {
+	err := walkFiles(d.site, d.contentKey("pub.polis.tag", "tag"), ".json", func(key string) {
 		// The fields of tag.TagFile an entry needs — see the import note.
 		var tf struct {
 			Tag     string `json:"tag"`
@@ -342,7 +412,7 @@ func tagEntries(d *siteDirs) ([]metadata.IndexEntry, int, error) {
 			Updated string `json:"updated"`
 			Version string `json:"current_version"`
 		}
-		if !readJSON(path, &tf) {
+		if !d.readJSON(key, &tf) {
 			skipped++
 			return
 		}
@@ -356,7 +426,7 @@ func tagEntries(d *siteDirs) ([]metadata.IndexEntry, int, error) {
 		}
 		entries = append(entries, metadata.IndexEntry{
 			Type:           EntryTypeTag,
-			Path:           d.relPath(path),
+			Path:           key,
 			Title:          tf.Tag,
 			Published:      published,
 			CurrentVersion: tf.Version,
@@ -373,14 +443,14 @@ func tagEntries(d *siteDirs) ([]metadata.IndexEntry, int, error) {
 func attestationEntries(d *siteDirs) ([]metadata.IndexEntry, int, error) {
 	var entries []metadata.IndexEntry
 	skipped := 0
-	err := walkFiles(d.contentAbs(attestationTypeName, "attestation"), ".json", func(path string) {
+	err := walkFiles(d.site, d.contentKey(attestationTypeName, "attestation"), ".json", func(key string) {
 		// The fields of attestation.Record an entry needs — see the import note.
 		var r struct {
 			Predicate string `json:"predicate"`
 			Asserted  string `json:"asserted"`
 			Version   string `json:"current_version"`
 		}
-		if !readJSON(path, &r) {
+		if !d.readJSON(key, &r) {
 			skipped++
 			return
 		}
@@ -390,7 +460,7 @@ func attestationEntries(d *siteDirs) ([]metadata.IndexEntry, int, error) {
 		}
 		entries = append(entries, metadata.IndexEntry{
 			Type:           EntryTypeAttestation,
-			Path:           d.relPath(path),
+			Path:           key,
 			Title:          r.Predicate,
 			Published:      r.Asserted,
 			CurrentVersion: r.Version,
@@ -399,9 +469,9 @@ func attestationEntries(d *siteDirs) ([]metadata.IndexEntry, int, error) {
 	return entries, skipped, err
 }
 
-// readJSON decodes a record file, reporting whether it could.
-func readJSON(path string, v any) bool {
-	data, err := os.ReadFile(path)
+// readJSON decodes a record, reporting whether it could.
+func (d *siteDirs) readJSON(key string, v any) bool {
+	data, err := d.read(key)
 	if err != nil {
 		return false
 	}

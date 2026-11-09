@@ -1,6 +1,7 @@
 package attestation
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,7 +44,7 @@ func rotateSiteKey(t *testing.T, dir, domain string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := site.RecordKeyRotation(dir, newPub, sig, validFrom); err != nil {
+	if err := site.RecordKeyRotation(storage.At(dir), newPub, sig, validFrom, ""); err != nil {
 		t.Fatalf("RecordKeyRotation: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, ".polis", "keys", "id_ed25519"), newPriv, 0600); err != nil {
@@ -58,7 +59,7 @@ func rotateSiteKey(t *testing.T, dir, domain string) []byte {
 func TestARecordSignedBeforeARotationStillVerifiesAndCanBeWithdrawn(t *testing.T) {
 	dir := t.TempDir()
 	const base = "https://alice.polis.pub"
-	if _, err := site.Init(dir, site.InitOptions{BaseURL: base, SiteTitle: "alice"}); err != nil {
+	if _, err := site.Init(storage.At(dir), site.InitOptions{BaseURL: base, SiteTitle: "alice"}); err != nil {
 		t.Fatal(err)
 	}
 	oldPriv, _ := os.ReadFile(filepath.Join(dir, ".polis", "keys", "id_ed25519"))
@@ -70,25 +71,25 @@ func TestARecordSignedBeforeARotationStillVerifiesAndCanBeWithdrawn(t *testing.T
 			GrantKeyBehaviours: "rosie/1", CustodyKeyBasis: CustodyBasisHostingTerms,
 		},
 	}
-	id, err := Issue(dir, rec, oldPriv)
+	id, err := Issue(storage.At(dir), rec, oldPriv)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	newPriv := rotateSiteKey(t, dir, "alice.polis.pub")
 
-	loaded, _ := Load(Path(dir, id))
-	status, retired, err := VerifyRecordResolved(dir, loaded)
+	loaded, _ := Load(storage.At(dir), id)
+	status, retired, err := VerifyRecordResolved(storage.At(dir), loaded)
 	if status != StatusValid || retired == nil {
 		t.Fatalf("pre-rotation record = %s (retired entry %v, err %v), want valid via the retired key", status, retired, err)
 	}
-	if g, _ := ResolveLiveGrant(dir, "rosie", "rosie", 1); !g.Valid() {
+	if g, _ := ResolveLiveGrant(storage.At(dir), "rosie", "rosie", 1); !g.Valid() {
 		t.Fatal("a grant signed before the rotation no longer resolves as live")
 	}
-	if _, err := Withdraw(dir, id, newPriv); err != nil {
+	if _, err := Withdraw(storage.At(dir), id, newPriv); err != nil {
 		t.Fatalf("withdrawing a pre-rotation record failed: %v", err)
 	}
-	if g, _ := ResolveLiveGrant(dir, "rosie", "rosie", 1); g != nil {
+	if g, _ := ResolveLiveGrant(storage.At(dir), "rosie", "rosie", 1); g != nil {
 		t.Fatal("the withdrawn grant still resolves")
 	}
 }
@@ -97,12 +98,12 @@ func TestARecordSignedBeforeARotationStillVerifiesAndCanBeWithdrawn(t *testing.T
 func TestAnUntrustedKeyHistoryResolvesNothing(t *testing.T) {
 	dir := t.TempDir()
 	const base = "https://alice.polis.pub"
-	if _, err := site.Init(dir, site.InitOptions{BaseURL: base, SiteTitle: "alice"}); err != nil {
+	if _, err := site.Init(storage.At(dir), site.InitOptions{BaseURL: base, SiteTitle: "alice"}); err != nil {
 		t.Fatal(err)
 	}
 	oldPriv, _ := os.ReadFile(filepath.Join(dir, ".polis", "keys", "id_ed25519"))
 	rec := &Record{Issuer: base, Predicate: PredicateEndorsement, Subject: Subject{Type: SubjectIdentity, ID: "https://bob.example"}}
-	id, err := Issue(dir, rec, oldPriv)
+	id, err := Issue(storage.At(dir), rec, oldPriv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,11 +111,11 @@ func TestAnUntrustedKeyHistoryResolvesNothing(t *testing.T) {
 	newPriv, newPubRaw, _ := signing.GenerateKeypair()
 	_ = newPriv
 	validFrom := time.Now().UTC().Add(2 * time.Minute).Format("2006-01-02T15:04:05Z")
-	if err := site.RecordKeyRotation(dir, strings.TrimSpace(string(newPubRaw)), "not-a-signature", validFrom); err != nil {
+	if err := site.RecordKeyRotation(storage.At(dir), strings.TrimSpace(string(newPubRaw)), "not-a-signature", validFrom, ""); err != nil {
 		t.Fatal(err)
 	}
-	loaded, _ := Load(Path(dir, id))
-	if status, _, _ := VerifyRecordResolved(dir, loaded); status == StatusValid {
+	loaded, _ := Load(storage.At(dir), id)
+	if status, _, _ := VerifyRecordResolved(storage.At(dir), loaded); status == StatusValid {
 		t.Fatal("an untrusted key history resolved a retired key")
 	}
 }

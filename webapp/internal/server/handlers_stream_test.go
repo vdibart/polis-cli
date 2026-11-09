@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -60,7 +61,7 @@ func streamRequest(t *testing.T, s *Server, query string) (int, map[string]inter
 // items so structured-query tests have data to filter against.
 func seedNetworkFeed(t *testing.T, s *Server, items []feed.FeedItem) {
 	t.Helper()
-	cm := feed.NewCacheManager(s.DataDir, "default")
+	cm := feed.NewCacheManager(s.Site(), "default")
 	if _, err := cm.MergeItems(items); err != nil {
 		t.Fatalf("seed feed: %v", err)
 	}
@@ -202,7 +203,7 @@ func TestStreamItems_ScopeMyAuthorFilter(t *testing.T) {
 	if err := os.WriteFile(full, []byte("---\ntitle: Mine\n---\nbody"), 0644); err != nil {
 		t.Fatalf("write post: %v", err)
 	}
-	if err := metadata.AppendPostToIndex(s.DataDir, postPath, "Mine", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:mine"); err != nil {
+	if err := metadata.AppendPostToIndex(storage.At(s.DataDir), postPath, "Mine", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:mine"); err != nil {
 		t.Fatalf("append index: %v", err)
 	}
 	// Cross-tenant post in the network cache (for scope=my-network /
@@ -285,7 +286,7 @@ func TestStreamItems_OwnContentCarriesSourcePath(t *testing.T) {
 	if err := os.WriteFile(full, []byte("---\ntitle: Mine\n---\nbody"), 0644); err != nil {
 		t.Fatalf("write post: %v", err)
 	}
-	if err := metadata.AppendPostToIndex(s.DataDir, postPath, "Mine", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:srcpath"); err != nil {
+	if err := metadata.AppendPostToIndex(storage.At(s.DataDir), postPath, "Mine", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:srcpath"); err != nil {
 		t.Fatalf("append index: %v", err)
 	}
 
@@ -331,7 +332,7 @@ func TestStreamItems_QualifierFiltersUnread(t *testing.T) {
 		{Type: "post", Title: "B", URL: "posts/b.md", Published: now.Add(-2 * time.Hour).Format(time.RFC3339), AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
 	})
 
-	cm := feed.NewCacheManager(s.DataDir, "default")
+	cm := feed.NewCacheManager(s.Site(), "default")
 	// Mark A as read by looking up its ID first.
 	all, err := cm.List()
 	if err != nil {
@@ -606,7 +607,7 @@ func TestStreamItems_CORSAndOptions(t *testing.T) {
 	// GET should set CORS *
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/items?type=posts&time=24h", nil)
 	w := httptest.NewRecorder()
-	publicContentMiddleware(sharedPublicContentLimiter, false, s.handleStreamItems)(w, req)
+	publicContentMiddleware(sharedPublicContentLimiter, ProxyNone, s.handleStreamItems)(w, req)
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Errorf("GET CORS: expected '*', got %q", got)
 	}
@@ -615,7 +616,7 @@ func TestStreamItems_CORSAndOptions(t *testing.T) {
 	preflightLimiter := newPublicContentLimiter(publicContentRateLimit, publicContentRateWindow)
 	req = httptest.NewRequest(http.MethodOptions, "/api/v1/stream/items", nil)
 	w = httptest.NewRecorder()
-	publicContentMiddleware(preflightLimiter, false, s.handleStreamItems)(w, req)
+	publicContentMiddleware(preflightLimiter, ProxyNone, s.handleStreamItems)(w, req)
 	if w.Code != http.StatusNoContent {
 		t.Errorf("OPTIONS: expected 204, got %d", w.Code)
 	}
@@ -636,7 +637,7 @@ func TestStreamItems_RateLimitTriggers429(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/items?type=posts&time=24h", nil)
 		req.RemoteAddr = "203.0.113.42:54321"
 		w := httptest.NewRecorder()
-		publicContentMiddleware(tinyLimiter, false, s.handleStreamItems)(w, req)
+		publicContentMiddleware(tinyLimiter, ProxyNone, s.handleStreamItems)(w, req)
 		if w.Code != http.StatusOK {
 			t.Fatalf("request %d under cap: expected 200, got %d", i+1, w.Code)
 		}
@@ -646,7 +647,7 @@ func TestStreamItems_RateLimitTriggers429(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/items?type=posts&time=24h", nil)
 	req.RemoteAddr = "203.0.113.42:54321"
 	w := httptest.NewRecorder()
-	publicContentMiddleware(tinyLimiter, false, s.handleStreamItems)(w, req)
+	publicContentMiddleware(tinyLimiter, ProxyNone, s.handleStreamItems)(w, req)
 	if w.Code != http.StatusTooManyRequests {
 		t.Errorf("third request: expected 429, got %d", w.Code)
 	}
@@ -658,7 +659,7 @@ func TestStreamItems_RateLimitTriggers429(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/stream/items?type=posts&time=24h", nil)
 	req.RemoteAddr = "198.51.100.7:54321"
 	w = httptest.NewRecorder()
-	publicContentMiddleware(tinyLimiter, false, s.handleStreamItems)(w, req)
+	publicContentMiddleware(tinyLimiter, ProxyNone, s.handleStreamItems)(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("different IP: expected 200, got %d", w.Code)
 	}
@@ -1001,10 +1002,10 @@ func TestStreamItems_ScopeOwnHandle_ReadsLocalIndex(t *testing.T) {
 			t.Fatalf("write %s: %v", full, err)
 		}
 	}
-	if err := metadata.AppendPostToIndex(s.DataDir, postPath1, "Post One", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:aaa"); err != nil {
+	if err := metadata.AppendPostToIndex(storage.At(s.DataDir), postPath1, "Post One", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:aaa"); err != nil {
 		t.Fatalf("append index post1: %v", err)
 	}
-	if err := metadata.AppendPostToIndex(s.DataDir, postPath2, "Post Two", now.Add(-2*time.Hour).Format(time.RFC3339), "sha256:bbb"); err != nil {
+	if err := metadata.AppendPostToIndex(storage.At(s.DataDir), postPath2, "Post Two", now.Add(-2*time.Hour).Format(time.RFC3339), "sha256:bbb"); err != nil {
 		t.Fatalf("append index post2: %v", err)
 	}
 
@@ -1116,14 +1117,14 @@ func TestStreamItems_WithCommentsFilter(t *testing.T) {
 			t.Fatalf("write: %v", err)
 		}
 	}
-	if err := metadata.AppendPostToIndex(s.DataDir, postWith, "Has Comments", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:aaa"); err != nil {
+	if err := metadata.AppendPostToIndex(storage.At(s.DataDir), postWith, "Has Comments", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:aaa"); err != nil {
 		t.Fatalf("append index: %v", err)
 	}
-	if err := metadata.AppendPostToIndex(s.DataDir, postWithout, "No Comments", now.Add(-2*time.Hour).Format(time.RFC3339), "sha256:bbb"); err != nil {
+	if err := metadata.AppendPostToIndex(storage.At(s.DataDir), postWithout, "No Comments", now.Add(-2*time.Hour).Format(time.RFC3339), "sha256:bbb"); err != nil {
 		t.Fatalf("append index: %v", err)
 	}
 	// Bless one comment against post-with.
-	if err := metadata.AddBlessedComment(s.DataDir, postWith, metadata.BlessedComment{
+	if err := metadata.AddBlessedComment(storage.At(s.DataDir), postWith, metadata.BlessedComment{
 		URL:       "https://alice.polis.pub/comments/20260427/c1.md",
 		Version:   "sha256:c1",
 		BlessedAt: now.Add(-30 * time.Minute).Format(time.RFC3339),
@@ -1170,9 +1171,9 @@ func TestStreamItems_CommentCountPopulated(t *testing.T) {
 	full := filepath.Join(s.DataDir, postPath)
 	_ = os.MkdirAll(filepath.Dir(full), 0755)
 	_ = os.WriteFile(full, []byte("---\ntitle: x\n---\n"), 0644)
-	_ = metadata.AppendPostToIndex(s.DataDir, postPath, "Three Comments", now.Format(time.RFC3339), "sha256:p1")
+	_ = metadata.AppendPostToIndex(storage.At(s.DataDir), postPath, "Three Comments", now.Format(time.RFC3339), "sha256:p1")
 	for i, hash := range []string{"c1", "c2", "c3"} {
-		_ = metadata.AddBlessedComment(s.DataDir, postPath, metadata.BlessedComment{
+		_ = metadata.AddBlessedComment(storage.At(s.DataDir), postPath, metadata.BlessedComment{
 			URL:       fmt.Sprintf("https://alice.polis.pub/comments/20260427/c%d.md", i+1),
 			Version:   "sha256:" + hash,
 			BlessedAt: now.Add(time.Duration(-i) * time.Minute).Format(time.RFC3339),
@@ -1220,7 +1221,7 @@ func TestStreamItems_TitleRedundant(t *testing.T) {
 	if err := os.WriteFile(redundantFull, []byte(redundantBody), 0644); err != nil {
 		t.Fatalf("write redundant: %v", err)
 	}
-	if err := metadata.AppendPostToIndex(s.DataDir, redundantPath, redundantTitle, now.Format(time.RFC3339), "sha256:r1"); err != nil {
+	if err := metadata.AppendPostToIndex(storage.At(s.DataDir), redundantPath, redundantTitle, now.Format(time.RFC3339), "sha256:r1"); err != nil {
 		t.Fatalf("append index redundant: %v", err)
 	}
 
@@ -1233,7 +1234,7 @@ func TestStreamItems_TitleRedundant(t *testing.T) {
 	if err := os.WriteFile(distinctFull, []byte(distinctBody), 0644); err != nil {
 		t.Fatalf("write distinct: %v", err)
 	}
-	if err := metadata.AppendPostToIndex(s.DataDir, distinctPath, distinctTitle, now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:d1"); err != nil {
+	if err := metadata.AppendPostToIndex(storage.At(s.DataDir), distinctPath, distinctTitle, now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:d1"); err != nil {
 		t.Fatalf("append index distinct: %v", err)
 	}
 
@@ -1287,7 +1288,7 @@ func TestStreamItems_BlessedCommentsEnriched(t *testing.T) {
 	if err := os.WriteFile(full, []byte("---\ntitle: Hello\n---\nbody"), 0644); err != nil {
 		t.Fatalf("write post: %v", err)
 	}
-	if err := metadata.AppendPostToIndex(s.DataDir, postPath, "Hello", now.Format(time.RFC3339), "sha256:p1"); err != nil {
+	if err := metadata.AppendPostToIndex(storage.At(s.DataDir), postPath, "Hello", now.Format(time.RFC3339), "sha256:p1"); err != nil {
 		t.Fatalf("append index: %v", err)
 	}
 
@@ -1297,10 +1298,10 @@ func TestStreamItems_BlessedCommentsEnriched(t *testing.T) {
 	// frontmatter, and renders the body through goldmark + bluemonday.
 	commentURL := "https://alice.polis.pub/comments/20260506/re-hello.md"
 	commentBody := "---\ntitle: re Hello\n---\nNice **post**!"
-	if err := cache.StoreBlessed(s.DataDir, "ds.polis.pub", cache.BlessedSidecar{SourceURL: commentURL, FetchedAt: "t"}, []byte(commentBody)); err != nil {
+	if err := cache.StoreBlessed(storage.At(s.DataDir), "ds.polis.pub", cache.BlessedSidecar{SourceURL: commentURL, FetchedAt: "t"}, []byte(commentBody)); err != nil {
 		t.Fatalf("store blessed cache: %v", err)
 	}
-	if err := metadata.AddBlessedComment(s.DataDir, postPath, metadata.BlessedComment{
+	if err := metadata.AddBlessedComment(storage.At(s.DataDir), postPath, metadata.BlessedComment{
 		URL:       commentURL,
 		Version:   "sha256:c1",
 		BlessedAt: now.Add(-30 * time.Minute).Format(time.RFC3339),
@@ -1359,7 +1360,7 @@ func TestStreamItems_TypeCommentsOutboundOnly(t *testing.T) {
 	full := filepath.Join(s.DataDir, myCommentPath)
 	_ = os.MkdirAll(filepath.Dir(full), 0755)
 	_ = os.WriteFile(full, []byte("---\ntitle: My Comment\n---\nbody"), 0644)
-	_ = metadata.AppendCommentToIndex(s.DataDir, myCommentPath, "My Comment", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:my", "https://other.polis.pub/posts/foo.md")
+	_ = metadata.AppendCommentToIndex(storage.At(s.DataDir), myCommentPath, "My Comment", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:my", "https://other.polis.pub/posts/foo.md")
 
 	// Inbound seed: a blessed remote comment on a local post. The new
 	// rescope MUST drop this from the response.
@@ -1367,8 +1368,8 @@ func TestStreamItems_TypeCommentsOutboundOnly(t *testing.T) {
 	postFull := filepath.Join(s.DataDir, myPostPath)
 	_ = os.MkdirAll(filepath.Dir(postFull), 0755)
 	_ = os.WriteFile(postFull, []byte("---\ntitle: My Post\n---\nbody"), 0644)
-	_ = metadata.AppendPostToIndex(s.DataDir, myPostPath, "My Post", now.Add(-3*time.Hour).Format(time.RFC3339), "sha256:p1")
-	_ = metadata.AddBlessedComment(s.DataDir, myPostPath, metadata.BlessedComment{
+	_ = metadata.AppendPostToIndex(storage.At(s.DataDir), myPostPath, "My Post", now.Add(-3*time.Hour).Format(time.RFC3339), "sha256:p1")
+	_ = metadata.AddBlessedComment(storage.At(s.DataDir), myPostPath, metadata.BlessedComment{
 		URL:       "https://alice.polis.pub/comments/20260427/from-alice.md",
 		Version:   "sha256:alice-c",
 		BlessedAt: now.Add(-2 * time.Hour).Format(time.RFC3339),
@@ -1413,14 +1414,14 @@ func TestStreamItems_TypeCommentsDedupeByPost(t *testing.T) {
 		_ = os.MkdirAll(filepath.Dir(full), 0755)
 		_ = os.WriteFile(full, []byte("---\ntitle: "+label+"\n---\nbody"), 0644)
 		ts := now.Add(time.Duration(-(2 - i)) * time.Hour).Format(time.RFC3339)
-		_ = metadata.AppendCommentToIndex(s.DataDir, path, label, ts, "sha256:"+label, target)
+		_ = metadata.AppendCommentToIndex(storage.At(s.DataDir), path, label, ts, "sha256:"+label, target)
 	}
 	// Plus one comment on a DIFFERENT target post — should be its own entry.
 	otherPath := "content/pub.polis.core/comment/20260427/elsewhere.md"
 	otherFull := filepath.Join(s.DataDir, otherPath)
 	_ = os.MkdirAll(filepath.Dir(otherFull), 0755)
 	_ = os.WriteFile(otherFull, []byte("---\ntitle: elsewhere\n---\nbody"), 0644)
-	_ = metadata.AppendCommentToIndex(s.DataDir, otherPath, "elsewhere", now.Add(-30*time.Minute).Format(time.RFC3339), "sha256:elsewhere", "https://other.polis.pub/posts/different.md")
+	_ = metadata.AppendCommentToIndex(storage.At(s.DataDir), otherPath, "elsewhere", now.Add(-30*time.Minute).Format(time.RFC3339), "sha256:elsewhere", "https://other.polis.pub/posts/different.md")
 
 	code, resp := streamRequest(t, s, "type=comments&scope=@"+myDomain)
 	if code != http.StatusOK {
@@ -1464,7 +1465,7 @@ func TestStreamItems_TypeCommentsEnrichesTargetPost(t *testing.T) {
 	commentFull := filepath.Join(s.DataDir, commentPath)
 	_ = os.MkdirAll(filepath.Dir(commentFull), 0755)
 	_ = os.WriteFile(commentFull, []byte("---\ntitle: My Comment\n---\n\nMy reply *text*."), 0644)
-	_ = metadata.AppendCommentToIndex(s.DataDir, commentPath, "My Comment", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:my", targetURL)
+	_ = metadata.AppendCommentToIndex(storage.At(s.DataDir), commentPath, "My Comment", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:my", targetURL)
 
 	// Pre-populate the reply-context-cache so no live HTTP fetch happens.
 	// The cache file lives at .polis/bundles/pub.polis.core/comments/reply-context-cache.json.
@@ -1525,7 +1526,7 @@ func TestStreamItems_TypeCommentsTitleRedundantFlag(t *testing.T) {
 	commentFull := filepath.Join(s.DataDir, commentPath)
 	_ = os.MkdirAll(filepath.Dir(commentFull), 0755)
 	_ = os.WriteFile(commentFull, []byte("---\ntitle: Reply\n---\n\nReply body."), 0644)
-	_ = metadata.AppendCommentToIndex(s.DataDir, commentPath, "Reply", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:dup", targetURL)
+	_ = metadata.AppendCommentToIndex(storage.At(s.DataDir), commentPath, "Reply", now.Add(-1*time.Hour).Format(time.RFC3339), "sha256:dup", targetURL)
 
 	cachePath := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "comments", "reply-context-cache.json")
 	_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
@@ -1577,14 +1578,14 @@ func TestStreamItems_TypeProfilesBidirectional(t *testing.T) {
 		{URL: "https://alice.polis.pub", AddedAt: now.Add(-1 * time.Hour).Format(time.RFC3339)},
 		{URL: "https://bob.polis.pub", AddedAt: now.Add(-2 * time.Hour).Format(time.RFC3339)},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 
 	// Inbound: who follows me, written into the projection cache the
 	// same way runUnifiedSync would (state file under
 	// .polis/ds/<discoveryDomain>/pub.polis.core/state/pub.polis.follow.json).
-	store := stream.NewStore(s.DataDir, s.GetDiscoveryDomain(), "pub.polis.core")
+	store := stream.NewStore(s.Site(), s.GetDiscoveryDomain(), "pub.polis.core")
 	fs := &stream.FollowerState{
 		Followers: []string{"carol.polis.pub", "dave.polis.pub"},
 		Count:     2,
@@ -1647,7 +1648,7 @@ func TestStreamItems_TypeProfiles_MissingProjectionIsOutboundOnly(t *testing.T) 
 	ff := &following.FollowingFile{Following: []following.FollowingEntry{
 		{URL: "https://alice.polis.pub", AddedAt: time.Now().UTC().Format(time.RFC3339)},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 	// No store.SaveState call — projection file doesn't exist.
@@ -1680,7 +1681,7 @@ func TestStreamItems_ScopeOtherHandle_StillUsesNetworkCache(t *testing.T) {
 	full := filepath.Join(s.DataDir, postPath)
 	_ = os.MkdirAll(filepath.Dir(full), 0755)
 	_ = os.WriteFile(full, []byte("---\ntitle: x\n---\nx"), 0644)
-	_ = metadata.AppendPostToIndex(s.DataDir, postPath, "Self Post", now.Format(time.RFC3339), "sha256:ccc")
+	_ = metadata.AppendPostToIndex(storage.At(s.DataDir), postPath, "Self Post", now.Format(time.RFC3339), "sha256:ccc")
 
 	code, resp := streamRequest(t, s, "scope=@other.polis.pub&type=posts&time=24h")
 	if code != http.StatusOK {
@@ -1711,7 +1712,7 @@ func TestStreamItems_ScopeMeAlias(t *testing.T) {
 	full := filepath.Join(s.DataDir, postPath)
 	_ = os.MkdirAll(filepath.Dir(full), 0755)
 	_ = os.WriteFile(full, []byte("---\ntitle: Me Alias\n---\nbody"), 0644)
-	_ = metadata.AppendPostToIndex(s.DataDir, postPath, "Me Alias Post", now.Format(time.RFC3339), "sha256:ma")
+	_ = metadata.AppendPostToIndex(storage.At(s.DataDir), postPath, "Me Alias Post", now.Format(time.RFC3339), "sha256:ma")
 
 	code, resp := streamRequest(t, s, "scope=me&type=posts")
 	if code != http.StatusOK {
@@ -1808,7 +1809,7 @@ func TestStreamItemsDM_ReturnsConversationSummaries(t *testing.T) {
 			MessageCount:   1,
 		}
 		data, _ := json.MarshalIndent(meta, "", "  ")
-		path := filepath.Join(dm.DMDir(s.DataDir), "conversations", peer, "conversation.json")
+		path := filepath.Join(s.Site().Path(dm.DMDirKey), "conversations", peer, "conversation.json")
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			t.Fatalf("write meta %s: %v", peer, err)
 		}
@@ -1987,11 +1988,11 @@ func TestStreamItems_ScopeMyMutuals(t *testing.T) {
 		{URL: "https://alice.polis.pub", AddedAt: now.Format(time.RFC3339)},
 		{URL: "https://bob.polis.pub", AddedAt: now.Format(time.RFC3339)},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 	// Inbound: alice + charlie follow me (NOT bob).
-	store := stream.NewStore(s.DataDir, s.GetDiscoveryDomain(), "pub.polis.core")
+	store := stream.NewStore(s.Site(), s.GetDiscoveryDomain(), "pub.polis.core")
 	if err := store.SaveState("pub.polis.follow", &stream.FollowerState{
 		Followers: []string{"alice.polis.pub", "charlie.polis.pub"},
 		Count:     2,
@@ -2030,10 +2031,10 @@ func TestComputeMutualsSet_CacheHit(t *testing.T) {
 	ff := &following.FollowingFile{Following: []following.FollowingEntry{
 		{URL: "https://alice.polis.pub", AddedAt: now.Format(time.RFC3339)},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
-	store := stream.NewStore(s.DataDir, s.GetDiscoveryDomain(), "pub.polis.core")
+	store := stream.NewStore(s.Site(), s.GetDiscoveryDomain(), "pub.polis.core")
 	if err := store.SaveState("pub.polis.follow", &stream.FollowerState{
 		Followers: []string{"alice.polis.pub"},
 		Count:     1,
@@ -2069,10 +2070,10 @@ func TestComputeMutualsSet_InvalidatesOnMtimeChange(t *testing.T) {
 	ff := &following.FollowingFile{Following: []following.FollowingEntry{
 		{URL: "https://alice.polis.pub", AddedAt: now.Format(time.RFC3339)},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
-	store := stream.NewStore(s.DataDir, s.GetDiscoveryDomain(), "pub.polis.core")
+	store := stream.NewStore(s.Site(), s.GetDiscoveryDomain(), "pub.polis.core")
 	if err := store.SaveState("pub.polis.follow", &stream.FollowerState{
 		Followers: []string{"alice.polis.pub", "bob.polis.pub"},
 		Count:     2,
@@ -2091,7 +2092,7 @@ func TestComputeMutualsSet_InvalidatesOnMtimeChange(t *testing.T) {
 	// 1s on some filesystems; 10ms is enough for either).
 	time.Sleep(10 * time.Millisecond)
 	ff.Following = append(ff.Following, following.FollowingEntry{URL: "https://bob.polis.pub", AddedAt: now.Format(time.RFC3339)})
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 
@@ -2259,7 +2260,7 @@ func TestStreamItems_ProfilesScopeAliases(t *testing.T) {
 	ff := &following.FollowingFile{Following: []following.FollowingEntry{
 		{URL: "https://discover.polis.pub", AddedAt: now.Format(time.RFC3339)},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 
@@ -2314,7 +2315,7 @@ func TestStreamItems_ProfilesSortByName(t *testing.T) {
 		{URL: "https://alice.polis.pub", AddedAt: now.Format(time.RFC3339)},
 		{URL: "https://maria.polis.pub", AddedAt: now.Format(time.RFC3339)},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 
@@ -2353,7 +2354,7 @@ func TestStreamItems_ProfilesMyNetworkSearch(t *testing.T) {
 		{URL: "https://carol.polis.pub", AddedAt: now.Format(time.RFC3339)},
 		{URL: "https://discover.polis.pub", AddedAt: now.Format(time.RFC3339)},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 
@@ -2410,7 +2411,7 @@ func TestStreamItems_ProfilesSortByActivity(t *testing.T) {
 		{URL: "https://new.polis.pub", AddedAt: now.Add(-1 * time.Hour).Format(time.RFC3339)},
 		{URL: "https://mid.polis.pub", AddedAt: now.Add(-24 * time.Hour).Format(time.RFC3339)},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 
@@ -2445,7 +2446,7 @@ func TestStreamItems_ProfilesDefaultSortIsByName(t *testing.T) {
 		{URL: "https://zane.polis.pub", AddedAt: now.Add(-1 * time.Hour).Format(time.RFC3339)},
 		{URL: "https://alice.polis.pub", AddedAt: now.Format(time.RFC3339)},
 	}}
-	if err := following.Save(following.DefaultPath(s.DataDir), ff); err != nil {
+	if err := following.Save(storage.At(s.DataDir), ff); err != nil {
 		t.Fatalf("save following: %v", err)
 	}
 	code, resp := streamRequest(t, s, "type=profiles&scope=@"+myDomain)
@@ -2556,15 +2557,13 @@ func TestHandleStreamItemsDMThread_LockedShipsBox(t *testing.T) {
 	const peer = "david.polis.pub"
 	const secret = "meet me at the old pier"
 
-	dmDir := dm.DMDir(s.DataDir)
-
 	// Keyring with only the bootstrap (server-held) epoch on disk — so the
 	// server's LoadAvailableDEKs hands the mailbox only epoch 0's DEK.
 	k := &dm.Keyring{}
 	if _, err := k.AddBootstrapEpoch(); err != nil {
 		t.Fatalf("AddBootstrapEpoch: %v", err)
 	}
-	if err := k.SaveCAS(dmDir, 0); err != nil {
+	if err := k.SaveCAS(s.Site(), 0); err != nil {
 		t.Fatalf("SaveCAS: %v", err)
 	}
 
@@ -2574,7 +2573,7 @@ func TestHandleStreamItemsDMThread_LockedShipsBox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEpochKeypair: %v", err)
 	}
-	mb := dm.NewMailbox(dmDir)
+	mb := dm.NewMailbox(s.Site())
 	if _, err := mb.AppendSent(peer, "testsite.polis.pub", secret, 1, pub1, dek1, "", "sent"); err != nil {
 		t.Fatalf("AppendSent: %v", err)
 	}

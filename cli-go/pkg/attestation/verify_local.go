@@ -1,9 +1,10 @@
 package attestation
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"strings"
 
-	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	sitepkg "github.com/vdibart/polis-cli/cli-go/pkg/site"
 )
 
 // VerifyRecordResolved is VerifyRecord that also reports WHICH key verified the
@@ -18,15 +19,15 @@ import (
 // ⚠️ A retired-key pass still reports StatusValid — the status vocabulary has no
 // fifth value, and epic 31 D4 keeps the distinction in WHICH key, not in the
 // status. Callers that must say "verified by a retired key" read the entry.
-func VerifyRecordResolved(siteDir string, r *Record) (SignatureStatus, *site.KeyHistoryEntry, error) {
+func VerifyRecordResolved(site storage.Site, r *Record) (SignatureStatus, *sitepkg.KeyHistoryEntry, error) {
 	if r == nil || r.Signature == "" {
 		return StatusUnsigned, nil, nil
 	}
-	keys, err := IdentityKeys(siteDir)
+	keys, err := IdentityKeys(site)
 	if err != nil {
 		return StatusUnknown, nil, err
 	}
-	return VerifyWithHistory(r, keys[0], trustedLocalChain(siteDir, r.Issuer, string(keys[0])))
+	return VerifyWithHistory(r, keys[0], trustedLocalChain(site, r.Issuer, string(keys[0])))
 }
 
 // trustedLocalChain returns the site's published key history when it can be
@@ -36,8 +37,8 @@ func VerifyRecordResolved(siteDir string, r *Record) (SignatureStatus, *site.Key
 // cannot import: the chain verifies for the site's domain, and its head is the
 // key the site publishes. A chain that fails either is not used — the result is
 // then exactly the current-key answer, never a weaker pass.
-func trustedLocalChain(siteDir, issuer, publicKey string) *site.KeyHistoryBlock {
-	block, err := site.LoadKeyHistory(siteDir)
+func trustedLocalChain(site storage.Site, issuer, publicKey string) *sitepkg.KeyHistoryBlock {
+	block, err := sitepkg.LoadKeyHistory(site)
 	if err != nil || block == nil || len(block.History) == 0 {
 		return nil
 	}
@@ -45,7 +46,7 @@ func trustedLocalChain(siteDir, issuer, publicKey string) *site.KeyHistoryBlock 
 	if i := strings.IndexByte(domain, '/'); i >= 0 {
 		domain = domain[:i]
 	}
-	if domain == "" || site.VerifyChain(block, domain) != nil {
+	if domain == "" || sitepkg.VerifyChain(block, domain) != nil {
 		return nil
 	}
 	if strings.TrimSpace(block.Current.Key) != strings.TrimSpace(publicKey) {

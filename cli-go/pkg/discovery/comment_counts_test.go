@@ -18,7 +18,7 @@ func TestFetchCommentCountsCtx_EmptyInputShortCircuits(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "")
+	c := NewClient(server.URL)
 	counts, err := c.FetchCommentCountsCtx(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -62,7 +62,7 @@ func TestFetchCommentCountsCtx_NormalizesHtmlToMd(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "")
+	c := NewClient(server.URL)
 	htmlURL := "https://discover.polis.pub/posts/a.html"
 	counts, err := c.FetchCommentCountsCtx(context.Background(), []string{htmlURL})
 	if err != nil {
@@ -93,7 +93,7 @@ func TestFetchCommentCountsCtx_NormalizesBackslashes(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "")
+	c := NewClient(server.URL)
 	original := "https://s13.nyc/content\\post\\a.html"
 	counts, err := c.FetchCommentCountsCtx(context.Background(), []string{original})
 	if err != nil {
@@ -113,7 +113,7 @@ func TestFetchCommentCountsCtx_HandlesContextCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "")
+	c := NewClient(server.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
@@ -137,7 +137,7 @@ func TestFetchCommentCountsCtx_OmitsMissingURLsAsZero(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "")
+	c := NewClient(server.URL)
 	urls := []string{"https://x.example/a.md", "https://x.example/b.md"}
 	counts, err := c.FetchCommentCountsCtx(context.Background(), urls)
 	if err != nil {
@@ -158,7 +158,7 @@ func TestFetchCommentCountsCtx_PropagatesDSError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "")
+	c := NewClient(server.URL)
 	_, err := c.FetchCommentCountsCtx(context.Background(), []string{"https://x.example/a.md"})
 	if err == nil {
 		t.Fatal("expected error for 400 response")

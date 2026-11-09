@@ -8,6 +8,10 @@ It is not a product, a service, or an add-on. It is the name for the specs, so t
 standards bodies, and anyone building against polis have something to reference. **A polis user never
 "uses Signet"** — they set terms on a post, or see that a signature verified.
 
+> **New to all of this?** Start with the [illustrated guide](https://polis.pub/for/trust) — one
+> person's story in seven short chapters, each folding down to the mechanism underneath it and then
+> to the real bytes. It assumes nothing, and it says plainly what each part does not do.
+>
 > **New here and already familiar with the identity field?** Start with
 > [`overview.md`](overview.md) — how polis thinks about identity and trust, the standards it
 > implements and declines, and what it has not solved, on one page.
@@ -92,7 +96,7 @@ describes ships**, so an empty slot below means unbuilt, not undocumented.
 
 | Page | Status |
 |---|---|
-| [`recipes/README.md`](recipes/README.md) — the recipe book: task-first, each with the records it produces, the commands, and how to verify it from another machine | **shipped** — eleven recipes, ten of them run end to end on every test run (recipe 7 is parked and says so), and the list of what cannot be built yet |
+| [`recipes/README.md`](recipes/README.md) — the recipe book: task-first, each with the records it produces, the commands, and how to verify it from another machine | **shipped** — fifteen recipes, fourteen of them run end to end on every test run (recipe 7 is parked and says so), and the list of what cannot be built yet |
 
 > **Every runnable recipe is exercised by a test**, the same way the spec's worked examples are checked
 > against the implementation. A recipe that cannot yet be written is listed as a gap, with the work

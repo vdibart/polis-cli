@@ -2,12 +2,17 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/index"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 func handleIndex(args []string) {
@@ -20,11 +25,13 @@ func handleIndex(args []string) {
 	// Resolved through the bundle pointer, not assumed: `dir` and `mount` are
 	// user-configurable, so a hardcoded content/pub.polis.core would be wrong
 	// on any site that moved one.
-	indexPath := index.IndexPath(dir)
-
-	file, err := os.Open(indexPath)
+	site := storage.At(dir)
+	indexKey := index.IndexKey(site)
+	// The path only names the file in a warning, as it always has.
+	indexPath := filepath.Join(dir, filepath.FromSlash(indexKey))
+	raw, err := site.Store().Get(context.Background(), indexKey)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, storage.ErrNotFound) {
 			if jsonOutput {
 				outputJSON(map[string]interface{}{
 					"status":  "success",
@@ -43,7 +50,6 @@ func handleIndex(args []string) {
 		}
 		exitError("Failed to open index: %v", err)
 	}
-	defer file.Close()
 
 	// A line that does not parse is COUNTED and reported, never dropped in
 	// silence: a listing of the parseable half is not a listing of the index
@@ -51,7 +57,7 @@ func handleIndex(args []string) {
 	var entries []map[string]interface{}
 	skippedLines := []int{}
 	lineNo := 0
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
 	for scanner.Scan() {
 		lineNo++
 		line := scanner.Text()

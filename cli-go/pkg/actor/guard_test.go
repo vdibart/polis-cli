@@ -2,6 +2,9 @@ package actor
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -243,10 +246,10 @@ func TestWithdrawRegistry_ClearsPointerAndFile(t *testing.T) {
 	if err := WithdrawRegistry(opDir); err != nil {
 		t.Fatalf("WithdrawRegistry: %v", err)
 	}
-	if p := site.ActorRegistryPointer(opDir); p != "" {
+	if p := site.ActorRegistryPointer(storage.At(opDir)); p != "" {
 		t.Errorf("pointer survived withdrawal: %q", p)
 	}
-	if _, err := os.Stat(RegistryPath(opDir)); !os.IsNotExist(err) {
+	if _, err := os.Stat(RegistryPath(opDir)); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("registry file survived withdrawal")
 	}
 	if g := LoadGuard(tenantsDir); !g.Bootstrap() || len(g.Problems) != 0 {

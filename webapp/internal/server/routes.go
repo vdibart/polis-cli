@@ -9,7 +9,32 @@ import (
 // SetupRoutes registers all API routes on the given ServeMux.
 func SetupRoutes(mux *http.ServeMux, s *Server) {
 	// API routes — GET-only handlers need no body limit
+	// ⭐ The capability descriptor: fetched, never injected, and PUBLIC. See
+	// capabilities.go for why a privileged global was the thing to remove.
+	mux.HandleFunc(CapabilitiesPath, s.handleCapabilities)
+
+	// ⛔ Recovery: PUBLIC by necessity. You cannot authenticate to reach the
+	// thing that lets you authenticate, and a locked-out owner is refused by
+	// everything else. Safe because they accept only a signature over a
+	// challenge this instance just issued. Rate-limited in the handlers.
+	mux.HandleFunc(RecoveryChallengePath, s.handleRecoveryChallenge)
+	mux.HandleFunc(RecoveryVerifyPath, s.handleRecoveryVerify)
+
+	// ⭐ Enrolment: authorised INSIDE the handler, by an enrolment session or
+	// by ownership. Not on the public allow-list — see enrol.go.
+	mux.HandleFunc(EnrolPathPrefix, s.handleEnrol)
+	mux.HandleFunc(ProvidersPath, s.handleProviders)
+
+	// ⛔ Sign-in ceremony: PUBLIC, because somebody not signed in is exactly
+	// who needs it. Safe because it accepts only an assertion over a challenge
+	// this instance just issued. Sign-out is NOT public — it needs a session.
+	mux.HandleFunc(SignInBeginPath, s.handleSignInBegin)
+	mux.HandleFunc(SignInCompletePath, s.handleSignInComplete)
+	mux.HandleFunc(SignOutPath, s.handleSignOut)
+
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/deploy-status", s.handleDeployStatus)
+	mux.HandleFunc("/api/deploy/apply", s.handleDeployApply)
 	mux.HandleFunc("/api/validate", s.handleValidate)
 	mux.HandleFunc("/api/posts", s.handlePosts)
 	mux.HandleFunc("/api/posts/", s.handlePost)
@@ -32,7 +57,6 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 
 	// Default body limit (1MB) — small-payload POST handlers
 	mux.HandleFunc("/api/init", limitBody(s.handleInit, MaxDefaultBodySize))
-	mux.HandleFunc("/api/link", limitBody(s.handleLink, MaxDefaultBodySize))
 	mux.HandleFunc("/api/drafts/", limitBody(s.handleDraft, MaxDefaultBodySize))
 	mux.HandleFunc("/api/comments/drafts/", limitBody(s.handleCommentDraft, MaxDefaultBodySize))
 	mux.HandleFunc("/api/comments/beseech", limitBody(s.handleCommentBeseech, MaxDefaultBodySize))
@@ -60,6 +84,10 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/settings/avatar", limitBody(s.handleUpdateAvatar, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/author-name", limitBody(s.handleUpdateAuthorName, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/theme", limitBody(s.handleThemeSwitch, MaxDefaultBodySize))
+	mux.HandleFunc("/api/settings/custom-css", limitBody(s.handleCustomCSS, MaxDefaultBodySize))
+	mux.HandleFunc("/api/site/palette", s.handleSitePalette)
+	mux.HandleFunc("/api/stream-marks", limitBody(s.handleStreamMarks, MaxDefaultBodySize))
+	mux.HandleFunc("/api/nav-shortcuts", limitBody(s.handleNavShortcuts, MaxDefaultBodySize))
 	mux.HandleFunc("/api/rotate-key", limitBody(s.handleRotateKey, MaxDefaultBodySize))
 	mux.HandleFunc("/api/download-site", s.handleDownloadSite)
 	mux.HandleFunc("/api/content/", s.handleContent)
@@ -86,6 +114,18 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/api/site/setup-wizard-dismiss", limitBody(s.handleSetupWizardDismiss, MaxDefaultBodySize))
 	mux.HandleFunc("/api/site/license", limitBody(s.handleSiteLicense, MaxDefaultBodySize))
 	mux.HandleFunc("/api/settings/rosie", limitBody(s.handleRosieSettings, MaxDefaultBodySize))
+	mux.HandleFunc("/api/keys", limitBody(s.handleAPIKeys, MaxDefaultBodySize))
+	mux.HandleFunc("/api/keys/", limitBody(s.handleAPIKey, MaxDefaultBodySize))
+	mux.HandleFunc("/api/mcp/calls", s.handleMCPCalls)
+	mux.HandleFunc("/api/kay", s.kayOnly(s.handleKay))
+	mux.HandleFunc("/api/kay/connect", s.kayOnly(limitBody(s.handleKayConnect, MaxDefaultBodySize)))
+	mux.HandleFunc("/api/kay/ask", s.kayOnly(limitBody(s.handleKayAsk, MaxDefaultBodySize)))
+	mux.HandleFunc("/api/kay/chats/", s.kayOnly(s.handleKayChat))
+	mux.HandleFunc("/api/kay/components", s.kayOnly(s.handleKayComponents))
+	// The owner's AI acts here with an API key; not under /api/, so the key is
+	// its whole authorisation (mcp.go).
+	mux.HandleFunc("/mcp", limitBody(s.handleMCP, MaxDefaultBodySize))
+	mux.HandleFunc("/mcp/c/", limitBody(s.handleMCPComponent, MaxDefaultBodySize))
 
 	// Social API routes (following, feed, remote content)
 	mux.HandleFunc("/api/following", limitBody(s.handleFollowing, MaxDefaultBodySize))
@@ -109,18 +149,18 @@ func SetupRoutes(mux *http.ServeMux, s *Server) {
 	// Read-focus single-latest-comment lookup (read-focus mode shows exactly
 	// one comment per post, blessed or not — sourced from DS). GET-only, same
 	// public wrapper as /stream/items.
-	mux.HandleFunc("/api/v1/stream/focus-comment", publicContentMiddleware(sharedPublicContentLimiter, s.BehindTrustedProxy, s.handleStreamFocusComment))
+	mux.HandleFunc("/api/v1/stream/focus-comment", publicContentMiddleware(sharedPublicContentLimiter, s.Proxy, s.handleStreamFocusComment))
 	// Read-focus full-body proxy: returns one post's rendered body so the SPA
 	// can show the whole post (not the excerpt) for cross-tenant entries that
 	// the browser can't fetch directly under its connect-src CSP. GET-only,
 	// same public wrapper as /stream/items.
-	mux.HandleFunc("/api/v1/stream/body", publicContentMiddleware(sharedPublicContentLimiter, s.BehindTrustedProxy, s.handleStreamBody))
+	mux.HandleFunc("/api/v1/stream/body", publicContentMiddleware(sharedPublicContentLimiter, s.Proxy, s.handleStreamBody))
 	// PQL-native data endpoint (pull-PQL-through Phase 3). GET /pql/<sentence>
 	// content-negotiates: Accept: application/json → versioned JSON envelope;
 	// else → HTML infinity-stream shell (Phase 5). Same public wrapper +
-	// per-IP limiter as /stream/items; owner-private (first-person) scopes are
-	// gated at the routing layer (hosted pqlRequiresOwnerAuth / localhost trust).
-	mux.HandleFunc("/pql/", publicContentMiddleware(sharedPublicContentLimiter, s.BehindTrustedProxy, s.handleStreamPQL))
+	// per-IP limiter as /stream/items; owner-private scopes are refused by the
+	// owner gate (PQLRequiresOwner), never by this handler.
+	mux.HandleFunc("/pql/", publicContentMiddleware(sharedPublicContentLimiter, s.Proxy, s.handleStreamPQL))
 	// step-06/6.e: client-emitted structured event endpoint. Owner SPA
 	// posts {event, fields} on icon-preset clicks (pub.polis.stream.
 	// preset_loaded) for usage telemetry. Allowlist-restricted.
@@ -210,11 +250,11 @@ func SetupReaderRoutes(mux *http.ServeMux, s *Server) {
 	// /api/v1/stream/items retired in the PQL hard cutover — see SetupRoutes.
 	// The data path is GET /pql/<sentence> (registered below).
 	// Read-focus single-latest-comment lookup — same wrapper as in SetupRoutes.
-	mux.HandleFunc("/api/v1/stream/focus-comment", publicContentMiddleware(sharedPublicContentLimiter, s.BehindTrustedProxy, s.handleStreamFocusComment))
+	mux.HandleFunc("/api/v1/stream/focus-comment", publicContentMiddleware(sharedPublicContentLimiter, s.Proxy, s.handleStreamFocusComment))
 	// Read-focus full-body proxy — same wrapper as in SetupRoutes.
-	mux.HandleFunc("/api/v1/stream/body", publicContentMiddleware(sharedPublicContentLimiter, s.BehindTrustedProxy, s.handleStreamBody))
+	mux.HandleFunc("/api/v1/stream/body", publicContentMiddleware(sharedPublicContentLimiter, s.Proxy, s.handleStreamBody))
 	// PQL-native data endpoint — same wrapper as in SetupRoutes.
-	mux.HandleFunc("/pql/", publicContentMiddleware(sharedPublicContentLimiter, s.BehindTrustedProxy, s.handleStreamPQL))
+	mux.HandleFunc("/pql/", publicContentMiddleware(sharedPublicContentLimiter, s.Proxy, s.handleStreamPQL))
 
 	// Content source path redirect (content/ .html → mount path)
 	mux.HandleFunc("/content/", s.handleContentRedirect)
@@ -230,7 +270,7 @@ func SetupReaderRoutes(mux *http.ServeMux, s *Server) {
 // injection is hosted-specific; non-hosted polis-server doesn't have
 // a "visitor" concept).
 func tenantStaticHandler(s *Server) http.HandlerFunc {
-	storage := NewDataDirStorage(s.DataDir)
+	storage := NewDataDirStorage(s.Site())
 	return func(w http.ResponseWriter, r *http.Request) {
 		serve.ServeTenantPublic(w, r, storage, "", nil)
 	}

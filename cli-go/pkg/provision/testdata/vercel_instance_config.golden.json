@@ -1,0 +1,94 @@
+{
+  "crons": [],
+  "routes": [
+    {
+      "continue": true,
+      "headers": {
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "public, max-age=60"
+      },
+      "src": "^/\\.well-known(?:/(.*))?$"
+    },
+    {
+      "continue": true,
+      "headers": {
+        "Cache-Control": "public, max-age=300"
+      },
+      "src": "^/robots\\.txt$"
+    },
+    {
+      "handle": "filesystem"
+    },
+    {
+      "check": true,
+      "dest": "/api/index",
+      "src": "^(?:/(.*))$"
+    },
+    {
+      "src": "^/api(/.*)?$",
+      "status": 404
+    },
+    {
+      "handle": "hit"
+    },
+    {
+      "continue": true,
+      "headers": {
+        "X-Content-Type-Options": "nosniff"
+      },
+      "src": "^/.*$"
+    },
+    {
+      "continue": true,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8"
+      },
+      "src": "^/\\.well-known/polis$"
+    },
+    {
+      "continue": true,
+      "headers": {
+        "Content-Type": "application/jsonl; charset=utf-8"
+      },
+      "src": "^/.*\\.jsonl$"
+    },
+    {
+      "continue": true,
+      "headers": {
+        "Content-Security-Policy": "default-src 'self'; frame-ancestors 'self'"
+      },
+      "src": "^/$"
+    },
+    {
+      "continue": true,
+      "headers": {
+        "Content-Security-Policy": "default-src 'self'; frame-ancestors 'self'"
+      },
+      "src": "^/.*\\.html$"
+    },
+    {
+      "continue": true,
+      "headers": {
+        "Content-Security-Policy": "default-src 'self'; frame-ancestors 'self'"
+      },
+      "src": "^/.*/$"
+    },
+    {
+      "handle": "error"
+    },
+    {
+      "dest": "/404.html",
+      "src": "^(?!/api).*$",
+      "status": 404
+    },
+    {
+      "handle": "miss"
+    },
+    {
+      "check": true,
+      "dest": "/api/$1",
+      "src": "^/api/(.+)(?:\\.(?:go))$"
+    }
+  ],
+  "version": 3
+}

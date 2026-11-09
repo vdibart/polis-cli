@@ -30,7 +30,6 @@ type HandlerEnv struct {
 	PublicKey    []byte
 	BaseURL      string
 	DiscoveryURL string
-	DiscoveryKey string
 	CLIThemesDir string
 	// EmitEvent, if set, routes structured operation events to the host's event
 	// sink (e.g. the webapp's Server.LogEvent → action=<name>). nil = discard.

@@ -1,6 +1,9 @@
 package site
 
 import (
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,11 +11,11 @@ import (
 
 func TestLegacyPrivateContentExists(t *testing.T) {
 	siteDir := t.TempDir()
-	if LegacyPrivateContentExists(siteDir) {
+	if LegacyPrivateContentExists(storage.At(siteDir)) {
 		t.Error("expected false on fresh site")
 	}
 	os.MkdirAll(filepath.Join(siteDir, ".polis", "content"), 0700)
-	if !LegacyPrivateContentExists(siteDir) {
+	if !LegacyPrivateContentExists(storage.At(siteDir)) {
 		t.Error("expected true once .polis/content/ exists")
 	}
 }
@@ -21,17 +24,17 @@ func TestLegacyActiveThemeInWellKnown(t *testing.T) {
 	siteDir := t.TempDir()
 	os.MkdirAll(filepath.Join(siteDir, ".well-known"), 0755)
 
-	if LegacyActiveThemeInWellKnown(siteDir) {
+	if LegacyActiveThemeInWellKnown(storage.At(siteDir)) {
 		t.Error("missing well-known should report false")
 	}
 
 	os.WriteFile(filepath.Join(siteDir, ".well-known", "polis"), []byte(`{"public_key":"x"}`), 0644)
-	if LegacyActiveThemeInWellKnown(siteDir) {
+	if LegacyActiveThemeInWellKnown(storage.At(siteDir)) {
 		t.Error("well-known without active_theme should report false")
 	}
 
 	os.WriteFile(filepath.Join(siteDir, ".well-known", "polis"), []byte(`{"active_theme":"vice"}`), 0644)
-	if !LegacyActiveThemeInWellKnown(siteDir) {
+	if !LegacyActiveThemeInWellKnown(storage.At(siteDir)) {
 		t.Error("well-known with active_theme should report true")
 	}
 }
@@ -46,7 +49,7 @@ func TestMigratePrivateBundlesPath_HappyPath(t *testing.T) {
 	os.WriteFile(filepath.Join(postDir, "my-draft.md"), []byte("draft body"), 0644)
 	os.WriteFile(filepath.Join(commentDir, "my-comment.md"), []byte("comment body"), 0644)
 
-	if err := MigratePrivateBundlesPath(siteDir); err != nil {
+	if err := MigratePrivateBundlesPath(storage.At(siteDir)); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -61,7 +64,7 @@ func TestMigratePrivateBundlesPath_HappyPath(t *testing.T) {
 	}
 
 	// Legacy tree should be gone.
-	if _, err := os.Stat(filepath.Join(siteDir, ".polis", "content")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(siteDir, ".polis", "content")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("legacy .polis/content/ should be removed")
 	}
 }
@@ -78,7 +81,7 @@ func TestMigratePrivateBundlesPath_PreservesExistingShapes(t *testing.T) {
 	os.MkdirAll(legacyPosts, 0755)
 	os.WriteFile(filepath.Join(legacyPosts, "draft.md"), []byte("body"), 0644)
 
-	if err := MigratePrivateBundlesPath(siteDir); err != nil {
+	if err := MigratePrivateBundlesPath(storage.At(siteDir)); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -95,10 +98,10 @@ func TestMigratePrivateBundlesPath_PreservesExistingShapes(t *testing.T) {
 func TestMigratePrivateBundlesPath_Idempotent(t *testing.T) {
 	siteDir := t.TempDir()
 	// No legacy tree — should be no-op.
-	if err := MigratePrivateBundlesPath(siteDir); err != nil {
+	if err := MigratePrivateBundlesPath(storage.At(siteDir)); err != nil {
 		t.Fatalf("first migrate (no-op): %v", err)
 	}
-	if err := MigratePrivateBundlesPath(siteDir); err != nil {
+	if err := MigratePrivateBundlesPath(storage.At(siteDir)); err != nil {
 		t.Fatalf("second migrate (no-op): %v", err)
 	}
 }
@@ -113,7 +116,7 @@ func TestMigratePrivateBundlesPath_RefusesAmbiguousMerge(t *testing.T) {
 	os.WriteFile(filepath.Join(legacyPosts, "old.md"), []byte("old"), 0644)
 	os.WriteFile(filepath.Join(newPosts, "new.md"), []byte("new"), 0644)
 
-	if err := MigratePrivateBundlesPath(siteDir); err == nil {
+	if err := MigratePrivateBundlesPath(storage.At(siteDir)); err == nil {
 		t.Error("expected error for ambiguous merge")
 	}
 }

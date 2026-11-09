@@ -1,12 +1,13 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // The catch-up record (epic 11 D13).
@@ -20,10 +21,13 @@ import (
 // decides nothing twice: a request already decided is no longer pending, and
 // a request a `review` rule holds stays held.
 
-// CatchUpPath is where the record lives.
-func CatchUpPath(siteDir string) string {
-	return filepath.Join(siteDir, ".polis", "webapp", "agents", Rosie+"-catch-up.json")
-}
+// CatchUpKey is where the record lives, relative to the site root.
+//
+// ⭐ A KEY, so the record and its reader agree on any backend. ⚠️ It matters
+// more than it looks: if the read and the write disagreed on a blob site, the
+// catch-up pass would run on EVERY boot, because "not done" is what a failed
+// read reports.
+const CatchUpKey = ".polis/webapp/agents/" + Rosie + "-catch-up.json"
 
 // CatchUpRecord is the record.
 type CatchUpRecord struct {
@@ -32,8 +36,8 @@ type CatchUpRecord struct {
 }
 
 // CatchUpDone reports whether the pass has run under this grant URL.
-func CatchUpDone(siteDir, grantURL string) bool {
-	data, err := os.ReadFile(CatchUpPath(siteDir))
+func CatchUpDone(site storage.Site, grantURL string) bool {
+	data, err := site.Store().Get(context.Background(), CatchUpKey)
 	if err != nil {
 		return false
 	}
@@ -45,22 +49,21 @@ func CatchUpDone(siteDir, grantURL string) bool {
 }
 
 // RecordCatchUp records that the pass ran under grantURL.
-func RecordCatchUp(siteDir, grantURL string) error {
-	p := CatchUpPath(siteDir)
-	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
-		return err
-	}
+func RecordCatchUp(site storage.Site, grantURL string) error {
+	// ⭐ No MkdirAll: atomicfile.Write has the store create the parent, and
+	// `.polis` is a declared private prefix, so it comes out 0700 as the
+	// literal here used to make it.
 	data, _ := json.MarshalIndent(CatchUpRecord{Grant: grantURL, At: time.Now().UTC().Format(time.RFC3339)}, "", "  ")
-	return atomicfile.WriteFile(p, append(data, '\n'), 0600)
+	return atomicfile.Write(context.Background(), site, CatchUpKey, append(data, '\n'), 0600)
 }
 
 // NeedsCatchUp reports whether the site has a live Rosie grant whose catch-up
 // pass has not run — what the hosted switch-on path uses to decide which
 // tenants to reach.
-func NeedsCatchUp(siteDir string) bool {
-	g, err := LiveRosieGrant(siteDir)
+func NeedsCatchUp(site storage.Site) bool {
+	g, err := LiveRosieGrant(site)
 	if err != nil || !g.Valid() {
 		return false
 	}
-	return !CatchUpDone(siteDir, g.URL())
+	return !CatchUpDone(site, g.URL())
 }

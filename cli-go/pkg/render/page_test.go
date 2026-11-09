@@ -2,8 +2,11 @@ package render
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,7 +26,7 @@ func TestNewPageRenderer(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir:       tempDir,
+		Site:          storage.At(tempDir),
 		BaseURL:       "https://example.com",
 		RenderMarkers: false,
 	})
@@ -47,7 +50,7 @@ func TestNewPageRenderer_DefaultsToStreamWhenRegistryEmpty(t *testing.T) {
 	// This test deliberately bypasses that by installing the reference
 	// payload directly without setupTestSite's v3-pinning step.
 	tempDir := t.TempDir()
-	if err := bundle.EnsureReferencePayload(tempDir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(tempDir), "pub.polis.core"); err != nil {
 		t.Fatalf("install reference payload: %v", err)
 	}
 	// Create minimal .well-known/polis so the renderer can boot.
@@ -63,7 +66,7 @@ func TestNewPageRenderer_DefaultsToStreamWhenRegistryEmpty(t *testing.T) {
 	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(""), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://example.com",
 	})
 	if err != nil {
@@ -79,12 +82,12 @@ func TestNewPageRenderer_PicksStreamFromRegistry(t *testing.T) {
 	tempDir := t.TempDir()
 	setupTestSite(t, tempDir)
 	// Flip to v4 via the canonical setter.
-	if err := bundle.SetActiveShapeName(tempDir, "v4"); err != nil {
+	if err := bundle.SetActiveShapeName(storage.At(tempDir), "v4"); err != nil {
 		t.Fatalf("SetActiveShapeName(v4): %v", err)
 	}
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://example.com",
 	})
 	if err != nil {
@@ -105,12 +108,12 @@ func TestNewPageRenderer_UnknownShapeErrors(t *testing.T) {
 	tempDir := t.TempDir()
 	setupTestSite(t, tempDir)
 	// Write an invalid active_shape directly to registry.
-	if err := bundle.SetActiveShapeName(tempDir, "v99"); err != nil {
+	if err := bundle.SetActiveShapeName(storage.At(tempDir), "v99"); err != nil {
 		t.Fatalf("SetActiveShapeName(v99): %v", err)
 	}
 
 	if _, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://example.com",
 	}); err == nil {
 		t.Error("NewPageRenderer should error for active_shape=v99 (shape dir absent)")
@@ -133,12 +136,12 @@ func TestNewPageRenderer_RegistryThemeWins(t *testing.T) {
 	// setupTestSite writes "active_theme: testtheme" into .well-known/polis
 	// (legacy fallback location). Set a different theme in the canonical
 	// location (registry) — registry should win over the legacy fallback.
-	if err := bundle.SetActiveThemeName(tempDir, "vice"); err != nil {
+	if err := bundle.SetActiveThemeName(storage.At(tempDir), "vice"); err != nil {
 		t.Fatalf("SetActiveThemeName(vice): %v", err)
 	}
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://example.com",
 	})
 	if err != nil {
@@ -160,7 +163,7 @@ func TestNewPageRenderer_RandomFallbackWhenEmpty(t *testing.T) {
 	tempDir := t.TempDir()
 	// Install bundle reference payload — gives us themes for SelectRandomTheme
 	// to pick from, and the blog shape templates needed by NewPageRenderer.
-	if err := bundle.EnsureReferencePayload(tempDir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(tempDir), "pub.polis.core"); err != nil {
 		t.Fatalf("install reference payload: %v", err)
 	}
 	// Write a minimal .well-known/polis WITHOUT active_theme — no legacy
@@ -171,7 +174,7 @@ func TestNewPageRenderer_RandomFallbackWhenEmpty(t *testing.T) {
 	os.WriteFile(filepath.Join(wkDir, "polis"), []byte(`{"base_url":"https://example.com","site_title":"Test","author_name":"Test"}`), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://example.com",
 	})
 	if err != nil {
@@ -183,7 +186,7 @@ func TestNewPageRenderer_RandomFallbackWhenEmpty(t *testing.T) {
 	}
 	// SelectRandomTheme persists its choice — verify it's now in the registry
 	// so subsequent renders are deterministic.
-	saved, err := bundle.GetActiveThemeName(tempDir)
+	saved, err := bundle.GetActiveThemeName(storage.At(tempDir))
 	if err != nil {
 		t.Fatalf("GetActiveThemeName after random fallback: %v", err)
 	}
@@ -210,7 +213,7 @@ This is the **test** content.
 	os.WriteFile(postPath, []byte(postContent), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir:       tempDir,
+		Site:          storage.At(tempDir),
 		BaseURL:       "https://example.com",
 		RenderMarkers: false,
 	})
@@ -237,7 +240,7 @@ This is the **test** content.
 
 	// Verify HTML file was written
 	htmlPath := filepath.Join(postsDir, "test-post.html")
-	if _, err := os.Stat(htmlPath); os.IsNotExist(err) {
+	if _, err := os.Stat(htmlPath); errors.Is(err, fs.ErrNotExist) {
 		t.Error("Expected HTML file to be created")
 	}
 }
@@ -258,7 +261,7 @@ Content.
 	os.WriteFile(postPath, []byte(postContent), 0644)
 
 	renderer, _ := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site: storage.At(tempDir),
 	})
 
 	// First render with force
@@ -298,7 +301,7 @@ func TestRenderIndex(t *testing.T) {
 	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(publicJSONL), 0644)
 
 	renderer, _ := NewPageRenderer(PageConfig{
-		DataDir:       tempDir,
+		Site:          storage.At(tempDir),
 		BaseURL:       "https://example.com",
 		RenderMarkers: false,
 	})
@@ -340,7 +343,7 @@ func TestRenderAll(t *testing.T) {
 	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(`{"path":"content/pub.polis.core/post/post1.md","title":"Post 1","type":"post"}`), 0644)
 
 	renderer, _ := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site: storage.At(tempDir),
 	})
 
 	stats, err := renderer.RenderAll(true)
@@ -372,7 +375,7 @@ func TestRenderIndex_LimitsRecentPosts(t *testing.T) {
 	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(entries), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir:       tempDir,
+		Site:          storage.At(tempDir),
 		BaseURL:       "https://example.com",
 		RenderMarkers: false,
 	})
@@ -420,7 +423,7 @@ func TestRenderIndex_NoViewAllWhenFewPosts(t *testing.T) {
 	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(entries), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir:       tempDir,
+		Site:          storage.At(tempDir),
 		BaseURL:       "https://example.com",
 		RenderMarkers: false,
 	})
@@ -467,7 +470,7 @@ func TestRenderArchive(t *testing.T) {
 	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(entries), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir:       tempDir,
+		Site:          storage.At(tempDir),
 		BaseURL:       "https://example.com",
 		RenderMarkers: false,
 	})
@@ -512,7 +515,7 @@ func TestRenderArchive(t *testing.T) {
 func TestRenderArchive_FromShape(t *testing.T) {
 	tempDir := t.TempDir()
 
-	if err := bundle.EnsureReferencePayload(tempDir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(tempDir), "pub.polis.core"); err != nil {
 		t.Fatalf("install reference payload: %v", err)
 	}
 
@@ -539,7 +542,7 @@ func TestRenderArchive_FromShape(t *testing.T) {
 	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(`{"path":"content/pub.polis.core/post/test.md","title":"Test","type":"post"}`), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site: storage.At(tempDir),
 	})
 	if err != nil {
 		t.Fatalf("NewPageRenderer failed: %v", err)
@@ -572,7 +575,7 @@ func TestRenderFile_AuthorDomainAndPageType(t *testing.T) {
 
 	// author_domain is derived from BaseURL config, not from .well-known/polis
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://alice.polis.pub",
 	})
 	if err != nil {
@@ -608,7 +611,7 @@ func TestRenderFile_WidgetVersionPopulated(t *testing.T) {
 	os.MkdirAll(postsDir, 0755)
 	os.WriteFile(filepath.Join(postsDir, "t.md"), []byte("---\ntitle: Test\n---\nContent"), 0644)
 
-	renderer, _ := NewPageRenderer(PageConfig{DataDir: tempDir, BaseURL: "https://example.com"})
+	renderer, _ := NewPageRenderer(PageConfig{Site: storage.At(tempDir), BaseURL: "https://example.com"})
 
 	html, _, err := renderer.RenderFile("content/pub.polis.core/post/t.md", "post", true)
 	if err != nil {
@@ -635,7 +638,7 @@ func TestRenderFile_AuthorDomainFromBaseURLConfig(t *testing.T) {
 	os.WriteFile(filepath.Join(postsDir, "t.md"), []byte("---\ntitle: Test\n---\nContent"), 0644)
 
 	// author_domain is derived from BaseURL config
-	renderer, _ := NewPageRenderer(PageConfig{DataDir: tempDir, BaseURL: "https://bob.example.com"})
+	renderer, _ := NewPageRenderer(PageConfig{Site: storage.At(tempDir), BaseURL: "https://bob.example.com"})
 
 	html, _, err := renderer.RenderFile("content/pub.polis.core/post/t.md", "post", true)
 	if err != nil {
@@ -661,7 +664,7 @@ func TestRenderFile_AuthorDomainEmptyWithoutBaseURL(t *testing.T) {
 	os.WriteFile(filepath.Join(postsDir, "t.md"), []byte("---\ntitle: Test\n---\nContent"), 0644)
 
 	// No BaseURL — author_domain should be empty (graceful degradation)
-	renderer, _ := NewPageRenderer(PageConfig{DataDir: tempDir})
+	renderer, _ := NewPageRenderer(PageConfig{Site: storage.At(tempDir)})
 
 	html, _, err := renderer.RenderFile("content/pub.polis.core/post/t.md", "post", true)
 	if err != nil {
@@ -698,7 +701,7 @@ func TestRenderIndex_ExcerptPopulated(t *testing.T) {
 	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(`{"path":"content/pub.polis.core/post/hello.md","title":"Hello World","published":"2026-01-15T12:00:00Z","type":"post"}`+"\n"), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://example.com",
 	})
 	if err != nil {
@@ -760,7 +763,7 @@ func TestRenderIndex_CommentCountWithSourceContentPath(t *testing.T) {
 	os.WriteFile(filepath.Join(commentDir, "blessed.json"), []byte(blessedJSON), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir:           tempDir,
+		Site:              storage.At(tempDir),
 		BaseURL:           "https://david.polis.pub",
 		PostsSourceDir:    "content/pub.polis.core/post",
 		PostsMountDir:     "posts",
@@ -811,7 +814,7 @@ func TestRenderIndex_PageTypeIsIndex(t *testing.T) {
 	os.MkdirAll(contentDir, 0755)
 	os.WriteFile(filepath.Join(contentDir, "index.jsonl"), []byte(""), 0644)
 
-	renderer, _ := NewPageRenderer(PageConfig{DataDir: tempDir, BaseURL: "https://example.com"})
+	renderer, _ := NewPageRenderer(PageConfig{Site: storage.At(tempDir), BaseURL: "https://example.com"})
 	err := renderer.RenderIndex()
 	if err != nil {
 		t.Fatalf("RenderIndex failed: %v", err)
@@ -826,7 +829,7 @@ func TestRenderIndex_PageTypeIsIndex(t *testing.T) {
 // mountConfig returns standard PageConfig fields for source/output separation tests.
 func mountConfig(dir string) PageConfig {
 	return PageConfig{
-		DataDir:           dir,
+		Site:              storage.At(dir),
 		BaseURL:           "https://example.com",
 		RenderMarkers:     false,
 		PostsSourceDir:    "content/pub.polis.core/post",
@@ -896,18 +899,18 @@ func TestRenderFile_MountDir(t *testing.T) {
 
 	// HTML should be in mount dir, NOT source dir
 	mountHTML := filepath.Join(tempDir, "posts", "test-post.html")
-	if _, err := os.Stat(mountHTML); os.IsNotExist(err) {
+	if _, err := os.Stat(mountHTML); errors.Is(err, fs.ErrNotExist) {
 		t.Error("Expected HTML file in mount dir (posts/test-post.html)")
 	}
 
 	sourceHTML := filepath.Join(postsDir, "test-post.html")
-	if _, err := os.Stat(sourceHTML); !os.IsNotExist(err) {
+	if _, err := os.Stat(sourceHTML); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("HTML should NOT be written to source dir")
 	}
 
 	// .md should NOT be copied to mount dir
 	mountMD := filepath.Join(tempDir, "posts", "test-post.md")
-	if _, err := os.Stat(mountMD); !os.IsNotExist(err) {
+	if _, err := os.Stat(mountMD); !errors.Is(err, fs.ErrNotExist) {
 		t.Error(".md file should NOT be copied to mount dir (posts/test-post.md)")
 	}
 }
@@ -1011,13 +1014,13 @@ func TestRenderAll_MountDir(t *testing.T) {
 	}
 
 	// Verify output is in mount dirs
-	if _, err := os.Stat(filepath.Join(tempDir, "posts", "post1.html")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(tempDir, "posts", "post1.html")); errors.Is(err, fs.ErrNotExist) {
 		t.Error("Expected posts/post1.html in mount dir")
 	}
-	if _, err := os.Stat(filepath.Join(tempDir, "posts", "post1.md")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(tempDir, "posts", "post1.md")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error(".md file should NOT be copied to mount dir (posts/post1.md)")
 	}
-	if _, err := os.Stat(filepath.Join(tempDir, "comments", "comment1.html")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(tempDir, "comments", "comment1.html")); errors.Is(err, fs.ErrNotExist) {
 		t.Error("Expected comments/comment1.html in mount dir")
 	}
 }
@@ -1041,7 +1044,7 @@ func TestRenderAll_CopiesArtifacts(t *testing.T) {
 
 	// Verify blessed.json was copied to comments mount dir
 	dstBlessed := filepath.Join(tempDir, "comments", "blessed.json")
-	if _, err := os.Stat(dstBlessed); os.IsNotExist(err) {
+	if _, err := os.Stat(dstBlessed); errors.Is(err, fs.ErrNotExist) {
 		t.Error("Expected blessed.json copied to comments mount dir")
 	}
 }
@@ -1114,7 +1117,7 @@ func TestRenderArchive_MountDir(t *testing.T) {
 
 	// Should NOT be in legacy location
 	legacyPath := filepath.Join(tempDir, "content", "pub.polis.core", "post", "index.html")
-	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(legacyPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("Archive should NOT be in legacy source dir when mount dir is configured")
 	}
 }
@@ -1124,7 +1127,7 @@ func TestBuildAvatarHTML_Default(t *testing.T) {
 	setupTestSite(t, tempDir)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://example.com",
 	})
 	if err != nil {
@@ -1158,7 +1161,7 @@ func TestBuildAvatarHTML_BGAndFG(t *testing.T) {
 	}`), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://example.com",
 	})
 	if err != nil {
@@ -1189,7 +1192,7 @@ func TestBuildAvatarHTML_Border(t *testing.T) {
 	}`), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://example.com",
 	})
 	if err != nil {
@@ -1218,7 +1221,7 @@ func TestBuildAvatarHTML_PatternHidesInitial(t *testing.T) {
 	}`), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://example.com",
 	})
 	if err != nil {
@@ -1251,7 +1254,7 @@ func TestBuildAvatarHTML_PatternNoneShowsInitial(t *testing.T) {
 	}`), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://example.com",
 	})
 	if err != nil {
@@ -1285,7 +1288,7 @@ func TestBuildAvatarHTML_AllPatterns(t *testing.T) {
 			}`, pattern)), 0644)
 
 			renderer, err := NewPageRenderer(PageConfig{
-				DataDir: tempDir,
+				Site:    storage.At(tempDir),
 				BaseURL: "https://example.com",
 			})
 			if err != nil {
@@ -1312,7 +1315,7 @@ func TestBuildAvatarHTML_UnknownPatternShowsInitial(t *testing.T) {
 	}`), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://example.com",
 	})
 	if err != nil {
@@ -1342,7 +1345,7 @@ func TestBuildAvatarHTML_FallbackToDomain(t *testing.T) {
 	}`), 0644)
 
 	renderer, err := NewPageRenderer(PageConfig{
-		DataDir: tempDir,
+		Site:    storage.At(tempDir),
 		BaseURL: "https://alice.polis.pub",
 	})
 	if err != nil {
@@ -1363,7 +1366,7 @@ func setupTestSite(t *testing.T, dir string) {
 
 	// Install the reference bundle payload — gives us a working blog shape at
 	// .polis/bundles/pub.polis.core/shapes/v3/, which render now requires.
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("install reference payload: %v", err)
 	}
 
@@ -1371,7 +1374,7 @@ func setupTestSite(t *testing.T, dir string) {
 	// site/themes/testtheme/, so we need active_shape=v3 to dispatch the
 	// v3 render path. Post-cutover the default is v4; tests that exercise
 	// v3 behavior must opt in explicitly.
-	if err := bundle.SetActiveShapeName(dir, "v3"); err != nil {
+	if err := bundle.SetActiveShapeName(storage.At(dir), "v3"); err != nil {
 		t.Fatalf("SetActiveShapeName(v3): %v", err)
 	}
 
@@ -1593,7 +1596,7 @@ func TestLoadOrFetchReplyContext_PartialEntryHits(t *testing.T) {
 	DefaultHTTPClient = &http.Client{Transport: errAllRoundTripper{}}
 	defer func() { DefaultHTTPClient = origClient }()
 
-	entry, ok := LoadOrFetchReplyContext(dir, "https://alice.example.com/posts/foo.html", 0)
+	entry, ok := LoadOrFetchReplyContext(storage.At(dir), "https://alice.example.com/posts/foo.html", 0)
 	if !ok {
 		t.Fatal("expected cache hit on partial entry; got ok=false (predicate forced re-fetch)")
 	}
@@ -1672,7 +1675,7 @@ func TestLoadOrFetchReplyContext_SingleflightDeduplicates(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			LoadOrFetchReplyContext(dir, url, 0)
+			LoadOrFetchReplyContext(storage.At(dir), url, 0)
 		}()
 	}
 
@@ -1710,7 +1713,7 @@ func TestLoadOrFetchReplyContext_NegativeCacheBlocksRefetch(t *testing.T) {
 	const url = "https://alice.example.com/posts/dead.html"
 
 	// First call: fetch attempt fails → negative cache populated.
-	_, ok := LoadOrFetchReplyContext(dir, url, 0)
+	_, ok := LoadOrFetchReplyContext(storage.At(dir), url, 0)
 	if ok {
 		t.Fatal("first call: expected ok=false on fetch failure")
 	}
@@ -1719,7 +1722,7 @@ func TestLoadOrFetchReplyContext_NegativeCacheBlocksRefetch(t *testing.T) {
 	DefaultHTTPClient = &http.Client{Transport: counter}
 
 	// Second call: must short-circuit via negative cache; no fetch.
-	_, ok = LoadOrFetchReplyContext(dir, url, 0)
+	_, ok = LoadOrFetchReplyContext(storage.At(dir), url, 0)
 	if ok {
 		t.Error("second call: negative cache hit should keep ok=false")
 	}
@@ -1756,7 +1759,7 @@ func TestLoadOrFetchReplyContext_ConcurrentWritesAllPersist(t *testing.T) {
 		wg.Add(1)
 		go func(u string) {
 			defer wg.Done()
-			_, ok := LoadOrFetchReplyContext(dir, u, 0)
+			_, ok := LoadOrFetchReplyContext(storage.At(dir), u, 0)
 			if !ok {
 				t.Errorf("fetch failed for %s", u)
 			}
@@ -1765,7 +1768,7 @@ func TestLoadOrFetchReplyContext_ConcurrentWritesAllPersist(t *testing.T) {
 	wg.Wait()
 
 	// Every URL we wrote must be present in the persisted cache.
-	final := loadReplyContextCache(dir)
+	final := loadReplyContextCache(storage.At(dir))
 	if len(final) != n {
 		t.Errorf("expected %d entries in persisted cache; got %d", n, len(final))
 	}
@@ -1805,23 +1808,23 @@ func TestLoadLocalCommentContent_CacheOnly(t *testing.T) {
 	}
 
 	// No cache entry → a miss must be a placeholder, NOT the public copy.
-	if html := LoadLocalCommentContent(dir, commentURL); html != "" {
+	if html := LoadLocalCommentContent(storage.At(dir), commentURL); html != "" {
 		t.Errorf("a foreign comment must NOT be served from a public path; got %q", html)
 	}
 
 	// Cache entry present → renders from the isolated cache.
-	if err := cache.StoreBlessed(dir, "ds.polis.pub", cache.BlessedSidecar{SourceURL: commentURL, FetchedAt: "t"}, []byte("cached body")); err != nil {
+	if err := cache.StoreBlessed(storage.At(dir), "ds.polis.pub", cache.BlessedSidecar{SourceURL: commentURL, FetchedAt: "t"}, []byte("cached body")); err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	if html := LoadLocalCommentContent(dir, commentURL); !strings.Contains(html, "cached body") {
+	if html := LoadLocalCommentContent(storage.At(dir), commentURL); !strings.Contains(html, "cached body") {
 		t.Errorf("expected the cache body, got %q", html)
 	}
 
 	// After eviction → miss again → placeholder, never the public copy.
-	if err := cache.EvictBlessedAnyDS(dir, commentURL); err != nil {
+	if err := cache.EvictBlessedAnyDS(storage.At(dir), commentURL); err != nil {
 		t.Fatal(err)
 	}
-	if html := LoadLocalCommentContent(dir, commentURL); html != "" {
+	if html := LoadLocalCommentContent(storage.At(dir), commentURL); html != "" {
 		t.Errorf("after eviction a miss must be a placeholder, not the public copy; got %q", html)
 	}
 }
@@ -1836,15 +1839,15 @@ func TestLoadLocalCommentContent_ReadThroughFiller(t *testing.T) {
 
 	orig := BlessedCacheFiller
 	defer func() { BlessedCacheFiller = orig }()
-	BlessedCacheFiller = func(dataDir, url string) bool {
+	BlessedCacheFiller = func(site storage.Site, url string) bool {
 		if url != commentURL {
 			return false
 		}
-		_ = cache.StoreBlessed(dataDir, "ds.polis.pub", cache.BlessedSidecar{SourceURL: url, FetchedAt: "t"}, []byte("filled body"))
+		_ = cache.StoreBlessed(site, "ds.polis.pub", cache.BlessedSidecar{SourceURL: url, FetchedAt: "t"}, []byte("filled body"))
 		return true
 	}
 
-	if html := LoadLocalCommentContent(dir, commentURL); !strings.Contains(html, "filled body") {
+	if html := LoadLocalCommentContent(storage.At(dir), commentURL); !strings.Contains(html, "filled body") {
 		t.Errorf("read-through filler should populate + render, got %q", html)
 	}
 }

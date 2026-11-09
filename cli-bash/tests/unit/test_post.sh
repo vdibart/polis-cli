@@ -104,44 +104,7 @@ test_post_without_init() {
     return 0
 }
 
-# Test: Post stages files in git
-test_post_git_staging() {
-    setup_test_env "post_git_staging"
-    trap teardown_test_env EXIT
-
-    # Initialize
-    "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
-
-    # Commit init files (scope to test-data/ only)
-    git add . && git commit -m "init" --quiet
-
-    # Create and post
-    create_sample_post "my-post.md" "Test Post"
-
-    local result
-    result=$("$POLIS_BIN" --json post my-post.md 2>&1)
-
-    # Get canonical path
-    local canonical_path
-    canonical_path=$(echo "$result" | jq -r '.data.file_path')
-
-    # Check that files are staged
-    local staged_files
-    staged_files=$(git diff --cached --name-only)
-
-    # Should have the posted file staged
-    echo "$staged_files" | grep -q "$(basename "$canonical_path")" || {
-        log_error "Posted file not staged"
-        return 1
-    }
-
-    log "  [OK] Posted file is staged in git"
-    return 0
-}
-
 # Run tests
 run_test "Post Basic" test_post_basic
 run_test "Post Missing File" test_post_missing_file
 run_test "Post Without Init" test_post_without_init
-# Post Git Staging: skipped — bash CLI does not auto-stage files in git
-skip_test "Post Git Staging" "Bash CLI does not auto-stage files in git"

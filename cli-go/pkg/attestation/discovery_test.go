@@ -2,6 +2,7 @@ package attestation
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -36,12 +37,12 @@ func TestRegisterIsTheConsumerOfCurrentVersion(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := discovery.WriteRegistrationMarker(site, srv.URL, "vdibart.polis.pub", ""); err != nil {
+	if err := discovery.WriteRegistrationMarker(storage.At(site), srv.URL, "vdibart.polis.pub", ""); err != nil {
 		t.Fatalf("WriteRegistrationMarker: %v", err)
 	}
 
 	rec := sampleRecord()
-	id, err := Issue(site, rec, priv)
+	id, err := Issue(storage.At(site), rec, priv)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -49,7 +50,7 @@ func TestRegisterIsTheConsumerOfCurrentVersion(t *testing.T) {
 	cfg := &DiscoveryConfig{
 		DiscoveryURL: srv.URL,
 		BaseURL:      "https://vdibart.polis.pub",
-		DataDir:      site,
+		Site:         storage.At(site),
 	}
 	if err := Register(rec, id, priv, cfg); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -116,7 +117,7 @@ func TestRegisterSendsThePinWhenThereIsOne(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := discovery.WriteRegistrationMarker(site, srv.URL, "vdibart.polis.pub", ""); err != nil {
+	if err := discovery.WriteRegistrationMarker(storage.At(site), srv.URL, "vdibart.polis.pub", ""); err != nil {
 		t.Fatalf("WriteRegistrationMarker: %v", err)
 	}
 
@@ -125,11 +126,11 @@ func TestRegisterSendsThePinWhenThereIsOne(t *testing.T) {
 	rec.Predicate = PredicateCorrection
 	rec.Subject = Subject{Type: SubjectURI, ID: "https://site.example/posts/x.md", Version: pin}
 
-	id, err := Issue(site, rec, priv)
+	id, err := Issue(storage.At(site), rec, priv)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	cfg := &DiscoveryConfig{DiscoveryURL: srv.URL, BaseURL: "https://vdibart.polis.pub", DataDir: site}
+	cfg := &DiscoveryConfig{DiscoveryURL: srv.URL, BaseURL: "https://vdibart.polis.pub", Site: storage.At(site)}
 	if err := Register(rec, id, priv, cfg); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -155,11 +156,11 @@ func TestRegisterIsSilentWhenNotRegisteredLocally(t *testing.T) {
 	defer srv.Close()
 
 	rec := sampleRecord()
-	id, err := Issue(site, rec, priv)
+	id, err := Issue(storage.At(site), rec, priv)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	cfg := &DiscoveryConfig{DiscoveryURL: srv.URL, BaseURL: "https://vdibart.polis.pub", DataDir: site}
+	cfg := &DiscoveryConfig{DiscoveryURL: srv.URL, BaseURL: "https://vdibart.polis.pub", Site: storage.At(site)}
 	if err := Register(rec, id, priv, cfg); err != nil {
 		t.Errorf("an unregistered site is not an error: %v", err)
 	}
@@ -174,11 +175,11 @@ func TestRegisterWithNoDiscoveryConfigured(t *testing.T) {
 	site := t.TempDir()
 
 	rec := sampleRecord()
-	id, err := Issue(site, rec, priv)
+	id, err := Issue(storage.At(site), rec, priv)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	if err := Register(rec, id, priv, &DiscoveryConfig{DataDir: site}); err != nil {
+	if err := Register(rec, id, priv, &DiscoveryConfig{Site: storage.At(site)}); err != nil {
 		t.Errorf("an unconfigured site is not an error: %v", err)
 	}
 }

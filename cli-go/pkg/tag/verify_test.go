@@ -2,6 +2,7 @@ package tag
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,7 +29,7 @@ func tagTestSite(t *testing.T) (siteDir string, priv []byte, pub []byte) {
 
 func writeTag(t *testing.T, siteDir string, tf *TagFile) string {
 	t.Helper()
-	path := TagPath(siteDir, tf.Tag)
+	path := filepath.Join(siteDir, filepath.FromSlash(TagKey(tf.Tag)))
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +117,7 @@ func TestVerifySite_ReportsPerTagStatusAgainstThePublishedKey(t *testing.T) {
 	writeTag(t, siteDir, signedTagFile(t, otherPriv, "forged"))
 	writeTag(t, siteDir, &TagFile{Tag: "bare", Created: "2026-01-01T00:00:00Z"})
 
-	got, err := VerifySite(siteDir)
+	got, err := VerifySite(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("VerifySite: %v", err)
 	}
@@ -135,7 +136,7 @@ func TestVerifySite_ReportsPerTagStatusAgainstThePublishedKey(t *testing.T) {
 // A site that has tagged nothing is an ordinary site, not a broken one.
 func TestVerifySite_NoTagsIsNotAnError(t *testing.T) {
 	siteDir, _, _ := tagTestSite(t)
-	got, err := VerifySite(siteDir)
+	got, err := VerifySite(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("a site with no tags must not error: %v", err)
 	}

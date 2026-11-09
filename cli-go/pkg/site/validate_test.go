@@ -2,6 +2,7 @@ package site
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +30,7 @@ func TestValidate_ScrubsAbsolutePaths(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	result := Validate(tempDir)
+	result := Validate(storage.At(tempDir))
 	if result == nil {
 		t.Fatal("Validate returned nil result")
 	}
@@ -71,7 +72,7 @@ func TestValidate_ScrubsAbsolutePaths(t *testing.T) {
 func TestValidate_PathRemainsUsableAfterScrub(t *testing.T) {
 	tempDir := t.TempDir()
 	os.MkdirAll(filepath.Join(tempDir, ".polis"), 0700)
-	result := Validate(tempDir)
+	result := Validate(storage.At(tempDir))
 
 	wantPaths := map[string]string{
 		"PRIVATE_KEY_MISSING": filepath.Join(".polis", "keys", "id_ed25519"),

@@ -94,13 +94,13 @@ func TestProfileIsATagNotAURL(t *testing.T) {
 func TestSignAndVerifyRoundTrip(t *testing.T) {
 	priv, pub := testKeys(t)
 	dir := t.TempDir()
-	path := DefaultPath(dir)
+	path := filepath.Join(dir, filepath.FromSlash(DefaultKey))
 
 	f, err := New(ProfileReserved, "https://maya.example")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := SignAndWrite(f, path, priv); err != nil {
+	if err := SignAndWrite(f, siteOf(path), keyOf(path), priv); err != nil {
 		t.Fatal(err)
 	}
 
@@ -126,10 +126,10 @@ func TestSignAndVerifyRoundTrip(t *testing.T) {
 func TestTamperedLicenceFailsVerification(t *testing.T) {
 	priv, pub := testKeys(t)
 	dir := t.TempDir()
-	path := DefaultPath(dir)
+	path := filepath.Join(dir, filepath.FromSlash(DefaultKey))
 
 	f, _ := New(ProfileReserved, "https://maya.example")
-	if err := SignAndWrite(f, path, priv); err != nil {
+	if err := SignAndWrite(f, siteOf(path), keyOf(path), priv); err != nil {
 		t.Fatal(err)
 	}
 
@@ -387,9 +387,9 @@ func TestLicenceFileIsPublicReadable(t *testing.T) {
 	// R11-17: self-hosters serve content/ through another user's web server.
 	priv, _ := testKeys(t)
 	dir := t.TempDir()
-	path := DefaultPath(dir)
+	path := filepath.Join(dir, filepath.FromSlash(DefaultKey))
 	f, _ := New(ProfileReserved, "https://maya.example")
-	if err := SignAndWrite(f, path, priv); err != nil {
+	if err := SignAndWrite(f, siteOf(path), keyOf(path), priv); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
@@ -401,11 +401,10 @@ func TestLicenceFileIsPublicReadable(t *testing.T) {
 	}
 }
 
-func TestDefaultPathIsUnderTheContentTree(t *testing.T) {
-	got := DefaultPath("/site")
-	want := filepath.Join("/site", "content", "pub.polis.core", "license", "license.json")
-	if got != want {
-		t.Errorf("DefaultPath = %q, want %q", got, want)
+func TestDefaultKeyIsUnderTheContentTree(t *testing.T) {
+	got := DefaultKey
+	if want := "content/pub.polis.core/license/license.json"; got != want {
+		t.Errorf("DefaultKey = %q, want %q", got, want)
 	}
 	// It must not sit beside policies/ — inbound policy and outbound licence
 	// are opposite directions, and adjacency invites exactly that conflation.

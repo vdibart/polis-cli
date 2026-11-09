@@ -3,28 +3,21 @@ package dm
 import (
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 )
 
-// DMDir returns the tenant DM directory under siteDir
-// (.polis/bundles/pub.polis.core/dm) — the single source of truth for where the
-// keyring, conversations, and inbox live.
-func DMDir(siteDir string) string {
-	return filepath.Join(siteDir, ".polis", "bundles", "pub.polis.core", "dm")
-}
-
 // IsProtected reports whether the site has secured its messages: true iff the keyring
 // has at least one password epoch. A site with no keyring (not provisioned) or only the
 // bootstrap epoch is unprotected — operator-readable by design. This is the single bit
 // the protection_status endpoint exposes; it never reveals keys, counts, or contents.
-func IsProtected(siteDir string) (bool, error) {
-	kr, err := LoadKeyring(DMDir(siteDir))
+func IsProtected(site storage.Site) (bool, error) {
+	kr, err := LoadKeyring(site)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
 		}
 		return false, fmt.Errorf("load keyring: %w", err)
@@ -78,11 +71,11 @@ var ErrProtectionStatusForbidden = errors.New("caller not in follow relationship
 // then returns a signed protected bit stamped with the current time. callerDomain must be
 // a domain the responder follows; otherwise ErrProtectionStatusForbidden (the handler maps
 // it to 403/404 so a non-follower learns nothing).
-func BuildProtectionStatus(siteDir, responderDomain string, identityPrivPEM []byte, callerDomain string, followingDomains map[string]bool) (*ProtectionStatus, error) {
+func BuildProtectionStatus(site storage.Site, responderDomain string, identityPrivPEM []byte, callerDomain string, followingDomains map[string]bool) (*ProtectionStatus, error) {
 	if !followingDomains[strings.ToLower(callerDomain)] {
 		return nil, ErrProtectionStatusForbidden
 	}
-	protected, err := IsProtected(siteDir)
+	protected, err := IsProtected(site)
 	if err != nil {
 		return nil, err
 	}

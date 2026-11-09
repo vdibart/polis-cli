@@ -3,11 +3,16 @@
 package tailor
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Version is set at startup by the cmd package.
@@ -128,6 +133,7 @@ func allChecks() []checkFunc {
 		// Before the declarations check, so a tenant the migration reaches is
 		// read against the defaults it now satisfies.
 		checkUnpublishedEmitsMigration,
+		checkThemeShapesMigration,
 		checkBundleDeclarations,
 		checkIndexEntries,
 		checkBlessedFollowingStructure,
@@ -161,7 +167,7 @@ func extractBaseURL(siteDir string) string {
 
 	// Read from .well-known/polis before legacy cleanup removes it
 	wkPath := filepath.Join(siteDir, ".well-known", "polis")
-	data, err := os.ReadFile(wkPath)
+	data, err := storage.ReadAtPath(wkPath)
 	if err != nil {
 		return ""
 	}
@@ -217,7 +223,7 @@ func run(siteDir string, dryRun bool, backupDir string, generator string) *Resul
 
 	// Verify .well-known/polis exists — if not, most checks are meaningless
 	wkPath := filepath.Join(siteDir, ".well-known", "polis")
-	if _, err := os.Stat(wkPath); os.IsNotExist(err) {
+	if _, err := storage.StatAtPath(wkPath); errors.Is(err, fs.ErrNotExist) {
 		result.Checks = []CheckResult{{
 			Name:    "wellknown-exists",
 			Status:  StatusSkip,
@@ -263,6 +269,8 @@ func run(siteDir string, dryRun bool, backupDir string, generator string) *Resul
 func createBackupDir(siteDir string) string {
 	ts := time.Now().Format("20060102-150405")
 	dir := filepath.Join(siteDir, ".polis", "tailor-backup", ts)
+	// NOT the storage interface: creates a backup directory that is EMPTY until
+	// something is copied into it, and 0700 because it is under .polis.
 	os.MkdirAll(dir, 0700)
 	return dir
 }
@@ -273,15 +281,16 @@ func backupFile(siteDir, backupDir, relPath string) error {
 		return nil
 	}
 	src := filepath.Join(siteDir, relPath)
-	data, err := os.ReadFile(src)
+	data, err := storage.ReadAtPath(src)
 	if err != nil {
 		return nil // File doesn't exist, nothing to back up
 	}
-	dst := filepath.Join(backupDir, relPath)
-	if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0644)
+	// ⛔ A store rooted at the backup directory with WithDirMode(0700), NOT
+	// storage.WriteAtPath: the backup lives under .polis, and WriteAtPath roots a
+	// plain POSIX store whose parents come out 0755. Declaring the mode on the
+	// store removes the MkdirAll that used to carry it.
+	return storage.NewPOSIX(backupDir, storage.WithDirMode(0o700)).
+		Put(context.Background(), filepath.ToSlash(relPath), data)
 }
 
 // pass creates a passing CheckResult.
@@ -310,14 +319,14 @@ func relPath(siteDir, path string) string {
 
 // fileExists checks if a path exists.
 func fileExists(path string) bool {
-	_, err := os.Stat(path)
+	_, err := storage.StatAtPath(path)
 	return err == nil
 }
 
 // dirExists checks if a path exists and is a directory.
 func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
+	info, err := storage.StatAtPath(path)
+	return err == nil && info.IsDir
 }
 
 // moveFile moves src to dst, creating destination directory as needed.
@@ -326,6 +335,8 @@ func moveFile(src, dst string) error {
 	if fileExists(dst) {
 		return fmt.Errorf("destination already exists: %s", dst)
 	}
+	// Stays: paired with the os.Rename below. The interface has no rename, because a
+	// copy-then-delete is not the same operation.
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
@@ -337,6 +348,8 @@ func moveDir(src, dst string) error {
 	if fileExists(dst) {
 		return fmt.Errorf("destination already exists: %s", dst)
 	}
+	// Stays: paired with the os.Rename below. The interface has no rename, because a
+	// copy-then-delete is not the same operation.
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
@@ -345,7 +358,7 @@ func moveDir(src, dst string) error {
 
 // isDirEmpty checks if a directory contains no entries.
 func isDirEmpty(path string) bool {
-	entries, err := os.ReadDir(path)
+	entries, err := storage.ListDir(path)
 	if err != nil {
 		return false
 	}

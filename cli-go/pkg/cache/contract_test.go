@@ -1,6 +1,9 @@
 package cache
 
 import (
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -34,12 +37,11 @@ func newSpy() *spyDescriptor {
 
 func (s *spyDescriptor) Kind() string { return "spy" }
 
-func (s *spyDescriptor) Paths(st Store, key string) (string, string, bool) {
+func (s *spyDescriptor) Keys(st Store, key string) (string, string, bool) {
 	if key == "" || key == "bad" {
 		return "", "", false
 	}
-	md := filepath.Join(st.DataDir, key+".md")
-	return md, md + ".meta.json", true
+	return key + ".md", key + ".md.meta.json", true
 }
 
 func (s *spyDescriptor) Fetch(st Store, key string, opts IngestOptions) FetchOutcome {
@@ -95,7 +97,7 @@ func (s *spyDescriptor) List(st Store) ([]CachedItem, error) {
 	defer s.mu.Unlock()
 	var items []CachedItem
 	for k, sc := range s.cars {
-		items = append(items, CachedItem{Key: k, MDPath: filepath.Join(st.DataDir, k+".md"), Sidecar: sc, HasSidecar: true})
+		items = append(items, CachedItem{Key: k, MDKey: k + ".md", Sidecar: sc, HasSidecar: true})
 	}
 	return items, nil
 }
@@ -110,7 +112,7 @@ func (s *spyDescriptor) DesiredSet(st Store) (map[string]DesiredEntry, error) {
 func (s *spyDescriptor) EvictionSignals() []string { return []string{"evict.signal"} }
 func (s *spyDescriptor) TTL() time.Duration        { return 0 }
 
-func st(t *testing.T) Store { return Store{DataDir: t.TempDir(), DSDomain: "ds.test"} }
+func st(t *testing.T) Store { return Store{Site: storage.At(t.TempDir()), DSDomain: "ds.test"} }
 
 // TestIngestIdempotent: a second Ingest of a present, pinned key is a no-op.
 func TestIngestIdempotent(t *testing.T) {
@@ -302,12 +304,12 @@ func TestGCRemovesOrphans(t *testing.T) {
 	// Inject an orphan: present in List with HasSidecar=false. We model this by
 	// adding a body with no sidecar via a custom List entry — simulate by writing
 	// the on-disk md and having List report it. Use a real file for GC to remove.
-	orphanPath := filepath.Join(store.DataDir, "orphan.md")
+	orphanPath := filepath.Join(store.Site.Dir(), "orphan.md")
 	if err := os.WriteFile(orphanPath, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// Override List to include the orphan.
-	gc := &orphanListDescriptor{spyDescriptor: s, orphan: CachedItem{Key: "orphan", MDPath: orphanPath, HasSidecar: false}}
+	gc := &orphanListDescriptor{spyDescriptor: s, orphan: CachedItem{Key: "orphan", MDKey: "orphan.md", HasSidecar: false}}
 
 	rep, err := GC(store, gc)
 	if err != nil {
@@ -316,7 +318,7 @@ func TestGCRemovesOrphans(t *testing.T) {
 	if rep.Removed != 1 {
 		t.Fatalf("expected 1 orphan removed, got %+v", rep)
 	}
-	if _, err := os.Stat(orphanPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(orphanPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("orphan body must be deleted")
 	}
 	if _, _, ok := s.Read(store, "healthy"); !ok {

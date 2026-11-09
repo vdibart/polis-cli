@@ -1,6 +1,9 @@
 package render
 
 import (
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -247,7 +250,7 @@ func TestUnpublishStream_DeletesAndCascades(t *testing.T) {
 
 	// The unpublished post's HTML must be gone.
 	deletedHTML := filepath.Join(tempDir, "posts", newestDate, newestSlug+".html")
-	if _, err := os.Stat(deletedHTML); !os.IsNotExist(err) {
+	if _, err := os.Stat(deletedHTML); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("unpublished post HTML should be deleted, but stat err = %v", err)
 	}
 
@@ -285,7 +288,7 @@ func TestUnpublishStream_LastPost(t *testing.T) {
 	}
 
 	// Solo post HTML deleted.
-	if _, err := os.Stat(filepath.Join(tempDir, "posts", "20260315", "solo.html")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(tempDir, "posts", "20260315", "solo.html")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("solo post HTML should be deleted")
 	}
 
@@ -429,7 +432,7 @@ func urlList(entries []sitemap.Entry) []string {
 func primeStreamRenderer(t *testing.T, dir string) *PageRenderer {
 	t.Helper()
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        dir,
+		Site:           storage.At(dir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",

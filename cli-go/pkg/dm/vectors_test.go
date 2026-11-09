@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -95,7 +97,7 @@ func TestCrossImplVectors(t *testing.T) {
 
 	// Golden compare / generate-on-miss.
 	data, err := os.ReadFile(vectorsPath)
-	if os.IsNotExist(err) {
+	if errors.Is(err, fs.ErrNotExist) {
 		if mkErr := os.MkdirAll(filepath.Dir(vectorsPath), 0o755); mkErr != nil {
 			t.Fatal(mkErr)
 		}

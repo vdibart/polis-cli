@@ -2,6 +2,8 @@
 package clone
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/attestation"
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Content type names this clone knows how to fetch. Names, not paths: WHERE
@@ -100,6 +103,8 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	serverURL = normalizeURL(serverURL)
 
 	// Create target directory
+	// NOT the storage interface: creating the store's own ROOT is a backend
+	// concern, not a key operation — an object store has no root to create.
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create target directory: %w", err)
 	}
@@ -108,7 +113,7 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	statePath := filepath.Join(targetDir, ".polis-clone-state.json")
 	var state *CloneState
 	if !opts.FullClone {
-		state, _ = loadState(statePath)
+		state, _ = loadState(targetDir, statePath)
 	}
 
 	// Fetch .well-known/polis as RAW BYTES and store them verbatim.
@@ -127,10 +132,7 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	if !ok {
 		return nil, fmt.Errorf("refusing to write .well-known/polis: it would land outside %s", targetDir)
 	}
-	if err := os.MkdirAll(filepath.Dir(wkDest), 0755); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(wkDest, []byte(wkRaw), 0644); err != nil {
+	if err := putUnder(targetDir, wkDest, []byte(wkRaw)); err != nil {
 		return nil, err
 	}
 
@@ -150,8 +152,13 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	if !ok {
 		return nil, fmt.Errorf("refusing bundle root %s: it would land outside %s", dirs.bundleRoot(), targetDir)
 	}
+	// NOT the storage interface, and this is a real limitation rather than an
+	// oversight: these directories are created so the tree shape matches a
+	// real site EVEN WHEN THEY STAY EMPTY, and a prefix store has no way to
+	// represent an empty directory. Put creates parents, which covers every
+	// MkdirAll that is followed by a write — but not these.
 	if err := os.MkdirAll(bundleDir, 0755); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create bundle directory: %w", err)
 	}
 
 	// Fetch public index
@@ -161,23 +168,17 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	}
 
 	// Save index.jsonl
-	indexFile, err := os.Create(filepath.Join(bundleDir, "index.jsonl"))
-	if err != nil {
-		return nil, err
-	}
+	var indexBuf bytes.Buffer
 	for _, entry := range entries {
 		data, err := json.Marshal(entry)
 		if err != nil {
-			indexFile.Close()
 			return nil, fmt.Errorf("marshal index entry: %w", err)
 		}
-		if _, err := indexFile.WriteString(string(data) + "\n"); err != nil {
-			indexFile.Close()
-			return nil, fmt.Errorf("write index entry: %w", err)
-		}
+		indexBuf.Write(data)
+		indexBuf.WriteByte('\n')
 	}
-	if err := indexFile.Close(); err != nil {
-		return nil, fmt.Errorf("close index file: %w", err)
+	if err := putUnder(targetDir, filepath.Join(bundleDir, "index.jsonl"), indexBuf.Bytes()); err != nil {
+		return nil, fmt.Errorf("write index file: %w", err)
 	}
 
 	// Download indexed content. Modern public indexes (post-bundle-refactor)
@@ -234,7 +235,7 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 			result.RejectedPaths = append(result.RejectedPaths, relPath)
 			continue
 		}
-		if !writeFetched(client, contentURL, dest) {
+		if !writeFetched(client, targetDir, contentURL, dest) {
 			result.Errors++
 			continue
 		}
@@ -257,9 +258,11 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	if blessedDest, ok := safeDest(targetDir, blessedRel); !ok {
 		result.RejectedPaths = append(result.RejectedPaths, blessedRel)
 	} else {
-		os.MkdirAll(filepath.Dir(blessedDest), 0755)
+		// See the note at the bundle root: a deliberately empty directory
+		// cannot be expressed through the storage interface.
+		_ = os.MkdirAll(filepath.Dir(blessedDest), 0755)
 		if content, err := client.FetchContent(serverURL + "/" + filepath.ToSlash(blessedRel)); err == nil {
-			if err := os.WriteFile(blessedDest, []byte(content), 0644); err == nil {
+			if err := putUnder(targetDir, blessedDest, []byte(content)); err == nil {
 				var bc struct {
 					Comments []struct {
 						Blessed []interface{} `json:"blessed"`
@@ -280,9 +283,10 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	if followingDest, ok := safeDest(targetDir, followingRel); !ok {
 		result.RejectedPaths = append(result.RejectedPaths, followingRel)
 	} else {
-		os.MkdirAll(filepath.Dir(followingDest), 0755)
+		// See the note at the bundle root.
+		_ = os.MkdirAll(filepath.Dir(followingDest), 0755)
 		if content, err := client.FetchContent(serverURL + "/" + filepath.ToSlash(followingRel)); err == nil {
-			os.WriteFile(followingDest, []byte(content), 0644)
+			_ = putUnder(targetDir, followingDest, []byte(content))
 		}
 	}
 
@@ -294,7 +298,7 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	if rel := licenseRelPath(&wk); rel != "" {
 		if dest, ok := safeDest(targetDir, rel); !ok {
 			result.RejectedPaths = append(result.RejectedPaths, rel)
-		} else if writeFetched(client, serverURL+"/"+filepath.ToSlash(rel), dest) {
+		} else if writeFetched(client, targetDir, serverURL+"/"+filepath.ToSlash(rel), dest) {
 			result.LicenseCloned = true
 		}
 	}
@@ -303,7 +307,7 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	// location is fixed by the did:web method, not by our config, so this one
 	// path really is constant.
 	if dest, ok := safeDest(targetDir, filepath.Join(".well-known", "did.json")); ok &&
-		writeFetched(client, serverURL+"/.well-known/did.json", dest) {
+		writeFetched(client, targetDir, serverURL+"/.well-known/did.json", dest) {
 		result.DIDDocumentCloned = true
 	}
 
@@ -343,7 +347,7 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 		newState.ClonedAt = state.ClonedAt
 		newState.PostsCount = state.PostsCount + result.PostsDownloaded
 	}
-	saveState(statePath, newState)
+	saveState(targetDir, statePath, newState)
 
 	return result, nil
 }
@@ -379,11 +383,7 @@ func fetchBundles(client *remote.Client, serverURL, targetDir string, wk *wellKn
 			result.Errors++
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-			result.Errors++
-			continue
-		}
-		if err := os.WriteFile(dest, []byte(content), 0644); err != nil {
+		if err := putUnder(targetDir, dest, []byte(content)); err != nil {
 			result.Errors++
 			continue
 		}
@@ -492,6 +492,8 @@ func safeDest(targetDir, rel string) (string, bool) {
 	}
 	dest := filepath.Join(targetDir, rel)
 
+	// NOT the storage interface: filepath.EvalSymlinks RESOLVES links, and the
+	// interface cannot represent one — Stat follows and Info.Mode is Perm() only.
 	realTarget, err := filepath.EvalSymlinks(targetDir)
 	if err != nil {
 		return "", false
@@ -500,6 +502,9 @@ func safeDest(targetDir, rel string) (string, bool) {
 	// itself, since writing to an existing symlink follows it.
 	existing := dest
 	for {
+		// NOT the storage interface: os.Lstat does NOT follow the link, which is the
+		// whole question. Stat follows, and Info.Mode is Perm() only, so a symlink is
+		// unrepresentable rather than merely unreported.
 		if _, err := os.Lstat(existing); err == nil {
 			break
 		}
@@ -523,15 +528,12 @@ func safeDest(targetDir, rel string) (string, bool) {
 // writeFetched downloads url and writes it to dest, creating parents. Returns
 // false when the resource is absent or unwritable — absence is expected for
 // most optional artifacts and is never an error here.
-func writeFetched(client *remote.Client, url, dest string) bool {
+func writeFetched(client *remote.Client, root, url, dest string) bool {
 	content, err := client.FetchContent(url)
 	if err != nil {
 		return false
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-		return false
-	}
-	return os.WriteFile(dest, []byte(content), 0644) == nil
+	return putUnder(root, dest, []byte(content)) == nil
 }
 
 // normalizeURL ensures URL has https:// prefix and no trailing slash.
@@ -544,8 +546,12 @@ func normalizeURL(url string) string {
 }
 
 // loadState loads the clone state from disk.
-func loadState(path string) (*CloneState, error) {
-	data, err := os.ReadFile(path)
+func loadState(root, path string) (*CloneState, error) {
+	key, keyErr := storage.RelKey(root, path)
+	if keyErr != nil {
+		return nil, keyErr
+	}
+	data, err := storage.NewPOSIX(root).Get(context.Background(), key)
 	if err != nil {
 		return nil, err
 	}
@@ -559,12 +565,12 @@ func loadState(path string) (*CloneState, error) {
 }
 
 // saveState saves the clone state to disk.
-func saveState(path string, state *CloneState) error {
+func saveState(root, path string, state *CloneState) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0644)
+	return putUnder(root, path, append(data, '\n'))
 }
 
 // ExtractDomainForDir extracts a directory name from a URL.
@@ -576,4 +582,15 @@ func ExtractDomainForDir(url string) string {
 		url = url[:idx]
 	}
 	return url
+}
+
+// putUnder writes content at absPath, which is under root, through the storage
+// interface. Parent prefixes are implicit, which is why every MkdirAll that
+// used to precede these writes is gone.
+func putUnder(root, absPath string, content []byte) error {
+	key, err := storage.RelKey(root, absPath)
+	if err != nil {
+		return err
+	}
+	return storage.NewPOSIX(root).Put(context.Background(), key, content)
 }

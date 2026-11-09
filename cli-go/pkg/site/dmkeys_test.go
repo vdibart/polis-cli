@@ -2,6 +2,7 @@ package site
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
@@ -15,16 +16,16 @@ func TestProvisionAndPublishMessagesKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Minimal well-known with just the identity key (as init would have written).
-	if err := SaveWellKnownRaw(siteDir, map[string]interface{}{"public_key": string(pubSSH)}); err != nil {
+	if err := SaveWellKnownRaw(storage.At(siteDir), map[string]interface{}{"public_key": string(pubSSH)}); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := ProvisionAndPublishMessagesKey(siteDir, privPEM); err != nil {
+	if err := ProvisionAndPublishMessagesKey(storage.At(siteDir), privPEM); err != nil {
 		t.Fatalf("provision+publish: %v", err)
 	}
 
 	// Keyring was provisioned with the bootstrap epoch.
-	kr, err := dm.LoadKeyring(dm.DMDir(siteDir))
+	kr, err := dm.LoadKeyring(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("load keyring: %v", err)
 	}
@@ -34,7 +35,7 @@ func TestProvisionAndPublishMessagesKey(t *testing.T) {
 
 	// The well-known now carries a public_key_messages block that verifies against the
 	// identity key — exactly what a sender checks before encrypting.
-	raw, err := LoadWellKnownRaw(siteDir)
+	raw, err := LoadWellKnownRaw(storage.At(siteDir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,10 +56,10 @@ func TestProvisionAndPublishMessagesKey(t *testing.T) {
 
 	// Idempotent: provisioning again keeps the same bootstrap key.
 	wantKey := block.Current.Key
-	if err := ProvisionAndPublishMessagesKey(siteDir, privPEM); err != nil {
+	if err := ProvisionAndPublishMessagesKey(storage.At(siteDir), privPEM); err != nil {
 		t.Fatal(err)
 	}
-	raw2, _ := LoadWellKnownRaw(siteDir)
+	raw2, _ := LoadWellKnownRaw(storage.At(siteDir))
 	blockJSON2, _ := json.Marshal(raw2["public_key_messages"])
 	var block2 dm.MessagesKeyBlock
 	json.Unmarshal(blockJSON2, &block2)
@@ -72,15 +73,15 @@ func TestProvisionAndPublishMessagesKey(t *testing.T) {
 func TestPublishMessagesKey_ResignsUnderNewIdentity(t *testing.T) {
 	siteDir := t.TempDir()
 	oldPriv, oldPub, _ := signing.GenerateKeypair()
-	if err := SaveWellKnownRaw(siteDir, map[string]interface{}{"public_key": string(oldPub)}); err != nil {
+	if err := SaveWellKnownRaw(storage.At(siteDir), map[string]interface{}{"public_key": string(oldPub)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ProvisionAndPublishMessagesKey(siteDir, oldPriv); err != nil {
+	if err := ProvisionAndPublishMessagesKey(storage.At(siteDir), oldPriv); err != nil {
 		t.Fatal(err)
 	}
 
 	readBlock := func() dm.MessagesKeyBlock {
-		raw, _ := LoadWellKnownRaw(siteDir)
+		raw, _ := LoadWellKnownRaw(storage.At(siteDir))
 		b, _ := json.Marshal(raw["public_key_messages"])
 		var block dm.MessagesKeyBlock
 		json.Unmarshal(b, &block)
@@ -90,7 +91,7 @@ func TestPublishMessagesKey_ResignsUnderNewIdentity(t *testing.T) {
 
 	// Rotate: new identity key, re-sign the block (what rotate_key does).
 	newPriv, newPub, _ := signing.GenerateKeypair()
-	if err := PublishMessagesKey(siteDir, newPriv); err != nil {
+	if err := PublishMessagesKey(storage.At(siteDir), newPriv); err != nil {
 		t.Fatalf("re-sign: %v", err)
 	}
 	after := readBlock()
@@ -119,17 +120,17 @@ func TestPublishMessagesKey_PreservesOtherFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	const acoorn = "mayoinmotion (X:115.73440a760bf_Y:188.aa0b7a427df)"
-	if err := SaveWellKnownRaw(siteDir, map[string]interface{}{
+	if err := SaveWellKnownRaw(storage.At(siteDir), map[string]interface{}{
 		"public_key":  string(pubSSH),
 		"author_name": acoorn,
 		"site_title":  "Polis Lounge",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ProvisionAndPublishMessagesKey(siteDir, privPEM); err != nil {
+	if err := ProvisionAndPublishMessagesKey(storage.At(siteDir), privPEM); err != nil {
 		t.Fatalf("provision+publish: %v", err)
 	}
-	raw, err := LoadWellKnownRaw(siteDir)
+	raw, err := LoadWellKnownRaw(storage.At(siteDir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +158,7 @@ func TestPublishMessagesKey_AbsentWellKnownIsAnErrorNotAPanic(t *testing.T) {
 			t.Fatalf("PublishMessagesKey panicked on an absent identity document: %v", r)
 		}
 	}()
-	if err := ProvisionAndPublishMessagesKey(siteDir, privPEM); err == nil {
+	if err := ProvisionAndPublishMessagesKey(storage.At(siteDir), privPEM); err == nil {
 		t.Fatal("publishing a messages key with no .well-known/polis succeeded")
 	}
 }

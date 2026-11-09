@@ -230,7 +230,7 @@ func (rr *Remote) RunArtifact(contentURL string) *Report {
 
 	// SIGNET epic 32 D8 — the witness axis, from the site's published set.
 	witFile, witNote := rr.witnessSet(base, rr.pointers[base])
-	reportArtifactWitness(r, witFile, witNote, contentURL, res, rr.DSKeys)
+	reportArtifactWitness(r, witFile, witNote, contentURL, res, VersionHashesBody, rr.DSKeys)
 
 	return r
 }
@@ -462,7 +462,7 @@ func (rr *Remote) runRecord(r *Report, contentURL, baseURL string, body []byte) 
 	// SIGNET epic 32 D8 — a record's witness binds its version, from the signing
 	// site's published set.
 	witFile, witNote := rr.witnessSet(v.signer, rr.pointers[v.signer])
-	reportArtifactWitness(r, witFile, witNote, contentURL, ContentResult{CurrentVersion: v.version}, rr.DSKeys)
+	reportArtifactWitness(r, witFile, witNote, contentURL, ContentResult{CurrentVersion: v.version}, VersionHashesRecord, rr.DSKeys)
 }
 
 // recordVerdict is one JSON record, identified and verified.
@@ -573,8 +573,66 @@ func (rr *Remote) RunSite(baseURL string) *Report {
 	rr.checkRemoteRecordSets(r, base, entries, pubKey, census)
 	census.emit(r, "the posts, comments, attestations and tags the index lists")
 	rr.checkRemoteRecords(r, base, wk.License, pubKey, chain)
+	rr.checkRemotePrivateFiles(r, base)
 
 	return r
+}
+
+// checkRemotePrivateFiles asks the site for every name it must never serve
+// (privatepath) and FAILS on any that comes back: a 2xx that is not the home
+// page, or any body carrying a private key header. Neither has a benign
+// reading, so this is a failure, not a warning.
+//
+// It is the only check that can see a self-hosted site on a static host,
+// which serves its directory without polis's handler in front of it.
+//
+// ⛔ The finding names the URL and status only. The body was read only far
+// enough to look for a key header, and is gone.
+func (rr *Remote) checkRemotePrivateFiles(r *Report, base string) {
+	res := ProbePrivate(base, "", rr.client.HTTPClient, PrivateProbeTargets())
+	answered := res.Checked()
+	if answered == 0 {
+		r.na("identity.private_files_served", FamilyIdentity, fmt.Sprintf("none of the %d requests for private names could be checked (no response, refused, or a server error), so whether the site serves them is unknown", res.Asked))
+		return
+	}
+	// ⛔ A name the server refused (429) or failed on (5xx) was NOT checked, and
+	// is named as such — never folded into "not served".
+	var notChecked []string
+	for _, u := range res.Unchecked {
+		notChecked = append(notChecked, privateUncheckedLine(u))
+	}
+	if len(res.Exposures) > 0 {
+		var findings []string
+		for _, e := range res.Exposures {
+			f := fmt.Sprintf("%s → %d", e.URL, e.Status)
+			if e.KeyHeader {
+				f += " (the response holds a private key; rotate it)"
+			}
+			findings = append(findings, f)
+		}
+		r.fail("identity.private_files_served", FamilyIdentity,
+			fmt.Sprintf("the site serves %d of the %d private names asked for — fix the server first, then rotate any key that was exposed", len(res.Exposures), answered),
+			answered, append(findings, notChecked...)...)
+		return
+	}
+	detail := fmt.Sprintf("none of the %d private names asked for is served (.polis, .env, .git, .ssh, key files, editor backups)", answered)
+	if len(notChecked) > 0 {
+		detail = fmt.Sprintf("none of the %d private names that could be checked is served; %d more NOT checked — run again", answered, len(notChecked))
+	}
+	r.passNoting("identity.private_files_served", FamilyIdentity, detail, answered, notChecked...)
+}
+
+// privateUncheckedLine names one private name the probe could not check, and
+// why.
+func privateUncheckedLine(u PrivateUnchecked) string {
+	switch {
+	case u.Status == 0:
+		return u.URL + ": NOT checked — no HTTP response"
+	case u.Status == 429:
+		return u.URL + ": NOT checked — refused (429, rate limited)"
+	default:
+		return fmt.Sprintf("%s: NOT checked — server error (%d)", u.URL, u.Status)
+	}
 }
 
 // checkRemoteRecordSets verifies the attestations and tag files a site's index

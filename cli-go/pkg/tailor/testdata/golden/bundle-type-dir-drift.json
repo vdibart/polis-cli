@@ -217,6 +217,12 @@
       "reason": ""
     },
     {
+      "name": "theme-shapes-migration",
+      "status": "pass",
+      "message": "theme compatible shapes include the defaults",
+      "reason": ""
+    },
+    {
       "name": "bundle-declarations",
       "status": "fail",
       "message": "type field drift: type pub.polis.post: dir mismatch (got \"elsewhere\", want \"post\")",

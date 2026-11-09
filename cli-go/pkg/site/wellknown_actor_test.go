@@ -2,6 +2,7 @@ package site
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,7 +39,7 @@ func rawWellKnown(t *testing.T, dir string) map[string]interface{} {
 // "no pointer" is the normal case and must not read as an error.
 func TestActorRegistryPointer_AbsentIsADefinedState(t *testing.T) {
 	dir := wellKnownFixture(t)
-	if got := ActorRegistryPointer(dir); got != "" {
+	if got := ActorRegistryPointer(storage.At(dir)); got != "" {
 		t.Errorf("a fresh site should publish no actor registry pointer, got %q", got)
 	}
 	if _, present := rawWellKnown(t, dir)["actor_registry"]; present {
@@ -51,14 +52,14 @@ func TestActorRegistryPointer_AbsentIsADefinedState(t *testing.T) {
 // pointer behind publishes a 404 where a fact used to be.
 func TestSetActorRegistryPointer_ClearingDeletesTheKey(t *testing.T) {
 	dir := wellKnownFixture(t)
-	if err := SetActorRegistryPointer(dir, "/actors/registry.json"); err != nil {
+	if err := SetActorRegistryPointer(storage.At(dir), "/actors/registry.json"); err != nil {
 		t.Fatalf("set: %v", err)
 	}
-	if got := ActorRegistryPointer(dir); got != "/actors/registry.json" {
+	if got := ActorRegistryPointer(storage.At(dir)); got != "/actors/registry.json" {
 		t.Fatalf("pointer = %q", got)
 	}
 
-	if err := SetActorRegistryPointer(dir, ""); err != nil {
+	if err := SetActorRegistryPointer(storage.At(dir), ""); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 	if _, present := rawWellKnown(t, dir)["actor_registry"]; present {
@@ -70,10 +71,10 @@ func TestSetActorRegistryPointer_ClearingDeletesTheKey(t *testing.T) {
 // risk is a round trip that silently drops a field the struct does not model.
 func TestSetPointers_PreserveEverythingElse(t *testing.T) {
 	dir := wellKnownFixture(t)
-	if err := SetActorRegistryPointer(dir, "/actors/registry.json"); err != nil {
+	if err := SetActorRegistryPointer(storage.At(dir), "/actors/registry.json"); err != nil {
 		t.Fatal(err)
 	}
-	if err := SetOperatorPointer(dir, "polis.polis.pub"); err != nil {
+	if err := SetOperatorPointer(storage.At(dir), "polis.polis.pub"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -86,7 +87,7 @@ func TestSetPointers_PreserveEverythingElse(t *testing.T) {
 	if raw["public_key"] != "ssh-ed25519 AAAA" {
 		t.Errorf("public_key changed: %v", raw["public_key"])
 	}
-	if got := OperatorPointer(dir); got != "polis.polis.pub" {
+	if got := OperatorPointer(storage.At(dir)); got != "polis.polis.pub" {
 		t.Errorf("operator = %q", got)
 	}
 }

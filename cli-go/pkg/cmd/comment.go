@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
@@ -73,7 +74,7 @@ func handleCommentDraft(args []string) {
 		Content:   "",
 	}
 
-	if err := comment.SaveDraft(dir, draft); err != nil {
+	if err := comment.SaveDraft(storage.At(dir), draft); err != nil {
 		exitError("Failed to create draft: %v", err)
 	}
 
@@ -103,7 +104,7 @@ func handleCommentSign(args []string) {
 	}
 
 	// Load the draft
-	draft, err := comment.LoadDraft(dir, draftID)
+	draft, err := comment.LoadDraft(storage.At(dir), draftID)
 	if err != nil {
 		exitError("Failed to load draft: %v", err)
 	}
@@ -115,7 +116,7 @@ func handleCommentSign(args []string) {
 	}
 
 	// Get author domain from .well-known/polis (domain is the public identity)
-	wk, err := site.LoadWellKnown(dir)
+	wk, err := site.LoadWellKnown(getSite())
 	if err != nil {
 		exitError("Failed to load .well-known/polis: %v", err)
 	}
@@ -136,7 +137,7 @@ func handleCommentSign(args []string) {
 	}
 
 	// Sign the comment
-	signed, err := comment.SignComment(dir, draft, authorIdentity, siteURL, privKey, generator)
+	signed, err := comment.SignComment(storage.At(dir), draft, authorIdentity, siteURL, privKey, generator)
 	if err != nil {
 		exitError("Failed to sign comment: %v", err)
 	}
@@ -171,7 +172,7 @@ func handleCommentList(args []string) {
 
 	switch status {
 	case "drafts", "draft":
-		drafts, err := comment.ListDrafts(dir)
+		drafts, err := comment.ListDrafts(storage.At(dir))
 		if err != nil {
 			exitError("Failed to list drafts: %v", err)
 		}
@@ -179,7 +180,7 @@ func handleCommentList(args []string) {
 			results = append(results, d)
 		}
 	case "pending":
-		comments, err := comment.ListComments(dir, comment.StatusPending)
+		comments, err := comment.ListComments(storage.At(dir), comment.StatusPending)
 		if err != nil {
 			exitError("Failed to list pending comments: %v", err)
 		}
@@ -187,7 +188,7 @@ func handleCommentList(args []string) {
 			results = append(results, c)
 		}
 	case "blessed":
-		comments, err := comment.ListComments(dir, comment.StatusBlessed)
+		comments, err := comment.ListComments(storage.At(dir), comment.StatusBlessed)
 		if err != nil {
 			exitError("Failed to list blessed comments: %v", err)
 		}
@@ -195,7 +196,7 @@ func handleCommentList(args []string) {
 			results = append(results, c)
 		}
 	case "denied":
-		comments, err := comment.ListComments(dir, comment.StatusDenied)
+		comments, err := comment.ListComments(storage.At(dir), comment.StatusDenied)
 		if err != nil {
 			exitError("Failed to list denied comments: %v", err)
 		}
@@ -204,28 +205,28 @@ func handleCommentList(args []string) {
 		}
 	case "all":
 		// List all
-		drafts, _ := comment.ListDrafts(dir)
+		drafts, _ := comment.ListDrafts(storage.At(dir))
 		for _, d := range drafts {
 			results = append(results, map[string]interface{}{
 				"status": "draft",
 				"id":     d.ID,
 			})
 		}
-		pending, _ := comment.ListComments(dir, comment.StatusPending)
+		pending, _ := comment.ListComments(storage.At(dir), comment.StatusPending)
 		for _, c := range pending {
 			results = append(results, map[string]interface{}{
 				"status": "pending",
 				"id":     c.ID,
 			})
 		}
-		blessed, _ := comment.ListComments(dir, comment.StatusBlessed)
+		blessed, _ := comment.ListComments(storage.At(dir), comment.StatusBlessed)
 		for _, c := range blessed {
 			results = append(results, map[string]interface{}{
 				"status": "blessed",
 				"id":     c.ID,
 			})
 		}
-		denied, _ := comment.ListComments(dir, comment.StatusDenied)
+		denied, _ := comment.ListComments(storage.At(dir), comment.StatusDenied)
 		for _, c := range denied {
 			results = append(results, map[string]interface{}{
 				"status": "denied",
@@ -267,7 +268,6 @@ func handleCommentSync(args []string) {
 
 	// Load discovery config from env
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
-	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if discoveryURL == "" {
 		discoveryURL = "https://ds.polis.pub"
 	}
@@ -275,9 +275,9 @@ func handleCommentSync(args []string) {
 	baseURL := os.Getenv("POLIS_BASE_URL")
 	myDomain := discovery.ExtractDomainFromURL(baseURL)
 	privKey, _ := loadPrivateKey(dir)
-	client := discovery.NewAuthenticatedClient(discoveryURL, discoveryKey, myDomain, privKey)
+	client := discovery.NewAuthenticatedClient(discoveryURL, myDomain, privKey)
 
-	result, err := comment.SyncPendingComments(dir, baseURL, client, nil)
+	result, err := comment.SyncPendingComments(storage.At(dir), baseURL, client, nil)
 	if err != nil {
 		exitError("Failed to sync comments: %v", err)
 	}

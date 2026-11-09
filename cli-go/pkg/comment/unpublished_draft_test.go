@@ -1,6 +1,7 @@
 package comment
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,7 +44,7 @@ func TestAnUnpublishedCommentCanBeSignedAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	loaded, err := LoadDraft(dir, "a-comment")
+	loaded, err := LoadDraft(storage.At(dir), "a-comment")
 	if err != nil {
 		t.Fatalf("LoadDraft: %v", err)
 	}
@@ -61,7 +62,7 @@ func TestAnUnpublishedCommentCanBeSignedAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signed, err := SignComment(dir, loaded, "owner.example", "https://owner.example", priv)
+	signed, err := SignComment(storage.At(dir), loaded, "owner.example", "https://owner.example", priv)
 	if err != nil {
 		t.Fatalf("SignComment on the unpublished draft: %v", err)
 	}

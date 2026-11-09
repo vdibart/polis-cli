@@ -2,6 +2,9 @@ package site
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,7 +12,7 @@ import (
 
 func TestInitPublishesADIDWhenItKnowsTheHost(t *testing.T) {
 	dir := t.TempDir()
-	result, err := Init(dir, InitOptions{
+	result, err := Init(storage.At(dir), InitOptions{
 		Author:  "Alice",
 		BaseURL: "https://alice.polis.pub",
 	})
@@ -20,7 +23,7 @@ func TestInitPublishesADIDWhenItKnowsTheHost(t *testing.T) {
 		t.Errorf("result.DID = %q, want did:web:alice.polis.pub", result.DID)
 	}
 
-	data, err := os.ReadFile(DIDDocumentPath(dir))
+	data, err := os.ReadFile(storage.At(dir).Path(DIDDocumentKey))
 	if err != nil {
 		t.Fatalf("read did.json: %v", err)
 	}
@@ -34,7 +37,7 @@ func TestInitPublishesADIDWhenItKnowsTheHost(t *testing.T) {
 
 	// The document must be world-readable: a DID resolver fetches it over HTTP
 	// like any other public file.
-	info, err := os.Stat(DIDDocumentPath(dir))
+	info, err := os.Stat(storage.At(dir).Path(DIDDocumentKey))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,14 +61,14 @@ func TestInitPublishesNoDIDWhenTheHostIsUnknown(t *testing.T) {
 	// is worse than publishing none. Medic and Tailor fill it in later, once
 	// somebody knows where the site actually lives.
 	dir := t.TempDir()
-	result, err := Init(dir, InitOptions{Author: "Alice"})
+	result, err := Init(storage.At(dir), InitOptions{Author: "Alice"})
 	if err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	if result.DID != "" {
 		t.Errorf("result.DID = %q, want empty", result.DID)
 	}
-	if _, err := os.Stat(DIDDocumentPath(dir)); !os.IsNotExist(err) {
+	if _, err := os.Stat(storage.At(dir).Path(DIDDocumentKey)); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("did.json exists with no canonical host: %v", err)
 	}
 }
@@ -74,7 +77,7 @@ func TestInitWithoutADIDIsOtherwiseUnchanged(t *testing.T) {
 	// The projection must not be load-bearing: a site with no DID is a normal,
 	// complete polis site.
 	dir := t.TempDir()
-	if _, err := Init(dir, InitOptions{Author: "Alice"}); err != nil {
+	if _, err := Init(storage.At(dir), InitOptions{Author: "Alice"}); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	for _, rel := range []string{
@@ -90,17 +93,17 @@ func TestInitWithoutADIDIsOtherwiseUnchanged(t *testing.T) {
 
 func TestPublishingTheDocumentIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := Init(dir, InitOptions{Author: "Alice", BaseURL: "https://alice.polis.pub"}); err != nil {
+	if _, err := Init(storage.At(dir), InitOptions{Author: "Alice", BaseURL: "https://alice.polis.pub"}); err != nil {
 		t.Fatal(err)
 	}
-	first, err := os.ReadFile(DIDDocumentPath(dir))
+	first, err := os.ReadFile(storage.At(dir).Path(DIDDocumentKey))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := PublishDIDDocument(dir, "alice.polis.pub"); err != nil {
+	if err := PublishDIDDocument(storage.At(dir), "alice.polis.pub"); err != nil {
 		t.Fatal(err)
 	}
-	second, err := os.ReadFile(DIDDocumentPath(dir))
+	second, err := os.ReadFile(storage.At(dir).Path(DIDDocumentKey))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,11 +114,11 @@ func TestPublishingTheDocumentIsIdempotent(t *testing.T) {
 
 func TestNeedsWriteSpotsMissingStaleAndTamperedDocuments(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := Init(dir, InitOptions{Author: "Alice", BaseURL: "https://alice.polis.pub"}); err != nil {
+	if _, err := Init(storage.At(dir), InitOptions{Author: "Alice", BaseURL: "https://alice.polis.pub"}); err != nil {
 		t.Fatal(err)
 	}
 
-	needs, _, err := DIDDocumentNeedsWrite(dir, "alice.polis.pub")
+	needs, _, err := DIDDocumentNeedsWrite(storage.At(dir), "alice.polis.pub")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,44 +127,44 @@ func TestNeedsWriteSpotsMissingStaleAndTamperedDocuments(t *testing.T) {
 	}
 
 	// Tampered.
-	if err := os.WriteFile(DIDDocumentPath(dir), []byte(`{"id":"did:web:evil.example"}`), 0644); err != nil {
+	if err := os.WriteFile(storage.At(dir).Path(DIDDocumentKey), []byte(`{"id":"did:web:evil.example"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if needs, _, _ := DIDDocumentNeedsWrite(dir, "alice.polis.pub"); !needs {
+	if needs, _, _ := DIDDocumentNeedsWrite(storage.At(dir), "alice.polis.pub"); !needs {
 		t.Error("a tampered document reports as up to date")
 	}
 
 	// Missing.
-	if err := os.Remove(DIDDocumentPath(dir)); err != nil {
+	if err := os.Remove(storage.At(dir).Path(DIDDocumentKey)); err != nil {
 		t.Fatal(err)
 	}
-	if needs, _, _ := DIDDocumentNeedsWrite(dir, "alice.polis.pub"); !needs {
+	if needs, _, _ := DIDDocumentNeedsWrite(storage.At(dir), "alice.polis.pub"); !needs {
 		t.Error("a missing document reports as up to date")
 	}
 
 	// Stale host — the same site served somewhere else needs a different DID.
-	if err := PublishDIDDocument(dir, "alice.polis.pub"); err != nil {
+	if err := PublishDIDDocument(storage.At(dir), "alice.polis.pub"); err != nil {
 		t.Fatal(err)
 	}
-	if needs, _, _ := DIDDocumentNeedsWrite(dir, "alice.example"); !needs {
+	if needs, _, _ := DIDDocumentNeedsWrite(storage.At(dir), "alice.example"); !needs {
 		t.Error("a document for a different host reports as up to date")
 	}
 }
 
 func TestTheDocumentStatesTheKeyTheWellKnownStates(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := Init(dir, InitOptions{Author: "Alice", BaseURL: "https://alice.polis.pub"}); err != nil {
+	if _, err := Init(storage.At(dir), InitOptions{Author: "Alice", BaseURL: "https://alice.polis.pub"}); err != nil {
 		t.Fatal(err)
 	}
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	built, err := BuildDIDDocument(dir, "alice.polis.pub")
+	built, err := BuildDIDDocument(storage.At(dir), "alice.polis.pub")
 	if err != nil {
 		t.Fatal(err)
 	}
-	onDisk, err := os.ReadFile(DIDDocumentPath(dir))
+	onDisk, err := os.ReadFile(storage.At(dir).Path(DIDDocumentKey))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,10 +180,10 @@ func TestNoDIDPointerIsAddedToTheWellKnown(t *testing.T) {
 	// did:web fixes the location; a pointer would be inert and would create a
 	// second source of truth for a path nobody can vary.
 	dir := t.TempDir()
-	if _, err := Init(dir, InitOptions{Author: "Alice", BaseURL: "https://alice.polis.pub"}); err != nil {
+	if _, err := Init(storage.At(dir), InitOptions{Author: "Alice", BaseURL: "https://alice.polis.pub"}); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := LoadWellKnownRaw(dir)
+	raw, err := LoadWellKnownRaw(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}

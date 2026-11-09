@@ -28,7 +28,7 @@ set -eo pipefail
 #   4. Hardcoded defaults
 
 # Fixed constants (never configurable - required for discovery)
-VERSION="0.68.0"
+VERSION="0.70.0"
 WELL_KNOWN_DIR=".well-known"
 WELL_KNOWN_FILE="polis"
 
@@ -99,7 +99,6 @@ apply_defaults() {
     # Developer config defaults
     : "${POLIS_BASE_URL:=}"
     : "${DISCOVERY_SERVICE_URL:=https://ds.polis.pub}"
-    : "${DISCOVERY_SERVICE_KEY:=}"
 
     # Derived endpoints (always computed from base) — unified content/relationship API
     POLIS_CONTENT_REGISTER_ENDPOINT="${DISCOVERY_SERVICE_URL}/v1/content"
@@ -210,7 +209,10 @@ json_error() {
     local command="$1"
     local code="$2"
     local message="$3"
-    local details="${4:-{}}"
+    # Not "${4:-{}}": bash reads that as ${4:-{} followed by a literal }, so a
+    # 4th argument came out with a stray } appended and broke --argjson.
+    local details="${4:-}"
+    [ -z "$details" ] && details='{}'
 
     if [ "$JSON_MODE" = true ]; then
         jq -n \
@@ -1276,7 +1278,6 @@ fetch_root_post_for_comment() {
 
     # Query the blessing relationship for this comment (source_url = comment URL)
     local response=$(curl -s --max-time 10 \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&source_url=${encoded_url}" 2>/dev/null)
 
     if [ -z "$response" ]; then
@@ -1474,7 +1475,6 @@ _fetch_pending_relationships() {
     local domain="$1"
 
     curl -s \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&actor=${domain}&status=pending"
 }
 
@@ -1484,7 +1484,6 @@ _fetch_comment_records_for_domain() {
     local domain="$1"
 
     curl -s \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         "${POLIS_CONTENT_QUERY_ENDPOINT}?type=pub.polis.comment&actor=${domain}"
 }
 
@@ -1802,7 +1801,6 @@ fetch_comments_by_author() {
 
     # Fetch blessing relationships for user's domain
     local response=$(curl -s \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?${query_params}")
 
     if [ $? -ne 0 ]; then
@@ -2465,124 +2463,6 @@ clone_blessed_comments() {
     echo "$count"
 }
 
-# Sync blessed comments from discovery service to local blessed-comments.json
-# Fetches all blessed comments for current user's posts and adds any missing entries
-# Returns: count of newly synced comments (echoed to stdout)
-# Rebuild blessed-comments.json entirely from discovery service
-# This is a "full" rebuild - truncates local file and rebuilds from scratch
-rebuild_blessed_comments_full() {
-    local domain=$(extract_domain_from_url "$POLIS_BASE_URL")
-
-    if [ -z "$domain" ]; then
-        error "Could not determine domain from POLIS_BASE_URL"
-    fi
-
-    # R24-2 / SIGNET epic 14 — blessed.json is AUTHORED, not a projection of DS
-    # state, and the DS does not store the version pin that records WHICH
-    # version of a comment was blessed. Rebuilding from the DS silently erased
-    # that pin for every entry, and with it the "edited since blessing" signal.
-    # So an existing file is preserved; the DS is consulted only to recover one
-    # that is missing entirely. Matches cli-go/pkg/index/rebuild.go.
-    if [ -f "$BLESSED_COMMENTS" ]; then
-        local kept
-        kept=$(jq '[.comments[].blessed[]] | length' "$BLESSED_COMMENTS" 2>/dev/null || echo "0")
-        success "Preserved blessed-comments.json ($kept blessed comment(s)) — it is authored, not derived from the discovery service"
-        return
-    fi
-
-    info "Recovering blessed-comments.json from discovery service..."
-
-    # Fetch all granted blessing relationships for our domain
-    local response=$(curl -s \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
-        "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&actor=${domain}&status=granted" 2>/dev/null)
-
-    # Initialize fresh blessed-comments.json
-    jq -n --arg v "$VERSION" '{version: $v, comments: []}' > "$BLESSED_COMMENTS"
-
-    # Check if response is valid JSON with records
-    local record_count=$(echo "$response" | jq -r '.count // 0' 2>/dev/null)
-    if [ -z "$record_count" ] || [ "$record_count" = "0" ] || [ "$record_count" = "null" ]; then
-        success "Recovered blessed-comments.json (0 blessed comments)"
-        return
-    fi
-
-    local added_count=0
-
-    # Process each granted blessing relationship
-    # source_url = comment URL, target_url = post URL (in_reply_to)
-    while IFS= read -r record; do
-        [ -z "$record" ] && continue
-
-        local comment_url=$(echo "$record" | jq -r '.source_url')
-        local in_reply_to=$(echo "$record" | jq -r '.target_url')
-        local blessed_at=$(echo "$record" | jq -r '.updated_at // empty')
-
-        # Use current timestamp if updated_at is empty
-        if [ -z "$blessed_at" ]; then
-            blessed_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-        fi
-
-        update_blessed_comments_json "$comment_url" "" "$in_reply_to" "$blessed_at"
-        added_count=$((added_count + 1))
-    done < <(echo "$response" | jq -c '.records[]' 2>/dev/null)
-
-    # ⚠️ Recovered entries carry an EMPTY version pin (the "" argument above):
-    # the DS never had it, and inventing one from the comment's current version
-    # would claim the author blessed whatever it says today.
-    success "Recovered blessed-comments.json ($added_count blessed comment(s), no version pins — the DS does not store them)"
-}
-
-sync_blessed_comments() {
-    local domain=$(extract_domain_from_url "$POLIS_BASE_URL")
-
-    if [ -z "$domain" ]; then
-        echo "0"
-        return
-    fi
-
-    # Fetch all granted blessing relationships for our domain
-    local response=$(curl -s \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
-        "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&actor=${domain}&status=granted" 2>/dev/null)
-
-    # Check if response is valid JSON with records
-    local record_count=$(echo "$response" | jq -r '.count // 0' 2>/dev/null)
-    if [ -z "$record_count" ] || [ "$record_count" = "0" ] || [ "$record_count" = "null" ]; then
-        echo "0"
-        return
-    fi
-
-    local synced_count=0
-
-    # Process each granted blessing relationship
-    # source_url = comment URL, target_url = post URL (in_reply_to)
-    while IFS= read -r record; do
-        [ -z "$record" ] && continue
-
-        local comment_url=$(echo "$record" | jq -r '.source_url')
-        local in_reply_to=$(echo "$record" | jq -r '.target_url')
-        local blessed_at=$(echo "$record" | jq -r '.updated_at // empty')
-
-        # Use current timestamp if updated_at is empty
-        if [ -z "$blessed_at" ]; then
-            blessed_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-        fi
-
-        # We don't have comment_version directly from relationship records
-        # Pass empty string; update_blessed_comments_json handles it
-        local comment_version=""
-
-        # Check if already in blessed-comments.json
-        if ! is_comment_blessed "$comment_url"; then
-            update_blessed_comments_json "$comment_url" "$comment_version" "$in_reply_to" "$blessed_at"
-            synced_count=$((synced_count + 1))
-        fi
-    done < <(echo "$response" | jq -c '.records[]' 2>/dev/null)
-
-    echo "$synced_count"
-}
-
 # Check if a comment URL exists in the discovery service
 # Args: $1 = comment_url
 # Returns: the comment URL itself if found (used as identifier in unified API), or empty
@@ -2594,7 +2474,6 @@ get_comment_id_by_url() {
 
     # Use content-check to verify the comment exists
     local response=$(curl -s \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         "${POLIS_CONTENT_CHECK_ENDPOINT}?type=pub.polis.comment&url=${encoded_url}")
 
     # Check if we got a valid response with exists=true
@@ -3069,7 +2948,11 @@ update_wellknown_pubkey() {
            history: []
        }) as $chain
        | .public_key = $key
-       | .public_key_history = {
+       # MERGED into the existing block, never rebuilt as a literal: a chain is
+       # append-only, and a block-level member this CLI does not model (one a
+       # newer writer added) must survive the rotation. Object addition keeps
+       # the key order of the block, so a chain without extras is byte-identical.
+       | .public_key_history = ($chain + {
            current: {
                epoch: ($chain.current.epoch + 1),
                key: $key,
@@ -3078,7 +2961,7 @@ update_wellknown_pubkey() {
            },
            # Oldest first: history[last] is the key `current` succeeded.
            history: ($chain.history + [$chain.current + {valid_until: $ts}])
-       }
+       })
        ' "$WELL_KNOWN_DIR/polis" > "$temp_file" 2>/dev/null || { rm -f "$temp_file"; return 1; }
 
     # jq emits nothing on a hard failure; refuse to install an empty identity
@@ -3186,7 +3069,6 @@ _register_post_with_discovery() {
     local http_code
     response=$(curl -s -w "\n%{http_code}" \
         --location --request POST "$POLIS_CONTENT_REGISTER_ENDPOINT" \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         --header 'Content-Type: application/json' \
         --data "$final_payload" 2>&1)
 
@@ -3231,12 +3113,27 @@ _emit_stream_event() {
         return 0
     fi
 
-    # Build canonical JSON for signing
-    # CRITICAL: Field order must match Go's json.Marshal output for streamCanonicalPayload
-    # Order: type, payload
+    # R23-2: stamp a freshness field INSIDE the payload, so a captured POST
+    # cannot be replayed once the discovery service stops accepting events
+    # without one. It goes inside rather than beside because a sibling field is
+    # verified once and then discarded — a stored event carries the service's
+    # created_at, not the string we signed — so no consumer could rebuild the
+    # canonical afterwards, and every event we published would be dropped.
+    #
+    # An event that already carries its own timestamp keeps it.
+    local stamped_payload
+    stamped_payload=$(printf '%s' "$payload_json" | jq -S -c \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        'if has("timestamp") then . else . + {timestamp: $ts} end')
+
+    # Build canonical JSON for signing.
+    # CRITICAL: Field order must match Go's json.Marshal output for
+    # streamCanonicalPayload. Top level is STRUCT ORDER — type, then payload —
+    # and is NOT sorted; Go marshals a struct in declaration order. The payload
+    # is a map, which Go DOES sort, which is what `jq -S` above matches.
     local canonical_payload=$(jq -n -c \
         --arg type "$event_type" \
-        --argjson payload "$payload_json" \
+        --argjson payload "$stamped_payload" \
         '{type: $type, payload: $payload}')
 
     # Sign the canonical JSON
@@ -3260,17 +3157,18 @@ _emit_stream_event() {
     fi
 
     # Build final payload for ds-stream-publish
+    # ⛔ Sends the SAME stamped, sorted payload that was signed. Sending
+    # $payload_json here instead would post bytes the signature does not cover.
     local final_payload=$(jq -n \
         --arg type "$event_type" \
         --arg actor "$actor" \
-        --argjson payload "$payload_json" \
+        --argjson payload "$stamped_payload" \
         --arg signature "$signature" \
         '{type: $type, actor: $actor, payload: $payload, signature: $signature}')
 
     # POST to stream endpoint (fire-and-forget, non-fatal)
     curl -s \
         --location --request POST "$POLIS_STREAM_PUBLISH_ENDPOINT" \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         --header 'Content-Type: application/json' \
         --data "$final_payload" > /dev/null 2>&1
 
@@ -3455,7 +3353,6 @@ _internal_beseech_from_file() {
     # Make the HTTP request and capture both response body and status code
     response=$(curl -s -w "\n%{http_code}" \
         --location --request POST "$discovery_endpoint" \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         --header 'Content-Type: application/json' \
         --data "$final_payload" 2>&1)
 
@@ -4600,8 +4497,10 @@ cmd_rebuild() {
 
     # Rebuild blessed comments
     if [[ "$do_comments" == true ]]; then
-        info_human "Rebuilding blessed comments..."
-        rebuild_blessed_comments_full
+        # blessed.json is left as it is: bash's rebuild read the wrong set of
+        # blessings and REPLACED the file with it (see cmd_blessing_sync). The Go
+        # CLI's 'polis rebuild --comments' reconciles it correctly.
+        warn_human "blessed-comments.json left unchanged: bash cannot rebuild it correctly. Use the Go CLI's 'polis rebuild --comments'."
         # Count blessed
         if [ -f "$BLESSED_COMMENTS" ]; then
             blessed_count=$(jq '.comments | length' "$BLESSED_COMMENTS" 2>/dev/null || echo "0")
@@ -4933,7 +4832,6 @@ cmd_about() {
             local check_endpoint="${DISCOVERY_SERVICE_URL}/v1/sites/check?domain=$domain"
             local check_response=$(curl -s -w "\n%{http_code}" \
                 --location --request GET "$check_endpoint" \
-                --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
                 --header 'Content-Type: application/json' 2>&1)
 
             local check_http_code=$(echo "$check_response" | tail -n 1)
@@ -5148,6 +5046,12 @@ cmd_about() {
 # Command: polis rotate-key
 # Generate a new keypair, hand authority over to it with a signed transition,
 # and append the handover to the site's own published key history.
+# _ssh_key_material prints an OpenSSH public key's type and key, without its
+# comment: ssh-keygen and the Go CLI label the same key differently.
+_ssh_key_material() {
+    echo "$1" | awk '{print $1" "$2}'
+}
+
 cmd_rotate_key() {
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -5180,23 +5084,106 @@ cmd_rotate_key() {
     info_human "Starting key rotation..."
     info_human ""
 
-    # Read old public key
-    local old_pubkey
-    old_pubkey=$(cat "$KEYS_DIR/id_ed25519.pub" 2>/dev/null | tr -d '\n')
-    if [ -z "$old_pubkey" ]; then
+    # Read old public key. ⛔ Which key is current is decided by the PRIVATE key:
+    # the install renames id_ed25519 before id_ed25519.pub, so a crash between
+    # the two leaves the new private key beside the old .pub, and judging by the
+    # .pub would sign the handover with the new key. The .pub must agree too.
+    local old_pubkey pubfile_pubkey
+    pubfile_pubkey=$(cat "$KEYS_DIR/id_ed25519.pub" 2>/dev/null | tr -d '\n')
+    old_pubkey=$(ssh-keygen -y -f "$KEYS_DIR/id_ed25519" 2>/dev/null | tr -d '\n') || true
+    if [ -z "$old_pubkey" ] || [ -z "$pubfile_pubkey" ]; then
         json_error "rotate-key" "INVALID_STATE" "Could not read current public key"
     fi
 
-    # 1. Generate new keypair
-    info_human "Generating new Ed25519 keypair..."
-    ssh-keygen -t ed25519 -f "$KEYS_DIR/id_ed25519.new" -N "" -C "polis@$(hostname)" > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        json_error "rotate-key" "KEY_GENERATION_FAILED" "Failed to generate new keypair"
-    fi
-    success_human "Generated new keypair"
-
+    # 1. Generate new keypair — or resume an interrupted rotation.
+    #
+    # A staged key left by an interrupted rotation may be the only copy of a key
+    # the discovery service already accepted: never overwrite it, and never
+    # tell the user to move it into place by hand (that skips the key history
+    # and destroys the old key the handover is signed with). Resume with it
+    # instead; step 3 asks the discovery service which key it holds. The Go CLI
+    # and the webapp stage to the same name and resume the same way.
+    #
+    # ⛔ The handover is signed by the key .well-known/polis PUBLISHES, because
+    # that is the head of the published key history. A handover signed by any
+    # other key appends an entry that never verifies, and a chain is never
+    # rebuilt. So a rotation refuses when the key on disk is not the published
+    # one, and an earlier rotation that installed its key and stopped before
+    # recording it is finished by signing with the retired key, which is kept at
+    # id_ed25519.prev until the record is written. The Go paths decide the same
+    # way (site.PrepareRotation).
+    local resuming=false
+    local installed=false
     local new_pubkey
-    new_pubkey=$(cat "$KEYS_DIR/id_ed25519.new.pub" 2>/dev/null | tr -d '\n')
+    local signing_key="$KEYS_DIR/id_ed25519"
+    local published_pubkey
+    published_pubkey=$(jq -r '.public_key // empty' "$WELL_KNOWN_DIR/polis" 2>/dev/null | tr -d '\n')
+    local held_file="$KEYS_DIR/id_ed25519" held_key="$old_pubkey"
+    if [ "$(_ssh_key_material "$old_pubkey")" = "$(_ssh_key_material "$published_pubkey")" ]; then
+        held_file="$KEYS_DIR/id_ed25519.pub" held_key="$pubfile_pubkey"
+    fi
+    local key_not_published_msg="The site's key does not match the public_key .well-known/polis publishes: $held_file holds $(_ssh_key_material "$held_key"), .well-known/polis publishes $(_ssh_key_material "$published_pubkey"). Nothing was changed; run 'polis validate' and bring the two back into agreement before rotating."
+    # The site's key, both halves, is the published one.
+    _site_key_published() {
+        [ "$(_ssh_key_material "$old_pubkey")" = "$(_ssh_key_material "$published_pubkey")" ] &&
+            [ "$(_ssh_key_material "$pubfile_pubkey")" = "$(_ssh_key_material "$published_pubkey")" ]
+    }
+    if [ -e "$KEYS_DIR/id_ed25519.new" ]; then
+        # The Go paths stage only the private key; derive the public half.
+        new_pubkey=$(ssh-keygen -y -f "$KEYS_DIR/id_ed25519.new" 2>/dev/null | tr -d '\n')
+        if [ -z "$new_pubkey" ]; then
+            json_error "rotate-key" "ROTATION_PENDING" "The staged key at $KEYS_DIR/id_ed25519.new does not parse. It was left by an interrupted rotation; nothing was changed."
+        fi
+        if [ "$(_ssh_key_material "$new_pubkey")" != "$(_ssh_key_material "$old_pubkey")" ]; then
+            # Staged, not installed: the current key still signs the handover.
+            if ! _site_key_published; then
+                json_error "rotate-key" "KEY_NOT_PUBLISHED" "$key_not_published_msg"
+            fi
+            old_pubkey="$pubfile_pubkey"
+            resuming=true
+        elif [ "$(_ssh_key_material "$new_pubkey")" = "$(_ssh_key_material "$published_pubkey")" ]; then
+            # Installed AND recorded: only the clean-up was lost. Finish it and
+            # start a fresh rotation, writing a .pub the install never reached.
+            if [ "$(_ssh_key_material "$pubfile_pubkey")" != "$(_ssh_key_material "$new_pubkey")" ]; then
+                printf '%s\n' "$new_pubkey" > "$KEYS_DIR/id_ed25519.pub.tmp" &&
+                    chmod 644 "$KEYS_DIR/id_ed25519.pub.tmp" &&
+                    mv -f "$KEYS_DIR/id_ed25519.pub.tmp" "$KEYS_DIR/id_ed25519.pub" ||
+                    json_error "rotate-key" "INVALID_STATE" "Could not write $KEYS_DIR/id_ed25519.pub"
+                pubfile_pubkey="$new_pubkey"
+            fi
+            rm -f "$KEYS_DIR/id_ed25519.prev" "$KEYS_DIR/id_ed25519.new" "$KEYS_DIR/id_ed25519.new.pub"
+            old_pubkey="$pubfile_pubkey"
+        else
+            # Installed, not recorded: sign with the retired key kept for this.
+            local prev_pubkey=""
+            if [ -f "$KEYS_DIR/id_ed25519.prev" ]; then
+                prev_pubkey=$(ssh-keygen -y -f "$KEYS_DIR/id_ed25519.prev" 2>/dev/null | tr -d '\n')
+            fi
+            if [ -z "$prev_pubkey" ] || [ "$(_ssh_key_material "$prev_pubkey")" != "$(_ssh_key_material "$published_pubkey")" ]; then
+                json_error "rotate-key" "ROTATION_PENDING" "The staged key at $KEYS_DIR/id_ed25519.new is already the current key: an earlier rotation installed it and stopped before publishing it, and the old key is gone. Run 'polis validate' to see what the site publishes; the staged copy is safe to delete once you have checked."
+            fi
+            resuming=true
+            installed=true
+            signing_key="$KEYS_DIR/id_ed25519.prev"
+            old_pubkey="$published_pubkey"
+        fi
+    fi
+    if [ "$resuming" = true ]; then
+        info_human "Resuming an interrupted rotation with the staged key..."
+        printf '%s\n' "$new_pubkey" > "$KEYS_DIR/id_ed25519.new.pub"
+    else
+        if ! _site_key_published; then
+            json_error "rotate-key" "KEY_NOT_PUBLISHED" "$key_not_published_msg"
+        fi
+        old_pubkey="$pubfile_pubkey"
+        info_human "Generating new Ed25519 keypair..."
+        ssh-keygen -t ed25519 -f "$KEYS_DIR/id_ed25519.new" -N "" -C "polis@$(hostname)" > /dev/null 2>&1
+        if [ $? -ne 0 ]; then
+            json_error "rotate-key" "KEY_GENERATION_FAILED" "Failed to generate new keypair"
+        fi
+        success_human "Generated new keypair"
+        new_pubkey=$(cat "$KEYS_DIR/id_ed25519.new.pub" 2>/dev/null | tr -d '\n')
+    fi
 
     # 2. Build canonical rotation JSON and sign with OLD key (transition signature)
     local timestamp
@@ -5211,7 +5198,7 @@ cmd_rotate_key() {
     local temp_file
     temp_file=$(mktemp)
     echo -n "$canonical" > "$temp_file"
-    ssh-keygen -Y sign -f "$KEYS_DIR/id_ed25519" -n file "$temp_file" > /dev/null 2>&1
+    ssh-keygen -Y sign -f "$signing_key" -n file "$temp_file" > /dev/null 2>&1
     if [ $? -ne 0 ]; then
         rm -f "$temp_file" "$temp_file.sig"
         json_error "rotate-key" "SIGN_FAILED" "Failed to sign transition message with old key"
@@ -5240,21 +5227,71 @@ cmd_rotate_key() {
 
         local ds_response
         local ds_status
-        ds_response=$(curl -s -w "\n%{http_code}" -X POST "${ds_url}/v1/sites/keys/rotate" \
-            -H "Content-Type: application/json" \
-            ${DISCOVERY_SERVICE_KEY:+-H "Authorization: Bearer $DISCOVERY_SERVICE_KEY"} \
-            -d "$ds_payload" 2>/dev/null)
-        ds_status=$(echo "$ds_response" | tail -n 1)
-        ds_response=$(echo "$ds_response" | sed '$d')
+        local already=false
 
-        # Anything but a 2xx is a failure — including "000", curl's status
-        # when the service was never reached, which `-ge 400` used to let
-        # through as an acknowledgement.
-        if ! [[ "$ds_status" =~ ^2[0-9][0-9]$ ]]; then
-            json_error "rotate-key" "DS_ROTATION_FAILED" "Discovery service rejected key rotation (HTTP $ds_status): $ds_response"
+        # Resuming: did the earlier run's request reach the DS? Ask which key
+        # it holds — the staged one means it did, the current one means it
+        # did not, anything else is for a person to look at.
+        if [ "$resuming" = true ]; then
+            # `|| true`: under set -e a curl that cannot connect would end the
+            # script silently; -w still prints 000, which is handled below.
+            ds_response=$(curl -s -w "\n%{http_code}" "${ds_url}/v1/sites/keys/history?domain=${domain}" 2>/dev/null || true)
+            ds_status=$(echo "$ds_response" | tail -n 1)
+            ds_response=$(echo "$ds_response" | sed '$d')
+            if [ "$ds_status" != "200" ]; then
+                json_error "rotate-key" "ROTATION_PENDING" "Could not ask the discovery service which key it holds (HTTP $ds_status). The staged key is kept at $KEYS_DIR/id_ed25519.new; run 'polis rotate-key' again to finish."
+            fi
+            local ds_current
+            ds_current=$(echo "$ds_response" | jq -r '(([.keys[]? | select(.valid_until == null)] | last) // (.keys | last) // {}) | .public_key // empty' 2>/dev/null)
+            if [ "$(_ssh_key_material "$ds_current")" = "$(_ssh_key_material "$new_pubkey")" ]; then
+                already=true
+            elif [ "$(_ssh_key_material "$ds_current")" != "$(_ssh_key_material "$old_pubkey")" ]; then
+                json_error "rotate-key" "ROTATION_PENDING" "The discovery service holds neither this site's current key nor the staged one. Nothing was changed; the staged key is kept at $KEYS_DIR/id_ed25519.new."
+            fi
+        fi
+
+        if [ "$already" = true ]; then
+            success_human "Discovery service already holds the staged key; finishing the rotation"
+        else
+            ds_response=$(curl -s -w "\n%{http_code}" -X POST "${ds_url}/v1/sites/keys/rotate" \
+                -H "Content-Type: application/json" \
+                -d "$ds_payload" 2>/dev/null || true)
+            ds_status=$(echo "$ds_response" | tail -n 1)
+            ds_response=$(echo "$ds_response" | sed '$d')
+
+            # ⛔ Only a 4xx is a refusal. "000" (no answer, including a timeout
+            # after the request was sent) and a 5xx leave it unknown whether the
+            # DS took the new key, so the staged key — perhaps the only copy of
+            # the key the network now holds — is kept, and running the command
+            # again resumes.
+            if [[ "$ds_status" =~ ^4[0-9][0-9]$ ]] && [ "$resuming" = true ]; then
+                # ⛔ A refused RE-SEND is not proof the key is unknown: the
+                # earlier run's request may have landed after the history check
+                # above (the DS then answers 409, the old key no longer being
+                # current). Ask again, and keep the staged key unless the DS
+                # holds it.
+                local refused_status="$ds_status" refused_body="$ds_response"
+                ds_response=$(curl -s -w "\n%{http_code}" "${ds_url}/v1/sites/keys/history?domain=${domain}" 2>/dev/null || true)
+                ds_status=$(echo "$ds_response" | tail -n 1)
+                ds_response=$(echo "$ds_response" | sed '$d')
+                local ds_now=""
+                if [ "$ds_status" = "200" ]; then
+                    ds_now=$(echo "$ds_response" | jq -r '(([.keys[]? | select(.valid_until == null)] | last) // (.keys | last) // {}) | .public_key // empty' 2>/dev/null)
+                fi
+                if [ "$(_ssh_key_material "$ds_now")" != "$(_ssh_key_material "$new_pubkey")" ]; then
+                    json_error "rotate-key" "ROTATION_PENDING" "The discovery service refused the re-sent rotation (HTTP $refused_status): $refused_body. The staged key is kept at $KEYS_DIR/id_ed25519.new, because an earlier request for it may yet be applied; run 'polis rotate-key' again to retry."
+                fi
+            elif [[ "$ds_status" =~ ^4[0-9][0-9]$ ]]; then
+                # Refused: drop the staged key. The current key was never touched,
+                # and a leftover .new would make the next rotation resume.
+                rm -f "$KEYS_DIR/id_ed25519.new" "$KEYS_DIR/id_ed25519.new.pub"
+                json_error "rotate-key" "DS_ROTATION_FAILED" "Discovery service rejected key rotation (HTTP $ds_status): $ds_response"
+            elif ! [[ "$ds_status" =~ ^2[0-9][0-9]$ ]]; then
+                json_error "rotate-key" "ROTATION_PENDING" "The discovery service's answer was lost (HTTP $ds_status), so it may have taken the new key. The staged key is kept at $KEYS_DIR/id_ed25519.new; run 'polis rotate-key' again to finish."
+            fi
+            success_human "Discovery service acknowledged key rotation"
         fi
         ds_rotation="success"
-        success_human "Discovery service acknowledged key rotation"
     else
         info_human ""
         info_human "DS notification skipped: site not registered with discovery service"
@@ -5272,10 +5309,30 @@ cmd_rotate_key() {
     #
     #    Existing .old files are left where they are. They stop being made; they
     #    are not cleaned up.
-    mv -f "$KEYS_DIR/id_ed25519.new" "$KEYS_DIR/id_ed25519"
-    mv -f "$KEYS_DIR/id_ed25519.new.pub" "$KEYS_DIR/id_ed25519.pub"
-    chmod 600 "$KEYS_DIR/id_ed25519"
-    chmod 644 "$KEYS_DIR/id_ed25519.pub"
+    #
+    #    ⛔ The key being retired is kept at id_ed25519.prev, and the staged copy
+    #    stays, until step 5 has recorded the handover: a crash in between is
+    #    then finished by the next rotation rather than breaking the chain. Each
+    #    file lands by rename, so a crash never leaves a partial key.
+    if [ "$installed" != true ]; then
+        ( umask 077 && cp "$KEYS_DIR/id_ed25519" "$KEYS_DIR/id_ed25519.prev.tmp" ) &&
+            chmod 600 "$KEYS_DIR/id_ed25519.prev.tmp" &&
+            mv -f "$KEYS_DIR/id_ed25519.prev.tmp" "$KEYS_DIR/id_ed25519.prev" ||
+            json_error "rotate-key" "ROTATION_PENDING" "Could not keep the key being retired; nothing was installed. The staged key is kept at $KEYS_DIR/id_ed25519.new; run 'polis rotate-key' again to finish."
+        ( umask 077 && cp "$KEYS_DIR/id_ed25519.new" "$KEYS_DIR/id_ed25519.tmp" ) &&
+            chmod 600 "$KEYS_DIR/id_ed25519.tmp" &&
+            mv -f "$KEYS_DIR/id_ed25519.tmp" "$KEYS_DIR/id_ed25519" &&
+            cp "$KEYS_DIR/id_ed25519.new.pub" "$KEYS_DIR/id_ed25519.pub.tmp" &&
+            chmod 644 "$KEYS_DIR/id_ed25519.pub.tmp" &&
+            mv -f "$KEYS_DIR/id_ed25519.pub.tmp" "$KEYS_DIR/id_ed25519.pub" ||
+            json_error "rotate-key" "ROTATION_PENDING" "Could not install the new key. It is staged at $KEYS_DIR/id_ed25519.new and the retired key is kept; run 'polis rotate-key' again to finish."
+    elif [ "$(_ssh_key_material "$pubfile_pubkey")" != "$(_ssh_key_material "$new_pubkey")" ]; then
+        # The earlier run installed the private key and stopped before the .pub.
+        cp "$KEYS_DIR/id_ed25519.new.pub" "$KEYS_DIR/id_ed25519.pub.tmp" &&
+            chmod 644 "$KEYS_DIR/id_ed25519.pub.tmp" &&
+            mv -f "$KEYS_DIR/id_ed25519.pub.tmp" "$KEYS_DIR/id_ed25519.pub" ||
+            json_error "rotate-key" "ROTATION_PENDING" "Could not install the new public key. The retired key is kept; run 'polis rotate-key' again to finish."
+    fi
     success_human "Installed new keypair"
 
     # 5. Update .well-known/polis — public_key and the appended history entry.
@@ -5288,8 +5345,12 @@ cmd_rotate_key() {
         # This is not cosmetic. The private key has already been replaced, so a
         # failure here leaves a site publishing a key it no longer signs with and
         # a history that never learned about the new one.
-        json_error "rotate-key" "WELLKNOWN_UPDATE_FAILED" "Rotation completed but .well-known/polis could not be updated. The site now signs with the new key while publishing the old one. Fix $WELL_KNOWN_DIR/polis before publishing anything."
+        json_error "rotate-key" "WELLKNOWN_UPDATE_FAILED" "Rotation completed but .well-known/polis could not be updated. The site now signs with the new key while publishing the old one. Do not publish anything; run 'polis rotate-key' again to finish: the retired key is kept at $KEYS_DIR/id_ed25519.prev."
     fi
+    # ⛔ Only now: until the handover was recorded, these were what a resume
+    # would sign it with. The retired key goes first.
+    rm -f "$KEYS_DIR/id_ed25519.prev"
+    rm -f "$KEYS_DIR/id_ed25519.new" "$KEYS_DIR/id_ed25519.new.pub"
 
     # 6. Remove .well-known/did.json — the key it states is now retired.
     #
@@ -5320,6 +5381,39 @@ cmd_rotate_key() {
         warn_human "Removed $WELL_KNOWN_DIR/did.json — it stated the old key"
     fi
 
+    # 6b. Drop the signature from the follow file and the blessing list.
+    #
+    # Neither carries a signing time, so each verifies against the CURRENT key
+    # only: left alone, both read `invalid` from this moment until the next
+    # write. The Go CLI and the webapp re-sign them here. Bash cannot — it has no
+    # signing path for either file (Go's canonical JSON is not reproducible in
+    # jq) — so it does what every bash write of these files already does: drops
+    # the signature, and the file reads `unsigned`, which is a fact and reports
+    # OK. The next follow or bless through Go signs it again.
+    #
+    # ⚠️ Go re-signs only a file that verified under the old key. Bash cannot
+    # check that, so it cannot keep a failing file failing — the same limit as
+    # every other bash write of these files. Recorded in
+    # docs/cli/implementation-parity.md.
+    local following_resign="absent" blessed_resign="absent"
+    if [ -f "$FOLLOWING_INDEX" ]; then
+        following_resign="unsigned"
+        if [ "$(jq -r 'has("signature")' "$FOLLOWING_INDEX" 2>/dev/null)" = "true" ]; then
+            jq --arg gen "polis-cli/$VERSION" 'del(.signature) | .version = $gen' \
+                "$FOLLOWING_INDEX" > "${FOLLOWING_INDEX}.tmp" && mv "${FOLLOWING_INDEX}.tmp" "$FOLLOWING_INDEX"
+            following_resign="signature-removed"
+            info_human "Removed the follow file's signature — it was made with the old key"
+        fi
+    fi
+    if [ -f "$BLESSED_COMMENTS" ]; then
+        blessed_resign="unsigned"
+        if [ "$(jq -r 'has("signature")' "$BLESSED_COMMENTS" 2>/dev/null)" = "true" ]; then
+            jq 'del(.signature)' "$BLESSED_COMMENTS" > "${BLESSED_COMMENTS}.tmp" && mv "${BLESSED_COMMENTS}.tmp" "$BLESSED_COMMENTS"
+            blessed_resign="signature-removed"
+            info_human "Removed the blessing list's signature — it was made with the old key"
+        fi
+    fi
+
     # 7. Rebuild index
     info_human ""
     info_human "Rebuilding index..."
@@ -5340,12 +5434,16 @@ cmd_rotate_key() {
             --arg fingerprint "$new_fingerprint" \
             --arg ds_rotation "$ds_rotation" \
             --arg did_document "$did_document_status" \
+            --arg following_resign "$following_resign" \
+            --arg blessed_resign "$blessed_resign" \
             --argjson key_history_epoch "${key_epoch:-0}" \
             '{
                 new_key_fingerprint: $fingerprint,
                 key_history_epoch: $key_history_epoch,
                 ds_rotation: $ds_rotation,
-                did_document: $did_document
+                did_document: $did_document,
+                following_resign: $following_resign,
+                blessed_resign: $blessed_resign
             }')
         json_success "rotate-key" "$result"
     else
@@ -5426,7 +5524,6 @@ cmd_unpublish() {
         local ds_response
         ds_response=$(curl -s -X POST "${ds_url}/v1/content/unregister" \
             -H "Content-Type: application/json" \
-            ${DISCOVERY_SERVICE_KEY:+-H "Authorization: Bearer $DISCOVERY_SERVICE_KEY"} \
             -d "$ds_payload" 2>/dev/null)
 
         # Non-fatal: DS might be unreachable
@@ -5520,13 +5617,8 @@ cmd_blessing_requests() {
         json_error "blessing-requests" "INVALID_STATE" "Polis not initialized. Run 'polis init' first."
     fi
 
-    # Sync blessed comments first (catches comments blessed elsewhere, e.g. by the web app)
-    if [ -n "$POLIS_BASE_URL" ]; then
-        local synced=$(sync_blessed_comments)
-        if [ "$synced" -gt 0 ]; then
-            info_human "Synced $synced blessed comment(s) to blessed-comments.json"
-        fi
-    fi
+    # (It used to run the blessing sync first. That read the wrong set and wrote
+    # it into blessed.json on every call, so it is gone; see cmd_blessing_sync.)
 
     # Extract author and domain
     local author=$(extract_author_from_wellknown)
@@ -5541,7 +5633,6 @@ cmd_blessing_requests() {
     # Incoming requests are those whose target_url — the post being commented on
     # — is ours. Filtered client-side below, matching the Go CLI.
     local response=$(curl -s \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&status=pending")
 
     if [ $? -ne 0 ]; then
@@ -5735,7 +5826,6 @@ cmd_blessing_grant() {
     # Call relationship-update endpoint
     local response=$(curl -s -w "\n%{http_code}" \
         --location --request POST "$POLIS_RELATIONSHIP_UPDATE_ENDPOINT" \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         --header 'Content-Type: application/json' \
         --data "$payload")
 
@@ -5881,7 +5971,6 @@ cmd_blessing_deny() {
     # Call relationship-update endpoint
     local response=$(curl -s -w "\n%{http_code}" \
         --location --request POST "$POLIS_RELATIONSHIP_UPDATE_ENDPOINT" \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         --header 'Content-Type: application/json' \
         --data "$payload")
 
@@ -5929,35 +6018,18 @@ cmd_blessing_deny() {
     esac
 }
 
-# Command: polis blessing sync
-# Synchronize blessed comments from discovery service to local blessed-comments.json
+# Command: polis blessing sync — DEPRECATED
+#
+# It rebuilt blessed.json from the wrong set: it asked the discovery service
+# for blessings whose ACTOR is this site, and a blessing's actor is the
+# COMMENTER, so it collected this site's own comments blessed elsewhere rather
+# than the comments this site blessed. The fix needs stream pagination bash
+# does not have, and bash is feature-frozen, so the command refuses and points
+# at the Go CLI, which reads the right set. Recorded in
+# docs/cli/implementation-parity.md.
 cmd_blessing_sync() {
-    # Check initialization
-    if [ ! -f "$WELL_KNOWN_DIR/polis" ]; then
-        json_error "blessing-sync" "INVALID_STATE" "Polis not initialized. Run 'polis init' first."
-    fi
-
-    # Check POLIS_BASE_URL is set
-    if [ -z "$POLIS_BASE_URL" ]; then
-        json_error "blessing-sync" "INVALID_STATE" "POLIS_BASE_URL not set. Export it first: export POLIS_BASE_URL=https://yourdomain.com"
-    fi
-
-    info_human "Syncing blessed comments from discovery service..."
-
-    local synced=$(sync_blessed_comments)
-
-    if [ "$JSON_MODE" = true ]; then
-        local result=$(jq -n \
-            --argjson synced_count "$synced" \
-            '{synced_count: $synced_count}')
-        json_success "blessing-sync" "$result"
-    else
-        if [ "$synced" -gt 0 ]; then
-            success "Synced $synced comment(s) to blessed-comments.json"
-        else
-            info "Already in sync - no new comments to add"
-        fi
-    fi
+    json_error "blessing-sync" "DEPRECATED" \
+        "bash 'polis blessing sync' is deprecated: it read the wrong set of blessings. Use the Go CLI's 'polis blessing sync' instead."
 }
 
 # Command: polis follow <author-url>
@@ -6077,7 +6149,6 @@ cmd_follow() {
             # Call relationship-update endpoint
             local response=$(curl -s -w "\n%{http_code}" \
                 --location --request POST "$POLIS_RELATIONSHIP_UPDATE_ENDPOINT" \
-                --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
                 --header 'Content-Type: application/json' \
                 --data "$payload")
 
@@ -6223,7 +6294,6 @@ cmd_unfollow() {
             # Query the relationship record to get it.
             local encoded_url=$(jq -rn --arg url "$comment_url" '$url | @uri')
             local rel_response=$(curl -s \
-                --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
                 "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&source_url=${encoded_url}" 2>/dev/null)
 
             local target_url=$(echo "$rel_response" | jq -r '.records[0].target_url // empty' 2>/dev/null)
@@ -6260,7 +6330,6 @@ cmd_unfollow() {
 
             local response=$(curl -s -w "\n%{http_code}" \
                 --location --request POST "$POLIS_RELATIONSHIP_UPDATE_ENDPOINT" \
-                --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
                 --header 'Content-Type: application/json' \
                 --data "$payload")
 
@@ -6680,7 +6749,6 @@ cmd_register() {
     local check_endpoint="${DISCOVERY_SERVICE_URL}/v1/sites/check?domain=$domain"
     local check_response=$(curl -s -w "\n%{http_code}" \
         --location --request GET "$check_endpoint" \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         --header 'Content-Type: application/json' 2>&1)
 
     local check_http_code=$(echo "$check_response" | tail -n 1)
@@ -6709,8 +6777,7 @@ cmd_register() {
             # Fetch discovery service public key
             local pubkey_endpoint="${DISCOVERY_SERVICE_URL}/v1/sites/public-key"
             local pubkey_response=$(curl -s -w "\n%{http_code}" \
-                --location --request GET "$pubkey_endpoint" \
-                --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" 2>&1)
+                --location --request GET "$pubkey_endpoint" 2>&1)
 
             local pubkey_http_code=$(echo "$pubkey_response" | tail -n 1)
             local pubkey_body=$(echo "$pubkey_response" | sed '$d')
@@ -6830,7 +6897,6 @@ cmd_register() {
     local register_endpoint="${DISCOVERY_SERVICE_URL}/v1/sites"
     local response=$(curl -s -w "\n%{http_code}" \
         --location --request POST "$register_endpoint" \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         --header 'Content-Type: application/json' \
         --data "$final_payload" 2>&1)
 
@@ -6936,13 +7002,18 @@ cmd_unregister() {
         esac
     done
 
+    # --json cannot show a prompt, and choosing an output format is not
+    # consent: without --force it refuses rather than unregister unasked.
+    if [ "$JSON_MODE" = true ] && [ "$force" = false ]; then
+        json_error "unregister" "CONFIRMATION_REQUIRED" "unregister under --json requires --force (-f): it cannot ask for confirmation. Nothing was unregistered"
+    fi
+
     # Check if registered
     info_human "Checking registration status for $domain..."
 
     local check_endpoint="${DISCOVERY_SERVICE_URL}/v1/sites/check?domain=$domain"
     local check_response=$(curl -s -w "\n%{http_code}" \
         --location --request GET "$check_endpoint" \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         --header 'Content-Type: application/json' 2>&1)
 
     local check_http_code=$(echo "$check_response" | tail -n 1)
@@ -6966,8 +7037,8 @@ cmd_unregister() {
         fi
     fi
 
-    # Show warning and confirm (unless --force or --json mode)
-    if [ "$JSON_MODE" = false ] && [ "$force" = false ]; then
+    # Show warning and confirm (unless --force)
+    if [ "$force" = false ]; then
         echo ""
         warn "WARNING: Unregistering will remove your site from the public directory."
         echo ""
@@ -7023,7 +7094,6 @@ cmd_unregister() {
     local unregister_endpoint="${DISCOVERY_SERVICE_URL}/v1/sites/unregister"
     local response=$(curl -s -w "\n%{http_code}" \
         --location --request POST "$unregister_endpoint" \
-        --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
         --header 'Content-Type: application/json' \
         --data "$final_payload" 2>&1)
 
@@ -7113,11 +7183,10 @@ cmd_notifications_list() {
     local pending_blessings="[]"
     local pending_count=0
 
-    if [ -n "$DISCOVERY_SERVICE_URL" ] && [ -n "$DISCOVERY_SERVICE_KEY" ]; then
+    if [ -n "$DISCOVERY_SERVICE_URL" ]; then
         local domain=$(extract_domain_from_url "$POLIS_BASE_URL")
         if [ -n "$domain" ]; then
             local blessing_response=$(curl -s --max-time 30 \
-                --header "${DISCOVERY_SERVICE_KEY:+Authorization: Bearer $DISCOVERY_SERVICE_KEY}" \
                 "${POLIS_RELATIONSHIP_QUERY_ENDPOINT}?type=pub.polis.comment.blessing&actor=${domain}&status=pending" 2>/dev/null)
 
             if [ -n "$blessing_response" ]; then
@@ -7692,9 +7761,16 @@ select_theme() {
         fi
     fi
 
-    # Randomly select a theme
-    local random_index=$((RANDOM % ${#available_themes[@]}))
-    ACTIVE_THEME="${available_themes[$random_index]}"
+    # Randomly select a theme, never a reserved one: sols is the logged-out
+    # landing theme and stardust is why.polis.pub's (same set as the Go CLI's
+    # theme.IsReserved). If reserved themes are all there is, use them.
+    local eligible_themes=() t
+    for t in "${available_themes[@]}"; do
+        case "$t" in sols|stardust) ;; *) eligible_themes+=("$t") ;; esac
+    done
+    [ ${#eligible_themes[@]} -eq 0 ] && eligible_themes=("${available_themes[@]}")
+    local random_index=$((RANDOM % ${#eligible_themes[@]}))
+    ACTIVE_THEME="${eligible_themes[$random_index]}"
 
     if write_active_theme "$ACTIVE_THEME"; then
         info_human "Selected theme: $ACTIVE_THEME (saved to registry)"

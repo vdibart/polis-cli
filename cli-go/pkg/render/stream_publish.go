@@ -1,12 +1,16 @@
 package render
 
 import (
+	"context"
 	"fmt"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/sitemap"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // PublishStream incrementally re-renders v4 output after a single post is published
@@ -142,13 +146,22 @@ func (r *PageRenderer) UnpublishStream(postSourceRelPath string) error {
 	// produced one (e.g. if the post was published+unpublished without a
 	// render in between).
 	targetURL := r.postSourceToURL(postSourceRelPath)
-	htmlPath := filepath.Join(r.config.DataDir, streamOutputPath(targetURL))
-	if err := os.Remove(htmlPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove post HTML %s: %w", htmlPath, err)
+	htmlKey := streamOutputPath(targetURL)
+	store := r.config.Site.Store()
+	if err := store.Delete(context.Background(), htmlKey, storage.IgnoreMissing()); err != nil {
+		return fmt.Errorf("remove post HTML %s: %w", htmlKey, err)
 	}
-	// Best-effort: drop the date directory if it's now empty. os.Remove fails
-	// if the directory still has siblings, which is the desired behavior.
-	_ = os.Remove(filepath.Dir(htmlPath))
+	// NOT the storage interface: remove-if-empty, which it cannot express and
+	// does not need to. os.Remove on a directory FAILS when siblings remain,
+	// and that failure is the logic — it is how the date directory survives
+	// until its last post goes. A prefix store has no empty directories to
+	// leave behind, so on a backend without real paths there is nothing to do,
+	// and the capability says so at the call site.
+	if store.Capabilities().RealPath {
+		if dir, err := store.RealPath(pathpkg.Dir(htmlKey)); err == nil {
+			_ = os.Remove(dir)
+		}
+	}
 
 	if len(posts) == 0 {
 		// Last post unpublished — render the empty-state index.
@@ -213,24 +226,26 @@ func (r *PageRenderer) updateSitemapForPost(postSourceRelPath string) error {
 	htmlURL := r.postSourceToURL(postSourceRelPath)
 	absURL := r.buildURL(strings.TrimPrefix(htmlURL, "/"))
 
-	srcPath := filepath.Join(r.config.DataDir, postSourceRelPath)
-	info, err := os.Stat(srcPath)
+	srcKey := strings.TrimPrefix(filepath.ToSlash(postSourceRelPath), "/")
+	info, err := r.config.Site.Store().Stat(context.Background(), srcKey)
 	if err != nil {
 		return fmt.Errorf("stat post source for sitemap: %w", err)
 	}
 
-	body, err := sitemap.Read(r.config.DataDir)
+	body, err := sitemap.Read(r.config.Site)
 	if err != nil {
 		return fmt.Errorf("read sitemap: %w", err)
 	}
 	updated, err := sitemap.InsertOrUpdate(body, sitemap.Entry{
-		URL:     absURL,
-		LastMod: info.ModTime(),
+		URL: absURL,
+		// ⚠️ Depends on ModTimes: a sitemap lastmod, which without one is the
+		// zero time rather than absent — wrong data, not merely missing.
+		LastMod: info.ModTime,
 	})
 	if err != nil {
 		return fmt.Errorf("insert into sitemap: %w", err)
 	}
-	return sitemap.Write(r.config.DataDir, updated)
+	return sitemap.Write(r.config.Site, updated)
 }
 
 // removeSitemapEntry strips the entry for the given path-form URL (e.g.
@@ -238,7 +253,7 @@ func (r *PageRenderer) updateSitemapForPost(postSourceRelPath string) error {
 // Idempotent — absent URL is OK.
 func (r *PageRenderer) removeSitemapEntry(htmlURL string) error {
 	absURL := r.buildURL(strings.TrimPrefix(htmlURL, "/"))
-	body, err := sitemap.Read(r.config.DataDir)
+	body, err := sitemap.Read(r.config.Site)
 	if err != nil {
 		return fmt.Errorf("read sitemap: %w", err)
 	}
@@ -246,5 +261,5 @@ func (r *PageRenderer) removeSitemapEntry(htmlURL string) error {
 	if err != nil {
 		return fmt.Errorf("remove from sitemap: %w", err)
 	}
-	return sitemap.Write(r.config.DataDir, updated)
+	return sitemap.Write(r.config.Site, updated)
 }

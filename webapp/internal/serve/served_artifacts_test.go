@@ -2,6 +2,7 @@ package serve
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -59,16 +60,16 @@ func siteWithEveryArtifact(t *testing.T) string {
 	}
 
 	// Derived-universal: the DID Document, from the key the site already publishes.
-	if err := site.PublishDIDDocument(root, host); err != nil {
+	if err := site.PublishDIDDocument(storage.At(root), host); err != nil {
 		t.Fatal(err)
 	}
 
 	// Authored-conditional: an author stating terms is what brings the rest
 	// into existence.
-	if stated, err := site.StateLicense(root, "reserved", baseURL, privKey); err != nil || !stated {
+	if stated, err := site.StateLicense(storage.At(root), "reserved", baseURL, privKey); err != nil || !stated {
 		t.Fatalf("StateLicense: stated=%v err=%v", stated, err)
 	}
-	robots, rsl, err := site.LicenseProjections(root, baseURL)
+	robots, rsl, err := site.LicenseProjections(storage.At(root), baseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +145,7 @@ func TestEachArtifactIndividually(t *testing.T) {
 // same state is asserted where that sweep lives.
 func TestWithdrawingTermsRemovesTheirArtifacts(t *testing.T) {
 	root := siteWithEveryArtifact(t)
-	if err := site.WithdrawLicense(root); err != nil {
+	if err := site.WithdrawLicense(storage.At(root)); err != nil {
 		t.Fatal(err)
 	}
 	for _, rel := range []string{"robots.txt", "rsl.xml", filepath.Join("license", "index.html")} {

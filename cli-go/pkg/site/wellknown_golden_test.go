@@ -2,6 +2,7 @@ package site
 
 import (
 	"bytes"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,19 +38,19 @@ func TestWellKnownWritersEmitTheBytesTheyAlwaysHave(t *testing.T) {
 				}
 				switch writer {
 				case "struct":
-					wk, err := LoadWellKnown(dir)
+					wk, err := LoadWellKnown(storage.At(dir))
 					if err != nil {
 						t.Fatal(err)
 					}
-					if err := SaveWellKnown(dir, wk); err != nil {
+					if err := SaveWellKnown(storage.At(dir), wk); err != nil {
 						t.Fatal(err)
 					}
 				case "raw":
-					raw, err := LoadWellKnownRaw(dir)
+					raw, err := LoadWellKnownRaw(storage.At(dir))
 					if err != nil {
 						t.Fatal(err)
 					}
-					if err := SaveWellKnownRaw(dir, raw); err != nil {
+					if err := SaveWellKnownRaw(storage.At(dir), raw); err != nil {
 						t.Fatal(err)
 					}
 				}

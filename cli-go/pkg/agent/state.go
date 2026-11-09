@@ -2,6 +2,7 @@ package agent
 
 import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/attestation"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // GrantView is one Rosie record as a person sees it.
@@ -31,13 +32,13 @@ type State struct {
 }
 
 // ReadState reads Rosie's state from the site's own records.
-func ReadState(siteDir string) (*State, error) {
-	grants, err := attestation.Grants(siteDir, Rosie)
+func ReadState(site storage.Site) (*State, error) {
+	grants, err := attestation.Grants(site, Rosie)
 	if err != nil {
 		return nil, err
 	}
 	st := &State{Never: len(grants) == 0, History: []GrantView{}}
-	live, _ := LiveRosieGrant(siteDir)
+	live, _ := LiveRosieGrant(site)
 	for _, g := range grants {
 		v := GrantView{
 			URL: g.URL, Behaviours: g.Record.Payload[attestation.GrantKeyBehaviours], Basis: g.Basis,

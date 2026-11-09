@@ -1,10 +1,12 @@
 package site
 
 import (
-	"os"
+	"context"
 	"path/filepath"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // CleanV3LegacyArchives removes stale v3 SHAPE archive HTML files from a
@@ -30,8 +32,8 @@ import (
 // and are out of scope for this clean. Operators wanting a deeper
 // purge can run `find` manually; the user-visible breakage is on the
 // index entry points.
-func CleanV3LegacyArchives(siteDir string) []string {
-	shapeName, err := bundle.GetActiveShapeName(siteDir)
+func CleanV3LegacyArchives(site storage.Site) []string {
+	shapeName, err := bundle.GetActiveShapeName(site)
 	if err != nil || shapeName != "v4" {
 		return nil
 	}
@@ -42,12 +44,15 @@ func CleanV3LegacyArchives(siteDir string) []string {
 		filepath.Join("comment", "index.html"),
 	}
 	var removed []string
+	ctx := context.Background()
 	for _, rel := range candidates {
-		full := filepath.Join(siteDir, rel)
-		if _, err := os.Stat(full); err != nil {
+		// ⚠️ The presence check keeps discarding its error, as before: a file
+		// we cannot see is one we do not try to remove, and that was true of
+		// PathExists too.
+		if present, _ := site.Store().Exists(ctx, rel); !present {
 			continue
 		}
-		if err := os.Remove(full); err == nil {
+		if err := site.Store().Delete(ctx, rel); err == nil {
 			removed = append(removed, rel)
 		}
 	}
@@ -58,8 +63,8 @@ func CleanV3LegacyArchives(siteDir string) []string {
 // present on disk. Detection-only; no side effects. Returns false on
 // any tenant not on active_shape=v4 (those files are live content for
 // v3 tenants).
-func V3LegacyArchivesExist(siteDir string) bool {
-	shapeName, err := bundle.GetActiveShapeName(siteDir)
+func V3LegacyArchivesExist(site storage.Site) bool {
+	shapeName, err := bundle.GetActiveShapeName(site)
 	if err != nil || shapeName != "v4" {
 		return false
 	}
@@ -70,7 +75,7 @@ func V3LegacyArchivesExist(siteDir string) bool {
 		filepath.Join("comment", "index.html"),
 	}
 	for _, rel := range candidates {
-		if _, err := os.Stat(filepath.Join(siteDir, rel)); err == nil {
+		if present, _ := site.Store().Exists(context.Background(), rel); present {
 			return true
 		}
 	}

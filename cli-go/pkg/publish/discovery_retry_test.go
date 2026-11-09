@@ -12,6 +12,7 @@ package publish
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,7 +48,7 @@ func setupDataDir(t *testing.T, dsURL string) (dataDir string, privKey []byte) {
 		t.Fatalf("write .well-known/polis: %v", err)
 	}
 
-	if err := discovery.WriteRegistrationMarker(dataDir, dsURL, "alice.example", ""); err != nil {
+	if err := discovery.WriteRegistrationMarker(storage.At(dataDir), dsURL, "alice.example", ""); err != nil {
 		t.Fatalf("WriteRegistrationMarker: %v", err)
 	}
 
@@ -88,7 +89,6 @@ func TestRegisterPost_RetriesOnTransientFailure(t *testing.T) {
 
 	cfg := &DiscoveryConfig{
 		DiscoveryURL: server.URL,
-		DiscoveryKey: "test-key",
 		BaseURL:      "https://alice.example",
 	}
 
@@ -99,7 +99,7 @@ func TestRegisterPost_RetriesOnTransientFailure(t *testing.T) {
 		Version: "sha256:" + "a" + "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcde",
 	}
 
-	if err := RegisterPost(dataDir, result, privKey, cfg); err != nil {
+	if err := RegisterPost(storage.At(dataDir), result, privKey, cfg); err != nil {
 		t.Fatalf("expected retry to mask transient failure, got: %v", err)
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
@@ -128,7 +128,6 @@ func TestRegisterPost_GivesUpAfterRetry(t *testing.T) {
 
 	cfg := &DiscoveryConfig{
 		DiscoveryURL: server.URL,
-		DiscoveryKey: "test-key",
 		BaseURL:      "https://alice.example",
 	}
 
@@ -139,7 +138,7 @@ func TestRegisterPost_GivesUpAfterRetry(t *testing.T) {
 		Version: "sha256:" + "11111111111111111111111111111111" + "11111111111111111111111111111111",
 	}
 
-	err := RegisterPost(dataDir, result, privKey, cfg)
+	err := RegisterPost(storage.At(dataDir), result, privKey, cfg)
 	if err == nil {
 		t.Fatal("expected error when DS fails both attempts, got nil")
 	}
@@ -168,7 +167,6 @@ func TestRegisterPost_SucceedsOnFirstAttempt(t *testing.T) {
 
 	cfg := &DiscoveryConfig{
 		DiscoveryURL: server.URL,
-		DiscoveryKey: "test-key",
 		BaseURL:      "https://alice.example",
 	}
 
@@ -179,7 +177,7 @@ func TestRegisterPost_SucceedsOnFirstAttempt(t *testing.T) {
 		Version: "sha256:" + "22222222222222222222222222222222" + "22222222222222222222222222222222",
 	}
 
-	if err := RegisterPost(dataDir, result, privKey, cfg); err != nil {
+	if err := RegisterPost(storage.At(dataDir), result, privKey, cfg); err != nil {
 		t.Fatalf("expected success, got: %v", err)
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {

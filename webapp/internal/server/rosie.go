@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"strings"
 	"time"
@@ -71,7 +72,7 @@ func (s *Server) rosieLiveGrant() *attestation.LiveGrant {
 	if s.RosiePaused {
 		return nil
 	}
-	g, err := agent.LiveRosieGrant(s.DataDir)
+	g, err := agent.LiveRosieGrant(s.Site())
 	if err != nil {
 		s.LogWarn("rosie: could not read grants: %v", err)
 		return nil
@@ -83,7 +84,7 @@ func (s *Server) rosieLiveGrant() *attestation.LiveGrant {
 // ThreadBlessedDomains is per request, filled by rosieEvaluate.
 func (s *Server) blessingEvalContext(store *stream.Store, myDomain string) policy.EvalContext {
 	followedDomains := make(map[string]bool)
-	if fl, err := following.Load(following.DefaultPath(s.DataDir)); err == nil {
+	if fl, err := following.LoadSite(s.Site()); err == nil {
 		for _, entry := range fl.All() {
 			if d := discovery.ExtractDomainFromURL(entry.URL); d != "" {
 				followedDomains[d] = true
@@ -119,11 +120,11 @@ func (s *Server) blessingEvalContext(store *stream.Store, myDomain string) polic
 //
 // Nil for an empty rootPost: no thread, and `thread-blessed` matches nobody —
 // as the DS, which asked nothing without a root post.
-func threadBlessedDomains(siteDir, rootPost string) map[string]bool {
+func threadBlessedDomains(site storage.Site, rootPost string) map[string]bool {
 	if rootPost == "" {
 		return nil
 	}
-	bc, err := metadata.LoadBlessedComments(siteDir)
+	bc, err := metadata.LoadBlessedComments(site)
 	if err != nil {
 		return nil
 	}
@@ -144,8 +145,8 @@ func threadBlessedDomains(siteDir, rootPost string) map[string]bool {
 
 // blessedListHas reports whether the owner's blessing list names commentURL. A
 // missing list names nothing.
-func blessedListHas(siteDir, commentURL string) bool {
-	bc, err := metadata.LoadBlessedComments(siteDir)
+func blessedListHas(site storage.Site, commentURL string) bool {
+	bc, err := metadata.LoadBlessedComments(site)
 	if err != nil {
 		return false
 	}
@@ -195,7 +196,7 @@ type rosieVerified struct {
 // the owner, and says why. The cache stores a comment with a missing signature
 // for availability; Rosie does not bless one.
 func (s *Server) rosieVerifyComment(req rosieRequest) (*rosieVerified, bool) {
-	store := cache.Store{DataDir: s.DataDir, DSDomain: extractDomainFromURL(s.DiscoveryURL)}
+	store := cache.Store{Site: s.Site(), DSDomain: extractDomainFromURL(s.DiscoveryURL)}
 	desc := cache.NewBlessedDescriptor(cache.DescriptorConfig{VerifyContent: rosieVerifyContent})
 	out := desc.Fetch(store, req.CommentURL, cache.IngestOptions{})
 
@@ -253,7 +254,7 @@ func (s *Server) rosieEvaluate(live *attestation.LiveGrant, policies []policy.Po
 	}
 	req.CommentVersion = verified.fetched.Sidecar.Pin
 
-	ctx.ThreadBlessedDomains = threadBlessedDomains(s.DataDir, req.RootPost)
+	ctx.ThreadBlessedDomains = threadBlessedDomains(s.Site(), req.RootPost)
 	threadBlessed := ctx.ThreadBlessedDomains[strings.ToLower(req.Actor)]
 
 	pEvt := policy.Event{
@@ -325,7 +326,7 @@ func (s *Server) rosieDecide(live *attestation.LiveGrant, decision policy.Decisi
 	switch decision {
 	case policy.Bless, policy.Allow, policy.Emit:
 		// Bless is the new grammar; Allow/Emit retained for legacy rules.
-		_, err := blessing.GrantAsAgent(s.DataDir, &blessing.IncomingRequest{
+		_, err := blessing.GrantAsAgent(s.Site(), &blessing.IncomingRequest{
 			CommentURL: req.CommentURL, CommentVersion: req.CommentVersion, InReplyTo: req.InReplyTo,
 		}, client, hc, s.PrivateKey, live)
 		if errors.Is(err, agent.ErrNoLiveGrant) {
@@ -380,8 +381,9 @@ func (s *Server) refuseAgentAct(req rosieRequest, decision policy.Decision) {
 // The pass is recorded only when it completes, so a DS that could not be reached
 // is retried on the next cycle.
 func (s *Server) rosieCatchUp() {
+	s.ReloadKeysIfChanged() // the pass signs; never with a retired key
 	live := s.rosieLiveGrant()
-	if !live.Valid() || agent.CatchUpDone(s.DataDir, live.URL()) {
+	if !live.Valid() || agent.CatchUpDone(s.Site(), live.URL()) {
 		return
 	}
 	if s.DiscoveryURL == "" || s.PrivateKey == nil || !s.IsRegisteredWithDS() {
@@ -408,9 +410,8 @@ func (s *Server) rosieCatchUp() {
 		return
 	}
 
-	privPath, pubPath := policy.DefaultPaths(s.DataDir)
-	policies, _ := policy.LoadPolicies(privPath, pubPath)
-	store := stream.NewStore(s.DataDir, s.GetDiscoveryDomain(), "pub.polis.core")
+	policies, _ := policy.LoadPolicies(s.Site())
+	store := stream.NewStore(s.Site(), s.GetDiscoveryDomain(), "pub.polis.core")
 	ctx := s.blessingEvalContext(store, myDomain)
 	hc := s.getHookConfig()
 	cutoff := time.Now().Add(-rosieCatchUpWindow)
@@ -451,7 +452,7 @@ func (s *Server) rosieCatchUp() {
 	// because the pass was full are still Rosie's to decide (review F2).
 	fields["complete"] = capped == 0
 	if capped == 0 {
-		if err := agent.RecordCatchUp(s.DataDir, live.URL()); err != nil {
+		if err := agent.RecordCatchUp(s.Site(), live.URL()); err != nil {
 			s.LogWarn("rosie: catch-up ran but could not be recorded: %v", err)
 		}
 	}
@@ -465,13 +466,12 @@ func (s *Server) rosieCatchUp() {
 
 // rosieConfig is the grant-writing configuration for this site.
 func (s *Server) rosieConfig() agent.Config {
-	cfg := agent.Config{SiteDir: s.DataDir, BaseURL: s.GetBaseURL(), PrivateKey: s.PrivateKey}
+	cfg := agent.Config{Site: s.Site(), BaseURL: s.GetBaseURL(), PrivateKey: s.PrivateKey}
 	if s.DiscoveryURL != "" {
 		cfg.Discovery = &attestation.DiscoveryConfig{
 			DiscoveryURL: s.DiscoveryURL,
-			DiscoveryKey: s.DiscoveryKey,
 			BaseURL:      s.GetBaseURL(),
-			DataDir:      s.DataDir,
+			Site:         s.Site(),
 			HTTPClient:   s.SharedHTTPClient,
 		}
 	}
@@ -488,7 +488,7 @@ func (s *Server) rosieSettings() map[string]interface{} {
 		"never":       true,
 		"history":     []agent.GrantView{},
 	}
-	st, err := agent.ReadState(s.DataDir)
+	st, err := agent.ReadState(s.Site())
 	if err != nil {
 		out["error"] = "could not read Rosie's records"
 		return out

@@ -2,6 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +36,7 @@ func TestDataDirStorage_StatPublicFile_Existing(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "posts", "hi.html"), "<html/>")
 
-	s := NewDataDirStorage(dir)
+	s := NewDataDirStorage(storage.At(dir))
 	info, err := s.StatPublicFile("ignored-handle", "posts/hi.html")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -47,12 +50,12 @@ func TestDataDirStorage_StatPublicFile_Existing(t *testing.T) {
 }
 
 func TestDataDirStorage_StatPublicFile_Missing(t *testing.T) {
-	s := NewDataDirStorage(t.TempDir())
+	s := NewDataDirStorage(storage.At(t.TempDir()))
 	_, err := s.StatPublicFile("h", "posts/does-not-exist.html")
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
-	if !os.IsNotExist(err) {
+	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected os.IsNotExist, got: %v", err)
 	}
 }
@@ -63,7 +66,7 @@ func TestDataDirStorage_StatPublicFile_HandleIgnored(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "a.txt"), "x")
 
-	s := NewDataDirStorage(dir)
+	s := NewDataDirStorage(storage.At(dir))
 	_, e1 := s.StatPublicFile("alice", "a.txt")
 	_, e2 := s.StatPublicFile("bob", "a.txt")
 	if (e1 == nil) != (e2 == nil) {
@@ -79,7 +82,7 @@ func TestDataDirStorage_ReadPublicFile_Existing(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "content.md"), "hello world")
 
-	s := NewDataDirStorage(dir)
+	s := NewDataDirStorage(storage.At(dir))
 	got, err := s.ReadPublicFile("h", "content.md")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -90,12 +93,12 @@ func TestDataDirStorage_ReadPublicFile_Existing(t *testing.T) {
 }
 
 func TestDataDirStorage_ReadPublicFile_Missing(t *testing.T) {
-	s := NewDataDirStorage(t.TempDir())
+	s := NewDataDirStorage(storage.At(t.TempDir()))
 	_, err := s.ReadPublicFile("h", "missing.html")
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !os.IsNotExist(err) {
+	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected os.IsNotExist, got %v", err)
 	}
 }
@@ -104,7 +107,7 @@ func TestDataDirStorage_ReadPublicFile_Empty(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "empty.txt"), "")
 
-	s := NewDataDirStorage(dir)
+	s := NewDataDirStorage(storage.At(dir))
 	got, err := s.ReadPublicFile("h", "empty.txt")
 	if err != nil {
 		t.Fatalf("empty file should not error: %v", err)
@@ -114,32 +117,32 @@ func TestDataDirStorage_ReadPublicFile_Empty(t *testing.T) {
 	}
 }
 
-// The adapter itself does NOT block path traversal — that's the
-// responsibility of serve.ServeTenantPublic upstream. Pin this down
-// so a future refactor that moves the traversal check elsewhere
-// doesn't silently introduce a regression.
+// The adapter refuses a path that climbs out of the site. It reads through the
+// site's store, whose key validation refuses an escaping key, so this is a
+// SECOND refusal: serve.ServeTenantPublic rejects traversal upstream first.
 //
-// CAUTION: if this test ever starts failing, the trusted boundary has
-// shifted and the upstream handler may no longer be the right place
-// for the check.
-func TestDataDirStorage_ReadPublicFile_DoesNotBlockTraversal(t *testing.T) {
+// ⚠️ This used to pin the opposite: the directory join it replaced read
+// whatever the path named, and the test recorded that the adapter had no guard
+// of its own. The boundary moved in the safer direction, deliberately; the
+// upstream check is unchanged and still the first line.
+func TestDataDirStorage_ReadPublicFile_RefusesTraversal(t *testing.T) {
 	dir := t.TempDir()
-	// Write a file *outside* DataDir that the traversal would reach.
+	// Write a file *outside* the site that the traversal would reach.
 	outsideDir := t.TempDir() // sibling temp dir, not under `dir`
 	writeFile(t, filepath.Join(outsideDir, "secret.txt"), "leaked")
 
-	s := NewDataDirStorage(dir)
-	// Compute a relative path that climbs out of DataDir into outsideDir.
+	s := NewDataDirStorage(storage.At(dir))
+	// Compute a relative path that climbs out of the site into outsideDir.
 	relTraversal, err := filepath.Rel(dir, filepath.Join(outsideDir, "secret.txt"))
 	if err != nil {
 		t.Fatalf("rel: %v", err)
 	}
 	got, err := s.ReadPublicFile("h", relTraversal)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatalf("read a file outside the site through %q: %q", relTraversal, got)
 	}
-	if string(got) != "leaked" {
-		t.Errorf("expected adapter to read traversed file (no guard at this layer); got %q", string(got))
+	if _, err := s.StatPublicFile("h", relTraversal); err == nil {
+		t.Fatalf("stat a file outside the site through %q", relTraversal)
 	}
 }
 
@@ -158,7 +161,7 @@ func TestDataDirStorage_LoadBundle_ReadsBundleJSON(t *testing.T) {
 	data, _ := json.Marshal(custom)
 	writeFile(t, filepath.Join(dir, "content", "pub.polis.core", "bundle.json"), string(data))
 
-	s := NewDataDirStorage(dir)
+	s := NewDataDirStorage(storage.At(dir))
 	b := s.LoadBundle("h")
 	if b == nil {
 		t.Fatal("LoadBundle returned nil")
@@ -174,7 +177,7 @@ func TestDataDirStorage_LoadBundle_ReadsBundleJSON(t *testing.T) {
 // refactor that "helpfully" logs or fails noisily can be reviewed
 // against this expectation.
 func TestDataDirStorage_LoadBundle_MissingFile_FallsBackToDefault(t *testing.T) {
-	s := NewDataDirStorage(t.TempDir())
+	s := NewDataDirStorage(storage.At(t.TempDir()))
 	b := s.LoadBundle("h")
 	if b == nil {
 		t.Fatal("LoadBundle returned nil; expected default bundle")
@@ -188,7 +191,7 @@ func TestDataDirStorage_LoadBundle_MalformedJSON_FallsBackToDefault(t *testing.T
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "content", "pub.polis.core", "bundle.json"), "{not valid json")
 
-	s := NewDataDirStorage(dir)
+	s := NewDataDirStorage(storage.At(dir))
 	b := s.LoadBundle("h")
 	if b == nil {
 		t.Fatal("LoadBundle returned nil")
@@ -210,7 +213,7 @@ func TestDataDirStorage_ConcurrentReads(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "shared.txt"), "shared content")
 
-	s := NewDataDirStorage(dir)
+	s := NewDataDirStorage(storage.At(dir))
 
 	var wg sync.WaitGroup
 	const goroutines = 32
@@ -245,10 +248,22 @@ func (m *readMismatch) Error() string { return "unexpected read result: " + m.go
 // NewDataDirStorage — constructor sanity
 // ============================================================================
 
-func TestNewDataDirStorage_PreservesPath(t *testing.T) {
-	s := NewDataDirStorage("/some/path")
-	if s.DataDir != "/some/path" {
-		t.Errorf("DataDir = %q, want /some/path", s.DataDir)
+func TestNewDataDirStorage_PreservesSite(t *testing.T) {
+	site := storage.At("/some/path")
+	s := NewDataDirStorage(site)
+	if s.Site.Dir() != "/some/path" {
+		t.Errorf("site dir = %q, want /some/path", s.Site.Dir())
+	}
+}
+
+// A zero site handle serves not-found, never a nil dereference.
+func TestNewDataDirStorage_ZeroSiteIsNotFound(t *testing.T) {
+	s := NewDataDirStorage(storage.Site{})
+	if _, err := s.ReadPublicFile("h", "index.html"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("read on a zero site: err = %v, want fs.ErrNotExist", err)
+	}
+	if _, err := s.StatPublicFile("h", "index.html"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat on a zero site: err = %v, want fs.ErrNotExist", err)
 	}
 }
 
@@ -256,12 +271,12 @@ func TestNewDataDirStorage_EmptyDirIsValid(t *testing.T) {
 	// Constructor doesn't validate path existence; callers control
 	// this. A non-existent DataDir produces errors at call time, not
 	// at construction time.
-	s := NewDataDirStorage("/definitely/does/not/exist/anywhere")
+	s := NewDataDirStorage(storage.At("/definitely/does/not/exist/anywhere"))
 	_, err := s.ReadPublicFile("h", "any.txt")
 	if err == nil {
 		t.Fatal("expected error reading from nonexistent DataDir")
 	}
-	if !strings.Contains(err.Error(), "no such file") && !os.IsNotExist(err) {
+	if !strings.Contains(err.Error(), "no such file") && !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected not-found-style error, got: %v", err)
 	}
 }

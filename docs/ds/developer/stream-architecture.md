@@ -200,6 +200,7 @@ verification. The `payload` is type-specific data.
 | `pub.polis.site.registered` | `POST /v1/sites` (new) | Site domain | domain, registry_url |
 | `pub.polis.site.reregistered` | `POST /v1/sites` (existing) | Site domain | domain, registry_url |
 | `pub.polis.site.key_rotated` | `POST /v1/sites/keys/rotate` | Site domain | old_key_id, new_key_id |
+| `pub.polis.site.branched` | `POST /v1/sites/branched` | The branch (destination) domain | source_domain, source_key, new_key, handover_valid_from, transition_sig |
 
 **Blessing decisions.** The DS emits `granted` / `denied` only for a decision the post author signed.
 A user agent's decision also carries `agent`, `grant` and `grant_state` (a fact about the cited grant,

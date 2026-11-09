@@ -2,6 +2,7 @@ package index
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,7 +79,7 @@ func indexEntries(t *testing.T, dataDir string) []map[string]any {
 func TestRebuildAll_IndexesEveryContentType(t *testing.T) {
 	dataDir := seedFourTypes(t)
 
-	result, err := RebuildContentIndex(dataDir, nil)
+	result, err := RebuildContentIndex(storage.At(dataDir), nil)
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -108,7 +109,7 @@ func TestRebuildAll_IndexesEveryContentType(t *testing.T) {
 // A partial rebuild owns ONLY its own type's lines.
 func TestPartialRebuild_PreservesEveryOtherType(t *testing.T) {
 	dataDir := seedFourTypes(t)
-	if _, err := RebuildContentIndex(dataDir, nil); err != nil {
+	if _, err := RebuildContentIndex(storage.At(dataDir), nil); err != nil {
 		t.Fatalf("seed rebuild: %v", err)
 	}
 	before, err := os.ReadFile(filepath.Join(dataDir, "content", "pub.polis.core", "index.jsonl"))
@@ -116,7 +117,7 @@ func TestPartialRebuild_PreservesEveryOtherType(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := RebuildContentIndex(dataDir, []string{EntryTypePost})
+	result, err := RebuildContentIndex(storage.At(dataDir), []string{EntryTypePost})
 	if err != nil {
 		t.Fatalf("rebuild --posts: %v", err)
 	}
@@ -152,7 +153,7 @@ func TestPartialRebuild_KeepsUnreadableAndUnknownLines(t *testing.T) {
 	garbage := `not json at all`
 	write(t, indexPath, unknown+"\n"+garbage+"\n")
 
-	result, err := RebuildContentIndex(dataDir, []string{EntryTypePost})
+	result, err := RebuildContentIndex(storage.At(dataDir), []string{EntryTypePost})
 	if err != nil {
 		t.Fatalf("rebuild --posts: %v", err)
 	}
@@ -196,7 +197,7 @@ current-version: sha256:aaaa
 Hello.
 `)
 
-	result, err := RebuildContentIndex(dataDir, []string{EntryTypePost})
+	result, err := RebuildContentIndex(storage.At(dataDir), []string{EntryTypePost})
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -216,7 +217,7 @@ func TestRebuild_ReportsSkippedFiles(t *testing.T) {
 	write(t, filepath.Join(dataDir, "content", "pub.polis.core", "post", "broken.md"),
 		"---\ntitle: No date\n---\n\nbody\n")
 
-	result, err := RebuildContentIndex(dataDir, []string{EntryTypePost})
+	result, err := RebuildContentIndex(storage.At(dataDir), []string{EntryTypePost})
 	if err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -232,7 +233,7 @@ func TestRebuild_ReportsSkippedFiles(t *testing.T) {
 // reverse the file to get newest-first. The pre-fix rebuild sorted descending.
 func TestRebuild_OrdersAscendingByPublished(t *testing.T) {
 	dataDir := seedFourTypes(t)
-	if _, err := RebuildContentIndex(dataDir, nil); err != nil {
+	if _, err := RebuildContentIndex(storage.At(dataDir), nil); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
 

@@ -88,6 +88,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,8 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Version is set at startup by the cmd package.
@@ -471,6 +474,40 @@ func Verify(r *Registry, operatorPublicKeySSH []byte) (SignatureStatus, error) {
 	return StatusValid, nil
 }
 
+// VerifyWithHistory is Verify for an operator that may have rotated its key:
+// the current key first, then the retired key the operator's published history
+// resolves for the registry's claimed signing time, `asserted`. chain must
+// already be trusted (sitecheck.ResolvingChain); nil means current key only,
+// which is exactly Verify. retired is the history entry that verified it, nil
+// for the current key.
+func VerifyWithHistory(r *Registry, operatorPublicKeySSH []byte, chain *site.KeyHistoryBlock) (SignatureStatus, *site.KeyHistoryEntry, error) {
+	if r == nil || r.Signature == "" {
+		return StatusUnsigned, nil, nil
+	}
+	if len(operatorPublicKeySSH) == 0 {
+		return StatusUnknown, nil, nil
+	}
+	canonical, err := CanonicalJSON(r)
+	if err != nil {
+		return StatusUnknown, nil, fmt.Errorf("canonical JSON: %w", err)
+	}
+	ok, retired, err := site.VerifyWithHistory(func(key []byte) (bool, error) {
+		return signing.VerifySignature(canonical, key, r.Signature)
+	}, operatorPublicKeySSH, chain, r.Asserted, "asserted")
+
+	// The tolerance rule, applied after the history walk, as in Verify.
+	switch out := signing.Resolve(ok, r.unrecognised); out.Status {
+	case signing.StatusUnknown:
+		return StatusUnknown, nil, errors.New(out.Explain())
+	case signing.StatusInvalid:
+		if err == nil {
+			err = fmt.Errorf("signature does not verify against the operator's published key")
+		}
+		return StatusInvalid, nil, err
+	}
+	return StatusValid, retired, nil
+}
+
 // SignAndWrite signs the registry and atomically writes it.
 //
 // ⛔ It REFUSES to rewrite a registry carrying members this build does not
@@ -514,6 +551,9 @@ func writeRegistry(r *Registry, path string) error {
 	}
 	data = append(data, '\n')
 
+	// Stays: the write below goes through atomicfile, which owns atomicity OUTSIDE
+	// the interface and does NOT create parent directories. Removing this is the
+	// judgepublish mistake, which has been made twice in this detach.
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("create registry directory: %w", err)
 	}
@@ -528,7 +568,7 @@ func writeRegistry(r *Registry, path string) error {
 
 // Load reads and parses a registry from disk.
 func Load(path string) (*Registry, error) {
-	data, err := os.ReadFile(path)
+	data, err := storage.ReadAtPath(path)
 	if err != nil {
 		return nil, fmt.Errorf("read registry: %w", err)
 	}
@@ -615,7 +655,7 @@ func StateRegistry(siteDir string, r *Registry, operatorPrivateKey []byte) error
 	if err := SignAndWrite(r, path, operatorPrivateKey); err != nil {
 		return err
 	}
-	if err := site.SetActorRegistryPointer(siteDir, RegistryURLPath(siteDir)); err != nil {
+	if err := site.SetActorRegistryPointer(storage.At(siteDir), RegistryURLPath(siteDir)); err != nil {
 		return fmt.Errorf("write actor registry pointer: %w", err)
 	}
 	return nil
@@ -629,10 +669,10 @@ func StateRegistry(siteDir string, r *Registry, operatorPrivateKey []byte) error
 // removal is announced by ISSUING a withdrawal attestation, never by deleting a
 // claim. Deleting the file only says "there is no current list".
 func WithdrawRegistry(siteDir string) error {
-	if err := site.SetActorRegistryPointer(siteDir, ""); err != nil {
+	if err := site.SetActorRegistryPointer(storage.At(siteDir), ""); err != nil {
 		return fmt.Errorf("clear actor registry pointer: %w", err)
 	}
-	if err := os.Remove(RegistryPath(siteDir)); err != nil && !os.IsNotExist(err) {
+	if err := storage.DeleteAtPath(RegistryPath(siteDir)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove registry: %w", err)
 	}
 	return nil

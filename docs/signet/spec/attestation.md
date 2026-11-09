@@ -572,8 +572,10 @@ Verify against the **published** key, not a locally cached one: that is the key 
 network would use, so it answers the same question everyone else is asking.
 
 ⚠️ **The current key only.** The file carries no signing time, so a key history has no moment to resolve
-a retired key for: a follow file signed before its site rotated reads `invalid` until its author next
-follows or unfollows someone, which re-signs it with the current key.
+a retired key for. The author's own key rotation therefore re-signs the file with the new key, ⛔ **but
+only if it verified under the old one**; a file that was failing stays failing. A follow file signed
+under a retired key that no rotation re-signed reads `invalid` until its author next follows or
+unfollows someone.
 
 ### 5 The four states, and why they are four
 
@@ -605,7 +607,8 @@ disqualifying is a judgment for whoever is asking, and the protocol does not get
 **Equally: nothing may re-sign the file on the author's behalf.** The follow list is authored, so an
 operator or an automated agent signing it would be asserting under someone's own key that they follow
 people they may not follow. Regenerating a *derived* artifact is maintenance; signing an *authored*
-one is forgery.
+one is forgery. The one re-sign that is not on anyone's behalf is the author's own key rotation (§4),
+which changes the key and nothing the key vouches for.
 
 ---
 
@@ -708,14 +711,17 @@ The byte-exact vectors, with and without the marker, are in [`signing-base.md` �
 
 Verify against the **published** key, for the same reason the follow file does: it is the key any
 third party on the network would use. ⚠️ **The current key only**, for the follow file's reason: the
-list carries no signing time, so it is re-signed with the current key at its author's next blessing
-decision. Tolerance of unrecognised fields is the follow file's too (§3 there).
+list carries no signing time, so the author's key rotation re-signs it, ⛔ **only if it verified under
+the old key**, and otherwise it is re-signed with the current key at its author's next blessing
+decision. Every entry, agent marker included, passes through a re-sign unchanged. Tolerance of
+unrecognised fields is the follow file's too (§3 there).
 
 ### 5 The four states, and why they are four
 
 Identical to the follow file's (§5 above), and for a sharper reason: **most sites will be `unsigned`
-for a long time.** A blessing list is only re-signed when its author next blesses or unblesses
-something, and every file written before this shipped has no signature at all. An implementation that
+for a long time.** A blessing list is only signed when its author next blesses or unblesses
+something (a key rotation re-signs a list that is already signed; it never signs one that is not), and
+every file written before this shipped has no signature at all. An implementation that
 reads absent-as-failure reports the entire network as broken on its first sweep.
 
 A fleet-level census must therefore count `unsigned` **separately** from `invalid`. Adding them
@@ -732,7 +738,8 @@ whoever is asking.
 file — repairing the render index, evicting a denied comment — write it **unsigned**, clearing any
 stale signature rather than re-signing. That is not a gap: an unsigned write degrades to a *fact*,
 where keeping a signature over changed content manufactures a false `invalid`. And an actor signing
-an authored file under the tenant's key would be forging authorship, not repairing state.
+an authored file under the tenant's key would be forging authorship, not repairing state. As for the
+follow file, the author's own key rotation (§4) is the one re-sign that acts on nobody's behalf.
 
 ⭐ **The line is WHOSE SOFTWARE HOLDS THE KEY, not whether a write is a repair** *(amended 2026-09-18)*. The paragraph above is about an **operator actor** — Chaplain, Medic, Clerk —
 reconciling a tenant's file from outside. It is **not** about the author's own instance.

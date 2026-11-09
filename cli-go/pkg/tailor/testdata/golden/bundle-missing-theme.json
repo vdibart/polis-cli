@@ -224,6 +224,12 @@
       "reason": ""
     },
     {
+      "name": "theme-shapes-migration",
+      "status": "pass",
+      "message": "theme compatible shapes include the defaults",
+      "reason": ""
+    },
+    {
       "name": "bundle-declarations",
       "status": "fail",
       "message": "missing declarations: theme:zane",

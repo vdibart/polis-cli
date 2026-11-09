@@ -30,6 +30,7 @@ The polis content system organizes all site data around **bundles** -- namespace
 
 site/
   snippets/                          # rendering primitives (about.md, etc.)
+  custom.css                         # the site's own CSS, layered after the theme (only once set)
 
 content/                             # SOURCE OF TRUTH (all content lives here)
   pub.polis.core/
@@ -558,6 +559,40 @@ Themes are declared in `bundle.json` under the `themes` key:
 themes share — not a selectable theme. `display_name` is the picker's label
 when it differs from the name.
 
+#### The site's own CSS — `site/custom.css`
+
+A site can carry CSS of its own, layered **after** the active theme: every
+writer of `styles.css` (the blog shape's render, the stream shape's render and a
+theme switch) appends `site/custom.css` when it exists, below a marker comment.
+The file is checked again at every one of those writes, not only when it is
+set: one that fails the checks below (written by hand, restored, or left by an
+older build) is withheld, a comment says so in its place, and the site renders
+with the theme alone.
+It is the way to change a site's look beyond choosing a theme, and it is made in
+place: the site's own file, which nothing interprets.
+
+- ⭐ **Override the theme's custom properties first.** A theme declares its
+  palette as custom properties on `:root`; a `:root` block in `custom.css` that
+  sets a few of them recolours the whole site without restating any rule.
+- **It survives what replaces the theme.** It sits beside the site's snippets,
+  not in the installed bundle, so a bundle resync never touches it, and a theme
+  switch keeps it. A branch copies it like any other site file.
+- **It may not load from elsewhere.** It is refused if it contains a backslash
+  anywhere (escapes are how a name or URL check is evaded) or a comment that is
+  never closed; other comments are removed before the rest is checked. The only
+  at-rules allowed are `@media`, `@supports`, `@keyframes`,
+  `@-webkit-keyframes`, `@container` and `@layer`, so `@import`, `@font-face`
+  and `@namespace` are refused. Functions that can fetch (`image-set()`,
+  `image()`, `cross-fade()`, `element()`, `src()`, `expression()` and their
+  prefixed forms) are
+  refused, and `url()` is allowed only for a path on the site or a
+  `data:image/` value. It is capped at 20,000 bytes.
+- The owner reads and replaces it at `/api/settings/custom-css` (owner-only).
+  A replace keeps the version it replaced as `site/custom.css.prev` and
+  re-renders.
+- ⚠️ **The bash CLI does not apply it**: its render writes the theme's CSS alone
+  ([implementation parity](../../cli/implementation-parity.md)).
+
 ### Per-tenant install
 
 Each tenant has the bundle's reference payload installed at
@@ -980,6 +1015,7 @@ Site events use `pub.polis.site.*`. These are not content type events -- they de
 | `pub.polis.site.registered` | DS (side-effect of site registration) | A new site was registered with the DS. |
 | `pub.polis.site.reregistered` | DS (side-effect of re-registration) | A site re-registered (e.g., after metadata update). |
 | `pub.polis.site.key_rotated` | DS (side-effect of key rotation) | A site rotated its Ed25519 signing key. |
+| `pub.polis.site.branched` | DS (side-effect of a branch announcement) | A site announced it was branched from another; the source is in the payload. Optional: it shows descent, never the source's consent. |
 
 ### Event Payload Structure
 

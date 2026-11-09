@@ -2,6 +2,9 @@ package site
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -26,7 +29,7 @@ func setupTestDir(t *testing.T) string {
 
 func writeTestWellKnown(t *testing.T, dir string, wk *WellKnown) {
 	t.Helper()
-	if err := SaveWellKnown(dir, wk); err != nil {
+	if err := SaveWellKnown(storage.At(dir), wk); err != nil {
 		t.Fatalf("Failed to save well-known: %v", err)
 	}
 }
@@ -83,7 +86,7 @@ func TestWellKnownValidJSON(t *testing.T) {
 	}
 	writeTestWellKnown(t, dir, wk)
 
-	loaded, err := LoadWellKnown(dir)
+	loaded, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatalf("Failed to load: %v", err)
 	}
@@ -183,7 +186,7 @@ func TestBundleRegistryRoundTrip(t *testing.T) {
 	}
 	writeTestWellKnown(t, dir, wk)
 
-	loaded, err := LoadWellKnown(dir)
+	loaded, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatalf("Failed to load: %v", err)
 	}
@@ -213,7 +216,7 @@ func TestNoBundlesField(t *testing.T) {
 	}
 	writeTestWellKnown(t, dir, wk)
 
-	loaded, err := LoadWellKnown(dir)
+	loaded, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatalf("Failed to load: %v", err)
 	}
@@ -238,7 +241,7 @@ func TestActiveThemeRoundTrip(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, ".well-known", "polis"),
 		[]byte(`{"version":"polis-cli-go/0.57.0","author_name":"alice","public_key":"ssh-ed25519 AAAA","created":"2026-01-01T00:00:00Z","active_theme":"turbo"}`), 0644)
 
-	if got := GetActiveTheme(dir); got != "turbo" {
+	if got := GetActiveTheme(storage.At(dir)); got != "turbo" {
 		t.Errorf("GetActiveTheme() = %q, want turbo (legacy fallback)", got)
 	}
 }
@@ -360,7 +363,7 @@ func TestEmailOmitempty_SerializedWhenSet(t *testing.T) {
 		t.Error("Email field should be present when set")
 	}
 
-	loaded, err := LoadWellKnown(dir)
+	loaded, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,11 +378,11 @@ func TestEmailOmitempty_SerializedWhenSet(t *testing.T) {
 
 func TestLoadMissingFile(t *testing.T) {
 	dir := setupTestDir(t)
-	_, err := LoadWellKnown(dir)
+	_, err := LoadWellKnown(storage.At(dir))
 	if err == nil {
 		t.Fatal("Expected error for missing file")
 	}
-	if !os.IsNotExist(err) {
+	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Expected IsNotExist error, got: %v", err)
 	}
 }
@@ -390,7 +393,7 @@ func TestLoadCorruptedJSON(t *testing.T) {
 	os.MkdirAll(wellKnownDir, 0755)
 	os.WriteFile(filepath.Join(wellKnownDir, "polis"), []byte("not valid json"), 0644)
 
-	_, err := LoadWellKnown(dir)
+	_, err := LoadWellKnown(storage.At(dir))
 	if err == nil {
 		t.Fatal("Expected error for corrupted JSON")
 	}
@@ -405,7 +408,7 @@ func TestSaveCreatesDirectory(t *testing.T) {
 		Created:    "2026-01-01T00:00:00Z",
 	}
 
-	if err := SaveWellKnown(dir, wk); err != nil {
+	if err := SaveWellKnown(storage.At(dir), wk); err != nil {
 		t.Fatalf("SaveWellKnown should create directory: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".well-known", "polis")); err != nil {
@@ -482,7 +485,7 @@ func TestSaveWellKnownIndentation(t *testing.T) {
 		},
 	}
 
-	if err := SaveWellKnown(dir, wk); err != nil {
+	if err := SaveWellKnown(storage.At(dir), wk); err != nil {
 		t.Fatal(err)
 	}
 
@@ -593,7 +596,7 @@ func TestAvatarRoundTrip(t *testing.T) {
 	}
 	writeTestWellKnown(t, dir, wk)
 
-	loaded, err := LoadWellKnown(dir)
+	loaded, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatalf("Failed to load: %v", err)
 	}
@@ -635,11 +638,11 @@ func TestMigrateAuthorField_AuthorOnly(t *testing.T) {
 	wkPath := filepath.Join(dir, ".well-known", "polis")
 	os.WriteFile(wkPath, []byte(`{"version":"1","public_key":"pk","author":"Alice","created":"2026-01-01T00:00:00Z"}`), 0644)
 
-	if err := MigrateAuthorField(dir); err != nil {
+	if err := MigrateAuthorField(storage.At(dir)); err != nil {
 		t.Fatalf("MigrateAuthorField: %v", err)
 	}
 
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatalf("LoadWellKnown: %v", err)
 	}
@@ -659,11 +662,11 @@ func TestMigrateAuthorField_BothPresent(t *testing.T) {
 	wkPath := filepath.Join(dir, ".well-known", "polis")
 	os.WriteFile(wkPath, []byte(`{"version":"1","public_key":"pk","author":"Old","author_name":"New","created":"2026-01-01T00:00:00Z"}`), 0644)
 
-	if err := MigrateAuthorField(dir); err != nil {
+	if err := MigrateAuthorField(storage.At(dir)); err != nil {
 		t.Fatalf("MigrateAuthorField: %v", err)
 	}
 
-	wk, _ := LoadWellKnown(dir)
+	wk, _ := LoadWellKnown(storage.At(dir))
 	if wk.AuthorName != "New" {
 		t.Errorf("AuthorName should preserve existing value, got %q", wk.AuthorName)
 	}
@@ -675,11 +678,11 @@ func TestMigrateAuthorField_AuthorNameOnly(t *testing.T) {
 	wkPath := filepath.Join(dir, ".well-known", "polis")
 	os.WriteFile(wkPath, []byte(`{"version":"1","public_key":"pk","author_name":"Alice","created":"2026-01-01T00:00:00Z"}`), 0644)
 
-	if err := MigrateAuthorField(dir); err != nil {
+	if err := MigrateAuthorField(storage.At(dir)); err != nil {
 		t.Fatalf("MigrateAuthorField: %v", err)
 	}
 
-	wk, _ := LoadWellKnown(dir)
+	wk, _ := LoadWellKnown(storage.At(dir))
 	if wk.AuthorName != "Alice" {
 		t.Errorf("AuthorName = %q", wk.AuthorName)
 	}
@@ -687,7 +690,7 @@ func TestMigrateAuthorField_AuthorNameOnly(t *testing.T) {
 
 func TestMigrateAuthorField_NoFile(t *testing.T) {
 	dir := t.TempDir()
-	if err := MigrateAuthorField(dir); err != nil {
+	if err := MigrateAuthorField(storage.At(dir)); err != nil {
 		t.Errorf("should not error on missing file: %v", err)
 	}
 }
@@ -789,7 +792,7 @@ func TestWriteFavicon_CreatesFile(t *testing.T) {
 	}
 	writeTestWellKnown(t, dir, wk)
 
-	if err := WriteFavicon(dir); err != nil {
+	if err := WriteFavicon(storage.At(dir)); err != nil {
 		t.Fatalf("WriteFavicon: %v", err)
 	}
 
@@ -816,7 +819,7 @@ func TestWriteFavicon_NoAvatar(t *testing.T) {
 	}
 	writeTestWellKnown(t, dir, wk)
 
-	if err := WriteFavicon(dir); err != nil {
+	if err := WriteFavicon(storage.At(dir)); err != nil {
 		t.Fatalf("WriteFavicon: %v", err)
 	}
 
@@ -828,7 +831,7 @@ func TestWriteFavicon_NoAvatar(t *testing.T) {
 
 func TestWriteFavicon_MissingWellKnown(t *testing.T) {
 	dir := t.TempDir()
-	err := WriteFavicon(dir)
+	err := WriteFavicon(storage.At(dir))
 	if err == nil {
 		t.Error("WriteFavicon should error when .well-known/polis is missing")
 	}
@@ -840,7 +843,7 @@ func TestWriteFavicon_MissingWellKnown(t *testing.T) {
 
 func TestLoadWellKnownRaw_NotExist(t *testing.T) {
 	dir := t.TempDir()
-	raw, err := LoadWellKnownRaw(dir)
+	raw, err := LoadWellKnownRaw(storage.At(dir))
 	if err != nil {
 		t.Fatalf("unexpected error for missing file: %v", err)
 	}
@@ -855,7 +858,7 @@ func TestLoadWellKnownRaw_ValidJSON(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, ".well-known", "polis"),
 		[]byte(`{"version":"1","public_key":"pk","author_name":"alice","created":"2026-01-01T00:00:00Z"}`), 0644)
 
-	raw, err := LoadWellKnownRaw(dir)
+	raw, err := LoadWellKnownRaw(storage.At(dir))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -872,7 +875,7 @@ func TestLoadWellKnownRaw_MalformedJSON(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
 	os.WriteFile(filepath.Join(dir, ".well-known", "polis"), []byte("not valid json{"), 0644)
 
-	raw, err := LoadWellKnownRaw(dir)
+	raw, err := LoadWellKnownRaw(storage.At(dir))
 	if err == nil {
 		t.Fatal("expected error for malformed JSON, got nil")
 	}
@@ -894,7 +897,7 @@ func TestLoadWellKnownRaw_PermissionDenied(t *testing.T) {
 	}
 	defer os.Chmod(path, 0644)
 
-	raw, err := LoadWellKnownRaw(dir)
+	raw, err := LoadWellKnownRaw(storage.At(dir))
 	if err == nil {
 		t.Fatal("expected error for permission-denied, got nil")
 	}
@@ -909,7 +912,7 @@ func TestLegacyActiveThemeInWellKnown_UnchangedOnMalformed(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
 	os.WriteFile(filepath.Join(dir, ".well-known", "polis"), []byte("{bad"), 0644)
 
-	if LegacyActiveThemeInWellKnown(dir) {
+	if LegacyActiveThemeInWellKnown(storage.At(dir)) {
 		t.Error("LegacyActiveThemeInWellKnown should return false on malformed JSON (assume-absent-on-error)")
 	}
 }
@@ -926,12 +929,12 @@ func TestWriteFavicon_OverwritesExisting(t *testing.T) {
 	writeTestWellKnown(t, dir, wk)
 
 	// Write initial favicon
-	WriteFavicon(dir)
+	WriteFavicon(storage.At(dir))
 
 	// Update avatar and rewrite
 	wk.Avatar.BG = "#00aa00"
 	writeTestWellKnown(t, dir, wk)
-	WriteFavicon(dir)
+	WriteFavicon(storage.At(dir))
 
 	data, _ := os.ReadFile(filepath.Join(dir, "favicon.svg"))
 	if !strings.Contains(string(data), `fill="#00aa00"`) {
@@ -960,20 +963,20 @@ func TestSaveWellKnownKeepsUnmodeledFields(t *testing.T) {
 			"current": map[string]interface{}{"epoch": 1, "key": "MESSAGESKEYB64", "sig": "SIGB64"},
 		},
 	}
-	if err := SaveWellKnownRaw(dir, seed); err != nil {
+	if err := SaveWellKnownRaw(storage.At(dir), seed); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	wk, err := LoadWellKnown(dir)
+	wk, err := LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	wk.AuthorName = "new name"
-	if err := SaveWellKnown(dir, wk); err != nil {
+	if err := SaveWellKnown(storage.At(dir), wk); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	raw, err := LoadWellKnownRaw(dir)
+	raw, err := LoadWellKnownRaw(storage.At(dir))
 	if err != nil {
 		t.Fatalf("reload raw: %v", err)
 	}

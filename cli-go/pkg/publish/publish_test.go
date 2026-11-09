@@ -1,6 +1,7 @@
 package publish
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,7 @@ func TestEnsureUniqueFilename_NoCollision(t *testing.T) {
 	dateDir := "20260101"
 	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir), 0755)
 
-	result := ensureUniqueFilename(dataDir, dateDir, "hello-world")
+	result := ensureUniqueFilename(storage.At(dataDir), dateDir, "hello-world")
 	if result != "hello-world" {
 		t.Errorf("expected 'hello-world', got %s", result)
 	}
@@ -38,7 +39,7 @@ func TestEnsureUniqueFilename_PostCollision(t *testing.T) {
 	// Create existing post
 	os.WriteFile(filepath.Join(postsDir, "hello-world.md"), []byte("existing"), 0644)
 
-	result := ensureUniqueFilename(dataDir, dateDir, "hello-world")
+	result := ensureUniqueFilename(storage.At(dataDir), dateDir, "hello-world")
 	if result != "hello-world-2" {
 		t.Errorf("expected 'hello-world-2', got %s", result)
 	}
@@ -54,7 +55,7 @@ func TestEnsureUniqueFilename_MultipleCollisions(t *testing.T) {
 	os.WriteFile(filepath.Join(postsDir, "hello-world.md"), []byte("v1"), 0644)
 	os.WriteFile(filepath.Join(postsDir, "hello-world-2.md"), []byte("v2"), 0644)
 
-	result := ensureUniqueFilename(dataDir, dateDir, "hello-world")
+	result := ensureUniqueFilename(storage.At(dataDir), dateDir, "hello-world")
 	if result != "hello-world-3" {
 		t.Errorf("expected 'hello-world-3', got %s", result)
 	}
@@ -138,7 +139,7 @@ func TestEnsureUniqueFilename_DraftCollision(t *testing.T) {
 	// Create existing draft
 	os.WriteFile(filepath.Join(draftsDir, "hello-world.md"), []byte("draft"), 0644)
 
-	result := ensureUniqueFilename(dataDir, dateDir, "hello-world")
+	result := ensureUniqueFilename(storage.At(dataDir), dateDir, "hello-world")
 	if result != "hello-world-2" {
 		t.Errorf("expected 'hello-world-2', got %s", result)
 	}

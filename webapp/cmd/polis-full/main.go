@@ -30,7 +30,7 @@ func main() {
 }
 
 func printServeUsage() {
-	fmt.Print(`Polis serve - run the local web app
+	fmt.Print(`polis serve - run the local web app
 
 Usage:
   polis serve [options]

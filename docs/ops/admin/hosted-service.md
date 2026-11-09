@@ -25,7 +25,7 @@ polis.pub (root domain)
   /v1/wake               Wake the tenant's server (public, 204)
   /v1/*                  Tenant server's public protocol routes
   /api/*, /pql/*         Authenticated API (session cookie must match handle) — except the
-                         public stream and PQL reads, which need no session
+                         public stream and PQL reads and /api/capabilities, which need no session
   /*                     The tenant's published site, served from its data directory
 ```
 
@@ -39,7 +39,7 @@ All hosted service code lives in `webapp/internal/hosted/`:
 |------|---------|
 | `hosted.go` | `HostedService` struct, top-level HTTP routing, SPA serving, tenant handler loading |
 | `handlers.go` | Auth handlers (signup, login, verify, logout), site provisioning logic |
-| `store.go` | Dual SQLite/Postgres persistence (`hosted_tenants`, `hosted_sessions`, `hosted_magic_links`, `hosted_widget_tokens`, `hosted_pending_blessings`, `hosted_email_history`) |
+| `store.go` | Postgres persistence; the service refuses to start without a Postgres `DATABASE_URL` (`hosted_tenants`, `hosted_sessions`, `hosted_magic_links`, `hosted_widget_tokens`, `hosted_pending_blessings`, `hosted_email_history`) |
 | `email.go` | Resend API client for transactional email (magic links) |
 | `tenant_cache.go` | Per-tenant handler cache with double-checked locking and LRU eviction (500 tenants); holds each tenant's wake callback |
 | `landing.go` | Landing page HTML and JS, generated (the share image is in `landing_assets.go`) |
@@ -102,7 +102,7 @@ When a request arrives at `{handle}.polis.pub`:
 
 - **Public paths** (`/`, `/posts/...`, etc.): The tenant's rendered site is served from its data directory, rate-limited per IP. A signed-in visitor from another tenant gets the nav widget injected.
 - **Owner SPA** (`/_/`): served from the shared embedded filesystem when the session's handle matches the subdomain; the HTML gets a nonce-bearing `<script>` setting `window.__POLIS_HOSTED=true` and `window.__POLIS_BASE_DOMAIN`. Without a matching session, `/_/` shows the tenant login page and deeper SPA paths redirect.
-- **API paths** (`/api/*`, and `/pql/*` owner queries): The `polis_session` cookie is validated -- the session must exist, be non-expired, and its handle must match the subdomain. If valid, the request is forwarded to the tenant's cached `server.Server` handler. If not, a 401 JSON error is returned. The public stream reads (`/api/v1/stream/focus-comment` and `/api/v1/stream/body`) and public PQL queries skip the session check. (`/api/v1/stream/items` was retired when the stream moved to PQL; its data path is `GET /pql/<sentence>`.)
+- **API paths** (`/api/*`, and `/pql/*` owner queries): The `polis_session` cookie is validated -- the session must exist, be non-expired, and its handle must match the subdomain. If valid, the request is forwarded to the tenant's cached `server.Server` handler. If not, a 401 JSON error is returned. The public stream reads (`/api/v1/stream/focus-comment` and `/api/v1/stream/body`) and public PQL queries skip the session check. So does the capability descriptor, `/api/capabilities`: a third party reads it to learn how to talk to the site, and a `401` there would read as "this site has no API". (`/api/v1/stream/items` was retired when the stream moved to PQL; its data path is `GET /pql/<sentence>`.)
 - **Protocol paths** (`/v1/*`): forwarded to the tenant's server without a session.
 
 Tenant handlers are lazily loaded and cached in `TenantCache` (LRU, 500 entries; an evicted tenant's sync goroutine is stopped). Use `Cache.Invalidate(handle)` to force reload after config changes.
@@ -126,19 +126,25 @@ Each tenant exposes a public `GET /v1/wake` endpoint that the DS calls after emi
 
 - Returns `204 No Content` — no data is exposed
 - No authentication required
+- Limited per client address, before anything is loaded: over the limit it returns `429` with `Retry-After`, loads nothing and triggers no sync
+- A handle with no tenant is redirected to the root domain before the wake route runs, so it loads nothing and does not count against the limit
 - Loads the tenant server into cache if not already loaded (starts sync goroutine)
-- Triggers an immediate sync cycle via `TriggerSync()` (non-blocking, buffered channel of 1)
-- Logs `wake.received`
-- Multiple rapid wake calls collapse into a single sync cycle
+- Triggers an immediate sync cycle via `TriggerSync()` (non-blocking, buffered channel of 1), unless the tenant is inside its wake cooldown: then it still returns `204`, and one sync is scheduled for the end of the cooldown instead
+- Logs `wake.received`, with `sync` saying what the call did: `triggered`, `deferred` (a sync is now scheduled for the end of the cooldown), or `already_deferred` (one already was)
 
 ### Load
 
-Anyone can call it, as often as they like, for any tenant, and nothing limits a caller today:
-- A call for a tenant that is not in the cache loads its server, which starts its sync goroutine and can evict another tenant from the cache (500 entries).
-- Every call asks for a sync cycle. At most one waits per tenant (`TriggerSync`'s channel holds one), so a steady stream of calls keeps that tenant syncing back to back, and each cycle calls the discovery service.
-- The discovery service's own limit, one wake per domain per 30 seconds, applies only to the wakes it sends.
+Anyone can call it, for any tenant. What a call can cost, and the two defences that bound it:
+- **A cold load: the per-client limit.** A call for a tenant that is not in the cache loads its server, which starts its sync goroutine and can evict another tenant from the cache (500 entries). This is the expensive part, and the **per-client limit** bounds it: 60 wakes per minute per client address, across all tenants, checked before the cache is touched (`wake_limit.go`). A refusal logs `rate_limit.hit` with `scope: wake`.
+- **A sync cycle: the per-tenant cooldown.** Every accepted call asks for one, and each cycle calls the discovery service. `TriggerSync` merges only wakes that arrive while a sync is still queued, and an empty sync takes about 42 ms, so on its own it merges almost nothing: on 2026-09-27, 70 wakes from one address ran 56 empty sync cycles in eight seconds. So a tenant has a **wake cooldown of 30 seconds** (`wakeSyncCooldown`, `wake_limit.go`): a wake triggers a sync only if no wake has triggered one for that tenant in the last 30 seconds. A wake inside the cooldown is not dropped; one sync runs when the cooldown ends, and every wake before then joins it. The cooldown belongs to the tenant, not to an address, so it holds however many addresses call: at most two wake syncs a minute per tenant.
 
-A per-client limit on `/v1/wake` is planned.
+The cooldown starts only from syncs that wakes triggered, not from the regular 30-second sync, which would otherwise swallow every wake for a tenant with a browser tab open. A wake is deferred rather than dropped because that regular sync runs only while a tab is connected: for an idle tenant, a dropped wake would wait for the next wake.
+
+Neither defence holds back the DS in practice. Its own limit, one wake per domain per 30 seconds, already spaces its wakes a cooldown apart, and a wake deferred by the cooldown arrives at most 30 seconds late, the same as the regular sync interval. That DS limit is not itself a defence here: it constrains only the wakes the DS sends, not anyone calling `/v1/wake` directly.
+
+The per-client limit is set from the observed rate of legitimate wakes, which all come from the DS and so from one address. Over 2026-08-26 to 2026-09-27 Axiom shows 2 `wake.received` events in total (peak 2 in one minute, 1 per tenant), and every DS registration that could trigger a wake peaked at 34 in one minute, so 60 leaves headroom without refusing the DS. `POLIS_WAKE_RATE_PER_CLIENT` overrides it if the DS's wake volume grows; watch for `rate_limit.hit` with `scope: wake` from the DS before raising it.
+
+The client address is the one every hosted limiter uses (`clientIP`): the visitor's own address, with a Cloudflare peer replaced by the client named in `CF-Connecting-IP`.
 
 ### Self-hosted sites
 
@@ -159,13 +165,22 @@ For what each actor does, and what it deliberately does not do, see [Actors](../
 When `LOG_FORMAT=json` is set, each HTTP request produces a JSON line on stdout:
 
 ```json
-{"ts":"2026-02-25T15:30:45Z","source":"http","request_id":"3f0c…","method":"GET","path":"/","host":"alice.polis.pub","status":200,"duration_ms":12}
+{"ts":"2026-02-25T15:30:45Z","source":"http","request_id":"3f0c…","method":"GET","path":"/","host":"alice.polis.pub","status":200,"duration_ms":12,"client":"9b1e…","agent":"Mozilla/5.0 …"}
 ```
+
+⛔ **A request line never carries the client's address.** `client` is an HMAC of the address under a
+salt generated once per process and never stored (`client_identity.go`): it can tell one client from
+ten thousand, and cannot say where a person reads, because this line is written for every page anyone
+reads. Correlation lasts as long as the process, and each machine salts differently, so counting
+distinct clients across machines over-counts. `agent` is the `User-Agent`, plain, cut at 256 bytes: it
+names software, not a person. Both are omitted when empty. Security events (`source: security`) are
+rare and specific, and may record the raw address. A request from a listed AI training crawler also
+carries `crawler_gate` and `crawler_gate_reason`.
 
 Health checks (`/health`) and `/.well-known/polis` fetches are excluded from logging to reduce noise
 (`webapp/internal/hosted/hosted.go`, `ServeHTTP`).
 
-**Every line shares a base schema:** `ts` (RFC 3339, UTC) and `source` (`http`, `landlord`, and on the
+**Every line shares a base schema:** `ts` (RFC 3339, UTC) and `source` (`http`, `landlord`, `security`, and on the
 discovery service `api`, `admin`, `auth`, `system`, `perf`, `security`, `db`). Named events carry
 their name in `action`. ⭐ **Nothing in the services knows where the logs go**, so any log aggregator works.
 

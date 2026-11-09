@@ -9,10 +9,10 @@ In the v4 architecture there are **three surfaces**, not five pages. The old "Da
 | # | Surface | URL | Nav | Content Theme |
 |---|---------|-----|-----|---------------|
 | 1 | Landing | polis.pub (logged out) | System topbar | SOLS |
-| 2 | Webapp SPA (logged in) | `handle.polis.pub/_/`, `/_/pql/<sentence>`, `/_/settings` | User's icon nav | User's theme |
+| 2 | Webapp SPA (logged in) | `handle.polis.pub/_/`, `/_/pql/<sentence>`, `/_/settings`, `/_/kay` (own instance only) | User's icon nav | User's theme |
 | 3 | Foreign site visit | alice.polis.pub | User's icon nav, mounted into Alice's topbar by the widget | Alice's theme |
 
-Inside surface 2, what used to be separate "Dashboard" and "My Content" pages are now PQL-filtered views of the same stream-screen: each icon button loads a preset sentence (see `navigation.md`), and the sentence-filter widget composes ad-hoc queries. Static routes are limited to `/_/` (default landing sentence) and `/_/settings`; everything else is `/_/pql/<sentence>`.
+Inside surface 2, what used to be separate "Dashboard" and "My Content" pages are now PQL-filtered views of the same stream-screen: each icon button loads a preset sentence (see `navigation.md`), and the sentence-filter widget composes ad-hoc queries. Static routes are limited to `/_/` (default landing sentence), `/_/settings` and `/_/kay`; everything else is `/_/pql/<sentence>`.
 
 ## Routing Model
 
@@ -20,8 +20,10 @@ Inside surface 2, what used to be separate "Dashboard" and "My Content" pages ar
 |--------|-------------|
 | Hover avatar | Avatar dropdown opens |
 | Click avatar | `/_/` (the default gateway view) |
+| Avatar menu → Follow a site | Opens the follow panel (enter an address to follow); no navigation |
 | Avatar menu → Copy follow link | Copies your follow link; no navigation |
-| Avatar menu → Settings | `/_/settings` (the only non-stream static route) |
+| Avatar menu → Kay | `/_/kay`, the Kay page (the entry is hidden on polis.pub) |
+| Avatar menu → Settings | `/_/settings` |
 | Click an icon button | Stream-screen with that icon's PQL preset (gateway, paragraph, comment, people, envelope) |
 | Click edit icon | Opens the inline editor |
 | Compose in sentence-filter | `/_/pql/<sentence>` |
@@ -108,5 +110,8 @@ Profiles in your network. Sortable by name or by activity.
 ### Messages view (`envelope` icon)
 `all messages from my mutuals by date` — your DM conversations. DMs are between mutuals, so the scope is locked to `my mutuals`.
 
+### Kay (`/_/kay`)
+One of two non-stream static routes. Accessed via the avatar dropdown (and the mobile menu), beside Settings. Only on the owner's own instance at a public address: on polis.pub the entries are hidden and the Kay API answers 404, because v0 reaches the site through its `/mcp`, which polis.pub does not route. The owner connects a v0 key once, then asks for changes to the site in plain words; v0 acts on the site through the site's own `/mcp`, under a key scoped to its rendered output, and the page shows each step v0 took and what it did on the site.
+
 ### Settings (`/_/settings`)
-The only non-stream static route. Accessed via the avatar dropdown.
+The other non-stream static route. Accessed via the avatar dropdown.

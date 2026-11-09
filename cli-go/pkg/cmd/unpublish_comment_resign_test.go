@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,7 +31,7 @@ func TestRunUnpublish_CommentDraftCanBeSignedAgain(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "comments", "drafts", "comment-a.md")); err != nil {
 		t.Fatalf("expected the draft: %v", err)
 	}
-	draft, err := comment.LoadDraft(dir, "comment-a")
+	draft, err := comment.LoadDraft(storage.At(dir), "comment-a")
 	if err != nil {
 		t.Fatalf("LoadDraft: %v", err)
 	}
@@ -45,7 +46,7 @@ func TestRunUnpublish_CommentDraftCanBeSignedAgain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := comment.SignComment(dir, draft, "test.example.com", "https://example.com", priv); err != nil {
+	if _, err := comment.SignComment(storage.At(dir), draft, "test.example.com", "https://example.com", priv); err != nil {
 		t.Fatalf("comment sign after unpublish: %v", err)
 	}
 }

@@ -3,6 +3,8 @@ package bundle
 import (
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,10 +80,10 @@ func TestRegistryRoundTrip(t *testing.T) {
 	siteDir := t.TempDir()
 	reg := DefaultRegistry()
 	reg.ActiveTheme = "pub.polis.themes.vice"
-	if err := SaveRegistry(siteDir, reg); err != nil {
+	if err := SaveRegistry(storage.At(siteDir), reg); err != nil {
 		t.Fatalf("SaveRegistry: %v", err)
 	}
-	loaded, err := LoadRegistry(siteDir)
+	loaded, err := LoadRegistry(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
@@ -99,19 +101,19 @@ func TestRegistryRoundTrip(t *testing.T) {
 func TestRegistryAtomicWrite(t *testing.T) {
 	siteDir := t.TempDir()
 	reg := DefaultRegistry()
-	if err := SaveRegistry(siteDir, reg); err != nil {
+	if err := SaveRegistry(storage.At(siteDir), reg); err != nil {
 		t.Fatalf("SaveRegistry: %v", err)
 	}
 	// No .tmp file should remain after a successful save.
-	tmp := RegistryPath(siteDir) + ".tmp"
-	if _, err := os.Stat(tmp); !os.IsNotExist(err) {
+	tmp := storage.At(siteDir).Path(RegistryKey) + ".tmp"
+	if _, err := os.Stat(tmp); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected no .tmp file, got: %v", err)
 	}
 }
 
 func TestLoadRegistryMissing(t *testing.T) {
 	siteDir := t.TempDir()
-	_, err := LoadRegistry(siteDir)
+	_, err := LoadRegistry(storage.At(siteDir))
 	if err == nil {
 		t.Fatal("expected error when registry.json is missing")
 	}
@@ -129,7 +131,7 @@ func TestLoadRegistryMissing(t *testing.T) {
 
 func TestLoadRegistryOrInit_MissingFile(t *testing.T) {
 	siteDir := t.TempDir()
-	reg, err := LoadRegistryOrInit(siteDir)
+	reg, err := LoadRegistryOrInit(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("missing file should not error: %v", err)
 	}
@@ -150,7 +152,7 @@ func TestLoadRegistryOrInit_MalformedJSON(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(regDir, "registry.json"), []byte(`{"active_theme":"pub.polis.themes.sols",}`), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	_, err := LoadRegistryOrInit(siteDir)
+	_, err := LoadRegistryOrInit(storage.At(siteDir))
 	if err == nil {
 		t.Fatal("malformed JSON must propagate as error, not silently fall back to DefaultRegistry")
 	}
@@ -183,7 +185,7 @@ func TestLoadRegistryOrInit_PermissionDenied(t *testing.T) {
 	}
 	defer os.Chmod(regPath, 0644) // best-effort cleanup so t.TempDir teardown can rm
 
-	_, err := LoadRegistryOrInit(siteDir)
+	_, err := LoadRegistryOrInit(storage.At(siteDir))
 	if err == nil {
 		t.Fatal("permission-denied read must propagate, not silently fall back")
 	}
@@ -220,10 +222,10 @@ func readWellKnown(t *testing.T, siteDir string) map[string]interface{} {
 
 func TestAdoptLegacyActiveTheme_CreatesTheRegistry(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := AdoptLegacyActiveTheme(siteDir, "vice"); err != nil {
+	if err := AdoptLegacyActiveTheme(storage.At(siteDir), "vice"); err != nil {
 		t.Fatalf("Adopt: %v", err)
 	}
-	reg, err := LoadRegistry(siteDir)
+	reg, err := LoadRegistry(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
@@ -233,7 +235,7 @@ func TestAdoptLegacyActiveTheme_CreatesTheRegistry(t *testing.T) {
 	if reg.ActiveShape != "pub.polis.shapes.v4" {
 		t.Errorf("ActiveShape = %q, want pub.polis.shapes.v4 (post-cutover default)", reg.ActiveShape)
 	}
-	if _, err := os.Stat(filepath.Join(siteDir, ".well-known", "polis")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(siteDir, ".well-known", "polis")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("the registry half must never write .well-known/polis")
 	}
 }
@@ -241,11 +243,11 @@ func TestAdoptLegacyActiveTheme_CreatesTheRegistry(t *testing.T) {
 func TestAdoptLegacyActiveTheme_Idempotent(t *testing.T) {
 	siteDir := t.TempDir()
 	for i := 0; i < 2; i++ {
-		if err := AdoptLegacyActiveTheme(siteDir, "vice"); err != nil {
+		if err := AdoptLegacyActiveTheme(storage.At(siteDir), "vice"); err != nil {
 			t.Fatalf("adopt #%d: %v", i+1, err)
 		}
 	}
-	reg, _ := LoadRegistry(siteDir)
+	reg, _ := LoadRegistry(storage.At(siteDir))
 	if reg.ActiveTheme != "pub.polis.themes.vice" {
 		t.Errorf("ActiveTheme changed on second adoption: %q", reg.ActiveTheme)
 	}
@@ -253,10 +255,10 @@ func TestAdoptLegacyActiveTheme_Idempotent(t *testing.T) {
 
 func TestAdoptLegacyActiveTheme_NothingToAdopt(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := AdoptLegacyActiveTheme(siteDir, ""); err != nil {
+	if err := AdoptLegacyActiveTheme(storage.At(siteDir), ""); err != nil {
 		t.Fatalf("adopt: %v", err)
 	}
-	if _, err := LoadRegistry(siteDir); err == nil {
+	if _, err := LoadRegistry(storage.At(siteDir)); err == nil {
 		t.Error("expected no registry created when there's nothing to adopt")
 	}
 }
@@ -265,13 +267,13 @@ func TestAdoptLegacyActiveTheme_PreservesExistingRegistryTheme(t *testing.T) {
 	siteDir := t.TempDir()
 	preExisting := DefaultRegistry()
 	preExisting.ActiveTheme = "pub.polis.themes.especial-light"
-	if err := SaveRegistry(siteDir, preExisting); err != nil {
+	if err := SaveRegistry(storage.At(siteDir), preExisting); err != nil {
 		t.Fatalf("seed registry: %v", err)
 	}
-	if err := AdoptLegacyActiveTheme(siteDir, "vice"); err != nil {
+	if err := AdoptLegacyActiveTheme(storage.At(siteDir), "vice"); err != nil {
 		t.Fatalf("adopt: %v", err)
 	}
-	reg, _ := LoadRegistry(siteDir)
+	reg, _ := LoadRegistry(storage.At(siteDir))
 	if reg.ActiveTheme != "pub.polis.themes.especial-light" {
 		t.Errorf("registry's active_theme overwritten: %q", reg.ActiveTheme)
 	}
@@ -283,10 +285,10 @@ func TestGetActiveThemeName_PrefersRegistry(t *testing.T) {
 	siteDir := t.TempDir()
 	reg := DefaultRegistry()
 	reg.ActiveTheme = "pub.polis.themes.vice"
-	SaveRegistry(siteDir, reg)
+	SaveRegistry(storage.At(siteDir), reg)
 	writeWellKnown(t, siteDir, map[string]interface{}{"active_theme": "especial-light"})
 
-	got, err := GetActiveThemeName(siteDir)
+	got, err := GetActiveThemeName(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("GetActiveThemeName: %v", err)
 	}
@@ -299,7 +301,7 @@ func TestGetActiveThemeName_LegacyFallback(t *testing.T) {
 	siteDir := t.TempDir()
 	writeWellKnown(t, siteDir, map[string]interface{}{"active_theme": "especial-light"})
 
-	got, err := GetActiveThemeName(siteDir)
+	got, err := GetActiveThemeName(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("GetActiveThemeName: %v", err)
 	}
@@ -310,7 +312,7 @@ func TestGetActiveThemeName_LegacyFallback(t *testing.T) {
 
 func TestGetActiveThemeName_EmptyWhenNeither(t *testing.T) {
 	siteDir := t.TempDir()
-	got, err := GetActiveThemeName(siteDir)
+	got, err := GetActiveThemeName(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("GetActiveThemeName: %v", err)
 	}
@@ -321,10 +323,10 @@ func TestGetActiveThemeName_EmptyWhenNeither(t *testing.T) {
 
 func TestSetActiveThemeName_WritesRegistry(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := SetActiveThemeName(siteDir, "vice"); err != nil {
+	if err := SetActiveThemeName(storage.At(siteDir), "vice"); err != nil {
 		t.Fatalf("SetActiveThemeName: %v", err)
 	}
-	reg, err := LoadRegistry(siteDir)
+	reg, err := LoadRegistry(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
@@ -335,7 +337,7 @@ func TestSetActiveThemeName_WritesRegistry(t *testing.T) {
 
 func TestGetActiveShapeName_DefaultsToStream(t *testing.T) {
 	siteDir := t.TempDir()
-	got, err := GetActiveShapeName(siteDir)
+	got, err := GetActiveShapeName(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("GetActiveShapeName: %v", err)
 	}
@@ -348,8 +350,8 @@ func TestGetActiveShapeName_FromRegistry(t *testing.T) {
 	siteDir := t.TempDir()
 	reg := DefaultRegistry()
 	reg.ActiveShape = "pub.polis.shapes.v4"
-	SaveRegistry(siteDir, reg)
-	got, _ := GetActiveShapeName(siteDir)
+	SaveRegistry(storage.At(siteDir), reg)
+	got, _ := GetActiveShapeName(storage.At(siteDir))
 	if got != "v4" {
 		t.Errorf("got %q, want v4", got)
 	}
@@ -361,7 +363,7 @@ func TestGetActiveShapeName_FromRegistry(t *testing.T) {
 
 func TestLoadRegistryRaw_NotExist(t *testing.T) {
 	siteDir := t.TempDir()
-	raw, err := LoadRegistryRaw(siteDir)
+	raw, err := LoadRegistryRaw(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("unexpected error for missing file: %v", err)
 	}
@@ -374,10 +376,10 @@ func TestLoadRegistryRaw_ValidJSON(t *testing.T) {
 	siteDir := t.TempDir()
 	reg := DefaultRegistry()
 	reg.ActiveTheme = "pub.polis.themes.vice"
-	if err := SaveRegistry(siteDir, reg); err != nil {
+	if err := SaveRegistry(storage.At(siteDir), reg); err != nil {
 		t.Fatalf("SaveRegistry: %v", err)
 	}
-	raw, err := LoadRegistryRaw(siteDir)
+	raw, err := LoadRegistryRaw(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -391,10 +393,10 @@ func TestLoadRegistryRaw_ValidJSON(t *testing.T) {
 
 func TestLoadRegistryRaw_MalformedJSON(t *testing.T) {
 	siteDir := t.TempDir()
-	os.MkdirAll(filepath.Dir(RegistryPath(siteDir)), 0700)
-	os.WriteFile(RegistryPath(siteDir), []byte("not valid{"), 0600)
+	os.MkdirAll(filepath.Dir(storage.At(siteDir).Path(RegistryKey)), 0700)
+	os.WriteFile(storage.At(siteDir).Path(RegistryKey), []byte("not valid{"), 0600)
 
-	raw, err := LoadRegistryRaw(siteDir)
+	raw, err := LoadRegistryRaw(storage.At(siteDir))
 	if err == nil {
 		t.Fatal("expected error for malformed JSON, got nil")
 	}
@@ -409,10 +411,10 @@ func TestLoadRegistryRaw_MalformedJSON(t *testing.T) {
 
 func TestSetActiveShapeName_WritesRegistry(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := SetActiveShapeName(siteDir, "v3"); err != nil {
+	if err := SetActiveShapeName(storage.At(siteDir), "v3"); err != nil {
 		t.Fatalf("SetActiveShapeName: %v", err)
 	}
-	reg, err := LoadRegistry(siteDir)
+	reg, err := LoadRegistry(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
@@ -425,13 +427,13 @@ func TestSetActiveShapeName_PreservesOtherFields(t *testing.T) {
 	siteDir := t.TempDir()
 	reg := DefaultRegistry()
 	reg.ActiveTheme = "pub.polis.themes.vice"
-	if err := SaveRegistry(siteDir, reg); err != nil {
+	if err := SaveRegistry(storage.At(siteDir), reg); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if err := SetActiveShapeName(siteDir, "v4"); err != nil {
+	if err := SetActiveShapeName(storage.At(siteDir), "v4"); err != nil {
 		t.Fatalf("SetActiveShapeName: %v", err)
 	}
-	loaded, _ := LoadRegistry(siteDir)
+	loaded, _ := LoadRegistry(storage.At(siteDir))
 	if loaded.ActiveTheme != "pub.polis.themes.vice" {
 		t.Errorf("ActiveTheme changed: %q", loaded.ActiveTheme)
 	}
@@ -442,7 +444,7 @@ func TestSetActiveShapeName_PreservesOtherFields(t *testing.T) {
 
 func TestSetActiveShapeName_RejectsEmpty(t *testing.T) {
 	siteDir := t.TempDir()
-	if err := SetActiveShapeName(siteDir, ""); err == nil {
+	if err := SetActiveShapeName(storage.At(siteDir), ""); err == nil {
 		t.Error("expected error for empty shape name")
 	}
 }

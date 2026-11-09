@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,7 +101,7 @@ func createTestPost(t *testing.T, dir, dateDir, slug, title string) string {
 	}
 
 	// Add entry to public.jsonl
-	if err := metadata.AppendPostToIndex(dir, relPath, title, "2026-02-01T00:00:00Z", "sha256:abc123"); err != nil {
+	if err := metadata.AppendPostToIndex(storage.At(dir), relPath, title, "2026-02-01T00:00:00Z", "sha256:abc123"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -143,19 +146,19 @@ func TestRunUnpublish_PostSuccess(t *testing.T) {
 	}
 
 	// Assert original .md file is deleted
-	if _, err := os.Stat(filepath.Join(dir, postPath)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, postPath)); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected .md file to be deleted after unpublish")
 	}
 
 	// Assert .html file is deleted
 	htmlPath := strings.TrimSuffix(filepath.Join(dir, postPath), ".md") + ".html"
-	if _, err := os.Stat(htmlPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(htmlPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected .html file to be deleted after unpublish")
 	}
 
 	// Assert .versions file is deleted
 	versionsFile := filepath.Join(dir, "content", "pub.polis.core", "post", "20260201", ".versions", "my-post.md")
-	if _, err := os.Stat(versionsFile); !os.IsNotExist(err) {
+	if _, err := os.Stat(versionsFile); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected .versions file to be deleted after unpublish")
 	}
 
@@ -194,7 +197,7 @@ func TestRunUnpublish_PostSuccess(t *testing.T) {
 	}
 
 	// Assert public.jsonl entry is removed
-	entries, err := metadata.LoadPublicIndex(dir)
+	entries, err := metadata.LoadPublicIndex(storage.At(dir))
 	if err != nil {
 		t.Fatalf("failed to load public index: %v", err)
 	}
@@ -224,7 +227,7 @@ func TestRunUnpublish_CommentSuccess(t *testing.T) {
 	}
 
 	// Assert original file is deleted
-	if _, err := os.Stat(filepath.Join(dir, commentPath)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, commentPath)); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected comment .md file to be deleted after unpublish")
 	}
 
@@ -321,7 +324,7 @@ func TestRunUnpublish_PreservesOtherPosts(t *testing.T) {
 	postA := createTestPost(t, dir, "20260201", "post-a", "Post A")
 	postB := createTestPost(t, dir, "20260201", "post-b", "Post B")
 
-	entries, err := metadata.LoadPublicIndex(dir)
+	entries, err := metadata.LoadPublicIndex(storage.At(dir))
 	if err != nil {
 		t.Fatalf("failed to load public index: %v", err)
 	}
@@ -335,7 +338,7 @@ func TestRunUnpublish_PreservesOtherPosts(t *testing.T) {
 	}
 
 	// Post A files should be deleted, draft should exist
-	if _, err := os.Stat(filepath.Join(dir, postA)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, postA)); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected post-a .md file to be deleted")
 	}
 	draftA := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", "post-a.md")
@@ -353,7 +356,7 @@ func TestRunUnpublish_PreservesOtherPosts(t *testing.T) {
 	}
 
 	// Only post B should remain in public.jsonl
-	entries, err = metadata.LoadPublicIndex(dir)
+	entries, err = metadata.LoadPublicIndex(storage.At(dir))
 	if err != nil {
 		t.Fatalf("failed to load public index after unpublish: %v", err)
 	}

@@ -6,13 +6,18 @@
 package snippet
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"os"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // SnippetInfo represents metadata about a single snippet file or directory.
@@ -69,8 +74,8 @@ func validatePath(path string) error {
 //
 // Keep this distinct from the canonical accessors so a reader scanning
 // snippet code sees the "always returns a usable name" semantic explicitly.
-func activeThemeOrDefault(dataDir string) (string, error) {
-	name, err := bundle.GetActiveThemeName(dataDir)
+func activeThemeOrDefault(site storage.Site) (string, error) {
+	name, err := bundle.GetActiveThemeName(site)
 	if err != nil || name == "" {
 		return "zane", nil
 	}
@@ -87,31 +92,33 @@ func activeThemeOrDefault(dataDir string) (string, error) {
 //   - "all" or "": return both global and theme snippets (merged)
 //   - "global": return only global snippets
 //   - "theme": return only theme snippets
-func ListSnippets(dataDir, cliThemesDir, activeTheme, relativePath, filter string) (*SnippetTree, error) {
+func ListSnippets(site storage.Site, cliThemesDir, activeTheme, relativePath, filter string) (*SnippetTree, error) {
 	if err := validatePath(relativePath); err != nil {
 		return nil, err
+	}
+	if !site.Valid() {
+		return nil, fmt.Errorf("list snippets: site handle is not usable")
 	}
 
 	// If activeTheme is empty, try to get it from manifest
 	if activeTheme == "" {
 		var err error
-		activeTheme, err = activeThemeOrDefault(dataDir)
+		activeTheme, err = activeThemeOrDefault(site)
 		if err != nil {
 			activeTheme = "zane"
 		}
 	}
 
-	globalBase := filepath.Join(dataDir, "site", "snippets")
+	globalBase := siteRoot(site, globalSnippetsKey)
 
 	// Theme snippets: prefer local site/themes/, fall back to CLI themes
-	themeBase := filepath.Join(dataDir, "site", "themes", activeTheme, "snippets")
-	if _, err := os.Stat(themeBase); os.IsNotExist(err) && cliThemesDir != "" {
+	themeBase := siteRoot(site, localThemeKey(activeTheme))
+	// Only a GENUINE absence falls back: a theme directory that is there but
+	// cannot be read is not replaced by the CLI's copy.
+	if present, existsErr := themeBase.present(); existsErr == nil && !present && cliThemesDir != "" {
 		// Fall back to CLI themes directory
-		themeBase = filepath.Join(cliThemesDir, activeTheme, "snippets")
+		themeBase = cliRoot(cliThemesDir, activeTheme)
 	}
-
-	globalPath := filepath.Join(globalBase, relativePath)
-	themePath := filepath.Join(themeBase, relativePath)
 
 	// Maps to track entries: key is the entry name
 	entries := make(map[string]SnippetInfo)
@@ -123,22 +130,25 @@ func ListSnippets(dataDir, cliThemesDir, activeTheme, relativePath, filter strin
 
 	// First, read theme snippets (will be overridden by global if scanning both)
 	if scanTheme {
-		if themeDir, err := os.ReadDir(themePath); err == nil {
+		if themeDir := themeBase.list(relativePath); len(themeDir) > 0 {
 			for _, entry := range themeDir {
-				name := entry.Name()
+				name := pathpkg.Base(entry.Key)
 				// Skip hidden files
 				if strings.HasPrefix(name, ".") {
 					continue
 				}
 
-				info, err := entry.Info()
+				// ⚠️ Depends on ModTimes: a snippet's size and mtime are both
+				// reported to the caller, so a backend without mtimes lists
+				// snippets with an empty date rather than failing.
+				info, err := themeBase.store.Stat(context.Background(), entry.Key)
 				if err != nil {
 					continue
 				}
 
 				ext := filepath.Ext(name)
 				// Only include .html and .md files, or directories
-				if !entry.IsDir() && ext != ".html" && ext != ".md" {
+				if !entry.IsDir && ext != ".html" && ext != ".md" {
 					continue
 				}
 
@@ -153,11 +163,11 @@ func ListSnippets(dataDir, cliThemesDir, activeTheme, relativePath, filter strin
 					Path:        entryPath,
 					Name:        name,
 					Type:        "theme",
-					IsDir:       entry.IsDir(),
+					IsDir:       entry.IsDir,
 					Extension:   ext,
 					HasOverride: false,
-					Size:        info.Size(),
-					ModTime:     info.ModTime().Format("2006-01-02T15:04:05Z"),
+					Size:        info.Size,
+					ModTime:     info.ModTime.Format("2006-01-02T15:04:05Z"),
 				}
 				themeEntries[name] = true
 			}
@@ -166,22 +176,25 @@ func ListSnippets(dataDir, cliThemesDir, activeTheme, relativePath, filter strin
 
 	// Then, read global snippets (override theme entries if scanning both)
 	if scanGlobal {
-		if globalDir, err := os.ReadDir(globalPath); err == nil {
+		if globalDir := globalBase.list(relativePath); len(globalDir) > 0 {
 			for _, entry := range globalDir {
-				name := entry.Name()
+				name := pathpkg.Base(entry.Key)
 				// Skip hidden files
 				if strings.HasPrefix(name, ".") {
 					continue
 				}
 
-				info, err := entry.Info()
+				// ⚠️ Depends on ModTimes: a snippet's size and mtime are both
+				// reported to the caller, so a backend without mtimes lists
+				// snippets with an empty date rather than failing.
+				info, err := globalBase.store.Stat(context.Background(), entry.Key)
 				if err != nil {
 					continue
 				}
 
 				ext := filepath.Ext(name)
 				// Only include .html and .md files, or directories
-				if !entry.IsDir() && ext != ".html" && ext != ".md" {
+				if !entry.IsDir && ext != ".html" && ext != ".md" {
 					continue
 				}
 
@@ -198,11 +211,11 @@ func ListSnippets(dataDir, cliThemesDir, activeTheme, relativePath, filter strin
 					Path:        entryPath,
 					Name:        name,
 					Type:        "global",
-					IsDir:       entry.IsDir(),
+					IsDir:       entry.IsDir,
 					Extension:   ext,
 					HasOverride: hasOverride,
-					Size:        info.Size(),
-					ModTime:     info.ModTime().Format("2006-01-02T15:04:05Z"),
+					Size:        info.Size,
+					ModTime:     info.ModTime.Format("2006-01-02T15:04:05Z"),
 				}
 			}
 		}
@@ -239,36 +252,28 @@ func ListSnippets(dataDir, cliThemesDir, activeTheme, relativePath, filter strin
 	}, nil
 }
 
-// resolveSnippetFile tries to find the snippet file, handling extension fallback.
+// resolveSnippetFile tries to find the snippet file, handling extension
+// fallback, and returns its key in r, or "" when there is none.
 // Per TEMPLATING.md, resolution order is: .md -> .html -> exact
-func resolveSnippetFile(baseDir, snippetPath string) string {
+func resolveSnippetFile(r snippetRoot, snippetPath string) string {
+	present := func(rel string) bool {
+		ok, _ := r.store.Exists(context.Background(), r.key(rel))
+		return ok
+	}
 	// If path already has extension, try exact match only
 	ext := filepath.Ext(snippetPath)
 	if ext == ".html" || ext == ".md" {
-		fullPath := filepath.Join(baseDir, snippetPath)
-		if _, err := os.Stat(fullPath); err == nil {
-			return fullPath
+		if present(snippetPath) {
+			return r.key(snippetPath)
 		}
 		return ""
 	}
 
 	// Per TEMPLATING.md: .md -> .html -> exact
-	// Try with .md extension first
-	fullPath := filepath.Join(baseDir, snippetPath+".md")
-	if _, err := os.Stat(fullPath); err == nil {
-		return fullPath
-	}
-
-	// Try with .html extension
-	fullPath = filepath.Join(baseDir, snippetPath+".html")
-	if _, err := os.Stat(fullPath); err == nil {
-		return fullPath
-	}
-
-	// Try exact path
-	fullPath = filepath.Join(baseDir, snippetPath)
-	if _, err := os.Stat(fullPath); err == nil {
-		return fullPath
+	for _, candidate := range []string{snippetPath + ".md", snippetPath + ".html", snippetPath} {
+		if present(candidate) {
+			return r.key(candidate)
+		}
 	}
 
 	return ""
@@ -279,48 +284,58 @@ func resolveSnippetFile(baseDir, snippetPath string) string {
 // Theme snippets are located at:
 //  1. data/site/themes/{active_theme}/snippets/ (local copy)
 //  2. cli/themes/{active_theme}/snippets/ (fallback to CLI themes)
-func ReadSnippet(dataDir, cliThemesDir, activeTheme, snippetPath, source string) (*SnippetContent, error) {
+func ReadSnippet(site storage.Site, cliThemesDir, activeTheme, snippetPath, source string) (*SnippetContent, error) {
 	if err := validatePath(snippetPath); err != nil {
 		return nil, err
+	}
+	if !site.Valid() {
+		return nil, fmt.Errorf("read snippet: site handle is not usable")
 	}
 
 	// If activeTheme is empty, try to get it from manifest
 	if activeTheme == "" {
 		var err error
-		activeTheme, err = activeThemeOrDefault(dataDir)
+		activeTheme, err = activeThemeOrDefault(site)
 		if err != nil {
 			activeTheme = "zane"
 		}
 	}
 
-	var fullPath string
+	var from snippetRoot
+	var key string
 	switch source {
 	case "global":
-		fullPath = resolveSnippetFile(filepath.Join(dataDir, "site", "snippets"), snippetPath)
+		from = siteRoot(site, globalSnippetsKey)
+		key = resolveSnippetFile(from, snippetPath)
 	case "theme":
 		// Theme snippets: prefer local site/themes/, fall back to CLI themes
-		fullPath = resolveSnippetFile(filepath.Join(dataDir, "site", "themes", activeTheme, "snippets"), snippetPath)
-		if fullPath == "" && cliThemesDir != "" {
+		from = siteRoot(site, localThemeKey(activeTheme))
+		key = resolveSnippetFile(from, snippetPath)
+		if key == "" && cliThemesDir != "" {
 			// Fall back to CLI themes directory
-			fullPath = resolveSnippetFile(filepath.Join(cliThemesDir, activeTheme, "snippets"), snippetPath)
+			from = cliRoot(cliThemesDir, activeTheme)
+			key = resolveSnippetFile(from, snippetPath)
 		}
 	default:
 		return nil, fmt.Errorf("invalid source: must be 'global' or 'theme'")
 	}
 
-	if fullPath == "" {
+	if key == "" {
 		return nil, fmt.Errorf("snippet not found: %s", snippetPath)
 	}
 
-	data, err := os.ReadFile(fullPath)
+	ctx := context.Background()
+	data, err := from.store.Get(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read snippet: %w", err)
 	}
 
-	info, err := os.Stat(fullPath)
+	// ⚠️ Depends on ModTimes: this is the displayed modification date, and it
+	// is already tolerant of a missing one — it stays empty.
+	info, err := from.store.Stat(ctx, key)
 	modTime := ""
 	if err == nil {
-		modTime = info.ModTime().Format("2006-01-02T15:04:05Z")
+		modTime = info.ModTime.Format("2006-01-02T15:04:05Z")
 	}
 
 	return &SnippetContent{
@@ -338,79 +353,68 @@ func ReadSnippet(dataDir, cliThemesDir, activeTheme, snippetPath, source string)
 //
 // When writing, if the snippetPath doesn't have an extension and no existing
 // file is found, defaults to .html extension.
-func WriteSnippet(dataDir, cliThemesDir, activeTheme, snippetPath, content, source string) error {
+func WriteSnippet(site storage.Site, cliThemesDir, activeTheme, snippetPath, content, source string) error {
 	if err := validatePath(snippetPath); err != nil {
 		return err
+	}
+	if !site.Valid() {
+		return fmt.Errorf("write snippet: site handle is not usable")
 	}
 
 	// If activeTheme is empty, try to get it from manifest
 	if activeTheme == "" {
 		var err error
-		activeTheme, err = activeThemeOrDefault(dataDir)
+		activeTheme, err = activeThemeOrDefault(site)
 		if err != nil {
 			activeTheme = "zane"
 		}
 	}
 
-	var fullPath string
+	var to snippetRoot
+	var key string
 	switch source {
 	case "global":
 		// Try to resolve existing file first
-		baseDir := filepath.Join(dataDir, "site", "snippets")
-		resolved := resolveSnippetFile(baseDir, snippetPath)
-		if resolved != "" {
-			fullPath = resolved
-		} else {
+		to = siteRoot(site, globalSnippetsKey)
+		if key = resolveSnippetFile(to, snippetPath); key == "" {
 			// New file: default to .html if no extension
 			ext := filepath.Ext(snippetPath)
 			if ext != ".html" && ext != ".md" {
 				snippetPath = snippetPath + ".html"
 			}
-			fullPath = filepath.Join(baseDir, snippetPath)
+			key = to.key(snippetPath)
 		}
 	case "theme":
 		// Theme snippets: prefer local site/themes/, fall back to CLI themes
-		localThemeBase := filepath.Join(dataDir, "site", "themes", activeTheme, "snippets")
-		cliThemeBase := filepath.Join(cliThemesDir, activeTheme, "snippets")
+		to = siteRoot(site, localThemeKey(activeTheme))
 
 		// Try to resolve existing file
-		resolved := resolveSnippetFile(localThemeBase, snippetPath)
-		if resolved != "" {
-			fullPath = resolved
-		} else if cliThemesDir != "" {
-			resolved = resolveSnippetFile(cliThemeBase, snippetPath)
-			if resolved != "" {
-				fullPath = resolved
+		key = resolveSnippetFile(to, snippetPath)
+		if key == "" && cliThemesDir != "" {
+			cli := cliRoot(cliThemesDir, activeTheme)
+			if key = resolveSnippetFile(cli, snippetPath); key != "" {
+				to = cli
 			}
 		}
 
 		// If no existing file found, default to local theme path with .html
-		if fullPath == "" {
+		if key == "" {
 			ext := filepath.Ext(snippetPath)
 			if ext != ".html" && ext != ".md" {
 				snippetPath = snippetPath + ".html"
 			}
-			fullPath = filepath.Join(localThemeBase, snippetPath)
+			key = to.key(snippetPath)
 		}
 	default:
 		return fmt.Errorf("invalid source: must be 'global' or 'theme'")
 	}
 
-	// Ensure parent directory exists
-	dir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	// Write atomically via temp file
-	tmpPath := fullPath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(content), 0644); err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, fullPath); err != nil {
-		os.Remove(tmpPath) // Clean up temp file on failure
-		return fmt.Errorf("failed to rename temp file: %w", err)
+	// ⭐ An atomic write, through whichever root the snippet resolved to:
+	// temp-and-rename on a filesystem, a single Put where there is none. A
+	// crash mid-write leaves the old snippet intact, as it always did, and
+	// atomicfile creates the parent at the store's 0755.
+	if err := atomicfile.Write(context.Background(), to.site, key, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to write snippet: %w", err)
 	}
 
 	return nil
@@ -418,9 +422,12 @@ func WriteSnippet(dataDir, cliThemesDir, activeTheme, snippetPath, content, sour
 
 // CreateSnippet creates a new snippet in the global snippets directory only.
 // Theme snippet creation is not supported - users should edit themes directly.
-func CreateSnippet(dataDir, snippetPath, content string) error {
+func CreateSnippet(site storage.Site, snippetPath, content string) error {
 	if err := validatePath(snippetPath); err != nil {
 		return err
+	}
+	if !site.Valid() {
+		return fmt.Errorf("create snippet: site handle is not usable")
 	}
 
 	// Validate extension
@@ -429,21 +436,16 @@ func CreateSnippet(dataDir, snippetPath, content string) error {
 		return fmt.Errorf("snippet must have .html or .md extension")
 	}
 
-	fullPath := filepath.Join(dataDir, "site", "snippets", snippetPath)
+	ctx := context.Background()
+	key := siteRoot(site, globalSnippetsKey).key(snippetPath)
 
 	// Check if snippet already exists
-	if _, err := os.Stat(fullPath); err == nil {
+	if present, _ := site.Store().Exists(ctx, key); present {
 		return fmt.Errorf("snippet already exists: %s", snippetPath)
 	}
 
-	// Ensure parent directory exists
-	dir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	// Write the file
-	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+	// Parent prefixes are implicit in the store.
+	if err := site.Store().Put(ctx, key, []byte(content)); err != nil {
 		return fmt.Errorf("failed to create snippet: %w", err)
 	}
 
@@ -452,30 +454,104 @@ func CreateSnippet(dataDir, snippetPath, content string) error {
 
 // DeleteSnippet removes a snippet from the global snippets directory only.
 // Theme snippet deletion is not supported.
-func DeleteSnippet(dataDir, snippetPath string) error {
+func DeleteSnippet(site storage.Site, snippetPath string) error {
 	if err := validatePath(snippetPath); err != nil {
 		return err
 	}
+	if !site.Valid() {
+		return fmt.Errorf("delete snippet: site handle is not usable")
+	}
 
-	fullPath := filepath.Join(dataDir, "site", "snippets", snippetPath)
+	ctx := context.Background()
+	key := siteRoot(site, globalSnippetsKey).key(snippetPath)
 
 	// Check if it exists
-	info, err := os.Stat(fullPath)
+	info, err := site.Store().Stat(ctx, key)
 	if err != nil {
-		if os.IsNotExist(err) {
+		// ⚠️ storage.ErrNotFound, NOT os.IsNotExist: the store wraps the
+		// filesystem error, and os.IsNotExist does not unwrap. Matching the old
+		// way compiles and silently reports "failed to stat" for a snippet that
+		// is merely absent, which a test caught.
+		if errors.Is(err, storage.ErrNotFound) {
 			return fmt.Errorf("snippet not found: %s", snippetPath)
 		}
 		return fmt.Errorf("failed to stat snippet: %w", err)
 	}
 
 	// Don't allow deleting directories via this function
-	if info.IsDir() {
+	if info.IsDir {
 		return fmt.Errorf("cannot delete directory: %s", snippetPath)
 	}
 
-	if err := os.Remove(fullPath); err != nil {
+	if err := site.Store().Delete(ctx, key); err != nil {
 		return fmt.Errorf("failed to delete snippet: %w", err)
 	}
 
 	return nil
+}
+
+// The site's snippet locations, as keys.
+const globalSnippetsKey = "site/snippets"
+
+func localThemeKey(theme string) string { return "site/themes/" + theme + "/snippets" }
+
+// snippetRoot is one place snippets live: a key prefix in a store.
+//
+// ⭐ This is what makes the two-root resolution above work without a special
+// case. The site's own snippets and its local theme are prefixes in the
+// site's store; the CLI themes directory is not a site, so it is a POSIX store
+// rooted there, with no prefix, and stays a path. Whichever root resolution
+// chose is the one every read, stat and write goes through.
+type snippetRoot struct {
+	site   storage.Site // the handle atomicfile writes through
+	store  storage.Store
+	prefix string
+}
+
+func siteRoot(site storage.Site, prefix string) snippetRoot {
+	return snippetRoot{site: site, store: site.Store(), prefix: prefix}
+}
+
+func cliRoot(cliThemesDir, theme string) snippetRoot {
+	dir := filepath.Join(cliThemesDir, theme, "snippets")
+	st := storage.NewPOSIX(dir)
+	return snippetRoot{site: storage.On(dir, st), store: st}
+}
+
+// key joins a validated snippet path onto the root's prefix.
+func (r snippetRoot) key(rel string) string {
+	rel = filepath.ToSlash(rel)
+	if r.prefix == "" {
+		return pathpkg.Clean(rel)
+	}
+	return pathpkg.Join(r.prefix, rel)
+}
+
+// present reports whether the root exists. On a filesystem that is whether
+// its directory exists, as it always was; a store with no filesystem has no
+// directories, so there a root is present when something is stored under it.
+func (r snippetRoot) present() (bool, error) {
+	ctx := context.Background()
+	if r.store.Capabilities().RealPath {
+		return r.store.Exists(ctx, r.prefix)
+	}
+	entries, err := r.store.List(ctx, r.prefix)
+	if err != nil {
+		return false, err
+	}
+	return len(entries) > 0, nil
+}
+
+// list returns what is directly under rel in the root, or nothing when it
+// could not be read.
+func (r snippetRoot) list(rel string) []storage.Entry {
+	prefix := r.prefix
+	if rel != "" {
+		prefix = r.key(rel)
+	}
+	entries, err := r.store.List(context.Background(), prefix)
+	if err != nil {
+		return nil
+	}
+	return entries
 }

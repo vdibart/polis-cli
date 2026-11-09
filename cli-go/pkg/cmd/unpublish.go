@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -15,15 +17,64 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
+// unpublishArgs is what `polis unpublish` was given on its command line.
+type unpublishArgs struct {
+	yes   bool
+	url   string
+	typ   string
+	paths []string
+}
+
+// parseUnpublishArgs reads unpublish's flags wherever they appear, before or
+// after the path, so `polis unpublish <path> -y` skips the prompt the same as
+// `polis unpublish -y <path>`.
+func parseUnpublishArgs(args []string) (unpublishArgs, error) {
+	var a unpublishArgs
+	fs := flag.NewFlagSet("unpublish", flag.ContinueOnError)
+	fs.BoolVar(&a.yes, "y", false, "Skip confirmation prompt (same as --yes)")
+	fs.BoolVar(&a.yes, "yes", false, "Skip confirmation prompt (same as -y)")
+	fs.StringVar(&a.url, "url", "", "Unpublish this exact discovery-service URL only; local files are NOT touched. For removing a stale or duplicate (type,url) registration row.")
+	fs.StringVar(&a.typ, "type", "", "Content type for --url (pub.polis.post | pub.polis.comment); inferred from the URL when omitted")
+	paths, err := parseFlagsInterspersed(fs, args)
+	a.paths = paths
+	return a, err
+}
+
+// parseFlagsInterspersed parses fs over args, accepting flags after positional
+// arguments as well as before them. Go's flag package stops at the first
+// positional, so it is re-run on what follows each one. A "--" still ends flag
+// parsing: everything after it is positional.
+func parseFlagsInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return positional, err
+		}
+		rest := fs.Args()
+		if consumed := len(args) - len(rest); consumed > 0 && args[consumed-1] == "--" {
+			return append(positional, rest...), nil
+		}
+		if len(rest) == 0 {
+			return positional, nil
+		}
+		positional = append(positional, rest[0])
+		args = rest[1:]
+	}
+}
+
 func handleUnpublish(args []string) {
-	fs := flag.NewFlagSet("unpublish", flag.ExitOnError)
-	yes := fs.Bool("y", false, "Skip confirmation prompt")
-	urlFlag := fs.String("url", "", "Unpublish this exact discovery-service URL only; local files are NOT touched. For removing a stale or duplicate (type,url) registration row.")
-	typeFlag := fs.String("type", "", "Content type for --url (pub.polis.post | pub.polis.comment); inferred from the URL when omitted")
-	fs.Parse(args)
+	parsed, err := parseUnpublishArgs(args)
+	if err != nil {
+		// The flag package has already printed the problem and the usage.
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
+		os.Exit(2)
+	}
 
 	dir := getDataDir()
 	if !isPolisSite(dir) {
@@ -34,23 +85,28 @@ func handleUnpublish(args []string) {
 	// local file. Use for superseded/duplicate DS rows (e.g. a legacy mount-path
 	// registration left behind by a path migration) where the local content and
 	// its canonical registration must stay intact.
-	if *urlFlag != "" {
-		if err := RunUnpublishURL(dir, *urlFlag, *typeFlag, *yes); err != nil {
+	if parsed.url != "" {
+		if err := RunUnpublishURL(dir, parsed.url, parsed.typ, parsed.yes); err != nil {
 			exitError("%v", err)
 		}
 		return
 	}
 
-	if fs.NArg() < 1 {
-		exitError("Usage: polis unpublish <path>\n  Example: polis unpublish content/pub.polis.core/post/20260201/my-post.md\n  Example: polis unpublish content/pub.polis.core/comment/20260201/comment-id.md\n  Discovery-only: polis unpublish --url https://you.example/comments/20260201/x.md")
+	if len(parsed.paths) < 1 {
+		exitError("Usage: polis unpublish <path> [-y|--yes]\n  -y, --yes  skip the confirmation prompt (before or after the path)\n  Example: polis unpublish content/pub.polis.core/post/20260201/my-post.md\n  Example: polis unpublish content/pub.polis.core/comment/20260201/comment-id.md\n  Discovery-only: polis unpublish --url https://you.example/comments/20260201/x.md")
 	}
 
-	contentPath := fs.Arg(0)
+	contentPath := parsed.paths[0]
 
-	if err := RunUnpublish(dir, contentPath, *yes); err != nil {
+	if err := RunUnpublish(dir, contentPath, parsed.yes); err != nil {
 		exitError("%v", err)
 	}
 }
+
+// errUnpublishNeedsYes is the refusal of an unconfirmed unpublish under --json.
+// Unpublishing cannot be undone, and the callers most likely to pass --json —
+// scripts and agents — are the ones a skipped prompt would hurt most.
+var errUnpublishNeedsYes = errors.New("unpublish under --json requires -y (--yes): it cannot ask for confirmation, and unpublishing cannot be undone. Nothing was unpublished")
 
 // RunUnpublish unpublishes a post or comment: notifies the DS, strips frontmatter,
 // deletes version history, and saves the content as a draft.
@@ -70,13 +126,18 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 	}
 
 	// Verify file exists
+	st := storage.NewSite(dataDir)
+	ctx := context.Background()
 	fullPath := filepath.Join(dataDir, contentPath)
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+	contentKey := filepath.ToSlash(contentPath)
+	// Only a GENUINE absence is "not found"; any other failure is reported by the
+	// read below with its own cause, as it was before.
+	if present, existsErr := st.Exists(ctx, contentKey); existsErr == nil && !present {
 		return fmt.Errorf("content not found: %s", contentPath)
 	}
 
 	// Read content for frontmatter extraction
-	contentBytes, err := os.ReadFile(fullPath)
+	contentBytes, err := st.Get(ctx, contentKey)
 	if err != nil {
 		return fmt.Errorf("failed to read content file: %v", err)
 	}
@@ -95,8 +156,12 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 		dsContentType = "pub.polis.comment"
 	}
 
-	// Confirmation prompt (unless -y flag or JSON output)
-	if !skipConfirm && !jsonOutput {
+	// Confirmation prompt unless -y. --json chooses an output format, not
+	// consent: it cannot show a prompt, so it refuses rather than proceed.
+	if !skipConfirm && jsonOutput {
+		return errUnpublishNeedsYes
+	}
+	if !skipConfirm {
 		contentKind := "post"
 		if isComment {
 			contentKind = "comment"
@@ -122,9 +187,7 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 		fmt.Scanln(&response)
 		response = strings.TrimSpace(strings.ToLower(response))
 		if response != "y" && response != "yes" {
-			if !jsonOutput {
-				fmt.Println("[i] Cancelled")
-			}
+			fmt.Println("[i] Cancelled")
 			return nil
 		}
 	}
@@ -163,13 +226,12 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 
 	// Call DS to unpublish — skip if not registered
 	dsURL := os.Getenv("DISCOVERY_SERVICE_URL")
-	dsKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if dsURL == "" {
 		dsURL = "https://ds.polis.pub"
 	}
 
-	if discovery.IsRegisteredLocally(dataDir, dsURL) {
-		dsClient := discovery.NewClient(dsURL, dsKey)
+	if discovery.IsRegisteredLocally(storage.At(dataDir), dsURL) {
+		dsClient := discovery.NewClient(dsURL)
 
 		if !jsonOutput {
 			fmt.Println("[i] Unpublishing from discovery service...")
@@ -218,14 +280,14 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 		draftsDir = filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "drafts")
 	}
 
-	// Create drafts directory if it doesn't exist
-	if err := os.MkdirAll(draftsDir, 0755); err != nil {
-		return fmt.Errorf("failed to create drafts directory: %v", err)
-	}
-
-	// Write draft file
+	// No directory is created: Put makes parent prefixes implicitly, which is
+	// the whole of what the MkdirAll here used to do.
 	draftPath := filepath.Join(draftsDir, baseName)
-	if err := os.WriteFile(draftPath, []byte(draftContent), 0644); err != nil {
+	draftKey, err := storage.RelKey(dataDir, draftPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve the draft path: %v", err)
+	}
+	if err := st.Put(ctx, draftKey, []byte(draftContent)); err != nil {
 		return fmt.Errorf("failed to write draft: %v", err)
 	}
 
@@ -233,32 +295,40 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 	if isPost {
 		dateDir := filepath.Base(filepath.Dir(contentPath)) // e.g., "20260201"
 		versionsFile := filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir, ".versions", baseName)
-		os.Remove(versionsFile) // Ignore error — may not exist
+		if k, kerr := storage.RelKey(dataDir, versionsFile); kerr == nil {
+			_ = st.Delete(ctx, k, storage.IgnoreMissing())
+		}
 	}
 
 	// Delete the original published file
-	if err := os.Remove(fullPath); err != nil {
+	if err := st.Delete(ctx, contentKey); err != nil {
 		return fmt.Errorf("failed to delete published file: %v", err)
 	}
 
 	// Delete rendered HTML if exists
 	if isPost {
 		htmlPath := strings.TrimSuffix(fullPath, ".md") + ".html"
-		os.Remove(htmlPath) // Ignore error — may not exist
+		if k, kerr := storage.RelKey(dataDir, htmlPath); kerr == nil {
+			_ = st.Delete(ctx, k, storage.IgnoreMissing())
+		}
 
 		// Also check the posts mount point
 		dateDir := filepath.Base(filepath.Dir(contentPath))
 		htmlName := strings.TrimSuffix(baseName, ".md") + ".html"
 		mountHtmlPath := filepath.Join(dataDir, "posts", dateDir, htmlName)
-		os.Remove(mountHtmlPath) // Ignore error — may not exist
+		if k, kerr := storage.RelKey(dataDir, mountHtmlPath); kerr == nil {
+			_ = st.Delete(ctx, k, storage.IgnoreMissing())
+		}
 	} else {
 		// Comment HTML in comments mount dir
 		htmlPath := strings.TrimSuffix(fullPath, ".md") + ".html"
-		os.Remove(htmlPath) // Ignore error — may not exist
+		if k, kerr := storage.RelKey(dataDir, htmlPath); kerr == nil {
+			_ = st.Delete(ctx, k, storage.IgnoreMissing())
+		}
 	}
 
 	// Remove from index.jsonl
-	if err := metadata.RemoveIndexEntry(dataDir, contentPath); err != nil {
+	if err := metadata.RemoveIndexEntry(storage.At(dataDir), contentPath); err != nil {
 		// Non-fatal: index entry may not exist
 		if !jsonOutput {
 			fmt.Printf("[!] Warning: could not remove index entry: %v\n", err)
@@ -266,7 +336,7 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 	}
 
 	// Update manifest
-	if err := publish.UpdateManifest(dataDir); err != nil {
+	if err := publish.UpdateManifest(storage.At(dataDir)); err != nil {
 		if !jsonOutput {
 			fmt.Printf("[!] Warning: failed to update manifest: %v\n", err)
 		}
@@ -277,7 +347,7 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 	// shifts if it was the newest. Only relevant for posts (comments don't
 	// participate in v4's per-post cascade today).
 	if isPost {
-		if shape, err := bundle.GetActiveShapeName(dataDir); err == nil && shape == "v4" {
+		if shape, err := bundle.GetActiveShapeName(storage.At(dataDir)); err == nil && shape == "v4" {
 			if err := unpublishStreamCascade(dataDir, contentPath); err != nil && !jsonOutput {
 				fmt.Printf("[!] Warning: v4 unpublish cascade failed: %v\n", err)
 			}
@@ -342,16 +412,17 @@ func RunUnpublishURL(dataDir, contentURL, contentType string, skipConfirm bool) 
 		return fmt.Errorf("could not extract domain from URL: %s", contentURL)
 	}
 
-	if !skipConfirm && !jsonOutput {
+	if !skipConfirm && jsonOutput {
+		return errUnpublishNeedsYes
+	}
+	if !skipConfirm {
 		fmt.Printf("Unpublish discovery registration for:\n  %s\n  (type: %s)\n\n", contentURL, contentType)
 		fmt.Println("This removes ONLY the discovery-service row. Local files are NOT touched.")
 		fmt.Print("Proceed? [y/N] ")
 		var response string
 		fmt.Scanln(&response)
 		if r := strings.TrimSpace(strings.ToLower(response)); r != "y" && r != "yes" {
-			if !jsonOutput {
-				fmt.Println("[i] Cancelled")
-			}
+			fmt.Println("[i] Cancelled")
 			return nil
 		}
 	}
@@ -372,7 +443,7 @@ func RunUnpublishURL(dataDir, contentURL, contentType string, skipConfirm bool) 
 	if dsURL == "" {
 		dsURL = "https://ds.polis.pub"
 	}
-	dsClient := discovery.NewClient(dsURL, os.Getenv("DISCOVERY_SERVICE_KEY"))
+	dsClient := discovery.NewClient(dsURL)
 	if err := dsClient.UnpublishContent(contentType, contentURL, timestamp, sig); err != nil {
 		return fmt.Errorf("DS unpublish failed: %v", err)
 	}
@@ -407,7 +478,7 @@ func unpublishStreamCascade(dir, postPath string) error {
 	commentsMountDir, _ := coreBundle.MountDir("pub.polis.comment")
 
 	renderer, err := render.NewPageRenderer(render.PageConfig{
-		DataDir:           dir,
+		Site:              storage.At(dir),
 		CLIThemesDir:      findCLIThemesDir(),
 		BaseURL:           url,
 		PostsSourceDir:    postsSource,

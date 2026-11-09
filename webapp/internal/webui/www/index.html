@@ -3,13 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Polis</title>
+    <title>polis</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Newsreader:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/style.css">
     <link rel="stylesheet" href="/nav-themes.css">
+    <!-- Point and ask (kay-point.js): the Kay icon, the spotlight and the terminal. -->
+    <link rel="stylesheet" href="/kay-point.css">
     <!-- v4 stream shape CSS. Served from cli-go/pkg/bundle/fixtures
          via /bundle-assets/ route so SPA stays in lockstep with the public
          shape's structural rules (.layout, .stream, .entry, etc.). -->
@@ -101,6 +103,14 @@
          decorators, canonical comment-WRITE CTA) on top of the shared
          controller via the window.PolisStream registries. -->
     <script src="/owner-extras.js" defer></script>
+    <!-- The Kay page (/_/kay): the owner asks their AI for changes to the site. -->
+    <script src="/kay.js" defer></script>
+    <!-- Point and ask: point at a part of the stream and ask Kay to change it.
+         Only where /api/kay/components says it is on (an owner's remote instance). -->
+    <script src="/kay-point.js" defer></script>
+    <!-- Owner auth: setup (which is also recovery), sign-in, the list of ways
+         to sign in, and the removal confirmation. -->
+    <script src="/owner-auth.js" defer></script>
 </head>
 <body data-polis-stream-direction="newest-top">
     <div id="app">
@@ -110,7 +120,7 @@
         <!-- Welcome Screen (shown when no site is configured) -->
         <div id="welcome-screen" class="screen hidden">
             <div class="welcome-container">
-                <h1>Welcome to Polis</h1>
+                <h1>Welcome to polis</h1>
                 <p class="welcome-subtitle">Choose how to set up your site</p>
                 <div class="welcome-options">
                     <div class="welcome-option" onclick="App.showInitFlow()">
@@ -121,17 +131,13 @@
                         </div>
                         <div class="option-arrow">&rarr;</div>
                     </div>
-                    <div class="welcome-option" onclick="App.showLinkFlow()">
-                        <div class="option-icon">&#8627;</div>
-                        <div class="option-content">
-                            <h3>Link Existing Site</h3>
-                            <p>Connect to an existing polis site directory</p>
-                        </div>
-                        <div class="option-arrow">&rarr;</div>
-                    </div>
                 </div>
             </div>
         </div>
+
+        <!-- Owner-auth screen (setup, which is also recovery; or sign-in).
+             Rendered by owner-auth.js from the gate's refusal. -->
+        <div id="owner-auth-screen" class="screen hidden owner-auth-screen"></div>
 
         <!-- Error Screen (shown when site is incomplete/invalid) -->
         <div id="error-screen" class="screen hidden">
@@ -168,7 +174,7 @@
                     </div>
                     <div class="wizard-section">
                         <label for="init-site-title">Site Title (optional):</label>
-                        <input type="text" id="init-site-title" class="wizard-input" placeholder="My Polis Site">
+                        <input type="text" id="init-site-title" class="wizard-input" placeholder="My polis site">
                         <p class="hint">A friendly name for your site</p>
                     </div>
                     <div class="wizard-section">
@@ -193,37 +199,6 @@
                     <button id="init-cancel-btn" class="secondary">Cancel</button>
                     <div class="wizard-footer-spacer"></div>
                     <button id="init-execute-btn" class="primary">Initialize Site</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- Link Panel (slide-out wizard for linking existing site) -->
-        <div id="link-panel" class="wizard-panel hidden">
-            <div class="wizard-overlay"></div>
-            <div class="wizard-content">
-                <div class="wizard-header">
-                    <h3>Link Existing Site</h3>
-                    <button id="link-close-btn" class="wizard-close">&times;</button>
-                </div>
-                <div class="wizard-body">
-                    <div class="wizard-section">
-                        <p class="wizard-intro">Connect to an existing polis site. The target directory must have:</p>
-                        <ul class="wizard-checklist">
-                            <li>.well-known/polis file</li>
-                            <li>.polis/keys/id_ed25519 (private key)</li>
-                            <li>.polis/keys/id_ed25519.pub (public key)</li>
-                        </ul>
-                    </div>
-                    <div class="wizard-section">
-                        <label for="link-path">Site Directory Path:</label>
-                        <input type="text" id="link-path" class="wizard-input" placeholder="/path/to/my-polis-site">
-                        <p class="hint">Absolute path to your existing polis site directory</p>
-                    </div>
-                </div>
-                <div class="wizard-footer">
-                    <button id="link-cancel-btn" class="secondary">Cancel</button>
-                    <div class="wizard-footer-spacer"></div>
-                    <button id="link-execute-btn" class="primary">Link Site</button>
                 </div>
             </div>
         </div>
@@ -261,7 +236,9 @@
                         <div class="avatar-menu-handle" id="avatar-menu-handle" onclick="event.stopPropagation(); window.open(App.siteBaseUrl, '_blank')"></div>
                     </div>
                     <div class="avatar-menu-stats" id="avatar-menu-stats"></div>
+                    <div class="avatar-menu-item" onclick="App.openFollowPanel()"><svg viewBox="0 0 24 24" width="15" height="15" fill="none"><circle cx="9" cy="7.5" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><line x1="18" y1="8" x2="18" y2="14"/><line x1="15" y1="11" x2="21" y2="11"/></svg> Follow a site</div>
                     <div class="avatar-menu-item" onclick="App.copyFollowLink()"><svg viewBox="0 0 24 24" width="15" height="15" fill="none"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg> Copy follow link</div>
+                    <div class="avatar-menu-item" data-kay-entry onclick="App.navigateTo('/kay')"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>Kay</div>
                     <div class="avatar-menu-item" onclick="App.navigateTo('/settings')"><svg viewBox="0 0 24 24" width="15" height="15" fill="none"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.2V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1.1-1.4 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3.2 15H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.4-1.1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.6 1.6 0 0 0 9 4.6V3a2 2 0 1 1 4 0v.1c0 .7.4 1.3 1.1 1.4a1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9c0 .7.4 1.3 1.1 1.4H21a2 2 0 1 1 0 4h-.1c-.7 0-1.3.4-1.4 1.1Z"/></svg> Settings</div>
                 </div>
             </div>
@@ -297,6 +274,8 @@
                  the DM nav-button moves to a more semantically distinct
                  envelope shape. -->
             <button id="nav-btn-envelope" class="nav-icon-btn" onclick="App.navigateTo('/pql/all+messages+from+my+mutuals+by+date')" data-tip="My messages"><svg viewBox="0 0 24 24" width="20" height="20" fill="none"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 8l9 6 9-6"/></svg><span class="nav-dot hidden" id="nav-dot-envelope"></span></button>
+            <!-- The owner's own nav shortcuts (App.renderNavShortcuts): each opens one PQL sentence. -->
+            <span id="nav-shortcuts" class="nav-shortcuts"></span>
             <div class="nav-sep"></div>
             <!-- Circled "+" glyph (David Alcorn standardized the nav compose
                  icon to the SAME ⊕ motif as the timeline's compose disc —
@@ -378,9 +357,17 @@
                         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
                         <span>New post</span>
                     </button>
+                    <button class="nav-mobile-item" type="button" data-action="follow-site">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="9" cy="7.5" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><line x1="18" y1="8" x2="18" y2="14"/><line x1="15" y1="11" x2="21" y2="11"/></svg>
+                        <span>Follow a site</span>
+                    </button>
                     <button class="nav-mobile-item" type="button" data-action="copy-follow-link">
                         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
                         <span>Copy follow link</span>
+                    </button>
+                    <button class="nav-mobile-item" type="button" data-action="kay" data-kay-entry>
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>
+                        <span>Kay</span>
                     </button>
                     <button class="nav-mobile-item" type="button" data-action="settings">
                         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.2V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1.1-1.4 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3.2 15H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.4-1.1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.6 1.6 0 0 0 9 4.6V3a2 2 0 1 1 4 0v.1c0 .7.4 1.3 1.1 1.4a1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9c0 .7.4 1.3 1.1 1.4H21a2 2 0 1 1 0 4h-.1c-.7 0-1.3.4-1.4 1.1Z"/></svg>
@@ -587,7 +574,7 @@
                     <div class="wizard-section">
                         <label for="follow-url-input">Author URL or Domain</label>
                         <input type="text" id="follow-url-input" class="wizard-input" placeholder="author.polis.pub" />
-                        <p class="wizard-hint">Enter a domain, URL, or follow link. Examples: author.polis.pub, https://author.polis.pub, polis.pub/f/author</p>
+                        <p class="wizard-hint">Enter a polis site&rsquo;s domain or URL, on polis.pub or anywhere else, or a polis.pub follow link. Examples: author.polis.pub, https://author.example.com, polis.pub/f/author</p>
                     </div>
                     <div id="follow-suggestion" class="follow-suggestion hidden">
                         <div class="follow-suggestion-label">Suggested</div>

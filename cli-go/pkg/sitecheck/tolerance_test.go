@@ -2,6 +2,7 @@ package sitecheck
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,7 +93,7 @@ func TestAnIntactLicenceWithAnUncoveredFieldSaysSo(t *testing.T) {
 		Generator: "polis-cli-go/test",
 	}
 	path := filepath.Join(b.dir, "content", "pub.polis.core", "license", "license.json")
-	if err := license.SignAndWrite(f, path, b.priv); err != nil {
+	if err := license.SignAndWrite(f, storage.At(filepath.Dir(path)), filepath.Base(path), b.priv); err != nil {
 		t.Fatalf("SignAndWrite: %v", err)
 	}
 	raw, err := os.ReadFile(path)

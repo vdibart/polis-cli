@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,12 +27,12 @@ func signedSyncSite(t *testing.T, seed ...string) *Server {
 	wk, _ := json.Marshal(map[string]string{"base_url": "https://owner.polis.pub", "public_key": string(pub)})
 	os.WriteFile(filepath.Join(dataDir, ".well-known", "polis"), wk, 0644)
 	for _, u := range seed {
-		if err := metadata.AddBlessedCommentSigned(dataDir, "posts/20260917/p.md", metadata.BlessedComment{URL: u}, priv); err != nil {
+		if err := metadata.AddBlessedCommentSigned(storage.At(dataDir), "posts/20260917/p.md", metadata.BlessedComment{URL: u}, priv); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if len(seed) > 0 {
-		if st, _ := metadata.VerifyBlessedSite(dataDir); st != metadata.StatusValid {
+		if st, _ := metadata.VerifyBlessedSite(storage.At(dataDir)); st != metadata.StatusValid {
 			t.Fatalf("setup: seeded list is %s, want valid", st)
 		}
 	}
@@ -57,10 +58,10 @@ func TestBlessingSyncEvictionKeepsTheListSigned(t *testing.T) {
 			if !r.FilesChanged {
 				t.Fatal("expected the eviction to change files")
 			}
-			if blessedListHas(s.DataDir, gone) {
+			if blessedListHas(s.Site(), gone) {
 				t.Fatal("setup: the evicted entry is still listed")
 			}
-			if st, err := metadata.VerifyBlessedSite(s.DataDir); st != metadata.StatusValid {
+			if st, err := metadata.VerifyBlessedSite(storage.At(s.DataDir)); st != metadata.StatusValid {
 				t.Errorf("after eviction blessed.json is %s (%v), want valid", st, err)
 			}
 		})
@@ -90,10 +91,10 @@ func TestBlessingSyncIngestKeepsTheListSigned(t *testing.T) {
 	if !r.FilesChanged {
 		t.Fatal("expected the ingest to change files")
 	}
-	if !blessedListHas(s.DataDir, commentURL) {
+	if !blessedListHas(s.Site(), commentURL) {
 		t.Fatal("setup: the ingested entry is not listed")
 	}
-	if st, err := metadata.VerifyBlessedSite(s.DataDir); st != metadata.StatusValid {
+	if st, err := metadata.VerifyBlessedSite(storage.At(s.DataDir)); st != metadata.StatusValid {
 		t.Errorf("after ingest blessed.json is %s (%v), want valid", st, err)
 	}
 }

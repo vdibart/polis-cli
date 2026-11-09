@@ -130,7 +130,7 @@ Thin HTTP layer that translates REST conventions into `ActionRequest` objects:
 
 ### Auth
 
-`routeContent` in `router.go` extracts the Bearer token from the `Authorization` header, hashes it with SHA-256, and checks against stored hashes in `.polis/api-keys.json`. GET requests on content and bundle routes bypass auth, except drafts and the private types (`dm`, `follow`).
+`routeContent` in `router.go` extracts the Bearer token from the `Authorization` header, hashes it with SHA-256, and checks against stored hashes in `.polis/api-keys.json` with `ops.LookupAPIKey`. A matching key that is scoped (and so every bound key) is refused with `403` and the code `insufficient_scope`: content is an authored source, and no scope covers one. GET requests on content and bundle routes bypass auth, except drafts and any type the core bundle does not declare public: the private types (`dm`, `follow`) and any type it does not know. Unauthenticated, an unknown type is therefore `401`, not `404`.
 
 ### Error Mapping
 
@@ -138,18 +138,21 @@ Engine errors are mapped to HTTP status codes:
 
 | Engine Error | HTTP Status |
 |-------------|-------------|
-| Unknown content type | 404 |
+| Unknown content type | 404 (to an authenticated caller; `401` without auth) |
 | Unsupported action | 400 |
 | Validation failure | 400 |
-| Auth failure | 401/403 |
+| Auth failure | 401/403 (`403 insufficient_scope` for a scoped key) |
 | Internal error | 500 |
 
 ## API Key Management
 
-Only validation exists: `ops.ValidateAPIKey()`. There is no generate or revoke function and no command; keys are added to and removed from `.polis/api-keys.json` by hand (see [reference.md § Authentication](reference.md#authentication)):
+Keys live in `.polis/api-keys.json` (mode `600`), in `cli-go/pkg/ops/auth.go` (see [reference.md § Authentication](reference.md#authentication)):
 
-- Only SHA-256 hashes are stored (in `.polis/api-keys.json`), compared in constant time
-- Each entry carries an `id`, a `name` and a `created_at` timestamp
+- `ops.MintAPIKey` returns the plaintext once and stores only its SHA-256 hash; `ops.RevokeAPIKey` deletes an entry; `ops.ListAPIKeys` lists them. The owner reaches them through the webapp's `/api/keys` routes
+- `ops.LookupAPIKey` returns the matching key with its `scopes`, compared in constant time; `ops.ValidateAPIKey` accepts only a **full-access** (unscoped) key, because its callers grant everything
+- Each entry carries an `id`, a `name`, a `created_at` timestamp and, optionally, `scopes` and `bound`
+- `bound` is the one path a key works at (`/mcp`, `/mcp/c/<component>`); `APIKey.UsableAt` checks it. `ops.MintBoundAPIKey` refuses to bind an unscoped key, so a bound key is always scoped. The webapp mints bound keys only for Kay; `/api/keys` mints unbound ones
+- A rewrite carries every member it does not model through unchanged, since the file is unsigned
 
 ## Adding a New Operation
 

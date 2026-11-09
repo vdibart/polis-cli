@@ -27,14 +27,16 @@ and writable by the other. They no longer share a **feature set**.
 | `clone` | ✅ | ✅ | ⚠️ **behaviour differs — see below** |
 | `actor` | — | ✅ | an operator's actor registry. ⭐ **Not a parity gap worth closing** — it is an OPERATOR command, and a bash-CLI self-hoster running system actors of their own is not a shape that exists. ⚠️ **`actor verify <action>` is the exception to that reasoning**: the stranger's check is run by *anyone*, not an operator — a bash user has no one-command way to check an actor from outside, and `custody.md` §7 is the by-hand procedure. ⚠️ **`actor verify --custody <domain>` is the same exception**: a tenant's own check of custody, run by the tenant rather than an operator — a bash user follows `custody.md` §12.5 by hand. Bash has no `attest` command, so it neither issues custody records nor rewrites them (no `withdrawn_by` drift is possible) |
 | `attest` | — | ✅ | signed attestations |
+| `branch` | — | ✅ | turns an export of your site, with its private key, into a new site at a new address: the key rotated on your machine, the handover signed under the origin's domain, nothing sent anywhere. ⭐ **Not a parity gap worth closing** — it is built on the Go rotation core and the Go renderer, and bash is feature-frozen. A bash user branches by exporting, running the Go CLI once, and carrying on with either. ⭐ **`branch deploy` is Go-only too**, for the same reason and one more: it drives the Go provisioning seam (create, seed, configure, hand over, deploy), which bash has no counterpart to. A bash user deploys a branch with the Go CLI once, or by hand. ⭐ **`branch announce` is Go-only** for the same reason: it reads the handover the Go branch wrote |
 | `did` | — | ✅ | `did:web` identity document |
 | `dm` | — | ✅ | encrypted direct messages |
 | `license` | — | ✅ | outbound licence |
+| `recover` | — | ✅ | `recover sign` signs a sign-in recovery challenge with the key you hold, under the `polis-recovery` namespace. ⭐ **Not a parity gap worth closing** — it is a convenience over `ssh-keygen -Y sign -n polis-recovery`, which the setup screen shows and which works with the same key, so a bash user signs by hand |
 | `site` | — | ✅ | `site set author-name` / `site set avatar` edit `.well-known/polis` through the lossless writer; `site rewrite-unsigned` is the escape hatch for a signed file a newer polis wrote. ⭐ **Not a parity gap worth closing for the edits** — bash edits the document with `jq`, which already keeps every member. ⚠️ **The escape hatch has no bash counterpart** — bash's one refusing writer (tags) points at the Go CLI's: see *Signed files a newer polis wrote — refused, never re-signed* below |
 | `serve` | — | ✅ | webapp-only; **not a divergence** — bash has no HTTP server by design |
 | `validate` | — | ✅ | site verification — per-URL JSON records, index consistency across all four entry types. Bash has no counterpart, so a bash user checks a record by hand against [`spec/attestation.md`](../signet/spec/attestation.md) §9. ⚠️ **Judge and Patrol are Go-only hosted actors**; their checks of registration attestations and retired-key resolution have no bash surface to diverge from |
 
-**Eight Go-only commands** (seven, not counting `serve`). **Zero bash-only commands.** bash is a strict subset.
+**Ten Go-only commands** (nine, not counting `serve`). **Zero bash-only commands.** bash is a strict subset.
 
 ## Behavioural divergence within shared commands
 
@@ -42,17 +44,23 @@ and writable by the other. They no longer share a **feature set**.
 
 | Command | bash | Go |
 |---|---|---|
-| **Flag position** | flags anywhere | ⚠️ **flags must come before positional arguments** — Go uses the standard `flag` package, which stops at the first positional, so `polis post file.md --filename x` silently ignores `--filename` |
+| **Flag position** | flags anywhere | ⚠️ **flags must come before positional arguments** — Go uses the standard `flag` package, which stops at the first positional, so `polis post file.md --filename x` silently ignores `--filename`. `unpublish` is the exception: its flags work on either side of the path |
 | `comment` | `comment <file> [<reply-to-url>]` and `comment - <url>` (stdin); signs, publishes and sends the blessing request in one step (`cmd_comment`) | `comment draft <url>` · `sign <id>` · `list` · `sync` (`pkg/cmd/comment.go`). ⚠️ **No Go CLI command sends the blessing request** — `sync` only checks status; the web app does it |
 | `post` from stdin | `polis post - [--filename] [--title]` | ❌ a file argument only |
+| `post` and git | ❌ stages nothing (automatic `git add` was removed from every command in 0.11.0) | ❌ stages nothing either. ⭐ **Not a divergence** — git automation is a post-publish hook (`.polis/webapp/hooks/`), which only the web app runs on publish; neither CLI's `post` runs one |
 | `post` and the site's terms | ❌ a new post carries no `license:` block, even on a site that states terms; there is no `--license` | ✅ stamps the site's terms (or `--license`) into the post's signed frontmatter |
 | `init` flags | `--site-title` plus path flags (`--posts-dir`, `--comments-dir`, `--keys-dir`, `--versions-dir`, …) | `--site-title` `--author` `--email` `--theme` `--license`; no path flags — paths are fixed by the bundle |
 | `index --json` | `{version, posts, comments}`; entries of any other type dropped | envelope with `data.entries` and `data.count`, every type |
 | `blessing grant` / `deny <ref>` | `<ref>` is a full version or a **short hash** (prefix/suffix match); grant also checks the comment URL is reachable first | `<ref>` is the full version or the comment URL — no short hashes, no reachability check. Both resolve the pending request from it before telling the discovery service |
-| `unregister` | asks for confirmation; `--force` / `-f` skips it | asks nothing, has no `--force` |
+| `blessing sync` | ⛔ **deprecated**: refuses with `DEPRECATED`. It asked the discovery service for blessings whose *actor* is this site, and a blessing's actor is the commenter, so it rebuilt `blessed.json` from the wrong set. The fix needs stream pagination; bash is feature-frozen, so the command was retired instead | ✅ reads the site's own `blessing.granted` stream events |
+| `rebuild --comments` and `blessed.json` | leaves `blessed.json` unchanged (it used to replace it using the same wrong read as `blessing sync`) | ✅ reconciles `blessed.json` |
+| `blessing requests` | no longer runs a blessing sync first (it wrote the same wrong set on every call) | lists requests only |
+| `blessing beseech` | ✅ re-requests a **pending** blessing. ⚠️ For a **denied** one it says it is re-submitting, but it only re-registers the comment, and the discovery service returns the denial unchanged: a denied comment cannot be re-requested | ❌ refuses with `NOT_SUPPORTED` (it used to report success for doing nothing). For a **pending** comment, `republish` (as a new version) or the web app re-requests; ⚠️ a **denied** comment cannot be re-requested by either, because the discovery service returns the earlier denial unchanged |
+| `unpublish` | asks nothing, has no `-y`, and goes ahead under `--json`; posts only | asks for confirmation; `-y` / `--yes` skips it, before or after the path; ⛔ under `--json` refuses without `-y`; posts and comments |
 | `discover --since <date>` | ✅ | ❌ (only `--author`) |
 | `notifications clear` | ❌ (`list` only) | ✅ |
-| `follow` announces | ✅ emits `pub.polis.follow.announced` | ❌ writes `following.json` only; the web app's follow announces (`following.FollowWithBlessing`) |
+| `render` and `site/custom.css` | ❌ writes `styles.css` from the theme alone, so a site's own CSS is dropped on a bash render. Not fixed: bash is feature-frozen, and the site's own CSS is set only through the web app | ✅ every writer of `styles.css` appends `site/custom.css` after the theme ([content system](../general/concepts/content-system.md#the-sites-own-css--sitecustomcss)) |
+| `follow` blessing | ⛔ blesses **every** pending and denied comment from the author, consulting no policy — so a follow overturns denies no rule asked it to. Not fixed: bash has no policy evaluator, and building one is a feature | ✅ blesses only what the site's policies bless, through `following.FollowWithBlessing`, the web app's own path |
 
 ### `init` — the Rosie question
 
@@ -171,12 +179,20 @@ verbatim — and `TestChainProducedByTheBashCLIVerifiesHere` requires the Go ver
 two maintain the chain through completely different code (a `jq` filter and a Go struct), so nothing
 short of that would catch a drift in field names, ordering, or timestamp formatting.
 
-**The one accepted gap: `did.json`.** bash removes the document rather than rebuilding it, because it
+**The first accepted gap: `did.json`.** bash removes the document rather than rebuilding it, because it
 has never written that file and projecting a JWK out of an OpenSSH key in bash is not worth the
 parity. Removal stays correct — the document is derived, so `polis did --write` rebuilds it, and an
 absent document fails honestly where a stale one answers `200` with a retired key. ⚠️ **A tenant
 rotated with bash will therefore have no DID document until someone republishes it**, which Judge's
 key-head check reports and Medic heals on the hosted fleet.
+
+**The second accepted gap: the follow file and the blessing list.** Neither carries a signing time, so
+each verifies against the current key only. Go re-signs both at rotation, and only if each verified
+under the old key. bash has no signing path for either file (Go's canonical JSON is not reproducible in
+`jq`), so it **removes** the signature instead, as every bash write of these files already does. The
+file then reads `unsigned`, which reports OK, and the next follow or bless through Go signs it again.
+⚠️ **bash cannot check the old signature first**, so unlike Go it cannot keep an already-failing file
+failing — the same limit as every other bash write of these files.
 
 ⚠️ **`cmd_rotate_key` calls `cmd_rebuild --posts`,** so the `rebuild` divergence above applies to a
 bash rotation on a site with tags or attestations: their index lines are carried through untouched,

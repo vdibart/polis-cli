@@ -28,50 +28,53 @@
 package stream
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Store manages per-projection cursors, state, and config on disk.
 // Each store is scoped to a specific discovery service domain and bundle.
 type Store struct {
-	mu         sync.Mutex
-	configDir  string // .polis/ds/<domain>/<bundle>/config/
-	stateDir   string // .polis/ds/<domain>/<bundle>/state/
-	bundleDir  string // .polis/ds/<domain>/<bundle>/
+	mu sync.Mutex
+
+	// site is where these files live and what they live on.
+	//
+	// ⭐ THE STRUCT WAS ALREADY THE RIGHT SHAPE, carrying three derived
+	// directories; only the identity's type was missing. Holding the handle is
+	// what lets the writes below go through the store, so a remote instance's
+	// cursors and config land in its backend rather than on a container disk
+	// that the next cold start throws away.
+	site storage.Site
+
+	// ⚠️ The three KEYS, relative to the site root. Every read and write
+	// below addresses its file by key under one of them.
+	configKey  string // .polis/ds/<domain>/<bundle>/config/
+	stateKey   string // .polis/ds/<domain>/<bundle>/state/
+	bundleKey  string // .polis/ds/<domain>/<bundle>/
 	bundleName string // e.g. "pub.polis.core"
 }
 
-// NewStore creates a new Store rooted at dataDir/.polis/ds/discoveryDomain/bundleName/.
-func NewStore(dataDir string, discoveryDomain string, bundleName string) *Store {
-	bundleDir := filepath.Join(dataDir, ".polis", "ds", discoveryDomain, bundleName)
+// NewStore creates a new Store rooted at the site's .polis/ds/discoveryDomain/bundleName/.
+func NewStore(site storage.Site, discoveryDomain string, bundleName string) *Store {
+	bundleKey := ".polis/ds/" + discoveryDomain + "/" + bundleName
 	return &Store{
-		configDir:  filepath.Join(bundleDir, "config"),
-		stateDir:   filepath.Join(bundleDir, "state"),
-		bundleDir:  bundleDir,
+		site:       site,
+		configKey:  bundleKey + "/config",
+		stateKey:   bundleKey + "/state",
+		bundleKey:  bundleKey,
 		bundleName: bundleName,
 	}
-}
-
-// BundleDir returns the bundle root directory (.polis/ds/<domain>/<bundle>/).
-func (s *Store) BundleDir() string {
-	return s.bundleDir
-}
-
-// StateDir returns the state directory (.polis/ds/<domain>/<bundle>/state/).
-func (s *Store) StateDir() string {
-	return s.stateDir
-}
-
-// ConfigDir returns the config directory (.polis/ds/<domain>/<bundle>/config/).
-func (s *Store) ConfigDir() string {
-	return s.configDir
 }
 
 // BundleName returns the bundle name this store is scoped to.
@@ -154,9 +157,9 @@ var deprecatedCursorKeys = []string{
 }
 
 func (s *Store) loadCursors() (*CursorsFile, error) {
-	data, err := os.ReadFile(filepath.Join(s.stateDir, "cursors.json"))
+	data, err := s.site.Store().Get(context.Background(), s.stateKey+"/cursors.json")
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return &CursorsFile{Cursors: make(map[string]CursorEntry)}, nil
 		}
 		return nil, fmt.Errorf("read cursors: %w", err)
@@ -189,33 +192,36 @@ func (s *Store) loadCursors() (*CursorsFile, error) {
 	}
 
 	if migrated {
-		_ = s.saveCursorsLocked(&cf)
+		// Not fatal: the migration is re-applied on the next load. But say so,
+		// or a store that can never be written looks like one that migrated.
+		if err := s.saveCursorsLocked(&cf); err != nil {
+			log.Printf("[!] stream: could not save migrated cursors: %v", err)
+		}
 	}
 
 	return &cf, nil
 }
 
+// ⭐ None of the writes below creates its directory: atomicfile.Write has the
+// site's store create the parent, under the store's own mode rule, which makes
+// everything at or under .polis exactly 0700 whatever the umask. That rule is
+// what keeps the stream state private, and TestStoreDirectoriesArePrivate pins
+// it.
 func (s *Store) saveCursors(cf *CursorsFile) error {
-	if err := os.MkdirAll(s.stateDir, 0700); err != nil {
-		return fmt.Errorf("create state dir: %w", err)
-	}
 	data, err := json.MarshalIndent(cf, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal cursors: %w", err)
 	}
-	return atomicfile.WriteFile(filepath.Join(s.stateDir, "cursors.json"), data, 0600)
+	return atomicfile.Write(context.Background(), s.site, s.stateKey+"/cursors.json", data, 0600)
 }
 
 // saveCursorsLocked writes cursors without acquiring the mutex (for use within already-locked methods).
 func (s *Store) saveCursorsLocked(cf *CursorsFile) error {
-	if err := os.MkdirAll(s.stateDir, 0700); err != nil {
-		return fmt.Errorf("create state dir: %w", err)
-	}
 	data, err := json.MarshalIndent(cf, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal cursors: %w", err)
 	}
-	return atomicfile.WriteFile(filepath.Join(s.stateDir, "cursors.json"), data, 0600)
+	return atomicfile.Write(context.Background(), s.site, s.stateKey+"/cursors.json", data, 0600)
 }
 
 // --- State operations (state/<name>.json) ---
@@ -226,11 +232,11 @@ var stateFileMigrations = map[string]string{
 	"polis.blessing": "pub.polis.comment.blessing",
 }
 
-// StatePath returns the absolute path of the state file for the given
-// name (without extension). Used by callers that need to stat the file
-// for mtime-based invalidation without reading its contents.
-func (s *Store) StatePath(name string) string {
-	return filepath.Join(s.stateDir, name+".json")
+// StateKey returns the site-relative key of the state file for the given name
+// (without extension). Used by callers that stat the file for mtime-based
+// invalidation without reading its contents.
+func (s *Store) StateKey(name string) string {
+	return s.stateKey + "/" + name + ".json"
 }
 
 // LoadState loads state from state/<name>.json directly into target.
@@ -239,17 +245,18 @@ func (s *Store) LoadState(name string, target interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	stateFile := filepath.Join(s.stateDir, name+".json")
-	data, err := os.ReadFile(stateFile)
+	ctx := context.Background()
+	st := s.site.Store()
+	stateKey := s.StateKey(name)
+	data, err := st.Get(ctx, stateKey)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			// Check if an old state file exists that should be migrated to this name
 			for oldName, newName := range stateFileMigrations {
 				if newName == name {
-					oldFile := filepath.Join(s.stateDir, oldName+".json")
-					if oldData, oldErr := os.ReadFile(oldFile); oldErr == nil {
-						// Rename old file to new name
-						if renameErr := os.Rename(oldFile, stateFile); renameErr == nil {
+					oldKey := s.StateKey(oldName)
+					if oldData, oldErr := st.Get(ctx, oldKey); oldErr == nil {
+						if s.migrateStateFile(ctx, oldKey, stateKey, oldData) {
 							data = oldData
 							err = nil
 						}
@@ -270,18 +277,44 @@ func (s *Store) LoadState(name string, target interface{}) error {
 	return nil
 }
 
+// migrateStateFile moves a state file from its legacy name to its current one
+// and reports whether the move happened. A false leaves the caller with no
+// state, exactly as a failed rename always did.
+func (s *Store) migrateStateFile(ctx context.Context, oldKey, newKey string, data []byte) bool {
+	st := s.site.Store()
+	if st.Capabilities().RealPath {
+		oldPath, oldErr := st.RealPath(oldKey)
+		newPath, newErr := st.RealPath(newKey)
+		if oldErr != nil || newErr != nil {
+			return false
+		}
+		// NOT the storage interface: a one-time layout MIGRATION by rename.
+		// The interface has no rename, and on a filesystem a copy-then-delete
+		// would not be atomic.
+		return os.Rename(oldPath, newPath) == nil
+	}
+	// ⭐ No filesystem, so no rename. Write the new name, then remove the old
+	// one. The state under .polis/ds is rebuilt from the stream if lost, and a
+	// failed delete leaves a legacy file that is never read again, because the
+	// new name is found first from then on.
+	if err := st.Put(ctx, newKey, data, storage.WithMode(0o600)); err != nil {
+		return false
+	}
+	if err := st.Delete(ctx, oldKey); err != nil {
+		log.Printf("[!] stream: migrated %s but could not remove it: %v", oldKey, err)
+	}
+	return true
+}
+
 // SaveState writes state directly to state/<name>.json.
 func (s *Store) SaveState(name string, state interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := os.MkdirAll(s.stateDir, 0700); err != nil {
-		return fmt.Errorf("create state dir: %w", err)
-	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal state %s: %w", name, err)
 	}
-	return atomicfile.WriteFile(filepath.Join(s.stateDir, name+".json"), data, 0600)
+	return atomicfile.Write(context.Background(), s.site, s.StateKey(name), data, 0600)
 }
 
 // --- Config operations (config/<name>.json) ---
@@ -290,9 +323,9 @@ func (s *Store) SaveState(name string, state interface{}) error {
 func (s *Store) LoadConfig(name string, target interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data, err := os.ReadFile(filepath.Join(s.configDir, name+".json"))
+	data, err := s.site.Store().Get(context.Background(), s.configKey+"/"+name+".json")
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil // no config yet
 		}
 		return fmt.Errorf("read config %s: %w", name, err)
@@ -307,12 +340,9 @@ func (s *Store) LoadConfig(name string, target interface{}) error {
 func (s *Store) SaveConfig(name string, config interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := os.MkdirAll(s.configDir, 0700); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
-	}
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal config %s: %w", name, err)
 	}
-	return atomicfile.WriteFile(filepath.Join(s.configDir, name+".json"), data, 0600)
+	return atomicfile.Write(context.Background(), s.site, s.configKey+"/"+name+".json", data, 0600)
 }

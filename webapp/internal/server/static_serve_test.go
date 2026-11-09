@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -65,7 +66,7 @@ func newStaticServeTestDir(t *testing.T) string {
 // DataDirStorage → serve.Storage → ServeTenantPublic chain.
 func TestDataDirStorage_ServesIndex(t *testing.T) {
 	dir := newStaticServeTestDir(t)
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -86,7 +87,7 @@ func TestDataDirStorage_ServesIndex(t *testing.T) {
 // returns the rendered post HTML.
 func TestDataDirStorage_ServesPost(t *testing.T) {
 	dir := newStaticServeTestDir(t)
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	req := httptest.NewRequest(http.MethodGet, "/posts/2026/02/post.html", nil)
 	w := httptest.NewRecorder()
@@ -109,7 +110,7 @@ func TestDataDirStorage_ServesPost(t *testing.T) {
 // (dot-path exception per the protocol).
 func TestDataDirStorage_ServesWellKnown(t *testing.T) {
 	dir := newStaticServeTestDir(t)
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	req := httptest.NewRequest(http.MethodGet, "/.well-known/polis", nil)
 	w := httptest.NewRecorder()
@@ -127,7 +128,7 @@ func TestDataDirStorage_ServesWellKnown(t *testing.T) {
 // (private data) returns 404 even though the file exists on disk.
 func TestDataDirStorage_BlocksPrivatePaths(t *testing.T) {
 	dir := newStaticServeTestDir(t)
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	req := httptest.NewRequest(http.MethodGet, "/.polis/keys/id_ed25519", nil)
 	w := httptest.NewRecorder()
@@ -144,7 +145,7 @@ func TestDataDirStorage_BlocksPrivatePaths(t *testing.T) {
 // TestDataDirStorage_BlocksTraversal ensures path traversal is blocked.
 func TestDataDirStorage_BlocksTraversal(t *testing.T) {
 	dir := newStaticServeTestDir(t)
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	req := httptest.NewRequest(http.MethodGet, "/../etc/passwd", nil)
 	w := httptest.NewRecorder()
@@ -158,7 +159,7 @@ func TestDataDirStorage_BlocksTraversal(t *testing.T) {
 // TestDataDirStorage_404OnMissing ensures missing paths return 404.
 func TestDataDirStorage_404OnMissing(t *testing.T) {
 	dir := newStaticServeTestDir(t)
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	req := httptest.NewRequest(http.MethodGet, "/posts/does-not-exist.html", nil)
 	w := httptest.NewRecorder()
@@ -173,7 +174,7 @@ func TestDataDirStorage_404OnMissing(t *testing.T) {
 // (no extension) is served as foo.html.
 func TestDataDirStorage_ExtensionlessFallsBackToHTML(t *testing.T) {
 	dir := newStaticServeTestDir(t)
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	req := httptest.NewRequest(http.MethodGet, "/posts/2026/02/post", nil)
 	w := httptest.NewRecorder()
@@ -192,7 +193,7 @@ func TestDataDirStorage_ExtensionlessFallsBackToHTML(t *testing.T) {
 // resource body.
 func TestDataDirStorage_OptionsPreflight(t *testing.T) {
 	dir := newStaticServeTestDir(t)
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	req := httptest.NewRequest(http.MethodOptions, "/posts/2026/02/post.html", nil)
 	w := httptest.NewRecorder()
@@ -219,7 +220,7 @@ func TestDataDirStorage_OptionsPreflight(t *testing.T) {
 // this test closes the symmetry gap on the single-tenant adapter.
 func TestDataDirStorage_SourceRedirectHTML(t *testing.T) {
 	dir := newStaticServeTestDir(t)
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	req := httptest.NewRequest(http.MethodGet, "/content/pub.polis.core/post/20260302/slug.html", nil)
 	w := httptest.NewRecorder()
@@ -241,7 +242,7 @@ func TestDataDirStorage_SourceRedirectHTML(t *testing.T) {
 // /comments/<…>.md DS URLs must resolve via this redirect.
 func TestDataDirStorage_MountMdAliasRedirect(t *testing.T) {
 	dir := newStaticServeTestDir(t)
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	cases := []struct {
 		url  string
@@ -302,7 +303,7 @@ func TestDataDirStorage_ContentMdServedNotRedirected(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cdir, "reply.md"), []byte("---\ntype: comment\n---\nhi"), 0644); err != nil {
 		t.Fatalf("write comment md: %v", err)
 	}
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	req := httptest.NewRequest(http.MethodGet, "/content/pub.polis.core/comment/20260302/reply.md", nil)
 	w := httptest.NewRecorder()
@@ -327,7 +328,7 @@ func TestDataDirStorage_ContentMdServedNotRedirected(t *testing.T) {
 // to write the resource body (protocol non-conformance).
 func TestDataDirStorage_OptionsNonCORS(t *testing.T) {
 	dir := newStaticServeTestDir(t)
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	req := httptest.NewRequest(http.MethodOptions, "/index.html", nil)
 	w := httptest.NewRecorder()
@@ -363,7 +364,7 @@ func TestDataDirStorage_OptionsNonCORS(t *testing.T) {
 // content-type so a future allow-list edit doesn't silently regress.
 func TestDataDirStorage_ServesStreamJS(t *testing.T) {
 	dir := newStaticServeTestDir(t)
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	req := httptest.NewRequest(http.MethodGet, "/stream.js", nil)
 	w := httptest.NewRecorder()
@@ -387,7 +388,7 @@ func TestDataDirStorage_ServesStreamJS(t *testing.T) {
 // being the future fix.
 func TestDataDirStorage_StreamJS_Cached(t *testing.T) {
 	dir := newStaticServeTestDir(t)
-	storage := NewDataDirStorage(dir)
+	storage := NewDataDirStorage(storage.At(dir))
 
 	req := httptest.NewRequest(http.MethodGet, "/stream.js", nil)
 	w := httptest.NewRecorder()

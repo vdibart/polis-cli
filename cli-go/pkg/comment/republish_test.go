@@ -1,6 +1,7 @@
 package comment
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,11 +31,11 @@ func setupPublishedComment(t *testing.T, dataDir, body string) (commentID, comme
 		InReplyTo: "https://alice.polis.pub/posts/20260101/hello.md",
 		Content:   body,
 	}
-	signed, err := SignComment(dataDir, draft, "bob.polis.pub", "https://bob.polis.pub", privKey)
+	signed, err := SignComment(storage.At(dataDir), draft, "bob.polis.pub", "https://bob.polis.pub", privKey)
 	if err != nil {
 		t.Fatalf("SignComment: %v", err)
 	}
-	if err := PublishComment(dataDir, signed.Meta.ID); err != nil {
+	if err := PublishComment(storage.At(dataDir), signed.Meta.ID); err != nil {
 		t.Fatalf("PublishComment: %v", err)
 	}
 	ts, _ := time.Parse("2006-01-02T15:04:05Z", signed.Meta.Timestamp)
@@ -51,7 +52,7 @@ func TestRepublishComment_PreservesPublishedAndVersionsHistory(t *testing.T) {
 	origContent, _ := os.ReadFile(filepath.Join(dataDir, commentPath))
 	origPublished := ParseFrontmatter(string(origContent))["published"]
 
-	result, err := RepublishComment(dataDir, commentPath, "Edited body, much improved.", privKey, &DiscoveryConfig{})
+	result, err := RepublishComment(storage.At(dataDir), commentPath, "Edited body, much improved.", privKey, &DiscoveryConfig{})
 	if err != nil {
 		t.Fatalf("RepublishComment: %v", err)
 	}
@@ -97,12 +98,12 @@ func TestRepublishComment_AdvancesIndexPreservingShape(t *testing.T) {
 	_, commentPath, _ := setupPublishedComment(t, dataDir, "Great post!")
 	privKey := generateTestKey(t)
 
-	result, err := RepublishComment(dataDir, commentPath, "Edited.", privKey, &DiscoveryConfig{})
+	result, err := RepublishComment(storage.At(dataDir), commentPath, "Edited.", privKey, &DiscoveryConfig{})
 	if err != nil {
 		t.Fatalf("RepublishComment: %v", err)
 	}
 
-	entries, err := metadata.LoadPublicIndex(dataDir)
+	entries, err := metadata.LoadPublicIndex(storage.At(dataDir))
 	if err != nil {
 		t.Fatalf("LoadPublicIndex: %v", err)
 	}
@@ -136,12 +137,12 @@ func TestRepublishComment_BlessedCarriesForward(t *testing.T) {
 	// at the original version.
 	postPath := "posts/20260101/hello.md"
 	commentURL := "https://bob.polis.pub/comments/" + filepath.Base(filepath.Dir(commentPath)) + "/" + commentID + ".md"
-	if err := metadata.AddBlessedComment(dataDir, postPath, metadata.BlessedComment{URL: commentURL, Version: origVersion}); err != nil {
+	if err := metadata.AddBlessedComment(storage.At(dataDir), postPath, metadata.BlessedComment{URL: commentURL, Version: origVersion}); err != nil {
 		t.Fatalf("AddBlessedComment: %v", err)
 	}
 	os.Remove(filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", StatusPending, commentID+".md"))
 
-	result, err := RepublishComment(dataDir, commentPath, "Edited blessed comment.", privKey, &DiscoveryConfig{})
+	result, err := RepublishComment(storage.At(dataDir), commentPath, "Edited blessed comment.", privKey, &DiscoveryConfig{})
 	if err != nil {
 		t.Fatalf("RepublishComment: %v", err)
 	}
@@ -153,7 +154,7 @@ func TestRepublishComment_BlessedCarriesForward(t *testing.T) {
 	}
 
 	// blessed.json must still pin the ORIGINAL version (carry forward / divergence).
-	blessed, err := metadata.GetBlessedCommentsForPost(dataDir, postPath)
+	blessed, err := metadata.GetBlessedCommentsForPost(storage.At(dataDir), postPath)
 	if err != nil {
 		t.Fatalf("GetBlessedCommentsForPost: %v", err)
 	}
@@ -175,7 +176,7 @@ func TestRepublishComment_PendingStaysPendingAndSyncs(t *testing.T) {
 
 	// Pending copy still present (PublishComment leaves it). DS not configured, so
 	// no auto-bless transition can occur.
-	result, err := RepublishComment(dataDir, commentPath, "Edited pending comment.", privKey, &DiscoveryConfig{})
+	result, err := RepublishComment(storage.At(dataDir), commentPath, "Edited pending comment.", privKey, &DiscoveryConfig{})
 	if err != nil {
 		t.Fatalf("RepublishComment: %v", err)
 	}
@@ -205,13 +206,13 @@ func TestIsEditedSinceBlessing(t *testing.T) {
 	dateDir := filepath.Base(filepath.Dir(commentPath))
 	postPath := "posts/20260101/hello.md"
 	commentURL := "https://bob.polis.pub/comments/" + dateDir + "/" + commentID + ".md"
-	if err := metadata.AddBlessedComment(dataDir, postPath, metadata.BlessedComment{URL: commentURL, Version: origVersion}); err != nil {
+	if err := metadata.AddBlessedComment(storage.At(dataDir), postPath, metadata.BlessedComment{URL: commentURL, Version: origVersion}); err != nil {
 		t.Fatalf("AddBlessedComment: %v", err)
 	}
 	os.Remove(filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", StatusPending, commentID+".md"))
 
 	// Freshly blessed, not yet edited.
-	edited, err := IsEditedSinceBlessing(dataDir, commentPath)
+	edited, err := IsEditedSinceBlessing(storage.At(dataDir), commentPath)
 	if err != nil {
 		t.Fatalf("IsEditedSinceBlessing: %v", err)
 	}
@@ -220,11 +221,11 @@ func TestIsEditedSinceBlessing(t *testing.T) {
 	}
 
 	// Republish: blessed.json stays pinned to origVersion, the file advances.
-	if _, err := RepublishComment(dataDir, commentPath, "Edited after blessing.", privKey, &DiscoveryConfig{}); err != nil {
+	if _, err := RepublishComment(storage.At(dataDir), commentPath, "Edited after blessing.", privKey, &DiscoveryConfig{}); err != nil {
 		t.Fatalf("RepublishComment: %v", err)
 	}
 
-	edited, err = IsEditedSinceBlessing(dataDir, commentPath)
+	edited, err = IsEditedSinceBlessing(storage.At(dataDir), commentPath)
 	if err != nil {
 		t.Fatalf("IsEditedSinceBlessing: %v", err)
 	}
@@ -237,7 +238,7 @@ func TestIsEditedSinceBlessing_NotBlessed(t *testing.T) {
 	dataDir := t.TempDir()
 	_, commentPath, _ := setupPublishedComment(t, dataDir, "Great post!")
 
-	edited, err := IsEditedSinceBlessing(dataDir, commentPath)
+	edited, err := IsEditedSinceBlessing(storage.At(dataDir), commentPath)
 	if err != nil {
 		t.Fatalf("IsEditedSinceBlessing: %v", err)
 	}
@@ -252,15 +253,15 @@ func TestLocalBlessingState(t *testing.T) {
 	os.MkdirAll(filepath.Join(base, StatusPending), 0755)
 	os.MkdirAll(filepath.Join(base, StatusDenied), 0755)
 
-	if got := localBlessingState(dataDir, "nope"); got != StatusBlessed {
+	if got := localBlessingState(storage.At(dataDir), "nope"); got != StatusBlessed {
 		t.Errorf("absent comment = %q, want blessed", got)
 	}
 	os.WriteFile(filepath.Join(base, StatusPending, "p.md"), []byte("x"), 0644)
-	if got := localBlessingState(dataDir, "p"); got != StatusPending {
+	if got := localBlessingState(storage.At(dataDir), "p"); got != StatusPending {
 		t.Errorf("pending = %q, want pending", got)
 	}
 	os.WriteFile(filepath.Join(base, StatusDenied, "d.md"), []byte("x"), 0644)
-	if got := localBlessingState(dataDir, "d"); got != StatusDenied {
+	if got := localBlessingState(storage.At(dataDir), "d"); got != StatusDenied {
 		t.Errorf("denied = %q, want denied", got)
 	}
 }

@@ -1,6 +1,7 @@
 package actor
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +20,7 @@ func initActorSite(t *testing.T, tenantsDir, handle string) string {
 	if err := os.MkdirAll(siteDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := site.Init(siteDir, site.InitOptions{
+	if _, err := site.Init(storage.At(siteDir), site.InitOptions{
 		BaseURL:   "https://" + handle + ".polis.pub",
 		SiteTitle: handle,
 	}); err != nil {
@@ -39,14 +40,14 @@ func initActorSite(t *testing.T, tenantsDir, handle string) string {
 func TestPaces_PolisValidateOnAnActorSite(t *testing.T) {
 	siteDir := initActorSite(t, t.TempDir(), "judge")
 
-	result := site.Validate(siteDir)
+	result := site.Validate(storage.At(siteDir))
 	if result.Status != site.StatusValid {
 		t.Fatalf("an actor site provisioned through site.Init is not valid: %s %+v", result.Status, result.Errors)
 	}
 
 	// And the minimal variant, for the record.
 	os.RemoveAll(filepath.Join(siteDir, "content", "pub.polis.core", "bundle.json"))
-	sparse := site.Validate(siteDir)
+	sparse := site.Validate(storage.At(siteDir))
 	found := false
 	for _, e := range sparse.Errors {
 		if e.Code == "BUNDLE_MISSING" {
@@ -96,7 +97,7 @@ func TestPaces_GuardIsNotConfusedByAPointerIntoAnotherDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := site.SetActorRegistryPointer(opDir, "/../../etc/passwd"); err != nil {
+	if err := site.SetActorRegistryPointer(storage.At(opDir), "/../../etc/passwd"); err != nil {
 		t.Fatal(err)
 	}
 	g := LoadGuard(tenantsDir)

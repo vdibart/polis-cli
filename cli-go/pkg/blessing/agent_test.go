@@ -3,6 +3,7 @@ package blessing
 import (
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -41,7 +42,7 @@ func newRecordingDS(t *testing.T) *recordingDS {
 func agentSite(t *testing.T) (string, []byte) {
 	t.Helper()
 	dir := t.TempDir()
-	if _, err := site.Init(dir, site.InitOptions{BaseURL: "https://alice.polis.pub", SiteTitle: "alice"}); err != nil {
+	if _, err := site.Init(storage.At(dir), site.InitOptions{BaseURL: "https://alice.polis.pub", SiteTitle: "alice"}); err != nil {
 		t.Fatal(err)
 	}
 	key, err := os.ReadFile(filepath.Join(dir, ".polis", "keys", "id_ed25519"))
@@ -60,11 +61,11 @@ var testRequest = &IncomingRequest{
 func TestAgentActsWithoutALiveGrantSignNothing(t *testing.T) {
 	dir, key := agentSite(t)
 	ds := newRecordingDS(t)
-	client := discovery.NewClient(ds.srv.URL, "")
-	before, _ := os.ReadFile(metadata.BlessedPath(dir))
+	client := discovery.NewClient(ds.srv.URL)
+	before, _ := os.ReadFile(filepath.Join(dir, metadata.BlessedKey))
 
 	for name, g := range map[string]*attestation.LiveGrant{"nil": nil, "zero": {}} {
-		if _, err := GrantAsAgent(dir, testRequest, client, nil, key, g); !errors.Is(err, agent.ErrNoLiveGrant) {
+		if _, err := GrantAsAgent(storage.At(dir), testRequest, client, nil, key, g); !errors.Is(err, agent.ErrNoLiveGrant) {
 			t.Errorf("GrantAsAgent(%s grant) err = %v, want ErrNoLiveGrant", name, err)
 		}
 		if _, err := DenyAsAgent(testRequest.CommentURL, testRequest.InReplyTo, client, key, g); !errors.Is(err, agent.ErrNoLiveGrant) {
@@ -74,20 +75,20 @@ func TestAgentActsWithoutALiveGrantSignNothing(t *testing.T) {
 	if n := ds.calls.Load(); n != 0 {
 		t.Fatalf("%d relationship requests were sent without a live grant", n)
 	}
-	if after, _ := os.ReadFile(metadata.BlessedPath(dir)); string(after) != string(before) {
+	if after, _ := os.ReadFile(filepath.Join(dir, metadata.BlessedKey)); string(after) != string(before) {
 		t.Fatalf("blessed.json was written without a live grant:\nbefore: %s\nafter:  %s", before, after)
 	}
 }
 
 func TestAgentGrantIsSignedWithTheUsersKeyAndMarkedInBothPlaces(t *testing.T) {
 	dir, key := agentSite(t)
-	if _, _, err := agent.IssueDefault(agent.Config{SiteDir: dir, BaseURL: "https://alice.polis.pub", PrivateKey: key}); err != nil {
+	if _, _, err := agent.IssueDefault(agent.Config{Site: storage.At(dir), BaseURL: "https://alice.polis.pub", PrivateKey: key}); err != nil {
 		t.Fatal(err)
 	}
-	live, _ := agent.LiveRosieGrant(dir)
+	live, _ := agent.LiveRosieGrant(storage.At(dir))
 	ds := newRecordingDS(t)
 
-	if _, err := GrantAsAgent(dir, testRequest, discovery.NewClient(ds.srv.URL, ""), nil, key, live); err != nil {
+	if _, err := GrantAsAgent(storage.At(dir), testRequest, discovery.NewClient(ds.srv.URL), nil, key, live); err != nil {
 		t.Fatal(err)
 	}
 
@@ -98,7 +99,7 @@ func TestAgentGrantIsSignedWithTheUsersKeyAndMarkedInBothPlaces(t *testing.T) {
 
 	// The blessed.json entry — marked, and the list verifies against the USER's
 	// published key.
-	bc, err := metadata.LoadBlessedComments(dir)
+	bc, err := metadata.LoadBlessedComments(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,17 +107,17 @@ func TestAgentGrantIsSignedWithTheUsersKeyAndMarkedInBothPlaces(t *testing.T) {
 	if e.Agent != agent.Rosie || e.Grant != live.URL() || e.Version != testRequest.CommentVersion {
 		t.Fatalf("blessed entry = %+v", e)
 	}
-	if st, err := metadata.VerifyBlessedSite(dir); st != metadata.StatusValid {
+	if st, err := metadata.VerifyBlessedSite(storage.At(dir)); st != metadata.StatusValid {
 		t.Fatalf("marked list status = %s (%v), want valid", st, err)
 	}
 }
 
 func TestAgentDenyIsMarked(t *testing.T) {
 	dir, key := agentSite(t)
-	_, _, _ = agent.IssueDefault(agent.Config{SiteDir: dir, BaseURL: "https://alice.polis.pub", PrivateKey: key})
-	live, _ := agent.LiveRosieGrant(dir)
+	_, _, _ = agent.IssueDefault(agent.Config{Site: storage.At(dir), BaseURL: "https://alice.polis.pub", PrivateKey: key})
+	live, _ := agent.LiveRosieGrant(storage.At(dir))
 	ds := newRecordingDS(t)
-	if _, err := DenyAsAgent(testRequest.CommentURL, testRequest.InReplyTo, discovery.NewClient(ds.srv.URL, ""), key, live); err != nil {
+	if _, err := DenyAsAgent(testRequest.CommentURL, testRequest.InReplyTo, discovery.NewClient(ds.srv.URL), key, live); err != nil {
 		t.Fatal(err)
 	}
 	if ds.last.Action != "deny" || ds.last.Agent != agent.Rosie || ds.last.Grant != live.URL() {
@@ -128,13 +129,13 @@ func TestAgentDenyIsMarked(t *testing.T) {
 func TestTheUsersOwnGrantCarriesNoMarker(t *testing.T) {
 	dir, key := agentSite(t)
 	ds := newRecordingDS(t)
-	if _, err := Grant(dir, testRequest, discovery.NewClient(ds.srv.URL, ""), nil, key); err != nil {
+	if _, err := Grant(dir, testRequest, discovery.NewClient(ds.srv.URL), nil, key); err != nil {
 		t.Fatal(err)
 	}
 	if ds.last.Agent != "" || ds.last.Grant != "" {
 		t.Fatalf("the user's own grant request is marked: %+v", ds.last)
 	}
-	bc, _ := metadata.LoadBlessedComments(dir)
+	bc, _ := metadata.LoadBlessedComments(storage.At(dir))
 	if e := bc.Comments[0].Blessed[0]; e.Agent != "" || e.Grant != "" {
 		t.Fatalf("the user's own blessed entry is marked: %+v", e)
 	}

@@ -2,6 +2,7 @@ package blessing
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -56,7 +57,7 @@ func writeEmptyBlessed(t *testing.T, siteDir string) {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	empty := &metadata.BlessedComments{Version: "test", Comments: []metadata.PostComments{}}
-	if err := metadata.SaveBlessedComments(siteDir, empty); err != nil {
+	if err := metadata.SaveBlessedComments(storage.At(siteDir), empty); err != nil {
 		t.Fatalf("SaveBlessedComments: %v", err)
 	}
 }
@@ -90,7 +91,7 @@ func TestSyncBlessedComments_AddsNewComments(t *testing.T) {
 		t.Errorf("result.Existing = %d, want 0", result.Existing)
 	}
 
-	bc, err := metadata.LoadBlessedComments(siteDir)
+	bc, err := metadata.LoadBlessedComments(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
 	}
@@ -139,7 +140,7 @@ func TestSyncBlessedComments_OnlySyncsPostOwnerSide(t *testing.T) {
 		t.Errorf("result.Synced = %d, want 1 (only the post-owner grant)", result.Synced)
 	}
 
-	bc, err := metadata.LoadBlessedComments(siteDir)
+	bc, err := metadata.LoadBlessedComments(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
 	}
@@ -172,7 +173,7 @@ func TestSyncBlessedComments_SkipsExisting(t *testing.T) {
 			},
 		},
 	}
-	if err := metadata.SaveBlessedComments(siteDir, existingBC); err != nil {
+	if err := metadata.SaveBlessedComments(storage.At(siteDir), existingBC); err != nil {
 		t.Fatalf("SaveBlessedComments: %v", err)
 	}
 
@@ -263,7 +264,7 @@ func TestSyncBlessedComments_ExtractsPostPathFromTargetURL(t *testing.T) {
 		t.Fatalf("SyncBlessedComments: %v", err)
 	}
 
-	bc, err := metadata.LoadBlessedComments(siteDir)
+	bc, err := metadata.LoadBlessedComments(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
 	}

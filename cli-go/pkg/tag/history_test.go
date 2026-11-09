@@ -2,6 +2,7 @@ package tag_test
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,7 +31,7 @@ func TestATagFileSignedBeforeARotationVerifiesAfterIt(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".well-known", "polis"), wk, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := site.WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := site.WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	canonical, _ := discovery.MakeKeyRotationCanonicalJSON(domain, k0pub, k1pub, "2026-09-15T10:22:03Z")
@@ -38,10 +39,10 @@ func TestATagFileSignedBeforeARotationVerifiesAfterIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := site.RecordKeyRotation(dir, k1pub, sig, "2026-09-15T10:22:03Z"); err != nil {
+	if err := site.RecordKeyRotation(storage.At(dir), k1pub, sig, "2026-09-15T10:22:03Z", ""); err != nil {
 		t.Fatal(err)
 	}
-	chain, _ := site.LoadKeyHistory(dir)
+	chain, _ := site.LoadKeyHistory(storage.At(dir))
 	if err := site.VerifyChain(chain, domain); err != nil {
 		t.Fatalf("setup: chain must verify: %v", err)
 	}

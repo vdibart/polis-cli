@@ -6,8 +6,11 @@ package policy
 import (
 	"bufio"
 	"encoding/json"
-	"os"
-	"path/filepath"
+	"errors"
+	"io"
+	"io/fs"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Policy is a single line from a rules.jsonl file.
@@ -77,14 +80,13 @@ type Event struct {
 	TargetPath   string
 }
 
-// DefaultPaths returns the private and public policy file paths for a site.
+// The private and public policy files, as keys on the site.
 // Private: .polis/policies/rules.jsonl (not published, highest priority)
 // Public:  policies/rules.jsonl (published on site, lower priority)
-func DefaultPaths(dataDir string) (privatePath, publicPath string) {
-	privatePath = filepath.Join(dataDir, ".polis", "policies", "rules.jsonl")
-	publicPath = filepath.Join(dataDir, "policies", "rules.jsonl")
-	return
-}
+const (
+	PrivateRulesKey = ".polis/policies/rules.jsonl"
+	PublicRulesKey  = "policies/rules.jsonl"
+)
 
 // DefaultPublicPolicyContent returns the default public policy file content for new sites.
 // Public policies are published at policies/rules.jsonl and visible to the network.
@@ -103,7 +105,7 @@ func DefaultPaths(dataDir string) (privatePath, publicPath string) {
 // check (policycheck.CheckDMEligibilityURL) fetches the recipient's public
 // policy to determine eligibility before sending.
 func DefaultPublicPolicyContent() string {
-	return `{"version":2,"generator":"polis-cli-go/` + policyVersion + `"}
+	return `{"version":2,"generator":"` + GetGenerator() + `"}
 {"active":true,"policy":"allow pub.polis.dm from following"}
 {"active":true,"policy":"deny pub.polis.dm from all"}
 {"active":true,"policy":"bless pub.polis.comment from self"}
@@ -122,27 +124,41 @@ func DefaultPublicPolicyContent() string {
 // Empty by default — a new site has nothing to hide. All standard rules live
 // in the public policy. Private overrides are added as needed.
 func DefaultPrivatePolicyContent() string {
-	return `{"version":2,"generator":"polis-cli-go/` + policyVersion + `"}
+	return `{"version":2,"generator":"` + GetGenerator() + `"}
 `
 }
 
-// policyVersion is the current polis-cli-go version string written into the
-// generator field of new policy files. Kept in sync with cli-go/version.txt.
-const policyVersion = "0.63.0"
+// Version is the build that writes policy files, set at startup by the CLI
+// (cmd/root.go) and the webapp (server.go) beside every other package's. It
+// was a hard-coded "0.63.0", so every policy file named a build that did not
+// write it.
+var Version = "dev"
 
-// LoadPolicies loads policies from private and public JSONL files.
-// Private policies are loaded first (higher priority), then public.
+// GetGenerator is the generator string written into a policy file's header.
+//
+// ⚠️ It changes with every release, which is why ContentKey compares policy
+// content with the header's generator removed: otherwise a version bump would
+// flag every default-policy tenant as drifted.
+func GetGenerator() string {
+	return "polis-cli-go/" + Version
+}
+
+// LoadPolicies loads a site's policies from its private and public JSONL
+// files. Private policies are loaded first (higher priority), then public.
 // Missing files are silently skipped. Malformed lines are skipped.
-func LoadPolicies(privatePath, publicPath string) ([]Policy, error) {
+func LoadPolicies(site storage.Site) ([]Policy, error) {
+	if !site.Valid() {
+		return nil, errors.New("load policies: site handle is not usable")
+	}
 	var policies []Policy
 
-	privPolicies, err := loadJSONL(privatePath)
+	privPolicies, err := loadJSONL(site, PrivateRulesKey)
 	if err != nil {
 		return nil, err
 	}
 	policies = append(policies, privPolicies...)
 
-	pubPolicies, err := loadJSONL(publicPath)
+	pubPolicies, err := loadJSONL(site, PublicRulesKey)
 	if err != nil {
 		return nil, err
 	}
@@ -151,20 +167,34 @@ func LoadPolicies(privatePath, publicPath string) ([]Policy, error) {
 	return policies, nil
 }
 
-// loadJSONL reads a JSONL file and returns parsed Policy entries.
-// Returns empty slice on missing file. Skips malformed lines.
-func loadJSONL(path string) ([]Policy, error) {
-	file, err := os.Open(path)
+// loadJSONL reads one policy file and returns its parsed entries.
+// Returns empty slice on a missing file. Skips malformed lines.
+//
+// ⭐ It STREAMS THE BYTES with a bufio.Scanner rather than reading the file
+// whole, which is what matters for a file that grows without bound, and
+// storage.OpenRead is what keeps that true on a filesystem. A store with no
+// filesystem can only hand the value over whole.
+//
+// ⚠️ A review called the streaming a rationalisation because the PARSED
+// entries are accumulated into a slice. That is true and is a different
+// question: the parsed form is bounded by what the caller needs, while a whole
+// read would hold the raw bytes as well.
+func loadJSONL(site storage.Site, key string) ([]Policy, error) {
+	file, err := storage.OpenRead(site, key)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
 	}
 	defer file.Close()
+	return parseJSONL(file)
+}
 
+// parseJSONL parses policy lines from r, skipping blank and malformed ones.
+func parseJSONL(r io.Reader) ([]Policy, error) {
 	var policies []Policy
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {

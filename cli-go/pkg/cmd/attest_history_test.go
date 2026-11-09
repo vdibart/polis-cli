@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +38,7 @@ func TestAttestVerifyResolvesARecordSignedBeforeARotation(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".well-known", "polis"), wk, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := site.WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := site.WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -62,7 +63,7 @@ func TestAttestVerifyResolvesARecordSignedBeforeARotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := site.RecordKeyRotation(dir, k1pub, sig, "2026-09-15T10:22:03Z"); err != nil {
+	if err := site.RecordKeyRotation(storage.At(dir), k1pub, sig, "2026-09-15T10:22:03Z", ""); err != nil {
 		t.Fatal(err)
 	}
 

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
@@ -70,9 +71,8 @@ Examples:
 }
 
 func handleTagList() {
-	dataDir := getDataDir()
 
-	tags, err := tag.ListTags(dataDir)
+	tags, err := tag.ListTags(getSite())
 	if err != nil {
 		exitError("Failed to list tags: %v", err)
 	}
@@ -108,15 +108,13 @@ func handleTagList() {
 }
 
 func handleTagShow(name string) {
-	dataDir := getDataDir()
 
 	normalized, err := tag.NormalizeTagName(name)
 	if err != nil {
 		exitError("Invalid tag name: %v", err)
 	}
 
-	path := tag.TagPath(dataDir, normalized)
-	tf, err := tag.Load(path)
+	tf, err := tag.LoadTag(getSite(), normalized)
 	if err != nil {
 		exitError("Failed to load tag %q: %v", normalized, err)
 	}
@@ -156,7 +154,7 @@ func handleTagApply(name, targetURI string) {
 	}
 	defer signing.ZeroKey(privKey)
 
-	tf, err := tag.ApplyTag(dataDir, name, targetURI, privKey, generator)
+	tf, err := tag.ApplyTag(getSite(), name, targetURI, privKey, generator)
 	if err != nil {
 		exitError("Failed to apply tag: %v", err)
 	}
@@ -165,10 +163,9 @@ func handleTagApply(name, targetURI string) {
 	if discoveryURL != "" && baseURL != "" {
 		dsCfg := &tag.DiscoveryConfig{
 			DiscoveryURL: discoveryURL,
-			DiscoveryKey: discoveryKey,
 			BaseURL:      baseURL,
 		}
-		if err := tag.SyncTag(dataDir, tf, privKey, dsCfg); err != nil {
+		if err := tag.SyncTag(storage.At(dataDir), tf, privKey, dsCfg); err != nil {
 			fmt.Fprintf(os.Stderr, "[!] Discovery sync skipped: %v\n", err)
 		}
 	}
@@ -198,7 +195,7 @@ func handleTagRemove(name, targetURI string) {
 	}
 	defer signing.ZeroKey(privKey)
 
-	tf, err := tag.RemoveTarget(dataDir, name, targetURI, privKey, generator)
+	tf, err := tag.RemoveTarget(getSite(), name, targetURI, privKey, generator)
 	if err != nil {
 		exitError("Failed to remove target: %v", err)
 	}
@@ -207,7 +204,6 @@ func handleTagRemove(name, targetURI string) {
 	if discoveryURL != "" && baseURL != "" {
 		dsCfg := &tag.DiscoveryConfig{
 			DiscoveryURL: discoveryURL,
-			DiscoveryKey: discoveryKey,
 			BaseURL:      baseURL,
 		}
 		if err := tag.UnregisterTarget(name, targetURI, privKey, dsCfg); err != nil {
@@ -240,13 +236,12 @@ func handleTagDelete(name string) {
 	}
 
 	// Load tag first to get targets for DS cleanup
-	path := tag.TagPath(dataDir, normalized)
-	tf, err := tag.Load(path)
+	tf, err := tag.LoadTag(getSite(), normalized)
 	if err != nil {
 		exitError("Failed to load tag %q: %v", normalized, err)
 	}
 
-	if err := tag.DeleteTag(dataDir, normalized); err != nil {
+	if err := tag.DeleteTag(getSite(), normalized); err != nil {
 		exitError("Failed to delete tag: %v", err)
 	}
 
@@ -257,7 +252,6 @@ func handleTagDelete(name string) {
 			defer signing.ZeroKey(privKey)
 			dsCfg := &tag.DiscoveryConfig{
 				DiscoveryURL: discoveryURL,
-				DiscoveryKey: discoveryKey,
 				BaseURL:      baseURL,
 			}
 			for _, target := range tf.Targets {

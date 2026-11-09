@@ -3,6 +3,7 @@ package cmd
 import (
 	"flag"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"strings"
 
@@ -45,7 +46,7 @@ func handleNotificationsClear(args []string) {
 		exitError("Not a polis site directory")
 	}
 
-	count, err := notification.ClearAll(dir)
+	count, err := notification.ClearAll(storage.At(dir))
 	if err != nil {
 		exitError("Failed to clear notifications: %v", err)
 	}
@@ -84,7 +85,7 @@ func handleNotificationsList(args []string) {
 	}
 
 	// Read notifications from new state file
-	mgr := notification.NewManager(dir, discoveryDomain)
+	mgr := notification.NewManager(storage.At(dir), discoveryDomain)
 
 	var entries []notification.StateEntry
 	var err error
@@ -101,13 +102,12 @@ func handleNotificationsList(args []string) {
 	// Also fetch pending blessings from discovery service
 	var pendingBlessings []map[string]interface{}
 
-	apiKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	baseURL := os.Getenv("POLIS_BASE_URL")
 
 	if baseURL != "" {
 		domain := extractDomain(baseURL)
 		privKey, _ := loadPrivateKey(dir)
-		client := discovery.NewAuthenticatedClient(discoveryURL, apiKey, domain, privKey)
+		client := discovery.NewAuthenticatedClient(discoveryURL, domain, privKey)
 
 		// Get pending blessings via relationship-query
 		resp, err := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{

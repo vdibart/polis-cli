@@ -2,6 +2,7 @@ package blessing
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,7 +27,7 @@ func TestSyncBlessedComments_TrustsDSAutobless(t *testing.T) {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	emptyBC := &metadata.BlessedComments{Version: "test", Comments: []metadata.PostComments{}}
-	if err := metadata.SaveBlessedComments(siteDir, emptyBC); err != nil {
+	if err := metadata.SaveBlessedComments(storage.At(siteDir), emptyBC); err != nil {
 		t.Fatalf("SaveBlessedComments: %v", err)
 	}
 
@@ -71,7 +72,7 @@ func TestSyncBlessedComments_PartialOverlapAcrossPosts(t *testing.T) {
 			{Post: "posts/p2.md", Blessed: []metadata.BlessedComment{{URL: "https://b.example/comments/old2.md", BlessedAt: "2026-04-01T00:00:00Z"}}},
 		},
 	}
-	if err := metadata.SaveBlessedComments(siteDir, existing); err != nil {
+	if err := metadata.SaveBlessedComments(storage.At(siteDir), existing); err != nil {
 		t.Fatalf("SaveBlessedComments: %v", err)
 	}
 
@@ -92,7 +93,7 @@ func TestSyncBlessedComments_PartialOverlapAcrossPosts(t *testing.T) {
 		t.Errorf("expected synced=2 existing=2, got synced=%d existing=%d", result.Synced, result.Existing)
 	}
 
-	bc, _ := metadata.LoadBlessedComments(siteDir)
+	bc, _ := metadata.LoadBlessedComments(storage.At(siteDir))
 	// Final state: p1 has 2, p2 has 1, p3 has 1
 	postCounts := map[string]int{}
 	for _, post := range bc.Comments {
@@ -117,7 +118,7 @@ func TestSyncBlessedComments_MalformedRecord_Tolerated(t *testing.T) {
 	if err := os.MkdirAll(commentDir, 0755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := metadata.SaveBlessedComments(siteDir, &metadata.BlessedComments{Version: "test"}); err != nil {
+	if err := metadata.SaveBlessedComments(storage.At(siteDir), &metadata.BlessedComments{Version: "test"}); err != nil {
 		t.Fatalf("SaveBlessedComments: %v", err)
 	}
 
@@ -156,7 +157,7 @@ func TestSyncBlessedComments_PaginatesStream(t *testing.T) {
 	if err := os.MkdirAll(commentDir, 0755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := metadata.SaveBlessedComments(siteDir, &metadata.BlessedComments{Version: "test"}); err != nil {
+	if err := metadata.SaveBlessedComments(storage.At(siteDir), &metadata.BlessedComments{Version: "test"}); err != nil {
 		t.Fatalf("SaveBlessedComments: %v", err)
 	}
 

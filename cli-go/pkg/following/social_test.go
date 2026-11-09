@@ -2,6 +2,7 @@ package following
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,9 +40,10 @@ func testPrivKey(t *testing.T) []byte {
 func testPolicies(t *testing.T) []policy.Policy {
 	t.Helper()
 	dir := t.TempDir()
-	pubPath := filepath.Join(dir, "public.jsonl")
+	pubPath := filepath.Join(dir, filepath.FromSlash(policy.PublicRulesKey))
+	os.MkdirAll(filepath.Dir(pubPath), 0755)
 	os.WriteFile(pubPath, []byte(policy.DefaultPublicPolicyContent()), 0644)
-	policies, err := policy.LoadPolicies("/nonexistent", pubPath)
+	policies, err := policy.LoadPolicies(storage.At(dir))
 	if err != nil {
 		t.Fatalf("failed to load test policies: %v", err)
 	}
@@ -86,12 +88,12 @@ func TestFollowWithBlessing_AddsToFollowing(t *testing.T) {
 	defer discoverySrv.Close()
 
 	tmpDir := t.TempDir()
-	followingPath := filepath.Join(tmpDir, "following.json")
+	followingPathSite := storage.At(tmpDir)
 
-	discoveryClient := discovery.NewClient(discoverySrv.URL, "test-key")
+	discoveryClient := discovery.NewClient(discoverySrv.URL)
 	remoteClient := remote.NewClient()
 
-	result, err := FollowWithBlessing(followingPath, remoteSite.URL, discoveryClient, remoteClient, testPrivKey(t), testPolicies(t))
+	result, err := FollowWithBlessing(followingPathSite, remoteSite.URL, discoveryClient, remoteClient, testPrivKey(t), testPolicies(t))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -107,7 +109,7 @@ func TestFollowWithBlessing_AddsToFollowing(t *testing.T) {
 	}
 
 	// Verify following.json was updated
-	f, err := Load(followingPath)
+	f, err := LoadSite(followingPathSite)
 	if err != nil {
 		t.Fatalf("failed to load following.json: %v", err)
 	}
@@ -127,16 +129,16 @@ func TestFollowWithBlessing_SignsTheFile(t *testing.T) {
 	discoverySrv := mockDiscoveryServer(t)
 	defer discoverySrv.Close()
 
-	followingPath := filepath.Join(t.TempDir(), "following.json")
+	followingPathSite := storage.At(t.TempDir())
 	priv, pub := testKeypair(t)
 
-	if _, err := FollowWithBlessing(followingPath, remoteSite.URL,
-		discovery.NewClient(discoverySrv.URL, "test-key"), remote.NewClient(),
+	if _, err := FollowWithBlessing(followingPathSite, remoteSite.URL,
+		discovery.NewClient(discoverySrv.URL), remote.NewClient(),
 		priv, testPolicies(t)); err != nil {
 		t.Fatalf("follow: %v", err)
 	}
 
-	f, err := Load(followingPath)
+	f, err := LoadSite(followingPathSite)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -147,12 +149,12 @@ func TestFollowWithBlessing_SignsTheFile(t *testing.T) {
 
 	// And unfollowing re-signs over the new roster rather than leaving the old
 	// signature stranded over content it no longer covers.
-	if _, err := UnfollowWithDenial(followingPath, remoteSite.URL,
-		discovery.NewClient(discoverySrv.URL, "test-key"), remote.NewClient(),
+	if _, err := UnfollowWithDenial(followingPathSite, remoteSite.URL,
+		discovery.NewClient(discoverySrv.URL), remote.NewClient(),
 		priv, testPolicies(t)); err != nil {
 		t.Fatalf("unfollow: %v", err)
 	}
-	f, err = Load(followingPath)
+	f, err = LoadSite(followingPathSite)
 	if err != nil {
 		t.Fatalf("load after unfollow: %v", err)
 	}
@@ -169,19 +171,19 @@ func TestFollowWithBlessing_AlreadyFollowed(t *testing.T) {
 	defer discoverySrv.Close()
 
 	tmpDir := t.TempDir()
-	followingPath := filepath.Join(tmpDir, "following.json")
+	followingPathSite := storage.At(tmpDir)
 
-	discoveryClient := discovery.NewClient(discoverySrv.URL, "test-key")
+	discoveryClient := discovery.NewClient(discoverySrv.URL)
 	remoteClient := remote.NewClient()
 
 	// Follow first time
-	_, err := FollowWithBlessing(followingPath, remoteSite.URL, discoveryClient, remoteClient, testPrivKey(t), testPolicies(t))
+	_, err := FollowWithBlessing(followingPathSite, remoteSite.URL, discoveryClient, remoteClient, testPrivKey(t), testPolicies(t))
 	if err != nil {
 		t.Fatalf("first follow failed: %v", err)
 	}
 
 	// Follow second time
-	result, err := FollowWithBlessing(followingPath, remoteSite.URL, discoveryClient, remoteClient, testPrivKey(t), testPolicies(t))
+	result, err := FollowWithBlessing(followingPathSite, remoteSite.URL, discoveryClient, remoteClient, testPrivKey(t), testPolicies(t))
 	if err != nil {
 		t.Fatalf("second follow failed: %v", err)
 	}
@@ -198,17 +200,17 @@ func TestUnfollowWithDenial_RemovesFromFollowing(t *testing.T) {
 	defer discoverySrv.Close()
 
 	tmpDir := t.TempDir()
-	followingPath := filepath.Join(tmpDir, "following.json")
+	followingPathSite := storage.At(tmpDir)
 
 	// Add author first
 	f := &FollowingFile{Version: Version, Following: []FollowingEntry{}}
 	f.Add(remoteSite.URL)
-	Save(followingPath, f)
+	Save(followingPathSite, f)
 
-	discoveryClient := discovery.NewClient(discoverySrv.URL, "test-key")
+	discoveryClient := discovery.NewClient(discoverySrv.URL)
 	remoteClient := remote.NewClient()
 
-	result, err := UnfollowWithDenial(followingPath, remoteSite.URL, discoveryClient, remoteClient, testPrivKey(t), testPolicies(t))
+	result, err := UnfollowWithDenial(followingPathSite, remoteSite.URL, discoveryClient, remoteClient, testPrivKey(t), testPolicies(t))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -218,7 +220,7 @@ func TestUnfollowWithDenial_RemovesFromFollowing(t *testing.T) {
 	}
 
 	// Verify removed from following.json
-	f, err = Load(followingPath)
+	f, err = LoadSite(followingPathSite)
 	if err != nil {
 		t.Fatalf("failed to load following.json: %v", err)
 	}
@@ -235,12 +237,12 @@ func TestUnfollowWithDenial_NotFollowing(t *testing.T) {
 	defer discoverySrv.Close()
 
 	tmpDir := t.TempDir()
-	followingPath := filepath.Join(tmpDir, "following.json")
+	followingPathSite := storage.At(tmpDir)
 
-	discoveryClient := discovery.NewClient(discoverySrv.URL, "test-key")
+	discoveryClient := discovery.NewClient(discoverySrv.URL)
 	remoteClient := remote.NewClient()
 
-	result, err := UnfollowWithDenial(followingPath, remoteSite.URL, discoveryClient, remoteClient, testPrivKey(t), testPolicies(t))
+	result, err := UnfollowWithDenial(followingPathSite, remoteSite.URL, discoveryClient, remoteClient, testPrivKey(t), testPolicies(t))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -281,8 +283,8 @@ func TestFollowWithBlessing_AnnouncesWithConfigDespiteCorruptGlobals(t *testing.
 
 	// This tenant's real data dir, with a registration marker under the DS domain.
 	siteDir := t.TempDir()
-	followingPath := filepath.Join(siteDir, "following.json")
-	if err := discovery.WriteRegistrationMarker(siteDir, ds.URL, "alice.polis.pub", ""); err != nil {
+	followingPathSite := storage.At(siteDir)
+	if err := discovery.WriteRegistrationMarker(storage.At(siteDir), ds.URL, "alice.polis.pub", ""); err != nil {
 		t.Fatalf("WriteRegistrationMarker: %v", err)
 	}
 
@@ -305,12 +307,11 @@ func TestFollowWithBlessing_AnnouncesWithConfigDespiteCorruptGlobals(t *testing.
 	cfg := &FollowConfig{
 		DataDir:      siteDir,
 		DiscoveryURL: ds.URL,
-		DiscoveryKey: "test-key",
 		BaseURL:      "https://alice.polis.pub",
 	}
 
-	_, err = FollowWithBlessing(followingPath, remoteSite.URL,
-		discovery.NewClient(ds.URL, "test-key"), remote.NewClient(),
+	_, err = FollowWithBlessing(followingPathSite, remoteSite.URL,
+		discovery.NewClient(ds.URL), remote.NewClient(),
 		priv, testPolicies(t), cfg)
 	if err != nil {
 		t.Fatalf("FollowWithBlessing: %v", err)
@@ -329,12 +330,12 @@ func TestFollowWithBlessing_UnreachableSite(t *testing.T) {
 	defer discoverySrv.Close()
 
 	tmpDir := t.TempDir()
-	followingPath := filepath.Join(tmpDir, "following.json")
+	followingPathSite := storage.At(tmpDir)
 
-	discoveryClient := discovery.NewClient(discoverySrv.URL, "test-key")
+	discoveryClient := discovery.NewClient(discoverySrv.URL)
 	remoteClient := remote.NewClient()
 
-	_, err := FollowWithBlessing(followingPath, "https://127.0.0.1:1", discoveryClient, remoteClient, testPrivKey(t), testPolicies(t))
+	_, err := FollowWithBlessing(followingPathSite, "https://127.0.0.1:1", discoveryClient, remoteClient, testPrivKey(t), testPolicies(t))
 	if err == nil {
 		t.Error("expected error for unreachable site")
 	}

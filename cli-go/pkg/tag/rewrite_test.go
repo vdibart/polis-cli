@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,10 +22,10 @@ func tagWithFutureMember(t *testing.T) (string, string, []byte, []byte) {
 	t.Helper()
 	dir := t.TempDir()
 	priv, _ := generateTestKey(t)
-	if _, err := ApplyTag(dir, "reading", "https://alice.example/p/1.md", priv); err != nil {
+	if _, err := ApplyTag(storage.At(dir), "reading", "https://alice.example/p/1.md", priv); err != nil {
 		t.Fatal(err)
 	}
-	path := TagPath(dir, "reading")
+	path := filepath.Join(dir, filepath.FromSlash(TagKey("reading")))
 	raw, _ := os.ReadFile(path)
 	var m map[string]interface{}
 	_ = json.Unmarshal(raw, &m)
@@ -38,11 +40,11 @@ func tagWithFutureMember(t *testing.T) (string, string, []byte, []byte) {
 func TestATagFileWithAnUnknownMemberRefusesEveryRewrite(t *testing.T) {
 	for name, write := range map[string]func(dir string, priv []byte) error{
 		"ApplyTag": func(d string, k []byte) error {
-			_, err := ApplyTag(d, "reading", "https://bob.example/p/2.md", k)
+			_, err := ApplyTag(storage.At(d), "reading", "https://bob.example/p/2.md", k)
 			return err
 		},
 		"RemoveTarget": func(d string, k []byte) error {
-			_, err := RemoveTarget(d, "reading", "https://alice.example/p/1.md", k)
+			_, err := RemoveTarget(storage.At(d), "reading", "https://alice.example/p/1.md", k)
 			return err
 		},
 	} {
@@ -62,7 +64,7 @@ func TestATagFileWithAnUnknownMemberRefusesEveryRewrite(t *testing.T) {
 
 func TestTagRewriteUnsignedIsTheOnlyWayPast(t *testing.T) {
 	dir, path, _, priv := tagWithFutureMember(t)
-	dropped, err := RewriteUnsigned(dir, path)
+	dropped, err := RewriteUnsigned(storage.At(dir), filepath.Base(path))
 	if err != nil || strings.Join(dropped, ",") != "colour" {
 		t.Fatalf("RewriteUnsigned = %v, %v", dropped, err)
 	}
@@ -78,7 +80,7 @@ func TestTagRewriteUnsignedIsTheOnlyWayPast(t *testing.T) {
 	if tf.Version != "sha256:"+hex.EncodeToString(sum[:]) {
 		t.Fatal("current_version was not recomputed over the rewritten bytes")
 	}
-	if _, err := ApplyTag(dir, "reading", "https://bob.example/p/2.md", priv); err != nil {
+	if _, err := ApplyTag(storage.At(dir), "reading", "https://bob.example/p/2.md", priv); err != nil {
 		t.Fatalf("after the escape hatch, a normal tag write must work: %v", err)
 	}
 }

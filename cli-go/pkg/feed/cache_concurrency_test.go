@@ -2,6 +2,7 @@ package feed
 
 import (
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"sync"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 // This is the safe path — it's the multi-instance path that loses data
 // (see TestCacheManager_ConcurrentMerge_SeparateInstances_LosesItems).
 func TestCacheManager_ConcurrentMerge_SameInstance_NoDataLoss(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 	now := time.Now().UTC()
 
 	const goroutines = 8
@@ -105,8 +106,8 @@ func TestCacheManager_ConcurrentMerge_SeparateInstances_LosesItems(t *testing.T)
 		wg.Add(1)
 		go func(m int) {
 			defer wg.Done()
-			cm := NewCacheManager(dir, testDiscoveryDomain) // SEPARATE INSTANCE
-			<-start                                         // align so they actually race
+			cm := NewCacheManager(storage.At(dir), testDiscoveryDomain) // SEPARATE INSTANCE
+			<-start                                                     // align so they actually race
 			if _, err := cm.MergeItems(allItems[m]); err != nil {
 				t.Errorf("manager %d merge: %v", m, err)
 			}
@@ -116,7 +117,7 @@ func TestCacheManager_ConcurrentMerge_SeparateInstances_LosesItems(t *testing.T)
 	wg.Wait()
 
 	// Re-open with a fresh manager and count what survived.
-	reader := NewCacheManager(dir, testDiscoveryDomain)
+	reader := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 	got, err := reader.List()
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -156,7 +157,7 @@ func TestCacheManager_ConcurrentMerge_SeparateInstances_DataRace(t *testing.T) {
 		wg.Add(1)
 		go func(m int) {
 			defer wg.Done()
-			cm := NewCacheManager(dir, testDiscoveryDomain)
+			cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 			items := []FeedItem{{
 				Type:         "post",
 				Title:        fmt.Sprintf("race-%d", m),

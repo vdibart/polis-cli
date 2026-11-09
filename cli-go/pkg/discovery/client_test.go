@@ -3,6 +3,7 @@ package discovery
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,7 +36,7 @@ func TestCheckSiteRegistration_Registered(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	client.DSKeyCache = nil // skip DS verification (testing request/response format)
 	result, err := client.CheckSiteRegistration("alice.com")
 	if err != nil {
@@ -62,7 +63,7 @@ func TestCheckSiteRegistration_NotRegistered(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	client.DSKeyCache = nil // skip DS verification (testing request/response format)
 	result, err := client.CheckSiteRegistration("bob.com")
 	if err != nil {
@@ -75,7 +76,7 @@ func TestCheckSiteRegistration_NotRegistered(t *testing.T) {
 }
 
 func TestCheckSiteRegistration_NetworkError(t *testing.T) {
-	client := NewClient("http://localhost:99999", "test-api-key")
+	client := NewClient("http://localhost:99999")
 	_, err := client.CheckSiteRegistration("test.com")
 	if err == nil {
 		t.Error("Expected error for network failure")
@@ -89,7 +90,7 @@ func TestCheckSiteRegistration_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	_, err := client.CheckSiteRegistration("test.com")
 	if err == nil {
 		t.Error("Expected error for server failure")
@@ -159,7 +160,7 @@ func TestRegisterSite_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 
 	// Use a mock private key (this won't actually sign correctly, but we can test the structure)
 	// In real usage, this would be a valid Ed25519 private key
@@ -196,7 +197,7 @@ func TestRegisterSite_AlreadyRegistered(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	mockPrivateKey := []byte("-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----\n")
 
 	_, err := client.RegisterSite("alice.com", mockPrivateKey, "", "")
@@ -230,7 +231,7 @@ func TestUnregisterSite_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	mockPrivateKey := []byte("-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----\n")
 
 	_, err := client.UnregisterSite("alice.com", mockPrivateKey)
@@ -261,7 +262,7 @@ func TestUnregisterSite_NotRegistered(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	mockPrivateKey := []byte("-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----\n")
 
 	_, err := client.UnregisterSite("bob.com", mockPrivateKey)
@@ -275,13 +276,10 @@ func TestUnregisterSite_NotRegistered(t *testing.T) {
 // ============================================================================
 
 func TestNewAuthenticatedClient(t *testing.T) {
-	client := NewAuthenticatedClient("https://ds.example.com", "key123", "alice.com", []byte("fake-priv-key"))
+	client := NewAuthenticatedClient("https://ds.example.com", "alice.com", []byte("fake-priv-key"))
 
 	if client.BaseURL != "https://ds.example.com" {
 		t.Errorf("Expected BaseURL=https://ds.example.com, got %s", client.BaseURL)
-	}
-	if client.APIKey != "key123" {
-		t.Errorf("Expected APIKey=key123, got %s", client.APIKey)
 	}
 	if client.Domain != "alice.com" {
 		t.Errorf("Expected Domain=alice.com, got %s", client.Domain)
@@ -293,7 +291,7 @@ func TestNewAuthenticatedClient(t *testing.T) {
 
 func TestAddAuthHeaders_WithoutAuth(t *testing.T) {
 	// Client without Domain/PrivateKeyPEM should NOT add auth headers
-	client := NewClient("https://ds.example.com", "key123")
+	client := NewClient("https://ds.example.com")
 
 	req, _ := http.NewRequest("GET", "https://ds.example.com/test", nil)
 	if err := client.addAuthHeaders(req); err != nil {
@@ -318,7 +316,7 @@ func TestAddAuthHeaders_WithAuth(t *testing.T) {
 		t.Fatalf("Failed to generate keypair: %v", err)
 	}
 
-	client := NewAuthenticatedClient("https://ds.example.com", "key123", "alice.com", privKey)
+	client := NewAuthenticatedClient("https://ds.example.com", "alice.com", privKey)
 
 	req, _ := http.NewRequest("GET", "https://ds.example.com/test", nil)
 	if err := client.addAuthHeaders(req); err != nil {
@@ -375,7 +373,7 @@ func TestQueryRelationships_AuthenticatedSendsHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAuthenticatedClient(server.URL, "test-key", "alice.com", privKey)
+	client := NewAuthenticatedClient(server.URL, "alice.com", privKey)
 	client.DSKeyCache = nil // skip DS verification (testing auth headers)
 	_, err = client.QueryRelationships("pub.polis.comment.blessing", map[string]string{"status": "pending"})
 	if err != nil {
@@ -406,7 +404,7 @@ func TestQueryContent_AuthenticatedSendsHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAuthenticatedClient(server.URL, "test-key", "alice.com", privKey)
+	client := NewAuthenticatedClient(server.URL, "alice.com", privKey)
 	client.DSKeyCache = nil // skip DS verification (testing auth headers)
 	_, err = client.QueryContent("pub.polis.comment", map[string]string{"actor": "bob.com"})
 	if err != nil {
@@ -437,7 +435,7 @@ func TestStreamQuery_AuthenticatedSendsHeaders(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAuthenticatedClient(server.URL, "test-key", "alice.com", privKey)
+	client := NewAuthenticatedClient(server.URL, "alice.com", privKey)
 	client.DSKeyCache = nil // skip DS verification (testing auth headers)
 	_, err = client.StreamQuery("0", 100, "", "", "alice.com")
 	if err != nil {
@@ -517,7 +515,7 @@ func TestStreamQuery_WithTargetFilter(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	client.DSKeyCache = nil // skip DS verification (testing target filter)
 	result, err := client.StreamQuery("0", 100, "", "", "bob.com")
 	if err != nil {
@@ -544,7 +542,7 @@ func TestStreamQuery_WithoutTargetFilter(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	client.DSKeyCache = nil // skip DS verification (testing no-target filter)
 	_, err := client.StreamQuery("0", 100, "", "", "")
 	if err != nil {
@@ -604,7 +602,7 @@ func TestStreamQueryInvolved_SendsInvolvedParam(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	client.DSKeyCache = nil
 	result, err := client.StreamQueryInvolved("42", 1000, "alice.com")
 	if err != nil {
@@ -625,7 +623,7 @@ func TestStreamQueryInvolved_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	_, err := client.StreamQueryInvolved("0", 1000, "alice.com")
 	if err == nil {
 		t.Error("Expected error for 400 response")
@@ -668,7 +666,7 @@ func TestStreamQueryBatch_SendsCorrectRequest(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	client.DSKeyCache = nil
 	result, err := client.StreamQueryBatch([]StreamBatchFilter{
 		{Since: "0", Limit: 1000, Involved: "alice.com"},
@@ -695,7 +693,7 @@ func TestStreamQueryBatch_ServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	_, err := client.StreamQueryBatch([]StreamBatchFilter{
 		{Since: "0", Limit: 100},
 	})
@@ -754,7 +752,7 @@ func TestStreamQueryUnified_SendsCorrectParams(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	client.DSKeyCache = nil
 	result, err := client.StreamQueryUnified("100", 3000, "alice.com", []string{"bob.com", "charlie.com"})
 	if err != nil {
@@ -788,7 +786,7 @@ func TestStreamQueryUnified_NoFollowedAuthors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	client.DSKeyCache = nil
 	_, err := client.StreamQueryUnified("0", 3000, "alice.com", nil)
 	if err != nil {
@@ -819,7 +817,7 @@ func TestStreamQueryUnified_AuthHeadersSent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAuthenticatedClient(server.URL, "test-key", "alice.com", privKey)
+	client := NewAuthenticatedClient(server.URL, "alice.com", privKey)
 	client.DSKeyCache = nil
 	_, err = client.StreamQueryUnified("0", 3000, "alice.com", []string{"bob.com"})
 	if err != nil {
@@ -933,7 +931,7 @@ func TestRotateKey_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	witness, err := client.RotateKey(KeyRotationRequest{
 		Domain:        "alice.polis.pub",
 		OldKey:        "ssh-ed25519 AAA",
@@ -957,7 +955,7 @@ func TestRotateKey_ReturnsTheDSWitness(t *testing.T) {
 	}))
 	defer server.Close()
 
-	witness, err := NewClient(server.URL, "").RotateKey(KeyRotationRequest{
+	witness, err := NewClient(server.URL).RotateKey(KeyRotationRequest{
 		Domain: "alice.polis.pub", OldKey: "ssh-ed25519 AAA", NewKey: "ssh-ed25519 BBB",
 		TransitionSig: "fake-signature", Timestamp: "2026-02-25T12:00:00Z",
 	})
@@ -977,7 +975,7 @@ func TestRotateKey_DSRejects(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-api-key")
+	client := NewClient(server.URL)
 	_, err := client.RotateKey(KeyRotationRequest{
 		Domain:        "alice.polis.pub",
 		OldKey:        "ssh-ed25519 WRONG",
@@ -991,8 +989,8 @@ func TestRotateKey_DSRejects(t *testing.T) {
 
 	// Verify the error message contains useful information
 	errMsg := err.Error()
-	if !strings.Contains(errMsg, "key rotation failed") {
-		t.Errorf("Expected error to contain 'key rotation failed', got: %s", errMsg)
+	if !strings.Contains(errMsg, "key rotation refused") {
+		t.Errorf("Expected error to contain 'key rotation refused', got: %s", errMsg)
 	}
 	if !strings.Contains(errMsg, "409") {
 		t.Errorf("Expected error to contain status code '409', got: %s", errMsg)
@@ -1011,7 +1009,7 @@ func TestClient_RequestIDPropagation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := NewClient(server.URL)
 	client.RequestID = "test-trace-id-123"
 
 	_, _ = client.CheckSiteRegistration("test.com")
@@ -1033,7 +1031,7 @@ func TestClient_RequestIDAbsentWhenEmpty(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := NewClient(server.URL)
 	// RequestID not set
 
 	_, _ = client.CheckSiteRegistration("test.com")
@@ -1056,7 +1054,7 @@ func TestClient_LoggerCallback(t *testing.T) {
 	var loggedMethod, loggedPath, loggedRequestID string
 	var loggedDuration int64
 
-	client := NewClient(server.URL, "test-key")
+	client := NewClient(server.URL)
 	client.RequestID = "trace-456"
 	client.Logger = func(method, path string, durationMs int64, requestID string) {
 		loggedMethod = method
@@ -1084,7 +1082,7 @@ func TestClient_LoggerCallback(t *testing.T) {
 // ---------- WithHTTP constructor tests ----------
 
 func TestNewClientWithHTTP_Nil(t *testing.T) {
-	c := NewClientWithHTTP("https://ds.example.com", "key", nil)
+	c := NewClientWithHTTP("https://ds.example.com", nil)
 	if c == nil {
 		t.Fatal("returned nil")
 	}
@@ -1098,15 +1096,12 @@ func TestNewClientWithHTTP_Nil(t *testing.T) {
 
 func TestNewClientWithHTTP_Shared(t *testing.T) {
 	shared := &http.Client{}
-	c := NewClientWithHTTP("https://ds.example.com", "key", shared)
+	c := NewClientWithHTTP("https://ds.example.com", shared)
 	if c.HTTPClient != shared {
 		t.Error("expected shared HTTPClient")
 	}
 	if c.BaseURL != "https://ds.example.com" {
 		t.Errorf("BaseURL = %q, want https://ds.example.com", c.BaseURL)
-	}
-	if c.APIKey != "key" {
-		t.Errorf("APIKey = %q, want key", c.APIKey)
 	}
 	if c.DSKeyCache == nil {
 		t.Error("expected DSKeyCache")
@@ -1117,7 +1112,7 @@ func TestNewClientWithHTTP_Shared(t *testing.T) {
 }
 
 func TestNewAuthenticatedClientWithHTTP_Nil(t *testing.T) {
-	c := NewAuthenticatedClientWithHTTP("https://ds.example.com", "key", "test.local", nil, nil)
+	c := NewAuthenticatedClientWithHTTP("https://ds.example.com", "test.local", nil, nil)
 	if c == nil {
 		t.Fatal("returned nil")
 	}
@@ -1132,7 +1127,7 @@ func TestNewAuthenticatedClientWithHTTP_Nil(t *testing.T) {
 func TestNewAuthenticatedClientWithHTTP_Shared(t *testing.T) {
 	shared := &http.Client{}
 	privKey := []byte("fake-key")
-	c := NewAuthenticatedClientWithHTTP("https://ds.example.com", "key", "test.local", privKey, shared)
+	c := NewAuthenticatedClientWithHTTP("https://ds.example.com", "test.local", privKey, shared)
 	if c.HTTPClient != shared {
 		t.Error("expected shared HTTPClient")
 	}
@@ -1141,5 +1136,34 @@ func TestNewAuthenticatedClientWithHTTP_Shared(t *testing.T) {
 	}
 	if string(c.PrivateKeyPEM) != "fake-key" {
 		t.Error("PrivateKeyPEM not set correctly")
+	}
+}
+
+// ⛔ Only a 4xx is a refusal. A 5xx, or no answer at all, leaves it unknown
+// whether the DS took the new key, and a caller that treated it as a refusal
+// would delete the only copy of the key the network now holds.
+func TestRotateKey_OnlyA4xxIsARefusal(t *testing.T) {
+	for _, c := range []struct {
+		status  int
+		refused bool
+	}{{400, true}, {401, true}, {409, true}, {429, true}, {500, false}, {502, false}, {503, false}} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(c.status)
+		}))
+		_, err := NewClient(server.URL).RotateKey(KeyRotationRequest{Domain: "a.example"})
+		server.Close()
+		var refused *RotationRefusedError
+		if err == nil || errors.As(err, &refused) != c.refused {
+			t.Errorf("status %d: err = %v; refused = %v, want %v", c.status, err, errors.As(err, &refused), c.refused)
+		}
+	}
+	// No answer: the connection is refused.
+	server := httptest.NewServer(http.NotFoundHandler())
+	url := server.URL
+	server.Close()
+	_, err := NewClient(url).RotateKey(KeyRotationRequest{Domain: "a.example"})
+	var refused *RotationRefusedError
+	if err == nil || errors.As(err, &refused) {
+		t.Errorf("no answer: err = %v; want an error that is not a refusal", err)
 	}
 }

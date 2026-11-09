@@ -35,9 +35,9 @@ func handleValidate(args []string) {
 	var report *sitecheck.Report
 	switch {
 	case target == "":
-		report = sitecheck.RunLocalWith(getDataDir(), dsKeys)
+		report = sitecheck.RunLocalWithThemes(getDataDir(), dsKeys, findCLIThemesDir())
 	case isLocalPath(target):
-		report = sitecheck.RunLocalWith(target, dsKeys)
+		report = sitecheck.RunLocalWithThemes(target, dsKeys, findCLIThemesDir())
 	default:
 		url := target
 		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
@@ -73,6 +73,9 @@ func isLocalPath(target string) bool {
 	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
 		return false
 	}
+	// NOT the storage interface: isLocalPath exists to decide whether a
+	// user-supplied string is a local path or a URL, so by construction the
+	// path may be anywhere.
 	if _, err := os.Stat(target); err == nil {
 		return true
 	}

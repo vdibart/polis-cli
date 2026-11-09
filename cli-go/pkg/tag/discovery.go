@@ -6,13 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"net/http"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
-	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	sitepkg "github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
@@ -24,19 +25,23 @@ import (
 // to SyncTag instead of using these globals.
 var (
 	DiscoveryURL string
-	DiscoveryKey string
 	BaseURL      string
 	DataDir      string
+
+	// DefaultSite is the process-wide site handle, for a caller that holds one.
+	// It wins over DataDir, because a handle carries the store the site is on.
+	DefaultSite storage.Site
 )
 
 // DiscoveryConfig holds per-tenant discovery service configuration.
 type DiscoveryConfig struct {
 	DiscoveryURL string
-	DiscoveryKey string
 	BaseURL      string
-	DataDir      string
-	HTTPClient   *http.Client // Optional shared HTTP client for connection pooling
-	Generator    string       // e.g. "polis-cli-go/0.59.0" — used in tag metadata
+	// Site is the tagging site: its registration marker is checked, and the
+	// DS's witness is published to it. Unset falls back to DataDir above.
+	Site       storage.Site
+	HTTPClient *http.Client // Optional shared HTTP client for connection pooling
+	Generator  string       // e.g. "polis-cli-go/0.59.0" — used in tag metadata
 
 	// RequestID is sent as X-Request-Id so a tag sync can be joined to the
 	// caller's own log line.
@@ -51,11 +56,11 @@ type DiscoveryConfig struct {
 
 // resolveDiscoveryConfig returns the effective config: explicit if provided,
 // otherwise falls back to package-level globals.
-func resolveDiscoveryConfig(cfg *DiscoveryConfig) (dsURL, dsKey, baseURL string) {
+func resolveDiscoveryConfig(cfg *DiscoveryConfig) (dsURL, baseURL string) {
 	if cfg != nil {
-		return cfg.DiscoveryURL, cfg.DiscoveryKey, cfg.BaseURL
+		return cfg.DiscoveryURL, cfg.BaseURL
 	}
-	return DiscoveryURL, DiscoveryKey, BaseURL
+	return DiscoveryURL, BaseURL
 }
 
 // TagTargetURL generates a deterministic URL for a tag+target pair.
@@ -77,8 +82,8 @@ func TagTargetMetadata(tagName, targetURI string) map[string]string {
 // SyncTag performs full reconciliation of a tag file with the discovery service.
 // Each target in the tag file becomes a separate DS row. Targets no longer present
 // are soft-deleted.
-func SyncTag(dataDir string, tf *TagFile, privateKey []byte, dsCfg *DiscoveryConfig) error {
-	dsURL, dsKey, baseURL := resolveDiscoveryConfig(dsCfg)
+func SyncTag(site storage.Site, tf *TagFile, privateKey []byte, dsCfg *DiscoveryConfig) error {
+	dsURL, baseURL := resolveDiscoveryConfig(dsCfg)
 	if dsURL == "" || baseURL == "" {
 		stream.LogSuppressedEmit("pub.polis.tag.applied", "config_missing",
 			discovery.ExtractDomainFromURL(baseURL),
@@ -86,11 +91,11 @@ func SyncTag(dataDir string, tf *TagFile, privateKey []byte, dsCfg *DiscoveryCon
 		return nil
 	}
 
-	checkDir := dataDir
-	if dsCfg != nil && dsCfg.DataDir != "" {
-		checkDir = dsCfg.DataDir
+	checkSite := site
+	if dsCfg != nil && dsCfg.Site.Valid() {
+		checkSite = dsCfg.Site
 	}
-	if !discovery.IsRegisteredLocally(checkDir, dsURL) {
+	if !checkSite.Valid() || !discovery.IsRegisteredLocally(checkSite, dsURL) {
 		stream.LogSuppressedEmit("pub.polis.tag.applied", "not_registered_locally",
 			discovery.ExtractDomainFromURL(baseURL),
 			map[string]interface{}{"tag": tf.Tag, "ds_url": dsURL})
@@ -114,7 +119,7 @@ func SyncTag(dataDir string, tf *TagFile, privateKey []byte, dsCfg *DiscoveryCon
 		if dsCfg != nil {
 			hc = dsCfg.HTTPClient
 		}
-		if err := registerTagRow(checkDir, dsURL, dsKey, url, tf.Version, author, meta, privateKey, hc, requestIDOf(dsCfg)); err != nil {
+		if err := registerTagRow(checkSite, dsURL, url, tf.Version, author, meta, privateKey, hc, requestIDOf(dsCfg)); err != nil {
 			return fmt.Errorf("register tag target %q: %w", target.URI, err)
 		}
 	}
@@ -124,7 +129,7 @@ func SyncTag(dataDir string, tf *TagFile, privateKey []byte, dsCfg *DiscoveryCon
 
 // UnregisterTarget soft-deletes a specific tag+target row from the DS.
 func UnregisterTarget(tagName, targetURI string, privateKey []byte, dsCfg *DiscoveryConfig) error {
-	dsURL, dsKey, baseURL := resolveDiscoveryConfig(dsCfg)
+	dsURL, baseURL := resolveDiscoveryConfig(dsCfg)
 	if dsURL == "" || baseURL == "" {
 		stream.LogSuppressedEmit("pub.polis.tag.removed", "config_missing",
 			discovery.ExtractDomainFromURL(baseURL),
@@ -132,11 +137,18 @@ func UnregisterTarget(tagName, targetURI string, privateKey []byte, dsCfg *Disco
 		return nil
 	}
 
-	checkDir := DataDir
-	if dsCfg != nil && dsCfg.DataDir != "" {
-		checkDir = dsCfg.DataDir
+	// ⚠️ DefaultSite (the server) and DataDir (the CLI) are the process-wide
+	// roots set at startup; a caller that holds the site passes it in the
+	// config instead.
+	checkSite := storage.Site{}
+	if dsCfg != nil && dsCfg.Site.Valid() {
+		checkSite = dsCfg.Site
+	} else if DefaultSite.Valid() {
+		checkSite = DefaultSite
+	} else if DataDir != "" {
+		checkSite = storage.At(DataDir)
 	}
-	if !discovery.IsRegisteredLocally(checkDir, dsURL) {
+	if !checkSite.Valid() || !discovery.IsRegisteredLocally(checkSite, dsURL) {
 		stream.LogSuppressedEmit("pub.polis.tag.removed", "not_registered_locally",
 			discovery.ExtractDomainFromURL(baseURL),
 			map[string]interface{}{"tag": tagName, "target": targetURI, "ds_url": dsURL})
@@ -151,13 +163,13 @@ func UnregisterTarget(tagName, targetURI string, privateKey []byte, dsCfg *Disco
 	if dsCfg != nil {
 		hc = dsCfg.HTTPClient
 	}
-	return softDeleteRow(dsURL, dsKey, url, privateKey, hc, requestIDOf(dsCfg))
+	return softDeleteRow(dsURL, url, privateKey, hc, requestIDOf(dsCfg))
 }
 
 // registerTagRow registers a single tag+target row with the DS. The payload
 // is signed with the tenant's private key and the signature is included so
 // the DS can verify against the tenant's well-known public key.
-func registerTagRow(siteDir, dsURL, dsKey, contentURL, version, author string, meta map[string]string, privateKey []byte, hc *http.Client, requestID string) error {
+func registerTagRow(site storage.Site, dsURL, contentURL, version, author string, meta map[string]string, privateKey []byte, hc *http.Client, requestID string) error {
 	// Metadata must be map[string]interface{} so it matches the canonical
 	// payload structure the DS builds (DS uses generic object shape).
 	metaIface := make(map[string]interface{}, len(meta))
@@ -198,9 +210,6 @@ func registerTagRow(siteDir, dsURL, dsKey, contentURL, version, author string, m
 		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if dsKey != "" {
-		req.Header.Set("Authorization", "Bearer "+dsKey)
-	}
 	if requestID != "" {
 		req.Header.Set("X-Request-Id", requestID)
 	}
@@ -221,13 +230,13 @@ func registerTagRow(siteDir, dsURL, dsKey, contentURL, version, author string, m
 	// SIGNET epic 32: publish the DS's countersignature under the row's URL. A
 	// tag file's `version` hashes the whole signed file, so the witness binds all
 	// of it. Never fails the registration.
-	if siteDir != "" {
+	if site.Valid() {
 		var result struct {
 			Witness *discovery.Witness `json:"witness"`
 		}
 		if data, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20)); rerr == nil &&
 			json.Unmarshal(data, &result) == nil && result.Witness != nil {
-			if _, werr := site.RecordWitness(siteDir, contentURL, *result.Witness); werr != nil {
+			if _, werr := sitepkg.RecordWitness(site, contentURL, *result.Witness); werr != nil {
 				fmt.Printf("[!] Could not publish the discovery service's witness for %s: %v\n", contentURL, werr)
 			}
 		}
@@ -245,7 +254,7 @@ func requestIDOf(cfg *DiscoveryConfig) string {
 }
 
 // softDeleteRow marks a content row as removed in the DS.
-func softDeleteRow(dsURL, dsKey, contentURL string, privateKey []byte, hc *http.Client, requestID string) error {
+func softDeleteRow(dsURL, contentURL string, privateKey []byte, hc *http.Client, requestID string) error {
 	payload := map[string]interface{}{
 		"type":   "pub.polis.tag",
 		"url":    contentURL,
@@ -262,9 +271,6 @@ func softDeleteRow(dsURL, dsKey, contentURL string, privateKey []byte, hc *http.
 		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if dsKey != "" {
-		req.Header.Set("Authorization", "Bearer "+dsKey)
-	}
 	if requestID != "" {
 		req.Header.Set("X-Request-Id", requestID)
 	}

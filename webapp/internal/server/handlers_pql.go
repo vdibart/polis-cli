@@ -23,10 +23,12 @@ import (
 // reuses 100% of the validation/dispatch/pagination logic — the endpoint
 // "speaks PQL" without duplicating the engine.
 //
-// SCOPE-RESOLUTION BOUNDARY: first-person scopes (me/my-*) are owner-private.
-// The owner-auth gate lives at the routing layer (hosted multiplexer's
-// pqlRequiresOwnerAuth; localhost owner-trust by construction) — the same
-// separation handleStreamItems relies on. The `about` relation and
+// SCOPE-RESOLUTION BOUNDARY: first-person scopes (me/my-*) and the drafts and
+// dms types are owner-private. This handler does NOT check that: the owner
+// gate does (ownerGateMiddleware, through PQLRequiresOwner, which hosted calls
+// too), in every mode, and refuses another site's page even on loopback. A
+// route that reaches this handler without passing that gate serves drafts and
+// decrypted DMs to anyone. The `about` relation and
 // fully-qualified event types are DS-only on this tenant surface and are
 // rejected here.
 func (s *Server) handleStreamPQL(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +58,7 @@ func (s *Server) handleStreamPQL(w http.ResponseWriter, r *http.Request) {
 		// inject window.__POLIS_INITIAL_PQL and stream.js re-filters on hydrate.
 		// Reads index.html directly (not via the "/" path) so the "/" →
 		// /pql/all+posts+by+date redirect can't loop back here.
-		shell, rerr := NewDataDirStorage(s.DataDir).ReadPublicFile("", "index.html")
+		shell, rerr := NewDataDirStorage(s.Site()).ReadPublicFile("", "index.html")
 		if rerr != nil {
 			http.NotFound(w, r)
 			return

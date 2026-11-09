@@ -1,12 +1,13 @@
 package bundle
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io/fs"
-	"os"
-	"path/filepath"
 	"strings"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // referencePayload holds the canonical bundle payload shipped with the CLI.
@@ -54,9 +55,9 @@ func ReferencePayloadFS() fs.FS {
 // Called by polis init (to populate a new site) and by Medic's resync loop
 // (to re-apply the reference when shipped versions advance). Safe to call
 // repeatedly.
-func EnsureReferencePayload(siteDir, bundleName string) error {
-	if siteDir == "" {
-		return fmt.Errorf("siteDir is required")
+func EnsureReferencePayload(site storage.Site, bundleName string) error {
+	if !site.Valid() {
+		return fmt.Errorf("a site handle is required")
 	}
 	if bundleName == "" {
 		return fmt.Errorf("bundleName is required")
@@ -67,41 +68,40 @@ func EnsureReferencePayload(siteDir, bundleName string) error {
 		return fmt.Errorf("no reference payload for bundle %q: %w", bundleName, err)
 	}
 
-	dstRoot := filepath.Join(siteDir, ".polis", "bundles", bundleName)
-	if err := os.MkdirAll(dstRoot, 0700); err != nil {
-		return fmt.Errorf("create bundle dir: %w", err)
-	}
+	// ⭐ Copied BY KEY into the site's store. ⛔ The rule the MkdirAlls here
+	// used to carry still holds, and the store now carries it: everything under
+	// .polis is created 0700 (the site store declares .polis a private
+	// prefix), because a 0755 child of a 0700 root is unreachable today but
+	// becomes live the moment the tree is copied anywhere else — an export
+	// unzipped, an archive restored. An embedded tree has no empty
+	// directories, so every directory the payload holds is the parent of a
+	// file the store writes. TestEnsureReferencePayloadKeepsTheBundleTreePrivate
+	// pins it.
+	dstRoot := ".polis/bundles/" + bundleName
+	ctx := context.Background()
 
 	walkErr := fs.WalkDir(referencePayload, srcRoot, func(embedPath string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel := strings.TrimPrefix(embedPath, srcRoot)
-		rel = strings.TrimPrefix(rel, "/")
-		dstPath := filepath.Join(dstRoot, rel)
-
 		if d.IsDir() {
-			if rel == "" {
-				return nil // root already created
-			}
-			return os.MkdirAll(dstPath, 0755)
+			return nil
 		}
+		rel := strings.TrimPrefix(strings.TrimPrefix(embedPath, srcRoot), "/")
+		dstKey := dstRoot + "/" + rel
 
 		data, err := referencePayload.ReadFile(embedPath)
 		if err != nil {
 			return fmt.Errorf("read embedded %s: %w", embedPath, err)
 		}
-		// Skip the write when on-disk content already matches the embedded
+		// Skip the write when stored content already matches the embedded
 		// reference. Saves mtime churn on every Medic cycle and lets file
 		// watchers / mtime-based diff tools stay quiet on no-op syncs.
-		if existing, err := os.ReadFile(dstPath); err == nil && bytesEqual(existing, data) {
+		if existing, err := site.Store().Get(ctx, dstKey); err == nil && bytesEqual(existing, data) {
 			return nil
 		}
-		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
-			return fmt.Errorf("create parent dir for %s: %w", dstPath, err)
-		}
-		if err := os.WriteFile(dstPath, data, 0644); err != nil {
-			return fmt.Errorf("write %s: %w", dstPath, err)
+		if err := site.Store().Put(ctx, dstKey, data); err != nil {
+			return fmt.Errorf("write %s: %w", dstKey, err)
 		}
 		return nil
 	})
@@ -123,12 +123,12 @@ func EnsureReferencePayload(siteDir, bundleName string) error {
 	// service running as polis user → permission denied → silent
 	// reset to v3 + random theme) was the smoking gun.
 	if bundleName == DefaultCoreBundle().Name {
-		reg, err := LoadRegistryOrInit(siteDir)
+		reg, err := LoadRegistryOrInit(site)
 		if err != nil {
 			return fmt.Errorf("load registry to record installed versions: %w", err)
 		}
 		reg.RecordInstalledVersions(DefaultCoreBundle())
-		if err := SaveRegistry(siteDir, reg); err != nil {
+		if err := SaveRegistry(site, reg); err != nil {
 			return fmt.Errorf("record installed versions: %w", err)
 		}
 	}
@@ -137,7 +137,7 @@ func EnsureReferencePayload(siteDir, bundleName string) error {
 
 // CompareReferencePayload walks the embedded reference payload for the named
 // bundle and compares each file's bytes against the corresponding file under
-// <siteDir>/.polis/bundles/<bundleName>/. Returns the list of relative paths
+// the site's .polis/bundles/<bundleName>/. Returns the list of relative paths
 // (within the bundle dir) where on-disk content is missing or differs.
 //
 // Files present on disk that are NOT in the embedded reference are ignored —
@@ -148,9 +148,9 @@ func EnsureReferencePayload(siteDir, bundleName string) error {
 // detect the "right version, wrong bytes" case that checkBundleReferencePayload
 // can't see. Per-cycle cost is bounded by the embed size (~21 files / ~500KB
 // for pub.polis.core); well under 10ms on any modern filesystem.
-func CompareReferencePayload(siteDir, bundleName string) ([]string, error) {
-	if siteDir == "" {
-		return nil, fmt.Errorf("siteDir is required")
+func CompareReferencePayload(site storage.Site, bundleName string) ([]string, error) {
+	if !site.Valid() {
+		return nil, fmt.Errorf("a site handle is required")
 	}
 	if bundleName == "" {
 		return nil, fmt.Errorf("bundleName is required")
@@ -161,7 +161,8 @@ func CompareReferencePayload(siteDir, bundleName string) ([]string, error) {
 		return nil, fmt.Errorf("no reference payload for bundle %q: %w", bundleName, err)
 	}
 
-	dstRoot := filepath.Join(siteDir, ".polis", "bundles", bundleName)
+	dstRoot := ".polis/bundles/" + bundleName
+	ctx := context.Background()
 
 	var mismatches []string
 	walkErr := fs.WalkDir(referencePayload, srcRoot, func(embedPath string, d fs.DirEntry, err error) error {
@@ -171,15 +172,13 @@ func CompareReferencePayload(siteDir, bundleName string) ([]string, error) {
 		if d.IsDir() {
 			return nil
 		}
-		rel := strings.TrimPrefix(embedPath, srcRoot)
-		rel = strings.TrimPrefix(rel, "/")
-		dstPath := filepath.Join(dstRoot, rel)
+		rel := strings.TrimPrefix(strings.TrimPrefix(embedPath, srcRoot), "/")
 
 		want, err := referencePayload.ReadFile(embedPath)
 		if err != nil {
 			return fmt.Errorf("read embedded %s: %w", embedPath, err)
 		}
-		got, err := os.ReadFile(dstPath)
+		got, err := site.Store().Get(ctx, dstRoot+"/"+rel)
 		if err != nil {
 			// Missing on disk or unreadable — both count as a mismatch.
 			mismatches = append(mismatches, rel)

@@ -1,25 +1,22 @@
 package dm
 
 import (
+	"context"
 	"fmt"
-	"os"
-	"path/filepath"
+	pathpkg "path"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Peers lists the conversation peer handles present on disk (newest order not guaranteed).
 func (m *Mailbox) Peers() ([]string, error) {
-	dirs, err := os.ReadDir(filepath.Join(m.dmDir, conversationsSubdir))
+	dirs, err := m.conversationDirs()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
 		return nil, err
 	}
 	var peers []string
 	for _, d := range dirs {
-		if d.IsDir() {
-			peers = append(peers, d.Name())
-		}
+		peers = append(peers, pathpkg.Base(d.Key))
 	}
 	return peers, nil
 }
@@ -43,7 +40,12 @@ func (m *Mailbox) PeerForConversationID(selfDomain, convID string) (string, bool
 
 // DeleteConversation removes a conversation's directory (messages + metadata). Idempotent.
 func (m *Mailbox) DeleteConversation(peer string) error {
-	if err := os.RemoveAll(m.convDir(peer)); err != nil {
+	key, err := m.convKey(peer)
+	if err != nil {
+		return err
+	}
+	if err := m.site.Store().Delete(context.Background(), key,
+		storage.DeleteRecursive(), storage.IgnoreMissing()); err != nil {
 		return fmt.Errorf("delete conversation: %w", err)
 	}
 	return nil

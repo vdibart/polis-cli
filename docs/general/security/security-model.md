@@ -74,7 +74,7 @@ The hash is computed over the canonicalized body content (leading empty lines st
 
 ### SHA-256 API Key Hashing
 
-API keys for the v1 REST API are stored only as SHA-256 hashes, in `.polis/api-keys.json`; the server hashes the presented Bearer token and compares it against the stored hashes. polis has no key generator: the key holder creates the token and records its hash by hand (see the [API reference](../../api/developer/reference.md#authentication)), so the plaintext is never written by polis. Validation uses constant-time comparison (`crypto/subtle.ConstantTimeCompare`) to prevent timing attacks.
+API keys for the v1 REST API are stored only as SHA-256 hashes, in `.polis/api-keys.json`; the server hashes the presented Bearer token and compares it against the stored hashes. The owner mints a key through the webapp's owner-only `/api/keys` routes, which return the plaintext once and write only its hash, in a file of mode `600`; a key can also be made by hand (see the [API reference](../../api/developer/reference.md#authentication)). Either way the plaintext is never written to disk by polis. A key may carry `scopes`; a scoped key is refused by any operation outside them. Validation uses constant-time comparison (`crypto/subtle.ConstantTimeCompare`) to prevent timing attacks.
 
 ### Direct Message Encryption
 
@@ -121,6 +121,25 @@ The `.polis/` directory is listed in `.gitignore` by default, so private keys ar
 .polis/
 .env*
 ```
+
+### What is never served
+
+The reference server (the webapp's `--reader` and `--mirror` modes, and polis.pub) refuses a fixed list of private names **in any segment of a path**, not only at the root, and matches them without regard to case:
+
+| Kind | Names |
+|------|-------|
+| What polis creates | `.polis/` (keys, the DM keyring, sessions, configuration, drafts), `.env` and `.env.*` |
+| Version control | `.git`, `.hg`, `.svn` |
+| Credential stores | `.ssh`, `.gnupg`, `.aws`, `.npmrc`, `.netrc`, `.htpasswd`, `.DS_Store` |
+| Key material | `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `*.pem`, `*.key`, `*.p12` |
+| Editor and backup copies | `*.swp`, `*~`, `*.bak`, `*.orig` |
+| Anything else hidden | any name beginning with a dot |
+
+Two names are stated exceptions: `.well-known/` at the root, which the protocol requires, and `.versions/` beside a post, because **version history is public by design**. A self-hoster may hide `.versions/` on their own server; that is their choice and not a fault.
+
+The server also serves a file with no extension only under `.well-known/`. Most private files have no extension (`id_rsa`, `.git/HEAD`), so this is a second layer under the list.
+
+⚠️ **A static host serves whatever it is given.** If you deploy by copying the site directory to a host (rsync, an object store, a plain web server), none of the above applies unless the host is configured to refuse those names. Deploying with git honours the `.gitignore` that `polis init` writes (on a filesystem, and only when the site has none), whose only private-file entries are `.polis/` and `.env*`; the rest of the list above is not in it, and git still commits a file that was already tracked. **Check what your host actually serves** with `polis validate https://your.site`: it asks for every name above and fails if any comes back (`identity.private_files_served`).
 
 ### Key Custody
 
@@ -210,7 +229,7 @@ Both CLI implementations check for existing keys before generation and refuse to
 
 | Check | Status |
 |-------|--------|
-| Private key never published | Enforced by `.gitignore` and directory convention |
+| Private key never published | Enforced by `.gitignore`; refused by the reference server in any path segment; checked from outside by `polis validate <url>` (see *What is never served*) |
 | Private key permissions | `0600` set at `os.WriteFile` |
 | Key generated with strong RNG | `crypto/rand.Reader` (system CSPRNG) |
 | No key escrow or backup | User responsibility |
@@ -430,8 +449,32 @@ The reference implementation is `cli-go/pkg/policy`.
 | Aspect | Detail |
 |--------|--------|
 | **Attack** | Attacker re-submits a previously valid signed message |
-| **Mitigation** | Signed requests carry a timestamp that is accepted only inside a freshness window — ±5 minutes at the discovery service, ±2 minutes for instance-to-instance DM delivery. The DS keeps one registration per type and URL, so a replayed registration overwrites the same row rather than adding one. A replayed DM is dropped by its message ID, which is derived from the transport nonce |
-| **Residual risk** | A request replayed inside its freshness window is accepted again; for a registration that re-applies the same state. There are no sequence numbers |
+| **Mitigation** | **Most** signed requests carry a timestamp inside the signed bytes, accepted only within a freshness window — ±5 minutes at the discovery service, ±2 minutes for instance-to-instance DM delivery. ⛔ **Two do not, and the table below says which.** A replayed DM is dropped by its message ID, which is derived from the transport nonce |
+| **Residual risk** | A request replayed inside its freshness window is accepted again; for a registration that re-applies the same state. There are no sequence numbers. ⛔ **And the two requests with no freshness field can be replayed indefinitely** — see below |
+
+#### Which signed requests carry a freshness window
+
+⚠️ **A timestamp only protects a request if it is inside the SIGNED bytes.** One sent
+alongside the signature can be rewritten by whoever replays it, so the question for each
+request is what its canonical covers, not what the request contains.
+
+| Request | Freshness | Notes |
+|---|---|---|
+| `POST /v1/sites` — **unregister** | ✅ ±5 min | |
+| `POST /v1/sites/keys/rotate` | ✅ ±5 min | |
+| `POST /v1/relationships` | ✅ ±5 min | a captured grant could otherwise be replayed after a later deny, reverting the decision |
+| `POST /v1/content/unregister` | ✅ ±5 min | |
+| `POST /v1/content/unpublish` | ✅ ±5 min | |
+| Signed `GET` reads (`X-Polis-Timestamp`) | ✅ ±5 min | |
+| Instance-to-instance DM delivery | ✅ ±2 min | plus message-ID replay rejection |
+| `POST /v1/stream` | ⚠️ **in transition** | the timestamp lives inside `payload` and is enforced **when present**. Clients from 0.70.0 send it; older ones do not, and are still accepted, so a captured publish from an older client replays until that window closes |
+| `POST /v1/sites` — **register** | ⛔ **none** | deliberate. Registration is keyed by domain and upserts, so a replay re-applies the same row and grants nothing an attacker did not already have |
+| `POST /v1/content` — **register** | ⛔ **none** | ⚠️ **not deliberate.** The canonical is `{type, url, version, author, metadata}` with no freshness field, so a captured registration replays indefinitely — including to **restore content the author has since unpublished**, because the upsert clears the removed state |
+
+⭐ **The discovery service no longer publishes the per-record `signature` on
+`GET /v1/content`**, so the tuple needed for that last replay cannot be collected from the
+service itself. Anyone who collected one before 2026-09-21 still holds a working one:
+withholding the signature narrowed who can start, it disarmed nobody already holding.
 
 ### 7.6 Impersonation (Author Spoofing)
 
@@ -502,7 +545,7 @@ The reference implementation is `cli-go/pkg/policy`.
 | Aspect | Detail |
 |--------|--------|
 | **Attack** | Attacker sends high volume of DMs to a target instance |
-| **Mitigation** | On `polis.pub`, an **edge budget first**: the hosting layer charges the delivery to a per-(recipient, claimed sender) and a per-recipient hourly budget before the recipient's server is even loaded, answering `429` when either is exhausted. Then the recipient's own seven checks, in the order they run: timestamp freshness → sender key fetch (cached) and signature verify → acceptance policy → global rate limit → per-sender rate limit → size check → validate the recipient epoch and store the box unopened |
+| **Mitigation** | On `polis.pub`, an **edge budget first**: the hosting layer charges every delivery attempt to a per-(recipient, client IP) hourly budget, then charges the delivery to a per-(recipient, claimed sender) and a per-recipient hourly budget, all before the recipient's server is even loaded, answering `429` when any is exhausted. Then the recipient's own seven checks, in the order they run: timestamp freshness → sender key fetch (cached) and signature verify → acceptance policy → global rate limit → per-sender rate limit → size check → validate the recipient epoch and store the box unopened |
 | **Residual risk** | The recipient's own timestamp and signature checks, including a cached fetch of the sender's `.well-known/polis`, run before its policy and rate-limit checks, so a flood of well-formed requests costs a verification each before any of its budgets is consumed. An attacker controlling many verified domains could distribute load across senders; the global rate limit is the backstop. ⚠️ **The hosted edge budget is charged before verification, so it is charged to the sender the request CLAIMS to be** — see the trade-off below |
 
 ⚠️ **The hosted edge budget cuts both ways, and this is a deliberate trade.** Verification is the
@@ -512,9 +555,12 @@ sender's hourly budget to one recipient, or spend a recipient's whole hourly inb
 rotating claimed senders. **The cost is bounded: up to an hour of refused inbound DMs for that
 recipient, and nothing is accepted, altered or read** — a forged header cannot deliver a message,
 because the recipient still verifies every one. Without the edge budget the same flood costs unbounded
-outbound fetches, signature verifications and disk writes instead. It is visible as
-`dm.deliver.global_rate_limited` with many distinct `sender_domain` values. A per-IP layer in front of
-it is planned.
+outbound fetches, signature verifications and disk writes instead.
+
+A **per-IP layer in front** bounds what one machine can do: each client address may attempt at most
+half a recipient's hourly budget, so rotating claimed senders from one address can no longer exhaust
+it. Exhausting a recipient now takes many addresses. It is visible as `dm.deliver.ip_rate_limited`
+(one address) or `dm.deliver.global_rate_limited` with many distinct `sender_domain` values (many).
 
 ### 7.15 DM Content Interception (Transport)
 
@@ -653,7 +699,7 @@ Layer 1 rule on `pub.polis.dm` in the [policy grammar](../reference/policy-gramm
 |--------|-------------------|
 | **Availability** | Self-hosting only. Disabled on polis.pub (`EnableHooks = false`; all hook endpoints return 403) |
 | **Execution model** | Shell scripts invoked via `exec.CommandContext` with 30-second timeout |
-| **Path containment** | Hook scripts must resolve within the site directory. Symlinks within the site directory are followed, allowing controlled escape for system-installed scripts |
+| **Path containment** | A hook must be a regular file inside the site directory **after symlinks are resolved**. A link to a script elsewhere in the site runs; a link that leads outside it is refused (`outside site directory`) and nothing is executed. The resolved path is what runs. To run a script installed elsewhere on the system, call it from a hook script inside the site |
 | **Environment** | Inherits parent process environment plus `POLIS_*` variables (event, path, title, version, timestamp, site dir, config dir, commit message) |
 | **Input** | JSON payload on stdin containing event metadata |
 | **Output** | Combined stdout/stderr captured and returned to the caller. A hook script uploaded through the webapp is capped at 32KB (`MaxHookBodySize`) |
@@ -673,7 +719,7 @@ Layer 1 rule on `pub.polis.dm` in the [policy grammar](../reference/policy-gramm
 | **Policy snapshot verification** | Snapshots policy file hashes and alerts once on any change; it compares hashes and knows nothing about blessings. Snapshots are kept per tenant in the Judge state directory |
 | **Index consistency** | Verifies `index.jsonl` entries match real signed files on disk; detects orphaned entries (indexed but missing), phantom files (on disk but not indexed), and hash mismatches |
 | **Cross-site comment verification** | Verifies the comments in the tenant's own comment directory (normally the tenant's own comments) against the key of the author each names, resolved through the author's published key history (fetched from the author's `.well-known/polis` via HTTPS); an unreachable author is reported, not counted as checked |
-| **Signed-artifact checks** | Also verifies the identity-document snapshot, the messages-key signature, the follow file and blessing list signatures, served artifacts against disk, licence origin, key-history chain validity and head agreement, and reports signed fields the verifier does not recognise. Judge reports and never heals |
+| **Signed-artifact checks** | Also verifies the identity-document snapshot, the messages-key signature, the follow file and blessing list signatures, served artifacts against disk, licence origin, key-history chain validity and head agreement, the signatures on attestation records (grants included), the licence, tag files and the operator's actor registry, each resolved through the site's key history, and reports signed fields the verifier does not recognise. Judge reports and never heals |
 | **State persistence** | Judge state survives restarts via a persistent volume |
 | **Observability** | All findings emitted as structured JSON events (`judge.sweep`, `judge.fail.*`, `judge.alert.*`, `judge.info.*`) to an observability backend for monitoring and alerting |
 | **Graceful degradation** | External HTTP failures (item 6) are skipped gracefully with 5-second timeouts; unreachable domains are cached to avoid retry storms |
@@ -723,7 +769,7 @@ Every DS write first passes the per-IP `write-preauth` budget, before its handle
 1. Generates a new Ed25519 keypair
 2. Signs a canonical rotation message with the **old** key, proving control of both keys
 3. Submits the rotation to the discovery service, which verifies the old-key transition signature, confirms the old key matches the site's current active key, and atomically records the new key in its versioned key history (emitting a signed `pub.polis.site.key_rotated` event)
-4. Publishes the new public key at `.well-known/polis` and appends the handover to the site's `public_key_history`. No `.old` backup of the retired private key is written
+4. Publishes the new public key at `.well-known/polis` and appends the handover to the site's `public_key_history`. No `.old` backup of the retired private key is written; it is held at `id_ed25519.prev` only from the install until the handover is recorded, so an interrupted rotation can be finished, and a rotation refuses to start from a key that is not the published chain head (judged by the private key on disk, so a crash midway through the install is finished, not mis-signed)
 
 Existing content is *not* re-signed. It stays verifiable because a verifier that fails against the current key resolves the retired key from the site's published key history ([key history](../../signet/spec/key-history.md)) — rotation moves identity forward without re-anchoring history. The retired key keeps verifying content that claims a time inside its window, whoever signs it (Section 7.2).
 

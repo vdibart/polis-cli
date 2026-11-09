@@ -261,3 +261,32 @@ func TestGoldenFilePresent(t *testing.T) {
 		t.Fatalf("golden corpus missing/empty at %s (abs %s): %v", goldenPath, abs, err)
 	}
 }
+
+func TestVocabularyDescribesWhatParseAccepts(t *testing.T) {
+	if len(typeTokens) != len(typeToInternal) {
+		t.Fatalf("typeTokens has %d entries, typeToInternal %d", len(typeTokens), len(typeToInternal))
+	}
+	v := Vocabulary()
+	for _, typ := range typeTokens {
+		if _, ok := typeToInternal[typ]; !ok {
+			t.Errorf("typeTokens names %q, which typeToInternal does not", typ)
+		}
+		if !strings.Contains(v, typ) {
+			t.Errorf("Vocabulary omits the type %q", typ)
+		}
+		for _, a := range scopeAtoms {
+			for _, c := range modifierClauses {
+				s := "all " + typ + " from " + strings.Join(a.tokens, " ") + " " + strings.Join(c.tokens, " ")
+				if _, err := Parse(s); err != nil {
+					t.Errorf("Parse(%q): %v", s, err)
+				}
+				if !strings.Contains(v, strings.Join(a.tokens, " ")) || !strings.Contains(v, strings.Join(c.tokens, " ")) {
+					t.Errorf("Vocabulary omits a word of %q", s)
+				}
+			}
+		}
+	}
+	if _, err := Parse("all profiles from all of polis by date"); err == nil {
+		t.Error("\"all of polis\" parsed; Vocabulary says it is not a scope")
+	}
+}

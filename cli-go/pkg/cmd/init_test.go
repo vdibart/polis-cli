@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,13 +39,13 @@ func TestInit_Basic(t *testing.T) {
 
 	// Verify .well-known/polis was created
 	wellKnownPath := filepath.Join(dir, ".well-known", "polis")
-	if _, err := os.Stat(wellKnownPath); os.IsNotExist(err) {
+	if _, err := os.Stat(wellKnownPath); errors.Is(err, fs.ErrNotExist) {
 		t.Error("Expected .well-known/polis to be created")
 	}
 
 	// Verify keys were created
 	privKeyPath := filepath.Join(dir, ".polis", "keys", "id_ed25519")
-	if _, err := os.Stat(privKeyPath); os.IsNotExist(err) {
+	if _, err := os.Stat(privKeyPath); errors.Is(err, fs.ErrNotExist) {
 		t.Error("Expected .polis/keys/id_ed25519 to be created")
 	}
 

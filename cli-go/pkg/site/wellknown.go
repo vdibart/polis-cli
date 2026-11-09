@@ -1,18 +1,24 @@
 package site
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"math/rand"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"reflect"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // BundleEntry represents a bundle registration in .well-known/polis.
@@ -48,7 +54,7 @@ type AvatarConfig struct {
 // This is the identity document and bundle registry for a polis site.
 //
 // active_theme used to live here but moved to .polis/bundles/registry.json in
-// step-01/1e — read it via bundle.GetActiveThemeName(siteDir).
+// step-01/1e — read it via bundle.GetActiveThemeName(the site root).
 type WellKnown struct {
 	Version    string                 `json:"version"`
 	PublicKey  string                 `json:"public_key"`
@@ -143,9 +149,8 @@ type WellKnown struct {
 // ⭐ Every member the struct does not model lands in Extra (see
 // WellKnown.UnmarshalJSON), so the value returned here can be mutated and handed
 // straight back to SaveWellKnown without losing anything.
-func LoadWellKnown(siteDir string) (*WellKnown, error) {
-	path := filepath.Join(siteDir, ".well-known", "polis")
-	data, err := os.ReadFile(path)
+func LoadWellKnown(site storage.Site) (*WellKnown, error) {
+	data, err := site.Store().Get(context.Background(), WellKnownKey)
 	if err != nil {
 		return nil, err
 	}
@@ -168,11 +173,10 @@ func LoadWellKnown(siteDir string) (*WellKnown, error) {
 // Downstream integrity checks (e.g. patrol F2/F3/F4) consume the error to
 // report malformed-but-present distinctly from absent. Pre-existing helpers
 // that want "assume-absent-on-any-error" semantics discard the error.
-func LoadWellKnownRaw(siteDir string) (map[string]interface{}, error) {
-	path := filepath.Join(siteDir, ".well-known", "polis")
-	data, err := os.ReadFile(path)
+func LoadWellKnownRaw(site storage.Site) (map[string]interface{}, error) {
+	data, err := site.Store().Get(context.Background(), WellKnownKey)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -198,12 +202,12 @@ func LoadWellKnownRaw(siteDir string) (map[string]interface{}, error) {
 // public_key_messages unless the caller names the change in allow — see
 // checkIdentityWrite. That is the backstop for a caller that builds a WellKnown
 // from scratch over an existing site, which Extra cannot help.
-func SaveWellKnown(siteDir string, wk *WellKnown, allow ...IdentityChange) error {
+func SaveWellKnown(site storage.Site, wk *WellKnown, allow ...IdentityChange) error {
 	data, err := json.MarshalIndent(wk, "", "  ")
 	if err != nil {
 		return err
 	}
-	return writeWellKnown(siteDir, append(data, '\n'), allow)
+	return writeWellKnown(site, append(data, '\n'), allow)
 }
 
 // SaveWellKnownRaw writes a raw map back to .well-known/polis with
@@ -213,12 +217,12 @@ func SaveWellKnown(siteDir string, wk *WellKnown, allow ...IdentityChange) error
 // untouched file.
 //
 // Subject to the same identity-change refusal as SaveWellKnown.
-func SaveWellKnownRaw(siteDir string, raw map[string]interface{}, allow ...IdentityChange) error {
+func SaveWellKnownRaw(site storage.Site, raw map[string]interface{}, allow ...IdentityChange) error {
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return err
 	}
-	return writeWellKnown(siteDir, append(data, '\n'), allow)
+	return writeWellKnown(site, append(data, '\n'), allow)
 }
 
 // IdentityChange names a member of .well-known/polis whose loss or alteration
@@ -258,18 +262,41 @@ func (e *IdentityChangeError) Error() string {
 		" — a write that means to change these must say so, and one that does not is losing identity a heal cannot restore"
 }
 
+// errNoWellKnown says a site has no identity document, and where it looked:
+// the site root on a filesystem, exactly as these messages have always said,
+// and the site itself on a store that has no root to name.
+func errNoWellKnown(site storage.Site, detail string) error {
+	where := "this site"
+	if st := site.Store(); st.Capabilities().RealPath {
+		if root, err := st.RealPath(""); err == nil {
+			where = root
+		}
+	}
+	return fmt.Errorf(".well-known/polis not found in %s%s", where, detail)
+}
+
+// WellKnownKey is .well-known/polis, relative to the site root.
+//
+// ⭐ A KEY, so every reader and writer of the trust anchor addresses it the
+// same way on any backend.
+const WellKnownKey = ".well-known/polis"
+
 // writeWellKnown is the single point every Go writer of .well-known/polis goes
 // through: the D5 content check, then the atomic write.
-func writeWellKnown(siteDir string, data []byte, allow []IdentityChange) error {
-	dir := filepath.Join(siteDir, ".well-known")
-	path := filepath.Join(dir, "polis")
-	if err := checkIdentityWrite(path, data, allow); err != nil {
+func writeWellKnown(site storage.Site, data []byte, allow []IdentityChange) error {
+	// ⚠️ The D5 content check compares what is about to be written against
+	// what is there, so it reads what the site's store holds: the document
+	// this write replaces, on whatever the instance is stored on. ⛔ Reading a
+	// local path instead would find nothing on a store with no filesystem,
+	// and "nothing there" lets any write through.
+	if err := checkIdentityWrite(site, data, allow); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	return atomicfile.WriteFile(path, data, 0644)
+	// ⭐ The write goes through the site, so .well-known lands in whatever the
+	// instance is stored on. The MkdirAll that used to precede it is gone:
+	// atomicfile.Write has the store create the parent, at the store's own
+	// mode rule.
+	return atomicfile.Write(context.Background(), site, WellKnownKey, data, 0644)
 }
 
 // checkIdentityWrite validates BEFORE the write, not after (D5). Writes are
@@ -284,10 +311,10 @@ func writeWellKnown(siteDir string, data []byte, allow []IdentityChange) error {
 // ⚠️ A present-but-unparseable file is refused outright: nothing can be said
 // about what the write would lose, and Go writers reach this only by building a
 // document from scratch — every load path fails on the same bytes first.
-func checkIdentityWrite(path string, next []byte, allow []IdentityChange) error {
-	current, err := os.ReadFile(path)
+func checkIdentityWrite(site storage.Site, next []byte, allow []IdentityChange) error {
+	current, err := site.Store().Get(context.Background(), WellKnownKey)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return err
@@ -345,31 +372,33 @@ func sameJSON(a, b json.RawMessage) bool {
 // and re-save every other field. Withdrawal has to be as reliable as statement.
 //
 // ⚠️ This changes .well-known/polis, which Judge snapshots (WellKnownSnapshot,
-// sha256). Judge will report the change once and then re-baseline, so callers
-// should emit an event at the same moment: the finding is then correlatable as
-// PROVISIONING rather than looking like tampering. This only ever fires on a
+// sha256). Judge holds the change pending and alerts until it has seen it
+// unchanged for several examinations, then accepts it; the check is
+// report-only, so the site's health does not move. Callers should emit an event
+// at the same moment: the alert is then correlatable as PROVISIONING rather than
+// looking like tampering. This only ever fires on a
 // deliberate act by the site owner — existing sites are never touched until
 // they choose.
-func SetLicensePointer(siteDir, pointer string) error {
-	raw, err := LoadWellKnownRaw(siteDir)
+func SetLicensePointer(site storage.Site, pointer string) error {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil {
 		return err
 	}
 	if raw == nil {
-		return fmt.Errorf(".well-known/polis not found in %s", siteDir)
+		return errNoWellKnown(site, "")
 	}
 	if pointer == "" {
 		delete(raw, "license")
 	} else {
 		raw["license"] = pointer
 	}
-	return SaveWellKnownRaw(siteDir, raw)
+	return SaveWellKnownRaw(site, raw)
 }
 
 // LicensePointer returns the site's licence pointer, or "" if it has stated no
 // terms. Absent is a defined state, not an error.
-func LicensePointer(siteDir string) string {
-	raw, err := LoadWellKnownRaw(siteDir)
+func LicensePointer(site storage.Site) string {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil || raw == nil {
 		return ""
 	}
@@ -385,18 +414,18 @@ func LicensePointer(siteDir string) string {
 // reliable as statement. An operator that stops running actors and leaves a
 // pointer to a deleted file publishes a 404 where a fact used to be.
 //
-// ⚠️ This changes .well-known/polis, which Judge snapshots. Judge reports the
-// change once and re-baselines, so emit an event at the same moment or the
-// finding reads as tampering rather than provisioning.
-func SetActorRegistryPointer(siteDir, pointer string) error {
-	return setWellKnownPointer(siteDir, "actor_registry", pointer)
+// ⚠️ This changes .well-known/polis, which Judge snapshots. Judge alerts while
+// the change is pending and then accepts it, so emit an event at the same
+// moment or the alert reads as tampering rather than provisioning.
+func SetActorRegistryPointer(site storage.Site, pointer string) error {
+	return setWellKnownPointer(site, "actor_registry", pointer)
 }
 
 // ActorRegistryPointer returns the site's actor-registry pointer, or "" if it
 // publishes none. Absent is a defined state — most sites run no actors — and
 // not an error.
-func ActorRegistryPointer(siteDir string) string {
-	raw, err := LoadWellKnownRaw(siteDir)
+func ActorRegistryPointer(site storage.Site) string {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil || raw == nil {
 		return ""
 	}
@@ -406,8 +435,8 @@ func ActorRegistryPointer(siteDir string) string {
 
 // SetOperatorPointer writes (or clears) the `operator` field — the domain of
 // the party accountable for this actor site.
-func SetOperatorPointer(siteDir, operatorDomain string) error {
-	return setWellKnownPointer(siteDir, "operator", operatorDomain)
+func SetOperatorPointer(site storage.Site, operatorDomain string) error {
+	return setWellKnownPointer(site, "operator", operatorDomain)
 }
 
 // OperatorPointer returns the operator domain an actor site claims, or "".
@@ -415,8 +444,8 @@ func SetOperatorPointer(siteDir, operatorDomain string) error {
 // ⛔ It is a CLAIM, not a fact. Corroborate it by fetching that operator's
 // registry and checking this domain is listed; a site can say anything about
 // who runs it.
-func OperatorPointer(siteDir string) string {
-	raw, err := LoadWellKnownRaw(siteDir)
+func OperatorPointer(site storage.Site) string {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil || raw == nil {
 		return ""
 	}
@@ -430,13 +459,13 @@ func OperatorPointer(siteDir string) string {
 // ⚠️ This changes .well-known/polis, which Patrol (mtime) and Judge (hash)
 // track. The caller writes it only when the value changes, and emits the grant
 // event that makes the finding correlatable as provisioning.
-func SetAgentsPointer(siteDir, pointer string) error {
-	return setWellKnownPointer(siteDir, "agents", pointer)
+func SetAgentsPointer(site storage.Site, pointer string) error {
+	return setWellKnownPointer(site, "agents", pointer)
 }
 
 // AgentsPointer returns the site's `agents` pointer, or "" when it has none.
-func AgentsPointer(siteDir string) string {
-	raw, err := LoadWellKnownRaw(siteDir)
+func AgentsPointer(site storage.Site) string {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil || raw == nil {
 		return ""
 	}
@@ -444,20 +473,20 @@ func AgentsPointer(siteDir string) string {
 	return v
 }
 
-func setWellKnownPointer(siteDir, key, value string) error {
-	raw, err := LoadWellKnownRaw(siteDir)
+func setWellKnownPointer(site storage.Site, key, value string) error {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil {
 		return err
 	}
 	if raw == nil {
-		return fmt.Errorf(".well-known/polis not found in %s", siteDir)
+		return errNoWellKnown(site, "")
 	}
 	if value == "" {
 		delete(raw, key)
 	} else {
 		raw[key] = value
 	}
-	return SaveWellKnownRaw(siteDir, raw)
+	return SaveWellKnownRaw(site, raw)
 }
 
 // MigrateActiveThemeToRegistry moves the legacy active_theme field from
@@ -471,8 +500,8 @@ func setWellKnownPointer(siteDir, key, value string) error {
 // goes through SaveWellKnownRaw, the guarded writer. It lives here rather than
 // in pkg/bundle because site imports bundle, and the package that owns a file
 // is the one that writes it.
-func MigrateActiveThemeToRegistry(siteDir string) error {
-	raw, err := LoadWellKnownRaw(siteDir)
+func MigrateActiveThemeToRegistry(site storage.Site) error {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil || raw == nil {
 		return nil // missing or unparseable; can't safely migrate
 	}
@@ -480,11 +509,11 @@ func MigrateActiveThemeToRegistry(siteDir string) error {
 	if legacyTheme == "" {
 		return nil // already migrated or never set
 	}
-	if err := bundle.AdoptLegacyActiveTheme(siteDir, legacyTheme); err != nil {
+	if err := bundle.AdoptLegacyActiveTheme(site, legacyTheme); err != nil {
 		return err
 	}
 	delete(raw, "active_theme")
-	if err := SaveWellKnownRaw(siteDir, raw); err != nil {
+	if err := SaveWellKnownRaw(site, raw); err != nil {
 		return fmt.Errorf("rewrite well-known: %w", err)
 	}
 	return nil
@@ -493,11 +522,30 @@ func MigrateActiveThemeToRegistry(siteDir string) error {
 // LegacyPrivateContentExists reports whether the tenant has any private state
 // at the pre-1f location (.polis/content/). Used by Patrol to flag tenants
 // needing the rename remediation in 1g.
-func LegacyPrivateContentExists(siteDir string) bool {
-	root := filepath.Join(siteDir, ".polis", "content")
-	info, err := os.Stat(root)
-	return err == nil && info.IsDir()
+func LegacyPrivateContentExists(site storage.Site) bool {
+	st := site.Store()
+	if st.Capabilities().RealPath {
+		// NOT the storage interface: this asks whether a legacy directory is
+		// THERE, and an EMPTY one still means the site needs migrating. A
+		// prefix listing cannot see an empty directory, so on a filesystem it
+		// would answer "no" for exactly the case this is looking for — the
+		// same reason theme.LegacyThemeLocationsExist asks for the real path.
+		root, err := st.RealPath(legacyPrivateContentKey)
+		if err != nil {
+			return false
+		}
+		info, err := os.Stat(root)
+		return err == nil && info.IsDir()
+	}
+	// ⭐ No filesystem, so no empty directories: the legacy location exists
+	// exactly when something is stored under it.
+	entries, err := st.List(context.Background(), legacyPrivateContentKey)
+	return err == nil && len(entries) > 0
 }
+
+// legacyPrivateContentKey is the pre-1f home of a tenant's per-bundle private
+// state.
+const legacyPrivateContentKey = ".polis/content"
 
 // LegacyActiveThemeInWellKnown reports whether .well-known/polis still carries
 // an active_theme field that the registry migration would relocate.
@@ -506,8 +554,8 @@ func LegacyPrivateContentExists(siteDir string) bool {
 // return false (the legacy check can't safely assert presence if the file
 // isn't readable). Routed through LoadWellKnownRaw so a single parse path
 // serves both this check and the parse-error-aware patrol checks.
-func LegacyActiveThemeInWellKnown(siteDir string) bool {
-	raw, err := LoadWellKnownRaw(siteDir)
+func LegacyActiveThemeInWellKnown(site storage.Site) bool {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil || raw == nil {
 		return false
 	}
@@ -520,15 +568,15 @@ func LegacyActiveThemeInWellKnown(siteDir string) bool {
 // installed_bundles[].active still carries a field. The "active" flags were
 // removed in step-01 cleanup C1+C4 — listing-is-activation now. This is
 // idempotent: returns false once both files have been stripped.
-func LegacyBundleActiveFieldsExist(siteDir string) bool {
-	if wellKnownHasBundleActive(siteDir) {
+func LegacyBundleActiveFieldsExist(site storage.Site) bool {
+	if wellKnownHasBundleActive(site) {
 		return true
 	}
-	return registryHasInstalledBundleActive(siteDir)
+	return registryHasInstalledBundleActive(site)
 }
 
-func wellKnownHasBundleActive(siteDir string) bool {
-	raw, err := LoadWellKnownRaw(siteDir)
+func wellKnownHasBundleActive(site storage.Site) bool {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil || raw == nil {
 		return false
 	}
@@ -542,8 +590,8 @@ func wellKnownHasBundleActive(siteDir string) bool {
 	return false
 }
 
-func registryHasInstalledBundleActive(siteDir string) bool {
-	raw, err := bundle.LoadRegistryRaw(siteDir)
+func registryHasInstalledBundleActive(site storage.Site) bool {
+	raw, err := bundle.LoadRegistryRaw(site)
 	if err != nil || raw == nil {
 		return false
 	}
@@ -566,18 +614,18 @@ func registryHasInstalledBundleActive(siteDir string) bool {
 // One-time migration; pairs with LegacyBundleActiveFieldsExist + the Patrol
 // check checkBundleActiveFields. Will be retired once all tenants are on
 // the cleaned-up format.
-func StripBundleActiveFields(siteDir string) error {
-	if err := stripWellKnownBundleActive(siteDir); err != nil {
+func StripBundleActiveFields(site storage.Site) error {
+	if err := stripWellKnownBundleActive(site); err != nil {
 		return fmt.Errorf("strip well-known bundle.active: %w", err)
 	}
-	if err := stripRegistryInstalledBundleActive(siteDir); err != nil {
+	if err := stripRegistryInstalledBundleActive(site); err != nil {
 		return fmt.Errorf("strip registry installed_bundles.active: %w", err)
 	}
 	return nil
 }
 
-func stripWellKnownBundleActive(siteDir string) error {
-	raw, err := LoadWellKnownRaw(siteDir)
+func stripWellKnownBundleActive(site storage.Site) error {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil || raw == nil {
 		return nil // unparseable → don't risk corrupting; missing → nothing to strip
 	}
@@ -599,12 +647,14 @@ func stripWellKnownBundleActive(siteDir string) error {
 	if !changed {
 		return nil
 	}
-	return SaveWellKnownRaw(siteDir, raw)
+	return SaveWellKnownRaw(site, raw)
 }
 
-func stripRegistryInstalledBundleActive(siteDir string) error {
-	regPath := filepath.Join(siteDir, ".polis", "bundles", "registry.json")
-	data, err := os.ReadFile(regPath)
+func stripRegistryInstalledBundleActive(site storage.Site) error {
+	// ⭐ The registry's own key, so this migration reads and writes the same
+	// object SaveRegistry does on any backend.
+	ctx := context.Background()
+	data, err := site.Store().Get(ctx, bundle.RegistryKey)
 	if err != nil {
 		return nil // missing → nothing to strip
 	}
@@ -634,7 +684,7 @@ func stripRegistryInstalledBundleActive(siteDir string) error {
 	if err != nil {
 		return err
 	}
-	return atomicfile.WriteFile(regPath, append(out, '\n'), 0600)
+	return atomicfile.Write(ctx, site, bundle.RegistryKey, append(out, '\n'), 0600)
 }
 
 // MigratePrivateBundlesPath moves a tenant's per-bundle private state from the
@@ -649,41 +699,67 @@ func stripRegistryInstalledBundleActive(siteDir string) error {
 //
 // One-time migration introduced in step-01/1g; will be retired once all
 // tenants are on the new layout.
-func MigratePrivateBundlesPath(siteDir string) error {
-	legacyRoot := filepath.Join(siteDir, ".polis", "content")
-	if _, err := os.Stat(legacyRoot); os.IsNotExist(err) {
+func MigratePrivateBundlesPath(site storage.Site) error {
+	st := site.Store()
+	if !st.Capabilities().RealPath {
+		// ⛔ This MOVES directories, and a store with no filesystem has neither
+		// directories nor a rename. The legacy layout predates every such
+		// store, so normally there is nothing here; if a site arrives carrying
+		// it anyway, say so rather than leave private state where nothing
+		// reads it.
+		entries, err := st.List(context.Background(), legacyPrivateContentKey)
+		if err != nil {
+			return fmt.Errorf("read legacy root: %w", err)
+		}
+		if len(entries) == 0 {
+			return nil
+		}
+		return fmt.Errorf("private state at the legacy %s on a store with no filesystem: move it to .polis/bundles on a filesystem first", legacyPrivateContentKey)
+	}
+	legacyRoot, err := st.RealPath(legacyPrivateContentKey)
+	if err != nil {
+		return err
+	}
+	if absent, _ := storage.PathAbsent(legacyRoot); absent {
 		return nil // already migrated, or never had legacy state
 	}
 
-	bundlesRoot := filepath.Join(siteDir, ".polis", "bundles")
+	bundlesRoot, err := st.RealPath(".polis/bundles")
+	if err != nil {
+		return err
+	}
+	// NOT the storage interface, for these two MkdirAlls and the os.Rename below:
+	// this MOVES a bundle directory, and the interface has no rename. 0700 because
+	// the bundles live under .polis. Filesystem only, so it runs on the real
+	// path behind the store's capability.
 	if err := os.MkdirAll(bundlesRoot, 0700); err != nil {
 		return fmt.Errorf("ensure .polis/bundles: %w", err)
 	}
 
 	// For each bundle dir under .polis/content/<bundle>/, walk its subtrees
 	// and move each into .polis/bundles/<bundle>/<subtree>.
-	bundleEntries, err := os.ReadDir(legacyRoot)
+	bundleEntries, err := storage.ListDir(legacyRoot)
 	if err != nil {
 		return fmt.Errorf("read legacy root: %w", err)
 	}
 	for _, bundleEntry := range bundleEntries {
-		if !bundleEntry.IsDir() {
+		if !bundleEntry.IsDir {
 			continue
 		}
-		bundleName := bundleEntry.Name()
+		bundleName := pathpkg.Base(bundleEntry.Key)
 		legacyBundleDir := filepath.Join(legacyRoot, bundleName)
 		newBundleDir := filepath.Join(bundlesRoot, bundleName)
 		if err := os.MkdirAll(newBundleDir, 0700); err != nil {
 			return fmt.Errorf("ensure %s: %w", newBundleDir, err)
 		}
-		subtrees, err := os.ReadDir(legacyBundleDir)
+		subtrees, err := storage.ListDir(legacyBundleDir)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", legacyBundleDir, err)
 		}
 		for _, sub := range subtrees {
-			src := filepath.Join(legacyBundleDir, sub.Name())
-			dst := filepath.Join(newBundleDir, sub.Name())
-			if _, err := os.Stat(dst); err == nil {
+			src := filepath.Join(legacyBundleDir, pathpkg.Base(sub.Key))
+			dst := filepath.Join(newBundleDir, pathpkg.Base(sub.Key))
+			if present, _ := storage.PathExists(dst); present {
 				// Destination already exists — refuse to merge.
 				return fmt.Errorf("migration ambiguous: %s already exists, won't merge from %s", dst, src)
 			}
@@ -692,11 +768,11 @@ func MigratePrivateBundlesPath(siteDir string) error {
 			}
 		}
 		// Empty bundle dir — remove.
-		_ = os.Remove(legacyBundleDir)
+		_ = storage.DeleteAtPath(legacyBundleDir, storage.IgnoreMissing())
 	}
 
 	// Remove the legacy root if empty.
-	_ = os.Remove(legacyRoot)
+	_ = storage.DeleteAtPath(legacyRoot, storage.IgnoreMissing())
 	return nil
 }
 
@@ -704,8 +780,8 @@ func MigratePrivateBundlesPath(siteDir string) error {
 // in .well-known/polis. If "author" exists and "author_name" is empty, the
 // value is copied. The "author" key is then removed. No-op if the file is
 // missing or already migrated.
-func MigrateAuthorField(siteDir string) error {
-	raw, err := LoadWellKnownRaw(siteDir)
+func MigrateAuthorField(site storage.Site) error {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil || raw == nil {
 		return nil // missing or corrupt: skip
 	}
@@ -723,14 +799,14 @@ func MigrateAuthorField(siteDir string) error {
 	}
 
 	delete(raw, "author")
-	return SaveWellKnownRaw(siteDir, raw)
+	return SaveWellKnownRaw(site, raw)
 }
 
 // GetActiveTheme returns the active theme name. Reads from
 // .polis/bundles/registry.json (post-1e canonical) with a legacy fallback to
 // active_theme in .well-known/polis for pre-migration sites.
-func GetActiveTheme(siteDir string) string {
-	name, _ := bundle.GetActiveThemeName(siteDir)
+func GetActiveTheme(site storage.Site) string {
+	name, _ := bundle.GetActiveThemeName(site)
 	return name
 }
 
@@ -902,8 +978,8 @@ func GenerateFaviconSVG(config *AvatarConfig, initial string) string {
 // WriteFavicon generates a favicon.svg from the avatar config in .well-known/polis
 // and writes it to the site root directory. Returns an error if .well-known/polis
 // cannot be read; missing avatar config produces a fallback initial-based favicon.
-func WriteFavicon(siteDir string) error {
-	wk, err := LoadWellKnown(siteDir)
+func WriteFavicon(site storage.Site) error {
+	wk, err := LoadWellKnown(site)
 	if err != nil {
 		return fmt.Errorf("load .well-known/polis: %w", err)
 	}
@@ -915,6 +991,5 @@ func WriteFavicon(siteDir string) error {
 	}
 
 	svg := GenerateFaviconSVG(wk.Avatar, initial)
-	faviconPath := filepath.Join(siteDir, "favicon.svg")
-	return os.WriteFile(faviconPath, []byte(svg), 0644)
+	return site.Store().Put(context.Background(), "favicon.svg", []byte(svg))
 }

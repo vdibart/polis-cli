@@ -1,29 +1,25 @@
 package notification
 
 import (
-	"path/filepath"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"testing"
 )
 
-func TestStateFile(t *testing.T) {
-	path := StateFile("/data", "example.supabase.co")
-	expected := filepath.Join("/data", ".polis", "ds", "example.supabase.co", "pub.polis.core", "state", "pub.polis.notification.jsonl")
-	if path != expected {
-		t.Errorf("StateFile() = %q, want %q", path, expected)
+func TestStateFileKey(t *testing.T) {
+	if got, want := StateFileKey("example.supabase.co"), ".polis/ds/example.supabase.co/pub.polis.core/state/pub.polis.notification.jsonl"; got != want {
+		t.Errorf("StateFileKey() = %q, want %q", got, want)
 	}
 }
 
-func TestStateDir(t *testing.T) {
-	dir := StateDir("/data", "example.supabase.co")
-	expected := filepath.Join("/data", ".polis", "ds", "example.supabase.co", "pub.polis.core", "state")
-	if dir != expected {
-		t.Errorf("StateDir() = %q, want %q", dir, expected)
+func TestStateDirKey(t *testing.T) {
+	if got, want := StateDirKey("example.supabase.co"), ".polis/ds/example.supabase.co/pub.polis.core/state"; got != want {
+		t.Errorf("StateDirKey() = %q, want %q", got, want)
 	}
 }
 
 func TestManagerList_Empty(t *testing.T) {
 	tmpDir := t.TempDir()
-	mgr := NewManager(tmpDir, "test.supabase.co")
+	mgr := NewManager(storage.At(tmpDir), "test.supabase.co")
 
 	entries, err := mgr.List()
 	if err != nil {
@@ -36,7 +32,7 @@ func TestManagerList_Empty(t *testing.T) {
 
 func TestCountUnread(t *testing.T) {
 	tmpDir := t.TempDir()
-	mgr := NewManager(tmpDir, "test.supabase.co")
+	mgr := NewManager(storage.At(tmpDir), "test.supabase.co")
 
 	// Empty = 0
 	count, _ := mgr.CountUnread()
@@ -59,7 +55,7 @@ func TestCountUnread(t *testing.T) {
 
 func TestMarkRead(t *testing.T) {
 	tmpDir := t.TempDir()
-	mgr := NewManager(tmpDir, "test.supabase.co")
+	mgr := NewManager(storage.At(tmpDir), "test.supabase.co")
 
 	if err := mgr.writeAll([]StateEntry{
 		{ID: "n1", RuleID: "test", Actor: "a", Icon: "i", Message: "m", EventIDs: []int{1}, CreatedAt: "2025-01-15T10:30:00Z"},
@@ -97,7 +93,7 @@ func TestMarkRead(t *testing.T) {
 
 func TestListPaginated(t *testing.T) {
 	tmpDir := t.TempDir()
-	mgr := NewManager(tmpDir, "test.supabase.co")
+	mgr := NewManager(storage.At(tmpDir), "test.supabase.co")
 
 	if err := mgr.writeAll([]StateEntry{
 		{ID: "n1", RuleID: "test", Actor: "a", Icon: "i", Message: "m", EventIDs: []int{1}, CreatedAt: "2025-01-15T10:30:00Z"},

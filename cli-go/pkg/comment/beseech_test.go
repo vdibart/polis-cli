@@ -2,6 +2,7 @@ package comment
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -89,14 +90,13 @@ func dirExists(p string) bool {
 }
 
 func TestBeseechComment_NotConfigured(t *testing.T) {
-	oldURL, oldKey, oldBase := DiscoveryURL, DiscoveryKey, BaseURL
-	defer func() { DiscoveryURL, DiscoveryKey, BaseURL = oldURL, oldKey, oldBase }()
+	oldURL, oldBase := DiscoveryURL, BaseURL
+	defer func() { DiscoveryURL, BaseURL = oldURL, oldBase }()
 
 	DiscoveryURL = ""
-	DiscoveryKey = ""
 	BaseURL = ""
 
-	_, err := BeseechComment(t.TempDir(), "test-id", nil)
+	_, err := BeseechComment(storage.At(t.TempDir()), "test-id", nil)
 	if err == nil {
 		t.Error("expected error when not configured")
 	}
@@ -106,14 +106,13 @@ func TestBeseechComment_NotConfigured(t *testing.T) {
 }
 
 func TestBeseechComment_NoBaseURL(t *testing.T) {
-	oldURL, oldKey, oldBase := DiscoveryURL, DiscoveryKey, BaseURL
-	defer func() { DiscoveryURL, DiscoveryKey, BaseURL = oldURL, oldKey, oldBase }()
+	oldURL, oldBase := DiscoveryURL, BaseURL
+	defer func() { DiscoveryURL, BaseURL = oldURL, oldBase }()
 
 	DiscoveryURL = "https://discovery.example.com"
-	DiscoveryKey = "test-key"
 	BaseURL = ""
 
-	_, err := BeseechComment(t.TempDir(), "test-id", nil)
+	_, err := BeseechComment(storage.At(t.TempDir()), "test-id", nil)
 	if err == nil {
 		t.Error("expected error when base URL not configured")
 	}
@@ -123,16 +122,15 @@ func TestBeseechComment_NoBaseURL(t *testing.T) {
 }
 
 func TestBeseechComment_CommentNotFound(t *testing.T) {
-	oldURL, oldKey, oldBase := DiscoveryURL, DiscoveryKey, BaseURL
-	defer func() { DiscoveryURL, DiscoveryKey, BaseURL = oldURL, oldKey, oldBase }()
+	oldURL, oldBase := DiscoveryURL, BaseURL
+	defer func() { DiscoveryURL, BaseURL = oldURL, oldBase }()
 
 	DiscoveryURL = "https://discovery.example.com"
-	DiscoveryKey = "test-key"
 	BaseURL = "https://test.polis.pub"
 
 	dataDir := t.TempDir()
 
-	_, err := BeseechComment(dataDir, "nonexistent-id", nil)
+	_, err := BeseechComment(storage.At(dataDir), "nonexistent-id", nil)
 	if err == nil {
 		t.Error("expected error when comment not found")
 	}
@@ -152,11 +150,10 @@ func TestBeseechComment_CommentNotFound(t *testing.T) {
 // the PublishComment step back below the registration check) would fail
 // this test.
 func TestBeseechComment_NotRegisteredLocally(t *testing.T) {
-	oldURL, oldKey, oldBase := DiscoveryURL, DiscoveryKey, BaseURL
-	defer func() { DiscoveryURL, DiscoveryKey, BaseURL = oldURL, oldKey, oldBase }()
+	oldURL, oldBase := DiscoveryURL, BaseURL
+	defer func() { DiscoveryURL, BaseURL = oldURL, oldBase }()
 
 	DiscoveryURL = "https://discovery.example.com"
-	DiscoveryKey = "test-key"
 	BaseURL = "https://test.polis.pub"
 
 	dataDir := t.TempDir()
@@ -180,7 +177,7 @@ func TestBeseechComment_NotRegisteredLocally(t *testing.T) {
 		InReplyTo: "https://alice.polis.pub/posts/20260101/hello.md",
 		Content:   "Local-only comment — DS deferred until registration.",
 	}
-	signed, err := SignComment(dataDir, draft, "bob.polis.pub", "https://bob.polis.pub", privKey)
+	signed, err := SignComment(storage.At(dataDir), draft, "bob.polis.pub", "https://bob.polis.pub", privKey)
 	if err != nil {
 		t.Fatalf("SignComment failed: %v", err)
 	}
@@ -191,7 +188,7 @@ func TestBeseechComment_NotRegisteredLocally(t *testing.T) {
 	// Intentionally do NOT write a registration marker; this is the
 	// scenario under test.
 
-	result, err := BeseechComment(dataDir, signed.Meta.ID, privKey)
+	result, err := BeseechComment(storage.At(dataDir), signed.Meta.ID, privKey)
 	if err != nil {
 		t.Fatalf("BeseechComment returned error when not registered (should defer): %v", err)
 	}

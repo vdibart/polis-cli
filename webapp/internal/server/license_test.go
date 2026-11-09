@@ -2,6 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,7 +26,7 @@ import (
 // It did nothing in precisely the case where the disagreement is created.
 func TestSettingsWithdrawalRemovesEveryProjection(t *testing.T) {
 	s := newConfiguredServer(t)
-	if err := bundle.EnsureReferencePayload(s.DataDir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(s.Site(), "pub.polis.core"); err != nil {
 		t.Fatalf("install reference payload: %v", err)
 	}
 
@@ -40,7 +43,7 @@ func TestSettingsWithdrawalRemovesEveryProjection(t *testing.T) {
 	}
 	post("reserved")
 
-	mount := site.LicenseMountDir(s.DataDir)
+	mount := site.LicenseMountDir(s.Site())
 	surfaces := []string{
 		"robots.txt",
 		"rsl.xml",
@@ -56,21 +59,21 @@ func TestSettingsWithdrawalRemovesEveryProjection(t *testing.T) {
 	post("none")
 
 	for _, rel := range append(surfaces, mount) {
-		if _, err := os.Stat(filepath.Join(s.DataDir, rel)); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(s.DataDir, rel)); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s survived withdrawal from Settings", rel)
 		}
 	}
-	if terms, err := site.SiteTerms(s.DataDir); err != nil || terms != nil {
+	if terms, err := site.SiteTerms(s.Site()); err != nil || terms != nil {
 		t.Errorf("after withdrawal SiteTerms = %v, %v; want nil, nil", terms, err)
 	}
 
 	// And the whole point: the site is now indistinguishable from one that
 	// never stated terms.
 	fresh := newConfiguredServer(t)
-	if err := bundle.EnsureReferencePayload(fresh.DataDir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(fresh.DataDir), "pub.polis.core"); err != nil {
 		t.Fatalf("install reference payload: %v", err)
 	}
-	renderer, err := render.NewPageRenderer(render.PageConfig{DataDir: fresh.DataDir, BaseURL: fresh.BaseURL})
+	renderer, err := render.NewPageRenderer(render.PageConfig{Site: storage.At(fresh.DataDir), BaseURL: fresh.BaseURL})
 	if err != nil {
 		t.Fatalf("NewPageRenderer: %v", err)
 	}
@@ -80,7 +83,7 @@ func TestSettingsWithdrawalRemovesEveryProjection(t *testing.T) {
 	for _, rel := range append(surfaces, mount) {
 		_, withdrawnErr := os.Stat(filepath.Join(s.DataDir, rel))
 		_, neverErr := os.Stat(filepath.Join(fresh.DataDir, rel))
-		if os.IsNotExist(withdrawnErr) != os.IsNotExist(neverErr) {
+		if errors.Is(withdrawnErr, fs.ErrNotExist) != errors.Is(neverErr, fs.ErrNotExist) {
 			t.Errorf("%s: withdrawn site and never-stated site disagree (%v vs %v)", rel, withdrawnErr, neverErr)
 		}
 	}
@@ -138,7 +141,7 @@ func TestSettingsLicenceSectionForATenantThatNeverStatedTerms(t *testing.T) {
 // silently withdrew the user's signed terms. Withdrawal must be named.
 func TestSiteLicenseEmptyProfileIsRejectedAndKeepsTerms(t *testing.T) {
 	s := newConfiguredServer(t)
-	if err := bundle.EnsureReferencePayload(s.DataDir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(s.Site(), "pub.polis.core"); err != nil {
 		t.Fatalf("install reference payload: %v", err)
 	}
 	post := func(body string) *httptest.ResponseRecorder {
@@ -156,7 +159,7 @@ func TestSiteLicenseEmptyProfileIsRejectedAndKeepsTerms(t *testing.T) {
 		if w := post(body); w.Code != http.StatusBadRequest {
 			t.Errorf("POST %s = %d, want 400: %s", body, w.Code, w.Body.String())
 		}
-		if terms, err := site.SiteTerms(s.DataDir); err != nil || terms == nil {
+		if terms, err := site.SiteTerms(s.Site()); err != nil || terms == nil {
 			t.Fatalf("POST %s withdrew the terms (SiteTerms = %v, %v)", body, terms, err)
 		}
 	}
@@ -168,7 +171,7 @@ func TestSiteLicenseEmptyProfileIsRejectedAndKeepsTerms(t *testing.T) {
 		if w := post(`{"profile":"` + word + `"}`); w.Code != http.StatusOK {
 			t.Fatalf("withdraw with %q = %d: %s", word, w.Code, w.Body.String())
 		}
-		if terms, err := site.SiteTerms(s.DataDir); err != nil || terms != nil {
+		if terms, err := site.SiteTerms(s.Site()); err != nil || terms != nil {
 			t.Errorf("%q did not withdraw (SiteTerms = %v, %v)", word, terms, err)
 		}
 	}

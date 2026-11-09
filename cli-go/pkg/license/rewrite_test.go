@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,13 @@ import (
 // A license.json carrying a member this build does not model is refused, never
 // rewritten, except by the explicit unsigned escape hatch.
 
+// siteOf and keyOf split a test's licence path into the site and key that
+// SignAndWrite and RewriteUnsigned take. ⚠️ The tests keep their PATHS because
+// they read the bytes back off disk to check what was written; the API takes a
+// site so the production write goes through the store.
+func siteOf(path string) storage.Site { return storage.At(filepath.Dir(path)) }
+func keyOf(path string) string        { return filepath.Base(path) }
+
 func licenceWithFutureMember(t *testing.T) (string, []byte, []byte) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "license.json")
@@ -23,7 +31,7 @@ func licenceWithFutureMember(t *testing.T) (string, []byte, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := SignAndWrite(f, path, priv); err != nil {
+	if err := SignAndWrite(f, siteOf(path), keyOf(path), priv); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(path)
@@ -42,7 +50,7 @@ func licenceWithFutureMember(t *testing.T) (string, []byte, []byte) {
 func TestALicenceWithAnUnknownMemberRefusesToBeRestated(t *testing.T) {
 	path, patched, priv := licenceWithFutureMember(t)
 	f, _ := New(ProfileReserved, "https://alice.polis.pub")
-	err := SignAndWrite(f, path, priv)
+	err := SignAndWrite(f, siteOf(path), keyOf(path), priv)
 	var refusal *signing.RewriteRefusedError
 	if !errors.As(err, &refusal) || strings.Join(refusal.Fields, ",") != "terms.ai-input-scope" {
 		t.Fatalf("want a refusal naming terms.ai-input-scope, got %v", err)
@@ -54,7 +62,7 @@ func TestALicenceWithAnUnknownMemberRefusesToBeRestated(t *testing.T) {
 
 func TestLicenceRewriteUnsignedIsTheOnlyWayPast(t *testing.T) {
 	path, _, priv := licenceWithFutureMember(t)
-	dropped, err := RewriteUnsigned(path)
+	dropped, err := RewriteUnsigned(siteOf(path), keyOf(path))
 	if err != nil || strings.Join(dropped, ",") != "terms.ai-input-scope" {
 		t.Fatalf("RewriteUnsigned = %v, %v", dropped, err)
 	}
@@ -66,7 +74,7 @@ func TestLicenceRewriteUnsignedIsTheOnlyWayPast(t *testing.T) {
 		t.Fatalf("escape hatch result: unrecognised=%v terms=%v", f.UnrecognisedFields(), f.Terms)
 	}
 	fresh, _ := New(ProfileReserved, "https://alice.polis.pub")
-	if err := SignAndWrite(fresh, path, priv); err != nil {
+	if err := SignAndWrite(fresh, siteOf(path), keyOf(path), priv); err != nil {
 		t.Fatalf("after the escape hatch, restating terms must work: %v", err)
 	}
 }

@@ -2,6 +2,9 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,14 +22,14 @@ const testBase = "https://alice.polis.pub"
 func newSite(t *testing.T) Config {
 	t.Helper()
 	dir := t.TempDir()
-	if _, err := site.Init(dir, site.InitOptions{BaseURL: testBase, SiteTitle: "alice"}); err != nil {
+	if _, err := site.Init(storage.At(dir), site.InitOptions{BaseURL: testBase, SiteTitle: "alice"}); err != nil {
 		t.Fatalf("site.Init: %v", err)
 	}
 	key, err := os.ReadFile(filepath.Join(dir, ".polis", "keys", "id_ed25519"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Config{SiteDir: dir, BaseURL: testBase, PrivateKey: key}
+	return Config{Site: storage.At(dir), BaseURL: testBase, PrivateKey: key}
 }
 
 func TestDefaultIssuesOnceAndAPassLaterFindsItStanding(t *testing.T) {
@@ -35,7 +38,7 @@ func TestDefaultIssuesOnceAndAPassLaterFindsItStanding(t *testing.T) {
 	if err != nil || outcome != DefaultIssued {
 		t.Fatalf("first pass = %s, %v", outcome, err)
 	}
-	g, _ := LiveRosieGrant(cfg.SiteDir)
+	g, _ := LiveRosieGrant(cfg.Site)
 	if !g.Valid() || g.Basis() != attestation.CustodyBasisHostingTerms || g.URL() != w.URL {
 		t.Fatalf("live grant after default = %+v", g)
 	}
@@ -44,7 +47,7 @@ func TestDefaultIssuesOnceAndAPassLaterFindsItStanding(t *testing.T) {
 			t.Fatalf("pass %d = %s, want %s", i+2, outcome, DefaultStanding)
 		}
 	}
-	if gs, _ := attestation.Grants(cfg.SiteDir, Rosie); len(gs) != 1 {
+	if gs, _ := attestation.Grants(cfg.Site, Rosie); len(gs) != 1 {
 		t.Fatalf("grants after three passes = %d, want 1", len(gs))
 	}
 }
@@ -64,7 +67,7 @@ func TestSwitchingRosieOffSurvivesTheDefaultPass(t *testing.T) {
 			t.Fatalf("pass after switch-off = %s, %v; want %s", outcome, err, DefaultWithdrawn)
 		}
 	}
-	if g, _ := LiveRosieGrant(cfg.SiteDir); g != nil {
+	if g, _ := LiveRosieGrant(cfg.Site); g != nil {
 		t.Fatal("Rosie is live after the user switched her off and the pass ran")
 	}
 }
@@ -80,7 +83,7 @@ func TestAUserWhoSwitchedBackOnReceivesNoFurtherDefault(t *testing.T) {
 	if outcome, _, _ := IssueDefault(cfg); outcome != DefaultWithdrawn {
 		t.Fatalf("default after a withdrawal ever = %s, want %s", outcome, DefaultWithdrawn)
 	}
-	if g, _ := LiveRosieGrant(cfg.SiteDir); !g.Valid() || g.Basis() != attestation.CustodyBasisUserSigned {
+	if g, _ := LiveRosieGrant(cfg.Site); !g.Valid() || g.Basis() != attestation.CustodyBasisUserSigned {
 		t.Fatal("the user's own switch-on is not the live grant")
 	}
 }
@@ -107,14 +110,14 @@ func TestDisableWithdrawsEveryStandingRosieGrant(t *testing.T) {
 			attestation.GrantKeyBehaviours: "rosie/2", attestation.CustodyKeyBasis: attestation.CustodyBasisHostingTerms,
 		},
 	}
-	if _, err := attestation.Issue(cfg.SiteDir, rec, cfg.PrivateKey); err != nil {
+	if _, err := attestation.Issue(cfg.Site, rec, cfg.PrivateKey); err != nil {
 		t.Fatal(err)
 	}
 	written, err := Disable(cfg)
 	if err != nil || len(written) != 2 {
 		t.Fatalf("Disable withdrew %d, err %v; want 2", len(written), err)
 	}
-	gs, _ := attestation.Grants(cfg.SiteDir, Rosie)
+	gs, _ := attestation.Grants(cfg.Site, Rosie)
 	for _, g := range gs {
 		if !g.Withdrawn {
 			t.Errorf("%s/%d still standing", g.Set, g.Version)
@@ -124,7 +127,7 @@ func TestDisableWithdrawsEveryStandingRosieGrant(t *testing.T) {
 
 func readProjection(t *testing.T, dir string) Projection {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(dir, MountDir(dir), AgentsFilename))
+	data, err := os.ReadFile(filepath.Join(dir, MountDir(storage.At(dir)), AgentsFilename))
 	if err != nil {
 		t.Fatalf("agents.json: %v", err)
 	}
@@ -139,25 +142,25 @@ func TestProjectionReflectsEveryGrantAndWithdrawal(t *testing.T) {
 	cfg := newSite(t)
 	_, w, _ := IssueDefault(cfg)
 
-	if got, want := site.AgentsPointer(cfg.SiteDir), "/attestations/agents.json"; got != want {
+	if got, want := site.AgentsPointer(cfg.Site), "/attestations/agents.json"; got != want {
 		t.Fatalf("agents pointer = %q, want %q", got, want)
 	}
-	p := readProjection(t, cfg.SiteDir)
+	p := readProjection(t, cfg.Site.Dir())
 	if len(p.Agents) != 1 || p.Agents[0].State != "live" || p.Agents[0].Grant != w.URL {
 		t.Fatalf("projection after default = %+v", p.Agents)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.SiteDir, "attestations", AgentsPageDir, "index.html")); err != nil {
+	if _, err := os.Stat(filepath.Join(cfg.Site.Dir(), "attestations", AgentsPageDir, "index.html")); err != nil {
 		t.Fatalf("page: %v", err)
 	}
 
 	_, _ = Disable(cfg)
-	p = readProjection(t, cfg.SiteDir)
+	p = readProjection(t, cfg.Site.Dir())
 	if p.Agents[0].State != "withdrawn" || p.Agents[0].WithdrawnAt == "" {
 		t.Fatalf("projection after switch-off = %+v", p.Agents[0])
 	}
 
 	on, _, _ := Enable(cfg)
-	p = readProjection(t, cfg.SiteDir)
+	p = readProjection(t, cfg.Site.Dir())
 	// Two records asserted in the same second sort by content hash, so find
 	// each by its URL rather than by position.
 	states := map[string]string{}
@@ -174,7 +177,7 @@ func TestProjectionReflectsEveryGrantAndWithdrawal(t *testing.T) {
 func TestTheMarkerNeverCitesTheProjection(t *testing.T) {
 	cfg := newSite(t)
 	_, _, _ = IssueDefault(cfg)
-	g, _ := LiveRosieGrant(cfg.SiteDir)
+	g, _ := LiveRosieGrant(cfg.Site)
 	if !strings.Contains(g.URL(), "/content/pub.polis.core/attestation/") || strings.Contains(g.URL(), AgentsFilename) {
 		t.Fatalf("live grant URL %q is not the record's source URL", g.URL())
 	}
@@ -191,7 +194,7 @@ func TestProjectionIsRefreshedAfterAFailedWrite(t *testing.T) {
 	// A stale projection claiming she is live.
 	stale := Projection{Type: ProjectionType, Agents: []ProjectionItem{{Agent: Rosie, State: "live"}}}
 	data, _ := json.Marshal(stale)
-	path := filepath.Join(cfg.SiteDir, MountDir(cfg.SiteDir), AgentsFilename)
+	path := filepath.Join(cfg.Site.Dir(), MountDir(cfg.Site), AgentsFilename)
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +204,7 @@ func TestProjectionIsRefreshedAfterAFailedWrite(t *testing.T) {
 	if _, _, err := Enable(broken); err == nil {
 		t.Fatal("Enable with no site address succeeded")
 	}
-	p := readProjection(t, cfg.SiteDir)
+	p := readProjection(t, cfg.Site.Dir())
 	if len(p.Agents) != 1 || p.Agents[0].State != "withdrawn" {
 		t.Fatalf("projection after a failed switch-on = %+v, want the truth (withdrawn)", p.Agents)
 	}
@@ -209,13 +212,13 @@ func TestProjectionIsRefreshedAfterAFailedWrite(t *testing.T) {
 
 func TestASiteWithNoGrantPublishesNothing(t *testing.T) {
 	cfg := newSite(t)
-	if err := RefreshProjections(cfg.SiteDir); err != nil {
+	if err := RefreshProjections(cfg.Site); err != nil {
 		t.Fatal(err)
 	}
-	if site.AgentsPointer(cfg.SiteDir) != "" {
+	if site.AgentsPointer(cfg.Site) != "" {
 		t.Error("a site with no grant has an agents pointer")
 	}
-	if _, err := os.Stat(filepath.Join(cfg.SiteDir, MountDir(cfg.SiteDir), AgentsFilename)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(cfg.Site.Dir(), MountDir(cfg.Site), AgentsFilename)); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("a site with no grant has an agents.json")
 	}
 }
@@ -223,10 +226,10 @@ func TestASiteWithNoGrantPublishesNothing(t *testing.T) {
 func TestThePointerIsNotRewrittenWhenUnchanged(t *testing.T) {
 	cfg := newSite(t)
 	_, _, _ = IssueDefault(cfg)
-	wk := filepath.Join(cfg.SiteDir, ".well-known", "polis")
+	wk := filepath.Join(cfg.Site.Dir(), ".well-known", "polis")
 	before, _ := os.Stat(wk)
 	beforeBytes, _ := os.ReadFile(wk)
-	if err := RefreshProjections(cfg.SiteDir); err != nil {
+	if err := RefreshProjections(cfg.Site); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := os.Stat(wk)
@@ -245,7 +248,7 @@ func TestAKeyRotationKeepsRosieLiveAndSwitchOffStillWorks(t *testing.T) {
 	}
 
 	oldPriv := cfg.PrivateKey
-	oldPub, _ := os.ReadFile(filepath.Join(cfg.SiteDir, ".polis", "keys", "id_ed25519.pub"))
+	oldPub, _ := os.ReadFile(filepath.Join(cfg.Site.Dir(), ".polis", "keys", "id_ed25519.pub"))
 	newPriv, newPubRaw, err := signing.GenerateKeypair()
 	if err != nil {
 		t.Fatal(err)
@@ -260,12 +263,12 @@ func TestAKeyRotationKeepsRosieLiveAndSwitchOffStillWorks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := site.RecordKeyRotation(cfg.SiteDir, newPub, sig, validFrom); err != nil {
+	if err := site.RecordKeyRotation(cfg.Site, newPub, sig, validFrom, ""); err != nil {
 		t.Fatal(err)
 	}
 	cfg.PrivateKey = newPriv
 
-	if g, _ := LiveRosieGrant(cfg.SiteDir); !g.Valid() {
+	if g, _ := LiveRosieGrant(cfg.Site); !g.Valid() {
 		t.Fatal("Rosie stopped after a key rotation: her grant no longer resolves")
 	}
 	if outcome, _, _ := IssueDefault(cfg); outcome != DefaultStanding {
@@ -275,7 +278,7 @@ func TestAKeyRotationKeepsRosieLiveAndSwitchOffStillWorks(t *testing.T) {
 	if err != nil || len(written) != 1 {
 		t.Fatalf("switching Rosie off after a rotation: withdrew %d, err %v", len(written), err)
 	}
-	if g, _ := LiveRosieGrant(cfg.SiteDir); g != nil {
+	if g, _ := LiveRosieGrant(cfg.Site); g != nil {
 		t.Fatal("Rosie still live after switch-off")
 	}
 	if outcome, _, _ := IssueDefault(cfg); outcome != DefaultWithdrawn {
@@ -301,22 +304,22 @@ func TestRosieTextAvoidsTheInstrumentWords(t *testing.T) {
 
 func TestCatchUpRunsOncePerGrant(t *testing.T) {
 	cfg := newSite(t)
-	if NeedsCatchUp(cfg.SiteDir) {
+	if NeedsCatchUp(cfg.Site) {
 		t.Fatal("a site with no grant needs a catch-up")
 	}
 	_, w, _ := IssueDefault(cfg)
-	if !NeedsCatchUp(cfg.SiteDir) {
+	if !NeedsCatchUp(cfg.Site) {
 		t.Fatal("a newly live grant needs no catch-up")
 	}
-	if err := RecordCatchUp(cfg.SiteDir, w.URL); err != nil {
+	if err := RecordCatchUp(cfg.Site, w.URL); err != nil {
 		t.Fatal(err)
 	}
-	if NeedsCatchUp(cfg.SiteDir) {
+	if NeedsCatchUp(cfg.Site) {
 		t.Fatal("catch-up recorded, still needed")
 	}
 	_, _ = Disable(cfg)
 	_, _, _ = Enable(cfg)
-	if !NeedsCatchUp(cfg.SiteDir) {
+	if !NeedsCatchUp(cfg.Site) {
 		t.Fatal("switching her back on needs a fresh catch-up")
 	}
 }

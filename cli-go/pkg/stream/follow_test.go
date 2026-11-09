@@ -2,6 +2,7 @@ package stream
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"sort"
 	"testing"
 
@@ -185,7 +186,7 @@ func TestFollowHandler_EmptyEvents(t *testing.T) {
 func TestFollowHandler_FullCycle(t *testing.T) {
 	// Test with Store integration
 	dir := t.TempDir()
-	store := NewStore(dir, "test.supabase.co", "pub.polis.core")
+	store := NewStore(storage.At(dir), "test.supabase.co", "pub.polis.core")
 	h := &FollowHandler{MyDomain: "bob.com"}
 
 	// Initial state

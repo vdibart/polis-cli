@@ -3,6 +3,7 @@ package ops
 import (
 	"context"
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,7 +19,7 @@ import (
 // env.Resolver.SiteDir().
 func minimalEnv(t *testing.T) HandlerEnv {
 	t.Helper()
-	r := resolve.New(t.TempDir(), map[string]*bundle.Bundle{})
+	r := resolve.New(storage.At(t.TempDir()), map[string]*bundle.Bundle{})
 	return HandlerEnv{Resolver: r}
 }
 

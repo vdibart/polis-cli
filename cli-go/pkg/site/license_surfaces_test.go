@@ -1,6 +1,9 @@
 package site
 
 import (
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,7 +15,7 @@ import (
 func TestRemoveLicenseSurfacesKeepsTheAuthorsOwnPages(t *testing.T) {
 	dir, _ := initSite(t, InitOptions{License: "reserved", BaseURL: "https://maya.example"})
 
-	mount := filepath.Join(dir, filepath.FromSlash(LicenseMountDir(dir)))
+	mount := filepath.Join(dir, filepath.FromSlash(LicenseMountDir(storage.At(dir))))
 	if err := os.MkdirAll(mount, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -32,12 +35,12 @@ func TestRemoveLicenseSurfacesKeepsTheAuthorsOwnPages(t *testing.T) {
 		}
 	}
 
-	if err := RemoveLicenseSurfaces(dir); err != nil {
+	if err := RemoveLicenseSurfaces(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 
 	for _, name := range rendered {
-		if _, err := os.Stat(filepath.Join(mount, name)); !os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(mount, name)); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("generated page %s survived removal", name)
 		}
 	}
@@ -51,15 +54,15 @@ func TestRemoveLicenseSurfacesKeepsTheAuthorsOwnPages(t *testing.T) {
 // With only generated pages present, the mount itself goes too.
 func TestRemoveLicenseSurfacesRemovesAnEmptiedMount(t *testing.T) {
 	dir, _ := initSite(t, InitOptions{License: "reserved", BaseURL: "https://maya.example"})
-	mount := filepath.Join(dir, filepath.FromSlash(LicenseMountDir(dir)))
+	mount := filepath.Join(dir, filepath.FromSlash(LicenseMountDir(storage.At(dir))))
 	os.MkdirAll(mount, 0755)
 	os.WriteFile(filepath.Join(mount, "index.html"), []byte("x"), 0644)
 	os.WriteFile(filepath.Join(mount, "reserved-1.html"), []byte("x"), 0644)
 
-	if err := RemoveLicenseSurfaces(dir); err != nil {
+	if err := RemoveLicenseSurfaces(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(mount); !os.IsNotExist(err) {
+	if _, err := os.Stat(mount); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("an emptied licence mount was left standing")
 	}
 }

@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"testing"
 )
 
@@ -15,11 +16,11 @@ func TestAppendToPublicIndex_NoDuplicates(t *testing.T) {
 		CurrentVersion: "sha256:abc",
 	}
 
-	if err := AppendToPublicIndex(siteDir, entry); err != nil {
+	if err := AppendToPublicIndex(storage.At(siteDir), entry); err != nil {
 		t.Fatalf("first append failed: %v", err)
 	}
 
-	entries, _ := LoadPublicIndex(siteDir)
+	entries, _ := LoadPublicIndex(storage.At(siteDir))
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
@@ -43,10 +44,10 @@ func TestAppendToPublicIndex_DuplicateUpdatesInPlace(t *testing.T) {
 		CurrentVersion: "sha256:def",
 	}
 
-	AppendToPublicIndex(siteDir, entry1)
-	AppendToPublicIndex(siteDir, entry2)
+	AppendToPublicIndex(storage.At(siteDir), entry1)
+	AppendToPublicIndex(storage.At(siteDir), entry2)
 
-	entries, _ := LoadPublicIndex(siteDir)
+	entries, _ := LoadPublicIndex(storage.At(siteDir))
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry after dedup, got %d", len(entries))
 	}
@@ -70,10 +71,10 @@ func TestAppendToPublicIndex_DifferentPathsAppended(t *testing.T) {
 		Path: "posts/20260101/world.md",
 	}
 
-	AppendToPublicIndex(siteDir, entry1)
-	AppendToPublicIndex(siteDir, entry2)
+	AppendToPublicIndex(storage.At(siteDir), entry1)
+	AppendToPublicIndex(storage.At(siteDir), entry2)
 
-	entries, _ := LoadPublicIndex(siteDir)
+	entries, _ := LoadPublicIndex(storage.At(siteDir))
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
@@ -84,10 +85,10 @@ func TestAppendCommentToIndex_Dedup(t *testing.T) {
 
 	path := "comments/20260101/comment-id.md"
 
-	AppendCommentToIndex(siteDir, path, "Comment v1", "2026-01-01T00:00:00Z", "sha256:aaa", "https://example.com/posts/hello.md")
-	AppendCommentToIndex(siteDir, path, "Comment v2", "2026-01-01T00:00:00Z", "sha256:bbb", "https://example.com/posts/hello.md")
+	AppendCommentToIndex(storage.At(siteDir), path, "Comment v1", "2026-01-01T00:00:00Z", "sha256:aaa", "https://example.com/posts/hello.md")
+	AppendCommentToIndex(storage.At(siteDir), path, "Comment v2", "2026-01-01T00:00:00Z", "sha256:bbb", "https://example.com/posts/hello.md")
 
-	entries, _ := LoadPublicIndex(siteDir)
+	entries, _ := LoadPublicIndex(storage.At(siteDir))
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry after comment dedup, got %d", len(entries))
 	}

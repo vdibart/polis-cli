@@ -8,21 +8,21 @@
 package atomicfile
 
 import (
-	"fmt"
 	"os"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
-// WriteFile writes data to path atomically: writes <path>.tmp first, then
-// renames onto path. mode applies to the final file. The temp file is
-// removed on rename failure.
+// WriteFile writes data to path atomically: writes a temp file beside it,
+// created exclusively under a unique dot-led name, syncs it, then renames it
+// onto path. mode applies to the final file. The temp file is removed on
+// failure. ⚠️ A path that is a symlink is REPLACED by a regular file, never
+// written through, so a link planted in a tenant directory cannot redirect the
+// write (storage.Put, by contrast, writes through one). Write, not this
+// function, also syncs the directory.
 func WriteFile(path string, data []byte, mode os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, mode); err != nil {
-		return fmt.Errorf("write tmp: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename: %w", err)
-	}
-	return nil
+	// ⭐ One implementation of temp-and-rename, in pkg/storage. ⛔ The temp name
+	// is unique per write: a fixed "<path>.tmp" let two writers to one key share
+	// a temp file and tear the target.
+	return storage.WriteFileAtomic(path, data, mode, false)
 }

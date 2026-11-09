@@ -2,6 +2,7 @@ package render
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -188,7 +189,7 @@ func TestRenderAll_StreamMetadataHeadBlock(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260102", "bravo", "Bravo", "Second post body content.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",

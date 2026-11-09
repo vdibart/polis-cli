@@ -18,7 +18,7 @@ We take security seriously. If you discover a security vulnerability in Polis CL
 
 **Please do NOT report security vulnerabilities through public GitHub issues.**
 
-Instead, please email security concerns to: **vdibart@duck.com**
+Instead, please email security concerns to: **security@polis.pub**
 
 Include the following in your report:
 - Description of the vulnerability

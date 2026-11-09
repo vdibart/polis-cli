@@ -2,6 +2,7 @@ package ops
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +34,7 @@ func protectionEnv(t *testing.T, followed ...string) (HandlerEnv, []byte) {
 	if _, _, err := kr.SetPassword([]byte("pw")); err != nil {
 		t.Fatal(err)
 	}
-	if err := kr.Save(dm.DMDir(siteDir)); err != nil {
+	if err := kr.Save(storage.At(siteDir)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -42,7 +43,7 @@ func protectionEnv(t *testing.T, followed ...string) (HandlerEnv, []byte) {
 	for _, d := range followed {
 		entries = append(entries, following.FollowingEntry{URL: "https://" + d})
 	}
-	fpath := following.DefaultPath(siteDir)
+	fpath := storage.At(siteDir).Path(following.DefaultKey)
 	if err := os.MkdirAll(filepath.Dir(fpath), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +53,7 @@ func protectionEnv(t *testing.T, followed ...string) (HandlerEnv, []byte) {
 	}
 
 	env := HandlerEnv{
-		Resolver:   resolve.New(siteDir, map[string]*bundle.Bundle{}),
+		Resolver:   resolve.New(storage.At(siteDir), map[string]*bundle.Bundle{}),
 		PrivateKey: privPEM,
 		PublicKey:  pubSSH,
 		BaseURL:    "https://bob.example.com",

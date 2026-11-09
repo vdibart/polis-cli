@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -83,12 +84,12 @@ func legacyMarkdownSigningBase(content string, isComment bool) string {
 type fleetTally struct {
 	mu sync.Mutex
 
-	sites, sitesUnreachable, sitesNoKey int
-	byType                              map[string]*typeTally
-	disagreements                       []string
-	failures                            []string
-	preExisting                         []string
-	notes                               []string
+	sites, sitesUnreachable, sitesNoKey, sitesThrottled int
+	byType                                              map[string]*typeTally
+	disagreements                                       []string
+	failures                                            []string
+	preExisting                                         []string
+	notes                                               []string
 
 	// Epic 31: sites publishing a history with at least one rotation, and
 	// artifacts whose verdict the history changed.
@@ -104,6 +105,37 @@ type fleetTally struct {
 	paritySites     int
 	parityOther     []string
 	parityExplained []string // disagreements on a declared clone gap (cloneGaps)
+
+	// The parity SAMPLE (fleetcanary_parity_test.go): which sites this run
+	// compares, how many it left out, and whether a 429 stopped the pass.
+	watch            *requestWatch
+	paritySampled    map[string]bool
+	parityPicked     []string
+	parityUnpicked   int
+	parityStopped    string // why the parity pass stopped; "" when it did not
+	parityOverBudget []string
+
+	// The signature SLICE: a site larger than the slice size is verified a
+	// rotating slice at a time (fleetcanary_parity_test.go).
+	entriesTotal, entriesChecked int
+	sliced                       []string
+}
+
+// parityHalted reports whether a 429 has already stopped the parity pass.
+func (ft *fleetTally) parityHalted() bool {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	return ft.parityStopped != ""
+}
+
+// haltParity stops the parity pass for the rest of the run. Only the first
+// reason is kept: it names the site where the throttling was seen.
+func (ft *fleetTally) haltParity(format string, a ...any) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	if ft.parityStopped == "" {
+		ft.parityStopped = fmt.Sprintf(format, a...)
+	}
 }
 
 // typeTally counts one artifact type across the whole fleet.
@@ -161,10 +193,26 @@ func TestFleetCanary(t *testing.T) {
 		t.Skip("set POLIS_FLEET_CANARY=1 to verify live production artifacts over the public internet")
 	}
 
+	// The watch goes in BEFORE any client is built: remote.NewClient reads
+	// http.DefaultTransport when it is called.
+	ds := os.Getenv("POLIS_FLEET_DS")
+	if ds == "" {
+		ds = defaultFleetDS
+	}
+	watch := newRequestWatch(http.DefaultTransport, ds)
+	orig := http.DefaultTransport
+	http.DefaultTransport = watch
+	t.Cleanup(func() { http.DefaultTransport = orig })
+
 	domains := fleetDomains(t)
 	t.Logf("fleet: %d site(s)", len(domains))
 
-	ft := &fleetTally{byType: map[string]*typeTally{}}
+	ft := &fleetTally{byType: map[string]*typeTally{}, watch: watch, paritySampled: map[string]bool{}}
+	ft.parityPicked = paritySample(domains, paritySampleSize(), paritySeed())
+	for _, d := range ft.parityPicked {
+		ft.paritySampled["https://"+d] = true
+	}
+	ft.parityUnpicked = len(domains) - len(ft.parityPicked)
 	client := remote.NewClient()
 
 	sem := make(chan struct{}, 3)
@@ -230,10 +278,22 @@ func checkFleetSite(ft *fleetTally, client *remote.Client, base string) {
 	// path would be answering a different question.
 	wk, err := client.FetchWellKnown(base)
 	if err != nil {
+		// A 429 says nothing about this site — it says we are being
+		// throttled. Counting it as "unreachable" is what let a
+		// rate-limited run report a clean sweep of an empty fleet.
+		throttled := remote.IsThrottled(err)
 		ft.mu.Lock()
-		ft.sitesUnreachable++
+		if throttled {
+			ft.sitesThrottled++
+		} else {
+			ft.sitesUnreachable++
+		}
 		ft.mu.Unlock()
-		ft.note("%s: no .well-known/polis (%v)", base, err)
+		if throttled {
+			ft.note("%s: THROTTLED (%v)", base, err)
+		} else {
+			ft.note("%s: no .well-known/polis (%v)", base, err)
+		}
 		return
 	}
 	var wkRaw struct {
@@ -271,7 +331,20 @@ func checkFleetSite(ft *fleetTally, client *remote.Client, base string) {
 		return
 	}
 	rr := sitecheck.NewRemote() // one per site: its caches are not shared across goroutines
-	for _, e := range entries {
+	size, err := signatureSliceSize()
+	if err != nil {
+		ft.note("%s: NOT VERIFIED — %v", base, err)
+		return
+	}
+	checked, lo, hi := signatureSlice(entries, size, paritySeed())
+	ft.mu.Lock()
+	ft.entriesTotal += len(entries)
+	ft.entriesChecked += len(checked)
+	if len(checked) < len(entries) {
+		ft.sliced = append(ft.sliced, sliceLabel(polisurl.ExtractDomain(base), lo, hi, len(entries)))
+	}
+	ft.mu.Unlock()
+	for _, e := range checked {
 		switch e.Type {
 		case "post", "comment":
 			checkFleetMarkdown(ft, client, base, pubKey, chain, e)
@@ -287,11 +360,14 @@ func checkFleetSite(ft *fleetTally, client *remote.Client, base string) {
 	// drew HTTP 429 and starved the verification pass: every post went uncounted
 	// and the remote run never started. A comparison against a rate-limited site
 	// would report orphans that are not there, so it is skipped and SAID.
+	if !ft.paritySampled[base] {
+		return // not in this run's sample; counted in the PARITY SAMPLE line
+	}
 	if max := parityMax(); len(entries) > max {
 		ft.note("%s: parity NOT COMPARED — %d index entries exceeds POLIS_FLEET_PARITY_MAX=%d (cloning it trips the site's rate limit)", base, len(entries), max)
 		return
 	}
-	checkFleetParity(ft, base)
+	checkFleetParity(ft, base, len(entries))
 }
 
 func parityMax() int {
@@ -552,7 +628,36 @@ var cloneGaps = map[string]string{
 //
 // ⚠️ A disagreement can be the clone's, not the validator's: a check only
 // passes locally over files `polis clone` actually collected.
-func checkFleetParity(ft *fleetTally, base string) {
+func checkFleetParity(ft *fleetTally, base string, entries int) {
+	if ft.parityHalted() {
+		ft.note("%s: parity NOT COMPARED — the parity pass stopped after a 429", base)
+		return
+	}
+	var throttledBefore int
+	if ft.watch != nil {
+		var used int
+		used, throttledBefore = ft.watch.snapshot()
+		if u, err := url.Parse(base); err == nil && isHostedHost(u.Hostname()) {
+			if cost := parityCost(entries); used+cost > hostedBudget() {
+				ft.mu.Lock()
+				ft.parityOverBudget = append(ft.parityOverBudget, fmt.Sprintf("%s (about %d requests; %d sent so far, budget %d)", base, cost, used, hostedBudget()))
+				ft.mu.Unlock()
+				return
+			}
+		}
+	}
+	// throttled reports whether any 429 arrived since this comparison began.
+	// ⚠️ From ANY site, not only this one: polis.pub's limit is per address
+	// across tenants, so a 429 anywhere means this comparison may have read
+	// a rate-limit response as absence.
+	throttled := func() bool {
+		if ft.watch == nil {
+			return false
+		}
+		_, n := ft.watch.snapshot()
+		return n > throttledBefore
+	}
+
 	dir, err := os.MkdirTemp("", "polis-fleet-parity-")
 	if err != nil {
 		ft.note("%s: parity not checked — %v", base, err)
@@ -561,6 +666,10 @@ func checkFleetParity(ft *fleetTally, base string) {
 	defer os.RemoveAll(dir)
 	target := dir + "/site"
 	if _, err := clone.Clone(base, target, clone.CloneOptions{FullClone: true}); err != nil {
+		if remote.IsThrottled(err) || throttled() {
+			ft.haltParity("%s: the clone was throttled (%v)", base, err)
+			return
+		}
 		ft.note("%s: parity not checked — clone failed: %v", base, err)
 		return
 	}
@@ -569,6 +678,12 @@ func checkFleetParity(ft *fleetTally, base string) {
 	rr := sitecheck.NewRemote()
 	rr.DSKeys = nil
 	remoteReport := rr.RunSite(base)
+	// ⛔ Checked BEFORE the verdicts are read: a throttled remote run reports
+	// absence, and comparing it would turn a 429 into a PARITY REGRESSION.
+	if throttled() {
+		ft.haltParity("%s: a 429 arrived during the comparison, so its result is discarded", base)
+		return
+	}
 	if remoteReport.FatalError != "" {
 		ft.note("%s: parity NOT COMPARED — the remote run could not start: %s", base, remoteReport.FatalError)
 		return
@@ -616,8 +731,23 @@ func reportFleet(t *testing.T, ft *fleetTally) {
 	sort.Strings(types)
 
 	var totalVerified, totalInvalid int
-	t.Logf("sites: %d checked, %d unreachable, %d without a published key",
-		ft.sites, ft.sitesUnreachable, ft.sitesNoKey)
+	t.Logf("sites: %d checked, %d unreachable, %d throttled, %d without a published key",
+		ft.sites, ft.sitesUnreachable, ft.sitesThrottled, ft.sitesNoKey)
+
+	// A throttled run is NOT EVIDENCE, and that is the whole point of this
+	// block. Before it existed, hammering the fleet got us 429s, every site
+	// was recorded as "unreachable", nothing was verified, and the test
+	// PASSED — a green result from a run that checked nothing, which is the
+	// exact failure this canary exists to prevent, inside the canary.
+	//
+	// It fails rather than retries on purpose: Retry-After is measured in
+	// tens of minutes, and a test that sleeps that long is one nobody runs.
+	// The operator waits and re-runs; the run that counts is the clean one.
+	if ft.sitesThrottled > 0 {
+		t.Errorf("THROTTLED: %d of %d site(s) returned 429 — this run verified only %d site(s) and IS NOT EVIDENCE. "+
+			"Wait out the Retry-After window and run it again; do not read the result below as a pass.",
+			ft.sitesThrottled, ft.sites+ft.sitesThrottled+ft.sitesUnreachable, ft.sites)
+	}
 	for _, k := range types {
 		v := ft.byType[k]
 		totalVerified += v.verified
@@ -627,7 +757,34 @@ func reportFleet(t *testing.T, ft *fleetTally) {
 	}
 	t.Logf("TOTAL VERIFIED: %d   TOTAL INVALID: %d", totalVerified, totalInvalid)
 	t.Logf("RECORD URLS: %d live tag/attestation record(s) — `polis validate <url>` agrees with the package predicate on each (epic 42 V2)", ft.recordURLAgreed)
+	size, _ := signatureSliceSize()
+	t.Logf("COVERAGE: %d of %d index entries checked this run; every site with at most %d entries in full (0 = no slicing), a rotating slice of each larger one", ft.entriesChecked, ft.entriesTotal, size)
+	sort.Strings(ft.sliced)
+	for _, sl := range ft.sliced {
+		t.Logf("  sliced: %s", sl)
+	}
+	t.Logf("PARITY SAMPLE: %d site(s) picked (seed %d), %d left out by sampling: %s", len(ft.parityPicked), paritySeed(), ft.parityUnpicked, strings.Join(ft.parityPicked, ", "))
 	t.Logf("PARITY: %d site(s) cloned and validated both ways (epic 44 D6); a disagreement on a check epic 44 changed is listed with the regressions below", ft.paritySites)
+	for _, o := range ft.parityOverBudget {
+		t.Logf("  parity NOT COMPARED, over the polis.pub request budget: %s", o)
+	}
+	// ⛔ A parity pass a 429 stopped is NOT EVIDENCE, the same rule as a
+	// throttled site above. It fails rather than passing on what it managed.
+	if ft.parityStopped != "" {
+		t.Errorf("PARITY STOPPED: throttled — %s. Parity is NOT EVIDENCE for this run; no comparison made during the throttling was kept.", ft.parityStopped)
+	}
+	if ft.watch != nil {
+		t.Logf("REQUESTS: %s", ft.watch.summary())
+		// ⛔ THE SAME RULE AS A THROTTLED SITE, ONE LEVEL DOWN. The site count
+		// above sees a 429 only on .well-known/polis; a 429 on an ARTIFACT
+		// fetch was counted as absent and the run passed. The first run with
+		// this watch (2026-10-09) passed with 557 of discover.polis.pub's
+		// posts answered 429 and silently uncounted.
+		if _, n := ft.watch.snapshot(); n > 0 && ft.parityStopped == "" {
+			t.Errorf("THROTTLED FETCHES: %d request(s) answered 429 and were counted as absent — this run IS NOT EVIDENCE for those artifacts. %s",
+				n, "The signature pass alone can exceed polis.pub's per-address limit; see the REQUESTS line.")
+		}
+	}
 	if len(ft.parityExplained) > 0 {
 		t.Logf("PARITY, EXPLAINED: %d disagreement(s) on a declared clone gap — the clone did not collect what the check reads:", len(ft.parityExplained))
 		for _, p := range ft.parityExplained {

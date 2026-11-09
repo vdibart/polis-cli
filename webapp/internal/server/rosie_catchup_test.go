@@ -28,7 +28,7 @@ func pendingRecord(id int, commentURL, actor string, created time.Time) string {
 
 func registered(t *testing.T, s *Server) {
 	t.Helper()
-	if err := discovery.WriteRegistrationMarker(s.DataDir, s.DiscoveryURL, "test-site.polis.pub", "test"); err != nil {
+	if err := discovery.WriteRegistrationMarker(s.Site(), s.DiscoveryURL, "test-site.polis.pub", "test"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -50,7 +50,7 @@ func TestCatchUpDecidesRequestsLeftPendingWithinItsWindow(t *testing.T) {
 	}
 
 	switchRosieOnByDefault(t, s)
-	live, _ := agent.LiveRosieGrant(s.DataDir)
+	live, _ := agent.LiveRosieGrant(s.Site())
 	events := captureEvents(t, s.rosieCatchUp)
 
 	if ds.writeCount() != 1 {
@@ -89,13 +89,13 @@ func TestCatchUpCapNeverStrandsRequests(t *testing.T) {
 		pendingRecord(3, catchUpComment("bob.polis.pub", "3"), "bob.polis.pub", now) +
 		`]}`
 	switchRosieOnByDefault(t, s)
-	live, _ := agent.LiveRosieGrant(s.DataDir)
+	live, _ := agent.LiveRosieGrant(s.Site())
 
 	events := captureEvents(t, s.rosieCatchUp)
 	if ds.writeCount() != 2 {
 		t.Fatalf("first pass decided %d, want the cap (2)", ds.writeCount())
 	}
-	if agent.CatchUpDone(s.DataDir, live.URL()) {
+	if agent.CatchUpDone(s.Site(), live.URL()) {
 		t.Fatal("a pass that stopped at the cap was recorded as done")
 	}
 	if ev := findEvent(events, "pub.polis.agent.catch_up"); ev == nil || ev["capped"] != float64(1) || ev["complete"] != false {
@@ -106,7 +106,7 @@ func TestCatchUpCapNeverStrandsRequests(t *testing.T) {
 	if ds.writeCount() != 3 {
 		t.Fatalf("second pass brought decisions to %d, want 3", ds.writeCount())
 	}
-	if !agent.CatchUpDone(s.DataDir, live.URL()) {
+	if !agent.CatchUpDone(s.Site(), live.URL()) {
 		t.Fatal("catch-up not recorded once nothing was left by the cap")
 	}
 

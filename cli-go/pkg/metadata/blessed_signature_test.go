@@ -2,6 +2,7 @@ package metadata
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -246,12 +247,12 @@ func TestVerifyBlessedSiteValid(t *testing.T) {
 	siteDir := t.TempDir()
 	writeWellKnown(t, siteDir, pub)
 
-	if err := AddBlessedCommentSigned(siteDir, "posts/20260101/hello.md",
+	if err := AddBlessedCommentSigned(storage.At(siteDir), "posts/20260101/hello.md",
 		BlessedComment{URL: "https://bob.example/c/1.md", Version: "sha256:aaa"}, priv); err != nil {
 		t.Fatalf("AddBlessedCommentSigned: %v", err)
 	}
 
-	status, err := VerifyBlessedSite(siteDir)
+	status, err := VerifyBlessedSite(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("VerifyBlessedSite: %v", err)
 	}
@@ -264,7 +265,7 @@ func TestVerifyBlessedSiteValid(t *testing.T) {
 // unsigned, not unknown and certainly not a finding.
 func TestVerifyBlessedSiteNoFileIsUnsigned(t *testing.T) {
 	siteDir := t.TempDir()
-	status, err := VerifyBlessedSite(siteDir)
+	status, err := VerifyBlessedSite(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("unexpected error for a site with no blessing list: %v", err)
 	}
@@ -278,12 +279,12 @@ func TestVerifyBlessedSiteNoFileIsUnsigned(t *testing.T) {
 func TestVerifyBlessedSiteNoWellKnownIsUnknown(t *testing.T) {
 	priv, _ := newTestKeys(t)
 	siteDir := t.TempDir()
-	if err := AddBlessedCommentSigned(siteDir, "posts/p.md",
+	if err := AddBlessedCommentSigned(storage.At(siteDir), "posts/p.md",
 		BlessedComment{URL: "https://bob.example/c/1.md"}, priv); err != nil {
 		t.Fatalf("AddBlessedCommentSigned: %v", err)
 	}
 
-	status, _ := VerifyBlessedSite(siteDir)
+	status, _ := VerifyBlessedSite(storage.At(siteDir))
 	if status != StatusUnknown {
 		t.Errorf("status = %q, want %q", status, StatusUnknown)
 	}
@@ -296,12 +297,12 @@ func TestVerifyBlessedSiteDetectsOnDiskTampering(t *testing.T) {
 	siteDir := t.TempDir()
 	writeWellKnown(t, siteDir, pub)
 
-	if err := AddBlessedCommentSigned(siteDir, "posts/p.md",
+	if err := AddBlessedCommentSigned(storage.At(siteDir), "posts/p.md",
 		BlessedComment{URL: "https://bob.example/c/1.md"}, priv); err != nil {
 		t.Fatalf("AddBlessedCommentSigned: %v", err)
 	}
 
-	path := BlessedPath(siteDir)
+	path := filepath.Join(siteDir, BlessedKey)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read: %v", err)
@@ -314,7 +315,7 @@ func TestVerifyBlessedSiteDetectsOnDiskTampering(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	status, _ := VerifyBlessedSite(siteDir)
+	status, _ := VerifyBlessedSite(storage.At(siteDir))
 	if status != StatusInvalid {
 		t.Errorf("hand-edited blessing list verified as %q, want %q", status, StatusInvalid)
 	}
@@ -329,10 +330,10 @@ func TestAddSignedProducesAVerifyingFile(t *testing.T) {
 	writeWellKnown(t, siteDir, pub)
 
 	for _, u := range []string{"https://a.example/c/1.md", "https://b.example/c/2.md"} {
-		if err := AddBlessedCommentSigned(siteDir, "posts/p.md", BlessedComment{URL: u}, priv); err != nil {
+		if err := AddBlessedCommentSigned(storage.At(siteDir), "posts/p.md", BlessedComment{URL: u}, priv); err != nil {
 			t.Fatalf("AddBlessedCommentSigned(%s): %v", u, err)
 		}
-		if status, err := VerifyBlessedSite(siteDir); status != StatusValid {
+		if status, err := VerifyBlessedSite(storage.At(siteDir)); status != StatusValid {
 			t.Fatalf("after adding %s: status = %q (%v), want %q", u, status, err, StatusValid)
 		}
 	}
@@ -351,11 +352,11 @@ func TestRemoveSignedKeepsTheFileVerifying(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	must(AddBlessedCommentSigned(siteDir, "posts/p.md", BlessedComment{URL: "https://a.example/c/1.md"}, priv))
-	must(AddBlessedCommentSigned(siteDir, "posts/p.md", BlessedComment{URL: "https://b.example/c/2.md"}, priv))
-	must(RemoveBlessedCommentSigned(siteDir, "https://a.example/c/1.md", priv))
+	must(AddBlessedCommentSigned(storage.At(siteDir), "posts/p.md", BlessedComment{URL: "https://a.example/c/1.md"}, priv))
+	must(AddBlessedCommentSigned(storage.At(siteDir), "posts/p.md", BlessedComment{URL: "https://b.example/c/2.md"}, priv))
+	must(RemoveBlessedCommentSigned(storage.At(siteDir), "https://a.example/c/1.md", priv))
 
-	status, err := VerifyBlessedSite(siteDir)
+	status, err := VerifyBlessedSite(storage.At(siteDir))
 	if status != StatusValid {
 		t.Errorf("after a signed removal: status = %q (%v), want %q", status, err, StatusValid)
 	}
@@ -370,28 +371,28 @@ func TestUnsignedWriteClearsAStaleSignature(t *testing.T) {
 	siteDir := t.TempDir()
 	writeWellKnown(t, siteDir, pub)
 
-	if err := AddBlessedCommentSigned(siteDir, "posts/p.md",
+	if err := AddBlessedCommentSigned(storage.At(siteDir), "posts/p.md",
 		BlessedComment{URL: "https://a.example/c/1.md"}, priv); err != nil {
 		t.Fatalf("AddBlessedCommentSigned: %v", err)
 	}
-	if status, _ := VerifyBlessedSite(siteDir); status != StatusValid {
+	if status, _ := VerifyBlessedSite(storage.At(siteDir)); status != StatusValid {
 		t.Fatalf("setup: expected a valid signature first, got %q", status)
 	}
 
 	// A keyless path writes next — Chaplain, a legacy caller, anything.
-	if err := AddBlessedComment(siteDir, "posts/p.md",
+	if err := AddBlessedComment(storage.At(siteDir), "posts/p.md",
 		BlessedComment{URL: "https://b.example/c/2.md"}); err != nil {
 		t.Fatalf("AddBlessedComment: %v", err)
 	}
 
-	bc, err := LoadBlessedComments(siteDir)
+	bc, err := LoadBlessedComments(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
 	}
 	if bc.Signature != "" {
 		t.Error("an unsigned write left the old signature in place")
 	}
-	if status, _ := VerifyBlessedSite(siteDir); status != StatusUnsigned {
+	if status, _ := VerifyBlessedSite(storage.At(siteDir)); status != StatusUnsigned {
 		t.Errorf("status = %q, want %q — unsigned is the safe degradation, invalid is a false alarm", status, StatusUnsigned)
 	}
 }
@@ -408,11 +409,11 @@ func TestUnsignedRemoveClearsAStaleSignature(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	must(AddBlessedCommentSigned(siteDir, "posts/p.md", BlessedComment{URL: "https://a.example/c/1.md"}, priv))
-	must(AddBlessedCommentSigned(siteDir, "posts/p.md", BlessedComment{URL: "https://b.example/c/2.md"}, priv))
-	must(RemoveBlessedComment(siteDir, "https://a.example/c/1.md"))
+	must(AddBlessedCommentSigned(storage.At(siteDir), "posts/p.md", BlessedComment{URL: "https://a.example/c/1.md"}, priv))
+	must(AddBlessedCommentSigned(storage.At(siteDir), "posts/p.md", BlessedComment{URL: "https://b.example/c/2.md"}, priv))
+	must(RemoveBlessedComment(storage.At(siteDir), "https://a.example/c/1.md"))
 
-	if status, _ := VerifyBlessedSite(siteDir); status != StatusUnsigned {
+	if status, _ := VerifyBlessedSite(storage.At(siteDir)); status != StatusUnsigned {
 		t.Errorf("status = %q, want %q", status, StatusUnsigned)
 	}
 }
@@ -424,21 +425,21 @@ func TestSaveBlessedCommentsClearsAStaleSignature(t *testing.T) {
 	siteDir := t.TempDir()
 	writeWellKnown(t, siteDir, pub)
 
-	if err := AddBlessedCommentSigned(siteDir, "posts/p.md",
+	if err := AddBlessedCommentSigned(storage.At(siteDir), "posts/p.md",
 		BlessedComment{URL: "https://a.example/c/1.md"}, priv); err != nil {
 		t.Fatalf("AddBlessedCommentSigned: %v", err)
 	}
 
-	bc, err := LoadBlessedComments(siteDir)
+	bc, err := LoadBlessedComments(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
 	}
 	bc.Comments[0].Blessed[0].URL = "https://rewritten.example/c/1.md"
-	if err := SaveBlessedComments(siteDir, bc); err != nil {
+	if err := SaveBlessedComments(storage.At(siteDir), bc); err != nil {
 		t.Fatalf("SaveBlessedComments: %v", err)
 	}
 
-	if status, _ := VerifyBlessedSite(siteDir); status != StatusUnsigned {
+	if status, _ := VerifyBlessedSite(storage.At(siteDir)); status != StatusUnsigned {
 		t.Errorf("status = %q, want %q", status, StatusUnsigned)
 	}
 }
@@ -455,19 +456,19 @@ func TestSignedWriteStampsGeneratorBeforeSigning(t *testing.T) {
 	Version = "9.9.9-test"
 	t.Cleanup(func() { Version = "dev" })
 
-	if err := AddBlessedCommentSigned(siteDir, "posts/p.md",
+	if err := AddBlessedCommentSigned(storage.At(siteDir), "posts/p.md",
 		BlessedComment{URL: "https://a.example/c/1.md"}, priv); err != nil {
 		t.Fatalf("AddBlessedCommentSigned: %v", err)
 	}
 
-	bc, err := LoadBlessedComments(siteDir)
+	bc, err := LoadBlessedComments(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
 	}
 	if bc.Version != "polis-cli-go/9.9.9-test" {
 		t.Errorf("version = %q, want %q", bc.Version, "polis-cli-go/9.9.9-test")
 	}
-	if status, err := VerifyBlessedSite(siteDir); status != StatusValid {
+	if status, err := VerifyBlessedSite(storage.At(siteDir)); status != StatusValid {
 		t.Errorf("status = %q (%v), want %q — the stamp must land BEFORE the signature", status, err, StatusValid)
 	}
 }
@@ -480,17 +481,17 @@ func TestGeneratorIsRestampedOnEveryWrite(t *testing.T) {
 	siteDir := t.TempDir()
 
 	Version = "1.0.0-old"
-	if err := AddBlessedComment(siteDir, "posts/p.md", BlessedComment{URL: "https://a.example/c/1.md"}); err != nil {
+	if err := AddBlessedComment(storage.At(siteDir), "posts/p.md", BlessedComment{URL: "https://a.example/c/1.md"}); err != nil {
 		t.Fatalf("AddBlessedComment: %v", err)
 	}
 
 	Version = "2.0.0-new"
 	t.Cleanup(func() { Version = "dev" })
-	if err := AddBlessedComment(siteDir, "posts/p.md", BlessedComment{URL: "https://b.example/c/2.md"}); err != nil {
+	if err := AddBlessedComment(storage.At(siteDir), "posts/p.md", BlessedComment{URL: "https://b.example/c/2.md"}); err != nil {
 		t.Fatalf("AddBlessedComment: %v", err)
 	}
 
-	bc, err := LoadBlessedComments(siteDir)
+	bc, err := LoadBlessedComments(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
 	}
@@ -506,16 +507,16 @@ func TestSignedPathWithEmptyKeyFallsThroughToUnsigned(t *testing.T) {
 	siteDir := t.TempDir()
 	writeWellKnown(t, siteDir, pub)
 
-	if err := AddBlessedCommentSigned(siteDir, "posts/p.md",
+	if err := AddBlessedCommentSigned(storage.At(siteDir), "posts/p.md",
 		BlessedComment{URL: "https://a.example/c/1.md"}, priv); err != nil {
 		t.Fatalf("AddBlessedCommentSigned: %v", err)
 	}
-	if err := AddBlessedCommentSigned(siteDir, "posts/p.md",
+	if err := AddBlessedCommentSigned(storage.At(siteDir), "posts/p.md",
 		BlessedComment{URL: "https://b.example/c/2.md"}, nil); err != nil {
 		t.Fatalf("AddBlessedCommentSigned with no key: %v", err)
 	}
 
-	if status, _ := VerifyBlessedSite(siteDir); status != StatusUnsigned {
+	if status, _ := VerifyBlessedSite(storage.At(siteDir)); status != StatusUnsigned {
 		t.Errorf("status = %q, want %q", status, StatusUnsigned)
 	}
 }
@@ -527,11 +528,11 @@ func TestSignatureSurvivesAReadWriteRoundTrip(t *testing.T) {
 	siteDir := t.TempDir()
 
 	bc := sampleBlessed()
-	if err := SaveBlessedCommentsSigned(siteDir, bc, priv); err != nil {
+	if err := SaveBlessedCommentsSigned(storage.At(siteDir), bc, priv); err != nil {
 		t.Fatalf("SaveBlessedCommentsSigned: %v", err)
 	}
 
-	reloaded, err := LoadBlessedComments(siteDir)
+	reloaded, err := LoadBlessedComments(storage.At(siteDir))
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
 	}

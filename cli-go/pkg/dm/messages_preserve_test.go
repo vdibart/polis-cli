@@ -2,6 +2,7 @@ package dm
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +30,7 @@ func TestReencryptBootstrapForwardKeepsMembersAndUntouchedLinesBytes(t *testing.
 		t.Fatal(err)
 	}
 
-	mb := NewMailbox(dir)
+	mb := NewMailbox(storage.At(dir))
 	_, sSK := epochKP(t)
 	sPub, _ := publicFromDEK(sSK[:])
 	ct, nonce, _ := Encrypt([]byte("sent during the bootstrap window"), &bootPub, &sSK)
@@ -42,7 +43,11 @@ func TestReencryptBootstrapForwardKeepsMembersAndUntouchedLinesBytes(t *testing.
 
 	// Give both lines a member this build does not model; re-space the second
 	// so a re-encode of it would show.
-	path := filepath.Join(mb.convDir(peer), messagesFile)
+	key, err := mb.convKey(peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(mb.site.Path(key), messagesFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

@@ -3,6 +3,7 @@ package feed
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +34,7 @@ func TestComputeItemID(t *testing.T) {
 }
 
 func TestCacheManager_EmptyCache(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	items, err := cm.List()
 	if err != nil {
@@ -65,7 +66,7 @@ func TestCacheManager_EmptyCache(t *testing.T) {
 // returns (empty following list, missing DS config) to break the
 // frontend's auto-refresh-on-stale loop when there's no work to do.
 func TestCacheManager_MarkChecked(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	// Fresh cache is stale.
 	if stale, _ := cm.IsStale(); !stale {
@@ -96,10 +97,10 @@ func TestCacheManager_MarkChecked(t *testing.T) {
 
 func TestCacheManager_ListSortsOutOfOrderJSONL(t *testing.T) {
 	dir := t.TempDir()
-	cm := NewCacheManager(dir, testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 
 	// Write items out of order directly to the JSONL cache file
-	cacheFile := CacheFile(dir, testDiscoveryDomain)
+	cacheFile := storage.At(dir).Path(CacheKey(testDiscoveryDomain))
 	if err := os.MkdirAll(filepath.Dir(cacheFile), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +140,7 @@ func TestCacheManager_ListSortsOutOfOrderJSONL(t *testing.T) {
 }
 
 func TestCacheManager_MergeItems(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	// Dates relative to now so items don't get pruned by the 90-day max age
 	// (default MaxAgeDays). Hardcoded calendar dates time-bomb the test.
@@ -187,7 +188,7 @@ func TestCacheManager_MergeItems(t *testing.T) {
 }
 
 func TestCacheManager_MergeDedup(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	now := time.Now().UTC()
 	items := []FeedItem{
@@ -230,7 +231,7 @@ func TestCacheManager_MergeDedup(t *testing.T) {
 func TestCacheManager_MergeDedup_BlessingGrantedAndPublished(t *testing.T) {
 	// When the same comment arrives via both comment.published (from another user)
 	// and blessing.granted, the cache should deduplicate by author+URL.
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	now := time.Now().UTC()
 	// First: comment arrives via comment.published
@@ -283,7 +284,7 @@ func TestCacheManager_MergeDedup_BlessingGrantedAndPublished(t *testing.T) {
 }
 
 func TestCacheManager_MarkRead(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	now := time.Now().UTC()
 	cm.MergeItems([]FeedItem{
@@ -311,7 +312,7 @@ func TestCacheManager_MarkRead(t *testing.T) {
 }
 
 func TestCacheManager_MarkUnread(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	now := time.Now().UTC()
 	cm.MergeItems([]FeedItem{
@@ -339,7 +340,7 @@ func TestCacheManager_MarkUnread(t *testing.T) {
 }
 
 func TestCacheManager_MarkAllRead(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	now := time.Now().UTC()
 	cm.MergeItems([]FeedItem{
@@ -359,7 +360,7 @@ func TestCacheManager_MarkAllRead(t *testing.T) {
 }
 
 func TestCacheManager_MarkUnreadFrom(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	// Use relative dates to avoid 90-day prune window
 	now := time.Now().UTC()
@@ -401,7 +402,7 @@ func TestCacheManager_MarkUnreadFrom(t *testing.T) {
 }
 
 func TestCacheManager_ListByType(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	now := time.Now().UTC()
 	cm.MergeItems([]FeedItem{
@@ -436,7 +437,7 @@ func TestCacheManager_ListByType(t *testing.T) {
 }
 
 func TestCacheManager_ListFiltered(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	now := time.Now().UTC()
 	cm.MergeItems([]FeedItem{
@@ -569,7 +570,7 @@ func TestCacheManager_ListFiltered(t *testing.T) {
 
 func TestCacheManager_Prune(t *testing.T) {
 	dir := t.TempDir()
-	cm := NewCacheManager(dir, testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 
 	// Set low limits for testing
 	cm.SaveConfig(&FeedConfig{
@@ -600,7 +601,7 @@ func TestCacheManager_Prune(t *testing.T) {
 
 func TestCacheManager_PruneByAge(t *testing.T) {
 	dir := t.TempDir()
-	cm := NewCacheManager(dir, testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 
 	// Set MaxAgeDays to 30
 	cm.SaveConfig(&FeedConfig{
@@ -628,7 +629,7 @@ func TestCacheManager_PruneByAge(t *testing.T) {
 
 func TestCacheManager_IsStale(t *testing.T) {
 	dir := t.TempDir()
-	cm := NewCacheManager(dir, testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 
 	// No cursor entry = stale
 	stale, _ := cm.IsStale()
@@ -647,7 +648,7 @@ func TestCacheManager_IsStale(t *testing.T) {
 
 func TestCacheManager_IsStale_SameCursorRefreshesTimestamp(t *testing.T) {
 	dir := t.TempDir()
-	cm := NewCacheManager(dir, testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 
 	// Use a very short staleness window
 	cm.SaveConfig(&FeedConfig{StalenessMinutes: 1, MaxItems: 500, MaxAgeDays: 90})
@@ -684,7 +685,7 @@ func TestCacheManager_IsStale_SameCursorRefreshesTimestamp(t *testing.T) {
 
 func TestCacheManager_Config(t *testing.T) {
 	dir := t.TempDir()
-	cm := NewCacheManager(dir, testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 
 	// Default config
 	cfg, err := cm.LoadConfig()
@@ -711,7 +712,7 @@ func TestCacheManager_Config(t *testing.T) {
 
 func TestCacheManager_CursorRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	cm := NewCacheManager(dir, testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 
 	// Default cursor
 	cursor, err := cm.GetCursor()
@@ -740,7 +741,7 @@ func TestCacheManager_CursorRoundTrip(t *testing.T) {
 }
 
 func TestCacheManager_MarkReadNotFound(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	err := cm.MarkRead("nonexistent")
 	if err == nil {
@@ -761,7 +762,7 @@ func TestCacheManager_MarkReadNotFound(t *testing.T) {
 func TestCacheManager_CreatesDirectory(t *testing.T) {
 	dir := t.TempDir()
 	// Don't pre-create directories
-	cm := NewCacheManager(dir, testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 
 	now := time.Now().UTC()
 	_, err := cm.MergeItems([]FeedItem{
@@ -779,7 +780,7 @@ func TestCacheManager_CreatesDirectory(t *testing.T) {
 
 func TestCacheManager_ConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	cm := NewCacheManager(dir, testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 
 	// Save config
 	cfg := &FeedConfig{
@@ -811,7 +812,7 @@ func TestCacheManager_ConfigRoundTrip(t *testing.T) {
 
 func TestCacheManager_PruneByType_AnnouncementsDoNotDisplacePosts(t *testing.T) {
 	dir := t.TempDir()
-	cm := NewCacheManager(dir, testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 
 	cm.SaveConfig(&FeedConfig{
 		StalenessMinutes:    15,
@@ -862,7 +863,7 @@ func TestCacheManager_PruneByType_AnnouncementsDoNotDisplacePosts(t *testing.T) 
 
 func TestCacheManager_PruneByType_AnnouncementAgeShorter(t *testing.T) {
 	dir := t.TempDir()
-	cm := NewCacheManager(dir, testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 
 	cm.SaveConfig(&FeedConfig{
 		StalenessMinutes:    15,
@@ -913,7 +914,7 @@ func TestCacheManager_PruneByType_AnnouncementAgeShorter(t *testing.T) {
 
 func TestCacheManager_PruneByType_LegacyConfigFallback(t *testing.T) {
 	dir := t.TempDir()
-	cm := NewCacheManager(dir, testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
 
 	// Save a legacy config with only MaxItems (no per-type limits)
 	cm.SaveConfig(&FeedConfig{
@@ -948,8 +949,8 @@ func TestNewScopedCacheManager_IsolatedFiles(t *testing.T) {
 	// Create network and global scope managers.
 	// Uses "global" because "followers" and "me" cursor keys are now deprecated
 	// and cleaned up by loadCursors(). Global retains its own materialized cache.
-	network := NewCacheManager(dir, testDiscoveryDomain)
-	global := NewScopedCacheManager(dir, testDiscoveryDomain, "global")
+	network := NewCacheManager(storage.At(dir), testDiscoveryDomain)
+	global := NewScopedCacheManager(storage.At(dir), testDiscoveryDomain, "global")
 
 	now := time.Now()
 
@@ -1068,7 +1069,7 @@ func TestPruneByType_Unit(t *testing.T) {
 // pruneLocked, but the stream cursor still advanced past it — permanently
 // losing the item.
 func TestCacheManager_MergeAtMaxPosts_NewestSurvivesPrune(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	// Default config: MaxPosts=300
 	cfg := DefaultFeedConfig()
@@ -1142,7 +1143,7 @@ func TestCacheManager_MergeAtMaxPosts_NewestSurvivesPrune(t *testing.T) {
 // TestMergeItemsResult_ReportsRetained verifies that MergeItemsResult correctly
 // reports how many newly added items survived pruning.
 func TestMergeItemsResult_ReportsRetained(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	// Set maxPosts=3 for easy testing
 	cm.SaveConfig(&FeedConfig{
@@ -1179,7 +1180,7 @@ func TestMergeItemsResult_ReportsRetained(t *testing.T) {
 // TestMergeItemsResult_DetectsPruneLoss verifies that MergeItemsResult detects
 // when a newly added item is lost to pruning (e.g., added but then pruned by age).
 func TestMergeItemsResult_DetectsPruneLoss(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 
 	cm.SaveConfig(&FeedConfig{
 		StalenessMinutes: 5,
@@ -1215,7 +1216,7 @@ func TestMergeItemsResult_DetectsPruneLoss(t *testing.T) {
 // preserving items that aren't in the update map. Closes the
 // concurrent-fetch overwrite race that SaveItems(items) carries.
 func TestCacheManager_UpdateExcerpts(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 	now := time.Now().UTC()
 
 	if _, err := cm.MergeItems([]FeedItem{
@@ -1309,7 +1310,7 @@ func TestCacheManager_UpdateExcerpts(t *testing.T) {
 // would overwrite the cache with its older snapshot, losing the
 // merged items. This test would fail.
 func TestCacheManager_UpdateExcerpts_RaceFreeWithMerge(t *testing.T) {
-	cm := NewCacheManager(t.TempDir(), testDiscoveryDomain)
+	cm := NewCacheManager(storage.At(t.TempDir()), testDiscoveryDomain)
 	now := time.Now().UTC()
 
 	if _, err := cm.MergeItems([]FeedItem{
@@ -1368,7 +1369,7 @@ func TestCacheManager_UpdateExcerpts_RaceFreeWithMerge(t *testing.T) {
 // reader. Fix: explicit 1MB buffer + skip-on-too-long.
 func TestList_OversizeLine_Skipped(t *testing.T) {
 	tempDir := t.TempDir()
-	cm := NewCacheManager(tempDir, "default")
+	cm := NewCacheManager(storage.At(tempDir), "default")
 
 	// Seed a tiny valid item.
 	// Clock-relative: a hardcoded date here would be pruned by MaxAgeDays once
@@ -1424,5 +1425,59 @@ func TestList_OversizeLine_Skipped(t *testing.T) {
 	}
 	if !titles["Valid"] {
 		t.Errorf("'Valid' item missing from results: %+v", items)
+	}
+}
+
+// TestCacheManager_StoreWithNoFilesystem pins both branches of the cache's
+// reads and writes. A store with a real path streams the file, as it always
+// did; a store without one reads and writes the value whole. Absence means an
+// empty cache and the default config on either.
+func TestCacheManager_StoreWithNoFilesystem(t *testing.T) {
+	site := storage.On("/nonexistent-site-root", storage.NewObjectStore(""))
+	cm := NewCacheManager(site, testDiscoveryDomain)
+
+	items, err := cm.List()
+	if err != nil || len(items) != 0 {
+		t.Fatalf("an absent cache lists empty, got %v, %v", items, err)
+	}
+	cfg, err := cm.LoadConfig()
+	if err != nil || cfg.StalenessMinutes != DefaultFeedConfig().StalenessMinutes {
+		t.Fatalf("an absent config loads the default, got %+v, %v", cfg, err)
+	}
+
+	want := []CachedFeedItem{
+		{ID: "a", Type: "post", Title: "A", Published: "2026-01-01T10:00:00Z", AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{ID: "b", Type: "post", Title: "B", Published: "2026-01-02T10:00:00Z", AuthorURL: "https://b.pub", AuthorDomain: "b.pub"},
+	}
+	if err := cm.SaveItems(want); err != nil {
+		t.Fatalf("SaveItems on a store with no filesystem: %v", err)
+	}
+	got, err := cm.List()
+	if err != nil || len(got) != 2 || got[0].ID != "b" {
+		t.Fatalf("List after SaveItems = %+v, %v", got, err)
+	}
+	if err := cm.SaveConfig(&FeedConfig{StalenessMinutes: 9}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if cfg, _ := cm.LoadConfig(); cfg.StalenessMinutes != 9 {
+		t.Errorf("config did not round-trip through the store: %+v", cfg)
+	}
+}
+
+// TestCacheManager_SaveConfigCreatesAPrivateParent pins the rule the removed
+// MkdirAll used to carry: the config directory under .polis is created at 0700.
+// atomicfile.Write now creates it, at the store's mode rule.
+func TestCacheManager_SaveConfigCreatesAPrivateParent(t *testing.T) {
+	dir := t.TempDir()
+	cm := NewCacheManager(storage.At(dir), testDiscoveryDomain)
+	if err := cm.SaveConfig(&FeedConfig{StalenessMinutes: 5}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Dir(storage.At(dir).Path(ConfigFileKey(testDiscoveryDomain))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Errorf("config directory mode = %v, want 0700", info.Mode().Perm())
 	}
 }

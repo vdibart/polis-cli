@@ -2,6 +2,8 @@ package actor
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,7 +109,7 @@ func TestProjectKey_AbsentSecretIsFatalAndNeverGenerates(t *testing.T) {
 			t.Fatalf("an empty secret (%q) was accepted", secret)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".polis", "keys", "id_ed25519")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, ".polis", "keys", "id_ed25519")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("a key file exists — the projection generated an identity")
 	}
 }
@@ -137,7 +139,7 @@ func TestProjectKey_StaleSecretIsRefused(t *testing.T) {
 	if !strings.Contains(err.Error(), "stale") {
 		t.Errorf("the error should name the cause a human can act on, got: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".polis", "keys", "id_ed25519")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, ".polis", "keys", "id_ed25519")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("the retired key was written anyway")
 	}
 }

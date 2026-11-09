@@ -2,7 +2,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -21,7 +23,9 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/attestation"
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	"github.com/vdibart/polis-cli/cli-go/pkg/capability"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
+	"github.com/vdibart/polis-cli/cli-go/pkg/deploy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
@@ -29,12 +33,17 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
 	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
+	"github.com/vdibart/polis-cli/cli-go/pkg/mode"
 	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
+	"github.com/vdibart/polis-cli/cli-go/pkg/owner"
+	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
+	"github.com/vdibart/polis-cli/cli-go/pkg/provision"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/resolve"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
@@ -136,6 +145,8 @@ const DefaultLogRetentionDays = 7
 
 // Server holds the application state
 type Server struct {
+	keyReload keyReloadState // key file as last loaded; see keyreload.go
+
 	DataDir          string
 	CLIThemesDir     string // Path to CLI themes directory (fallback for theme snippets)
 	CLIVersion       string // CLI version for metadata files (set by bundled binary or from version.txt)
@@ -144,10 +155,107 @@ type Server struct {
 	PublicKey        []byte
 	Logger           *Logger
 	LogLevel         int    // From .env LOG_LEVEL (default 1)
+	logLevelSet      bool   // LOG_LEVEL was present and valid, so 0 means off, not unset
 	LogRetentionDays int    // From .env LOG_RETENTION_DAYS (default 7)
 	BaseURL          string // From POLIS_BASE_URL env var (runtime config, not stored in .well-known/polis)
 	DiscoveryURL     string // From .env / env var DISCOVERY_SERVICE_URL (not stored in webapp/config.json)
-	DiscoveryKey     string // From .env / env var DISCOVERY_SERVICE_KEY (not stored in webapp/config.json)
+
+	// Site is this server's site: where it is, and what it is stored on.
+	//
+	// ⭐ IT SITS ALONGSIDE DataDir DURING THE MIGRATION, deliberately. There
+	// are ~600 uses of s.DataDir, and they convert WITH THEIR CALLEES — a call
+	// site changes only when the package it calls takes a Site. ⛔ So this is
+	// not 600 edits; it is two representations coexisting while the packages
+	// beneath move, which is why internal/server converts LAST.
+	//
+	// ⚠️ Built on demand so a zero-valued Server in a test still works.
+	siteOnce sync.Once
+	siteV    storage.Site
+
+	// devServer is set by Run from `--dev`, and nowhere else. See owner.Instance.Dev.
+	devServer bool
+	// siteConfigLoaded says Initialize found a valid site and read its
+	// configuration. EnsureSite reads it again when it was not.
+	siteConfigLoaded bool
+
+	// backend is the storage backend this server's site is on, when it is
+	// not the local filesystem. Set once, by UseBackend, before Site is used.
+	backend storage.Backend
+
+	// deployQueue publishes the site by deploying it, on Vercel; nil elsewhere.
+	deployQueue *deploy.Queue
+
+	// kayV0Base is v0's Platform API; "" means v0.DefaultBase. Tests point it
+	// at a fake.
+	kayV0Base string
+
+	// syncOnRequestFn replaces syncFeed in sync on request, and
+	// syncOnRequestBudget its time budget; tests set them.
+	syncOnRequestFn     func()
+	syncOnRequestBudget time.Duration
+	// deployAPIBase overrides the platform API, for tests.
+	deployAPIBase string
+	// releaseFunctionFor replaces the release fetch, for tests.
+	releaseFunctionFor func(ctx context.Context, version string) (provision.FunctionManifest, func(context.Context, provision.DeployFile) ([]byte, error), error)
+	// runningBootstrapSHA replaces the digest of the running executable, for
+	// tests. Nil reads the executable itself, on Vercel only.
+	runningBootstrapSHA func() (string, error)
+	// deployGetenv is the environment the deploy queue was built with.
+	deployGetenv func(string) string
+
+	// deployStore is the site's store as the deploy queue sees it, counting
+	// and timing every call, for the request timing log; nil without a queue.
+	deployStore *timedStore
+	// deployLiveBase overrides where the live site is read before a deploy,
+	// for tests; the base URL otherwise.
+	deployLiveBase string
+
+	// started guards the deferred start of a request-credentialed backend.
+	startMu sync.Mutex
+	started bool
+
+	// Mode is how this instance is deployed, and the SOURCE the published
+	// capability descriptor is derived from.
+	//
+	// ⭐ An empty value means local, which keeps `polis serve` on a laptop
+	// configuration-free — the overwhelmingly common case.
+	//
+	// ⛔ NOTHING READS THIS TO BRANCH ON BEHAVIOUR. Branch on a capability
+	// (capability.For) instead: a mode is a closed set every consumer must
+	// know all of, and a fifth one breaks anyone who enumerated four.
+	Mode mode.Mode
+
+	// BoundToLoopback records whether this process's listener is bound to a
+	// loopback address.
+	//
+	// ⛔ IT IS SET ONCE FROM THE LISTENER AND NEVER FROM A REQUEST. The owner
+	// seam's loopback provider rests entirely on this being unforgeable: a
+	// header, RemoteAddr or X-Forwarded-For can each be controlled by a
+	// caller, and deriving this per request would turn owner-trust from a
+	// safety property into a universal bypass.
+	BoundToLoopback bool
+
+	// Recovery proves ownership for the first enrolment and after access is
+	// lost. ⭐ Nil, or configured with no key, on local and custodied — neither
+	// needs it: loopback answers on one, the operator fixes logins on the other.
+	Recovery *owner.Recovery
+
+	ownerStoreOnce sync.Once
+	ownerStoreV    storage.Store
+
+	// ⭐ Owner auth keeps NO state of its own in the server: sessions,
+	// ceremonies and recovery challenges are sealed tokens the client holds.
+	// What is here is a cache of store reads and the per-process limiters.
+	ownerAuthOnce sync.Once
+	ownerCacheV   *owner.Cache
+	signInLimit   *attemptLimiter
+	recoveryLimit *attemptLimiter
+
+	// mcpKeys caches the keys file for /mcp; mcpFail counts /mcp requests
+	// that failed to authenticate, per address (mcp.go).
+	mcpKeys     mcpKeyCache
+	mcpFailOnce sync.Once
+	mcpFail     *attemptLimiter
 
 	// SharedHTTPClient is a process-level HTTP client using a shared transport
 	// for connection pooling. Set by the hosted entry point; nil in localhost mode
@@ -187,13 +295,14 @@ type Server struct {
 	// local instance.
 	RestrictDMEgress bool
 
-	// BehindTrustedProxy says the client IP may be read from Fly-Client-IP and
-	// X-Forwarded-For, because a proxy that sets them stands in front. Set true
-	// only by the hosted multi-tenant entry point, which runs behind Fly's
-	// proxy. Left false in localhost and self-hosted mode, where nothing
-	// guarantees a proxy and a client could set the headers itself to slip
-	// past a per-IP limit; the IP is then RemoteAddr.
-	BehindTrustedProxy bool
+	// Proxy names the platform proxy standing in front of this server, which
+	// decides the header the client IP may be read from (see peerIP). ProxyFly
+	// is set only by the hosted multi-tenant entry point, behind Fly's proxy;
+	// ProxyVercel only by the network handler, behind Vercel's. Left ProxyNone
+	// in localhost and self-hosted mode, where nothing guarantees a proxy and a
+	// client could set the headers itself to slip past a per-IP limit; the IP
+	// is then RemoteAddr.
+	Proxy ProxyKind
 
 	// RosiePaused is the hosted operator switch POLIS_ROSIE, seen from one
 	// tenant's server (Signet epic 11 D12). While true, Rosie resolves no grant,
@@ -241,6 +350,182 @@ type Server struct {
 	mutualsInboundMt  time.Time // mtime of pub.polis.follow.json when cached
 
 	syncDone chan struct{} // closed by StopSync() to stop the background goroutine
+}
+
+// Site returns this server's site handle: where the site is, and what it is
+// stored on.
+//
+// ⭐ THE ONE PLACE THE WEBAPP DECIDES WHAT ITS SITE IS STORED ON. A blob-backed
+// instance constructs it with storage.On here, and nothing downstream changes.
+//
+// ⚠️ Built on demand rather than in Initialize, because tests construct a
+// Server as a literal and would otherwise get a zero-valued handle.
+func (s *Server) Site() storage.Site {
+	s.siteOnce.Do(func() {
+		if s.backend.Store != nil {
+			s.siteV = storage.On(s.DataDir, s.backend.Store)
+			return
+		}
+		s.siteV = storage.At(s.DataDir)
+	})
+	return s.siteV
+}
+
+// checkModeForBackend refuses a mode that would grant the wrong trust for where
+// the site is stored.
+//
+// ⛔ AN UNUSABLE MODE STOPS THE BOOT, ON EVERY BACKEND. ResolveSelfHosted's
+// fallback to local was meant for a typo in a developer's shell, but the same
+// typo on a VPS behind a reverse proxy granted loopback owner-trust to everyone
+// the proxy forwarded, and /api/download-site served the private key. An unset
+// mode still runs as local: that is the laptop, and it needs no configuration.
+// ⛔ UNLESS a setting only a remote instance has is present (remoteSignals, from
+// remoteOnlySignals): then an unset mode is a deployer who forgot POLIS_MODE, and
+// running as local would hand loopback owner-trust to whatever their proxy
+// forwards. --dev does not exempt it — a dev server with a recovery key set is
+// exactly the confused case. An explicit POLIS_MODE=local is a choice and runs.
+// ⛔ And local trust is for a site on this machine's disk: a local mode with its
+// site in a remote store is a misconfiguration, never a laptop. A dev server is
+// exempt from that second rule only, since --dev already chose its mode.
+func checkModeForBackend(m mode.Mode, modeNote string, unset, dev bool, backendKind string, remoteSignals []string) error {
+	if modeNote != "" {
+		return fmt.Errorf("%s — refusing to start: %s must be a valid mode, or unset to run as local",
+			modeNote, capability.ModeEnv)
+	}
+	if unset && len(remoteSignals) > 0 {
+		return fmt.Errorf("%s is unset, but %s is set: that is an instance reached over the network, where local "+
+			"would grant loopback owner-trust to whatever reaches it — refusing to start: set %s "+
+			"(remote-server-signed or remote-client-signed), or %s=local to run locally on purpose",
+			capability.ModeEnv, strings.Join(remoteSignals, " and "), capability.ModeEnv, capability.ModeEnv)
+	}
+	deployed := backendKind != "" && backendKind != storage.BackendPOSIX
+	if deployed && m == mode.Local && !dev {
+		return fmt.Errorf("local, but %s=%s: a local instance keeps its site on this machine; set %s",
+			storage.EnvStorageKind, backendKind, capability.ModeEnv)
+	}
+	return nil
+}
+
+// vercelRuntimeEnv is set to "1" by Vercel's runtime on every deployment.
+const vercelRuntimeEnv = "VERCEL"
+
+// remoteOnlySignals names the settings present in getenv that only a remote
+// instance has: a recovery key (recovery is for an owner who cannot reach the
+// instance on loopback) and Vercel's runtime marker. A non-POSIX POLIS_STORAGE
+// is not listed: checkModeForBackend already refuses local on one.
+func remoteOnlySignals(getenv func(string) string) []string {
+	var set []string
+	for _, name := range []string{owner.RecoveryKeyEnv, vercelRuntimeEnv} {
+		if strings.TrimSpace(getenv(name)) != "" {
+			set = append(set, name)
+		}
+	}
+	return set
+}
+
+// UseBackend puts this server's site on b.
+//
+// ⛔ IT MUST RUN BEFORE ANYTHING ASKS FOR THE SITE, and it refuses otherwise:
+// a handle built on the filesystem first and a backend set afterwards would
+// leave part of the server writing to a disk the instance does not keep.
+func (s *Server) UseBackend(b storage.Backend) error {
+	if b.Store == nil {
+		return errors.New("server: backend has no store")
+	}
+	set := false
+	s.siteOnce.Do(func() {
+		s.backend = b
+		s.siteV = storage.On(s.DataDir, b.Store)
+		set = true
+	})
+	if !set {
+		return errors.New("server: the site was already in use before its backend was set")
+	}
+	return nil
+}
+
+// StartsOnRequest reports whether this server's site work waits for the first
+// request, because its backend has no credential until a request delivers one.
+func (s *Server) StartsOnRequest() bool { return s.backend.StartsOnRequest }
+
+// backendMiddleware hands every request's credential to the backend and, for a
+// backend that starts on request, starts the server on the first request.
+//
+// ⭐ The backend decides WHICH header carries its credential; this only passes
+// the request's headers along. ⛔ It must be OUTERMOST: no handler may touch
+// the site before the credential is offered and the start has run.
+func (s *Server) backendMiddleware(next http.Handler) http.Handler {
+	if s.backend.FromRequest == nil && !s.backend.StartsOnRequest {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.backend.FromRequest != nil {
+			// ⛔ Refused outright: more than one value of the credential
+			// header, or a credential that does not verify. ⚠️ Logged by
+			// cause only; the token is never written down.
+			// ⭐ EXCEPT a credential that could not be CHECKED (the issuer's
+			// keys could not be loaded, or name a key not fetched yet): it is
+			// not adopted, and the request continues on whatever credential the
+			// backend already holds. On a platform that sends the credential
+			// with every request, refusing here refused every public read for
+			// as long as the issuer was unreachable.
+			if err := s.backend.FromRequest(r.Header.Values); err != nil {
+				if !errors.Is(err, storage.ErrVerifierUnavailable) {
+					log.Printf("[warning] request credential refused: %v", err)
+					http.Error(w, "credential refused", http.StatusBadRequest)
+					return
+				}
+				log.Printf("[warning] request credential not checked, continuing on the held one: %v", err)
+			}
+		}
+		if s.backend.StartsOnRequest {
+			if err := s.startOnFirstRequest(r.Context()); err != nil {
+				// ⛔ Not fatal: the next request may carry what this one lacked.
+				// ⚠️ Logged by cause, never with the credential.
+				log.Printf("[warning] deferred start failed, will retry on the next request: %v", err)
+				http.Error(w, "this instance is starting; try again shortly", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// startOnFirstRequest runs the site work a POSIX server does at boot —
+// Initialize, then the identity-key bootstrap — once, on the first request
+// that can. ⭐ It retries until it succeeds rather than giving up, because the
+// usual failure is "no credential yet", which the next request fixes.
+func (s *Server) startOnFirstRequest(ctx context.Context) error {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if s.started {
+		return nil
+	}
+	// ⭐ Probe the store before Initialize, so a missing credential fails
+	// cleanly here instead of half-way through Initialize's reads.
+	if _, err := s.Site().Store().Exists(ctx, site.WellKnownKey); err != nil {
+		return fmt.Errorf("storage not reachable yet: %w", err)
+	}
+	s.Initialize()
+	// ⛔ RE-BIND RECOVERY to the domain the started instance serves. At boot a
+	// deferred server could not read the site's .env, so recovery was bound to
+	// whatever the boot-time environment said; its challenges must name the
+	// domain Initialize just read.
+	if key := os.Getenv(owner.RecoveryKeyEnv); key != "" {
+		if rec, err := owner.NewRecovery(key, s.GetBaseURL()); err == nil {
+			s.Recovery = rec
+		}
+	}
+	if err := s.EnsureIdentityKey(ctx); err != nil {
+		return fmt.Errorf("identity key: %w", err)
+	}
+	s.EnsureSite(ctx)
+	s.deployIfNeverDeployed(ctx)
+	// ⭐ The session key into memory now, so the sign-in that may have woken
+	// this process costs no store operation of its own.
+	s.prepareOwnerAuth()
+	s.started = true
+	return nil
 }
 
 // mutualsCacheTTL caps how long the cached mutuals set is trusted even
@@ -333,6 +618,9 @@ type Logger struct {
 	mu             sync.Mutex
 	jsonOutput     bool            // emit JSON to stdout when true (LOG_FORMAT=json)
 	disabledEvents map[string]bool // LOG_EVENTS_DISABLED (see EventDisabled)
+	// stdoutOnly: no log file at all, every line goes to stdout as JSON. For a
+	// site whose storage is not this machine's disk (see NewStdoutLogger).
+	stdoutOnly bool
 }
 
 // NewLogger creates a new logger with the given level and logs directory
@@ -341,6 +629,16 @@ func NewLogger(level int, logsDir string) *Logger {
 		level:   level,
 		logsDir: logsDir,
 	}
+}
+
+// NewStdoutLogger creates a logger that writes nothing to disk: every line
+// goes to stdout as JSON, which the platform captures.
+//
+// ⛔ For a site on a remote backend. Its local disk is not where the site
+// lives and may not outlive the instance, and the rotating file is appended to
+// per request, which an object store cannot take.
+func NewStdoutLogger(level int) *Logger {
+	return &Logger{level: level, jsonOutput: true, stdoutOnly: true}
 }
 
 // SetRetentionDays sets the number of days to keep log files for pruning.
@@ -352,7 +650,7 @@ func (l *Logger) SetRetentionDays(days int) {
 
 // getLogFile returns the log file for today, creating it if necessary
 func (l *Logger) getLogFile() (*os.File, error) {
-	if l.level == LogLevelOff {
+	if l.level == LogLevelOff || l.stdoutOnly {
 		return nil, nil
 	}
 
@@ -360,6 +658,9 @@ func (l *Logger) getLogFile() (*os.File, error) {
 	logPath := filepath.Join(l.logsDir, today+".log")
 
 	// Create logs directory if it doesn't exist (.polis/logs — restricted)
+	// NOT the storage interface: this creates the log directory itself, which
+	// may stay empty until something is logged, and a prefix store cannot
+	// represent an empty directory.
 	if err := os.MkdirAll(l.logsDir, 0700); err != nil {
 		return nil, err
 	}
@@ -375,7 +676,15 @@ func (l *Logger) getLogFile() (*os.File, error) {
 		l.file.Close()
 	}
 
-	// Open new log file
+	// Open new log file.
+	//
+	// NOT the storage interface, and ⭐ THIS STAYS ON PURPOSE. A rotating log
+	// is appended to once per request; on a backend with no append that would
+	// be a read-modify-write of the whole file per line — an object write per
+	// log entry, growing without bound. ⭐ A deployment whose storage cannot
+	// take this logs to STDOUT, which the platform captures; hosted already
+	// ships stdout to its pipeline. A different answer, not a missing
+	// conversion.
 	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, err
@@ -612,7 +921,7 @@ func (l *Logger) Close() {
 // PruneLogs deletes log files older than retentionDays.
 // Short-circuits if less than 24h since last prune. Nil-safe.
 func (l *Logger) PruneLogs() {
-	if l == nil || l.retentionDays <= 0 {
+	if l == nil || l.retentionDays <= 0 || l.stdoutOnly {
 		return
 	}
 
@@ -624,21 +933,24 @@ func (l *Logger) PruneLogs() {
 	l.lastPruneAt = time.Now()
 	l.mu.Unlock()
 
-	entries, err := os.ReadDir(l.logsDir)
+	logStore := storage.NewPOSIX(l.logsDir)
+	entries, err := logStore.List(context.Background(), "")
 	if err != nil {
 		return
 	}
 	cutoff := time.Now().AddDate(0, 0, -l.retentionDays)
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") {
+		if e.IsDir || !strings.HasSuffix(e.Key, ".log") {
 			continue
 		}
-		info, err := e.Info()
+		// ⚠️ Depends on ModTimes: log rotation is decided by age, so a
+		// backend that cannot report one would never rotate.
+		info, err := logStore.Stat(context.Background(), e.Key)
 		if err != nil {
 			continue
 		}
-		if info.ModTime().Before(cutoff) {
-			os.Remove(filepath.Join(l.logsDir, e.Name()))
+		if info.ModTime.Before(cutoff) {
+			_ = logStore.Delete(context.Background(), e.Key, storage.IgnoreMissing())
 		}
 	}
 }
@@ -680,15 +992,15 @@ func (s *Server) LogEvent(event string, fields map[string]interface{}) {
 // IsRegisteredWithDS checks whether this site has a local registration marker
 // for the configured discovery service. Pure filesystem check — no network call.
 func (s *Server) IsRegisteredWithDS() bool {
-	return discovery.IsRegisteredLocally(s.DataDir, s.DiscoveryURL)
+	return discovery.IsRegisteredLocally(s.Site(), s.DiscoveryURL)
 }
 
 func (s *Server) NewDSClient(r *http.Request) *discovery.Client {
 	var client *discovery.Client
 	if s.SharedHTTPClient != nil {
-		client = discovery.NewClientWithHTTP(s.DiscoveryURL, s.DiscoveryKey, s.SharedHTTPClient)
+		client = discovery.NewClientWithHTTP(s.DiscoveryURL, s.SharedHTTPClient)
 	} else {
-		client = discovery.NewClient(s.DiscoveryURL, s.DiscoveryKey)
+		client = discovery.NewClient(s.DiscoveryURL)
 	}
 	if r != nil {
 		client.RequestID = RequestIDFromContext(r.Context())
@@ -701,9 +1013,9 @@ func (s *Server) NewDSClient(r *http.Request) *discovery.Client {
 func (s *Server) NewAuthDSClient(r *http.Request, domain string) *discovery.Client {
 	var client *discovery.Client
 	if s.SharedHTTPClient != nil {
-		client = discovery.NewAuthenticatedClientWithHTTP(s.DiscoveryURL, s.DiscoveryKey, domain, s.PrivateKey, s.SharedHTTPClient)
+		client = discovery.NewAuthenticatedClientWithHTTP(s.DiscoveryURL, domain, s.PrivateKey, s.SharedHTTPClient)
 	} else {
-		client = discovery.NewAuthenticatedClient(s.DiscoveryURL, s.DiscoveryKey, domain, s.PrivateKey)
+		client = discovery.NewAuthenticatedClient(s.DiscoveryURL, domain, s.PrivateKey)
 	}
 	if r != nil {
 		client.RequestID = RequestIDFromContext(r.Context())
@@ -777,7 +1089,6 @@ func (s *Server) DiscoveryConfig() *publish.DiscoveryConfig {
 	}
 	return &publish.DiscoveryConfig{
 		DiscoveryURL: s.DiscoveryURL,
-		DiscoveryKey: s.DiscoveryKey,
 		BaseURL:      s.BaseURL,
 		Generator:    "polis-cli-go/" + s.CLIVersion,
 	}
@@ -794,10 +1105,10 @@ func (s *Server) FollowConfig() *following.FollowConfig {
 	if s.DiscoveryURL == "" || s.BaseURL == "" {
 		return nil
 	}
+	// No DataDir: following checks and announces from the site handle it is
+	// given, which is s.Site() at every call.
 	return &following.FollowConfig{
-		DataDir:      s.DataDir,
 		DiscoveryURL: s.DiscoveryURL,
-		DiscoveryKey: s.DiscoveryKey,
 		BaseURL:      s.BaseURL,
 	}
 }
@@ -805,8 +1116,7 @@ func (s *Server) FollowConfig() *following.FollowConfig {
 // loadOrDefaultBundle loads the site's bundle.json if present, otherwise returns
 // the default pub.polis.core bundle.
 func (s *Server) loadOrDefaultBundle() *bundle.Bundle {
-	bundlePath := filepath.Join(s.DataDir, "content", "pub.polis.core", "bundle.json")
-	if b, err := bundle.LoadBundle(bundlePath); err == nil {
+	if b, err := bundle.LoadBundleAt(s.Site(), "content/pub.polis.core/bundle.json"); err == nil {
 		return b
 	}
 	return bundle.DefaultCoreBundle()
@@ -818,16 +1128,18 @@ func (s *Server) newContentEngine() (*ops.Engine, error) {
 	bundles := map[string]*bundle.Bundle{
 		"pub.polis.core": coreBundle,
 	}
-	resolver := resolve.New(s.DataDir, bundles)
+	resolver := resolve.New(s.Site(), bundles)
 
 	return ops.NewEngine(ops.EngineConfig{
-		Resolver:     resolver,
-		Bundles:      bundles,
-		PrivateKey:   s.PrivateKey,
+		Resolver:   resolver,
+		Bundles:    bundles,
+		PrivateKey: s.PrivateKey,
+		// ⭐ At call time: the engine is built during route setup, before a
+		// deferred start loads the key, and it must also follow a rotation.
+		Keys:         func() ([]byte, []byte) { return s.PrivateKey, s.PublicKey },
 		PublicKey:    s.PublicKey,
 		BaseURL:      s.GetBaseURL(),
 		DiscoveryURL: s.DiscoveryURL,
-		DiscoveryKey: s.DiscoveryKey,
 		CLIThemesDir: s.CLIThemesDir,
 		EmitEvent:    s.LogEvent,
 		OnContentChanged: func() {
@@ -840,6 +1152,16 @@ func (s *Server) newContentEngine() (*ops.Engine, error) {
 
 // RenderSite renders all pages after publish/republish operations.
 // This ensures HTML files are updated and hooks can act on the complete output.
+// renderSite is the site as one render sees it: its reads remembered for
+// the render (storage.ReadCache), its writes going straight through. ⭐ A
+// render reads the same templates, snippets and theme files for every page;
+// on a remote store each read is a round trip, and a three-post publish made
+// 216 store calls. ⛔ A fresh one per render, never kept.
+func (s *Server) renderSite() storage.Site {
+	site := s.Site()
+	return site.WithStore(storage.ReadCache(site.Store()))
+}
+
 func (s *Server) RenderSite() error {
 	// Get site base URL from POLIS_BASE_URL env var (matches bash CLI behavior)
 	baseURL := s.GetBaseURL()
@@ -853,7 +1175,7 @@ func (s *Server) RenderSite() error {
 
 	// Create page renderer
 	renderer, err := render.NewPageRenderer(render.PageConfig{
-		DataDir:           s.DataDir,
+		Site:              s.renderSite(),
 		CLIThemesDir:      s.CLIThemesDir,
 		BaseURL:           baseURL,
 		RenderMarkers:     false, // No markers needed for publish flow
@@ -890,7 +1212,7 @@ func (s *Server) RenderSite() error {
 // publish.PublishPost / RepublishPost (e.g.
 // "content/pub.polis.core/post/YYYYMMDD/slug.md").
 func (s *Server) RenderSiteAfterPublish(postSourceRelPath string) error {
-	shape, err := bundle.GetActiveShapeName(s.DataDir)
+	shape, err := bundle.GetActiveShapeName(s.Site())
 	if err != nil || shape != "v4" {
 		// v3 or unknown → existing full-corpus path. Preserves byte-identical
 		// output for blog-shape tenants.
@@ -905,7 +1227,7 @@ func (s *Server) RenderSiteAfterPublish(postSourceRelPath string) error {
 	commentsMountDir, _ := coreBundle.MountDir("pub.polis.comment")
 
 	renderer, err := render.NewPageRenderer(render.PageConfig{
-		DataDir:           s.DataDir,
+		Site:              s.renderSite(),
 		CLIThemesDir:      s.CLIThemesDir,
 		BaseURL:           baseURL,
 		PostsSourceDir:    postsSource,
@@ -930,8 +1252,8 @@ func (s *Server) RenderSiteAfterPublish(postSourceRelPath string) error {
 
 // LoadConfig loads the webapp configuration from webapp/config.json
 func (s *Server) LoadConfig() {
-	configPath := filepath.Join(s.DataDir, ".polis", "webapp", "config.json")
-	data, err := os.ReadFile(configPath)
+	configPath := siteKey(".polis", "webapp", "config.json")
+	data, err := s.readKey(configPath)
 	if err != nil {
 		return // Config doesn't exist yet
 	}
@@ -956,10 +1278,7 @@ func (s *Server) getHookConfig() *hooks.HookConfig {
 
 // SaveConfig saves the webapp configuration to webapp/config.json
 func (s *Server) SaveConfig() error {
-	configPath := filepath.Join(s.DataDir, ".polis", "webapp", "config.json")
-	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
-		return err
-	}
+	// No MkdirAll: Put creates parent prefixes.
 	// Clear deprecated fields before saving (don't persist them)
 	savedSubdomain := s.Config.Subdomain
 	s.Config.Subdomain = ""
@@ -968,35 +1287,153 @@ func (s *Server) SaveConfig() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(configPath, data, 0644)
+	return s.Site().Store().Put(context.Background(), siteKey(".polis", "webapp", "config.json"), data)
 }
 
-// LoadKeys loads the private and public keys from the keys directory
+// LoadKeys loads the private and public keys from the site's store.
+//
+// ⭐ Through the store, so an instance whose site lives in Blob loads the key
+// it generated there. ⛔ Absent is silent (a site before init has none); any
+// other failure is logged by KEY, never with the bytes.
 func (s *Server) LoadKeys() {
-	privPath := filepath.Join(s.DataDir, ".polis", "keys", "id_ed25519")
-	pubPath := filepath.Join(s.DataDir, ".polis", "keys", "id_ed25519.pub")
-
-	priv, err := os.ReadFile(privPath)
+	st := s.Site().Store()
+	ctx := context.Background()
+	priv, err := st.Get(ctx, site.PrivateKeyKey)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Printf("[warning] Could not read private key %s: %v", privPath, err)
+		if !errors.Is(err, storage.ErrNotFound) {
+			log.Printf("[warning] Could not read private key %s: %v", site.PrivateKeyKey, err)
 		}
 		return
 	}
-	pub, err := os.ReadFile(pubPath)
+	pub, err := st.Get(ctx, site.PublicKeyKey)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Printf("[warning] Could not read public key %s: %v", pubPath, err)
+		if !errors.Is(err, storage.ErrNotFound) {
+			log.Printf("[warning] Could not read public key %s: %v", site.PublicKeyKey, err)
 		}
 		return
 	}
 	s.PrivateKey = priv
 	s.PublicKey = pub
+	s.stampKeyFile()
 }
 
+// EnsureIdentityKey gives a server-signed instance its identity key, generating
+// it into the site's own store on first boot, and loads it.
+//
+// ⭐ It does nothing for any other mode: a client-signed instance holds no
+// key (the owner signs), `polis init` makes a local one, and the operator
+// provisions a custodied tenant's. ⛔ Called once the Mode is known, because
+// the mode is what decides.
+func (s *Server) EnsureIdentityKey(ctx context.Context) error {
+	if !site.NeedsIdentityKey(capability.For(s.effectiveMode())) {
+		return nil
+	}
+	k, err := site.EnsureIdentityKey(ctx, s.Site())
+	if err != nil {
+		return err
+	}
+	if k.Created {
+		log.Printf("[i] generated this instance's identity key at %s", site.PrivateKeyKey)
+	}
+	s.LoadKeys()
+	return nil
+}
+
+// EnsureSite writes a server-signed instance's site around the identity key
+// it already holds, the first time it starts with no .well-known/polis.
+//
+// ⭐ Only remote-server-signed: the key existed before any site did, so
+// nothing else would ever publish it. A client-signed instance holds no key;
+// `polis init` makes a local site, and the operator a custodied tenant's.
+//
+// ⛔ Nothing is stated on the owner's behalf (no licence, no registration),
+// and a site with no domain is never written: with no base URL it logs the
+// cause and the next start tries again.
+//
+// ⚠️ NOT FATAL. The instance still serves what it has, and a later start
+// retries: the claim inside site.Init makes a retry, or a racing start, write
+// nothing twice. A site whose claiming start stopped part way is FINISHED by a
+// start that finds it after site.Init's resume window; one found sooner is
+// logged as still being written.
+func (s *Server) EnsureSite(ctx context.Context) {
+	if s.effectiveMode() != mode.RemoteServerSigned {
+		return
+	}
+	baseURL := s.GetBaseURL()
+	if baseURL == "" {
+		log.Printf("[warning] site not initialised: POLIS_BASE_URL is not set, and a site needs its domain; it will be tried on the next start")
+		return
+	}
+	res, err := site.Init(s.Site(), site.InitOptions{
+		AdoptExistingKey: true,
+		BaseURL:          baseURL,
+		Generator:        "polis-cli-go/" + s.CLIVersion,
+	})
+	switch {
+	case err == nil && res.Resumed:
+		log.Printf("[warning] finished this instance's site, which an earlier start claimed and left part-written")
+		s.LogEvent("pub.polis.site.init", map[string]interface{}{"adopted_key": true, "resumed": true})
+		s.Initialize()
+		s.LoadKeys()
+		s.renderIfNoFrontPage(ctx)
+	case err == nil:
+		log.Printf("[i] initialised this instance's site around its identity key")
+		s.LogEvent("pub.polis.site.init", map[string]interface{}{"adopted_key": true})
+		// ⭐ The configuration read at start predates the site; read it again.
+		s.Initialize()
+		s.LoadKeys()
+		s.renderIfNoFrontPage(ctx)
+	case errors.Is(err, site.ErrInitInProgress):
+		log.Printf("[i] this instance's site is still being written by another start; a start after the resume window finishes it if that one stopped")
+	case errors.Is(err, site.ErrAlreadyInitialised):
+		// ⭐ A start that lost the race to another ran Initialize before the
+		// site existed, so its configuration was never read.
+		if !s.siteConfigLoaded {
+			s.Initialize()
+			s.LoadKeys()
+		}
+		s.renderIfNoFrontPage(ctx)
+	case errors.Is(err, site.ErrPartialSite):
+		log.Printf("[warning] the site is only partly initialised and is served as it is; finishing it is not automatic: %v", err)
+	default:
+		log.Printf("[error] site not initialised; it will be tried on the next start: %v", err)
+	}
+}
+
+// renderIfNoFrontPage renders a server-signed instance's site when it has no
+// index.html, as hosted renders a tenant at signup.
+//
+// ⭐ On Vercel the front page is a static file of the deployment, so a site
+// that was written but never rendered has no front page to deploy.
+// ⚠️ Not fatal, and only while there is no front page: a site with one is never
+// re-rendered here. Every rendered page is derived output, so two starts
+// rendering at once write the same bytes.
+func (s *Server) renderIfNoFrontPage(ctx context.Context) {
+	if ok, err := s.Site().Store().Exists(ctx, "index.html"); err != nil || ok {
+		return
+	}
+	if err := s.RenderSite(); err != nil {
+		log.Printf("[warning] the site has no front page and rendering it failed; it will be tried on the next start: %v", err)
+		return
+	}
+	log.Printf("[i] rendered this instance's site, which had no front page")
+}
+
+// effectiveMode is Mode with empty read as local, the documented default.
+func (s *Server) effectiveMode() mode.Mode {
+	if s.Mode == "" {
+		return mode.Local
+	}
+	return s.Mode
+}
+
+// envKeys are the settings LoadEnv reads. ⚠️ A new one is added HERE, or it
+// reads only from .env and the process environment is silently ignored for it.
+var envKeys = []string{"POLIS_BASE_URL", "DISCOVERY_SERVICE_URL", "LOG_LEVEL", "LOG_RETENTION_DAYS"}
+
 // LoadEnv reads the .env file and applies discovery service settings.
-// This matches the bash CLI behavior where DISCOVERY_SERVICE_URL and DISCOVERY_SERVICE_KEY
-// are read from .env file rather than being stored in config.json.
+// This matches the bash CLI behavior where DISCOVERY_SERVICE_URL is read from
+// the .env file rather than being stored in config.json.
 //
 // Search order:
 // 1. Data directory .env (where the polis site data lives)
@@ -1007,17 +1444,18 @@ func (s *Server) LoadEnv() {
 	var data []byte
 	var err error
 
-	// First, try the data directory (where webapp/config.json and keys live)
-	envPath = filepath.Join(s.DataDir, ".env")
-	data, err = os.ReadFile(envPath)
+	// First, try the site (where webapp/config.json and keys live)
+	data, err = s.readKey(".env")
 	if err == nil {
-		log.Printf("[i] Loaded .env from data directory: %s", envPath)
+		log.Printf("[i] Loaded .env from data directory: %s", filepath.Join(s.DataDir, ".env"))
 	}
 
 	// If not found, try current working directory
 	if err != nil {
 		cwd, cwdErr := os.Getwd()
 		if cwdErr == nil {
+			// NOT the storage interface: the working directory is not the
+			// site.
 			envPath = filepath.Join(cwd, ".env")
 			data, err = os.ReadFile(envPath)
 			if err == nil {
@@ -1030,6 +1468,7 @@ func (s *Server) LoadEnv() {
 	if err != nil {
 		homeDir, homeErr := os.UserHomeDir()
 		if homeErr == nil {
+			// NOT the storage interface: the home directory is not the site.
 			envPath = filepath.Join(homeDir, ".polis", ".env")
 			data, err = os.ReadFile(envPath)
 			if err == nil {
@@ -1038,9 +1477,11 @@ func (s *Server) LoadEnv() {
 		}
 	}
 
-	// If still not found, that's fine - just return
+	// ⛔ NOT FOUND IS NOT "NOTHING TO DO". The process environment still
+	// applies below — on a platform (Vercel, Fly) there is never a .env file,
+	// and returning here is how a remote instance used to boot with no base URL.
 	if err != nil {
-		return
+		data = nil
 	}
 
 	// Parse .env file (simple KEY=VALUE format, one per line)
@@ -1066,24 +1507,50 @@ func (s *Server) LoadEnv() {
 		env[key] = value
 	}
 
-	// Apply discovery service settings from .env (single source of truth, like CLI)
+	// ⭐ THE PROCESS ENVIRONMENT WINS OVER .env — the same rule both CLIs
+	// already follow (bash's load_env_file and the Go CLI's loadEnvFile each
+	// set a key only if it is not already in the environment), and the way
+	// every hosting platform expects to configure a process.
+	//
+	// ⛔⛔ EXCEPT WHERE THERE IS AN OPERATOR. One process then serves many
+	// sites, so a process-wide value cannot be any one site's setting: a single
+	// POLIS_BASE_URL in the operator's environment would re-point EVERY tenant
+	// at one domain. There the site's own .env is the only source. ⚠️ This is
+	// why hosted sets a tenant's Mode BEFORE Initialize.
+	processWins := !capability.For(s.effectiveMode()).HasOperator
+	for _, key := range envKeys {
+		if !processWins {
+			break
+		}
+		fromProcess := os.Getenv(key)
+		fromFile, inFile := env[key]
+		if fromProcess == "" {
+			continue
+		}
+		// ⚠️ Both set and different is rare and confusing, so say so. ⛔ Name
+		// the KEY, never the values: a .env is where credentials live.
+		if inFile && fromFile != "" && fromFile != fromProcess {
+			log.Printf("[i] %s is set in both the process environment and %s; the process environment wins", key, envPath)
+		}
+		env[key] = fromProcess
+	}
+
+	// Apply discovery service settings
 	if url := env["DISCOVERY_SERVICE_URL"]; url != "" {
 		s.DiscoveryURL = url
 	}
-	if key := env["DISCOVERY_SERVICE_KEY"]; key != "" {
-		s.DiscoveryKey = key
-	}
 
-	// Store POLIS_BASE_URL for runtime use (matches bash CLI behavior)
+	// Store POLIS_BASE_URL for runtime use.
 	// This is the authoritative source for base_url - not stored in .well-known/polis
 	if baseURL := env["POLIS_BASE_URL"]; baseURL != "" {
 		s.BaseURL = strings.TrimSuffix(baseURL, "/")
 	}
 
-	// Log level and retention from .env
+	// Log level and retention
 	if v := env["LOG_LEVEL"]; v != "" {
 		if level, err := strconv.Atoi(v); err == nil && level >= 0 {
 			s.LogLevel = level
+			s.logLevelSet = true
 		}
 	}
 	if v := env["LOG_RETENTION_DAYS"]; v != "" {
@@ -1105,7 +1572,7 @@ func (s *Server) ApplyDiscoveryDefaults() {
 // GetAuthorEmail returns the author email from .well-known/polis.
 // Deprecated: Use GetAuthorDomain instead. Email is private by default.
 func (s *Server) GetAuthorEmail() string {
-	wk, err := site.LoadWellKnown(s.DataDir)
+	wk, err := site.LoadWellKnown(s.Site())
 	if err != nil {
 		return ""
 	}
@@ -1140,7 +1607,7 @@ func (s *Server) GetSubdomain() string {
 
 // GetSiteTitle returns site_title from .well-known/polis, falling back to POLIS_BASE_URL if empty
 func (s *Server) GetSiteTitle() string {
-	wk, err := site.LoadWellKnown(s.DataDir)
+	wk, err := site.LoadWellKnown(s.Site())
 	if err != nil {
 		// No .well-known/polis file - try config subdomain
 		if s.Config != nil && s.Config.Subdomain != "" {
@@ -1161,6 +1628,8 @@ func (s *Server) GetSiteTitle() string {
 
 // ResolveSymlink follows symlinks to get the real path.
 func ResolveSymlink(path string) string {
+	// NOT the storage interface: filepath.EvalSymlinks RESOLVES links, and the
+	// interface cannot represent one — Stat follows and Info.Mode is Perm() only.
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		// Path doesn't exist yet or other error - return original
@@ -1199,6 +1668,9 @@ func OpenBrowser(url string) {
 	}
 }
 
+// NOT the storage interface: FindCLIThemesDir searches UPWARD from a directory
+// to find a repo root, so by construction it looks outside the site.
+//
 // FindCLIThemesDir locates the cli/themes directory for fallback theme snippets.
 // It searches upward from the given directory to find the repo root.
 func FindCLIThemesDir(startDir string) string {
@@ -1206,6 +1678,8 @@ func FindCLIThemesDir(startDir string) string {
 	dir := startDir
 	for i := 0; i < 10; i++ { // Max 10 levels up
 		themesPath := filepath.Join(dir, "cli-bash", "themes")
+		// NOT the storage interface: asks whether a legacy directory is THERE, and an
+		// EMPTY one still counts — which Exists cannot say.
 		if info, err := os.Stat(themesPath); err == nil && info.IsDir() {
 			return themesPath
 		}
@@ -1223,6 +1697,8 @@ func FindCLIThemesDir(startDir string) string {
 		dir = cwd
 		for i := 0; i < 10; i++ {
 			themesPath := filepath.Join(dir, "cli-bash", "themes")
+			// NOT the storage interface: asks whether a legacy directory is THERE, and an
+			// EMPTY one still counts — which Exists cannot say.
 			if info, err := os.Stat(themesPath); err == nil && info.IsDir() {
 				return themesPath
 			}
@@ -1255,6 +1731,7 @@ func (s *Server) Initialize() {
 		comment.Version = s.CLIVersion
 		metadata.Version = s.CLIVersion
 		following.Version = s.CLIVersion
+		policy.Version = s.CLIVersion
 		site.Version = s.CLIVersion
 		tag.Version = s.CLIVersion
 		// Wired before the webapp issues an attestation, on purpose. A package
@@ -1270,11 +1747,12 @@ func (s *Server) Initialize() {
 	s.migrateDraftsDir()
 
 	// Validate the site first - only load keys/config if valid
-	validation := site.Validate(s.DataDir)
+	validation := site.Validate(s.Site())
 	if validation.Status == site.StatusValid {
 		// Load existing config if present
 		s.LoadConfig()
 		s.LoadKeys()
+		s.siteConfigLoaded = true
 	}
 
 	// Load .env file for discovery service settings (overrides webapp/config.json)
@@ -1286,17 +1764,15 @@ func (s *Server) Initialize() {
 	// Propagate discovery config to packages that register with discovery.
 	// This ensures publish and comment packages handle registration internally.
 	publish.DiscoveryURL = s.DiscoveryURL
-	publish.DiscoveryKey = s.DiscoveryKey
 	publish.BaseURL = s.BaseURL
 	comment.DiscoveryURL = s.DiscoveryURL
-	comment.DiscoveryKey = s.DiscoveryKey
 	comment.BaseURL = s.BaseURL
 	stream.DiscoveryURL = s.DiscoveryURL
-	stream.DiscoveryKey = s.DiscoveryKey
 	stream.BaseURL = s.BaseURL
-	stream.DataDir = s.DataDir
-	tag.DataDir = s.DataDir
-	following.DataDir = s.DataDir
+	// ⭐ The handle, not the directory: it carries the store the site is on.
+	// following needs neither, because it is handed the site at every call.
+	stream.DefaultSite = s.Site()
+	tag.DefaultSite = s.Site()
 	following.DiscoveryURL = s.DiscoveryURL
 
 	// Render-time read-through for blessed-comment cache misses: populate the
@@ -1305,25 +1781,35 @@ func (s *Server) Initialize() {
 	InstallBlessedCacheFiller(extractDomainFromURL(s.DiscoveryURL))
 
 	// One-time migration: consolidate author → author_name in .well-known/polis
-	site.MigrateAuthorField(s.DataDir)
+	site.MigrateAuthorField(s.Site())
 
 	// Apply log defaults and write back to .env so settings are visible
-	if s.LogLevel == 0 {
+	// Only an ABSENT level takes the default. LOG_LEVEL=0 is LogLevelOff, a
+	// real setting; defaulting it would turn logging back on and write 1 over
+	// the user's 0 in .env.
+	if !s.logLevelSet && s.LogLevel == 0 {
 		s.LogLevel = LogLevelBasic
 	}
 	if s.LogRetentionDays == 0 {
 		s.LogRetentionDays = DefaultLogRetentionDays
 	}
 
-	envPath := filepath.Join(s.DataDir, ".env")
-	s.writeEnvFile(envPath, map[string]string{
+	s.writeEnvFile(".env", map[string]string{
 		"LOG_LEVEL":          strconv.Itoa(s.LogLevel),
 		"LOG_RETENTION_DAYS": strconv.Itoa(s.LogRetentionDays),
 	})
 
 	// Create logger (disk always; JSON stdout when LOG_FORMAT=json)
 	logsDir := filepath.Join(s.DataDir, ".polis", "logs")
-	s.Logger = NewLogger(s.LogLevel, logsDir)
+	// ⭐ Reuse a logger made at boot rather than replacing it: a server that
+	// starts on its first request builds its request middleware before
+	// Initialize runs, and that middleware holds the logger it was given.
+	// Replacing it here would leave every request unlogged, silently.
+	if s.Logger == nil {
+		s.Logger = NewLogger(s.LogLevel, logsDir)
+	} else {
+		s.Logger.level, s.Logger.logsDir = s.LogLevel, logsDir
+	}
 	s.Logger.retentionDays = s.LogRetentionDays
 
 	// Enable JSON stdout output when LOG_FORMAT=json (for Axiom/Vector ingestion)
@@ -1356,11 +1842,14 @@ func (s *Server) migrateDraftsDir() {
 	oldPath := filepath.Join(s.DataDir, ".polis", "drafts")
 	newPath := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
 
-	// Only migrate if old path exists and new path doesn't
+	// NOT the storage interface, all of it: this MOVES A DIRECTORY with
+	// os.Rename. The interface has no rename — atomicity lives in atomicfile
+	// and a prefix store has no directories to move — so a one-time layout
+	// migration like this stays on the filesystem.
 	oldInfo, oldErr := os.Stat(oldPath)
 	_, newErr := os.Stat(newPath)
 
-	if oldErr == nil && oldInfo.IsDir() && os.IsNotExist(newErr) {
+	if oldErr == nil && oldInfo.IsDir() && errors.Is(newErr, fs.ErrNotExist) {
 		// Create parent directory (.polis/bundles — restricted)
 		if err := os.MkdirAll(filepath.Dir(newPath), 0700); err != nil {
 			log.Printf("[warning] Failed to create parent directory for drafts migration: %v", err)
@@ -1560,7 +2049,7 @@ func (s *Server) computeAllCounts() CountsPayload {
 	// content type the site publishes — comments for as long as it has
 	// existed, and tag + attestation since Signet epic 25 — so a
 	// not-a-comment test counts tags as posts.
-	if entries, err := metadata.LoadPublicIndex(s.DataDir); err == nil {
+	if entries, err := metadata.LoadPublicIndex(s.Site()); err == nil {
 		for _, e := range entries {
 			if isPostIndexEntry(e.Type, e.Path) {
 				counts.Posts++
@@ -1569,10 +2058,10 @@ func (s *Server) computeAllCounts() CountsPayload {
 	}
 
 	// Drafts
-	draftsDir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
-	if entries, err := os.ReadDir(draftsDir); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+	draftsDir := siteKey(".polis", "bundles", "pub.polis.core", "posts", "drafts")
+	{
+		for _, e := range s.listKey(draftsDir) {
+			if !e.IsDir && strings.HasSuffix(e.Key, ".md") {
 				counts.Drafts++
 			}
 		}
@@ -1586,10 +2075,10 @@ func (s *Server) computeAllCounts() CountsPayload {
 		{"pending", &counts.MyPending},
 		{"denied", &counts.MyDenied},
 	} {
-		dir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "comments", status.dir)
-		if entries, err := os.ReadDir(dir); err == nil {
-			for _, e := range entries {
-				if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+		dir := siteKey(".polis", "bundles", "pub.polis.core", "comments", status.dir)
+		{
+			for _, e := range s.listKey(dir) {
+				if !e.IsDir && strings.HasSuffix(e.Key, ".md") {
 					*status.dest++
 				}
 			}
@@ -1597,16 +2086,16 @@ func (s *Server) computeAllCounts() CountsPayload {
 	}
 
 	// My blessed comments live in content/pub.polis.core/comment/YYYYMMDD/ (date-based subdirs)
-	blessedDir := filepath.Join(s.DataDir, "content", "pub.polis.core", "comment")
-	if dateDirs, err := os.ReadDir(blessedDir); err == nil {
-		for _, dd := range dateDirs {
-			if !dd.IsDir() {
+	blessedDir := siteKey("content", "pub.polis.core", "comment")
+	{
+		for _, dd := range s.listKey(blessedDir) {
+			if !dd.IsDir {
 				continue
 			}
-			subDir := filepath.Join(blessedDir, dd.Name())
-			if files, err := os.ReadDir(subDir); err == nil {
-				for _, f := range files {
-					if !f.IsDir() && strings.HasSuffix(f.Name(), ".md") {
+			subDir := siteKey(dd.Key)
+			{
+				for _, f := range s.listKey(subDir) {
+					if !f.IsDir && strings.HasSuffix(f.Key, ".md") {
 						counts.MyBlessed++
 					}
 				}
@@ -1615,18 +2104,18 @@ func (s *Server) computeAllCounts() CountsPayload {
 	}
 
 	// Comment drafts
-	commentDraftsDir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "comments", "drafts")
-	if entries, err := os.ReadDir(commentDraftsDir); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+	commentDraftsDir := siteKey(".polis", "bundles", "pub.polis.core", "comments", "drafts")
+	{
+		for _, e := range s.listKey(commentDraftsDir) {
+			if !e.IsDir && strings.HasSuffix(e.Key, ".json") {
 				counts.MyCommentDrafts++
 			}
 		}
 	}
 
 	// Incoming blessed comments (on our posts)
-	blessedIndex := filepath.Join(s.DataDir, "content", "pub.polis.core", "comment", "blessed.json")
-	if data, err := os.ReadFile(blessedIndex); err == nil {
+	blessedIndex := siteKey("content", "pub.polis.core", "comment", "blessed.json")
+	if data, err := s.readKey(blessedIndex); err == nil {
 		var idx map[string]interface{}
 		if json.Unmarshal(data, &idx) == nil {
 			if posts, ok := idx["posts"].(map[string]interface{}); ok {
@@ -1640,8 +2129,7 @@ func (s *Server) computeAllCounts() CountsPayload {
 	}
 
 	// Following
-	followingPath := following.DefaultPath(s.DataDir)
-	if f, err := following.Load(followingPath); err == nil {
+	if f, err := following.LoadSite(s.Site()); err == nil {
 		counts.Following = f.Count()
 	}
 
@@ -1657,7 +2145,7 @@ func (s *Server) computeAllCounts() CountsPayload {
 
 	// Followers (from cached state)
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 	var followerState stream.FollowerState
 	if store.LoadState("pub.polis.follow", &followerState) == nil {
 		counts.Followers = followerState.Count
@@ -1757,11 +2245,11 @@ func (s *Server) dmMailbox() (*dm.Mailbox, string, map[int][32]byte, error) {
 	if s.PrivateKey == nil {
 		return nil, "", nil, fmt.Errorf("no private key configured")
 	}
-	deks, err := dm.LoadAvailableDEKs(s.DataDir)
+	deks, err := dm.LoadAvailableDEKs(s.Site())
 	if err != nil {
 		return nil, "", nil, err
 	}
-	return dm.NewMailbox(dm.DMDir(s.DataDir)), dm.ExtractDomainFromURL(s.GetBaseURL()), deks, nil
+	return dm.NewMailbox(s.Site()), dm.ExtractDomainFromURL(s.GetBaseURL()), deks, nil
 }
 
 // syncCommentStatuses checks pending comments against the discovery service
@@ -1777,8 +2265,9 @@ func (s *Server) syncCommentStatuses() {
 	}
 
 	// Quick check: any pending comments at all?
-	pendingDir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending")
-	entries, err := os.ReadDir(pendingDir)
+	pendingDir := siteKey(".polis", "bundles", "pub.polis.core", "comments", "pending")
+	entries := s.listKey(pendingDir)
+	var err error
 	if err != nil || len(entries) == 0 {
 		return
 	}
@@ -1792,7 +2281,7 @@ func (s *Server) syncCommentStatuses() {
 
 	hc := s.getHookConfig()
 
-	result, err := comment.SyncPendingComments(s.DataDir, baseURL, client, hc)
+	result, err := comment.SyncPendingComments(s.Site(), baseURL, client, hc)
 	if err != nil {
 		s.LogDebug("background comment sync failed: %v", err)
 		return
@@ -1851,8 +2340,7 @@ func (s *Server) syncFeed() {
 	}
 
 	// Load following list to get followed domains
-	followingPath := following.DefaultPath(s.DataDir)
-	f, err := following.Load(followingPath)
+	f, err := following.LoadSite(s.Site())
 	if err != nil {
 		log.Printf("[feed-sync] skip: following load error: %v", err)
 		// Load error could be transient (file lock, partial write) —
@@ -1860,7 +2348,7 @@ func (s *Server) syncFeed() {
 		return
 	}
 	if f.Count() == 0 {
-		log.Printf("[feed-sync] skip: following list is empty (path=%s)", followingPath)
+		log.Printf("[feed-sync] skip: following list is empty (site=%s)", s.DataDir)
 		_ = cm.MarkChecked()
 		return
 	}
@@ -2100,12 +2588,18 @@ func (s *Server) Handler() http.Handler {
 
 	// Setup v1 content API routes (needed for DM delivery, content queries, etc.)
 	if apiEngine, err := s.newContentEngine(); err == nil {
-		api.SetupRoutes(mux, apiEngine, s.DataDir, func(event string, fields map[string]interface{}) {
+		api.SetupRoutes(mux, apiEngine, s.Site(), func(event string, fields map[string]interface{}) {
 			s.LogEvent(event, fields)
 		})
 	}
 
-	return mux
+	// ⚠️ NOT loopback: this handler is mounted by the hosted service and
+	// reached over the network, so BoundToLoopback stays false and the
+	// operator provider is what answers in custodied mode.
+	// ⛔ Key reload outermost — see the note at the standalone listener: a
+	// request refused by the gate must still have refreshed the keys, or a
+	// provider that verifies against them reads a retired one.
+	return s.keyReloadMiddleware(s.ownerGateMiddleware(mux))
 }
 
 // Two-axis flag values for polis-server invocation modes (step 5.a).
@@ -2139,12 +2633,12 @@ type RunOptions struct {
 	Port       int    // Specific port to bind to (0 = auto-pick an available port)
 	DataMode   string // "owner" (default) or "mirror"; empty == DataModeOwner
 	Surface    string // "editor" or "reader"; empty defaults from DataMode
-	// DevMode (polis serve --dev) injects window.__POLIS_DEV=true, which the SPA
-	// reads to enable the full messaging UI (compose/send) on localhost. By
-	// default localhost DMs are read-only (DMs are a networked/hosted feature; a
-	// served export is offline) — dev mode re-enables the send/compose surface for
-	// development + testing, with the understanding that some of it (delivery to a
-	// real peer) only works against a reachable network. See docs/cli/user/command-reference.md (polis serve).
+	// DevMode (polis serve --dev) runs the server as remote-client-signed, a
+	// reachable instance, so the capability descriptor turns the full messaging
+	// UI (compose/send) on; loopback trust still holds (owner.Instance.Dev). By
+	// default localhost DMs are read-only (DMs are a networked feature; a served
+	// export is offline). Delivery to a real peer still needs a reachable
+	// network. See docs/cli/user/command-reference.md (polis serve).
 	DevMode bool
 }
 
@@ -2198,7 +2692,9 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 
 	// DON'T auto-create directories on startup - let the user choose init vs link
 	// We only create the parent data dir if it doesn't exist (needed for symlink target)
-	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
+	// NOT the storage interface: creating the store's own ROOT is a backend
+	// concern, not a key operation.
+	if _, err := os.Stat(dataDir); errors.Is(err, fs.ErrNotExist) {
 		// Create just the data directory (not the full structure)
 		if err := os.MkdirAll(dataDir, 0755); err != nil {
 			log.Printf("[warning] Failed to create data directory: %v", err)
@@ -2215,24 +2711,32 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 	// Find CLI themes directory (for fallback theme snippets)
 	cliThemesDir := FindCLIThemesDir(execDir)
 
-	// Initialize server
-	server := NewServer(dataDir, cliThemesDir)
-	server.EnableHooks = true // Localhost mode: hooks are safe to run
-	if len(opts) > 0 && opts[0].CLIVersion != "" {
-		server.CLIVersion = opts[0].CLIVersion
+	// Developer mode (polis serve --dev): re-enable the localhost messaging UI.
+	devMode := len(opts) > 0 && opts[0].DevMode
+
+	// ⭐ The one construction, shared with the network handler: backend, mode,
+	// configuration, identity key and recovery. ⛔ Every failure stops the boot.
+	server, err := newInstance(instanceOptions{
+		DataDir:      dataDir,
+		CLIThemesDir: cliThemesDir,
+		CLIVersion:   optsVal.CLIVersion,
+		DevMode:      devMode,
+		Getenv:       os.Getenv,
+	})
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
-	server.Initialize()
+	server.EnableHooks = true // Localhost mode: hooks are safe to run
 	defer server.Close()
 
 	// Start background sync (notifications + feed). Mirror mode skips —
 	// the data dir is a clone, not the operator's tenant; no DS announce
-	// or auto-register applies.
-	if dataMode != DataModeMirror {
+	// or auto-register applies. ⚠️ Nor does a request-credentialed backend:
+	// the loops need storage between requests, which it cannot give them, so
+	// that work arrives as scheduled requests instead.
+	if dataMode != DataModeMirror && !server.StartsOnRequest() {
 		server.StartBackgroundSync()
 	}
-
-	// Developer mode (polis serve --dev): re-enable the localhost messaging UI.
-	devMode := len(opts) > 0 && opts[0].DevMode
 
 	// Resolve port: explicit RunOptions.Port wins; otherwise auto-pick.
 	var port int
@@ -2254,34 +2758,13 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 	//   endpoint at /api/v1/stream/items. No SPA, no editor APIs, no
 	//   /_/... deep-link routes. Used by polis-server-as-discover for
 	//   the local-stack scenario (step 5.e) and by --reader dogfood mode.
-	mux := http.NewServeMux()
+	var routes *http.ServeMux
 	if surface == SurfaceReader {
-		SetupReaderRoutes(mux, server)
-		mux.Handle("/", tenantStaticHandler(server))
+		routes = http.NewServeMux()
+		SetupReaderRoutes(routes, server)
+		routes.Handle("/", tenantStaticHandler(server))
 	} else {
-		SetupRoutes(mux, server)
-
-		// Setup v1 content API routes (alongside existing /api/ routes)
-		if apiEngine, err := server.newContentEngine(); err != nil {
-			log.Printf("[warning] v1 API not available: %v", err)
-		} else {
-			api.SetupRoutes(mux, apiEngine, dataDir, func(event string, fields map[string]interface{}) {
-				server.LogEvent(event, fields)
-			})
-			log.Printf("[info] v1 content API enabled")
-		}
-
-		// Bundle reference assets (step-06/6.a). Serves the v4 stream shape's
-		// stream.js / stream.css / snippet HTML to the SPA homepage so it can
-		// hydrate against the canonical controller without duplicating files
-		// in webapp/internal/webui/www. Path shape:
-		//   /bundle-assets/pub.polis.core/shapes/v4/stream.js
-		//   /bundle-assets/pub.polis.core/shapes/v4/stream.css
-		//   /bundle-assets/pub.polis.core/shapes/v4/snippets/stream-filter.html
-		mux.Handle("/bundle-assets/", http.StripPrefix("/bundle-assets/", http.FileServer(http.FS(bundle.ReferencePayloadFS()))))
-
-		// Static files from embedded filesystem with SPA fallback
-		mux.Handle("/", spaHandler(webFS, dataDir, devMode))
+		routes = editorRoutes(server, webFS)
 	}
 
 	// R18-18 (2026-05-18): bind is HARDCODED to `localhost` so the
@@ -2314,19 +2797,27 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 		OpenBrowser(url)
 	}()
 
+	// Every request first checks the key file (keyreload.go), then the
+	// localhost guard and the rest of localhostModeHandler wrap it.
+	// ⭐ The bind below is hardcoded to localhost, so this is true by
+	// construction here — recorded from the listener, never inferred later.
+	server.BoundToLoopback = true
+	// ⭐ The shared middleware order (instanceHandler), inside the localhost
+	// guard and the rest of localhostModeHandler.
+	mux := server.instanceHandler(routes)
 	if err := http.ListenAndServe(addr, localhostModeHandler(server.Logger, mux)); err != nil {
 		log.Fatal("Server error:", err)
 	}
 }
 
 // spaHandler serves static files from the embedded filesystem, falling back
-// to index.html for unknown paths (SPA deep-link support). For index.html
+// to index.html for the app's deep links (/_/…) and 404 for anything else. For index.html
 // itself (and the SPA fallback path), substitutes a {{theme_attr}}
 // placeholder with the tenant's active theme attribute so first paint
 // lands in the user's selected theme rather than the sols-flavored default
 // (R23 #4 follow-up — the inline-script localStorage path covered repeat
 // visits but not first-load).
-func spaHandler(fsys fs.FS, dataDir string, devMode bool) http.Handler {
+func spaHandler(fsys fs.FS, site storage.Site) http.Handler {
 	fileServer := http.FileServer(http.FS(fsys))
 	serveTemplatedIndex := func(w http.ResponseWriter, r *http.Request) {
 		// Sub-rooted at www/ in cmd/server/main.go via fs.Sub, so paths
@@ -2338,7 +2829,7 @@ func spaHandler(fsys fs.FS, dataDir string, devMode bool) http.Handler {
 			return
 		}
 		var attr string
-		if name, _ := bundle.GetActiveThemeName(dataDir); name != "" {
+		if name, _ := bundle.GetActiveThemeName(site); name != "" {
 			// Bare attribute injection — the value is constrained by
 			// SetActiveThemeName to ParseFQN-validated tokens (alnum +
 			// `-`/`_`), so direct interpolation is safe.
@@ -2354,14 +2845,12 @@ func spaHandler(fsys fs.FS, dataDir string, devMode bool) http.Handler {
 		// match the CSP header and gets the importmap blocked.
 		nonce := GenerateCSPNonce()
 		out = strings.ReplaceAll(out, "{{csp_nonce}}", nonce)
-		// Developer mode (polis serve --dev): inject window.__POLIS_DEV so the
-		// SPA enables the localhost messaging UI. Carries the per-response nonce
-		// so it survives the strict admin-SPA CSP (same trick as hosted's
-		// __POLIS_HOSTED injection).
-		if devMode {
-			out = strings.Replace(out, "</head>",
-				fmt.Sprintf(`<script nonce=%q>window.__POLIS_DEV=true;</script></head>`, nonce), 1)
-		}
+		// ⛔ __POLIS_DEV IS GONE. It injected a flag the SPA checked alongside
+		// the hosted flag to decide ONE capability — two globals answering "is
+		// this instance reachable?" differently, which is the scattering the
+		// capability model removes. `polis serve --dev` now selects a mode, and
+		// the SPA fetches the descriptor derived from it. ⚠️ Nothing replaces
+		// this block; a dev-only global would be the same bug wearing a hat.
 		// R18-21: override the default tenant-content CSP from
 		// securityHeadersMiddleware with the admin-SPA variant that
 		// permits this nonce + the Milkdown esm.sh CDN.
@@ -2384,13 +2873,30 @@ func spaHandler(fsys fs.FS, dataDir string, devMode bool) http.Handler {
 		// The site's own generated files (robots.txt, rsl.xml, licence pages,
 		// .well-known/) come from the data dir, 404 when absent — never the
 		// shell with a 200 (epic 29 E2).
-		if isSiteFilePath(dataDir, r.URL.Path) {
-			serveSiteFile(w, r, dataDir)
+		if isSiteFilePath(site, r.URL.Path) {
+			serveSiteFile(w, r, site)
 			return
 		}
-		// SPA fallback: serve templated index.html for deep-link paths
-		serveTemplatedIndex(w, r)
+		// SPA fallback: the templated index.html, for the app's own deep links
+		// only (/_ and below, where every app route lives).
+		//
+		// ⛔ ANY OTHER PATH IS A 404, as on hosted. Serving the shell with a 200
+		// for everything made a mistyped page, a retired URL and a private name
+		// (/.env, /.polis/keys/…) all look served, to a crawler and to any check
+		// that reads the status; on a remote instance every such path reaches
+		// this handler, since the deployment's static files answer the rest.
+		if isAppPath(path) {
+			serveTemplatedIndex(w, r)
+			return
+		}
+		http.NotFound(w, r)
 	})
+}
+
+// isAppPath reports whether a path (without its leading slash) is one of the
+// owner app's own routes, which the SPA resolves in the browser.
+func isAppPath(path string) bool {
+	return path == "_" || strings.HasPrefix(path, "_/")
 }
 
 // GetDiscoveryDomain returns the discovery service hostname for use as
@@ -2462,9 +2968,9 @@ func (s *Server) feedCacheForScope(scope string) *feed.CacheManager {
 	discoveryDomain := s.GetDiscoveryDomain()
 	var cm *feed.CacheManager
 	if key == "network" {
-		cm = feed.NewCacheManager(s.DataDir, discoveryDomain)
+		cm = feed.NewCacheManager(s.Site(), discoveryDomain)
 	} else {
-		cm = feed.NewScopedCacheManager(s.DataDir, discoveryDomain, key)
+		cm = feed.NewScopedCacheManager(s.Site(), discoveryDomain, key)
 	}
 	s.feedCaches[key] = cm
 	return cm
@@ -2476,7 +2982,7 @@ func (s *Server) feedFilterForScope(scope string) feed.FilterOptions {
 	switch scope {
 	case "followers":
 		discoveryDomain := s.GetDiscoveryDomain()
-		store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+		store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 		var state stream.FollowerState
 		_ = store.LoadState("pub.polis.follow", &state)
 		m := make(map[string]bool, len(state.Followers))

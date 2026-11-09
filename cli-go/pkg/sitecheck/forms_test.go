@@ -2,6 +2,7 @@ package sitecheck
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,7 +34,7 @@ func servedSite(t *testing.T) (*siteBuilder, *httptest.Server, map[string]string
 	ts := httptest.NewServer(http.FileServer(http.Dir(b.dir)))
 	t.Cleanup(ts.Close)
 
-	if _, err := site.WriteGenesisKeyHistory(b.dir); err != nil {
+	if _, err := site.WriteGenesisKeyHistory(storage.At(b.dir)); err != nil {
 		t.Fatal(err)
 	}
 	b.addPost(t, "hello", "Hello.\n", true)

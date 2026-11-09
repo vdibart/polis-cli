@@ -3,6 +3,7 @@ package remote
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -165,7 +166,7 @@ func (c *Client) FetchContent(url string) (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("fetch failed with status %d for %s", resp.StatusCode, url)
+		return "", &StatusError{Code: resp.StatusCode, URL: url, RetryAfter: resp.Header.Get("Retry-After")}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
@@ -188,12 +189,12 @@ func (c *Client) FetchWellKnown(baseURL string) (*WellKnown, error) {
 
 	content, err := c.FetchContent(url)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch .well-known/polis: %w", err)
+		return nil, &WellKnownError{Err: fmt.Errorf("failed to fetch .well-known/polis: %w", err)}
 	}
 
 	var wk WellKnown
 	if err := json.Unmarshal([]byte(content), &wk); err != nil {
-		return nil, fmt.Errorf("failed to parse .well-known/polis: %w", err)
+		return nil, &WellKnownError{Err: fmt.Errorf("failed to parse .well-known/polis: %w", err), NotPolis: true}
 	}
 
 	return &wk, nil
@@ -426,4 +427,65 @@ func (c *Client) TryAlternateExtension(url string) (string, string, error) {
 	}
 
 	return content, altURL, nil
+}
+
+// StatusError is an HTTP error response from a fetch. It carries the status
+// code so a caller can tell the difference between "this site has no such
+// file" (404) and "we are being throttled" (429) — a distinction that matters
+// because the second says nothing about the site and everything about us.
+//
+// Its Error() string is byte-identical to the fmt.Errorf it replaced, so
+// anything matching on the message keeps working.
+type StatusError struct {
+	Code int
+	URL  string
+	// RetryAfter is the Retry-After header verbatim, empty when absent.
+	RetryAfter string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("fetch failed with status %d for %s", e.Code, e.URL)
+}
+
+// WellKnownError is a failure to read ANOTHER site's .well-known/polis. It is
+// about the target, never about us, so a server answering for it says so with
+// a 4xx or a 502 rather than a 500. Its Error() is the message it wraps.
+type WellKnownError struct {
+	Err error
+	// NotPolis is set when the document came back and is not a polis document.
+	NotPolis bool
+}
+
+func (e *WellKnownError) Error() string { return e.Err.Error() }
+func (e *WellKnownError) Unwrap() error { return e.Err }
+
+// TargetIsNotPolis reports whether err says the target is not a polis site:
+// its .well-known/polis is absent or refused (a 4xx other than 429), or is not
+// a polis document. That is the caller's mistake.
+func TargetIsNotPolis(err error) bool {
+	var we *WellKnownError
+	if !errors.As(err, &we) {
+		return false
+	}
+	if we.NotPolis {
+		return true
+	}
+	var se *StatusError
+	return errors.As(err, &se) && se.Code >= 400 && se.Code < 500 && se.Code != http.StatusTooManyRequests
+}
+
+// TargetUnavailable reports whether err is a failure to read the target's
+// .well-known/polis that is neither ours nor the caller's: the target errored,
+// throttled us, or could not be reached.
+func TargetUnavailable(err error) bool {
+	var we *WellKnownError
+	return errors.As(err, &we) && !TargetIsNotPolis(err)
+}
+
+// IsThrottled reports whether err is a 429. A throttled fetch is not evidence
+// about the site: a caller counting "unreachable" or "absent" must not count
+// this, or a run that was rate-limited reads as a run that found nothing.
+func IsThrottled(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Code == http.StatusTooManyRequests
 }

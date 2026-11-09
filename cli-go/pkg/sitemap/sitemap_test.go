@@ -1,12 +1,17 @@
 package sitemap
 
 import (
+	"context"
 	"encoding/xml"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 func TestBuild_ValidXMLAndOrder(t *testing.T) {
@@ -151,7 +156,7 @@ func TestWriteRead_RoundTrip(t *testing.T) {
 	a := Entry{URL: "https://x.example/posts/20260101/a.html", LastMod: parseTime(t, "2026-01-01T12:00:00Z")}
 	body, _ := Build([]Entry{a})
 
-	if err := Write(dir, body); err != nil {
+	if err := Write(storage.At(dir), body); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
@@ -165,23 +170,60 @@ func TestWriteRead_RoundTrip(t *testing.T) {
 	}
 
 	// Atomic write left no .tmp behind.
-	if _, err := os.Stat(filepath.Join(dir, Filename+".tmp")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, Filename+".tmp")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf(".tmp file should have been renamed away; err = %v", err)
 	}
 }
 
 func TestRead_MissingFile_ReturnsEmpty(t *testing.T) {
-	dir := t.TempDir()
-	body, err := Read(dir)
-	if err != nil {
-		t.Fatalf("Read of missing file: %v", err)
+	// ⭐ The absence branch: a site that has never published has no
+	// sitemap.xml, and Read must answer "empty", not fail, on every backend.
+	sites := map[string]storage.Site{
+		"posix": storage.At(t.TempDir()),
+		"blob":  storage.On(t.TempDir(), storage.NewObjectStore("tenants/alice")),
 	}
-	entries, err := Parse(body)
-	if err != nil {
-		t.Fatalf("Parse of empty sitemap: %v", err)
+	for name, site := range sites {
+		t.Run(name, func(t *testing.T) {
+			body, err := Read(site)
+			if err != nil {
+				t.Fatalf("Read of missing file: %v", err)
+			}
+			entries, err := Parse(body)
+			if err != nil {
+				t.Fatalf("Parse of empty sitemap: %v", err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("missing-file Read should yield 0 entries, got %d", len(entries))
+			}
+		})
 	}
-	if len(entries) != 0 {
-		t.Errorf("missing-file Read should yield 0 entries, got %d", len(entries))
+}
+
+func TestWriteRead_RoundTripOnAStoreWithNoFilesystem(t *testing.T) {
+	site := storage.On(t.TempDir(), storage.NewObjectStore("tenants/alice"))
+	a := Entry{URL: "https://x.example/posts/20260101/a.html", LastMod: parseTime(t, "2026-01-01T12:00:00Z")}
+	body, _ := Build([]Entry{a})
+
+	if err := Write(site, body); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got, err := Read(site)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(got) != string(body) {
+		t.Errorf("read back %q, wrote %q", got, body)
+	}
+	// ⛔ No temp key left behind: on a store without a filesystem the Put is
+	// the atomic write, so there is nothing to rename and nothing to litter.
+	if _, err := site.Store().Get(context.Background(), Filename+".tmp"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a temp key was written beside sitemap.xml; err = %v", err)
+	}
+}
+
+func TestRead_ZeroSiteIsRefused(t *testing.T) {
+	if _, err := Read(storage.Site{}); err == nil {
+		t.Error("Read of a zero site handle succeeded; it must refuse")
 	}
 }
 

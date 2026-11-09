@@ -5,12 +5,13 @@
 All endpoints are available at `{DS_PUBLIC_URL}/{endpoint}`. Resource endpoints live under the `/v1/` prefix.
 
 Auth conventions:
-- **Write operations** require an Ed25519 SSH signature in the request body. Every write except `POST /v1/sites`, `POST /v1/content` and `POST /v1/stream` also carries a signed `timestamp`, which must be within **±5 minutes** of the service's clock (checked before the signature)
+- **Write operations** require an Ed25519 SSH signature in the request body. Every write except `POST /v1/sites` and `POST /v1/content` also carries a signed `timestamp`, which must be within **±5 minutes** of the service's clock (checked before the signature). `POST /v1/stream` carries it inside `payload`, and for now accepts an event without one (see [POST /v1/stream](#post-v1stream))
+- **Order of checks on a write:** the IP pre-auth limit comes first. A `timestamp` is checked before any outbound key fetch or signature verification, so a stale replay costs the service nothing. Most writes also count against their per-domain limit before the signature; `POST /v1/content` and `POST /v1/stream` count only once it verifies. Each endpoint below gives its own order where it matters
 - **Read queries** on content, relationships, stream and PQL accept **optional** signed GET headers (`X-Polis-Domain`, `X-Polis-Timestamp`, `X-Polis-Signature`). With no headers the caller is unauthenticated and sees only public data; with all three the caller is authenticated as that domain and also sees what is scoped to it. Supplying only some of the three is an error (`401 AUTH_INCOMPLETE`). The signature covers `{"action":"query","domain":"<domain>","timestamp":"<timestamp>"}`, verified against the domain's `.well-known/polis` key, and the timestamp must be within ±5 minutes
 - **Admin operations** require `Authorization: Bearer <operator-api-key>` header
 
 Rate limiting:
-- **Write endpoints** enforce two tiers: (1) IP-based pre-auth limit of 120 req/hr before any outbound fetch or signature verification, (2) per-domain limit after authentication (varies by endpoint)
+- **Write endpoints** enforce two tiers: (1) IP-based pre-auth limit of 120 req/hr before any outbound fetch or signature verification, (2) per-domain limit (varies by endpoint; see *Order of checks on a write* above for when it is counted)
 - **Read endpoints** enforce IP-based limits (see individual endpoints for rates)
 - IP-based limits (and `POST /v1/content`'s per-domain limit) return `429` with a `Retry-After` header and the `RATE_LIMIT_EXCEEDED` code. Other per-domain limits return `429` with the wait in the `error` message only
 - **Content quota:** a domain may create at most **2,000 new content records per rolling 30 days** (see [Per-Domain Quotas](#per-domain-quotas)). Over quota returns `429` with `QUOTA_EXCEEDED`, a `Retry-After` header and a `retry_after_seconds` field. The write is refused, never silently dropped
@@ -357,7 +358,6 @@ Only these metadata keys can be filtered, per type. Any other `metadata.*` param
       "version": "sha256:abc123...",
       "actor": "alice.com",
       "author": "alice",
-      "signature": "...",
       "signature_verified": true,
       "key_id": 5,
       "metadata": { "title": "Hello World" },
@@ -371,6 +371,14 @@ Only these metadata keys can be filtered, per type. Any other `metadata.*` param
   "ds_key_id": "ds-primary"
 }
 ```
+
+**The per-record `signature` is not published.** The registration signature covers
+`{type, url, version, author, metadata}` — every one of those fields is in this same
+response, so publishing the signature alongside them would hand any reader a complete,
+replayable registration tuple. A caller authenticated as a record's own `actor` still
+receives that record's `signature`, because it made it and can reproduce it; every other
+caller, authenticated or not, sees the record without the field. `signature_verified`
+still reports whether the service verified it at registration.
 
 For `pub.polis.comment` queries that list a post's thread (any query without `actor`, or with a `metadata.in_reply_to` / `metadata.root_post` filter): comments with a granted blessing are visible to all; others are visible only to an authenticated caller who wrote the comment or whose domain owns the post. A query by `actor` alone ("comments by this site") returns the site's comments whatever their blessing status. Results ordered by `updated_at` DESC, newest registration first among equal timestamps.
 
@@ -704,6 +712,62 @@ new key's `valid_from` in the site's published key history, and the whole
 published chain is signed over it. A DS that recorded a backdated rotation
 would be a witness that agrees with a backdated chain.
 
+### POST /v1/sites/branched
+
+A branch announcing where it came from. `polis branch` makes a new site at a new address whose key history
+carries a **handover**: the source's key signing over to the new site's key, under the source's domain, in the
+key-rotation canonical form above. This presents that handover. The DS checks it against what it witnessed of
+the source and emits one `pub.polis.site.branched` stream event, so followers' software can offer the new
+address. ⛔ It shows **descent, never consent** (anyone holding the source's key then could have signed), and it
+**changes nothing of the source's**: no registration, key, content or follow is touched. Optional: a branch is
+valid without it. The CLI sends it with `polis branch announce`.
+
+Rate limit: per-domain 5/hr, a counter of its own, checked before the timestamp and the signature
+
+```json
+// Request
+{
+  "domain": "alice.example",
+  "source_domain": "alice.polis.pub",
+  "handover": {
+    "old_key": "ssh-ed25519 AAAA... (the source's key when the branch was made)",
+    "new_key": "ssh-ed25519 BBBB... (the key this site registered with)",
+    "timestamp": "2026-10-17T04:00:00Z",
+    "transition_sig": "-----BEGIN SSH SIGNATURE-----\n...\n-----END SSH SIGNATURE-----"
+  },
+  "timestamp": "2026-11-08T12:00:00Z",
+  "signature": "-----BEGIN SSH SIGNATURE-----\n...\n-----END SSH SIGNATURE-----"
+}
+
+// Response 200
+{
+  "success": true,
+  "message": "Branch announced",
+  "event_id": 1234,
+  "witness": { "action": "site-branched", "domain": "alice.example", "source_domain": "alice.polis.pub", "...": "..." }
+}
+```
+
+`signature` is the site's **current** key over (keys sorted):
+```json
+{"action":"site-branched","domain":"alice.example","source_domain":"alice.polis.pub","timestamp":"2026-11-08T12:00:00Z","transition_sig":"-----BEGIN SSH SIGNATURE-----\n..."}
+```
+
+The DS verifies, in order: the request is fresh (±5 minutes) and signed by the site's current key; the
+handover's `new_key` is the first key this DS witnessed for the site; its `old_key` is the key it witnessed the
+source holding at the handover's `timestamp`; and `transition_sig` verifies as that key's signature over the
+key-rotation message under `source_domain`. ⚠️ The handover itself has **no freshness window**: it was signed
+when the branch was made. ⛔ But a **retired key cannot vouch for a branch**: the key that signed the handover
+must still be the source's current key, and the handover must be dated within **30 days before** the site
+registered. Without that, anyone holding a source's old (perhaps leaked) key could claim descent for any domain.
+
+**Error cases:**
+- `400` — Missing fields, a site announcing a branch from itself, or a stale request `timestamp`
+- `401` — The request or the handover signature does not verify
+- `404` — The site is not registered (register it first), or the DS never witnessed the source
+- `409` — The handover's `new_key` is not the site's first key, its `old_key` is not the source's key at that time, the source has rotated away from that key since, or the handover is dated more than 30 days before (or after) the site registered
+- `429` — Rate limited
+
 ### GET /v1/sites/keys/history?domain=alice.com
 
 The key history the DS has **witnessed** for a domain, oldest first.
@@ -936,7 +1000,8 @@ Rate limit: per-domain 100/hr
   "actor": "alice.com",
   "payload": {
     "source_domain": "alice.com",
-    "target_domain": "bob.com"
+    "target_domain": "bob.com",
+    "timestamp": "2026-11-08T12:00:00Z"
   },
   "signature": "-----BEGIN SSH SIGNATURE-----\n...\n-----END SSH SIGNATURE-----"
 }
@@ -951,7 +1016,9 @@ Rate limit: per-domain 100/hr
 
 Clients may publish only these `pub.polis.*` types: `pub.polis.follow.announced`, `pub.polis.follow.removed`, `pub.polis.actor.registered`, `pub.polis.actor.reregistered`, `pub.polis.actor.withdrawn`. Every other `pub.polis.*` type is emitted by the service itself and refused here (`400`); types outside `pub.polis.` are not restricted.
 
-Verifies the actor is registered (`403`), then evaluates the event against the DS operator policies — a `deny` match is refused with `403` — then verifies the signature over `{"type","payload"}` against the actor's `.well-known/polis` key (`401`), then applies the per-domain limit. Event payloads limited to 8KB.
+**`payload.timestamp`** is the event's freshness field: ISO 8601, within **±5 minutes** of the service's clock, or the event is refused (`400`). It sits inside `payload`, not beside it, because `payload` is stored and returned verbatim, so a consumer re-checking the author's signature on a stored event can rebuild the signed bytes; the canonical form is unchanged. The CLIs send it from 0.70.0. ⚠️ An event **without** one is still accepted, so older clients keep working; replay protection holds only for events that carry it, until the field becomes required.
+
+Checks the timestamp when present (`400`), then verifies the actor is registered (`403`), then evaluates the event against the DS operator policies — a `deny` match is refused with `403` — then verifies the signature over `{"type","payload"}` against the actor's `.well-known/polis` key (`401`), then applies the per-domain limit. Event payloads limited to 8KB.
 
 ### GET /pql/:sentence
 
@@ -1166,6 +1233,7 @@ Every event type can be blocked by an operator `deny` rule; none is exempt.
 | `pub.polis.site.registered` | POST /v1/sites |
 | `pub.polis.site.reregistered` | POST /v1/sites (re-registration) |
 | `pub.polis.site.key_rotated` | POST /v1/sites/keys/rotate |
+| `pub.polis.site.branched` | POST /v1/sites/branched |
 | `pub.polis.post.published` | POST /v1/content (new post) |
 | `pub.polis.post.republished` | POST /v1/content (updated post) |
 | `pub.polis.post.unpublished` | POST /v1/content/unpublish (post) |
@@ -1193,12 +1261,13 @@ Events older than the retention window (90 days by default) move to an archive t
 
 ## Rate Limits
 
-### Per-Domain Limits (after authentication)
+### Per-Domain Limits
 
 | Endpoint | Limit |
 |----------|-------|
 | Site register/unregister | 5/hr |
 | Key rotation | 5/hr |
+| Branch announcement | 5/hr |
 | Content register | 50/hr |
 | Content unregister (tags) | 20/hr |
 | Content unpublish | 20/hr |

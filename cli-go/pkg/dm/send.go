@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"net/http"
 	"net/url"
@@ -24,8 +25,11 @@ type Sender struct {
 	PrivateKeyPEM []byte
 	PublicKeySSH  []byte
 	Domain        string
-	SiteDir       string // tenant site dir (locates the keyring + mailbox)
-	Logger        Logger
+	// Site locates the keyring and mailbox.
+	//
+	// ⭐ This struct already carried the identity; only its type was wrong.
+	Site   storage.Site
+	Logger Logger
 
 	keyCache   map[string]*cachedKey
 	keyCacheMu sync.Mutex
@@ -49,12 +53,12 @@ const maxKeyCacheEntries = 2048
 
 // NewSender creates a Sender for delivering DMs from the given tenant site dir.
 // The domain is normalized to lowercase (DNS hostnames are case-insensitive per RFC 1123).
-func NewSender(privateKeyPEM, publicKeySSH []byte, domain, siteDir string) *Sender {
+func NewSender(privateKeyPEM, publicKeySSH []byte, domain string, site storage.Site) *Sender {
 	return &Sender{
 		PrivateKeyPEM: privateKeyPEM,
 		PublicKeySSH:  publicKeySSH,
 		Domain:        strings.ToLower(domain),
-		SiteDir:       siteDir,
+		Site:          site,
 		Logger:        nopLogger{},
 		keyCache:      make(map[string]*cachedKey),
 		httpClient: &http.Client{
@@ -64,15 +68,15 @@ func NewSender(privateKeyPEM, publicKeySSH []byte, domain, siteDir string) *Send
 }
 
 // NewSenderWithHTTP creates a Sender using a shared HTTP client for connection pooling.
-func NewSenderWithHTTP(privateKeyPEM, publicKeySSH []byte, domain, siteDir string, hc *http.Client) *Sender {
+func NewSenderWithHTTP(privateKeyPEM, publicKeySSH []byte, domain string, site storage.Site, hc *http.Client) *Sender {
 	if hc == nil {
-		return NewSender(privateKeyPEM, publicKeySSH, domain, siteDir)
+		return NewSender(privateKeyPEM, publicKeySSH, domain, site)
 	}
 	return &Sender{
 		PrivateKeyPEM: privateKeyPEM,
 		PublicKeySSH:  publicKeySSH,
 		Domain:        strings.ToLower(domain),
-		SiteDir:       siteDir,
+		Site:          site,
 		Logger:        nopLogger{},
 		keyCache:      make(map[string]*cachedKey),
 		httpClient:    hc,
@@ -104,8 +108,8 @@ func (s *Sender) SendMessage(recipientURL, content, replyToID string) (*MailboxM
 	}
 
 	// Sender's current-epoch sealing material (bootstrap → server_dek; password → locked).
-	siteDir := s.SiteDir
-	seal, err := loadCurrentSealing(siteDir)
+	site := s.Site
+	seal, err := loadCurrentSealing(site)
 	if err != nil {
 		return nil, fmt.Errorf("sender sealing key: %w", err)
 	}
@@ -138,7 +142,7 @@ func (s *Sender) SendMessage(recipientURL, content, replyToID string) (*MailboxM
 	}
 
 	// Store our own copy, sealed to our own current-epoch key (mailbox).
-	mb := NewMailbox(DMDir(siteDir))
+	mb := NewMailbox(site)
 	msg, err := mb.AppendSent(recipientDomain, s.Domain, content, seal.epoch, seal.pub, seal.dek, replyToID, status)
 	if err != nil {
 		return nil, fmt.Errorf("store sent message: %w", err)
@@ -226,7 +230,7 @@ func (s *Sender) SendSealed(recipientURL string, senderEpoch, recipientEpoch int
 
 	// Store the browser's pre-sealed box-to-self copy (no re-seal — the server
 	// has no password-epoch DEK).
-	mb := NewMailbox(DMDir(s.SiteDir))
+	mb := NewMailbox(s.Site)
 	msg, err := mb.AppendSentRaw(recipientDomain, senderEpoch, sent.Ciphertext, sent.Nonce, boxPubB64, replyToID, status)
 	if err != nil {
 		return nil, fmt.Errorf("store sent message: %w", err)

@@ -1,6 +1,7 @@
 package site
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,21 +31,21 @@ const postURL = "https://alice.polis.pub/content/pub.polis.core/post/20260913/he
 
 func TestRecordWitnessPublishesTheFileAndItsPointer(t *testing.T) {
 	dir := writeSite(t, newKeypair(t).pub, "2026-01-01T00:00:00Z")
-	if got := WitnessesPointer(dir); got != "" {
+	if got := WitnessesPointer(storage.At(dir)); got != "" {
 		t.Fatalf("a fresh site publishes no witnesses pointer, got %q", got)
 	}
-	if f, err := LoadWitnesses(dir); err != nil || f != nil {
+	if f, err := LoadWitnesses(storage.At(dir)); err != nil || f != nil {
 		t.Fatalf("no pointer must read as no witness file, not an error: %v %v", f, err)
 	}
 
-	changed, err := RecordWitness(dir, postURL, witnessOf(postURL, "sha256:v1", "2026-09-13T12:00:00.000Z"))
+	changed, err := RecordWitness(storage.At(dir), postURL, witnessOf(postURL, "sha256:v1", "2026-09-13T12:00:00.000Z"))
 	if err != nil || !changed {
 		t.Fatalf("RecordWitness: changed=%v err=%v", changed, err)
 	}
-	if got := WitnessesPointer(dir); got != DefaultWitnessesPointer {
+	if got := WitnessesPointer(storage.At(dir)); got != DefaultWitnessesPointer {
 		t.Fatalf("pointer = %q, want %q", got, DefaultWitnessesPointer)
 	}
-	f, err := LoadWitnesses(dir)
+	f, err := LoadWitnesses(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +53,7 @@ func TestRecordWitnessPublishesTheFileAndItsPointer(t *testing.T) {
 		t.Fatalf("expected one witness for the post, got %+v", f.Witnesses)
 	}
 	// Other identity fields survive the pointer write.
-	raw, _ := LoadWellKnownRaw(dir)
+	raw, _ := LoadWellKnownRaw(storage.At(dir))
 	if raw["public_key_messages"] == nil {
 		t.Fatal("setting the witnesses pointer dropped an unmodelled .well-known/polis field")
 	}
@@ -63,20 +64,20 @@ func TestRecordWitnessPublishesTheFileAndItsPointer(t *testing.T) {
 // published file is the only copy of every earlier one.
 func TestRecordWitnessNeverRemovesASupersededVersion(t *testing.T) {
 	dir := writeSite(t, newKeypair(t).pub, "2026-01-01T00:00:00Z")
-	if _, err := RecordWitness(dir, postURL, witnessOf(postURL, "sha256:v1", "2026-09-13T12:00:00.000Z")); err != nil {
+	if _, err := RecordWitness(storage.At(dir), postURL, witnessOf(postURL, "sha256:v1", "2026-09-13T12:00:00.000Z")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordWitness(dir, postURL, witnessOf(postURL, "sha256:v2", "2026-09-14T12:00:00.000Z")); err != nil {
+	if _, err := RecordWitness(storage.At(dir), postURL, witnessOf(postURL, "sha256:v2", "2026-09-14T12:00:00.000Z")); err != nil {
 		t.Fatal(err)
 	}
-	f, _ := LoadWitnesses(dir)
+	f, _ := LoadWitnesses(storage.At(dir))
 	set := f.For(postURL)
 	if len(set) != 2 || set[0].Version != "sha256:v1" || set[1].Version != "sha256:v2" {
 		t.Fatalf("the v1 witness must survive v2's registration, in witnessed order: %+v", set)
 	}
 
 	// Re-registering v2 later (Chaplain's repair sweep) adds nothing.
-	changed, err := RecordWitness(dir, postURL, witnessOf(postURL, "sha256:v2", "2026-09-20T00:00:00.000Z"))
+	changed, err := RecordWitness(storage.At(dir), postURL, witnessOf(postURL, "sha256:v2", "2026-09-20T00:00:00.000Z"))
 	if err != nil || changed {
 		t.Fatalf("a later witness of the same bytes must change nothing: changed=%v err=%v", changed, err)
 	}
@@ -84,14 +85,14 @@ func TestRecordWitnessNeverRemovesASupersededVersion(t *testing.T) {
 
 func TestRecordWitnessRefusesToOverwriteAFileItCannotRead(t *testing.T) {
 	dir := writeSite(t, newKeypair(t).pub, "2026-01-01T00:00:00Z")
-	if _, err := RecordWitness(dir, postURL, witnessOf(postURL, "sha256:v1", "2026-09-13T12:00:00.000Z")); err != nil {
+	if _, err := RecordWitness(storage.At(dir), postURL, witnessOf(postURL, "sha256:v1", "2026-09-13T12:00:00.000Z")); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, strings.TrimPrefix(DefaultWitnessesPointer, "/"))
 	if err := os.WriteFile(path, []byte("{not json"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RecordWitness(dir, postURL, witnessOf(postURL, "sha256:v2", "2026-09-14T12:00:00.000Z")); err == nil {
+	if _, err := RecordWitness(storage.At(dir), postURL, witnessOf(postURL, "sha256:v2", "2026-09-14T12:00:00.000Z")); err == nil {
 		t.Fatal("an unparseable witness file may hold the only copy of old testimony and must never be replaced")
 	}
 	if data, _ := os.ReadFile(path); string(data) != "{not json" {
@@ -101,13 +102,13 @@ func TestRecordWitnessRefusesToOverwriteAFileItCannotRead(t *testing.T) {
 
 func TestAWitnessesPointerCannotEscapeTheSite(t *testing.T) {
 	dir := writeSite(t, newKeypair(t).pub, "2026-01-01T00:00:00Z")
-	if err := setWellKnownPointer(dir, witnessesPointerField, "/../../etc/witnesses.json"); err != nil {
+	if err := setWellKnownPointer(storage.At(dir), witnessesPointerField, "/../../etc/witnesses.json"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadWitnesses(dir); err == nil {
+	if _, err := LoadWitnesses(storage.At(dir)); err == nil {
 		t.Fatal("a pointer outside the site must be refused")
 	}
-	if _, err := RecordWitness(dir, postURL, witnessOf(postURL, "sha256:v1", "2026-09-13T12:00:00.000Z")); err == nil {
+	if _, err := RecordWitness(storage.At(dir), postURL, witnessOf(postURL, "sha256:v1", "2026-09-13T12:00:00.000Z")); err == nil {
 		t.Fatal("a pointer outside the site must not be written through")
 	}
 }
@@ -127,7 +128,7 @@ func TestAWitnessedRotationCarriesItsWitnessAndTheChainStillVerifies(t *testing.
 		OldKey: k0.pub, NewKey: k1.pub, Timestamp: ts, TransitionSig: sig,
 		DS: "https://ds.polis.pub", DSKeyID: "ds-primary", WitnessedAt: "2026-09-13T12:00:00.321Z", Signature: "ds-sig",
 	}
-	if err := RecordKeyRotation(dir, k1.pub, sig, ts, w); err != nil {
+	if err := RecordKeyRotation(storage.At(dir), k1.pub, sig, ts, "", w); err != nil {
 		t.Fatal(err)
 	}
 	block := mustLoad(t, dir)

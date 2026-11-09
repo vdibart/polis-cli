@@ -170,7 +170,10 @@ Reference for parsing JSON responses from polis CLI commands.
     "author_url": "https://alice.com",
     "author_email": "alice@example.com",
     "comments_found": 5,
-    "comments_blessed": 5,
+    "comments_blessed": 2,
+    "comments_failed": 0,
+    "blessed_comments": ["https://alice.com/comments/20260105/reply.md", "https://alice.com/comments/20260106/another.md"],
+    "already_followed": false,
     "added_to_following": true
   }
 }

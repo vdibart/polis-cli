@@ -1,6 +1,7 @@
 package render
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -146,7 +147,7 @@ func TestRenderAll_StreamSmoke(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260325", "charlie", "Charlie", "Third body text.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -211,7 +212,7 @@ func TestRenderAll_StreamTitleTags(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260325", "charlie", "Charlie", "Third body text.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -269,7 +270,7 @@ func TestRenderAll_StreamBlessedCommentsPanel(t *testing.T) {
 	// Bless one comment for the focus post. The path matches what
 	// renderStreamFile hands to loadBlessedCommentsForPost (srcRel = the
 	// content-source path, not the mounted /posts/.../*.html URL).
-	if err := metadata.AddBlessedComment(tempDir,
+	if err := metadata.AddBlessedComment(storage.At(tempDir),
 		"content/pub.polis.core/post/20260423/alpha.md",
 		metadata.BlessedComment{
 			URL:       "https://bob.example.org/comments/20260424/re-alpha.md",
@@ -280,7 +281,7 @@ func TestRenderAll_StreamBlessedCommentsPanel(t *testing.T) {
 	}
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -347,7 +348,7 @@ func TestRenderAll_StreamBlessedCommentsPanel_Empty(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260423", "alpha", "Alpha", "Body.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -401,7 +402,7 @@ func TestRenderAll_StreamDoesNotEmitV3Archives(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260508", "p2", "Post 2", "Body.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -465,7 +466,7 @@ func TestRenderAll_StreamCommentWriteSurface(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260507", "writesurf", "WriteSurf", "Body.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -523,7 +524,7 @@ func TestRenderAll_StreamFilterPartialSubstitutes(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260423", "alpha", "Alpha", "Body.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -591,7 +592,7 @@ func TestRenderAll_StreamLayoutAndDateFormat(t *testing.T) {
 	writeStreamPostAt(t, tempDir, "20260421", "spring", "Notes on spring", "2026-04-21T08:30:00Z", "Body.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -684,7 +685,7 @@ func TestRenderAll_StreamSiteIdentityBlock(t *testing.T) {
 	}
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -726,7 +727,7 @@ func TestRenderAll_StreamSiteIdentityBlock_NoBio(t *testing.T) {
 	// No about.md, no DS state, no following.json.
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -782,7 +783,7 @@ func TestRenderAll_StreamRelativeDataDir(t *testing.T) {
 	// Construct the renderer with the RELATIVE DataDir, mimicking real-world
 	// CLI invocation `polis --data-dir tests/harness/clone render`.
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        relDir,
+		Site:           storage.At(relDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -817,7 +818,7 @@ func TestRenderAll_StreamControllerInstalled(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260315", "alpha", "Alpha", "Body.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -854,7 +855,7 @@ func TestRenderAll_StreamSinglePost(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260325", "solo", "Solo", "Only post.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -908,7 +909,7 @@ func TestRenderAll_StreamFocusTitleRendered(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260429", "no-leading-heading", "My Post Title", "Just a body paragraph, no heading on top.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -964,7 +965,7 @@ func TestRenderAll_StreamLayoutRightStateClass(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260325", "charlie", "Charlie", "Third.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -1020,7 +1021,7 @@ func TestRenderAll_StreamHomePathAbsolute(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260429", "deep", "Deep", "Two-dirs-deep post.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -1081,7 +1082,7 @@ func TestRenderAll_StreamCanonical(t *testing.T) {
 	writeStreamPost(t, tempDir, "20260325", "charlie", "Charlie", "Third.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -1125,7 +1126,7 @@ func TestRenderAll_StreamEmptyCorpusCanonical(t *testing.T) {
 	setupStreamTestSite(t, tempDir)
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -1151,7 +1152,7 @@ func TestRenderAll_StreamEmptyCorpus(t *testing.T) {
 	setupStreamTestSite(t, tempDir)
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -1200,13 +1201,13 @@ func TestRenderAll_StreamEmptyCorpus(t *testing.T) {
 func setupStreamTestSite(t *testing.T, dir string) {
 	t.Helper()
 
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("install reference payload: %v", err)
 	}
-	if err := bundle.SetActiveShapeName(dir, "v4"); err != nil {
+	if err := bundle.SetActiveShapeName(storage.At(dir), "v4"); err != nil {
 		t.Fatalf("set active shape v4: %v", err)
 	}
-	if err := bundle.SetActiveThemeName(dir, "studio13"); err != nil {
+	if err := bundle.SetActiveThemeName(storage.At(dir), "studio13"); err != nil {
 		t.Fatalf("set active theme studio13: %v", err)
 	}
 
@@ -1259,7 +1260,7 @@ func writeStreamPostAt(t *testing.T, dir, date, slug, title, published, body str
 		Title:     title,
 		Published: published,
 	}
-	if err := metadata.AppendToPublicIndex(dir, entry); err != nil {
+	if err := metadata.AppendToPublicIndex(storage.At(dir), entry); err != nil {
 		t.Fatalf("append index entry: %v", err)
 	}
 }
@@ -1325,7 +1326,7 @@ func TestRenderedHTMLHasNoComments(t *testing.T) {
 	writeStreamPostAt(t, tempDir, "20260506", "p1", "First post", "2026-05-06T12:00:00Z", "Body of the first post.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",
@@ -1581,7 +1582,7 @@ func TestRenderAll_StreamSiblingTitleRedundancy(t *testing.T) {
 		"Newest post used as focus on the homepage — body that does NOT match the title prefix at all, so its own title-link should NOT be flagged redundant.")
 
 	r, err := NewPageRenderer(PageConfig{
-		DataDir:        tempDir,
+		Site:           storage.At(tempDir),
 		BaseURL:        "https://example.com",
 		PostsSourceDir: "content/pub.polis.core/post",
 		PostsMountDir:  "posts",

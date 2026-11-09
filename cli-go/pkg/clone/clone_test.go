@@ -479,7 +479,7 @@ func TestClone_IncrementalSkipsOldPosts(t *testing.T) {
 	}
 
 	// Verify cumulative post count in updated state
-	updatedState, err := loadState(statePath)
+	updatedState, err := loadState(targetDir, statePath)
 	if err != nil {
 		t.Fatalf("failed to load updated state: %v", err)
 	}
@@ -601,23 +601,26 @@ func TestClone_CreatesTargetDirectory(t *testing.T) {
 }
 
 func TestLoadState_NonExistent(t *testing.T) {
-	_, err := loadState(filepath.Join(t.TempDir(), "nonexistent.json"))
+	missingDir := t.TempDir()
+	_, err := loadState(missingDir, filepath.Join(missingDir, "nonexistent.json"))
 	if err == nil {
 		t.Error("loadState() expected error for non-existent file, got nil")
 	}
 }
 
 func TestLoadState_InvalidJSON(t *testing.T) {
-	tmpFile := filepath.Join(t.TempDir(), "bad.json")
+	badDir := t.TempDir()
+	tmpFile := filepath.Join(badDir, "bad.json")
 	os.WriteFile(tmpFile, []byte("not json"), 0644)
-	_, err := loadState(tmpFile)
+	_, err := loadState(badDir, tmpFile)
 	if err == nil {
 		t.Error("loadState() expected error for invalid JSON, got nil")
 	}
 }
 
 func TestSaveAndLoadState_Roundtrip(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "state.json")
+	stateDir := t.TempDir()
+	statePath := filepath.Join(stateDir, "state.json")
 	original := &CloneState{
 		SourceURL:   "https://example.com",
 		ClonedAt:    "2025-01-01T00:00:00Z",
@@ -625,11 +628,11 @@ func TestSaveAndLoadState_Roundtrip(t *testing.T) {
 		PostsCount:  42,
 	}
 
-	if err := saveState(statePath, original); err != nil {
+	if err := saveState(stateDir, statePath, original); err != nil {
 		t.Fatalf("saveState() error: %v", err)
 	}
 
-	loaded, err := loadState(statePath)
+	loaded, err := loadState(stateDir, statePath)
 	if err != nil {
 		t.Fatalf("loadState() error: %v", err)
 	}

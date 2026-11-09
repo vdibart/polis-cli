@@ -2,14 +2,20 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"golang.org/x/term"
 )
 
@@ -25,7 +31,7 @@ func handleDMPublishKey() {
 	if err != nil {
 		exitError("cannot read identity private key: %v", err)
 	}
-	if err := site.PublishMessagesKey(dir, privKey); err != nil {
+	if err := site.PublishMessagesKey(getSite(), privKey); err != nil {
 		exitError("publish messages key failed: %v", err)
 	}
 	if jsonOutput {
@@ -47,6 +53,14 @@ func handleDM(args []string) {
 
 	subcommand := args[0]
 	subArgs := args[1:]
+
+	// ⛔ Every subcommand but decrypt (which only reads) writes into the site:
+	// `list` rebuilt dm/inbox.json in whatever directory it was run in, so a
+	// directory that is not a site gained a .polis tree and the command said
+	// nothing was wrong.
+	if subcommand != "decrypt" && !isPolisSite(getDataDir()) {
+		exitError("Not a polis site directory")
+	}
 
 	switch subcommand {
 	case "list":
@@ -111,12 +125,12 @@ Options for 'decrypt':
 // and the epoch DEKs available without a password (bootstrap server_dek).
 func loadDMMailbox() (*dm.Mailbox, string, map[int][32]byte) {
 	dataDir := getDataDir()
-	deks, err := dm.LoadAvailableDEKs(dataDir)
+	deks, err := dm.LoadAvailableDEKs(storage.At(dataDir))
 	if err != nil {
 		exitError("Cannot load DM keys: %v", err)
 	}
 	self := dm.ExtractDomainFromURL(baseURL)
-	return dm.NewMailbox(dm.DMDir(dataDir)), self, deks
+	return dm.NewMailbox(storage.At(dataDir)), self, deks
 }
 
 func handleDMList() {
@@ -188,17 +202,21 @@ func handleDMDecrypt(args []string) {
 	}
 
 	dataDir := getDataDir()
-	dmDir := dm.DMDir(dataDir)
-	kr, err := dm.LoadKeyring(dmDir)
+	site := storage.At(dataDir)
+	// ⚠️ dmDir is kept ONLY for the operator-facing message below; nothing is
+	// read or written through it. The CLI runs on a directory, so a path is
+	// what the person reading the message can act on.
+	dmDir := filepath.Join(dataDir, filepath.FromSlash(dm.DMDirKey))
+	kr, err := dm.LoadKeyring(site)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			exitError("No DM keyring at %s — is this an unzipped polis site export?", dmDir)
 		}
 		exitError("Load keyring: %v", err)
 	}
 
 	// Bootstrap (server-held) DEKs need no prompt; collect them first.
-	deks, err := dm.LoadAvailableDEKs(dataDir)
+	deks, err := dm.LoadAvailableDEKs(storage.At(dataDir))
 	if err != nil {
 		exitError("Load available keys: %v", err)
 	}
@@ -231,7 +249,12 @@ func handleDMDecrypt(args []string) {
 		}
 	}
 
-	mb := dm.NewMailbox(dmDir)
+	// ⛔⛔ THE SITE, NOT THE DM DIR. A mailbox takes the site and appends the
+	// DM path itself; rooting it at dmDir made it look two levels too deep, so
+	// `polis dm decrypt` rebuilt an EMPTY inbox from a full export and reported
+	// nothing to decrypt. A sweep introduced that; this function is now
+	// covered by a test.
+	mb := dm.NewMailbox(site)
 	self := dm.ExtractDomainFromURL(baseURL)
 	entries, err := mb.RebuildInbox()
 	if err != nil {
@@ -392,11 +415,13 @@ func handleDMRead(convID string) {
 
 func handleDMSend(recipientURL, content string) {
 	dataDir := getDataDir()
-	privPEM, err := os.ReadFile(dataDir + "/.polis/keys/id_ed25519")
+	dmStore := storage.NewSite(dataDir)
+	dmCtx := context.Background()
+	privPEM, err := dmStore.Get(dmCtx, ".polis/keys/id_ed25519")
 	if err != nil {
 		exitError("Cannot read private key: %v", err)
 	}
-	pubSSH, err := os.ReadFile(dataDir + "/.polis/keys/id_ed25519.pub")
+	pubSSH, err := dmStore.Get(dmCtx, ".polis/keys/id_ed25519.pub")
 	if err != nil {
 		exitError("Cannot read public key: %v", err)
 	}
@@ -406,7 +431,7 @@ func handleDMSend(recipientURL, content string) {
 		exitError("POLIS_BASE_URL must be set to send DMs")
 	}
 
-	sender := dm.NewSender(privPEM, pubSSH, dm.ExtractDomainFromURL(domain), dataDir)
+	sender := dm.NewSender(privPEM, pubSSH, dm.ExtractDomainFromURL(domain), storage.At(dataDir))
 	msg, err := sender.SendMessage(recipientURL, content, "")
 
 	if jsonOutput {
@@ -493,17 +518,15 @@ func handleDMRetry(convID string) {
 
 func handleDMConfig() {
 	dataDir := getDataDir()
-	privatePath, publicPath := policy.DefaultPaths(dataDir)
-
 	// Load all policies and filter to DM-related ones
-	allPolicies, err := policy.LoadPolicies(privatePath, publicPath)
+	allPolicies, err := policy.LoadPolicies(storage.At(dataDir))
 	if err != nil {
 		exitError("Load policies: %v", err)
 	}
 
 	// Separate private vs public DM rules
-	privateDM := filterDMPolicies(privatePath)
-	publicDM := filterDMPolicies(publicPath)
+	privateDM := filterDMPolicies(storage.At(dataDir), policy.PrivateRulesKey)
+	publicDM := filterDMPolicies(storage.At(dataDir), policy.PublicRulesKey)
 
 	if jsonOutput {
 		outputJSON(map[string]interface{}{
@@ -558,15 +581,13 @@ func handleDMConfig() {
 }
 
 // filterDMPolicies loads policies from a single file and returns only DM-related ones.
-func filterDMPolicies(path string) []policy.Policy {
-	file, err := os.Open(path)
+func filterDMPolicies(site storage.Site, key string) []policy.Policy {
+	raw, err := site.Store().Get(context.Background(), key)
 	if err != nil {
 		return nil
 	}
-	defer file.Close()
-
 	var dmPolicies []policy.Policy
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {

@@ -6,13 +6,17 @@
 package bundle
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // StreamShapeVersion is the single source of truth for the stream shape's
@@ -100,14 +104,11 @@ type DSConfig struct {
 // Private types (R18-14, 2026-05-18): the `Private` flag marks
 // content types whose data is owner-private — reads must require
 // auth even on the v1 API. The webapp's
-// `webapp/internal/api/router.go:isPrivateContentType` ALLOWLIST
-// must stay in parity with every type that ships `Private: true`.
-// `TestIsPrivateContentType_Parity` in the api package asserts this
-// invariant by walking `DefaultCoreBundle().Types` and failing if
-// any `Private: true` type is missing from the allowlist (or vice
-// versa). When a new private content type is added to a bundle,
-// adding it to `isPrivateContentType` is therefore CI-enforced, not
-// documentation-enforced.
+// `webapp/internal/api/router.go:isPrivateContentType` reads this flag
+// directly and fails closed: a type is public on /v1/ only if this
+// bundle declares it with Private false, so a new private type needs
+// nothing beyond the flag. `TestIsPrivateContentType_Parity` and
+// `TestEveryV1ContentTypeIsClassified` in the api package pin it.
 type ContentType struct {
 	Dir           string             `json:"dir"`
 	Mount         string             `json:"mount,omitempty"`
@@ -152,18 +153,40 @@ func (n *NotificationRule) IsEnabled() bool {
 
 // LoadBundle reads and parses a bundle.json file.
 func LoadBundle(path string) (*Bundle, error) {
-	data, err := os.ReadFile(path)
+	data, err := storage.ReadAtPath(path)
 	if err != nil {
 		return nil, fmt.Errorf("read bundle %s: %w", path, err)
 	}
+	return parseBundle(data, path)
+}
 
+// LoadBundleAt reads and parses the bundle.json stored at key on a site.
+//
+// ⭐ It is LoadBundle through the site's store, for code that holds a handle
+// rather than a directory. An absent key is an error wrapping
+// storage.ErrNotFound, as an absent path was for LoadBundle, so a caller's
+// "no bundle here" branch reads the same either way.
+func LoadBundleAt(site storage.Site, key string) (*Bundle, error) {
+	if !site.Valid() {
+		return nil, fmt.Errorf("read bundle %s: site handle is not usable", key)
+	}
+	data, err := site.Store().Get(context.Background(), key)
+	if err != nil {
+		return nil, fmt.Errorf("read bundle %s: %w", key, err)
+	}
+	return parseBundle(data, key)
+}
+
+// parseBundle is the parse and validation both loaders share; name only
+// labels the errors.
+func parseBundle(data []byte, name string) (*Bundle, error) {
 	var b Bundle
 	if err := json.Unmarshal(data, &b); err != nil {
-		return nil, fmt.Errorf("parse bundle %s: %w", path, err)
+		return nil, fmt.Errorf("parse bundle %s: %w", name, err)
 	}
 
 	if err := b.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid bundle %s: %w", path, err)
+		return nil, fmt.Errorf("invalid bundle %s: %w", name, err)
 	}
 
 	return &b, nil
@@ -212,17 +235,95 @@ func (b *Bundle) MergeDefaults(defaults *Bundle) bool {
 	return added
 }
 
+// UnionThemeShapes adds to each theme b already declares every compatible shape
+// the same theme declares in defaults, and returns the names of the themes it
+// changed, sorted. Nothing else about a theme is touched, and nothing is ever
+// removed: a shape b lists that defaults does not is a tenant's own addition
+// and stays. A theme defaults does not declare, or b does not, is left alone —
+// MergeDefaults provisions whole missing themes.
+//
+// ⛔ It exists because MergeDefaults never touches an existing entry, so a
+// site created before a theme gained a shape keeps the old list for good.
+// Union only, because add-only cannot undo a tenant's edit. Do not widen it to
+// other theme fields.
+func (b *Bundle) UnionThemeShapes(defaults *Bundle) []string {
+	var changed []string
+	for name, th := range b.Themes {
+		def, ok := defaults.Themes[name]
+		if !ok || th == nil || def == nil {
+			continue
+		}
+		added := false
+		for _, s := range def.CompatibleShapes {
+			if !containsString(th.CompatibleShapes, s) {
+				th.CompatibleShapes = append(th.CompatibleShapes, s)
+				added = true
+			}
+		}
+		if added {
+			changed = append(changed, name)
+		}
+	}
+	sort.Strings(changed)
+	return changed
+}
+
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 // SaveBundle writes a bundle to disk as JSON.
 func SaveBundle(path string, b *Bundle) error {
+	// Stays: ⛔ 0755, and the two reasons an earlier comment here gave for 0700 were BOTH
+	// FALSE. A bundle does NOT live under .polis — every caller passes
+	// content/pub.polis.core/bundle.json, which is SERVED CONTENT — and the write
+	// below is storage.WriteAtPath, not an atomicfile write. On a fresh path that
+	// comment produced content/ and content/pub.polis.core/ at 0700, unreadable by
+	// anything but the owner; it was masked only because Init, Tailor and Medic
+	// create the directory at 0755 first.
+	//
+	// It stays off the interface because WriteAtPath creates parents at 0755
+	// anyway, so this line is belt and braces for a caller that passes a path
+	// whose parent does not exist.
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("create bundle dir: %w", err)
 	}
+	data, err := marshalBundle(b)
+	if err != nil {
+		return err
+	}
+	return storage.WriteAtPath(path, data)
+}
+
+// SaveBundleAt writes a bundle as JSON at key on a site.
+//
+// ⭐ SaveBundle through the site's store. Put creates the parents, at 0755
+// outside .polis (a bundle is served content), so the belt-and-braces
+// MkdirAll SaveBundle keeps has nothing to do here. On a filesystem the write
+// lands in place, as SaveBundle's WriteAtPath does, so an existing
+// bundle.json keeps its mode.
+func SaveBundleAt(site storage.Site, key string, b *Bundle) error {
+	if !site.Valid() {
+		return fmt.Errorf("write bundle %s: site handle is not usable", key)
+	}
+	data, err := marshalBundle(b)
+	if err != nil {
+		return err
+	}
+	return site.Store().Put(context.Background(), key, data)
+}
+
+func marshalBundle(b *Bundle) ([]byte, error) {
 	data, err := json.MarshalIndent(b, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal bundle: %w", err)
+		return nil, fmt.Errorf("marshal bundle: %w", err)
 	}
-	data = append(data, '\n')
-	return os.WriteFile(path, data, 0644)
+	return append(data, '\n'), nil
 }
 
 // Validate checks that the bundle declaration is well-formed.

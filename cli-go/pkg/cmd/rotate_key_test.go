@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/base64"
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,7 +130,7 @@ func TestRotateKeyRepublishesTheDIDDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := site.PublishDIDDocument(dir, "example.com"); err != nil {
+	if err := site.PublishDIDDocument(storage.At(dir), "example.com"); err != nil {
 		t.Fatalf("publish before rotation: %v", err)
 	}
 	before := readDIDKey(t, dir)
@@ -144,7 +145,7 @@ func TestRotateKeyRepublishesTheDIDDocument(t *testing.T) {
 	if err := os.WriteFile(wellKnownPath, append(data, '\n'), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := site.PublishDIDDocument(dir, "example.com"); err != nil {
+	if err := site.PublishDIDDocument(storage.At(dir), "example.com"); err != nil {
 		t.Fatalf("publish after rotation: %v", err)
 	}
 	after := readDIDKey(t, dir)

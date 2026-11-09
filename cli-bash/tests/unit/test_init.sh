@@ -142,7 +142,42 @@ test_init_creates_avatar() {
     return 0
 }
 
+# Test: a random theme pick never lands on a reserved theme (sols, stardust)
+test_random_theme_never_reserved() {
+    setup_test_env "init_theme_reserved"
+    trap teardown_test_env EXIT
+
+    "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
+
+    # bash init installs no themes (they arrive from the Go CLI or a
+    # migration), so install one ordinary theme beside the two reserved ones.
+    local themes_dir=".polis/bundles/pub.polis.core/themes" t
+    for t in sols stardust vice; do
+        mkdir -p "$themes_dir/$t" && echo "body{}" > "$themes_dir/$t/$t.css"
+    done
+    mkdir -p .polis/bundles
+    echo '{"active_theme":"","installed_bundles":[]}' > .polis/bundles/registry.json
+
+    local i picked
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        jq '.active_theme = ""' .polis/bundles/registry.json > reg.tmp && mv reg.tmp .polis/bundles/registry.json
+        POLIS_BASE_URL="https://example.com" "$POLIS_BIN" render > /dev/null 2>&1
+        picked=$(jq -r '.active_theme' .polis/bundles/registry.json)
+        case "$picked" in
+            *vice) ;;
+            *sols|*stardust)
+                log "  FAIL: random pick $i chose reserved theme $picked"
+                return 1 ;;
+            *)
+                log "  FAIL: random pick $i chose nothing usable: '$picked'"
+                return 1 ;;
+        esac
+    done
+    return 0
+}
+
 # Run tests
+run_test "Random Theme Never Reserved" test_random_theme_never_reserved
 run_test "Init Basic" test_init_basic
 run_test "Init Custom Directories" test_init_custom_dirs
 run_test "Init Already Initialized" test_init_already_initialized

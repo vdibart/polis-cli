@@ -1,11 +1,14 @@
 package discovery
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // RegistrationMarker is written to disk when a site successfully registers
@@ -18,42 +21,42 @@ type RegistrationMarker struct {
 	ServiceAttestation string `json:"service_attestation,omitempty"`
 }
 
-// registrationMarkerPath returns the path to the registration marker file
-// for a given DS URL: .polis/ds/{ds-domain}/registration.json
-func registrationMarkerPath(dataDir, dsURL string) string {
+// registrationMarkerKey returns the registration marker's key for a given DS
+// URL, relative to the site root: .polis/ds/{ds-domain}/registration.json. It
+// is "" when the URL names no domain.
+//
+// ⭐ A KEY, NOT A PATH: every read, write and delete of the marker goes through
+// the site's store with it.
+func registrationMarkerKey(dsURL string) string {
 	dsDomain := ExtractDomainFromURL(dsURL)
 	if dsDomain == "" {
 		return ""
 	}
-	return filepath.Join(dataDir, ".polis", "ds", dsDomain, "registration.json")
+	return ".polis/ds/" + dsDomain + "/registration.json"
 }
 
 // IsRegisteredLocally checks whether the site has a local registration marker
 // for the given discovery service. This is a pure filesystem check — no network
-// call is made. Returns false if dataDir or dsURL are empty, if the marker file
+// call is made. Returns false if the site handle is unusable or dsURL is empty, if the marker file
 // does not exist, or on any error.
-func IsRegisteredLocally(dataDir, dsURL string) bool {
-	if dataDir == "" || dsURL == "" {
+func IsRegisteredLocally(site storage.Site, dsURL string) bool {
+	if !site.Valid() || dsURL == "" {
 		return false
 	}
-	path := registrationMarkerPath(dataDir, dsURL)
-	if path == "" {
+	key := registrationMarkerKey(dsURL)
+	if key == "" {
 		return false
 	}
-	_, err := os.Stat(path)
-	return err == nil
+	present, _ := site.Store().Exists(context.Background(), key)
+	return present
 }
 
 // WriteRegistrationMarker writes the registration marker file after a
 // successful registration with the discovery service.
-func WriteRegistrationMarker(dataDir, dsURL, siteDomain, attestation string) error {
-	path := registrationMarkerPath(dataDir, dsURL)
-	if path == "" {
+func WriteRegistrationMarker(site storage.Site, dsURL, siteDomain, attestation string) error {
+	key := registrationMarkerKey(dsURL)
+	if key == "" {
 		return fmt.Errorf("could not determine marker path (empty dsURL?)")
-	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return fmt.Errorf("create marker directory: %w", err)
 	}
 
 	marker := RegistrationMarker{
@@ -68,7 +71,13 @@ func WriteRegistrationMarker(dataDir, dsURL, siteDomain, attestation string) err
 		return fmt.Errorf("marshal marker: %w", err)
 	}
 
-	if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
+	// ⛔ A SITE STORE, so .polis stays 0700. The marker lives at
+	// .polis/ds/<domain>/registration.json, and the MkdirAll that used to carry
+	// that mode by hand is gone — storage.WriteAtPath would have created the
+	// parents at 0755, which is the mistake this detach made three times
+	// elsewhere.
+	if err := site.Store().Put(context.Background(), key,
+		append(data, '\n'), storage.WithMode(0600)); err != nil {
 		return fmt.Errorf("write marker: %w", err)
 	}
 
@@ -78,9 +87,9 @@ func WriteRegistrationMarker(dataDir, dsURL, siteDomain, attestation string) err
 // ReadRegistrationMarker reads and parses a registration marker file.
 // Returns nil and no error if the file does not exist.
 func ReadRegistrationMarker(path string) (*RegistrationMarker, error) {
-	data, err := os.ReadFile(path)
+	data, err := storage.ReadAtPath(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -94,14 +103,10 @@ func ReadRegistrationMarker(path string) (*RegistrationMarker, error) {
 
 // RemoveRegistrationMarker deletes the registration marker file after a
 // successful unregistration. Returns nil if the file does not exist (idempotent).
-func RemoveRegistrationMarker(dataDir, dsURL string) error {
-	path := registrationMarkerPath(dataDir, dsURL)
-	if path == "" {
+func RemoveRegistrationMarker(site storage.Site, dsURL string) error {
+	key := registrationMarkerKey(dsURL)
+	if key == "" {
 		return nil
 	}
-	err := os.Remove(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
+	return site.Store().Delete(context.Background(), key, storage.IgnoreMissing())
 }

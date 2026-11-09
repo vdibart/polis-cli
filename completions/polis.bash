@@ -157,7 +157,7 @@ _polis_completion() {
                 unpublish)
                     # Complete flags if typing flag, otherwise fall back to file completion
                     if [[ "$cur" == -* ]]; then
-                        COMPREPLY=($(compgen -W "--json" -- "$cur"))
+                        COMPREPLY=($(compgen -W "--json --yes -y" -- "$cur"))
                     fi
                     ;;
                 about|version|index|register)

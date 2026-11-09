@@ -123,13 +123,28 @@ A command that fails prints, **on stdout**, and exits `1`:
 ```
 
 There is **no error code** — `error` is a human-readable sentence, and a script should branch on the
-exit status, not parse it. The one differently shaped error is `blessing beseech` for a comment the
-discovery service does not know, which returns `{"status": "error", "command": "blessing-beseech",
-"error": {"code": "NOT_FOUND", "message": …}}` — and, like every other failure, exits `1`.
+exit status, not parse it. The one differently shaped error is `blessing beseech`, which the Go CLI does
+not support: it returns `{"status": "error", "command": "blessing-beseech", "error": {"code":
+"NOT_SUPPORTED", "message": …}}` — and, like every other failure, exits `1`.
 
 > **bash:** errors are `{"status": "error", "command": …, "error": {"code", "message", "details"}}` on
 > **stderr**. Its codes include `FILE_NOT_FOUND`, `INVALID_INPUT`, `API_ERROR`, `SIGNATURE_ERROR`,
-> `MISSING_DEPENDENCY`, `PERMISSION_ERROR`, `INVALID_STATE` and `UNSUPPORTED_CONTENT`.
+> `MISSING_DEPENDENCY`, `PERMISSION_ERROR`, `INVALID_STATE`, `UNSUPPORTED_CONTENT` and
+> `CONFIRMATION_REQUIRED`.
+
+### Commands that would ask first
+
+`--json` cannot show a prompt, and choosing an output format is not consent. A command that asks for
+confirmation interactively therefore **refuses** under `--json` unless its skip flag is given — it exits
+`1` with an error naming the flag, and changes nothing:
+
+| Command | Required under `--json` |
+|---|---|
+| `unpublish` (and `unpublish --url`) | `-y` / `--yes` |
+| `unregister` | `--force` / `-f` |
+
+> **bash:** `unregister` follows the same rule (code `CONFIRMATION_REQUIRED`). Bash `unpublish` never
+> asks, interactively or not.
 
 ## Command-Specific JSON Responses
 
@@ -419,21 +434,21 @@ A flat object:
 
 ### `polis blessing beseech <version>`
 
-⚠️ **The Go CLI does not re-beseech from this command.** It checks that the discovery service knows the
-comment and points at `polis comment sync`, which re-beseeches pending comments:
+⚠️ **The Go CLI does not support this command.** It cannot re-request a blessing for a comment version,
+so it contacts nothing, exits `1`, and returns:
 
 ```json
 {
-  "status": "success",
+  "status": "error",
   "command": "blessing-beseech",
-  "data": {
-    "comment_version": "sha256:abc123...",
-    "message": "Use 'polis comment sync' to re-beseech pending comments"
+  "error": {
+    "code": "NOT_SUPPORTED",
+    "message": "the Go CLI cannot re-request a blessing for a comment version. For a PENDING comment, re-request it from the web app, or republish the comment (polis republish <comment path>), which signs a new version and asks for the blessing again. A denied comment cannot be re-requested: the discovery service keeps the denial"
   }
 }
 ```
 
-A comment the service does not know returns the `NOT_FOUND` error object described under *Errors*.
+Without `--json` it prints `[x] Not supported:` and the same message to stderr.
 
 ### `polis follow <url>`
 
@@ -446,11 +461,23 @@ A comment the service does not know returns the `NOT_FOUND` error object describ
     "author_email": "alice@example.com",
     "blessed_by": "bob@example.com",
     "comments_found": 5,
-    "comments_blessed": 5,
+    "comments_blessed": 2,
+    "comments_failed": 0,
+    "blessed_comments": [
+      "https://alice.com/comments/20260105/reply.md",
+      "https://alice.com/comments/20260106/another.md"
+    ],
+    "already_followed": false,
     "added_to_following": true
   }
 }
 ```
+
+`comments_found` counts every pending or denied comment on your posts that was re-read; `blessed_comments`
+names the ones your policies blessed (always an array). Nothing is blessed that no rule blesses.
+
+> **bash:** blesses every pending or denied comment from the author, without consulting your policies, and
+> carries no `comments_failed`, `blessed_comments` or `already_followed`.
 
 ### `polis unfollow <url>`
 
@@ -860,7 +887,9 @@ Captured:
     "key_history_epoch": 1,
     "ds_rotation": "success",
     "did_published": true,
-    "did_removed": false
+    "did_removed": false,
+    "following_resign": "resigned",
+    "blessed_resign": "absent"
   }
 }
 ```
@@ -880,13 +909,29 @@ stay in `verificationMethod`). If that republish fails, the document — which n
 is removed and `did_removed` is `true`; run `polis did --write` to republish it. The rotation itself
 always succeeds — a security operation is never blocked by a derived file.
 
+`following_resign` and `blessed_resign` say what happened to your follow file and blessing list. Neither
+carries a signing time, so each verifies against your current key only, and the rotation re-signs them:
+`"resigned"` when it did; `"absent"` or `"unsigned"` when there was nothing to re-sign; and
+`"not-valid-under-old-key"` or `"refused"` when the file was left exactly as it was, because its
+signature did not verify under the old key or it carries fields this version does not understand. A
+rotation never turns a file that was failing into a valid one.
+
 ⚠️ **`old_key` is gone**, along with `--delete-old-key` and the `id_ed25519.old` file it described.
-No retired private key is kept any more; the published chain replaces it.
+No retired private key is kept once the rotation is recorded; the published chain replaces it.
+
+A rotation that cannot start or finish fails with an error envelope. The bash codes are
+`KEY_NOT_PUBLISHED` (your key on disk is not the key `.well-known/polis` publishes; nothing was changed)
+and `ROTATION_PENDING` (an interrupted rotation, or an unknown answer from the discovery service;
+run the command again to finish it). ⚠️ One `ROTATION_PENDING` cannot be finished by running again:
+an earlier rotation installed its key and the retired key is gone. Its message says so; run
+`polis validate` to see what the site publishes.
 
 > **bash:** `new_key_fingerprint`, `key_history_epoch`, `ds_rotation`, `did_document` (`"deleted"` or
-> `"absent"`). bash has never written `did.json`, so it removes rather than rebuilds it.
-> `key_history_epoch` and `ds_rotation` are the only fields both emit — scripts that must work against both should branch on
-> the keys they find.
+> `"absent"`), `following_resign`, `blessed_resign`. bash has never written `did.json`, so it removes rather than rebuilds it.
+> bash cannot sign either list, so its `following_resign` / `blessed_resign` are `"signature-removed"`
+> (the file now reads unsigned), `"unsigned"` or `"absent"` — never `"resigned"`.
+> `key_history_epoch`, `ds_rotation`, `following_resign` and `blessed_resign` are the fields both emit — scripts that must
+> work against both should branch on the keys and values they find.
 
 ### Tags — `polis tag list | show | apply | remove | delete`
 

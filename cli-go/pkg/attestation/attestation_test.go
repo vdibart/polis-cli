@@ -2,6 +2,7 @@ package attestation
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,7 +100,7 @@ func TestVersionIsTheHashOfTheSignedBytes(t *testing.T) {
 	dir := t.TempDir()
 
 	r := sampleRecord()
-	if _, err := Issue(dir, r, priv); err != nil {
+	if _, err := Issue(storage.At(dir), r, priv); err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
 
@@ -148,7 +149,7 @@ func TestIssueThenVerify(t *testing.T) {
 	dir := t.TempDir()
 
 	r := sampleRecord()
-	id, err := Issue(dir, r, priv)
+	id, err := Issue(storage.At(dir), r, priv)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -163,8 +164,8 @@ func TestIssueThenVerify(t *testing.T) {
 	if status != StatusValid {
 		t.Errorf("status = %q, want %q", status, StatusValid)
 	}
-	if _, err := os.Stat(Path(dir, id)); err != nil {
-		t.Errorf("record not on disk at %s: %v", Path(dir, id), err)
+	if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(Key(id)))); err != nil {
+		t.Errorf("record not on disk at %s: %v", filepath.Join(dir, filepath.FromSlash(Key(id))), err)
 	}
 }
 
@@ -175,12 +176,12 @@ func TestSignatureSurvivesTheFile(t *testing.T) {
 	priv, pub := newTestKeys(t)
 	dir := t.TempDir()
 
-	id, err := Issue(dir, sampleRecord(), priv)
+	id, err := Issue(storage.At(dir), sampleRecord(), priv)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
 
-	loaded, err := Load(Path(dir, id))
+	loaded, err := Load(storage.At(dir), id)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -200,11 +201,11 @@ func TestTamperedRecordIsInvalidAndStillLoads(t *testing.T) {
 	priv, pub := newTestKeys(t)
 	dir := t.TempDir()
 
-	id, err := Issue(dir, sampleRecord(), priv)
+	id, err := Issue(storage.At(dir), sampleRecord(), priv)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	path := Path(dir, id)
+	path := filepath.Join(dir, filepath.FromSlash(Key(id)))
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -219,7 +220,7 @@ func TestTamperedRecordIsInvalidAndStillLoads(t *testing.T) {
 		t.Fatalf("write tampered: %v", err)
 	}
 
-	loaded, err := Load(path)
+	loaded, err := Load(storage.At(dir), id)
 	if err != nil {
 		t.Fatalf("a tampered record must STILL LOAD, got error: %v", err)
 	}
@@ -254,11 +255,11 @@ func TestVersionPinIsInsideTheSignature(t *testing.T) {
 		ID:      "https://site.example/posts/20260901-claim.md",
 		Version: pin,
 	}
-	id, err := Issue(dir, r, priv)
+	id, err := Issue(storage.At(dir), r, priv)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	path := Path(dir, id)
+	path := filepath.Join(dir, filepath.FromSlash(Key(id)))
 
 	raw, _ := os.ReadFile(path)
 	repointed := strings.Replace(string(raw), pin, "sha256:"+strings.Repeat("dead", 16), 1)
@@ -269,7 +270,7 @@ func TestVersionPinIsInsideTheSignature(t *testing.T) {
 		t.Fatalf("write repointed: %v", err)
 	}
 
-	loaded, _ := Load(path)
+	loaded, _ := Load(storage.At(dir), id)
 	status, _ := Verify(loaded, pub)
 	if status != StatusInvalid {
 		t.Errorf("repointing the version pin left the record %q — the pin is OUTSIDE the "+
@@ -296,7 +297,7 @@ func TestVerifyWrongKeyIsInvalid(t *testing.T) {
 	dir := t.TempDir()
 
 	r := sampleRecord()
-	if _, err := Issue(dir, r, priv); err != nil {
+	if _, err := Issue(storage.At(dir), r, priv); err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
 	if status, _ := Verify(r, otherPub); status != StatusInvalid {
@@ -310,7 +311,7 @@ func TestVerifyWithoutKeyIsUnknown(t *testing.T) {
 	dir := t.TempDir()
 
 	r := sampleRecord()
-	if _, err := Issue(dir, r, priv); err != nil {
+	if _, err := Issue(storage.At(dir), r, priv); err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
 	if status, _ := Verify(r, nil); status != StatusUnknown {
@@ -332,12 +333,12 @@ func TestUnknownPredicateVerifiesAndRenders(t *testing.T) {
 
 	r := sampleRecord()
 	r.Predicate = "com.example.reviewed" // nothing in polis knows this
-	id, err := Issue(dir, r, priv)
+	id, err := Issue(storage.At(dir), r, priv)
 	if err != nil {
 		t.Fatalf("a third party's predicate must be issuable: %v", err)
 	}
 
-	loaded, err := Load(Path(dir, id))
+	loaded, err := Load(storage.At(dir), id)
 	if err != nil {
 		t.Fatalf("a record with an unknown predicate must load: %v", err)
 	}
@@ -360,18 +361,18 @@ func TestUnknownPredicateVerifiesAndRenders(t *testing.T) {
 // not — it would not know which key to read.
 func TestUnknownSubjectTypeIsReadable(t *testing.T) {
 	priv, pub := newTestKeys(t)
-	path := filepath.Join(t.TempDir(), "future.json")
+	dir := t.TempDir()
 
 	r := sampleRecord()
 	r.Subject = Subject{Type: "relationship", ID: "https://a.example/follows/b.example"}
 	if err := signAndStamp(r, priv); err != nil {
 		t.Fatalf("signAndStamp: %v", err)
 	}
-	if err := write(path, r); err != nil {
+	if err := write(storage.At(dir), Key("future"), r); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
-	loaded, err := Load(path)
+	loaded, err := Load(storage.At(dir), "future")
 	if err != nil {
 		t.Fatalf("a record with an unknown subject type must load: %v", err)
 	}
@@ -392,11 +393,11 @@ func TestUnknownTopLevelKeyDoesNotBreakVerification(t *testing.T) {
 	priv, pub := newTestKeys(t)
 	dir := t.TempDir()
 
-	id, err := Issue(dir, sampleRecord(), priv)
+	id, err := Issue(storage.At(dir), sampleRecord(), priv)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	path := Path(dir, id)
+	path := filepath.Join(dir, filepath.FromSlash(Key(id)))
 
 	raw, _ := os.ReadFile(path)
 	withExtra := strings.Replace(string(raw), "{\n", "{\n  \"future_field\": \"hello\",\n", 1)
@@ -407,7 +408,7 @@ func TestUnknownTopLevelKeyDoesNotBreakVerification(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	loaded, err := Load(path)
+	loaded, err := Load(storage.At(dir), id)
 	if err != nil {
 		t.Fatalf("an unknown top-level key must not break parsing: %v", err)
 	}
@@ -423,7 +424,7 @@ func TestIssueRejectsBarePredicate(t *testing.T) {
 	priv, _ := newTestKeys(t)
 	r := sampleRecord()
 	r.Predicate = "same-as" // the prose form — never legal in a file
-	if _, err := Issue(t.TempDir(), r, priv); err == nil {
+	if _, err := Issue(storage.At(t.TempDir()), r, priv); err == nil {
 		t.Error("issuing a bare predicate should fail — the namespace is what makes tolerance meaningful")
 	}
 }
@@ -443,14 +444,14 @@ func TestIssueRefusesTheWithdrawalPredicate(t *testing.T) {
 		ID:      "https://someone-else.example/content/pub.polis.core/attestation/x.json",
 		Version: "sha256:" + strings.Repeat("a", 64),
 	}
-	_, err := Issue(dir, r, priv)
+	_, err := Issue(storage.At(dir), r, priv)
 	if err == nil {
 		t.Fatal("Issue accepted pub.polis.attestation.withdrawal — a retraction of a claim this site never made, with no checks")
 	}
 	if !strings.Contains(err.Error(), "polis attest withdraw") {
 		t.Errorf("the refusal should point at `polis attest withdraw`, got: %v", err)
 	}
-	if records, _ := List(dir); len(records) != 0 {
+	if records, _ := List(storage.At(dir)); len(records) != 0 {
 		t.Errorf("a refused issue wrote %d record(s)", len(records))
 	}
 }
@@ -462,15 +463,15 @@ func TestWithdrawStillWritesAWithdrawal(t *testing.T) {
 	dir := t.TempDir()
 	writeWellKnown(t, dir, pub)
 
-	id, err := Issue(dir, sampleRecord(), priv)
+	id, err := Issue(storage.At(dir), sampleRecord(), priv)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	wid, err := Withdraw(dir, id, priv)
+	wid, err := Withdraw(storage.At(dir), id, priv)
 	if err != nil {
 		t.Fatalf("Withdraw: %v", err)
 	}
-	w, err := Load(Path(dir, wid))
+	w, err := Load(storage.At(dir), wid)
 	if err != nil {
 		t.Fatalf("load withdrawal: %v", err)
 	}
@@ -483,7 +484,7 @@ func TestIssueRejectsUnknownSubjectType(t *testing.T) {
 	priv, _ := newTestKeys(t)
 	r := sampleRecord()
 	r.Subject.Type = "relationship"
-	if _, err := Issue(t.TempDir(), r, priv); err == nil {
+	if _, err := Issue(storage.At(t.TempDir()), r, priv); err == nil {
 		t.Error("issuing an unmodelled subject type should fail on the WRITE path")
 	}
 }
@@ -492,7 +493,7 @@ func TestIssueRejectsPinOnIdentitySubject(t *testing.T) {
 	priv, _ := newTestKeys(t)
 	r := sampleRecord()
 	r.Subject.Version = "sha256:" + strings.Repeat("a", 64)
-	if _, err := Issue(t.TempDir(), r, priv); err == nil {
+	if _, err := Issue(storage.At(t.TempDir()), r, priv); err == nil {
 		t.Error("a version pin on an identity subject is meaningless and should be refused")
 	}
 }
@@ -501,7 +502,7 @@ func TestIssueRejectsMalformedPin(t *testing.T) {
 	priv, _ := newTestKeys(t)
 	r := sampleRecord()
 	r.Subject = Subject{Type: SubjectURI, ID: "https://site.example/x.md", Version: "9f2a"}
-	if _, err := Issue(t.TempDir(), r, priv); err == nil {
+	if _, err := Issue(storage.At(t.TempDir()), r, priv); err == nil {
 		t.Error("a pin that is not sha256:<64 hex> should be refused")
 	}
 }
@@ -524,7 +525,7 @@ func TestOneClaimPerSubjectWritesOneFileEach(t *testing.T) {
 		r := sampleRecord()
 		r.Predicate = PredicateEndorsement
 		r.Subject = Subject{Type: SubjectIdentity, ID: s}
-		id, err := Issue(dir, r, priv)
+		id, err := Issue(storage.At(dir), r, priv)
 		if err != nil {
 			t.Fatalf("Issue %s: %v", s, err)
 		}
@@ -534,7 +535,7 @@ func TestOneClaimPerSubjectWritesOneFileEach(t *testing.T) {
 	if len(ids) != len(subjects) {
 		t.Errorf("got %d distinct ids for %d subjects — records collided", len(ids), len(subjects))
 	}
-	records, err := List(dir)
+	records, err := List(storage.At(dir))
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -562,7 +563,7 @@ func TestSubjectMayBeAnotherAttestation(t *testing.T) {
 	dir := t.TempDir()
 
 	first := sampleRecord()
-	firstID, err := Issue(dir, first, priv)
+	firstID, err := Issue(storage.At(dir), first, priv)
 	if err != nil {
 		t.Fatalf("Issue first: %v", err)
 	}
@@ -578,12 +579,12 @@ func TestSubjectMayBeAnotherAttestation(t *testing.T) {
 		Payload:  map[string]string{"note": "the party named here changed hands"},
 		Asserted: "2026-08-29T00:00:00Z",
 	}
-	secondID, err := Issue(dir, about, priv)
+	secondID, err := Issue(storage.At(dir), about, priv)
 	if err != nil {
 		t.Fatalf("an attestation about an attestation must issue: %v", err)
 	}
 
-	loaded, err := Load(Path(dir, secondID))
+	loaded, err := Load(storage.At(dir), secondID)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -628,7 +629,7 @@ func TestSameAsIsAPairNotADoubleSignature(t *testing.T) {
 		Subject:   Subject{Type: SubjectIdentity, ID: newURL},
 		Asserted:  "2026-08-28T00:00:00Z",
 	}
-	forwardID, err := Issue(oldSite, forward, oldPriv)
+	forwardID, err := Issue(storage.At(oldSite), forward, oldPriv)
 	if err != nil {
 		t.Fatalf("forward: %v", err)
 	}
@@ -639,22 +640,22 @@ func TestSameAsIsAPairNotADoubleSignature(t *testing.T) {
 		Subject:   Subject{Type: SubjectIdentity, ID: oldURL},
 		Asserted:  "2026-08-28T00:05:00Z",
 	}
-	backID, err := Issue(newSite, back, newPriv)
+	backID, err := Issue(storage.At(newSite), back, newPriv)
 	if err != nil {
 		t.Fatalf("back: %v", err)
 	}
 
 	// Each half verifies against ITS OWN site's published key, independently.
-	if status, err := VerifyFile(oldSite, Path(oldSite, forwardID)); status != StatusValid {
+	if status, err := VerifyFile(storage.At(oldSite), forwardID); status != StatusValid {
 		t.Errorf("forward half: status = %q (%v), want %q", status, err, StatusValid)
 	}
-	if status, err := VerifyFile(newSite, Path(newSite, backID)); status != StatusValid {
+	if status, err := VerifyFile(storage.At(newSite), backID); status != StatusValid {
 		t.Errorf("back half: status = %q (%v), want %q", status, err, StatusValid)
 	}
 
 	// And the halves genuinely reference each other.
-	f, _ := Load(Path(oldSite, forwardID))
-	b, _ := Load(Path(newSite, backID))
+	f, _ := Load(storage.At(oldSite), forwardID)
+	b, _ := Load(storage.At(newSite), backID)
 	if f.Subject.ID != b.Issuer || b.Subject.ID != f.Issuer {
 		t.Error("the pair does not close the loop — each record must name the other party")
 	}
@@ -685,12 +686,12 @@ func TestIssueStampsGeneratorInsideTheSignature(t *testing.T) {
 
 	r := sampleRecord()
 	r.Generator = "polis-cli-go/0.56.0" // a stale value the writer must replace
-	id, err := Issue(dir, r, priv)
+	id, err := Issue(storage.At(dir), r, priv)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
 
-	got, err := Load(Path(dir, id))
+	got, err := Load(storage.At(dir), id)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -725,12 +726,12 @@ func TestIDIsDerivedAndRecomputable(t *testing.T) {
 	dir := t.TempDir()
 
 	r := sampleRecord()
-	id, err := Issue(dir, r, priv)
+	id, err := Issue(storage.At(dir), r, priv)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
 
-	loaded, _ := Load(Path(dir, id))
+	loaded, _ := Load(storage.At(dir), id)
 	if got := ID(loaded); got != id {
 		t.Errorf("recomputed id = %q, want %q", got, id)
 	}
@@ -741,7 +742,7 @@ func TestIDIsDerivedAndRecomputable(t *testing.T) {
 		t.Errorf("id = %q, want 16 hex characters of digest", id)
 	}
 
-	raw, _ := os.ReadFile(Path(dir, id))
+	raw, _ := os.ReadFile(filepath.Join(dir, filepath.FromSlash(Key(id))))
 	if strings.Contains(string(raw), id) {
 		t.Errorf("the id %q appears in the record body — it must be computed from the signed "+
 			"bytes, never stored beside them", id)
@@ -761,14 +762,14 @@ func TestListSkipsMalformedRecords(t *testing.T) {
 	priv, _ := newTestKeys(t)
 	dir := t.TempDir()
 
-	if _, err := Issue(dir, sampleRecord(), priv); err != nil {
+	if _, err := Issue(storage.At(dir), sampleRecord(), priv); err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(Dir(dir), "broken.json"), []byte("{not json"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(filepath.Join(dir, filepath.FromSlash(DirKey)), "broken.json"), []byte("{not json"), 0644); err != nil {
 		t.Fatalf("write broken: %v", err)
 	}
 
-	records, err := List(dir)
+	records, err := List(storage.At(dir))
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -778,7 +779,7 @@ func TestListSkipsMalformedRecords(t *testing.T) {
 }
 
 func TestListOnSiteWithNoAttestations(t *testing.T) {
-	records, err := List(t.TempDir())
+	records, err := List(storage.At(t.TempDir()))
 	if err != nil {
 		t.Errorf("a site that has issued nothing is not an error: %v", err)
 	}
@@ -795,11 +796,11 @@ func TestVerifyFileAndSite(t *testing.T) {
 	t.Run("signed record verifies against the published key", func(t *testing.T) {
 		site := t.TempDir()
 		writeWellKnown(t, site, pub)
-		id, err := Issue(site, sampleRecord(), priv)
+		id, err := Issue(storage.At(site), sampleRecord(), priv)
 		if err != nil {
 			t.Fatalf("Issue: %v", err)
 		}
-		status, err := VerifyFile(site, Path(site, id))
+		status, err := VerifyFile(storage.At(site), id)
 		if err != nil {
 			t.Fatalf("VerifyFile: %v", err)
 		}
@@ -810,11 +811,11 @@ func TestVerifyFileAndSite(t *testing.T) {
 
 	t.Run("signed but no well-known is unknown", func(t *testing.T) {
 		site := t.TempDir()
-		id, err := Issue(site, sampleRecord(), priv)
+		id, err := Issue(storage.At(site), sampleRecord(), priv)
 		if err != nil {
 			t.Fatalf("Issue: %v", err)
 		}
-		if status, _ := VerifyFile(site, Path(site, id)); status != StatusUnknown {
+		if status, _ := VerifyFile(storage.At(site), id); status != StatusUnknown {
 			t.Errorf("status = %q, want %q — could not look is not a finding", status, StatusUnknown)
 		}
 	})
@@ -825,11 +826,11 @@ func TestVerifyFileAndSite(t *testing.T) {
 		for _, s := range []string{"https://a.example", "https://b.example"} {
 			r := sampleRecord()
 			r.Subject = Subject{Type: SubjectIdentity, ID: s}
-			if _, err := Issue(site, r, priv); err != nil {
+			if _, err := Issue(storage.At(site), r, priv); err != nil {
 				t.Fatalf("Issue: %v", err)
 			}
 		}
-		statuses, err := VerifySite(site)
+		statuses, err := VerifySite(storage.At(site))
 		if err != nil {
 			t.Fatalf("VerifySite: %v", err)
 		}
@@ -846,7 +847,7 @@ func TestVerifyFileAndSite(t *testing.T) {
 	t.Run("a site with no attestations is not a finding", func(t *testing.T) {
 		site := t.TempDir()
 		writeWellKnown(t, site, pub)
-		statuses, err := VerifySite(site)
+		statuses, err := VerifySite(storage.At(site))
 		if err != nil {
 			t.Errorf("having issued nothing is an ordinary state: %v", err)
 		}
@@ -864,7 +865,7 @@ func TestIdentityKeysIsTheOnePlaceToWiden(t *testing.T) {
 	site := t.TempDir()
 	writeWellKnown(t, site, pub)
 
-	keys, err := IdentityKeys(site)
+	keys, err := IdentityKeys(storage.At(site))
 	if err != nil {
 		t.Fatalf("IdentityKeys: %v", err)
 	}
@@ -875,7 +876,7 @@ func TestIdentityKeysIsTheOnePlaceToWiden(t *testing.T) {
 		t.Error("IdentityKeys returned something other than the published key")
 	}
 
-	if _, err := IdentityKeys(t.TempDir()); err == nil {
+	if _, err := IdentityKeys(storage.At(t.TempDir())); err == nil {
 		t.Error("a site with no .well-known/polis should report that it could not be checked")
 	}
 }
@@ -888,7 +889,7 @@ func TestVerifyAgainstTriesEveryKey(t *testing.T) {
 	dir := t.TempDir()
 
 	r := sampleRecord()
-	if _, err := Issue(dir, r, priv); err != nil {
+	if _, err := Issue(storage.At(dir), r, priv); err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
 
@@ -913,7 +914,7 @@ func TestWithdrawAddsARecordAndDeletesNothing(t *testing.T) {
 	priv, pub := newTestKeys(t)
 	writeWellKnown(t, dir, pub)
 
-	id, err := Issue(dir, &Record{
+	id, err := Issue(storage.At(dir), &Record{
 		Issuer:    "https://alice.example",
 		Predicate: PredicateEndorsement,
 		Subject:   Subject{Type: SubjectIdentity, ID: "https://bob.example"},
@@ -922,21 +923,21 @@ func TestWithdrawAddsARecordAndDeletesNothing(t *testing.T) {
 		t.Fatalf("issue: %v", err)
 	}
 
-	wid, err := Withdraw(dir, id, priv)
+	wid, err := Withdraw(storage.At(dir), id, priv)
 	if err != nil {
 		t.Fatalf("withdraw: %v", err)
 	}
 
 	// The retracted record is still there, still parses, still verifies.
-	target, err := Load(Path(dir, id))
+	target, err := Load(storage.At(dir), id)
 	if err != nil {
 		t.Fatalf("the withdrawn record was destroyed: %v", err)
 	}
-	if status, err := VerifyRecord(dir, target); status != StatusValid {
+	if status, err := VerifyRecord(storage.At(dir), target); status != StatusValid {
 		t.Fatalf("the withdrawn record no longer verifies: %v (%v)", status, err)
 	}
 
-	w, err := Load(Path(dir, wid))
+	w, err := Load(storage.At(dir), wid)
 	if err != nil {
 		t.Fatalf("load withdrawal: %v", err)
 	}
@@ -952,7 +953,7 @@ func TestWithdrawAddsARecordAndDeletesNothing(t *testing.T) {
 	if w.Subject.Version != target.Version {
 		t.Errorf("pin = %q, want the target's version %q", w.Subject.Version, target.Version)
 	}
-	if status, err := VerifyRecord(dir, w); status != StatusValid {
+	if status, err := VerifyRecord(storage.At(dir), w); status != StatusValid {
 		t.Fatalf("the withdrawal does not verify: %v (%v)", status, err)
 	}
 }
@@ -964,16 +965,16 @@ func TestWithdrawRefusesAWithdrawal(t *testing.T) {
 	priv, pub := newTestKeys(t)
 	writeWellKnown(t, dir, pub)
 
-	id, _ := Issue(dir, &Record{
+	id, _ := Issue(storage.At(dir), &Record{
 		Issuer:    "https://alice.example",
 		Predicate: PredicateEndorsement,
 		Subject:   Subject{Type: SubjectIdentity, ID: "https://bob.example"},
 	}, priv)
-	wid, err := Withdraw(dir, id, priv)
+	wid, err := Withdraw(storage.At(dir), id, priv)
 	if err != nil {
 		t.Fatalf("withdraw: %v", err)
 	}
-	if _, err := Withdraw(dir, wid, priv); err == nil {
+	if _, err := Withdraw(storage.At(dir), wid, priv); err == nil {
 		t.Error("withdrawing a withdrawal was allowed")
 	}
 }
@@ -985,7 +986,7 @@ func TestWithdrawUnknownIDIsAnError(t *testing.T) {
 	priv, pub := newTestKeys(t)
 	writeWellKnown(t, dir, pub)
 
-	if _, err := Withdraw(dir, "20200101T000000Z-deadbeefdeadbeef", priv); err == nil {
+	if _, err := Withdraw(storage.At(dir), "20200101T000000Z-deadbeefdeadbeef", priv); err == nil {
 		t.Error("withdrawing a record that does not exist reported success")
 	}
 }
@@ -1012,17 +1013,17 @@ func TestWithdrawRefusesARecordWeDidNotSign(t *testing.T) {
 		Predicate: PredicateEndorsement,
 		Subject:   Subject{Type: SubjectIdentity, ID: "https://carol.example"},
 	}
-	fid, err := Issue(dir, foreign, otherPriv)
+	fid, err := Issue(storage.At(dir), foreign, otherPriv)
 	if err != nil {
 		t.Fatalf("seed foreign record: %v", err)
 	}
 
-	if _, err := Withdraw(dir, fid, priv); err == nil {
+	if _, err := Withdraw(storage.At(dir), fid, priv); err == nil {
 		t.Fatal("withdrew a record this site did not sign")
 	}
 
 	// And nothing was written: no record anywhere claims to retract it.
-	all, _ := List(dir)
+	all, _ := List(storage.At(dir))
 	for _, r := range all {
 		if r.Predicate == PredicateWithdrawal {
 			t.Errorf("a withdrawal was written anyway: %s (issuer %q)", ID(r), r.Issuer)
@@ -1041,7 +1042,7 @@ func TestWithdrawRefusesASecondWithdrawal(t *testing.T) {
 	priv, pub := newTestKeys(t)
 	writeWellKnown(t, dir, pub)
 
-	id, err := Issue(dir, &Record{
+	id, err := Issue(storage.At(dir), &Record{
 		Issuer:    "https://alice.example",
 		Predicate: PredicateEndorsement,
 		Subject:   Subject{Type: SubjectIdentity, ID: "https://bob.example"},
@@ -1049,15 +1050,15 @@ func TestWithdrawRefusesASecondWithdrawal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
-	if _, err := Withdraw(dir, id, priv); err != nil {
+	if _, err := Withdraw(storage.At(dir), id, priv); err != nil {
 		t.Fatalf("first withdraw: %v", err)
 	}
-	if _, err := Withdraw(dir, id, priv); err == nil {
+	if _, err := Withdraw(storage.At(dir), id, priv); err == nil {
 		t.Fatal("a second withdrawal was allowed")
 	}
 
 	withdrawals := 0
-	all, _ := List(dir)
+	all, _ := List(storage.At(dir))
 	for _, r := range all {
 		if r.Predicate == PredicateWithdrawal {
 			withdrawals++
@@ -1083,10 +1084,10 @@ func TestWithdrawRefusesAnUnsignedRecord(t *testing.T) {
 		Asserted:  "2026-01-01T00:00:00Z",
 		Version:   "sha256:" + strings.Repeat("a", 64),
 	}
-	if err := write(Path(dir, "20260101T000000Z-aaaaaaaaaaaaaaaa"), r); err != nil {
+	if err := write(storage.At(dir), Key("20260101T000000Z-aaaaaaaaaaaaaaaa"), r); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	_, err := Withdraw(dir, "20260101T000000Z-aaaaaaaaaaaaaaaa", priv)
+	_, err := Withdraw(storage.At(dir), "20260101T000000Z-aaaaaaaaaaaaaaaa", priv)
 	if err == nil {
 		t.Fatal("withdrew an unsigned record")
 	}
@@ -1103,7 +1104,7 @@ func TestWithdrawRefusesAnUnsignedRecord(t *testing.T) {
 //
 // ✅ SETTLED, and no longer the bug the name describes: Dir() and RecordURL()
 // use the literal `content/pub.polis.core/attestation`, and that is correct —
-// the core bundle's layout is fixed by design, as tag.TagPath's is (settled
+// the core bundle's layout is fixed by design, as tag.TagKey's is (settled
 // 2026-09-02). The name is kept because plans cite it.
 //
 // ❓ STILL OPEN: the declared `mount` (/attestations) renders no record view.
@@ -1114,5 +1115,5 @@ func TestWithdrawRefusesAnUnsignedRecord(t *testing.T) {
 func TestKnownBug_PathsHardcodeInsteadOfResolvingTheBundle(t *testing.T) {
 	t.Skip("OPEN QUESTION, epic 06 (record views): the declared mount /attestations " +
 		"renders no record view (/attestations/<id> 404s; epic 11's agents.json lives under it). " +
-		"The literal content path in Dir/RecordURL is SETTLED as correct, like tag.TagPath.")
+		"The literal content path in Dir/RecordURL is SETTLED as correct, like tag.TagKey.")
 }

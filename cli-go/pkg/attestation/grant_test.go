@@ -1,6 +1,7 @@
 package attestation
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,7 +54,7 @@ func TestGrantWriterRuleRefusesEveryMissingField(t *testing.T) {
 	for _, key := range []string{GrantKeyAgent, GrantKeyProvider, GrantKeyBehaviours, CustodyKeyBasis} {
 		r := grantRecord("rosie/1", CustodyBasisHostingTerms)
 		delete(r.Payload, key)
-		if _, err := Issue(dir, r, priv); err == nil {
+		if _, err := Issue(storage.At(dir), r, priv); err == nil {
 			t.Errorf("a grant without %s was issued — there must be no default", key)
 		}
 	}
@@ -63,7 +64,7 @@ func TestGrantWriterRuleRefusesASubjectOtherThanTheIssuer(t *testing.T) {
 	dir, priv := grantFixture(t)
 	r := grantRecord("rosie/1", CustodyBasisUserSigned)
 	r.Subject.ID = "https://bob.example"
-	if _, err := Issue(dir, r, priv); err == nil {
+	if _, err := Issue(storage.At(dir), r, priv); err == nil {
 		t.Fatal("a grant about someone else's site was issued")
 	}
 }
@@ -80,7 +81,7 @@ func TestGrantWriterRuleRefusesMalformedValues(t *testing.T) {
 	for name, mutate := range cases {
 		r := grantRecord("rosie/1", CustodyBasisHostingTerms)
 		mutate(r)
-		if _, err := Issue(dir, r, priv); err == nil {
+		if _, err := Issue(storage.At(dir), r, priv); err == nil {
 			t.Errorf("%s: issued", name)
 		}
 	}
@@ -88,84 +89,84 @@ func TestGrantWriterRuleRefusesMalformedValues(t *testing.T) {
 
 func TestLiveGrantIsTheHighestStandingVersion(t *testing.T) {
 	dir, priv := grantFixture(t)
-	if _, err := Issue(dir, grantRecord("rosie/1", CustodyBasisHostingTerms), priv); err != nil {
+	if _, err := Issue(storage.At(dir), grantRecord("rosie/1", CustodyBasisHostingTerms), priv); err != nil {
 		t.Fatal(err)
 	}
 	r2 := grantRecord("rosie/2", CustodyBasisHostingTerms)
 	r2.Asserted = "2030-01-01T00:00:00Z"
-	id2, err := Issue(dir, r2, priv)
+	id2, err := Issue(storage.At(dir), r2, priv)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	g, err := ResolveLiveGrant(dir, "rosie", "rosie", 1)
+	g, err := ResolveLiveGrant(storage.At(dir), "rosie", "rosie", 1)
 	if err != nil || !g.Valid() {
 		t.Fatalf("no live grant: %v", err)
 	}
 	if g.URL() != RecordURL(grantSite, id2) || g.Behaviours() != "rosie/2" {
 		t.Errorf("live grant = %s %s, want the rosie/2 record", g.URL(), g.Behaviours())
 	}
-	if g2, _ := ResolveLiveGrant(dir, "rosie", "rosie", 3); g2 != nil {
+	if g2, _ := ResolveLiveGrant(storage.At(dir), "rosie", "rosie", 3); g2 != nil {
 		t.Errorf("a grant below the minimum version resolved: %s", g2.Behaviours())
 	}
-	if g3, _ := ResolveLiveGrant(dir, "someone-else", "rosie", 1); g3 != nil {
+	if g3, _ := ResolveLiveGrant(storage.At(dir), "someone-else", "rosie", 1); g3 != nil {
 		t.Error("a grant for another agent resolved")
 	}
 }
 
 func TestLiveGrantFailsClosedOnWithdrawal(t *testing.T) {
 	dir, priv := grantFixture(t)
-	id, err := Issue(dir, grantRecord("rosie/1", CustodyBasisUserSigned), priv)
+	id, err := Issue(storage.At(dir), grantRecord("rosie/1", CustodyBasisUserSigned), priv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Withdraw(dir, id, priv); err != nil {
+	if _, err := Withdraw(storage.At(dir), id, priv); err != nil {
 		t.Fatal(err)
 	}
-	if g, _ := ResolveLiveGrant(dir, "rosie", "rosie", 1); g != nil {
+	if g, _ := ResolveLiveGrant(storage.At(dir), "rosie", "rosie", 1); g != nil {
 		t.Fatal("a withdrawn grant resolved as live")
 	}
 
 	// The withdrawal record alone is enough — even with the forward pointer
 	// stripped by some writer that did not know the field.
-	rec, _ := Load(Path(dir, id))
+	rec, _ := Load(storage.At(dir), id)
 	rec.WithdrawnBy = ""
-	if err := write(Path(dir, id), rec); err != nil {
+	if err := write(storage.At(dir), Key(id), rec); err != nil {
 		t.Fatal(err)
 	}
-	if g, _ := ResolveLiveGrant(dir, "rosie", "rosie", 1); g != nil {
+	if g, _ := ResolveLiveGrant(storage.At(dir), "rosie", "rosie", 1); g != nil {
 		t.Fatal("a grant with its pointer stripped resolved as live despite the withdrawal on disk")
 	}
 }
 
 func TestLiveGrantFailsClosedOnADanglingPointer(t *testing.T) {
 	dir, priv := grantFixture(t)
-	id, err := Issue(dir, grantRecord("rosie/1", CustodyBasisUserSigned), priv)
+	id, err := Issue(storage.At(dir), grantRecord("rosie/1", CustodyBasisUserSigned), priv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, _ := Load(Path(dir, id))
+	rec, _ := Load(storage.At(dir), id)
 	rec.WithdrawnBy = grantSite + "/content/pub.polis.core/attestation/missing.json"
-	if err := write(Path(dir, id), rec); err != nil {
+	if err := write(storage.At(dir), Key(id), rec); err != nil {
 		t.Fatal(err)
 	}
-	if g, _ := ResolveLiveGrant(dir, "rosie", "rosie", 1); g != nil {
+	if g, _ := ResolveLiveGrant(storage.At(dir), "rosie", "rosie", 1); g != nil {
 		t.Fatal("a grant pointing at a withdrawal resolved as live")
 	}
 }
 
 func TestLiveGrantRequiresAVerifyingSignature(t *testing.T) {
 	dir, priv := grantFixture(t)
-	id, err := Issue(dir, grantRecord("rosie/1", CustodyBasisUserSigned), priv)
+	id, err := Issue(storage.At(dir), grantRecord("rosie/1", CustodyBasisUserSigned), priv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, _ := Load(Path(dir, id))
+	rec, _ := Load(storage.At(dir), id)
 	rec.Payload[GrantKeyBehaviours] = "rosie/9" // tampered after signing
-	if err := write(Path(dir, id), rec); err != nil {
+	if err := write(storage.At(dir), Key(id), rec); err != nil {
 		t.Fatal(err)
 	}
-	if g, _ := ResolveLiveGrant(dir, "rosie", "rosie", 1); g != nil {
+	if g, _ := ResolveLiveGrant(storage.At(dir), "rosie", "rosie", 1); g != nil {
 		t.Fatal("a grant that does not verify resolved as live")
 	}
 }
@@ -179,7 +180,7 @@ func TestAZeroLiveGrantIsNotValid(t *testing.T) {
 
 func TestNoGrantsIsNotAnError(t *testing.T) {
 	dir, _ := grantFixture(t)
-	gs, err := Grants(dir, "rosie")
+	gs, err := Grants(storage.At(dir), "rosie")
 	if err != nil || len(gs) != 0 {
 		t.Fatalf("Grants on an empty site = %v, %v", gs, err)
 	}

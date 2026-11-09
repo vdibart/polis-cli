@@ -1,12 +1,15 @@
 package bundle
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // UpgradeActiveShape flips a tenant's active_shape from
@@ -24,10 +27,10 @@ import (
 // Returns (flipped, err). When flipped is true the caller can log /
 // attribute the action; a false-without-error means the tenant didn't
 // need migration.
-func UpgradeActiveShape(siteDir string) (bool, error) {
-	reg, err := LoadRegistry(siteDir)
+func UpgradeActiveShape(site storage.Site) (bool, error) {
+	reg, err := LoadRegistry(site)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
 		}
 		return false, err
@@ -35,7 +38,7 @@ func UpgradeActiveShape(siteDir string) (bool, error) {
 	if reg.ActiveShape != "pub.polis.shapes.v3" {
 		return false, nil
 	}
-	if err := SetActiveShapeName(siteDir, "v4"); err != nil {
+	if err := SetActiveShapeName(site, "v4"); err != nil {
 		return false, fmt.Errorf("flip active_shape v3→v4: %w", err)
 	}
 	return true, nil
@@ -60,11 +63,12 @@ func UpgradeActiveShape(siteDir string) (bool, error) {
 // crash mid-write leaves the registry as the authoritative source —
 // the worst-case re-run is a duplicate detection (no rules added, all
 // removed) rather than orphaned rules.
-func MigrateNotificationRulesToRegistry(siteDir string) (migrated int, removed int, err error) {
-	bundlePath := filepath.Join(siteDir, "content", "pub.polis.core", "bundle.json")
-	bundleData, rdErr := os.ReadFile(bundlePath)
+func MigrateNotificationRulesToRegistry(site storage.Site) (migrated int, removed int, err error) {
+	// ⭐ One key for the read and the write, so the migration rewrites the
+	// object it read on any backend.
+	bundleData, rdErr := site.Store().Get(context.Background(), BundleJSONKey)
 	if rdErr != nil {
-		if os.IsNotExist(rdErr) {
+		if errors.Is(rdErr, fs.ErrNotExist) {
 			return 0, 0, nil
 		}
 		return 0, 0, fmt.Errorf("read bundle.json: %w", rdErr)
@@ -108,7 +112,7 @@ func MigrateNotificationRulesToRegistry(siteDir string) (migrated int, removed i
 		return 0, 0, nil
 	}
 
-	reg, lErr := LoadRegistryOrInit(siteDir)
+	reg, lErr := LoadRegistryOrInit(site)
 	if lErr != nil {
 		return 0, 0, fmt.Errorf("load registry: %w", lErr)
 	}
@@ -133,7 +137,7 @@ func MigrateNotificationRulesToRegistry(siteDir string) (migrated int, removed i
 	}
 	raw["types"] = typesRaw
 
-	if sErr := SaveRegistry(siteDir, reg); sErr != nil {
+	if sErr := SaveRegistry(site, reg); sErr != nil {
 		return 0, 0, fmt.Errorf("save registry: %w", sErr)
 	}
 
@@ -142,19 +146,24 @@ func MigrateNotificationRulesToRegistry(siteDir string) (migrated int, removed i
 		return 0, 0, fmt.Errorf("marshal cleaned bundle.json: %w", mErr)
 	}
 	out = append(out, '\n')
-	if wErr := atomicfile.WriteFile(bundlePath, out, 0644); wErr != nil {
+	if wErr := atomicfile.Write(context.Background(), site, BundleJSONKey, out, 0644); wErr != nil {
 		return 0, 0, fmt.Errorf("write bundle.json: %w", wErr)
 	}
 	return migrated, removed, nil
 }
 
+// BundleJSONKey is the core bundle manifest, relative to the site root.
+//
+// ⚠️ The migration and its detector read the same key, so the detector cannot
+// report "needs migrating" for a file the migration would not find.
+const BundleJSONKey = "content/pub.polis.core/bundle.json"
+
 // NotificationRulesNeedMigration reports whether bundle.json carries
 // any per-content-type `notifications` array that should be relocated
 // to registry.json. Detection-only; no side effects. Used by Patrol
 // and Tailor to flag pre-migration tenants.
-func NotificationRulesNeedMigration(siteDir string) bool {
-	bundlePath := filepath.Join(siteDir, "content", "pub.polis.core", "bundle.json")
-	data, err := os.ReadFile(bundlePath)
+func NotificationRulesNeedMigration(site storage.Site) bool {
+	data, err := site.Store().Get(context.Background(), BundleJSONKey)
 	if err != nil {
 		return false
 	}

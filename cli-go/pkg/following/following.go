@@ -2,16 +2,18 @@
 package following
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 	"strings"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // normalizeFollowURL ensures consistent URL comparison by lowercasing and trimming trailing slashes.
@@ -248,8 +250,8 @@ func Verify(f *FollowingFile, publicKeySSH []byte) (SignatureStatus, error) {
 // A missing follow file, a missing .well-known/polis, or an absent public_key
 // all yield a non-finding status, never an error-shaped failure: they are
 // ordinary states of a site that has not done a thing yet.
-func VerifySite(siteDir string) (SignatureStatus, error) {
-	f, err := Load(DefaultPath(siteDir))
+func VerifySite(site storage.Site) (SignatureStatus, error) {
+	f, err := LoadSite(site)
 	if err != nil {
 		return StatusUnknown, fmt.Errorf("load following.json: %w", err)
 	}
@@ -259,7 +261,7 @@ func VerifySite(siteDir string) (SignatureStatus, error) {
 		return StatusUnsigned, nil
 	}
 
-	data, err := os.ReadFile(filepath.Join(siteDir, ".well-known", "polis"))
+	data, err := site.Store().Get(context.Background(), ".well-known/polis")
 	if err != nil {
 		return StatusUnknown, fmt.Errorf("no .well-known/polis to verify against")
 	}
@@ -276,16 +278,45 @@ func VerifySite(siteDir string) (SignatureStatus, error) {
 	return Verify(f, []byte(wk.PublicKey))
 }
 
-// DefaultPath returns the default path to following.json.
-func DefaultPath(dataDir string) string {
-	return filepath.Join(dataDir, "content", "pub.polis.core", "follow", "following.json")
+// DefaultKey is the follow file relative to the site root.
+//
+// ⭐ A KEY, NOT A PATH, so every reader and writer addresses it the same way on
+// any backend. It replaced the exported DefaultPath builder.
+const DefaultKey = "content/pub.polis.core/follow/following.json"
+
+// LoadSite reads and parses a site's own follow file.
+//
+// ⭐⭐ IT REPLACES THE DefaultPath+Load PAIR, which appeared verbatim six times
+// across judge, ops, cmd and sitecheck. ⛔ The pair cannot cross a backend
+// boundary, because Load takes a bare path with no site to resolve it against —
+// the same shape LoadTag replaced in pkg/tag.
+//
+// ⛔⛔ ABSENCE IS NOT AN ERROR, AND THAT IS LOAD'S CONTRACT, NOT A CONVENIENCE.
+// A site that follows nobody has no follow file, and `polis validate` must
+// report it `unsigned` rather than failing to look. ⚠️ The first version of
+// this returned the raw not-found and broke six tests across verification and
+// the follow flow — the same family as the ListDir trap: a rewrite that quietly
+// turns "there is nothing there" into "I could not look".
+func LoadSite(site storage.Site) (*FollowingFile, error) {
+	data, err := site.Store().Get(context.Background(), DefaultKey)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &FollowingFile{Following: []FollowingEntry{}}, nil
+		}
+		return nil, fmt.Errorf("failed to read following.json: %w", err)
+	}
+	f, err := Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse following.json: %w", err)
+	}
+	return f, nil
 }
 
 // Load loads the following.json file from the given path.
 func Load(path string) (*FollowingFile, error) {
-	data, err := os.ReadFile(path)
+	data, err := storage.ReadAtPath(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return &FollowingFile{
 				Following: []FollowingEntry{},
 			}, nil
@@ -311,11 +342,19 @@ func Load(path string) (*FollowingFile, error) {
 // A nil/empty key falls through to Save, i.e. writes UNSIGNED. That is the safe
 // direction: an unsigned file reports OK, whereas keeping a now-stale signature
 // over changed content would manufacture a spurious "does not verify" finding.
-func SaveSigned(path string, f *FollowingFile, privateKeyPEM []byte) error {
+// SaveSigned signs a site's follow file and writes it.
+//
+// ⭐ IT TAKES THE SITE, NOT A PATH, because every PRODUCTION caller passed
+// DefaultPath or a variable holding it — measured, not assumed. ⚠️ Tests used
+// to pass arbitrary paths; that freedom is gone, and it was never a capability
+// production used.
+func SaveSigned(site storage.Site, f *FollowingFile, privateKeyPEM []byte) error {
 	if len(privateKeyPEM) == 0 {
-		return Save(path, f)
+		return Save(site, f)
 	}
-	if err := guardRewrite(path); err != nil {
+	// ⛔ The guard reads what is actually STORED, never f — it compares what
+	// this build models against the bytes really there.
+	if err := guardRewrite(site); err != nil {
 		return err
 	}
 	// BEFORE Sign, so the signature covers the version string that lands on
@@ -324,7 +363,48 @@ func SaveSigned(path string, f *FollowingFile, privateKeyPEM []byte) error {
 	if err := Sign(f, privateKeyPEM); err != nil {
 		return err
 	}
-	return writeFile(path, f)
+	return writeFile(site, f)
+}
+
+// ResignAfterRotation re-signs the follow file at path with newPrivateKeyPEM,
+// but only when it is present, signed, and verifies under oldPublicKey. Every
+// other file is left exactly as it was; the outcome says why. See
+// signing.ResignOutcome for the rule and the reason for the old-key gate.
+//
+// It does not touch any entry: only the generator is restamped, as on every
+// signed write.
+func ResignAfterRotation(site storage.Site, oldPublicKey, newPrivateKeyPEM []byte) (signing.ResignOutcome, error) {
+	// Load invents an empty file when none exists; a rotation must not.
+	// ⚠️ The two arms are NOT interchangeable: absent means there is nothing to
+	// re-sign, and a stat that FAILED for any other reason must not be read as
+	// absent — Load would invent an empty file and a rotation would sign it.
+	// ⭐ Store.Exists keeps exactly that split: (false, nil) only for absence,
+	// an error for anything else.
+	present, statErr := site.Store().Exists(context.Background(), DefaultKey)
+	if statErr != nil {
+		return "", fmt.Errorf("stat following.json: %w", statErr)
+	}
+	if !present {
+		return signing.ResignAbsent, nil
+	}
+	f, err := LoadSite(site)
+	if err != nil {
+		return "", err
+	}
+	if f.Signature == "" {
+		return signing.ResignUnsigned, nil
+	}
+	if status, _ := Verify(f, oldPublicKey); status != StatusValid {
+		return signing.ResignNotValid, nil
+	}
+	if err := SaveSigned(site, f, newPrivateKeyPEM); err != nil {
+		var refused *signing.RewriteRefusedError
+		if errors.As(err, &refused) {
+			return signing.ResignRefused, err
+		}
+		return "", err
+	}
+	return signing.ResignDone, nil
 }
 
 // Save saves the following.json file to the given path, UNSIGNED.
@@ -335,21 +415,23 @@ func SaveSigned(path string, f *FollowingFile, privateKeyPEM []byte) error {
 // has to chase. Degrading to "unsigned" is honest and costs nobody anything;
 // degrading to "invalid" is a false alarm. Callers holding a key want
 // SaveSigned.
-func Save(path string, f *FollowingFile) error {
-	if err := guardRewrite(path); err != nil {
+func Save(site storage.Site, f *FollowingFile) error {
+	// ⛔ The guard reads what is actually STORED, never f — it compares what
+	// this build models against the bytes really there.
+	if err := guardRewrite(site); err != nil {
 		return err
 	}
 	stampGenerator(f)
 	f.Signature = ""
-	return writeFile(path, f)
+	return writeFile(site, f)
 }
 
 // guardRewrite is the refusal both writers share: a follow file carrying
 // members this build does not declare is not rewritten, signed or unsigned —
-// either would drop them (signing.GuardRewrite). The way past is
+// either would drop them (signing.GuardRewriteAt). The way past is
 // RewriteUnsigned.
-func guardRewrite(path string) error {
-	return signing.GuardRewrite("following.json", path, FollowingFile{})
+func guardRewrite(site storage.Site) error {
+	return signing.GuardRewriteAt("following.json", site, DefaultKey, FollowingFile{})
 }
 
 // RewriteUnsigned is the ESCAPE HATCH for a user stranded by that refusal: it
@@ -357,8 +439,11 @@ func guardRewrite(path string) error {
 // signature, and returns what it dropped. ⛔ It never signs — a signature must
 // not cover content the signer's software could not read. A file with nothing
 // unrecognised is left untouched.
-func RewriteUnsigned(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
+//
+// ⚠️ It takes the SITE because its one caller only ever dispatched to it for
+// the site's default follow path — the same shape metadata's escape hatch has.
+func RewriteUnsigned(site storage.Site) ([]string, error) {
+	data, err := site.Store().Get(context.Background(), DefaultKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read following.json: %w", err)
 	}
@@ -372,7 +457,7 @@ func RewriteUnsigned(path string) ([]string, error) {
 	}
 	stampGenerator(f)
 	f.Signature = ""
-	if err := writeFile(path, f); err != nil {
+	if err := writeFile(site, f); err != nil {
 		return nil, err
 	}
 	return dropped, nil
@@ -380,23 +465,22 @@ func RewriteUnsigned(path string) ([]string, error) {
 
 // writeFile marshals and atomically writes the follow file as-is, signature
 // field included if set. The single write point shared by Save and SaveSigned.
-func writeFile(path string, f *FollowingFile) error {
+func writeFile(site storage.Site, f *FollowingFile) error {
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal following.json: %w", err)
 	}
 
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	// R23-6: write atomically (tmp+rename) so a crash mid-write can't leave a
-	// truncated following.json. Mode stays 0644 — this is PUBLIC served content
+	// R23-6: write atomically so a crash mid-write can't leave a truncated
+	// following.json. Mode stays 0644 — this is PUBLIC served content
 	// (content/pub.polis.core/follow/), so self-hosters serving it via nginx/
 	// Apache under a different user must be able to read it (the R11-17 lesson:
 	// don't tighten public-facing files to 0600).
-	if err := atomicfile.WriteFile(path, append(data, '\n'), 0644); err != nil {
+	//
+	// ⭐ Through the site: on a blob backend the Put is the atomic write, and
+	// on POSIX atomicfile.Write creates the parent the way the MkdirAll that
+	// used to sit here did.
+	if err := atomicfile.Write(context.Background(), site, DefaultKey, append(data, '\n'), 0644); err != nil {
 		return fmt.Errorf("failed to write following.json: %w", err)
 	}
 

@@ -1,6 +1,7 @@
 package dm
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,7 +19,7 @@ func epochKP(t *testing.T) (pub [32]byte, dek [32]byte) {
 }
 
 func TestMailboxSentRoundTrip(t *testing.T) {
-	mb := NewMailbox(t.TempDir())
+	mb := NewMailbox(storage.At(t.TempDir()))
 	pub, dek := epochKP(t)
 
 	msg, err := mb.AppendSent("Maya.Polis.PUB", "me.polis.pub", "hey, thursday?", 1, pub, dek, "", "sent")
@@ -29,7 +30,7 @@ func TestMailboxSentRoundTrip(t *testing.T) {
 		t.Errorf("bad sent message: %+v", msg)
 	}
 	// Handle is lowercased on disk.
-	if _, err := os.Stat(filepath.Join(mb.dmDir, "conversations", "maya.polis.pub", "messages.jsonl")); err != nil {
+	if _, err := os.Stat(filepath.Join(mb.site.Path(DMDirKey), "conversations", "maya.polis.pub", "messages.jsonl")); err != nil {
 		t.Fatalf("expected lowercased conversation dir: %v", err)
 	}
 
@@ -43,7 +44,7 @@ func TestMailboxSentRoundTrip(t *testing.T) {
 }
 
 func TestMailboxReceivedRoundTrip(t *testing.T) {
-	mb := NewMailbox(t.TempDir())
+	mb := NewMailbox(storage.At(t.TempDir()))
 	myPub, myDEK := epochKP(t)
 	senderPub, senderDEK := epochKP(t)
 
@@ -68,7 +69,7 @@ func TestMailboxReceivedRoundTrip(t *testing.T) {
 // (same transport nonce → same message ID) must be stored exactly once. Re-ports the dedup
 // guarantee lost when the legacy Store was removed (was R20-C-F7).
 func TestMailboxReceivedDedupesOnMessageID(t *testing.T) {
-	mb := NewMailbox(t.TempDir())
+	mb := NewMailbox(storage.At(t.TempDir()))
 	myPub, myDEK := epochKP(t)
 	senderPub, senderDEK := epochKP(t)
 	ct, nonce, err := Encrypt([]byte("replay me"), &myPub, &senderDEK)
@@ -109,7 +110,7 @@ func TestMailboxReceivedDedupesOnMessageID(t *testing.T) {
 // (DEK present, but the tag fails) is flagged per-message and the rest of the conversation
 // still reads — it must not error the whole batch (a thread-level DoS).
 func TestMailboxReadResilientToCorruptBox(t *testing.T) {
-	mb := NewMailbox(t.TempDir())
+	mb := NewMailbox(storage.At(t.TempDir()))
 	myPub, myDEK := epochKP(t)
 	senderPub, senderDEK := epochKP(t)
 
@@ -147,7 +148,7 @@ func TestMailboxReadResilientToCorruptBox(t *testing.T) {
 // concurrent appends of the SAME wire envelope (same nonce → same ID) must still land
 // exactly one message, with no race (run with -race).
 func TestMailboxConcurrentReplayDedup(t *testing.T) {
-	mb := NewMailbox(t.TempDir())
+	mb := NewMailbox(storage.At(t.TempDir()))
 	myPub, myDEK := epochKP(t)
 	senderPub, senderDEK := epochKP(t)
 	ct, nonce, err := Encrypt([]byte("concurrent replay"), &myPub, &senderDEK)
@@ -176,7 +177,7 @@ func TestMailboxConcurrentReplayDedup(t *testing.T) {
 }
 
 func TestMailboxLockedWhenEpochDEKMissing(t *testing.T) {
-	mb := NewMailbox(t.TempDir())
+	mb := NewMailbox(storage.At(t.TempDir()))
 	pub, dek := epochKP(t)
 	if _, err := mb.AppendSent("a.polis.pub", "me", "secret from epoch 2", 2, pub, dek, "", "sent"); err != nil {
 		t.Fatal(err)
@@ -196,7 +197,7 @@ func TestMailboxLockedWhenEpochDEKMissing(t *testing.T) {
 }
 
 func TestMailboxAppendOnlyAndMeta(t *testing.T) {
-	mb := NewMailbox(t.TempDir())
+	mb := NewMailbox(storage.At(t.TempDir()))
 	pub, dek := epochKP(t)
 	for i := 0; i < 3; i++ {
 		if _, err := mb.AppendSent("p.polis.pub", "me", "msg", 1, pub, dek, "", "sent"); err != nil {
@@ -217,7 +218,7 @@ func TestMailboxAppendOnlyAndMeta(t *testing.T) {
 }
 
 func TestMailboxMarkReadAndInbox(t *testing.T) {
-	mb := NewMailbox(t.TempDir())
+	mb := NewMailbox(storage.At(t.TempDir()))
 	myPub, myDEK := epochKP(t)
 	sPub, sDEK := epochKP(t)
 
@@ -250,7 +251,7 @@ func TestMailboxMarkReadAndInbox(t *testing.T) {
 	}
 
 	// inbox.json was written.
-	if _, err := os.Stat(filepath.Join(mb.dmDir, inboxFile)); err != nil {
+	if _, err := os.Stat(filepath.Join(mb.site.Path(DMDirKey), inboxFile)); err != nil {
 		t.Errorf("inbox.json not written: %v", err)
 	}
 }
@@ -277,7 +278,7 @@ func TestReencryptBootstrapForward(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mb := NewMailbox(dir)
+	mb := NewMailbox(storage.At(dir))
 	// A received bootstrap-epoch message (sealed to our bootstrap pubkey by a peer).
 	_, sSK := epochKP(t)
 	sPub, _ := publicFromDEK(sSK[:])

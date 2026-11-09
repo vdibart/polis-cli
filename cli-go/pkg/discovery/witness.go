@@ -45,6 +45,11 @@ const (
 	// (SIGNET epic 45 D7). Decision is the request's action (grant/deny); the
 	// marker fields and grant_state are present only for a user agent's act.
 	WitnessActionRelationship = "relationship-update"
+	// WitnessActionSiteBranched is a site announcing it branched from another
+	// (pub.polis.site.branched): the handover's key-rotation fields, the
+	// destination in Domain and the origin in SourceDomain. ⚠️ Timestamp is the
+	// HANDOVER's valid_from; WitnessedAt dates the announcement, not it.
+	WitnessActionSiteBranched = "site-branched"
 )
 
 // MetadataArtifactHash is the registration metadata key carrying a hash of the
@@ -70,6 +75,9 @@ type Witness struct {
 	NewKey        string `json:"new_key,omitempty"`
 	Timestamp     string `json:"timestamp,omitempty"`
 	TransitionSig string `json:"transition_sig,omitempty"`
+
+	// site-branched (with the key-rotation fields above)
+	SourceDomain string `json:"source_domain,omitempty"`
 
 	// relationship-update (Type, Timestamp, Actor and PublicKey are shared).
 	// Agent, Grant and GrantState are present only for a user agent's act.
@@ -114,6 +122,10 @@ var witnessFields = map[string][]string{
 		"action", "domain", "old_key", "new_key", "timestamp", "transition_sig",
 		"ds", "ds_key_id", "witnessed_at",
 	},
+	WitnessActionSiteBranched: {
+		"action", "domain", "source_domain", "old_key", "new_key", "timestamp", "transition_sig",
+		"ds", "ds_key_id", "witnessed_at",
+	},
 	WitnessActionRelationship: {
 		"action", "type", "source_url", "target_url", "decision", "timestamp", "actor", "public_key",
 		"agent", "grant", "grant_state",
@@ -153,6 +165,8 @@ func (w Witness) field(name string) string {
 		return w.GrantState
 	case "domain":
 		return w.Domain
+	case "source_domain":
+		return w.SourceDomain
 	case "old_key":
 		return w.OldKey
 	case "new_key":

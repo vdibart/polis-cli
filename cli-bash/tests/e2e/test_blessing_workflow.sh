@@ -6,7 +6,6 @@
 #
 # Prerequisites:
 #   - POLIS_BASE_URL must be set to a reachable domain
-#   - DISCOVERY_SERVICE_KEY must be configured
 #   - Discovery service must be deployed
 #
 # Tests covered:
@@ -17,9 +16,6 @@
 # Helper: Check if e2e tests can run
 check_e2e_prerequisites() {
     if [[ -z "$POLIS_BASE_URL" ]]; then
-        return 1
-    fi
-    if [[ -z "$DISCOVERY_SERVICE_KEY" ]]; then
         return 1
     fi
     return 0
@@ -35,8 +31,10 @@ test_comment_with_beseech() {
         if should_skip_network; then
             log "  Skipping network call (--skip-network mode)"
         else
-            log_error "Missing POLIS_BASE_URL or DISCOVERY_SERVICE_KEY"
-            return 1
+            # Not a failure: this e2e test needs credentials the environment
+            # does not have. mark_skip, or the runner counts it as a pass.
+            mark_skip "requires POLIS_BASE_URL"
+            return 0
         fi
     fi
 
@@ -88,17 +86,24 @@ test_comment_with_beseech() {
             mark_skip "Skipping remainder of test due to network issues"
             return 0
         fi
+
+        # The test inits a fresh site the discovery service has never seen, so beseech
+        # cannot succeed until the test registers a real site with a DS
+        if [[ "$error_code" == "NOT_REGISTERED" ]]; then
+            mark_skip "Fresh test site is not registered with the discovery service"
+            return 0
+        fi
+
+        # Any other failure is the command failing, not the environment
+        log_error "comment exited $exit_code with error code $error_code: $comment_result"
+        return 1
     fi
 
-    # If we got here with success, validate the response
-    if [[ $exit_code -eq 0 ]]; then
-        assert_valid_json "$comment_result" || return 1
-        assert_json_has_field "$comment_result" ".data.file_path" || return 1
-        assert_json_has_field "$comment_result" ".data.in_reply_to" || return 1
+    assert_valid_json "$comment_result" || return 1
+    assert_json_has_field "$comment_result" ".data.file_path" || return 1
+    assert_json_has_field "$comment_result" ".data.in_reply_to" || return 1
 
-        log "  [OK] Comment created with beseech"
-    fi
-
+    log "  [OK] Comment created with beseech"
     return 0
 }
 
@@ -114,8 +119,10 @@ test_blessing_requests() {
             mark_skip "Skipping blessing requests test"
             return 0
         else
-            log_error "Missing POLIS_BASE_URL or DISCOVERY_SERVICE_KEY"
-            return 1
+            # Not a failure: this e2e test needs credentials the environment
+            # does not have. mark_skip, or the runner counts it as a pass.
+            mark_skip "requires POLIS_BASE_URL"
+            return 0
         fi
     fi
 
@@ -201,8 +208,10 @@ test_blessing_grant() {
             mark_skip "Skipping blessing grant test"
             return 0
         else
-            log_error "Missing POLIS_BASE_URL or DISCOVERY_SERVICE_KEY"
-            return 1
+            # Not a failure: this e2e test needs credentials the environment
+            # does not have. mark_skip, or the runner counts it as a pass.
+            mark_skip "requires POLIS_BASE_URL"
+            return 0
         fi
     fi
 
@@ -295,8 +304,10 @@ test_blessing_deny() {
             mark_skip "Skipping blessing deny test"
             return 0
         else
-            log_error "Missing POLIS_BASE_URL or DISCOVERY_SERVICE_KEY"
-            return 1
+            # Not a failure: this e2e test needs credentials the environment
+            # does not have. mark_skip, or the runner counts it as a pass.
+            mark_skip "requires POLIS_BASE_URL"
+            return 0
         fi
     fi
 

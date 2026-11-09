@@ -1,12 +1,13 @@
 package dm
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Version is the CLI version, set by cmd/root.go at startup (the project-wide
@@ -71,7 +72,7 @@ type Epoch struct {
 // recovery phrase themselves are never stored.
 type Keyring struct {
 	SchemaVersion int     `json:"schema_version"`
-	Revision      int     `json:"revision"` // monotonic; bumped on every mutation (CAS — task 1.5)
+	Revision      int     `json:"revision"` // monotonic; bumped on every mutation (compare-and-swap, see SaveCAS)
 	Generator     string  `json:"generator,omitempty"`
 	Epochs        []Epoch `json:"epochs"`
 	Current       int     `json:"current"`
@@ -88,16 +89,26 @@ type Keyring struct {
 }
 
 // keyringPath returns the keyring.json path for a tenant DM dir.
-func keyringPath(dmDir string) string { return filepath.Join(dmDir, keyringFile) }
+// keyringKey is the keyring, relative to the site root.
+//
+// ⛔⛔ THE LOAD AND THE SAVE MUST ADDRESS IT THE SAME WAY, which is why both
+// take the site and use this. If Save went through the store while Load read a
+// path, a blob-backed site's keyring would be written and then unreadable — and
+// five callers branch on Load's not-found, one of them deciding an HTTP status.
+const keyringKey = DMDirKey + "/" + keyringFile
 
 // LoadKeyring reads keyring.json from a tenant DM dir. A missing file returns an
-// error satisfying os.IsNotExist, so callers can distinguish "not provisioned
-// yet" from a real read/parse failure. Unknown JSON fields are tolerated
+// error satisfying errors.Is(err, fs.ErrNotExist), so callers can distinguish
+// "not provisioned yet" from a real read/parse failure.
+//
+// ⛔ os.IsNotExist does NOT answer this question and never did reliably; it does
+// not unwrap. Five callers branch on this distinction and one of them decides an
+// HTTP status, so the contract is named precisely. Unknown JSON fields are tolerated
 // (forward-compatibility for schema growth) and kept, so Save writes them back.
-func LoadKeyring(dmDir string) (*Keyring, error) {
-	data, err := os.ReadFile(keyringPath(dmDir))
+func LoadKeyring(site storage.Site) (*Keyring, error) {
+	data, err := site.Store().Get(context.Background(), keyringKey)
 	if err != nil {
-		return nil, err // *os.PathError; os.IsNotExist-friendly
+		return nil, err // storage.ErrNotFound, which wraps fs.ErrNotExist
 	}
 	var k Keyring
 	if err := json.Unmarshal(data, &k); err != nil {
@@ -108,8 +119,8 @@ func LoadKeyring(dmDir string) (*Keyring, error) {
 
 // Save writes the keyring atomically with 0600 perms, stamping the schema version
 // and generator. Callers that mutate the keyring should bump Revision first (the
-// server-side compare-and-swap discipline — task 1.5).
-func (k *Keyring) Save(dmDir string) error {
+// server-side compare-and-swap discipline, SaveCAS).
+func (k *Keyring) Save(site storage.Site) error {
 	if k.SchemaVersion == 0 {
 		k.SchemaVersion = KeyringSchemaVersion
 	}
@@ -118,10 +129,30 @@ func (k *Keyring) Save(dmDir string) error {
 	if err != nil {
 		return fmt.Errorf("marshal keyring: %w", err)
 	}
-	if err := os.MkdirAll(dmDir, 0700); err != nil {
-		return fmt.Errorf("create dm dir: %w", err)
+	// ⭐ No MkdirAll: atomicfile.Write has the store create the parent, and the
+	// DM tree is under .polis, a declared private prefix — so it comes out
+	// 0700, as the literal here used to make it.
+	if err := atomicfile.Write(context.Background(), site, keyringKey, data, 0600); err != nil {
+		return fmt.Errorf("write keyring.json: %w", err)
 	}
-	if err := atomicfile.WriteFile(keyringPath(dmDir), data, 0600); err != nil {
+	return nil
+}
+
+// SaveNew writes k only if the site has no keyring yet; otherwise it returns
+// an error wrapping storage.ErrExists and writes nothing. ⭐ For the first
+// keyring of a site, which two starts finishing one site at once might each
+// provision: the loser loads the winner's, so the published messages key and
+// the keyring cannot disagree.
+func (k *Keyring) SaveNew(site storage.Site) error {
+	if k.SchemaVersion == 0 {
+		k.SchemaVersion = KeyringSchemaVersion
+	}
+	k.Generator = GetGenerator()
+	data, err := json.MarshalIndent(k, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal keyring: %w", err)
+	}
+	if err := site.Store().Put(context.Background(), keyringKey, data, storage.IfAbsent(), storage.WithMode(0o600)); err != nil {
 		return fmt.Errorf("write keyring.json: %w", err)
 	}
 	return nil

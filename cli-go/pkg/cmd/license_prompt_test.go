@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,10 +166,10 @@ func TestInitWithoutTermsSaysHowToStateThemLater(t *testing.T) {
 		t.Errorf("init did not say how to state terms later:\n%s", output)
 	}
 
-	if _, err := os.Stat(site.LicensePath(dir)); !os.IsNotExist(err) {
+	if _, err := os.Stat(storage.At(dir).Path(site.LicenseKey(storage.At(dir)))); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("`polis init --license none` wrote a licence document")
 	}
-	if p := site.LicensePointer(dir); p != "" {
+	if p := site.LicensePointer(storage.At(dir)); p != "" {
 		t.Errorf("`polis init --license none` wrote a licence pointer: %q", p)
 	}
 }
@@ -187,17 +190,17 @@ func TestInitWithAnExplicitLicenceStillStatesIt(t *testing.T) {
 	w.Close()
 	os.Stdout = old
 
-	terms, err := site.SiteTerms(dir)
+	terms, err := site.SiteTerms(storage.At(dir))
 	if err != nil || terms == nil {
 		t.Fatalf("SiteTerms after --license reserved = %v, %v; want terms", terms, err)
 	}
 	if terms.Profile != "pub.polis.license.reserved/1" {
 		t.Errorf("profile = %q; want the reserved profile", terms.Profile)
 	}
-	if p := site.LicensePointer(dir); p == "" {
+	if p := site.LicensePointer(storage.At(dir)); p == "" {
 		t.Error(".well-known/polis has no licence pointer")
 	}
-	if _, err := os.Stat(filepath.Join(dir, site.LicenseURLPath(dir))); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, site.LicenseURLPath(storage.At(dir)))); err != nil {
 		t.Errorf("licence document missing: %v", err)
 	}
 }

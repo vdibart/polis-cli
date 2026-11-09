@@ -1,15 +1,18 @@
 package comment
 
 import (
+	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
-	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	// ⚠️ ALIASED: `site` is the parameter name throughout the site-handle
+	// migration, and an unaliased import of this package shadows it.
+	sitepkg "github.com/vdibart/polis-cli/cli-go/pkg/site"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Discovery service configuration. Set by the calling application
@@ -19,7 +22,6 @@ import (
 // to BeseechComment instead of using these globals.
 var (
 	DiscoveryURL string
-	DiscoveryKey string
 	BaseURL      string
 )
 
@@ -28,7 +30,6 @@ var (
 // enabling safe multi-tenant operation.
 type DiscoveryConfig struct {
 	DiscoveryURL string
-	DiscoveryKey string
 	BaseURL      string
 	Generator    string // e.g. "polis-cli-go/0.59.0" — used in comment metadata
 }
@@ -74,7 +75,7 @@ func commentRegistrationMetadata(meta *CommentMeta, beseech bool) map[string]int
 	return m
 }
 
-func registerCommentContent(dataDir string, meta *CommentMeta, commentID string, privateKey []byte, dsURL, dsKey, baseURL string, beseech bool) (*discovery.ContentRegisterResponse, error) {
+func registerCommentContent(site storage.Site, meta *CommentMeta, commentID string, privateKey []byte, dsURL, baseURL string, beseech bool) (*discovery.ContentRegisterResponse, error) {
 	ts, err := time.Parse("2006-01-02T15:04:05Z", meta.Timestamp)
 	if err != nil {
 		return nil, fmt.Errorf("invalid timestamp: %w", err)
@@ -92,8 +93,8 @@ func registerCommentContent(dataDir string, meta *CommentMeta, commentID string,
 	// only the body `version` hashes. The file is the one PublishComment (or
 	// RepublishComment) just wrote; if it cannot be read the registration goes
 	// ahead and the witness binds `version` alone.
-	publishedPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", dateDir, commentID+".md")
-	if data, rerr := os.ReadFile(publishedPath); rerr == nil {
+	publishedKey := "content/pub.polis.core/comment/" + dateDir + "/" + commentID + ".md"
+	if data, rerr := site.Store().Get(context.Background(), publishedKey); rerr == nil {
 		commentMetadata[discovery.MetadataArtifactHash] = discovery.ArtifactHash(
 			signing.MarkdownSigningBase(string(data), signing.TypeComment))
 	}
@@ -110,7 +111,7 @@ func registerCommentContent(dataDir string, meta *CommentMeta, commentID string,
 		return nil, fmt.Errorf("sign: %w", err)
 	}
 
-	client := discovery.NewClient(dsURL, dsKey)
+	client := discovery.NewClient(dsURL)
 	resp, err := client.RegisterContent(&discovery.ContentRegisterRequest{
 		Type:      "pub.polis.comment",
 		URL:       commentURL,
@@ -121,7 +122,7 @@ func registerCommentContent(dataDir string, meta *CommentMeta, commentID string,
 	})
 	if err == nil && resp != nil && resp.Witness != nil {
 		// Never fails the registration; see publish.RegisterPost.
-		if _, werr := site.RecordWitness(dataDir, commentURL, *resp.Witness); werr != nil {
+		if _, werr := sitepkg.RecordWitness(site, commentURL, *resp.Witness); werr != nil {
 			fmt.Printf("[!] Could not publish the discovery service's witness for %s: %v\n", commentURL, werr)
 		}
 	}
@@ -137,8 +138,8 @@ func registerCommentContent(dataDir string, meta *CommentMeta, commentID string,
 // multi-tenant safety. Pass nil to use globals (single-tenant / CLI mode).
 //
 // Returns an error if discovery is not configured or the request fails.
-func BeseechComment(dataDir, commentID string, privateKey []byte, dsCfg ...*DiscoveryConfig) (*BeseechResult, error) {
-	return publishAndRegisterComment(dataDir, commentID, privateKey, true, dsCfg...)
+func BeseechComment(site storage.Site, commentID string, privateKey []byte, dsCfg ...*DiscoveryConfig) (*BeseechResult, error) {
+	return publishAndRegisterComment(site, commentID, privateKey, true, dsCfg...)
 }
 
 // publishAndRegisterComment publishes a pending comment to the public content
@@ -150,15 +151,19 @@ func BeseechComment(dataDir, commentID string, privateKey []byte, dsCfg ...*Disc
 // always published, indexed, rendered, and discoverable regardless of whether a
 // blessing is ever requested (it is never stuck unpublished for lack of a
 // beseech).
-func publishAndRegisterComment(dataDir, commentID string, privateKey []byte, beseech bool, dsCfg ...*DiscoveryConfig) (*BeseechResult, error) {
-	var dsURL, dsKey, baseURL string
+func publishAndRegisterComment(site storage.Site, commentID string, privateKey []byte, beseech bool, dsCfg ...*DiscoveryConfig) (*BeseechResult, error) {
+	// ⛔ Before anything else: the id is a path below, and it arrives from a
+	// request body. Refusing here keeps a traversing id from reaching the
+	// discovery service as well as the disk.
+	if err := lookupCommentID(commentID); err != nil {
+		return nil, err
+	}
+	var dsURL, baseURL string
 	if len(dsCfg) > 0 && dsCfg[0] != nil {
 		dsURL = dsCfg[0].DiscoveryURL
-		dsKey = dsCfg[0].DiscoveryKey
 		baseURL = dsCfg[0].BaseURL
 	} else {
 		dsURL = DiscoveryURL
-		dsKey = DiscoveryKey
 		baseURL = BaseURL
 	}
 
@@ -170,7 +175,7 @@ func publishAndRegisterComment(dataDir, commentID string, privateKey []byte, bes
 	}
 
 	// Get the pending comment
-	signed, err := GetComment(dataDir, commentID, StatusPending)
+	signed, err := GetComment(site, commentID, StatusPending)
 	if err != nil {
 		return nil, fmt.Errorf("comment not found in pending: %w", err)
 	}
@@ -181,7 +186,7 @@ func publishAndRegisterComment(dataDir, commentID string, privateKey []byte, bes
 	// publish-only path, ensures it is published even when no blessing is asked.
 	// Runs regardless of DS-registration status — when the site isn't registered
 	// we still want the comment on the local public mount.
-	if err := PublishComment(dataDir, commentID); err != nil {
+	if err := PublishComment(site, commentID); err != nil {
 		return nil, fmt.Errorf("publish comment: %w", err)
 	}
 
@@ -194,7 +199,7 @@ func publishAndRegisterComment(dataDir, commentID string, privateKey []byte, bes
 	// error here would force callers to treat a known + expected state
 	// (unregistered site = no DS contact) as a runtime failure, which
 	// produced confusing HTTP 500s on the v4 SPA's first comment.
-	if !discovery.IsRegisteredLocally(dataDir, dsURL) {
+	if !discovery.IsRegisteredLocally(site, dsURL) {
 		return &BeseechResult{
 			Success: true,
 			Status:  "deferred",
@@ -205,7 +210,7 @@ func publishAndRegisterComment(dataDir, commentID string, privateKey []byte, bes
 
 	// Register the comment content with the discovery service (beseech controls
 	// whether the DS also requests a blessing).
-	resp, err := registerCommentContent(dataDir, signed.Meta, commentID, privateKey, dsURL, dsKey, baseURL, beseech)
+	resp, err := registerCommentContent(site, signed.Meta, commentID, privateKey, dsURL, baseURL, beseech)
 	if err != nil {
 		return nil, fmt.Errorf("register: %w", err)
 	}
@@ -224,7 +229,7 @@ func publishAndRegisterComment(dataDir, commentID string, privateKey []byte, bes
 	// post author blessed this comment earlier (a re-registration), which is a
 	// fact worth reflecting locally. (Never granted when beseech=false.)
 	if resp.RelationshipStatus == "granted" {
-		if err := MoveComment(dataDir, commentID, StatusPending, StatusBlessed); err != nil {
+		if err := MoveComment(site, commentID, StatusPending, StatusBlessed); err != nil {
 			return result, fmt.Errorf("move already-blessed comment: %w", err)
 		}
 		result.AutoBlessed = true

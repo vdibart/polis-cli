@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"net/http"
 	"strings"
@@ -28,7 +29,7 @@ type Receiver struct {
 	PrivateKeyPEM  []byte
 	PublicKeySSH   []byte
 	Domain         string
-	SiteDir        string
+	Site           storage.Site
 	RateLimiter    *RateLimiter
 	Logger         Logger
 	MaxMessageSize int // max encrypted envelope size in bytes (default: 64KB)
@@ -83,12 +84,12 @@ type LogEvent struct {
 
 // NewReceiver creates a Receiver for handling incoming DM deliveries.
 // The domain is normalized to lowercase (DNS hostnames are case-insensitive per RFC 1123).
-func NewReceiver(privateKeyPEM, publicKeySSH []byte, domain, siteDir string, rl *RateLimiter) *Receiver {
+func NewReceiver(privateKeyPEM, publicKeySSH []byte, domain string, site storage.Site, rl *RateLimiter) *Receiver {
 	return &Receiver{
 		PrivateKeyPEM:  privateKeyPEM,
 		PublicKeySSH:   publicKeySSH,
 		Domain:         strings.ToLower(domain),
-		SiteDir:        siteDir,
+		Site:           site,
 		RateLimiter:    rl,
 		Logger:         nopLogger{},
 		MaxMessageSize: maxDMPayloadSize,
@@ -295,7 +296,7 @@ func (rcv *Receiver) ReceiveMessage(senderDomain string, envelopeBody []byte, fo
 	// makes clearing the bootstrap `server_dek` safe: after a password is set, a late
 	// message still addressed to the (now non-current, key-cleared) bootstrap epoch is
 	// rejected for retry rather than stored as ciphertext nobody can ever open.
-	kr, err := LoadKeyring(DMDir(rcv.SiteDir))
+	kr, err := LoadKeyring(rcv.Site)
 	if err != nil {
 		return nil, fmt.Errorf("load keyring (site not provisioned for DMs?): %w", err)
 	}
@@ -334,7 +335,7 @@ func (rcv *Receiver) ReceiveMessage(senderDomain string, envelopeBody []byte, fo
 	// Store the wire box as-is via the mailbox (key_epoch = the recipient epoch it was
 	// sealed to). No re-seal, no decrypt. reply_to is envelope metadata; the message body
 	// stays sealed and opens client-side on read.
-	mb := NewMailbox(DMDir(rcv.SiteDir))
+	mb := NewMailbox(rcv.Site)
 	msg, err := mb.AppendReceived(senderDomain, senderDomain, envelope.RecipientEpoch, ciphertext, nonce, senderPub, envelope.ReplyTo)
 	if err != nil {
 		return nil, fmt.Errorf("store received message: %w", err)
@@ -349,8 +350,7 @@ func (rcv *Receiver) ReceiveMessage(senderDomain string, envelopeBody []byte, fo
 
 // checkPolicy evaluates DM acceptance policy for the sender domain.
 func (rcv *Receiver) checkPolicy(senderDomain string, followingDomains map[string]bool) error {
-	privatePath, publicPath := policy.DefaultPaths(rcv.SiteDir)
-	policies, err := policy.LoadPolicies(privatePath, publicPath)
+	policies, err := policy.LoadPolicies(rcv.Site)
 	if err != nil {
 		return fmt.Errorf("load policies: %w", err)
 	}

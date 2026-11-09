@@ -1,0 +1,7 @@
+{
+  "handler": "bootstrap",
+  "runtime": "provided.al2023",
+  "architecture": "x86_64",
+  "environment": {},
+  "supportsWrapper": true
+}

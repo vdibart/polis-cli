@@ -3,6 +3,7 @@ package bundle
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,15 +71,15 @@ func TestSaveBundlePreservesUnmodelledMembersAtEveryLevel(t *testing.T) {
 
 func TestAnUntouchedRegistryRoundTripIsByteIdentical(t *testing.T) {
 	dir := t.TempDir()
-	golden := copyFixture(t, "registry.golden.json", RegistryPath(dir))
-	reg, err := LoadRegistry(dir)
+	golden := copyFixture(t, "registry.golden.json", storage.At(dir).Path(RegistryKey))
+	reg, err := LoadRegistry(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := SaveRegistry(dir, reg); err != nil {
+	if err := SaveRegistry(storage.At(dir), reg); err != nil {
 		t.Fatal(err)
 	}
-	after, _ := os.ReadFile(RegistryPath(dir))
+	after, _ := os.ReadFile(storage.At(dir).Path(RegistryKey))
 	if !bytes.Equal(after, golden) {
 		t.Fatalf("an untouched round-trip changed registry.json:\n--- before\n%s\n--- after\n%s", golden, after)
 	}
@@ -86,12 +87,12 @@ func TestAnUntouchedRegistryRoundTripIsByteIdentical(t *testing.T) {
 
 func TestSaveRegistryPreservesUnmodelledMembersAtEveryLevel(t *testing.T) {
 	dir := t.TempDir()
-	before := copyFixture(t, "registry.future.json", RegistryPath(dir))
+	before := copyFixture(t, "registry.future.json", storage.At(dir).Path(RegistryKey))
 	// A real setter: load → mutate → save.
-	if err := SetActiveThemeName(dir, "vice"); err != nil {
+	if err := SetActiveThemeName(storage.At(dir), "vice"); err != nil {
 		t.Fatal(err)
 	}
-	after, _ := os.ReadFile(RegistryPath(dir))
+	after, _ := os.ReadFile(storage.At(dir).Path(RegistryKey))
 	if !bytes.Contains(after, []byte(`"pub.polis.themes.vice"`)) {
 		t.Fatalf("the mutation itself was lost:\n%s", after)
 	}

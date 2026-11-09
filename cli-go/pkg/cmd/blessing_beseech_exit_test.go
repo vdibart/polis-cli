@@ -3,47 +3,88 @@ package cmd
 import (
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 )
 
-// `blessing beseech` for a comment the discovery service does not know used to
-// print an error and exit 0 — so a script checking the exit status, as the
-// JSON contract tells it to, read a failure as success.
-func TestBlessingBeseech_NotFoundExitsNonZero(t *testing.T) {
+// `blessing beseech` used to look the comment up at the discovery service, do
+// nothing, and report "status": "success" with a pointer at `comment sync`,
+// which does not re-request a blessing either. The Go CLI cannot re-request
+// one for an existing version, so the command now says so and exits non-zero.
+func TestBlessingBeseech_RefusesAsNotSupported(t *testing.T) {
 	if os.Getenv("POLIS_TEST_BESEECH_HELPER") == "1" {
 		dataDir = os.Getenv("POLIS_TEST_DIR")
 		jsonOutput = os.Getenv("POLIS_TEST_JSON") == "1"
-		handleBlessingBeseech([]string{"sha256:unknown"})
+		handleBlessingBeseech([]string{"sha256:abc123"})
 		os.Exit(0)
 	}
 
 	dir := t.TempDir()
-	if _, err := site.Init(dir, site.InitOptions{BaseURL: "https://alice.polis.pub", SiteTitle: "alice"}); err != nil {
+	if _, err := site.Init(storage.At(dir), site.InitOptions{BaseURL: "https://alice.polis.pub", SiteTitle: "alice"}); err != nil {
 		t.Fatal(err)
 	}
+	var hits atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{"exists": false})
+		hits.Add(1)
+		json.NewEncoder(w).Encode(map[string]interface{}{"exists": true})
 	}))
 	defer ts.Close()
 
 	for _, mode := range []string{"1", "0"} {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestBlessingBeseech_NotFoundExitsNonZero$")
+		cmd := exec.Command(os.Args[0], "-test.run=^TestBlessingBeseech_RefusesAsNotSupported$")
 		cmd.Env = append(os.Environ(),
 			"POLIS_TEST_BESEECH_HELPER=1",
 			"POLIS_TEST_DIR="+dir,
 			"POLIS_TEST_JSON="+mode,
+			"POLIS_BASE_URL=https://alice.polis.pub",
 			"DISCOVERY_SERVICE_URL="+ts.URL,
 		)
-		out, err := cmd.CombinedOutput()
+		var stdout, stderr strings.Builder
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() == 0 {
-			t.Errorf("json=%s: beseech of an unknown comment exited 0; want non-zero\n%s", mode, out)
+			t.Errorf("json=%s: beseech exited 0; want non-zero\n%s%s", mode, stdout.String(), stderr.String())
 		}
+		all := stdout.String() + stderr.String()
+		if strings.Contains(all, "comment sync") {
+			t.Errorf("json=%s: still points at `comment sync`, which does not re-request a blessing:\n%s", mode, all)
+		}
+		if mode != "1" {
+			continue
+		}
+		var got struct {
+			Status  string `json:"status"`
+			Command string `json:"command"`
+			Error   struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(stdout.String()), &got); err != nil {
+			t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout.String())
+		}
+		if got.Status != "error" || got.Command != "blessing-beseech" || got.Error.Code != "NOT_SUPPORTED" {
+			t.Errorf("want status error, command blessing-beseech, code NOT_SUPPORTED; got %+v", got)
+		}
+		if !strings.Contains(got.Error.Message, "web app") || !strings.Contains(got.Error.Message, "polis republish") {
+			t.Errorf("message does not say where it can be done: %q", got.Error.Message)
+		}
+		// Republishing or the web app re-requests only a pending comment: the
+		// discovery service returns an earlier denial unchanged.
+		if !strings.Contains(got.Error.Message, "PENDING") || !strings.Contains(got.Error.Message, "denied comment cannot be re-requested") {
+			t.Errorf("message does not say only a pending comment can be re-requested: %q", got.Error.Message)
+		}
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("beseech made %d discovery-service request(s); it should refuse without one", n)
 	}
 }

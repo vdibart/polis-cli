@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -56,6 +57,9 @@ func TestHelp_DocumentsAllCommands(t *testing.T) {
 		"polis preview",
 		"polis extract",
 		"polis republish",
+		"polis branch",
+		"polis branch deploy",
+		"polis recover sign",
 	}
 	for _, cmd := range wantPresent {
 		if !strings.Contains(output, cmd) {
@@ -214,6 +218,108 @@ func TestHelp_AdvertisesOnlyFormsTheHandlersAccept(t *testing.T) {
 	} {
 		if strings.Contains(output, stale) {
 			t.Errorf("help advertises %q, which the Go CLI does not accept", stale)
+		}
+	}
+}
+
+// subcommandsExemptFromHelp are subcommand case labels that deliberately do not
+// appear in `polis help`: help aliases, which print the text this test checks.
+var subcommandsExemptFromHelp = map[string]bool{"help": true, "--help": true, "-h": true}
+
+// TestHelp_EveryDispatchedSubcommandIsInHelp is the subcommand twin of the test
+// above. `dm config`, `dm decrypt`, `dm publish-key`, `attest register`, `actor
+// announce` and `actor declare-operator` all shipped dispatched and working,
+// and none appeared in `polis help`: the per-command subcommand tests are
+// hand-maintained lists, and a subcommand absent from the list was absent from
+// nothing. This one reads each top-level handler's own switch, so a new
+// subcommand fails here until help mentions it.
+//
+// A case line naming several labels (`case "requests", "list":`) is one
+// subcommand with aliases, so help need name only one of them.
+func TestHelp_EveryDispatchedSubcommandIsInHelp(t *testing.T) {
+	root, err := os.ReadFile("root.go")
+	if err != nil {
+		t.Fatalf("read root.go: %v", err)
+	}
+	body := string(root)
+	start := strings.Index(body, "switch command {")
+	if start < 0 {
+		t.Fatal("could not find `switch command {` in root.go — update this test rather than deleting it")
+	}
+	body = body[start:]
+
+	// The source of every handler, keyed by name.
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var src strings.Builder
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src.Write(b)
+		src.WriteString("\n")
+	}
+	all := src.String()
+	handlerBody := func(name string) string {
+		i := strings.Index(all, "\nfunc "+name+"(")
+		if i < 0 {
+			return ""
+		}
+		rest := all[i+1:]
+		if j := strings.Index(rest, "\n}\n"); j > 0 {
+			return rest[:j]
+		}
+		return rest
+	}
+
+	dispatchRe := regexp.MustCompile(`(?m)^\tcase ([^\n]+):\n\t\t(handle\w+)\(cmdArgs\)`)
+	caseRe := regexp.MustCompile(`(?m)^\tcase (.+):$`) // one tab: the handler's own switch, not a nested one
+	nameRe := regexp.MustCompile(`"([^"]+)"`)
+
+	help := captureHelp(t)
+	found := map[string]int{}
+	for _, d := range dispatchRe.FindAllStringSubmatch(body, -1) {
+		names := nameRe.FindAllStringSubmatch(d[1], -1)
+		if len(names) == 0 {
+			continue
+		}
+		cmd := names[0][1]
+		hb := handlerBody(d[2])
+		if hb == "" {
+			t.Errorf("dispatch names %s for `polis %s`, but no such function was found", d[2], cmd)
+			continue
+		}
+		for _, line := range caseRe.FindAllStringSubmatch(hb, -1) {
+			var labels []string
+			for _, n := range nameRe.FindAllStringSubmatch(line[1], -1) {
+				if !subcommandsExemptFromHelp[n[1]] {
+					labels = append(labels, n[1])
+				}
+			}
+			if len(labels) == 0 {
+				continue
+			}
+			found[cmd]++
+			ok := false
+			for _, l := range labels {
+				ok = ok || strings.Contains(help, "polis "+cmd+" "+l)
+			}
+			if !ok {
+				t.Errorf("`polis %s %s` is dispatched by %s but never mentioned in help — add it to printUsage",
+					cmd, strings.Join(labels, "|"), d[2])
+			}
+		}
+	}
+	// Guard the parse itself: these commands are known to have subcommands.
+	for _, cmd := range []string{"dm", "attest", "actor", "blessing", "tag", "comment", "notifications", "site"} {
+		if found[cmd] < 2 {
+			t.Errorf("found %d subcommands for `polis %s`; the parse is wrong, not the code", found[cmd], cmd)
 		}
 	}
 }

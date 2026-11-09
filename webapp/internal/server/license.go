@@ -1,9 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -29,7 +29,6 @@ func (s *Server) publishConfigWithLicense(authoredLicense string) *publish.Disco
 		}
 		cfg = &publish.DiscoveryConfig{
 			DiscoveryURL: s.DiscoveryURL,
-			DiscoveryKey: s.DiscoveryKey,
 			BaseURL:      s.BaseURL,
 			Generator:    "polis-cli-go/" + s.CLIVersion,
 		}
@@ -53,7 +52,7 @@ func (s *Server) publishConfigWithLicense(authoredLicense string) *publish.Disco
 func (s *Server) logLicenseMaterialised(postPath string) {
 	fields := map[string]interface{}{"path": postPath, "stated": false}
 
-	data, err := os.ReadFile(filepath.Join(s.DataDir, postPath))
+	data, err := s.Site().Store().Get(context.Background(), filepath.ToSlash(postPath))
 	if err == nil {
 		if terms := license.ParseBlock(string(data)); terms != nil {
 			fields["stated"] = true
@@ -75,7 +74,7 @@ func (s *Server) logLicenseMaterialised(postPath string) {
 func (s *Server) licenseSettings() map[string]interface{} {
 	out := map[string]interface{}{"stated": false}
 
-	terms, err := site.SiteTerms(s.DataDir)
+	terms, err := site.SiteTerms(s.Site())
 	if err != nil || terms == nil {
 		return out
 	}
@@ -127,14 +126,14 @@ func (s *Server) handleSiteLicense(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !stated {
-		if err := site.WithdrawLicense(s.DataDir); err != nil {
+		if err := site.WithdrawLicense(s.Site()); err != nil {
 			s.LogError("Failed to withdraw licence: %v", err)
 			http.Error(w, "Failed to withdraw licence", http.StatusInternalServerError)
 			return
 		}
 		s.LogEvent("pub.polis.license.withdrawn", map[string]interface{}{})
 	} else {
-		if _, err := site.StateLicense(s.DataDir, req.Profile, s.GetBaseURL(), s.PrivateKey); err != nil {
+		if _, err := site.StateLicense(s.Site(), req.Profile, s.GetBaseURL(), s.PrivateKey); err != nil {
 			s.LogError("Failed to state licence: %v", err)
 			http.Error(w, "Failed to state licence", http.StatusInternalServerError)
 			return
@@ -145,7 +144,7 @@ func (s *Server) handleSiteLicense(w http.ResponseWriter, r *http.Request) {
 	// Regenerate the projections so robots.txt, rsl.xml, and the terms page
 	// stop disagreeing with the signed source the moment it changes.
 	if renderer, rerr := render.NewPageRenderer(render.PageConfig{
-		DataDir: s.DataDir,
+		Site:    s.Site(),
 		BaseURL: s.GetBaseURL(),
 	}); rerr == nil {
 		if lerr := renderer.RenderLicenseSurfaces(); lerr != nil {

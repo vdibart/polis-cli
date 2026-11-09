@@ -3,10 +3,11 @@ package theme
 import (
 	"crypto/sha256"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // baseTemplateFiles are the template files that _base provides.
@@ -56,13 +57,13 @@ func normalizeForHash(content string) string {
 // isStaleFile returns true if the file at themePath is a known old system template
 // (matches a canonical hash) OR matches the current _base file exactly.
 func isStaleFile(themePath, basePath, relPath string) bool {
-	themeData, err := os.ReadFile(themePath)
+	themeData, err := storage.ReadAtPath(themePath)
 	if err != nil {
 		return false
 	}
 
 	// Check 1: exact match against _base (handles future _base updates)
-	if baseData, err := os.ReadFile(basePath); err == nil {
+	if baseData, err := storage.ReadAtPath(basePath); err == nil {
 		if string(themeData) == string(baseData) {
 			return true
 		}

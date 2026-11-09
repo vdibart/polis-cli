@@ -1,44 +1,53 @@
 package site
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/license"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // LicenseFilename is the licence document's name inside its content directory.
 const LicenseFilename = "license.json"
 
-// LicensePath returns where this site's licence document lives, honouring the
-// site's own bundle declaration rather than assuming a path.
+// LicenseKey is the licence document's key, relative to the site root.
+//
+// ⭐⭐ THIS IS THE SOURCE OF TRUTH: LicenseURLPath prefixes it with "/", and
+// every read, write and delete of the document addresses it by this key.
+// ⚠️ Before this, LicenseURLPath recovered the relative form by calling
+// filepath.Rel on two absolute paths — a round trip that only worked because a
+// path happened to be available, and that had a fallback arm for when Rel
+// failed. A key is that relative form already.
 //
 // `dir` is user-configurable per content type, so a site that has moved its
 // licence directory is a supported configuration, not a broken one. Falls back
 // to the default layout when the bundle cannot be read.
-func LicensePath(siteDir string) string {
-	b, err := bundle.LoadBundle(filepath.Join(siteDir, "content", "pub.polis.core", "bundle.json"))
+func LicenseKey(site storage.Site) string {
+	// ⚠️ bundle.LoadBundle takes a path: pkg/bundle is not on the serving path
+	// and has not converted.
+	b, err := bundle.LoadBundleAt(site, "content/pub.polis.core/bundle.json")
 	if err == nil {
 		if dir, err := b.ContentDir(license.TypeName); err == nil {
-			return filepath.Join(siteDir, dir, LicenseFilename)
+			return filepath.ToSlash(filepath.Join(dir, LicenseFilename))
 		}
 	}
-	return license.DefaultPath(siteDir)
+	return "content/pub.polis.core/license/" + LicenseFilename
 }
 
 // LicenseURLPath returns the site-relative URL of the licence document — the
 // value written into the `license` pointer in .well-known/polis.
-func LicenseURLPath(siteDir string) string {
-	rel, err := filepath.Rel(siteDir, LicensePath(siteDir))
-	if err != nil {
-		rel = filepath.Join("content", "pub.polis.core", "license", LicenseFilename)
-	}
-	return "/" + filepath.ToSlash(rel)
+func LicenseURLPath(site storage.Site) string {
+	return "/" + LicenseKey(site)
 }
 
 // LicenseMountDir returns the site-relative directory the licence type's
@@ -46,15 +55,15 @@ func LicenseURLPath(siteDir string) string {
 // profile explanations — honouring the site's own bundle declaration.
 //
 // ⚠️ This is the MOUNT, not the content dir. license.json lives at
-// LicensePath (the signed source); this is where its projections go. They are
+// LicenseKey (the signed source); this is where its projections go. They are
 // configured separately and a site may move either one.
 //
 // One resolver, because two callers need the same answer for opposite reasons:
 // the renderer writes those pages, and WithdrawLicense removes them. A second
 // idea of where they live would leave one of the two acting on an empty
 // directory.
-func LicenseMountDir(siteDir string) string {
-	b, err := bundle.LoadBundle(filepath.Join(siteDir, "content", "pub.polis.core", "bundle.json"))
+func LicenseMountDir(site storage.Site) string {
+	b, err := bundle.LoadBundleAt(site, "content/pub.polis.core/bundle.json")
 	if err == nil {
 		if dir, err := b.MountDir(license.TypeName); err == nil {
 			return dir
@@ -77,7 +86,7 @@ func LicenseMountDir(siteDir string) string {
 // ⚠️ Never call this on an author's behalf without their having chosen. A
 // license.json is a signed statement of intent; creating one the author never
 // made asserts they said something they did not.
-func StateLicense(siteDir, choice, baseURL string, privateKey []byte) (bool, error) {
+func StateLicense(site storage.Site, choice, baseURL string, privateKey []byte) (bool, error) {
 	profile, stated, err := license.ParseProfileName(choice)
 	if err != nil {
 		return false, err
@@ -90,7 +99,7 @@ func StateLicense(siteDir, choice, baseURL string, privateKey []byte) (bool, err
 	if err != nil {
 		return false, err
 	}
-	path := LicensePath(siteDir)
+	key := LicenseKey(site)
 
 	// `created` means CREATED. license.New builds a fresh file with created,
 	// updated and asserted all set to now, which is right for a first
@@ -105,15 +114,20 @@ func StateLicense(siteDir, choice, baseURL string, privateKey []byte) (bool, err
 	// It means there is nothing to carry forward, so the fresh value stands —
 	// which is exactly what a first statement wants. Refusing to state terms
 	// because an old file would not parse would be the worst possible trade.
-	if existing, err := license.Load(path); err == nil && existing.Created != "" {
+	//
+	// ⛔ Read through the STORE. A path read on a blob-backed site fails, and
+	// because a failed read is deliberately "nothing to carry forward" here, it
+	// would fail SILENTLY — every restatement would reset the date this site
+	// first stated terms.
+	if existing, err := license.LoadKey(site, key); err == nil && existing.Created != "" {
 		f.Created = existing.Created
 	}
 
-	if err := license.SignAndWrite(f, path, privateKey); err != nil {
+	if err := license.SignAndWrite(f, site, key, privateKey); err != nil {
 		return false, err
 	}
 
-	if err := SetLicensePointer(siteDir, LicenseURLPath(siteDir)); err != nil {
+	if err := SetLicensePointer(site, LicenseURLPath(site)); err != nil {
 		return false, fmt.Errorf("write licence pointer: %w", err)
 	}
 	return true, nil
@@ -143,17 +157,14 @@ func StateLicense(siteDir, choice, baseURL string, privateKey []byte) (bool, err
 //
 // Withdrawal does NOT change any work already published: those carry the terms
 // they were signed with, and no later act by the author reaches back to them.
-func WithdrawLicense(siteDir string) error {
-	if err := RemoveLicenseSurfaces(siteDir); err != nil {
+func WithdrawLicense(site storage.Site) error {
+	if err := RemoveLicenseSurfaces(site); err != nil {
 		return err
 	}
-	if err := SetLicensePointer(siteDir, ""); err != nil {
+	if err := SetLicensePointer(site, ""); err != nil {
 		return err
 	}
-	if err := os.Remove(LicensePath(siteDir)); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return site.Store().Delete(context.Background(), LicenseKey(site), storage.IgnoreMissing())
 }
 
 // RemoveLicenseSurfaces deletes every generated licence surface: robots.txt,
@@ -173,38 +184,41 @@ func WithdrawLicense(siteDir string) error {
 // publish, and a site that never stated terms may have a robots.txt of its own
 // that is none of our business. Removal belongs to the one act that means it:
 // withdrawal.
-func RemoveLicenseSurfaces(siteDir string) error {
+func RemoveLicenseSurfaces(site storage.Site) error {
 	for _, name := range []string{"robots.txt", "rsl.xml"} {
-		if err := os.Remove(filepath.Join(siteDir, name)); err != nil && !os.IsNotExist(err) {
+		if err := site.Store().Delete(context.Background(), name, storage.IgnoreMissing()); err != nil {
 			return err
 		}
 	}
 
-	mount := strings.Trim(LicenseMountDir(siteDir), "/")
+	mount := strings.Trim(LicenseMountDir(site), "/")
 	// A mount that resolves to the site root is not a mount we may empty.
 	if mount == "" || mount == "." {
 		return nil
 	}
-	mountPath := filepath.Join(siteDir, filepath.FromSlash(mount))
+	ctx := context.Background()
 
-	entries, err := os.ReadDir(mountPath)
+	// ⭐ List, not ListDir: a missing mount and an empty one mean the same
+	// thing here — there is nothing of ours to remove — and that is exactly
+	// List's contract. A read that fails for any other reason is still an
+	// error.
+	entries, err := site.Store().List(ctx, mount)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
 	for _, e := range entries {
-		if e.IsDir() || !isRenderedLicensePage(e.Name()) {
+		if e.IsDir || !isRenderedLicensePage(pathpkg.Base(e.Key)) {
 			continue
 		}
-		if err := os.Remove(filepath.Join(mountPath, e.Name())); err != nil && !os.IsNotExist(err) {
+		if err := site.Store().Delete(ctx, mount+"/"+pathpkg.Base(e.Key), storage.IgnoreMissing()); err != nil {
 			return err
 		}
 	}
-	// Remove is the right call, not RemoveAll: it succeeds only on an empty
-	// directory, so anything the author left there keeps the mount alive.
-	if err := os.Remove(mountPath); err != nil && !os.IsNotExist(err) {
+	// A plain delete is the right call, not a recursive one: on a filesystem
+	// it succeeds only on an empty directory, so anything the author left
+	// there keeps the mount alive. A store with no directories holds no key at
+	// the mount itself, so there is nothing to delete and absence is ignored.
+	if err := site.Store().Delete(ctx, mount, storage.IgnoreMissing()); err != nil {
 		if !isNotEmpty(err) {
 			return err
 		}
@@ -251,19 +265,22 @@ func isNotEmpty(err error) bool {
 // nowhere is treated the same way: a consumer cannot tell the difference
 // between "no terms" and "terms we failed to fetch", and inventing terms in
 // either case would be worse than silence.
-func SiteTerms(siteDir string) (*license.Terms, error) {
-	pointer := LicensePath(siteDir)
-	if p := LicensePointer(siteDir); p != "" {
-		pointer = filepath.Join(siteDir, filepath.FromSlash(trimLeadingSlash(p)))
-	} else {
+func SiteTerms(site storage.Site) (*license.Terms, error) {
+	p := LicensePointer(site)
+	if p == "" {
 		// No pointer means the author has stated nothing, even if a stray file
 		// exists. The pointer is the statement.
 		return nil, nil
 	}
+	pointer := trimLeadingSlash(p)
 
-	f, err := license.Load(pointer)
+	f, err := license.LoadKey(site, pointer)
 	if err != nil {
-		if os.IsNotExist(err) || os.IsNotExist(underlying(err)) {
+		// ⚠️ A pointer that escapes the site leads nowhere too. When this
+		// joined the pointer onto a path it read whatever file sat outside the
+		// site; the store refuses the key, and that refusal is "nothing here",
+		// the same as a pointer to a file that is gone.
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, storage.ErrInvalidKey) {
 			return nil, nil
 		}
 		return nil, err
@@ -282,14 +299,4 @@ func trimLeadingSlash(s string) string {
 		s = s[1:]
 	}
 	return s
-}
-
-// underlying unwraps one level of error wrapping so os.IsNotExist can see
-// through license.Load's %w.
-func underlying(err error) error {
-	type unwrapper interface{ Unwrap() error }
-	if u, ok := err.(unwrapper); ok {
-		return u.Unwrap()
-	}
-	return err
 }

@@ -2,6 +2,8 @@ package discovery
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,7 +28,7 @@ func repoRoot(t *testing.T) string {
 // Anywhere the DS tree exists, a missing fixture still fails.
 func skipWithoutDS(t *testing.T) {
 	t.Helper()
-	if _, err := os.Stat(filepath.Join(repoRoot(t), "discovery-service")); os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(repoRoot(t), "discovery-service")); errors.Is(err, fs.ErrNotExist) {
 		t.Skip("the shared contract fixtures live with the discovery service source, which is not in this repository")
 	}
 }

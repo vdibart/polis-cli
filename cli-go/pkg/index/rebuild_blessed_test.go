@@ -2,6 +2,7 @@ package index
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,7 +21,7 @@ import (
 
 func writeBlessed(t *testing.T, dataDir string, bc *metadata.BlessedComments) {
 	t.Helper()
-	if err := metadata.SaveBlessedComments(dataDir, bc); err != nil {
+	if err := metadata.SaveBlessedComments(storage.At(dataDir), bc); err != nil {
 		t.Fatalf("SaveBlessedComments: %v", err)
 	}
 }
@@ -46,8 +47,8 @@ func dsServingGrants(t *testing.T, targetURL string, sourceURLs ...string) *http
 
 // unverifiedClient skips DS response-signature verification so the fake DS above
 // does not have to sign. Production always constructs a verifying client.
-func unverifiedClient(url, key string) *discovery.Client {
-	c := discovery.NewClient(url, key)
+func unverifiedClient(url string) *discovery.Client {
+	c := discovery.NewClient(url)
 	c.DSKeyCache = nil
 	return c
 }
@@ -72,17 +73,16 @@ func TestRebuildPreservesVersionPins(t *testing.T) {
 	srv := dsServingGrants(t, "https://alice.example/"+post, commentURL)
 	defer srv.Close()
 
-	if _, err := RebuildIndex(dataDir, RebuildOptions{
+	if _, err := RebuildIndex(storage.At(dataDir), RebuildOptions{
 		Comments:     true,
 		DiscoveryURL: srv.URL,
-		DiscoveryKey: "k",
 		BaseURL:      "https://alice.example",
 		NewDSClient:  unverifiedClient,
 	}); err != nil {
 		t.Fatalf("RebuildIndex: %v", err)
 	}
 
-	bc, err := metadata.LoadBlessedComments(dataDir)
+	bc, err := metadata.LoadBlessedComments(storage.At(dataDir))
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
 	}
@@ -117,28 +117,27 @@ func TestRebuildPreservesTheSignature(t *testing.T) {
 		t.Fatalf("write .well-known/polis: %v", err)
 	}
 
-	if err := metadata.AddBlessedCommentSigned(dataDir, "posts/20260101/hello.md",
+	if err := metadata.AddBlessedCommentSigned(storage.At(dataDir), "posts/20260101/hello.md",
 		metadata.BlessedComment{URL: "https://bob.example/c/1.md", Version: "sha256:aaa"}, priv); err != nil {
 		t.Fatalf("AddBlessedCommentSigned: %v", err)
 	}
-	if status, _ := metadata.VerifyBlessedSite(dataDir); status != metadata.StatusValid {
+	if status, _ := metadata.VerifyBlessedSite(storage.At(dataDir)); status != metadata.StatusValid {
 		t.Fatalf("setup: expected a valid signature, got %q", status)
 	}
 
 	srv := dsServingGrants(t, "https://alice.example/posts/20260101/hello.md", "https://bob.example/c/1.md")
 	defer srv.Close()
 
-	if _, err := RebuildIndex(dataDir, RebuildOptions{
+	if _, err := RebuildIndex(storage.At(dataDir), RebuildOptions{
 		Comments:     true,
 		DiscoveryURL: srv.URL,
-		DiscoveryKey: "k",
 		BaseURL:      "https://alice.example",
 		NewDSClient:  unverifiedClient,
 	}); err != nil {
 		t.Fatalf("RebuildIndex: %v", err)
 	}
 
-	if status, err := metadata.VerifyBlessedSite(dataDir); status != metadata.StatusValid {
+	if status, err := metadata.VerifyBlessedSite(storage.At(dataDir)); status != metadata.StatusValid {
 		t.Errorf("status after rebuild = %q (%v), want %q", status, err, metadata.StatusValid)
 	}
 }
@@ -163,10 +162,9 @@ func TestRebuildDoesNotDropEntriesTheDSNeverSaw(t *testing.T) {
 	srv := dsServingGrants(t, "https://alice.example/posts/20260101/hello.md", "https://bob.example/c/1.md")
 	defer srv.Close()
 
-	count, err := RebuildIndex(dataDir, RebuildOptions{
+	count, err := RebuildIndex(storage.At(dataDir), RebuildOptions{
 		Comments:     true,
 		DiscoveryURL: srv.URL,
-		DiscoveryKey: "k",
 		BaseURL:      "https://alice.example",
 		NewDSClient:  unverifiedClient,
 	})
@@ -178,7 +176,7 @@ func TestRebuildDoesNotDropEntriesTheDSNeverSaw(t *testing.T) {
 			"preserved file, not the DS query", count.CommentsRebuilt)
 	}
 
-	bc, _ := metadata.LoadBlessedComments(dataDir)
+	bc, _ := metadata.LoadBlessedComments(storage.At(dataDir))
 	if len(bc.Comments[0].Blessed) != 2 {
 		t.Errorf("rebuild dropped a blessing the DS did not know about: %+v", bc.Comments[0].Blessed)
 	}
@@ -193,17 +191,16 @@ func TestRebuildRecoversAnAbsentFileFromTheDS(t *testing.T) {
 		"https://bob.example/c/1.md", "https://carol.example/c/2.md")
 	defer srv.Close()
 
-	if _, err := RebuildIndex(dataDir, RebuildOptions{
+	if _, err := RebuildIndex(storage.At(dataDir), RebuildOptions{
 		Comments:     true,
 		DiscoveryURL: srv.URL,
-		DiscoveryKey: "k",
 		BaseURL:      "https://alice.example",
 		NewDSClient:  unverifiedClient,
 	}); err != nil {
 		t.Fatalf("RebuildIndex: %v", err)
 	}
 
-	bc, err := metadata.LoadBlessedComments(dataDir)
+	bc, err := metadata.LoadBlessedComments(storage.At(dataDir))
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
 	}
@@ -232,7 +229,7 @@ func TestRebuildRefusesToOverwriteAnUnparseableFile(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	if _, err := RebuildIndex(dataDir, RebuildOptions{Comments: true}); err == nil {
+	if _, err := RebuildIndex(storage.At(dataDir), RebuildOptions{Comments: true}); err == nil {
 		t.Fatal("rebuild silently overwrote an unparseable blessed.json")
 	}
 
@@ -249,10 +246,10 @@ func TestRebuildRefusesToOverwriteAnUnparseableFile(t *testing.T) {
 // behaviour for a fresh site: rebuild leaves a well-formed empty list behind.
 func TestRebuildCreatesAnEmptyFileWhenThereIsNothingToRecover(t *testing.T) {
 	dataDir := t.TempDir()
-	if _, err := RebuildIndex(dataDir, RebuildOptions{Comments: true}); err != nil {
+	if _, err := RebuildIndex(storage.At(dataDir), RebuildOptions{Comments: true}); err != nil {
 		t.Fatalf("RebuildIndex: %v", err)
 	}
-	bc, err := metadata.LoadBlessedComments(dataDir)
+	bc, err := metadata.LoadBlessedComments(storage.At(dataDir))
 	if err != nil {
 		t.Fatalf("LoadBlessedComments: %v", err)
 	}

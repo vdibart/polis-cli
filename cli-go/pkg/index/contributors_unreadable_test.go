@@ -1,6 +1,7 @@
 package index
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,7 +28,7 @@ func TestRebuild_CountsAnUnreadableFileAsSkipped(t *testing.T) {
 		defer os.Chmod(p, 0644)
 	}
 
-	result, err := RebuildContentIndex(dataDir, nil)
+	result, err := RebuildContentIndex(storage.At(dataDir), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

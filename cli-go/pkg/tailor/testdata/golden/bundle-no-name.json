@@ -217,6 +217,12 @@
       "reason": "the discovery service emits pub.polis.post.unpublished and pub.polis.comment.unpublished; the core bundle now declares them, and a named migration adds them to existing sites before the defaults change"
     },
     {
+      "name": "theme-shapes-migration",
+      "status": "skip",
+      "message": "cannot load bundle.json: invalid bundle $SITES/bundle-no-name/content/pub.polis.core/bundle.json: bundle name is required",
+      "reason": "sites created before the stream shape existed declare their core themes as blog-only, and merging defaults never updates a theme already declared; the missing shapes are added, and none the site lists is removed"
+    },
+    {
       "name": "bundle-declarations",
       "status": "skip",
       "message": "cannot load bundle.json: invalid bundle $SITES/bundle-no-name/content/pub.polis.core/bundle.json: bundle name is required",

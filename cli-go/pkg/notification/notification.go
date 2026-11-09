@@ -8,14 +8,18 @@ package notification
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
+	pathpkg "path"
 	"strings"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // StateEntry represents a single notification in state.jsonl.
@@ -32,33 +36,46 @@ type StateEntry struct {
 	ReadAt    string                 `json:"read_at,omitempty"`
 }
 
-// StateDir returns the state directory for a given DS domain (bundle-scoped).
-func StateDir(dataDir, discoveryDomain string) string {
-	return filepath.Join(dataDir, ".polis", "ds", discoveryDomain, "pub.polis.core", "state")
+// StateDirKey is the state directory for a DS domain, relative to the site
+// root. ⭐ A KEY, so the same address works on any backend.
+func StateDirKey(discoveryDomain string) string {
+	return ".polis/ds/" + discoveryDomain + "/pub.polis.core/state"
 }
 
-// StateFile returns the path to pub.polis.notification.jsonl for a given DS domain.
-func StateFile(dataDir, discoveryDomain string) string {
-	return filepath.Join(StateDir(dataDir, discoveryDomain), "pub.polis.notification.jsonl")
+// StateFileKey is pub.polis.notification.jsonl for a DS domain, as a key.
+func StateFileKey(discoveryDomain string) string {
+	return StateDirKey(discoveryDomain) + "/pub.polis.notification.jsonl"
 }
 
 // Manager handles notification state operations.
 type Manager struct {
-	stateFile string
+	// ⭐ The struct was already the right shape; only the identity was missing.
+	site     storage.Site
+	stateKey string
 }
 
 // NewManager creates a notification manager for a specific discovery service domain.
-func NewManager(dataDir, discoveryDomain string) *Manager {
+func NewManager(site storage.Site, discoveryDomain string) *Manager {
 	return &Manager{
-		stateFile: StateFile(dataDir, discoveryDomain),
+		site:     site,
+		stateKey: StateFileKey(discoveryDomain),
 	}
 }
 
 // List returns all notification entries from state.jsonl.
 func (m *Manager) List() ([]StateEntry, error) {
-	file, err := os.Open(m.stateFile)
+	// NOT a whole Get on a filesystem: this STREAMS THE BYTES with a
+	// bufio.Scanner rather than reading the file whole, which is what matters
+	// for a file that grows without bound. storage.OpenRead streams wherever
+	// the store has a real path, and reads whole only where there is no file.
+	//
+	// ⚠️ A review called this a rationalisation because the PARSED entries are
+	// accumulated into a slice. That is true and is a different question: the
+	// parsed form is bounded by what the caller needs, while Get would hold the
+	// raw bytes as well. Converting is possible and is not free.
+	file, err := storage.OpenRead(m.site, m.stateKey)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return []StateEntry{}, nil
 		}
 		return nil, fmt.Errorf("failed to open state file: %w", err)
@@ -177,9 +194,8 @@ func (m *Manager) ListPaginated(offset, limit int, includeRead bool) ([]StateEnt
 // than silently dropping it (the prior implementation discarded write/marshal
 // errors and the deferred Close swallowed close errors too).
 func (m *Manager) writeAll(entries []StateEntry) error {
-	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
+	// Stays: the write below goes through atomicfile, which owns atomicity outside
+	// the interface and creates no parents.
 
 	var buf bytes.Buffer
 	for _, e := range entries {
@@ -191,7 +207,7 @@ func (m *Manager) writeAll(entries []StateEntry) error {
 		buf.WriteByte('\n')
 	}
 
-	return atomicfile.WriteFile(m.stateFile, buf.Bytes(), 0600)
+	return atomicfile.Write(context.Background(), m.site, m.stateKey, buf.Bytes(), 0600)
 }
 
 // ClearAll empties every discovery domain's notification state file and returns
@@ -204,24 +220,23 @@ func (m *Manager) writeAll(entries []StateEntry) error {
 // alias.
 //
 // Mode stays 0600: this is `.polis/` state, not served content.
-func ClearAll(dataDir string) (int, error) {
+func ClearAll(site storage.Site) (int, error) {
 	count := 0
 
-	dsDir := filepath.Join(dataDir, ".polis", "ds")
-	entries, err := os.ReadDir(dsDir)
+	// ⭐ Through the store. Store.List reports a real failure and treats only
+	// absence as empty, which is what the not-exist arm here returned anyway.
+	ctx := context.Background()
+	entries, err := site.Store().List(ctx, ".polis/ds")
 	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
 		return 0, err
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir {
 			continue
 		}
-		statePath := StateFile(dataDir, entry.Name())
-		data, err := os.ReadFile(statePath)
+		stateKey := StateFileKey(pathpkg.Base(entry.Key))
+		data, err := site.Store().Get(ctx, stateKey)
 		if err != nil {
 			continue
 		}
@@ -230,7 +245,7 @@ func ClearAll(dataDir string) (int, error) {
 				count++
 			}
 		}
-		if err := atomicfile.WriteFile(statePath, []byte{}, 0600); err != nil {
+		if err := atomicfile.Write(ctx, site, stateKey, []byte{}, 0600); err != nil {
 			return count, err
 		}
 	}

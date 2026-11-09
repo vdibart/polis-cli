@@ -60,7 +60,7 @@ func TestMarkedRelationshipRequestSignsTheMarker(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "")
+	c := NewClient(srv.URL)
 	marker := AgentMarker{Agent: "rosie", Grant: "https://alice.example/content/pub.polis.core/attestation/x.json"}
 	if err := c.UpdateRelationshipMarked("pub.polis.comment.blessing", "https://bob.example/c.md", "https://alice.example/p.md", "grant", marker, priv); err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestUnmarkedRelationshipRequestCarriesNoMarkerKeys(t *testing.T) {
 		raw = string(b)
 	}))
 	defer srv.Close()
-	if err := NewClient(srv.URL, "").UpdateRelationship("pub.polis.comment.blessing", "https://bob.example/c.md", "https://alice.example/p.md", "grant", priv); err != nil {
+	if err := NewClient(srv.URL).UpdateRelationship("pub.polis.comment.blessing", "https://bob.example/c.md", "https://alice.example/p.md", "grant", priv); err != nil {
 		t.Fatal(err)
 	}
 	var keys map[string]interface{}
@@ -151,7 +151,7 @@ func TestRelationshipSignatureMatchesTheSharedContractFixture(t *testing.T) {
 
 func TestAHalfMarkerIsRefused(t *testing.T) {
 	priv, _, _ := signing.GenerateKeypair()
-	c := NewClient("http://127.0.0.1:1", "")
+	c := NewClient("http://127.0.0.1:1")
 	if err := c.UpdateRelationshipMarked("pub.polis.comment.blessing", "a", "b", "grant", AgentMarker{Agent: "rosie"}, priv); err == nil {
 		t.Fatal("a marker with an agent and no grant was sent")
 	}

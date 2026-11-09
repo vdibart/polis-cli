@@ -2,14 +2,17 @@ package index
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 	"sort"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // ContentIndexResult reports what a content-index rebuild did, PER TYPE.
@@ -178,8 +181,11 @@ func sameLines(a, b []string) bool {
 //
 // `only` names the entry types to rebuild; an empty slice rebuilds every
 // contributor. Everything not named is preserved byte-identically.
-func PlanContentIndex(siteDir string, only []string) ([]byte, *ContentIndexResult, error) {
-	d := newSiteDirs(siteDir)
+func PlanContentIndex(site storage.Site, only []string) ([]byte, *ContentIndexResult, error) {
+	if !site.Valid() {
+		return nil, nil, fmt.Errorf("plan content index: site handle is not usable")
+	}
+	d := newSiteDirs(site)
 
 	wanted := map[string]bool{}
 	for _, t := range only {
@@ -205,8 +211,8 @@ func PlanContentIndex(siteDir string, only []string) ([]byte, *ContentIndexResul
 		}
 	}
 
-	existing, err := os.ReadFile(d.indexPath())
-	if err != nil && !os.IsNotExist(err) {
+	existing, err := d.read(d.indexKey())
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, nil, fmt.Errorf("read index: %w", err)
 	}
 
@@ -225,27 +231,39 @@ func PlanContentIndex(siteDir string, only []string) ([]byte, *ContentIndexResul
 // pre-fix rebuild used would 403 the site's own index on a self-hosted
 // split-user nginx setup. 0600 is right for `.polis/` state and wrong here —
 // do not "fix" the sibling state writers to match this.
-func RebuildContentIndex(siteDir string, only []string) (*ContentIndexResult, error) {
-	content, result, err := PlanContentIndex(siteDir, only)
+func RebuildContentIndex(site storage.Site, only []string) (*ContentIndexResult, error) {
+	content, result, err := PlanContentIndex(site, only)
 	if err != nil {
 		return nil, err
 	}
 
-	path := newSiteDirs(siteDir).indexPath()
+	key := newSiteDirs(site).indexKey()
+	st := site.Store()
+	ctx := context.Background()
 
 	// Nothing to change: leave the file, and its mtime, alone. Since epic 37
 	// this runs on every tag and attestation write, and Patrol baselines file
 	// mtimes — a rewrite of identical bytes is noise it would have to explain.
 	if !result.Changed {
-		if _, err := os.Stat(path); err == nil {
+		if present, _ := st.Exists(ctx, key); present {
 			return result, nil
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return nil, err
-	}
-	if err := atomicfile.WriteFile(path, content, 0644); err != nil {
+	// ⛔⛔ IT TAKES THE INDEX'S KEY LOCK, and that is the load-bearing part.
+	// This is Medic's rebuild, running on EVERY SWEEP, and it replaces the
+	// whole file. Without the lock it lands between a publisher's append and
+	// clobbers it — silently, because the lost line is a published post no
+	// reader can discover. ⭐ atomicfile makes the write atomic; only the lock
+	// makes it safe against a concurrent writer. (The key lock and the path
+	// lock resolve to one mutex for one file, so the publishers that still
+	// lock by path are excluded too.)
+	//
+	// ⚠️ This was already a temp-and-rename before it took the site, so the
+	// file's mode under a strict umask is what it was.
+	if err := storage.WithKeyLock(st, key, func() error {
+		return atomicfile.Write(ctx, site, key, content, 0644)
+	}); err != nil {
 		return nil, err
 	}
 	return result, nil

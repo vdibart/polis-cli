@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -32,7 +34,7 @@ func TestSiteValidation_EmptyDirectory(t *testing.T) {
 	// Create required directories but no polis files
 	os.MkdirAll(filepath.Join(dataDir, ".polis", "keys"), 0755)
 
-	result := site.Validate(dataDir)
+	result := site.Validate(storage.At(dataDir))
 
 	// Empty directory should return not_found or incomplete
 	if result.Status == site.StatusValid {
@@ -63,7 +65,7 @@ func TestSiteValidation_ValidSite(t *testing.T) {
 	wellKnownData, _ := json.Marshal(wellKnown)
 	os.WriteFile(filepath.Join(dataDir, ".well-known", "polis"), wellKnownData, 0644)
 
-	result := site.Validate(dataDir)
+	result := site.Validate(storage.At(dataDir))
 
 	if result.Status != site.StatusValid {
 		t.Errorf("Expected status valid, got %s", result.Status)
@@ -92,7 +94,7 @@ func TestSiteValidation_MissingPrivateKey(t *testing.T) {
 	wellKnownData, _ := json.Marshal(wellKnown)
 	os.WriteFile(filepath.Join(dataDir, ".well-known", "polis"), wellKnownData, 0644)
 
-	result := site.Validate(dataDir)
+	result := site.Validate(storage.At(dataDir))
 
 	if result.Status == site.StatusValid {
 		t.Error("Expected incomplete status when private key missing")
@@ -123,7 +125,7 @@ func TestSiteValidation_MissingWellKnown(t *testing.T) {
 	os.WriteFile(privKeyPath, []byte("fake-private-key"), 0600)
 	os.WriteFile(pubKeyPath, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest polis-local"), 0644)
 
-	result := site.Validate(dataDir)
+	result := site.Validate(storage.At(dataDir))
 
 	if result.Status == site.StatusValid {
 		t.Error("Expected incomplete status when .well-known/polis missing")
@@ -164,7 +166,7 @@ func TestSiteValidation_PublicKeyMismatch(t *testing.T) {
 	wellKnownData, _ := json.Marshal(wellKnown)
 	os.WriteFile(filepath.Join(dataDir, ".well-known", "polis"), wellKnownData, 0644)
 
-	result := site.Validate(dataDir)
+	result := site.Validate(storage.At(dataDir))
 
 	if result.Status == site.StatusValid {
 		t.Error("Expected incomplete status when public keys don't match")
@@ -413,14 +415,14 @@ func TestBlessingSyncHandler_StoresAutoBlessedComment(t *testing.T) {
 	// canonical content/ tree (Defect 3). The cached body is the
 	// frontmatter-stripped markdown.
 	commentURL := ts.URL + "/comments/20260222/abc123.md"
-	body, _, ok := cache.FindBlessed(dataDir, commentURL)
+	body, _, ok := cache.FindBlessed(storage.At(dataDir), commentURL)
 	if !ok {
 		t.Fatalf("expected blessed comment in the cache for %s", commentURL)
 	}
 	if !strings.Contains(string(body), "I really enjoyed this") {
 		t.Errorf("cached comment body = %q, want it to contain the comment text", string(body))
 	}
-	if _, err := os.Stat(filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260222", "abc123.md")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260222", "abc123.md")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("blessed comment must NOT be written under content/ (Defect 3)")
 	}
 
@@ -464,7 +466,7 @@ func TestBlessingSyncHandler_SkipsExistingComment(t *testing.T) {
 
 	// Pre-cache the blessed comment in the isolated cache.
 	commentURL := ts.URL + "/comments/20260222/abc123.md"
-	if err := cache.StoreBlessed(dataDir, "ds.polis.pub", cache.BlessedSidecar{SourceURL: commentURL, FetchedAt: "t"}, []byte("existing content")); err != nil {
+	if err := cache.StoreBlessed(storage.At(dataDir), "ds.polis.pub", cache.BlessedSidecar{SourceURL: commentURL, FetchedAt: "t"}, []byte("existing content")); err != nil {
 		t.Fatalf("pre-store cache: %v", err)
 	}
 
@@ -497,7 +499,7 @@ func TestBlessingSyncHandler_SkipsExistingComment(t *testing.T) {
 	}
 
 	// The cached content is preserved (not re-fetched/overwritten).
-	data, _, ok := cache.FindBlessed(dataDir, commentURL)
+	data, _, ok := cache.FindBlessed(storage.At(dataDir), commentURL)
 	if !ok || string(data) != "existing content" {
 		t.Errorf("cached content not preserved: got %q (ok=%v)", string(data), ok)
 	}
@@ -532,12 +534,12 @@ func TestCacheBlessedComment(t *testing.T) {
 	if !s.cacheBlessedComment(commentURL) {
 		t.Fatal("expected true on first cache of a fresh comment")
 	}
-	body, _, ok := cache.FindBlessed(dataDir, commentURL)
+	body, _, ok := cache.FindBlessed(storage.At(dataDir), commentURL)
 	if !ok || !strings.Contains(string(body), "Thoughtful reply") {
 		t.Errorf("cached body = %q (ok=%v), want the comment text", string(body), ok)
 	}
 	// The body must NEVER land under our canonical content/ tree (Defect 3).
-	if _, err := os.Stat(filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260222", "abc.md")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260222", "abc.md")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("blessed comment must NOT be written under content/ (Defect 3)")
 	}
 
@@ -638,7 +640,7 @@ func TestCacheBlessedComment_RefusesInvalidSignature(t *testing.T) {
 	if s.cacheBlessedComment(commentURL) {
 		t.Error("expected REFUSE (false) for a present-but-invalid signature")
 	}
-	if _, _, ok := cache.FindBlessed(dataDir, commentURL); ok {
+	if _, _, ok := cache.FindBlessed(storage.At(dataDir), commentURL); ok {
 		t.Error("an invalid-signature comment must NOT be cached (WS3·b2)")
 	}
 }
@@ -719,7 +721,7 @@ func newTestFS() fs.FS {
 }
 
 func TestSPAHandler_RootServesIndex(t *testing.T) {
-	handler := spaHandler(newTestFS(), t.TempDir(), false)
+	handler := spaHandler(newTestFS(), storage.At(t.TempDir()))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -732,25 +734,39 @@ func TestSPAHandler_RootServesIndex(t *testing.T) {
 	}
 }
 
-func TestSPAHandler_DevModeInjection(t *testing.T) {
+// ⛔ THE ASSERTION INVERTED, AND THAT IS THE CHANGE. This test used to require
+// that `polis serve --dev` injected window.__POLIS_DEV. It now requires that
+// NOTHING does.
+//
+// The flag was a second source of truth: the SPA checked it alongside the
+// hosted flag to decide one capability, so two globals answered "is this
+// instance reachable?" independently. ⭐ What the developer wanted — live
+// messaging — now comes from the MODE (--dev selects remote-client-signed) and
+// reaches the SPA through the capability descriptor it fetches, which is the
+// same door a third party uses.
+//
+// ⚠️ Keep this test. A future change that reintroduces a mode-ish global will
+// look harmless and will fail here.
+func TestSPAHandlerInjectsNoInstanceKindGlobal(t *testing.T) {
 	fsys := fstest.MapFS{
 		"index.html": &fstest.MapFile{Data: []byte("<html><head></head><body>SPA</body></html>")},
 	}
-	get := func(dev bool) string {
-		w := httptest.NewRecorder()
-		spaHandler(fsys, t.TempDir(), dev).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
-		return w.Body.String()
-	}
-	if body := get(false); strings.Contains(body, "__POLIS_DEV") {
-		t.Errorf("dev off: index.html must NOT inject __POLIS_DEV; got %q", body)
-	}
-	if body := get(true); !strings.Contains(body, "window.__POLIS_DEV=true") {
-		t.Errorf("dev on: index.html must inject window.__POLIS_DEV=true; got %q", body)
+	w := httptest.NewRecorder()
+	spaHandler(fsys, storage.At(t.TempDir())).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := w.Body.String()
+	// ⚠️ The dev parameter is gone from spaHandler too: once the flag stopped
+	// being injected there was nothing left for the shell to do with it. What
+	// remains worth guarding is the whole CLASS — any global that tells the SPA
+	// what kind of instance it is.
+	for _, banned := range []string{"__POLIS_DEV", "__POLIS_HOSTED", "__POLIS_MODE", "__POLIS_CAPABILITIES"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("the SPA shell injected %s; capabilities are FETCHED, never injected (got %q)", banned, body)
+		}
 	}
 }
 
 func TestSPAHandler_ExistingAsset(t *testing.T) {
-	handler := spaHandler(newTestFS(), t.TempDir(), false)
+	handler := spaHandler(newTestFS(), storage.At(t.TempDir()))
 
 	for _, path := range []string{"/app.js", "/style.css"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -764,7 +780,7 @@ func TestSPAHandler_ExistingAsset(t *testing.T) {
 }
 
 func TestSPAHandler_DeepLinkFallsBackToIndex(t *testing.T) {
-	handler := spaHandler(newTestFS(), t.TempDir(), false)
+	handler := spaHandler(newTestFS(), storage.At(t.TempDir()))
 
 	deepPaths := []string{
 		"/_/posts",
@@ -814,7 +830,7 @@ func TestPruneLogs_BasicPrune(t *testing.T) {
 	logger.PruneLogs()
 
 	// Old file should be deleted
-	if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+	if _, err := os.Stat(oldFile); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected old log file to be deleted")
 	}
 
@@ -844,7 +860,7 @@ func TestPruneLogs_TimeGuard(t *testing.T) {
 	logger.PruneLogs()
 
 	// File should still exist because prune was skipped
-	if _, err := os.Stat(oldFile); os.IsNotExist(err) {
+	if _, err := os.Stat(oldFile); errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected old file to still exist due to time guard")
 	}
 }
@@ -915,6 +931,28 @@ func TestEnvWriteBack(t *testing.T) {
 	}
 	if !strings.Contains(content, "LOG_RETENTION_DAYS=7") {
 		t.Errorf("expected LOG_RETENTION_DAYS=7 in .env, got:\n%s", content)
+	}
+}
+
+// LOG_LEVEL=0 is "no logging", not "unset": it must survive Initialize and
+// stay 0 in .env across a restart.
+func TestEnvLogLevelZeroTurnsLoggingOff(t *testing.T) {
+	dataDir := t.TempDir()
+	os.MkdirAll(filepath.Join(dataDir, ".polis", "keys"), 0755)
+	envPath := filepath.Join(dataDir, ".env")
+	os.WriteFile(envPath, []byte("LOG_LEVEL=0\n"), 0644)
+
+	for restart := 0; restart < 2; restart++ {
+		s := NewServer(dataDir, "")
+		s.Initialize()
+		if s.LogLevel != LogLevelOff {
+			t.Errorf("start %d: LogLevel = %d, want %d (off)", restart, s.LogLevel, LogLevelOff)
+		}
+		s.Close()
+		data, _ := os.ReadFile(envPath)
+		if !strings.Contains(string(data), "LOG_LEVEL=0") {
+			t.Errorf("start %d: .env no longer says LOG_LEVEL=0:\n%s", restart, data)
+		}
 	}
 }
 
@@ -1607,7 +1645,6 @@ func TestNewDSClient_WithSharedHTTP(t *testing.T) {
 	s := &Server{
 		SharedHTTPClient: shared,
 		DiscoveryURL:     "https://ds.example.com",
-		DiscoveryKey:     "test-key",
 	}
 	dc := s.NewDSClient(nil)
 	if dc == nil {
@@ -1624,7 +1661,6 @@ func TestNewDSClient_WithSharedHTTP(t *testing.T) {
 func TestNewDSClient_WithoutSharedHTTP(t *testing.T) {
 	s := &Server{
 		DiscoveryURL: "https://ds.example.com",
-		DiscoveryKey: "test-key",
 	}
 	dc := s.NewDSClient(nil)
 	if dc == nil {
@@ -1667,7 +1703,7 @@ func TestNewReadDSClient_RegisteredAddsAuth(t *testing.T) {
 	dataDir := t.TempDir()
 	dsURL := "https://ds.example.com"
 	// Write a registration marker so IsRegisteredLocally returns true.
-	if err := discovery.WriteRegistrationMarker(dataDir, dsURL, "x.polis.pub", "test-attestation"); err != nil {
+	if err := discovery.WriteRegistrationMarker(storage.At(dataDir), dsURL, "x.polis.pub", "test-attestation"); err != nil {
 		t.Fatalf("WriteRegistrationMarker: %v", err)
 	}
 	s := &Server{
@@ -1742,10 +1778,10 @@ func TestBlessingSyncHandler_EvictsOnDeny(t *testing.T) {
 	handler := &blessingSyncHandler{server: s}
 
 	commentURL := "https://testpilot.polis.pub/comments/20260222/abc123.md"
-	if err := cache.StoreBlessed(dataDir, "ds.polis.pub", cache.BlessedSidecar{SourceURL: commentURL, FetchedAt: "t"}, []byte("blessed body")); err != nil {
+	if err := cache.StoreBlessed(storage.At(dataDir), "ds.polis.pub", cache.BlessedSidecar{SourceURL: commentURL, FetchedAt: "t"}, []byte("blessed body")); err != nil {
 		t.Fatalf("pre-store: %v", err)
 	}
-	if err := metadata.AddBlessedComment(dataDir, "content/pub.polis.core/post/20260222/my-post.md", metadata.BlessedComment{URL: commentURL}); err != nil {
+	if err := metadata.AddBlessedComment(storage.At(dataDir), "content/pub.polis.core/post/20260222/my-post.md", metadata.BlessedComment{URL: commentURL}); err != nil {
 		t.Fatalf("add blessed: %v", err)
 	}
 
@@ -1762,7 +1798,7 @@ func TestBlessingSyncHandler_EvictsOnDeny(t *testing.T) {
 	if !result.FilesChanged {
 		t.Error("expected FilesChanged=true after eviction")
 	}
-	if _, _, ok := cache.FindBlessed(dataDir, commentURL); ok {
+	if _, _, ok := cache.FindBlessed(storage.At(dataDir), commentURL); ok {
 		t.Error("expected blessed comment evicted from cache after deny")
 	}
 }
@@ -1803,11 +1839,11 @@ func TestBlessedCommentLifecycle_E2E(t *testing.T) {
 	}
 
 	// 2. DISPLAY sources the body from the isolated cache (content/ has no copy).
-	html := render.LoadLocalCommentContent(dataDir, commentURL)
+	html := render.LoadLocalCommentContent(storage.At(dataDir), commentURL)
 	if !strings.Contains(html, "thoughtful reply") {
 		t.Fatalf("display did not source the blessed body from cache; got %q", html)
 	}
-	if _, err := os.Stat(filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260222", "abc.md")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260222", "abc.md")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("blessed comment must NOT be under content/ (Defect 3)")
 	}
 
@@ -1824,10 +1860,10 @@ func TestBlessedCommentLifecycle_E2E(t *testing.T) {
 	}
 
 	// 4. DISPLAY now empty — the cache is gone (and a LOCAL load never re-fetches).
-	if _, _, ok := cache.FindBlessed(dataDir, commentURL); ok {
+	if _, _, ok := cache.FindBlessed(storage.At(dataDir), commentURL); ok {
 		t.Error("expected cache evicted after unpublish")
 	}
-	if html := render.LoadLocalCommentContent(dataDir, commentURL); strings.Contains(html, "thoughtful reply") {
+	if html := render.LoadLocalCommentContent(storage.At(dataDir), commentURL); strings.Contains(html, "thoughtful reply") {
 		t.Errorf("display still shows the unpublished comment; got %q", html)
 	}
 }
@@ -1856,7 +1892,7 @@ func TestSPAHandler_SiteFilesAreNotTheSPA(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	handler := spaHandler(newTestFS(), dataDir, false)
+	handler := spaHandler(newTestFS(), storage.At(dataDir))
 	get := func(path string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
@@ -1883,7 +1919,7 @@ func TestSPAHandler_SiteFilesAreNotTheSPA(t *testing.T) {
 	}
 
 	// A site that stated no terms has none of these: 404, not the shell.
-	empty := spaHandler(newTestFS(), t.TempDir(), false)
+	empty := spaHandler(newTestFS(), storage.At(t.TempDir()))
 	for _, path := range []string{"/robots.txt", "/rsl.xml", "/license", "/license/open-1", "/.well-known/polis"} {
 		w := httptest.NewRecorder()
 		empty.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
@@ -1892,11 +1928,46 @@ func TestSPAHandler_SiteFilesAreNotTheSPA(t *testing.T) {
 		}
 	}
 
-	// The fallback itself is untouched, including paths that merely start
-	// with the mount's name.
-	for _, path := range []string{"/_/settings", "/licenses-page"} {
-		if w := get(path); w.Body.String() != "<html>SPA</html>" {
-			t.Errorf("GET %s = %q, want the SPA shell", path, w.Body.String())
+	// The app's own routes still get the shell; a path that merely starts
+	// with the mount's name is not the mount, and is not an app route either.
+	if w := get("/_/settings"); w.Body.String() != "<html>SPA</html>" {
+		t.Errorf("GET /_/settings = %q, want the SPA shell", w.Body.String())
+	}
+	if w := get("/licenses-page"); w.Code != http.StatusNotFound {
+		t.Errorf("GET /licenses-page = %d %q, want 404", w.Code, w.Body.String())
+	}
+}
+
+// Only the app's own routes (/ and /_/…) get the shell. Anything else the
+// handler does not have is a 404, as on hosted: a 200 shell made a mistyped
+// page, a retired URL and a private name look served. On a remote instance
+// every path the deployment's static files do not answer reaches this handler.
+func TestSPAHandler_UnknownPathIsNotFound(t *testing.T) {
+	handler := spaHandler(newTestFS(), storage.At(t.TempDir()))
+	for _, path := range []string{
+		"/zzz-nonexistent",
+		"/posts/nope.html",
+		"/.env",
+		"/.polis/keys/id_ed25519",
+		"/.polis/deploy/recovery.pub",
+		"/.polis/bundles/registry.json",
+		"/_x",
+		"/settings",
+	} {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", path, w.Code)
+		}
+		if strings.Contains(w.Body.String(), "SPA") {
+			t.Errorf("GET %s served the app shell: %q", path, w.Body.String())
+		}
+	}
+	for _, path := range []string{"/", "/index.html", "/_", "/_/", "/_/settings", "/_/kay", "/_/pql/all+posts"} {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusOK || w.Body.String() != "<html>SPA</html>" {
+			t.Errorf("GET %s = %d %q, want 200 and the shell", path, w.Code, w.Body.String())
 		}
 	}
 }

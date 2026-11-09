@@ -1,9 +1,11 @@
 package render
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/sitemap"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"github.com/vdibart/polis-cli/cli-go/pkg/template"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 )
@@ -40,15 +43,15 @@ func (r *PageRenderer) renderStreamAll(force bool) (*RenderStats, error) {
 	stats := &RenderStats{}
 
 	// Structural CSS first: base.css (shared) + styles.css (stream shape + theme).
-	if err := theme.CopyBaseCSS(r.config.DataDir, r.config.CLIThemesDir); err != nil {
+	if err := theme.CopyBaseCSS(r.config.Site, r.config.CLIThemesDir); err != nil {
 		return nil, fmt.Errorf("failed to copy base CSS: %w", err)
 	}
-	if err := theme.CopyStreamCSS(r.config.DataDir, r.themeName); err != nil {
+	if err := theme.CopyStreamCSS(r.config.Site, r.themeName); err != nil {
 		return nil, fmt.Errorf("failed to copy v4 CSS: %w", err)
 	}
 	// /stream.js placeholder (step-03/3.e). Quiets pageview 404s before WS-2
 	// ships the real controller.
-	if err := theme.CopyStreamController(r.config.DataDir); err != nil {
+	if err := theme.CopyStreamController(r.config.Site); err != nil {
 		return nil, fmt.Errorf("failed to copy v4 controller stub: %w", err)
 	}
 
@@ -152,7 +155,7 @@ func (r *PageRenderer) renderStreamAll(force bool) (*RenderStats, error) {
 // republish updates correctly — RepublishPost rewrites the source file, so
 // the on-disk mtime advances even though the published-timestamp does not.
 func (r *PageRenderer) rebuildSitemapFromCorpus() error {
-	entries, err := metadata.LoadPublicIndex(r.config.DataDir)
+	entries, err := metadata.LoadPublicIndex(r.config.Site)
 	if err != nil {
 		return fmt.Errorf("load index for sitemap: %w", err)
 	}
@@ -163,22 +166,25 @@ func (r *PageRenderer) rebuildSitemapFromCorpus() error {
 		}
 		htmlURL := r.postSourceToURL(e.Path)
 		absURL := r.buildURL(strings.TrimPrefix(htmlURL, "/"))
-		info, statErr := os.Stat(filepath.Join(r.config.DataDir, e.Path))
+		info, statErr := r.config.Site.Store().Stat(context.Background(), strings.TrimPrefix(filepath.ToSlash(e.Path), "/"))
 		if statErr != nil {
 			// Source missing — skip the entry; don't poison the sitemap with
 			// dangling URLs.
 			continue
 		}
 		smEntries = append(smEntries, sitemap.Entry{
-			URL:     absURL,
-			LastMod: info.ModTime(),
+			URL: absURL,
+			// ⚠️ Depends on ModTimes: this is a sitemap lastmod, so without one
+			// the published sitemap carries the zero time rather than nothing.
+			// Unlike the skip checks this is WRONG DATA, not just slow.
+			LastMod: info.ModTime,
 		})
 	}
 	body, err := sitemap.Build(smEntries)
 	if err != nil {
 		return fmt.Errorf("build sitemap: %w", err)
 	}
-	return sitemap.Write(r.config.DataDir, body)
+	return sitemap.Write(r.config.Site, body)
 }
 
 // populateSiteIdentity fills the .site-bio + .site-stats blocks on the v4
@@ -200,18 +206,19 @@ func (r *PageRenderer) rebuildSitemapFromCorpus() error {
 func (r *PageRenderer) populateSiteIdentity(ctx *template.RenderContext, postsCount int) {
 	ctx.PostCount = postsCount
 
-	if followFile, err := following.Load(following.DefaultPath(r.config.DataDir)); err == nil {
+	if followFile, err := following.LoadSite(r.config.Site); err == nil {
 		ctx.FollowingCount = followFile.Count()
 	}
 
-	dsDir := filepath.Join(r.config.DataDir, ".polis", "ds")
-	if entries, err := os.ReadDir(dsDir); err == nil {
+	// ⭐ Store.List, not ListDir: it reports a real failure and treats only
+	// absence as empty, and this caller gates on err == nil either way.
+	if entries, err := r.config.Site.Store().List(context.Background(), ".polis/ds"); err == nil {
 		for _, entry := range entries {
-			if !entry.IsDir() {
+			if !entry.IsDir {
 				continue
 			}
-			followerPath := filepath.Join(dsDir, entry.Name(), "pub.polis.core", "state", "pub.polis.follow.json")
-			followerData, err := os.ReadFile(followerPath)
+			followerKey := ".polis/ds/" + pathpkg.Base(entry.Key) + "/pub.polis.core/state/pub.polis.follow.json"
+			followerData, err := r.config.Site.Store().Get(context.Background(), followerKey)
 			if err != nil {
 				continue
 			}
@@ -233,8 +240,8 @@ func (r *PageRenderer) populateSiteIdentity(ctx *template.RenderContext, postsCo
 
 	// Bio: render site/snippets/about.md to HTML. Absent file → empty bio
 	// (the .site-bio:empty CSS rule then collapses the block).
-	aboutPath := filepath.Join(r.config.DataDir, "site", "snippets", "about.md")
-	if data, err := os.ReadFile(aboutPath); err == nil {
+	aboutKey := "site/snippets/about.md"
+	if data, err := r.config.Site.Store().Get(context.Background(), aboutKey); err == nil {
 		if html, err := MarkdownToHTML(string(data)); err == nil {
 			ctx.SiteBio = html
 		}
@@ -352,8 +359,8 @@ func (r *PageRenderer) populateSiblingBodies(siblings []template.PostData, cache
 		if err != nil {
 			continue
 		}
-		srcPath := filepath.Join(r.config.DataDir, srcRel)
-		data, err := os.ReadFile(srcPath)
+		srcKey := strings.TrimPrefix(filepath.ToSlash(srcRel), "/")
+		data, err := r.config.Site.Store().Get(context.Background(), srcKey)
 		if err != nil {
 			continue
 		}
@@ -514,8 +521,7 @@ func streamOutputPath(focusURL string) string {
 }
 
 // renderStreamFile renders a single stream page with the given focus and siblings.
-// outPath is either site-root/index.html or a mount-relative posts/.../*.html
-// (relative paths are resolved against DataDir here). totalPosts feeds the
+// outPath is the page's key: "index.html" or a mount-relative posts/.../*.html. totalPosts feeds the
 // .site-stats block; callers pass the known full-corpus count from their
 // loadPublicIndex result (passing 0 is also valid for empty-corpus paths).
 // siblingsAbove + siblingsBelow split the unified-grammar sibling rail into
@@ -523,10 +529,7 @@ func streamOutputPath(focusURL string) string {
 // Either may be nil — callers thread nil for siblingsAbove on /index.html
 // (focus IS the newest, nothing newer to show).
 func (r *PageRenderer) renderStreamFile(focus template.PostData, siblingsAbove, siblingsBelow []template.PostData, totalPosts int, outPath string, force bool) error {
-	// If outPath is relative (mount-path case), resolve against DataDir.
-	if !filepath.IsAbs(outPath) {
-		outPath = filepath.Join(r.config.DataDir, outPath)
-	}
+	outPath = strings.TrimPrefix(filepath.ToSlash(outPath), "/")
 
 	// Derive source path for the focus post from its URL. URL looks like
 	// "/posts/20260323/slug.html" — strip the mount prefix and re-map to
@@ -535,18 +538,22 @@ func (r *PageRenderer) renderStreamFile(focus template.PostData, siblingsAbove, 
 	if err != nil {
 		return fmt.Errorf("map focus URL to source: %w", err)
 	}
-	srcPath := filepath.Join(r.config.DataDir, srcRel)
+	srcKey := strings.TrimPrefix(filepath.ToSlash(srcRel), "/")
 
 	// Skip-if-newer unless forced.
 	if !force {
-		if srcInfo, err := os.Stat(srcPath); err == nil {
-			if outInfo, err := os.Stat(outPath); err == nil && outInfo.ModTime().After(srcInfo.ModTime()) {
+		if srcInfo, err := r.config.Site.Store().Stat(context.Background(), srcKey); err == nil {
+			// ⚠️ Depends on ModTimes, and this is the COSTLIEST of the
+			// dependencies: it is the skip-if-unchanged check. Without mtimes
+			// both are the zero time, After is false, and every render
+			// re-renders everything. Correct output, much slower.
+			if outInfo, err := r.config.Site.Store().Stat(context.Background(), outPath); err == nil && outInfo.ModTime.After(srcInfo.ModTime) {
 				return nil
 			}
 		}
 	}
 
-	content, err := os.ReadFile(srcPath)
+	content, err := r.config.Site.Store().Get(context.Background(), srcKey)
 	if err != nil {
 		return fmt.Errorf("read focus source: %w", err)
 	}
@@ -610,8 +617,8 @@ func (r *PageRenderer) renderStreamFile(focus template.PostData, siblingsAbove, 
 	// Site identity.
 	ctx.SiteURL = r.config.BaseURL
 	ctx.SiteTitle = r.getSiteTitle()
-	ctx.CSSPath = streamRelativePath(outPath, r.config.DataDir, "styles.css")
-	ctx.BaseCSSPath = streamRelativePath(outPath, r.config.DataDir, "base.css")
+	ctx.CSSPath = streamRelativePath(outPath, "styles.css")
+	ctx.BaseCSSPath = streamRelativePath(outPath, "base.css")
 	// Absolute paths for HomePath + FaviconPath so they survive the stream
 	// controller's pushState/replaceState URL-bar updates on scroll. Browsers
 	// resolve relative <a href> against document.baseURI at click/hover time;
@@ -696,7 +703,7 @@ func (r *PageRenderer) renderStreamFile(focus template.PostData, siblingsAbove, 
 		ctx.ISOModified = ctx.ISOPublished
 	}
 
-	isIndex := outPath == filepath.Join(r.config.DataDir, "index.html")
+	isIndex := outPath == "index.html"
 
 	// Tab/<title>: the index represents the SITE — don't title it with the newest
 	// post (which is merely the index's focus); per-post pages title with the post.
@@ -775,10 +782,7 @@ func (r *PageRenderer) renderStreamFile(focus template.PostData, siblingsAbove, 
 	}
 	rendered = StripHTMLComments(rendered)
 
-	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
-		return fmt.Errorf("create output dir: %w", err)
-	}
-	if err := os.WriteFile(outPath, []byte(rendered), 0644); err != nil {
+	if err := r.config.Site.Store().Put(context.Background(), outPath, []byte(rendered), storage.Rebuildable()); err != nil {
 		return fmt.Errorf("write output: %w", err)
 	}
 	return nil
@@ -797,8 +801,21 @@ func (r *PageRenderer) renderStreamFile(focus template.PostData, siblingsAbove, 
 // .site-avatar, .site-bio, …) is already present in the tenant's stylesheet.
 // Only the small .stream-getting-started block needs its own scoped <style>.
 func (r *PageRenderer) renderStreamEmptyIndex() error {
-	if err := os.MkdirAll(r.config.DataDir, 0755); err != nil {
-		return err
+	// NOT the storage interface: this creates the SITE ROOT itself, which may
+	// be empty until the first render writes into it, and a prefix store has
+	// nothing to represent an empty directory with.
+	//
+	// ⛔⛔ SO IT IS SKIPPED WHEN THE BACKEND HAS NO FILESYSTEM, and that is not
+	// a tidy-up. It returned its error, and Vercel's filesystem is READ-ONLY
+	// outside /tmp — so on a blob-backed instance this call would have failed
+	// the render of an EMPTY SITE, which is the very first render a new
+	// instance does. ⭐ The capability is the right gate: the reason the
+	// comment above gives for not using the interface is exactly the reason
+	// there is nothing to do on a backend that has no directories.
+	if r.config.Site.Store().Capabilities().RealPath {
+		if err := os.MkdirAll(r.config.Site.Dir(), 0755); err != nil {
+			return err
+		}
 	}
 	siteTitle := r.getSiteTitle()
 	authorName := r.getAuthorName()
@@ -815,8 +832,8 @@ func (r *PageRenderer) renderStreamEmptyIndex() error {
 	// (site/snippets/about.md → HTML). Absent/empty file leaves the block
 	// empty; .site-bio:empty collapses it in CSS.
 	var bioHTML string
-	aboutPath := filepath.Join(r.config.DataDir, "site", "snippets", "about.md")
-	if data, err := os.ReadFile(aboutPath); err == nil {
+	aboutKey := "site/snippets/about.md"
+	if data, err := r.config.Site.Store().Get(context.Background(), aboutKey); err == nil {
 		if html, err := MarkdownToHTML(string(data)); err == nil {
 			bioHTML = html
 		}
@@ -954,7 +971,7 @@ func (r *PageRenderer) renderStreamEmptyIndex() error {
 		attrEscape(subject),
 		attrEscape(WidgetVersion),
 	)
-	return os.WriteFile(filepath.Join(r.config.DataDir, "index.html"), []byte(body), 0644)
+	return r.config.Site.Store().Put(context.Background(), "index.html", []byte(body), storage.Rebuildable())
 }
 
 // streamSourceMDPath maps a post's output URL ("/posts/YYYYMMDD/slug.html") to its
@@ -972,15 +989,29 @@ func streamSourceMDPath(focusURL, sourceDir, mountDir string) (string, error) {
 	return trimmed, nil
 }
 
-// streamRelativePath computes a relative href from outPath back to targetRel, both
-// expressed relative to dataDir. For posts/YYYYMMDD/slug.html → styles.css,
+// streamRelativePath computes a relative href from the page at outKey to
+// targetKey, both site-relative keys. For posts/YYYYMMDD/slug.html → styles.css
 // the result is "../../styles.css".
-func streamRelativePath(outPath, dataDir, targetRel string) string {
-	rel, err := filepath.Rel(filepath.Dir(outPath), filepath.Join(dataDir, targetRel))
-	if err != nil {
-		return targetRel
+//
+// ⭐ Key arithmetic, no filesystem: drop the directories the two share, climb
+// out of the rest of the page's directory, then descend to the target. The
+// standard library's path package has no Rel, and filepath.Rel is OS-shaped.
+func streamRelativePath(outKey, targetKey string) string {
+	from := strings.Split(pathpkg.Dir(pathpkg.Clean(outKey)), "/")
+	if len(from) == 1 && from[0] == "." {
+		from = nil
 	}
-	return filepath.ToSlash(rel)
+	to := strings.Split(pathpkg.Clean(targetKey), "/")
+	common := 0
+	for common < len(from) && common < len(to)-1 && from[common] == to[common] {
+		common++
+	}
+	parts := make([]string, 0, len(from)-common+len(to)-common)
+	for range from[common:] {
+		parts = append(parts, "..")
+	}
+	parts = append(parts, to[common:]...)
+	return strings.Join(parts, "/")
 }
 
 // streamHandleFromDomain extracts a local-handle component from a domain: "alice"

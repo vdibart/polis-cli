@@ -1,10 +1,12 @@
 package actor
 
 import (
-	"os"
+	pathpkg "path"
 	"path/filepath"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // A Guard is an actor's answer to "is this site one of ours?", built from the
@@ -103,20 +105,24 @@ func (g *Guard) Registries() (found, trusted int) { return g.registries, g.verif
 func LoadGuard(tenantsDir string) *Guard {
 	g := &Guard{byDomain: map[string]*Entry{}}
 
-	entries, err := os.ReadDir(tenantsDir)
+	// ⛔ ListDir, NOT ListAtPath: the error below is how "I could not look" reaches
+	// Problems. With ListAtPath a missing tenants directory listed empty, no
+	// problem was recorded, and the guard silently claimed to know there were no
+	// tenants.
+	entries, err := storage.ListDir(tenantsDir)
 	if err != nil {
 		g.Problems = append(g.Problems, "cannot read tenants directory: "+err.Error())
 		return g
 	}
 
 	for _, e := range entries {
-		if !e.IsDir() || e.Name() == "" || e.Name()[0] == '.' {
+		if !e.IsDir || pathpkg.Base(e.Key) == "" || pathpkg.Base(e.Key)[0] == '.' {
 			continue
 		}
-		handle := e.Name()
+		handle := pathpkg.Base(e.Key)
 		siteDir := filepath.Join(tenantsDir, handle)
 
-		pointer := site.ActorRegistryPointer(siteDir)
+		pointer := site.ActorRegistryPointer(storage.At(siteDir))
 		if pointer == "" {
 			continue // an ordinary tenant: runs no actors, publishes no registry
 		}
@@ -133,7 +139,7 @@ func LoadGuard(tenantsDir string) *Guard {
 			continue
 		}
 
-		wk, err := site.LoadWellKnown(siteDir)
+		wk, err := site.LoadWellKnown(storage.At(siteDir))
 		if err != nil || wk.PublicKey == "" {
 			g.Problems = append(g.Problems,
 				"no published key for operator "+handle+" — its registry cannot be trusted")

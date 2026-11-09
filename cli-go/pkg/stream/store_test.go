@@ -2,33 +2,42 @@ package stream
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
 func TestNewStore(t *testing.T) {
-	s := NewStore("/tmp/testsite", "ds.polis.pub", "pub.polis.core")
-	expectedState := filepath.Join("/tmp/testsite", ".polis", "ds", "ds.polis.pub", "pub.polis.core", "state")
-	if s.StateDir() != expectedState {
-		t.Errorf("StateDir() = %q, want %q", s.StateDir(), expectedState)
+	s := NewStore(storage.At("/tmp/testsite"), "ds.polis.pub", "pub.polis.core")
+	if want := ".polis/ds/ds.polis.pub/pub.polis.core/state"; s.stateKey != want {
+		t.Errorf("stateKey = %q, want %q", s.stateKey, want)
 	}
-	expectedConfig := filepath.Join("/tmp/testsite", ".polis", "ds", "ds.polis.pub", "pub.polis.core", "config")
-	if s.ConfigDir() != expectedConfig {
-		t.Errorf("ConfigDir() = %q, want %q", s.ConfigDir(), expectedConfig)
+	if want := ".polis/ds/ds.polis.pub/pub.polis.core/config"; s.configKey != want {
+		t.Errorf("configKey = %q, want %q", s.configKey, want)
 	}
-	expectedBundle := filepath.Join("/tmp/testsite", ".polis", "ds", "ds.polis.pub", "pub.polis.core")
-	if s.BundleDir() != expectedBundle {
-		t.Errorf("BundleDir() = %q, want %q", s.BundleDir(), expectedBundle)
+	if want := ".polis/ds/ds.polis.pub/pub.polis.core"; s.bundleKey != want {
+		t.Errorf("bundleKey = %q, want %q", s.bundleKey, want)
+	}
+	if want := ".polis/ds/ds.polis.pub/pub.polis.core/state/pub.polis.follow.json"; s.StateKey("pub.polis.follow") != want {
+		t.Errorf("StateKey = %q, want %q", s.StateKey("pub.polis.follow"), want)
 	}
 	if s.BundleName() != "pub.polis.core" {
 		t.Errorf("BundleName() = %q, want pub.polis.core", s.BundleName())
 	}
 }
 
+// stateDir is where a POSIX store keeps the state files, for tests that
+// inspect or plant them on disk.
+func stateDir(s *Store) string {
+	return s.site.Path(s.stateKey)
+}
+
 func TestCursors(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "ds.polis.pub", "pub.polis.core")
+	s := NewStore(storage.At(dir), "ds.polis.pub", "pub.polis.core")
 
 	// Default cursor is "0"
 	cursor, err := s.GetCursor("pub.polis.follow")
@@ -76,7 +85,7 @@ func TestCursors(t *testing.T) {
 	}
 
 	// All cursors are in a single file
-	data, err := os.ReadFile(filepath.Join(s.StateDir(), "cursors.json"))
+	data, err := os.ReadFile(filepath.Join(stateDir(s), "cursors.json"))
 	if err != nil {
 		t.Fatalf("read cursors.json: %v", err)
 	}
@@ -91,7 +100,7 @@ func TestCursors(t *testing.T) {
 
 func TestCursorEntry(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "ds.polis.pub", "pub.polis.core")
+	s := NewStore(storage.At(dir), "ds.polis.pub", "pub.polis.core")
 
 	// Non-existent entry returns zero value
 	entry, err := s.GetCursorEntry("pub.polis.feed")
@@ -118,7 +127,7 @@ func TestCursorEntry(t *testing.T) {
 
 func TestState(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "ds.polis.pub", "pub.polis.core")
+	s := NewStore(storage.At(dir), "ds.polis.pub", "pub.polis.core")
 
 	// Loading non-existent state should not error
 	var state FollowerState
@@ -147,15 +156,15 @@ func TestState(t *testing.T) {
 	}
 
 	// Verify state file exists at state/<name>.json
-	stateFile := filepath.Join(s.StateDir(), "follow.json")
-	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
+	stateFile := filepath.Join(stateDir(s), "follow.json")
+	if _, err := os.Stat(stateFile); errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("state file %q does not exist", stateFile)
 	}
 }
 
 func TestConfig(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "ds.polis.pub", "pub.polis.core")
+	s := NewStore(storage.At(dir), "ds.polis.pub", "pub.polis.core")
 
 	type TestConfig struct {
 		Name  string `json:"name"`
@@ -188,7 +197,7 @@ func TestConfig(t *testing.T) {
 
 func TestStateAndCursorsIndependent(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "ds.polis.pub", "pub.polis.core")
+	s := NewStore(storage.At(dir), "ds.polis.pub", "pub.polis.core")
 
 	// Set cursor first
 	s.SetCursor("pub.polis.follow", "100")
@@ -216,10 +225,10 @@ func TestStateAndCursorsIndependent(t *testing.T) {
 
 func TestDeprecatedCursorKeyCleanup(t *testing.T) {
 	dir := t.TempDir()
-	s := NewStore(dir, "ds.polis.pub", "pub.polis.core")
+	s := NewStore(storage.At(dir), "ds.polis.pub", "pub.polis.core")
 
 	// Pre-populate cursors.json with deprecated keys alongside valid ones
-	os.MkdirAll(s.StateDir(), 0755)
+	os.MkdirAll(stateDir(s), 0755)
 	cf := CursorsFile{
 		Cursors: map[string]CursorEntry{
 			"pub.polis.sync":           {Position: "500", LastUpdated: "2026-04-01T00:00:00Z"},
@@ -231,7 +240,7 @@ func TestDeprecatedCursorKeyCleanup(t *testing.T) {
 		},
 	}
 	data, _ := json.MarshalIndent(cf, "", "  ")
-	os.WriteFile(filepath.Join(s.StateDir(), "cursors.json"), data, 0644)
+	os.WriteFile(filepath.Join(stateDir(s), "cursors.json"), data, 0644)
 
 	// Reading any cursor triggers loadCursors which cleans up deprecated keys
 	cursor, err := s.GetCursor("pub.polis.sync")
@@ -274,7 +283,7 @@ func TestDeprecatedCursorKeyCleanup(t *testing.T) {
 	}
 
 	// Verify the file on disk no longer has deprecated keys
-	rawData, _ := os.ReadFile(filepath.Join(s.StateDir(), "cursors.json"))
+	rawData, _ := os.ReadFile(filepath.Join(stateDir(s), "cursors.json"))
 	var persisted CursorsFile
 	json.Unmarshal(rawData, &persisted)
 	if _, ok := persisted.Cursors["pub.polis.feed.followers"]; ok {

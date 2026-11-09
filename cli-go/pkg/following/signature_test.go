@@ -2,6 +2,7 @@ package following
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,14 +114,14 @@ func TestSignThenVerify(t *testing.T) {
 // marshalling change that alters the bytes the signature covers.
 func TestSignatureSurvivesTheFile(t *testing.T) {
 	priv, pub := newTestKeys(t)
-	path := filepath.Join(t.TempDir(), "following.json")
+	pathSite := storage.At(t.TempDir())
 
 	f := sampleFile()
-	if err := SaveSigned(path, f, priv); err != nil {
+	if err := SaveSigned(pathSite, f, priv); err != nil {
 		t.Fatalf("SaveSigned: %v", err)
 	}
 
-	loaded, err := Load(path)
+	loaded, err := LoadSite(pathSite)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -141,10 +142,11 @@ func TestSignatureSurvivesTheFile(t *testing.T) {
 // bug, not an attacker. A wrong signature is evidence, not a verdict.
 func TestTamperedFileIsInvalidAndStillLoads(t *testing.T) {
 	priv, pub := newTestKeys(t)
-	path := filepath.Join(t.TempDir(), "following.json")
+	pathSite := storage.At(t.TempDir())
+	path := pathSite.Path(DefaultKey)
 
 	f := sampleFile()
-	if err := SaveSigned(path, f, priv); err != nil {
+	if err := SaveSigned(pathSite, f, priv); err != nil {
 		t.Fatalf("SaveSigned: %v", err)
 	}
 
@@ -164,7 +166,7 @@ func TestTamperedFileIsInvalidAndStillLoads(t *testing.T) {
 		t.Fatalf("write tampered: %v", err)
 	}
 
-	loaded, err := Load(path)
+	loaded, err := LoadSite(pathSite)
 	if err != nil {
 		t.Fatalf("a tampered follow file must STILL LOAD, got error: %v", err)
 	}
@@ -240,7 +242,7 @@ func TestVerifyWithoutKeyIsUnknown(t *testing.T) {
 // anything.
 func TestSaveClearsSignature(t *testing.T) {
 	priv, pub := newTestKeys(t)
-	path := filepath.Join(t.TempDir(), "following.json")
+	pathSite := storage.At(t.TempDir())
 
 	f := sampleFile()
 	if err := Sign(f, priv); err != nil {
@@ -248,10 +250,10 @@ func TestSaveClearsSignature(t *testing.T) {
 	}
 	f.Add("https://carol.example") // content changes; the signature is now void
 
-	if err := Save(path, f); err != nil {
+	if err := Save(pathSite, f); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	loaded, err := Load(path)
+	loaded, err := LoadSite(pathSite)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -265,12 +267,12 @@ func TestSaveClearsSignature(t *testing.T) {
 // TestSaveSignedWithoutKeyWritesUnsigned — no key, no signature, no error.
 func TestSaveSignedWithoutKeyWritesUnsigned(t *testing.T) {
 	_, pub := newTestKeys(t)
-	path := filepath.Join(t.TempDir(), "following.json")
+	pathSite := storage.At(t.TempDir())
 
-	if err := SaveSigned(path, sampleFile(), nil); err != nil {
+	if err := SaveSigned(pathSite, sampleFile(), nil); err != nil {
 		t.Fatalf("SaveSigned with no key: %v", err)
 	}
-	loaded, _ := Load(path)
+	loaded, _ := LoadSite(pathSite)
 	status, _ := Verify(loaded, pub)
 	if status != StatusUnsigned {
 		t.Errorf("status = %q, want %q", status, StatusUnsigned)
@@ -285,10 +287,10 @@ func TestVerifySite(t *testing.T) {
 	t.Run("signed site verifies", func(t *testing.T) {
 		siteDir := t.TempDir()
 		writeWellKnown(t, siteDir, pub)
-		if err := SaveSigned(DefaultPath(siteDir), sampleFile(), priv); err != nil {
+		if err := SaveSigned(storage.At(siteDir), sampleFile(), priv); err != nil {
 			t.Fatalf("SaveSigned: %v", err)
 		}
-		status, err := VerifySite(siteDir)
+		status, err := VerifySite(storage.At(siteDir))
 		if err != nil {
 			t.Fatalf("VerifySite: %v", err)
 		}
@@ -300,7 +302,7 @@ func TestVerifySite(t *testing.T) {
 	t.Run("site with no follow file at all is unsigned", func(t *testing.T) {
 		siteDir := t.TempDir()
 		writeWellKnown(t, siteDir, pub)
-		status, err := VerifySite(siteDir)
+		status, err := VerifySite(storage.At(siteDir))
 		if err != nil {
 			t.Errorf("a site that follows nobody is not an error: %v", err)
 		}
@@ -312,10 +314,10 @@ func TestVerifySite(t *testing.T) {
 	t.Run("legacy unsigned follow file is unsigned", func(t *testing.T) {
 		siteDir := t.TempDir()
 		writeWellKnown(t, siteDir, pub)
-		if err := Save(DefaultPath(siteDir), sampleFile()); err != nil {
+		if err := Save(storage.At(siteDir), sampleFile()); err != nil {
 			t.Fatalf("Save: %v", err)
 		}
-		status, err := VerifySite(siteDir)
+		status, err := VerifySite(storage.At(siteDir))
 		if err != nil {
 			t.Errorf("an unsigned file is a fact, not an error: %v", err)
 		}
@@ -329,10 +331,10 @@ func TestVerifySite(t *testing.T) {
 	// found a problem.
 	t.Run("signed but no well-known is unknown", func(t *testing.T) {
 		siteDir := t.TempDir()
-		if err := SaveSigned(DefaultPath(siteDir), sampleFile(), priv); err != nil {
+		if err := SaveSigned(storage.At(siteDir), sampleFile(), priv); err != nil {
 			t.Fatalf("SaveSigned: %v", err)
 		}
-		status, _ := VerifySite(siteDir)
+		status, _ := VerifySite(storage.At(siteDir))
 		if status != StatusUnknown {
 			t.Errorf("status = %q, want %q", status, StatusUnknown)
 		}
@@ -341,8 +343,8 @@ func TestVerifySite(t *testing.T) {
 	t.Run("tampered site is invalid", func(t *testing.T) {
 		siteDir := t.TempDir()
 		writeWellKnown(t, siteDir, pub)
-		path := DefaultPath(siteDir)
-		if err := SaveSigned(path, sampleFile(), priv); err != nil {
+		path := storage.At(siteDir).Path(DefaultKey)
+		if err := SaveSigned(storage.At(siteDir), sampleFile(), priv); err != nil {
 			t.Fatalf("SaveSigned: %v", err)
 		}
 		raw, _ := os.ReadFile(path)
@@ -350,7 +352,7 @@ func TestVerifySite(t *testing.T) {
 		if err := os.WriteFile(path, []byte(tampered), 0644); err != nil {
 			t.Fatalf("write tampered: %v", err)
 		}
-		status, _ := VerifySite(siteDir)
+		status, _ := VerifySite(storage.At(siteDir))
 		if status != StatusInvalid {
 			t.Errorf("status = %q, want %q", status, StatusInvalid)
 		}
@@ -369,7 +371,7 @@ func TestVerifySite(t *testing.T) {
 // catches that; the field assertion alone would pass either way.
 func TestSaveSignedStampsGeneratorInsideTheSignature(t *testing.T) {
 	priv, pub := newTestKeys(t)
-	path := filepath.Join(t.TempDir(), "following.json")
+	pathSite := storage.At(t.TempDir())
 
 	old := Version
 	Version = "9.9.9"
@@ -377,11 +379,11 @@ func TestSaveSignedStampsGeneratorInsideTheSignature(t *testing.T) {
 
 	f := sampleFile()
 	f.Version = "polis-cli-go/0.56.0" // the stale value E4 found in production
-	if err := SaveSigned(path, f, priv); err != nil {
+	if err := SaveSigned(pathSite, f, priv); err != nil {
 		t.Fatalf("SaveSigned: %v", err)
 	}
 
-	got, err := Load(path)
+	got, err := LoadSite(pathSite)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -399,7 +401,7 @@ func TestSaveSignedStampsGeneratorInsideTheSignature(t *testing.T) {
 // TestSaveStampsGenerator — the unsigned path records the writer too. A file
 // that degrades to unsigned should still say who wrote it.
 func TestSaveStampsGenerator(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "following.json")
+	pathSite := storage.At(t.TempDir())
 
 	old := Version
 	Version = "1.2.3"
@@ -407,11 +409,11 @@ func TestSaveStampsGenerator(t *testing.T) {
 
 	f := sampleFile()
 	f.Version = "polis-cli-go/0.56.0"
-	if err := Save(path, f); err != nil {
+	if err := Save(pathSite, f); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
-	got, err := Load(path)
+	got, err := LoadSite(pathSite)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,7 @@ import (
 // through the one writer, and `polis validate` is no worse afterwards.
 func TestSiteSetAuthorNameKeepsTheSiteValid(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := site.Init(dir, site.InitOptions{BaseURL: "https://alice.polis.pub", SiteTitle: "alice"}); err != nil {
+	if _, err := site.Init(storage.At(dir), site.InitOptions{BaseURL: "https://alice.polis.pub", SiteTitle: "alice"}); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(filepath.Join(dir, ".well-known", "polis"))
@@ -27,7 +28,7 @@ func TestSiteSetAuthorNameKeepsTheSiteValid(t *testing.T) {
 	dataDir, jsonOutput = dir, false
 	handleSite([]string{"set", "author-name", "Alice Liddell"})
 
-	wk, err := site.LoadWellKnown(dir)
+	wk, err := site.LoadWellKnown(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,10 +71,10 @@ func failedChecks(r *sitecheck.Report) map[string]bool {
 // and writes UNSIGNED.
 func TestSiteRewriteUnsignedDropsWhatItCannotReadAndDoesNotSign(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := site.Init(dir, site.InitOptions{BaseURL: "https://alice.polis.pub", SiteTitle: "alice"}); err != nil {
+	if _, err := site.Init(storage.At(dir), site.InitOptions{BaseURL: "https://alice.polis.pub", SiteTitle: "alice"}); err != nil {
 		t.Fatal(err)
 	}
-	path := following.DefaultPath(dir)
+	path := storage.At(dir).Path(following.DefaultKey)
 	_ = os.MkdirAll(filepath.Dir(path), 0755)
 	_ = os.WriteFile(path, []byte(`{"version":"polis-cli-go/9.0.0","following":[{"url":"https://bob.example","added_at":"2026-01-01T00:00:00Z","muted":true}],"signature":"-----BEGIN SSH SIGNATURE-----\nx\n-----END SSH SIGNATURE-----"}`), 0644)
 

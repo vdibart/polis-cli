@@ -11,6 +11,9 @@ before:
   hooks:
     - go mod tidy -C cli-go
     - go mod tidy -C webapp
+    # The remote instance's Vercel function and its manifest (EXPERIMENTAL), built without the Vercel CLI.
+    # An instance and `polis branch deploy` fetch both by version; outside dist/, which --clean empties.
+    - go run -C webapp ./cmd/vercel-function -version {{ .Version }} -out ../vercel-dist
 
 builds:
   # CLI-only binary (~9 MB)
@@ -153,11 +156,15 @@ archives:
 checksum:
   name_template: 'checksums.txt'
   algorithm: sha256
+  extra_files:
+    - glob: ./vercel-dist/*
 
 release:
   github:
     owner: vdibart
     name: polis-cli
+  extra_files:
+    - glob: ./vercel-dist/*
   draft: false
   prerelease: auto
   mode: replace

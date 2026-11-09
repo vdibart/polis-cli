@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -85,7 +86,7 @@ func testSetup(t *testing.T) (*http.ServeMux, string, string) {
 	// Create engine
 	coreBundle := bundle.DefaultCoreBundle()
 	bundles := map[string]*bundle.Bundle{"pub.polis.core": coreBundle}
-	resolver := resolve.New(siteDir, bundles)
+	resolver := resolve.New(storage.At(siteDir), bundles)
 
 	engine, err := ops.NewEngine(ops.EngineConfig{
 		Resolver:   resolver,
@@ -103,7 +104,7 @@ func testSetup(t *testing.T) (*http.ServeMux, string, string) {
 
 	// Setup routes
 	mux := http.NewServeMux()
-	SetupRoutes(mux, engine, siteDir)
+	SetupRoutes(mux, engine, storage.At(siteDir))
 
 	return mux, siteDir, apiKey
 }
@@ -359,6 +360,36 @@ func TestCreatePostBadAuth(t *testing.T) {
 	}
 }
 
+// ⛔ A render-scoped key reaches the site's appearance, never its content: every
+// authenticated content operation refuses it, reads of private types included.
+func TestRenderScopedKeyIsRefusedByContentOperations(t *testing.T) {
+	mux, siteDir, _ := testSetup(t)
+	renderKey, _, err := ops.MintAPIKey(storage.At(siteDir), "Kay", []string{ops.ScopeRender})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ method, path string }{
+		{http.MethodPost, "/v1/content/post"},
+		{http.MethodPut, "/v1/content/post/some-id"},
+		{http.MethodDelete, "/v1/content/post/some-id"},
+		{http.MethodGet, "/v1/content/follow"},
+		{http.MethodGet, "/v1/content/post/drafts"},
+		{http.MethodPost, "/v1/content/post/actions/republish"},
+	}
+	for _, c := range cases {
+		body := jsonBody(t, map[string]any{"markdown": "# Hello\n\nWorld"})
+		req := httptest.NewRequest(c.method, c.path, body)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+renderKey)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "insufficient_scope") {
+			t.Errorf("%s %s with a render-scoped key = %d %s, want 403 insufficient_scope",
+				c.method, c.path, w.Code, w.Body.String())
+		}
+	}
+}
+
 func TestCreatePostWithAuth(t *testing.T) {
 	mux, _, apiKey := testSetup(t)
 
@@ -420,9 +451,12 @@ func TestActionMethodNotAllowed(t *testing.T) {
 // ── Unknown type ────────────────────────────────────────────────────
 
 func TestUnknownContentType(t *testing.T) {
-	mux, _, _ := testSetup(t)
+	mux, _, apiKey := testSetup(t)
 
+	// An unknown type requires auth like a private one (fail closed); with
+	// it, the owner learns the type does not exist.
 	req := httptest.NewRequest(http.MethodGet, "/v1/content/unknown_type", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -781,7 +815,7 @@ func TestDispatchErrorNotConfigured(t *testing.T) {
 	}
 	coreBundle := bundle.DefaultCoreBundle()
 	bundles := map[string]*bundle.Bundle{"pub.polis.core": coreBundle}
-	resolver := resolve.New(siteDir, bundles)
+	resolver := resolve.New(storage.At(siteDir), bundles)
 
 	engine, _ := ops.NewEngine(ops.EngineConfig{
 		Resolver: resolver,
@@ -791,7 +825,7 @@ func TestDispatchErrorNotConfigured(t *testing.T) {
 
 	apiKey := seedAPIKey(t, siteDir)
 	mux := http.NewServeMux()
-	SetupRoutes(mux, engine, siteDir)
+	SetupRoutes(mux, engine, storage.At(siteDir))
 
 	body := jsonBody(t, map[string]any{"markdown": "# Test"})
 	req := httptest.NewRequest(http.MethodPost, "/v1/content/post", body)
@@ -868,6 +902,35 @@ func TestIsPrivateContentType_Parity(t *testing.T) {
 				t.Errorf("isPrivateContentType(%q) is TRUE but bundle declares %s Private=false — fix one side",
 					fqn, fqn)
 			}
+		}
+	}
+}
+
+// ⛔ EVERY /v1/ content type is classified, over HTTP, from the bundle: an
+// unauthenticated read of a private type or an unknown one is 401, and of a
+// declared public type is not.
+func TestEveryV1ContentTypeIsClassified(t *testing.T) {
+	mux, _, _ := testSetup(t)
+	get := func(name string) int {
+		req := httptest.NewRequest(http.MethodGet, "/v1/content/"+name, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		return w.Code
+	}
+	for fqn, ct := range bundle.DefaultCoreBundle().Types {
+		for _, name := range []string{fqn, ct.Dir} {
+			code := get(name)
+			if ct.Private && code != http.StatusUnauthorized {
+				t.Errorf("GET /v1/content/%s (private) without auth = %d, want 401", name, code)
+			}
+			if !ct.Private && code == http.StatusUnauthorized {
+				t.Errorf("GET /v1/content/%s (public) without auth = 401", name)
+			}
+		}
+	}
+	for _, name := range []string{"feed", "pub.polis.feed", "notafeed", "DM"} {
+		if code := get(name); code != http.StatusUnauthorized {
+			t.Errorf("GET /v1/content/%s (undeclared) without auth = %d, want 401", name, code)
 		}
 	}
 }

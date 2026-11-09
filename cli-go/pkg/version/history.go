@@ -3,12 +3,16 @@ package version
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // VersionEntry represents a version in the history file.
@@ -37,6 +41,8 @@ func GetVersionsFilePath(canonicalFile, versionsDir string) string {
 
 // ParseHistoryFile parses a versions file.
 func ParseHistoryFile(path string) (*HistoryFile, error) {
+	// NOT the storage interface: this STREAMS a versions file line by line, and a
+	// version history grows without bound.
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open versions file: %w", err)
@@ -180,7 +186,7 @@ func ReconstructVersion(canonicalFile, targetHash, versionsDir string) (string, 
 // reconstructBackward reconstructs by applying reverse patches from current.
 func reconstructBackward(canonicalFile, targetHash string, history *HistoryFile) (string, error) {
 	// Read current canonical file content (without frontmatter)
-	data, err := os.ReadFile(canonicalFile)
+	data, err := storage.ReadAtPath(canonicalFile)
 	if err != nil {
 		return "", err
 	}
@@ -301,10 +307,12 @@ func applyReversePatch(content, diff string) (string, error) {
 	}
 
 	// Write content to temp file
+	// NOT the storage interface: a temp file outside the site, for diff/patch.
 	tempContent, err := os.CreateTemp("", "polis-content-*")
 	if err != nil {
 		return "", err
 	}
+	// NOT the storage interface: a TEMP FILE from os.CreateTemp, outside the site.
 	defer os.Remove(tempContent.Name())
 
 	if _, err := tempContent.WriteString(content); err != nil {
@@ -318,6 +326,7 @@ func applyReversePatch(content, diff string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// NOT the storage interface: a TEMP FILE from os.CreateTemp, outside the site.
 	defer os.Remove(tempDiff.Name())
 
 	if _, err := tempDiff.WriteString(diff); err != nil {
@@ -331,6 +340,7 @@ func applyReversePatch(content, diff string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// NOT the storage interface: a TEMP FILE from os.CreateTemp, outside the site.
 	defer os.Remove(tempOutput.Name())
 	tempOutput.Close()
 
@@ -339,7 +349,7 @@ func applyReversePatch(content, diff string) (string, error) {
 		return "", fmt.Errorf("failed to apply reverse patch: %w", err)
 	}
 
-	result, err := os.ReadFile(tempOutput.Name())
+	result, err := storage.ReadAtPath(tempOutput.Name())
 	if err != nil {
 		return "", err
 	}
@@ -354,10 +364,12 @@ func applyForwardPatch(content, diff string) (string, error) {
 	}
 
 	// Write content to temp file
+	// NOT the storage interface: a temp file outside the site, for diff/patch.
 	tempContent, err := os.CreateTemp("", "polis-content-*")
 	if err != nil {
 		return "", err
 	}
+	// NOT the storage interface: a TEMP FILE from os.CreateTemp, outside the site.
 	defer os.Remove(tempContent.Name())
 
 	if _, err := tempContent.WriteString(content); err != nil {
@@ -371,6 +383,7 @@ func applyForwardPatch(content, diff string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// NOT the storage interface: a TEMP FILE from os.CreateTemp, outside the site.
 	defer os.Remove(tempDiff.Name())
 
 	if _, err := tempDiff.WriteString(diff); err != nil {
@@ -384,6 +397,7 @@ func applyForwardPatch(content, diff string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// NOT the storage interface: a TEMP FILE from os.CreateTemp, outside the site.
 	defer os.Remove(tempOutput.Name())
 	tempOutput.Close()
 
@@ -392,7 +406,7 @@ func applyForwardPatch(content, diff string) (string, error) {
 		return "", fmt.Errorf("failed to apply forward patch: %w", err)
 	}
 
-	result, err := os.ReadFile(tempOutput.Name())
+	result, err := storage.ReadAtPath(tempOutput.Name())
 	if err != nil {
 		return "", err
 	}
@@ -440,19 +454,31 @@ func canonicalizeContent(content string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// InitializeHistory writes the initial version history side-car at versionsPath,
+// VersionsKey returns the key of the versions side-car for a canonical file's
+// key: the side-car sits in versionsDir beside the file, under its name.
+//
+// ⚠️ It is PUBLIC content, like the file it records: a .versions directory
+// sits in content, not under .polis, so on a remote instance it lands in the
+// public store with the post or comment it belongs to.
+func VersionsKey(canonicalKey, versionsDir string) string {
+	return path.Join(path.Dir(canonicalKey), versionsDir, path.Base(canonicalKey))
+}
+
+// InitializeHistory writes the initial version history side-car at versionsKey,
 // recording the base (parent=none) version as full content. canonicalPath is the
 // site-relative path stored in the header; body is the content without frontmatter;
-// hash is the sha256 hex (no "sha256:" prefix); timestamp is RFC3339. The parent
-// directory (e.g. ".versions/") is created if needed.
+// hash is the sha256 hex (no "sha256:" prefix); timestamp is RFC3339.
 //
 // This is content-type agnostic: posts and comments both call it with the
-// versions path derived via GetVersionsFilePath(canonicalFile, ".versions").
-func InitializeHistory(versionsPath, canonicalPath, body, hash, timestamp string) error {
-	if err := os.MkdirAll(filepath.Dir(versionsPath), 0755); err != nil {
-		return err
+// side-car's key derived via VersionsKey(canonicalKey, ".versions").
+//
+// ⭐ The store creates the side-car's directory, at 0755: a .versions
+// directory sits in content, not under .polis. On a filesystem the write lands
+// in place, as it did when it was addressed by path.
+func InitializeHistory(site storage.Site, versionsKey, canonicalPath, body, hash, timestamp string) error {
+	if !site.Valid() {
+		return fmt.Errorf("initialize version history: site handle is not usable")
 	}
-
 	content := fmt.Sprintf(`# VERSION_FILE_FORMAT=1.0
 # CANONICAL_FILE=%s
 # CURRENT_HASH=sha256:%s
@@ -465,33 +491,43 @@ FULL_CONTENT_START
 
 `, canonicalPath, hash, hash, timestamp, body)
 
-	return os.WriteFile(versionsPath, []byte(content), 0644)
+	return site.Store().Put(context.Background(), versionsKey, []byte(content))
 }
 
 // AppendHistory appends a new version entry — a unified diff of newBody against
-// oldBody — to the side-car at versionsPath and advances the CURRENT_HASH header.
+// oldBody — to the side-car at versionsKey and advances the CURRENT_HASH header.
 // previousHash and newHash are sha256 hex (no prefix). If the side-car does not
 // exist yet, it is created with a header (but no base version); callers that need
 // the prior content to be reconstructable should InitializeHistory with the old
 // content first (see comment republish lazy-init).
-func AppendHistory(versionsPath, canonicalPath, previousHash, newHash, timestamp, oldBody, newBody string) error {
-	if err := os.MkdirAll(filepath.Dir(versionsPath), 0755); err != nil {
-		return err
+func AppendHistory(site storage.Site, versionsKey, canonicalPath, previousHash, newHash, timestamp, oldBody, newBody string) error {
+	if !site.Valid() {
+		return fmt.Errorf("append version history: site handle is not usable")
 	}
+	st := site.Store()
+	ctx := context.Background()
 
-	if _, statErr := os.Stat(versionsPath); errors.Is(statErr, os.ErrNotExist) {
+	// ⭐ THREE ARMS, deliberately: genuinely absent, could-not-tell, and present.
+	// This site made that distinction with os.Stat and errors.Is, and then with
+	// PathAbsent; Stat through the store draws the same line, since its absence
+	// is ErrNotFound and any other failure is "could not tell".
+	_, statErr := st.Stat(ctx, versionsKey)
+	switch {
+	case errors.Is(statErr, storage.ErrNotFound):
 		header := fmt.Sprintf(`# VERSION_FILE_FORMAT=1.0
 # CANONICAL_FILE=%s
 # CURRENT_HASH=sha256:%s
 
 `, canonicalPath, newHash)
-		if err := os.WriteFile(versionsPath, []byte(header), 0644); err != nil {
+		if err := st.Put(ctx, versionsKey, []byte(header)); err != nil {
 			return err
 		}
-	} else if statErr != nil {
+	case statErr != nil:
 		return statErr
-	} else if err := updateCurrentHash(versionsPath, newHash); err != nil {
-		return err
+	default:
+		if err := updateCurrentHash(st, versionsKey, newHash); err != nil {
+			return err
+		}
 	}
 
 	diffContent, err := computeUnifiedDiff(oldBody, newBody)
@@ -507,19 +543,31 @@ DIFF_START
 
 `, newHash, timestamp, previousHash, diffContent)
 
-	f, err := os.OpenFile(versionsPath, os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	_, err = f.WriteString(entry)
-	return err
+	// ⭐ A version entry is appended to the side-car. The comment that stood
+	// here argued against read-modify-write because it would turn "the kernel
+	// appends" into "last writer wins".
+	//
+	// ⛔ But this file has the same two-writer shape as the public index:
+	// updateCurrentHash below REWRITES IT WHOLE to change the CURRENT_HASH
+	// header. So the kernel's append was never atomic against the other
+	// writer, and the story was already last-writer-wins. ⭐⭐ Both now take
+	// the same per-key lock, which is what actually makes it safe.
+	return storage.Append(ctx, st, versionsKey, []byte(entry), storage.WithMode(0644))
 }
 
 // updateCurrentHash rewrites the CURRENT_HASH header line in a side-car file.
-func updateCurrentHash(versionsPath, newHash string) error {
-	content, err := os.ReadFile(versionsPath)
+func updateCurrentHash(st storage.Store, versionsKey, newHash string) error {
+	// ⛔ THE SAME LOCK AppendHistory TAKES. This replaces the whole side-car to
+	// change one header line, so without it a concurrent append is clobbered —
+	// losing a version entry, which is the record that makes an edit auditable.
+	return storage.WithKeyLock(st, versionsKey, func() error {
+		return updateCurrentHashLocked(st, versionsKey, newHash)
+	})
+}
+
+func updateCurrentHashLocked(st storage.Store, versionsKey, newHash string) error {
+	ctx := context.Background()
+	content, err := st.Get(ctx, versionsKey)
 	if err != nil {
 		return err
 	}
@@ -532,16 +580,18 @@ func updateCurrentHash(versionsPath, newHash string) error {
 		}
 	}
 
-	return os.WriteFile(versionsPath, []byte(strings.Join(lines, "\n")), 0644)
+	return st.Put(ctx, versionsKey, []byte(strings.Join(lines, "\n")))
 }
 
 // computeUnifiedDiff computes a unified diff between old and new content via the
 // system `diff -u`. Returns the diff output, or empty string if identical.
 func computeUnifiedDiff(oldContent, newContent string) (string, error) {
+	// NOT the storage interface: a temp file or directory outside the site.
 	tmpDir, err := os.MkdirTemp("", "polis-diff-*")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp dir: %w", err)
 	}
+	// NOT the storage interface: a temp DIRECTORY outside the site.
 	defer os.RemoveAll(tmpDir)
 	os.Chmod(tmpDir, 0700)
 

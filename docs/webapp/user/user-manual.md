@@ -77,7 +77,7 @@ The server binds to `localhost` only. It is never accessible from other machines
 
 ### First Launch
 
-If the data directory has no site configured, the webapp shows a **Welcome screen** with two options:
+If the data directory has no site configured, the webapp shows a **Welcome screen** offering to initialize one. To use an existing site, start the webapp in that site's directory, or pass `--data-dir`.
 
 **Initialize New Site** — Creates a fresh Polis site with:
 - A new Ed25519 keypair for signing your content
@@ -86,8 +86,6 @@ If the data directory has no site configured, the webapp shows a **Welcome scree
 - A default `site/snippets/about.md` for your About section
 
 You can optionally provide a site title, base URL, and discovery service URL. These can also be configured later.
-
-**Link Existing Site** — Points the webapp at a directory that already contains a valid Polis site (the directory is validated before it is linked).
 
 ### The Setup Wizard
 
@@ -99,6 +97,19 @@ After creating a site, and on later launches until your site is registered, the 
 Click **Do this later** to dismiss it; it stays dismissed. You can register at any time from **Settings → Discovery Service**.
 
 ---
+
+## Signing In to Your Own Instance (experimental)
+
+⚠️ **Experimental.** This applies only to a **remote** instance: your own polis server on a host such as Vercel,
+made with `polis branch` and `polis branch deploy`. A laptop needs no sign-in, and polis.pub uses magic links
+(below).
+
+- **The first time**, the setup screen shows a challenge. Save its **Copy message only** text, sign it on your own
+  computer with the recovery key `polis branch` made (`polis recover sign --domain <your site> --challenge challenge.txt`), and paste
+  the signature back. Then add a **passkey** (your device's fingerprint, face or PIN), which is how you sign in
+  from then on.
+- **Lost every passkey?** The same recovery-key signature signs you in again.
+- ⛔ **Keep the recovery key off the server.** It proves the instance is yours; anyone holding it can claim it.
 
 ## Hosted Accounts & Signing In
 
@@ -154,7 +165,7 @@ The webapp uses a centered-column layout with a thin top navigation bar. The log
 
 The top bar contains (left to right):
 
-- **Avatar button** — your avatar. Clicking it returns you to the default stream; hovering opens a menu with your name and handle (click the handle to open your public site), follower/following/post counts, **Copy follow link**, and **Settings**.
+- **Avatar button** — your avatar. Clicking it returns you to the default stream; hovering opens a menu with your name and handle (click the handle to open your public site), follower/following/post counts, **Follow a site**, **Copy follow link**, **Kay** (not on polis.pub; see [Kay](#kay-have-your-ai-change-your-site-experimental)), and **Settings**.
 - **Icon row** (each loads a PQL preset; three carry a notification dot):
   - **Gateway** (arc + dots) — "Activity from my network" (`all activity from my network`). Dot = new items in your network since you last looked.
   - **Paragraph** (three lines) — "My posts" (`all posts from me by date`).
@@ -167,7 +178,7 @@ The top bar contains (left to right):
 
 A dot clears when you open its view.
 
-On a narrow screen the icon row and avatar collapse into a **menu** button that opens a drawer with the same items plus **Copy follow link** and **Settings**.
+On a narrow screen the icon row and avatar collapse into a **menu** button that opens a drawer with the same items plus **Follow a site**, **Copy follow link**, **Kay** (where it is offered) and **Settings**.
 
 ### Centered Content Column
 
@@ -179,13 +190,14 @@ The stream, message threads and the editors are rendered in a centered column be
 
 ### Deep-Linking
 
-The webapp is a single stream-screen, and the URL **is** the filter. There are only three kinds of route:
+The webapp is a single stream-screen, and the URL **is** the filter. There are only four kinds of route:
 
 | URL | View |
 |-----|------|
 | `/_/` | The default stream (activity from your network, by date) |
 | `/_/pql/<sentence>` | The stream filtered by a PQL sentence — every icon button and the sentence-filter widget just load one of these |
-| `/_/settings` | Settings (the only non-stream surface) |
+| `/_/settings` | Settings |
+| `/_/kay` | Kay: have your AI change your site, in plain words (from the avatar menu, beside Settings; not on polis.pub) |
 
 Every view you used to reach by a dedicated page — posts, comments, blessings, following, messages — is now a PQL filter. For example:
 
@@ -215,6 +227,8 @@ A toast confirms the publish and the post appears in your stream. **Cancel** (or
 2. The editor opens with the post's content
 3. Click **Republish** — the post is re-signed with a new version hash
 4. The post's `version-history` frontmatter gains the new hash, and every version's full text is kept in the `.versions/` directory beside the post
+
+**Version history is public.** Anyone can read earlier versions of a post, the same as the post itself. On your own server you can choose to hide it, for example with an `.htaccess` rule that refuses `.versions/`. On polis.pub it's always visible, and there's no setting to hide it.
 
 ### Unpublishing a Post
 
@@ -287,11 +301,35 @@ Snippet resolution order: `.md` first, then `.html`, then exact name match. Glob
 
 ---
 
+### Kay: have your AI change your site (experimental)
+
+⚠️ **Experimental.** Kay (avatar menu → **Kay**, `/_/kay`) lets you ask an AI, in plain words, for changes to
+how your site looks: its theme, its styles, the shortcuts in your nav bar, marks in your stream. Today the AI is
+**v0**: you paste a v0 API key once, and the page shows each step v0 took and what it changed.
+
+**Where it works:** only on your own instance, at a public address v0 can reach (`localhost` is refused,
+because v0 calls your site from outside). **It is not offered on polis.pub**: the menu has no Kay entry there,
+and the Kay API answers `404`.
+
+- **v0 acts on your site only through your site's own tools.** Your site registers its `/mcp` endpoint with v0
+  under keys it mints for this purpose (one for each address it registers, and each works only there), and those
+  keys can only change what readers see rendered: styles, theme, nav shortcuts, stream marks. It cannot publish or delete posts, sign anything new as you, read your messages, or
+  reach your keys.
+- **Changes are data, never code.** A stream mark or a nav shortcut is a rule from a fixed set; nothing the AI
+  writes is ever run as a script.
+- **Your v0 key stays on your server** and is never sent to your browser after you paste it. **Disconnect**
+  removes it and your site's registration with v0.
+
 ## Social Features
 
 ### Following Authors
 
 Click the **People** icon, or pick the *profiles* type in the sentence filter. Choose *all polis* as the scope to see authors you don't follow yet. Each profile has a **+ Follow** or **Unfollow** button and says whether you follow each other (*mutual*, *follows you*, *following*, *not following*).
+
+**To follow a site anywhere**, on polis.pub or on its own domain, choose **Follow a site** from the avatar
+menu and enter its address (`alice.example`, `https://alice.example`, or a polis.pub follow link such as
+`polis.pub/f/alice`). Only polis.pub's own follow links are rewritten, and a bare handle with no dot
+(`alice`) is completed to `alice.polis.pub`; any other address is followed as you entered it. An address that isn't a polis site is refused with the reason.
 
 Anyone can follow you with your follow link: choose **Copy follow link** from the avatar menu to share it. New hosted spaces follow `discover.polis.pub` from the start, so the stream has content from day one.
 
@@ -417,9 +455,11 @@ lose if one goes away.
 You do not have to do anything to get this. It starts the moment your site is created and grows by one
 entry each time you rotate.
 
-⚠️ **Your old private key is not kept anywhere.** Earlier versions tucked it away in a file; that has
+⚠️ **Your old private key is not kept once a rotation finishes.** Earlier versions tucked it away in a file; that has
 been removed, because it was never what made old signatures checkable — the *public* key in your
-history is — and a spare copy of a private key is only something to lose. If you have an old
+history is — and a spare copy of a private key is only something to lose. (During a rotation it is
+held briefly at `.polis/keys/id_ed25519.prev`, so that an interrupted rotation can be finished by
+rotating again, and removed as soon as the handover is recorded.) If you have an old
 `.polis/keys/id_ed25519.old` from before, it is left where it is and nothing new is written.
 
 ### Terms of Use
@@ -580,11 +620,13 @@ Settings are loaded from multiple places:
 | Source | What It Stores |
 |--------|---------------|
 | `.well-known/polis` | Site identity (title, author name, avatar, public key) |
-| `.env` | Runtime config (`POLIS_BASE_URL`, `DISCOVERY_SERVICE_URL`, `DISCOVERY_SERVICE_KEY`, `LOG_LEVEL`, `LOG_RETENTION_DAYS`) |
+| `.env` | Runtime config (`POLIS_BASE_URL`, `DISCOVERY_SERVICE_URL`, `LOG_LEVEL`, `LOG_RETENTION_DAYS`) |
 | `.polis/bundles/registry.json` | Active theme and shape, and the activity-summary rules |
 | `.polis/webapp/config.json` | Web app state (setup wizard dismissed, hook paths, a few display preferences) |
 
 The `.env` file is searched in order: your data directory first, then the current working directory, then `~/.polis/`.
+
+**An environment variable wins over `.env`**, the same rule both CLIs follow, so a platform that configures your instance through its dashboard (Vercel, Fly) works without any `.env` at all. If a setting appears in both and the values differ, the web app logs a line naming the setting, but not either value. On a hosted service it's the other way round: one process serves many sites, so each site's settings come only from that site's own `.env`.
 
 ---
 
@@ -627,6 +669,8 @@ Hook scripts live at `.polis/webapp/hooks/`:
 ```
 
 Each script must be executable (`chmod +x`). Hooks are resolved by checking the explicit paths in `.polis/webapp/config.json`, then auto-discovering scripts in `.polis/webapp/hooks/`.
+
+A hook must be a file inside your site directory. A symlink is fine as long as it points at a script that is also inside the site; one that points outside it is refused and the hook does not run. To run a script installed somewhere else, write a short hook script that calls it.
 
 ### Built-In Templates
 
@@ -825,8 +869,7 @@ LOG_RETENTION_DAYS=7
 |----------|---------|-------------|
 | `POLIS_BASE_URL` | — | Your site's public URL (required for registration and key rotation) |
 | `DISCOVERY_SERVICE_URL` | `https://ds.polis.pub` | Discovery service endpoint |
-| `DISCOVERY_SERVICE_KEY` | — | Discovery service API key (optional — requests are authenticated with your signature) |
-| `LOG_LEVEL` | `1` | `1` = basic, `2` = verbose |
+| `LOG_LEVEL` | `1` | `0` = off, `1` = basic, `2` = verbose |
 | `LOG_RETENTION_DAYS` | `7` | How many days of logs to keep |
 
 When the web app starts it writes the log settings it is using back into the `.env` in your data directory, so they are visible.

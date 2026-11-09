@@ -1,10 +1,13 @@
 package policy
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // ============================================================================
@@ -12,7 +15,7 @@ import (
 // ============================================================================
 
 func TestLoadPolicies_MissingFiles(t *testing.T) {
-	policies, err := LoadPolicies("/nonexistent/private", "/nonexistent/public")
+	policies, err := loadPolicyFiles("/nonexistent/private", "/nonexistent/public")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -29,7 +32,7 @@ func TestLoadPolicies_PrivateAndPublicOrdering(t *testing.T) {
 	os.WriteFile(privPath, []byte(`{"active":true,"policy":"deny all from all at evil.corp"}`+"\n"), 0644)
 	os.WriteFile(pubPath, []byte(`{"active":true,"policy":"allow pub.polis.comment from following"}`+"\n"), 0644)
 
-	policies, err := LoadPolicies(privPath, pubPath)
+	policies, err := loadPolicyFiles(privPath, pubPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,7 +58,7 @@ not valid json
 `
 	os.WriteFile(path, []byte(content), 0644)
 
-	policies, err := LoadPolicies(path, "/nonexistent")
+	policies, err := loadPolicyFiles(path, "/nonexistent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -74,7 +77,7 @@ func TestLoadPolicies_EmptyLines(t *testing.T) {
 `
 	os.WriteFile(path, []byte(content), 0644)
 
-	policies, err := LoadPolicies(path, "/nonexistent")
+	policies, err := loadPolicyFiles(path, "/nonexistent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,7 +96,7 @@ func TestLoadPolicies_VersionHeaderSkipped(t *testing.T) {
 `
 	os.WriteFile(path, []byte(content), 0644)
 
-	policies, err := LoadPolicies(path, "/nonexistent")
+	policies, err := loadPolicyFiles(path, "/nonexistent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -108,15 +111,68 @@ func TestLoadPolicies_VersionHeaderSkipped(t *testing.T) {
 	}
 }
 
-func TestDefaultPaths(t *testing.T) {
-	priv, pub := DefaultPaths("/site")
-	wantPriv := filepath.Join("/site", ".polis", "policies", "rules.jsonl")
-	wantPub := filepath.Join("/site", "policies", "rules.jsonl")
-	if priv != wantPriv {
-		t.Errorf("private = %q, want %q", priv, wantPriv)
+func TestRulesKeys(t *testing.T) {
+	if PrivateRulesKey != ".polis/policies/rules.jsonl" {
+		t.Errorf("private = %q", PrivateRulesKey)
 	}
-	if pub != wantPub {
-		t.Errorf("public = %q, want %q", pub, wantPub)
+	if PublicRulesKey != "policies/rules.jsonl" {
+		t.Errorf("public = %q", PublicRulesKey)
+	}
+}
+
+// loadPolicyFiles is LoadPolicies over two arbitrary files, for the tests of
+// the parse rules: each path is its own one-file site.
+func loadPolicyFiles(privatePath, publicPath string) ([]Policy, error) {
+	var out []Policy
+	for _, p := range []string{privatePath, publicPath} {
+		got, err := loadJSONL(storage.At(filepath.Dir(p)), filepath.Base(p))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, got...)
+	}
+	return out, nil
+}
+
+// ⭐ A site's two files load in priority order through the site handle, the
+// same on a store with no filesystem; a missing file is no policies, and a
+// file that cannot be read is an error.
+func TestLoadPoliciesReadsBothFilesThroughTheSite(t *testing.T) {
+	ctx := context.Background()
+	priv := `{"active":true,"policy":"deny all from all at stalker.example"}` + "\n"
+	pub := `{"active":true,"policy":"allow all from all"}` + "\n"
+
+	dir := t.TempDir()
+	posix := storage.At(dir)
+	obj := storage.On(filepath.Join(t.TempDir(), "no-such-dir"), storage.NewObjectStore("tenants/alice"))
+	for _, site := range []storage.Site{posix, obj} {
+		if got, err := LoadPolicies(site); err != nil || len(got) != 0 {
+			t.Fatalf("a site with no policy files: %v, %v", got, err)
+		}
+		if err := site.Store().Put(ctx, PrivateRulesKey, []byte(priv)); err != nil {
+			t.Fatal(err)
+		}
+		if err := site.Store().Put(ctx, PublicRulesKey, []byte(pub)); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadPolicies(site)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 || !strings.Contains(got[0].Rule, "stalker") || got[1].Rule != "allow all from all" {
+			t.Errorf("policies = %+v, want the private rule first", got)
+		}
+	}
+
+	// A rules "file" that is a directory cannot be read: an error, not "none".
+	if err := os.Remove(filepath.Join(dir, filepath.FromSlash(PublicRulesKey))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, filepath.FromSlash(PublicRulesKey)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPolicies(posix); err == nil {
+		t.Error("an unreadable rules file was read as no policies")
 	}
 }
 
@@ -847,7 +903,7 @@ func TestSpec_PrivateOverridesPublic(t *testing.T) {
 	// Public: deny all comments
 	os.WriteFile(pubPath, []byte(`{"active":true,"policy":"deny pub.polis.comment from all"}`+"\n"), 0644)
 
-	policies, err := LoadPolicies(privPath, pubPath)
+	policies, err := loadPolicyFiles(privPath, pubPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -946,7 +1002,7 @@ func TestDefaultPublicPolicyContent(t *testing.T) {
 	path := filepath.Join(dir, "rules.jsonl")
 	os.WriteFile(path, []byte(content), 0644)
 
-	policies, err := LoadPolicies(path, "/nonexistent")
+	policies, err := loadPolicyFiles(path, "/nonexistent")
 	if err != nil {
 		t.Fatalf("failed to load default policy content: %v", err)
 	}
@@ -994,7 +1050,7 @@ func TestDefaultPrivatePolicyContent(t *testing.T) {
 	path := filepath.Join(dir, "rules.jsonl")
 	os.WriteFile(path, []byte(content), 0644)
 
-	policies, err := LoadPolicies(path, "/nonexistent")
+	policies, err := loadPolicyFiles(path, "/nonexistent")
 	if err != nil {
 		t.Fatalf("failed to load default private policy content: %v", err)
 	}
@@ -1020,7 +1076,7 @@ func TestDefaultPublicPolicy_DenyAllCatchAll(t *testing.T) {
 	path := filepath.Join(dir, "rules.jsonl")
 	os.WriteFile(path, []byte(content), 0644)
 
-	policies, err := LoadPolicies("/nonexistent", path)
+	policies, err := loadPolicyFiles("/nonexistent", path)
 	if err != nil {
 		t.Fatalf("failed to load: %v", err)
 	}
@@ -1058,7 +1114,7 @@ func TestDefaultPolicies_PrivateOverridesPublic(t *testing.T) {
 	os.WriteFile(privPath, []byte(`{"active":true,"policy":"deny all from all at blocked.com"}`+"\n"), 0644)
 	os.WriteFile(pubPath, []byte(DefaultPublicPolicyContent()), 0644)
 
-	policies, err := LoadPolicies(privPath, pubPath)
+	policies, err := loadPolicyFiles(privPath, pubPath)
 	if err != nil {
 		t.Fatalf("failed to load: %v", err)
 	}
@@ -1094,7 +1150,7 @@ func TestDefaultPolicies_DiscoverPolisPubLandsInReview(t *testing.T) {
 	pubPath := filepath.Join(dir, "public.jsonl")
 	os.WriteFile(pubPath, []byte(DefaultPublicPolicyContent()), 0644)
 
-	policies, err := LoadPolicies("/nonexistent", pubPath)
+	policies, err := loadPolicyFiles("/nonexistent", pubPath)
 	if err != nil {
 		t.Fatalf("failed to load defaults: %v", err)
 	}

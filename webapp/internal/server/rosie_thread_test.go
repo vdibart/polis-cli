@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,7 +29,7 @@ import (
 // writeRules replaces the site's public rules.
 func writeRules(t *testing.T, s *Server, rules []string) {
 	t.Helper()
-	_, pub := policy.DefaultPaths(s.DataDir)
+	pub := filepath.Join(s.DataDir, filepath.FromSlash(policy.PublicRulesKey))
 	var b strings.Builder
 	b.WriteString(`{"version":2,"generator":"test"}` + "\n")
 	for _, r := range rules {
@@ -66,7 +68,7 @@ func loadThreadParity(t *testing.T) parityFixture {
 	path := filepath.Join(filepath.Dir(file), "..", "..", "..", "discovery-service", "core", "contract-fixtures", "thread-blessed-parity.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if _, derr := os.Stat(filepath.Join(filepath.Dir(file), "..", "..", "..", "discovery-service")); os.IsNotExist(derr) {
+		if _, derr := os.Stat(filepath.Join(filepath.Dir(file), "..", "..", "..", "discovery-service")); errors.Is(derr, fs.ErrNotExist) {
 			t.Skip("the shared contract fixtures live with the discovery service source, which is not in this repository")
 		}
 		t.Fatal(err)
@@ -92,7 +94,7 @@ func paritySite(t *testing.T, f parityFixture, c parityCase) (*Server, *fakeDS) 
 	s, ds := rosieServer(t, "review pub.polis.comment from all")
 	writeRules(t, s, f.Rules)
 	for _, p := range c.PriorBlessed {
-		if err := metadata.AddBlessedComment(s.DataDir, extractPostPathFromURL(p.InReplyTo), metadata.BlessedComment{URL: p.CommentURL}); err != nil {
+		if err := metadata.AddBlessedComment(storage.At(s.DataDir), extractPostPathFromURL(p.InReplyTo), metadata.BlessedComment{URL: p.CommentURL}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -183,7 +185,7 @@ func TestACommentRosieBlessedMakesItsAuthorThreadBlessed(t *testing.T) {
 	}
 
 	// The owner blesses it by hand; bob's next comment on the thread is Rosie's.
-	if err := metadata.AddBlessedComment(s.DataDir, extractPostPathFromURL(rosiePostURL), metadata.BlessedComment{URL: rosieCommentURL}); err != nil {
+	if err := metadata.AddBlessedComment(storage.At(s.DataDir), extractPostPathFromURL(rosiePostURL), metadata.BlessedComment{URL: rosieCommentURL}); err != nil {
 		t.Fatal(err)
 	}
 	second := requestedEvent()
@@ -262,7 +264,7 @@ func TestTheBlessedVersionIsTheVerifiedBytesNeverTheRequested(t *testing.T) {
 		if ds.writeCount() != 1 {
 			t.Fatalf("writes = %d; events %v", ds.writeCount(), events)
 		}
-		bc, err := metadata.LoadBlessedComments(s.DataDir)
+		bc, err := metadata.LoadBlessedComments(storage.At(s.DataDir))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -284,7 +286,7 @@ func TestTheBlessedVersionIsTheVerifiedBytesNeverTheRequested(t *testing.T) {
 			t.Fatalf("version_differs = %v", ev)
 		}
 		// The bytes she verified are cached, pinned to that version.
-		_, sc, ok := cache.FindBlessed(s.DataDir, rosieCommentURL)
+		_, sc, ok := cache.FindBlessed(storage.At(s.DataDir), rosieCommentURL)
 		if !ok || sc.BlessedVersionHash != rosieVerifiedVersion {
 			t.Fatalf("blessed cache = %v %+v", ok, sc)
 		}
@@ -320,13 +322,13 @@ func TestAWithdrawnBlessingOfAnUncachedCommentEndsThreadBlessed(t *testing.T) {
 				"review pub.polis.comment from all",
 			})
 			switchRosieOnByDefault(t, s)
-			if err := metadata.AddBlessedComment(s.DataDir, extractPostPathFromURL(rosiePostURL), metadata.BlessedComment{URL: rosieCommentURL}); err != nil {
+			if err := metadata.AddBlessedComment(storage.At(s.DataDir), extractPostPathFromURL(rosiePostURL), metadata.BlessedComment{URL: rosieCommentURL}); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, ok := cache.FindBlessed(s.DataDir, rosieCommentURL); ok {
+			if _, _, ok := cache.FindBlessed(storage.At(s.DataDir), rosieCommentURL); ok {
 				t.Fatal("fixture: the comment must be uncached")
 			}
-			if !threadBlessedDomains(s.DataDir, rosiePostURL)["bob.polis.pub"] {
+			if !threadBlessedDomains(s.Site(), rosiePostURL)["bob.polis.pub"] {
 				t.Fatal("fixture: bob must start thread-blessed")
 			}
 
@@ -341,10 +343,10 @@ func TestAWithdrawnBlessingOfAnUncachedCommentEndsThreadBlessed(t *testing.T) {
 				},
 			}})
 
-			if blessedListHas(s.DataDir, rosieCommentURL) {
+			if blessedListHas(s.Site(), rosieCommentURL) {
 				t.Fatal("the withdrawn blessing is still in blessed.json")
 			}
-			if threadBlessedDomains(s.DataDir, rosiePostURL)["bob.polis.pub"] {
+			if threadBlessedDomains(s.Site(), rosiePostURL)["bob.polis.pub"] {
 				t.Fatal("bob is still thread-blessed after the blessing was withdrawn")
 			}
 			// And the next comment from bob on the thread waits for the owner.
@@ -363,10 +365,10 @@ func TestAWithdrawnBlessingOfAnUncachedCommentEndsThreadBlessed(t *testing.T) {
 // unsigned rewrite would clear the list's signature.
 func TestAWithdrawalForAnUnlistedCommentLeavesTheListUntouched(t *testing.T) {
 	s, _ := rosieServer(t, "review pub.polis.comment from all")
-	if err := metadata.AddBlessedCommentSigned(s.DataDir, extractPostPathFromURL(rosiePostURL), metadata.BlessedComment{URL: rosieCommentURL}, s.PrivateKey); err != nil {
+	if err := metadata.AddBlessedCommentSigned(storage.At(s.DataDir), extractPostPathFromURL(rosiePostURL), metadata.BlessedComment{URL: rosieCommentURL}, s.PrivateKey); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := os.ReadFile(metadata.BlessedPath(s.DataDir))
+	before, _ := os.ReadFile(filepath.Join(s.DataDir, metadata.BlessedKey))
 	(&blessingSyncHandler{server: s}).Process([]discovery.StreamEvent{{
 		Type: "pub.polis.comment.blessing.denied",
 		Payload: map[string]interface{}{
@@ -375,7 +377,7 @@ func TestAWithdrawalForAnUnlistedCommentLeavesTheListUntouched(t *testing.T) {
 			"target_domain": "test-site.polis.pub",
 		},
 	}})
-	if after, _ := os.ReadFile(metadata.BlessedPath(s.DataDir)); string(after) != string(before) {
+	if after, _ := os.ReadFile(filepath.Join(s.DataDir, metadata.BlessedKey)); string(after) != string(before) {
 		t.Fatal("blessed.json was rewritten for a comment it never listed")
 	}
 }

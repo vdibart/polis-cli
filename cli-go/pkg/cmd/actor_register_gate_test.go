@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,7 +40,7 @@ func registerGateRegistryFile(t *testing.T, dir string) {
 
 func registerGatePointer(t *testing.T, dir string) {
 	t.Helper()
-	if err := site.SetActorRegistryPointer(dir, "/content/pub.polis.core/actor/registry.json"); err != nil {
+	if err := site.SetActorRegistryPointer(storage.At(dir), "/content/pub.polis.core/actor/registry.json"); err != nil {
 		t.Fatal(err)
 	}
 }

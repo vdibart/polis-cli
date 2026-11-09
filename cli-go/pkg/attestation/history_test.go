@@ -2,6 +2,7 @@ package attestation_test
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,7 +53,7 @@ func rotatedIssuer(t *testing.T, k0, k1 keypair) *site.KeyHistoryBlock {
 	if err := os.WriteFile(filepath.Join(dir, ".well-known", "polis"), wk, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := site.WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := site.WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	canonical, err := discovery.MakeKeyRotationCanonicalJSON(issuerDomain, k0.pub, k1.pub, rotatedAt)
@@ -63,10 +64,10 @@ func rotatedIssuer(t *testing.T, k0, k1 keypair) *site.KeyHistoryBlock {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := site.RecordKeyRotation(dir, k1.pub, sig, rotatedAt); err != nil {
+	if err := site.RecordKeyRotation(storage.At(dir), k1.pub, sig, rotatedAt, ""); err != nil {
 		t.Fatal(err)
 	}
-	chain, err := site.LoadKeyHistory(dir)
+	chain, err := site.LoadKeyHistory(storage.At(dir))
 	if err != nil || chain == nil {
 		t.Fatalf("no chain: %v", err)
 	}

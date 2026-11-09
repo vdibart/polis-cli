@@ -15,10 +15,9 @@ This API covers **content type operations only**. Site settings, theme switching
 ## Quick Start
 
 ```bash
-# Create an API key by hand (no generator command yet — see Authentication below)
-KEY="polis_$(openssl rand -hex 16)"
-printf '%s' "$KEY" | sha256sum   # record this hash in .polis/api-keys.json
-echo "$KEY"                       # use this value as the Bearer token
+# Mint a full-access key from the signed-in webapp (or by hand: see Authentication below)
+# POST /api/keys {"name": "my-script", "scopes": ["full"]}  ->  {"key": {...}, "token": "polis_..."}
+KEY="polis_..."                   # the token, shown once
 
 # List posts (public, no auth needed)
 curl https://mysite.example.com/v1/content/post
@@ -41,24 +40,38 @@ Read operations (GET) on content and bundles are public. All write operations re
 Authorization: Bearer <api-key>
 ```
 
-There is no key-generation command yet. An API key is any token — `polis_`-prefixed by convention; the server does not check the prefix (`ops.ValidateAPIKey`) — whose **SHA-256 hash** you record in `.polis/api-keys.json`; the server hashes the presented Bearer token and compares against the stored hashes. Create one by hand:
+An API key is a token whose **SHA-256 hash** is recorded in `.polis/api-keys.json`; the server hashes the presented Bearer token and compares it against the stored hashes. Only the hash is ever stored.
 
-```bash
-KEY="polis_$(openssl rand -hex 16)"
-HASH=$(printf '%s' "$KEY" | sha256sum | cut -d' ' -f1)
-```
+**Minting a key.** The site's owner mints and revokes keys through the webapp's owner-only routes, which work the same on a laptop and on a remote instance whose files are not on the owner's disk:
 
-Then add an entry to `.polis/api-keys.json` (create the file if it doesn't exist):
+| Route | Does |
+|---|---|
+| `GET /api/keys` | lists the keys: `id`, `name`, `scopes`, `created_at` (never a hash) |
+| `POST /api/keys` `{"name": "...", "scopes": [...]}` | mints a key and returns it once, as `token`, with `Cache-Control: no-store`. ⛔ `scopes` is required: name the scopes the key needs, or `["full"]` for a key with full access. An empty or missing list is refused rather than defaulting to full |
+| `DELETE /api/keys/{id}` | revokes it |
 
-```json
-{
-  "keys": [
-    { "id": "k1", "name": "my-script", "key_hash": "<HASH>", "created_at": "2026-06-11T00:00:00Z" }
-  ]
-}
-```
+A key can also be made by hand: `KEY="polis_$(openssl rand -hex 32)"`, then add `{"id": "k1", "name": "my-script", "key_hash": "<sha256 of $KEY>", "created_at": "..."}` to the `keys` list in `.polis/api-keys.json`, mode `600`.
 
-Use the plaintext `$KEY` as the Bearer token — only its hash is stored, never the key itself.
+### Scopes
+
+A key with no `scopes` has **full access**, as every key did before scopes existed. A scoped key may act only within its scopes:
+
+| Scope | Covers |
+|---|---|
+| `render` | the site's rendered output (its appearance), never an authored or signed source |
+
+The content API on this page acts on authored content, so it accepts **only full-access keys**. A scoped key is refused with `403` and the error code `insufficient_scope`.
+
+⚠️ A scoped key is only as narrow as the build reading it: a build older than scopes ignores the field and treats every key as full access.
+
+A key may also be **bound** to one path (`"bound": "/mcp"` in its entry): it works there and nowhere else. The keys an instance mints
+for Kay are bound, one per MCP address, so a key handed to a chat limited to one part of the site cannot be used at another. A bound
+key is always scoped. Only the instance mints bound keys: `POST /api/keys` makes unbound ones, and `GET /api/keys` does not show
+`bound`. ⚠️ Like scopes, a build older than binding ignores it.
+
+**`/mcp` limits.** [`/mcp`](site-api.md#mcp-outside-api) is where the owner's AI acts on the site. An address whose requests keep failing to authenticate is refused with `429` for the rest of the minute; successful
+calls are never counted. The instance keeps its list of keys in memory for a few seconds, so a key revoked on one instance of a
+multi-instance deployment can keep working on another for up to ten seconds.
 
 | Operation | Auth Required |
 |-----------|---------------|
@@ -67,7 +80,7 @@ Use the plaintext `$KEY` as the Bearer token — only its hash is stored, never 
 | `GET /v1/bundles` | No |
 | `GET /v1/bundles/{name}` | No |
 | `GET /v1/content/{type}/drafts[/{id}]` | Yes |
-| `GET` on private types (`dm`, `follow`) | Yes |
+| `GET` on private types (`dm`, `follow`) and on any type the core bundle does not declare | Yes |
 | Everything else | Yes |
 
 Private content types (`pub.polis.dm`, `pub.polis.follow`) require Bearer token auth for all operations including reads. Every other type allows unauthenticated reads.
@@ -84,7 +97,7 @@ The signed canonical JSON is `{"action","body_sha256","domain","recipient","time
 
 ### Error Responses
 
-Missing auth returns `401 Unauthorized`. Invalid key, or a signed request that fails verification, returns `403 Forbidden`.
+Missing auth returns `401 Unauthorized`. Invalid key, or a signed request that fails verification, returns `403 Forbidden`. A valid key without the access an operation needs returns `403` with the code `insufficient_scope`.
 
 ## Routes
 

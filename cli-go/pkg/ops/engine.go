@@ -23,9 +23,15 @@ type Engine struct {
 	PublicKey    []byte
 	BaseURL      string
 	DiscoveryURL string
-	DiscoveryKey string
 	CLIThemesDir string
 	Logger       Logger
+
+	// Keys, when set, supplies the key pair at CALL time, overriding the
+	// fixed fields above. ⭐ A long-lived host passes it so the engine signs
+	// with the key it holds NOW: one that loads its key after building the
+	// engine (a deferred start), or reloads it after a rotation, would
+	// otherwise leave the engine with nil or the retired key.
+	Keys func() (private, public []byte)
 
 	// EmitEvent, if set, routes structured operation events (e.g. dm.* security
 	// signals) to the host's event sink. nil = discard.
@@ -80,10 +86,10 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		Resolver:         cfg.Resolver,
 		Bundles:          cfg.Bundles,
 		PrivateKey:       cfg.PrivateKey,
+		Keys:             cfg.Keys,
 		PublicKey:        cfg.PublicKey,
 		BaseURL:          cfg.BaseURL,
 		DiscoveryURL:     cfg.DiscoveryURL,
-		DiscoveryKey:     cfg.DiscoveryKey,
 		CLIThemesDir:     cfg.CLIThemesDir,
 		Logger:           cfg.Logger,
 		EmitEvent:        cfg.EmitEvent,
@@ -109,9 +115,9 @@ type EngineConfig struct {
 	Bundles          map[string]*bundle.Bundle
 	PrivateKey       []byte
 	PublicKey        []byte
+	Keys             func() (private, public []byte)
 	BaseURL          string
 	DiscoveryURL     string
-	DiscoveryKey     string
 	CLIThemesDir     string
 	Logger           Logger
 	EmitEvent        func(action string, fields map[string]any)
@@ -139,19 +145,23 @@ func (e *Engine) Dispatch(ctx context.Context, req ActionRequest) (*ActionResult
 	// Check if this is a write operation
 	isWrite := isWriteAction(req.Action)
 
+	priv, pub := e.PrivateKey, e.PublicKey
+	if e.Keys != nil {
+		priv, pub = e.Keys()
+	}
+
 	// Write operations require a private key
-	if isWrite && e.PrivateKey == nil {
+	if isWrite && priv == nil {
 		return nil, fmt.Errorf("not configured: no private key available")
 	}
 
 	// Build handler environment
 	env := HandlerEnv{
 		Resolver:     e.Resolver,
-		PrivateKey:   e.PrivateKey,
-		PublicKey:    e.PublicKey,
+		PrivateKey:   priv,
+		PublicKey:    pub,
 		BaseURL:      e.BaseURL,
 		DiscoveryURL: e.DiscoveryURL,
-		DiscoveryKey: e.DiscoveryKey,
 		CLIThemesDir: e.CLIThemesDir,
 		EmitEvent:    e.EmitEvent,
 		Bundle:       b,

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
@@ -260,10 +262,11 @@ const (
 // recovery case — re-running register rebuilds it — and a file-keyed gate would
 // break exactly that.
 func registerGate(dataDir string) registerDecision {
-	if site.ActorRegistryPointer(dataDir) != "" {
+	if site.ActorRegistryPointer(storage.At(dataDir)) != "" {
 		return registerProceed
 	}
-	if _, err := os.Stat(actor.RegistryPath(dataDir)); err == nil {
+	registryKey, keyErr := storage.RelKey(dataDir, actor.RegistryPath(dataDir))
+	if present, _ := storage.NewSite(dataDir).Exists(context.Background(), registryKey); keyErr == nil && present {
 		return registerBroken
 	}
 	return registerNoop
@@ -356,7 +359,7 @@ func handleActorRegister(args []string) {
 		//
 		// ⛔ The actor's claim is NOT evidence. It is corroborated by this
 		// operator's list containing the domain — never the other way round.
-		if err := site.SetOperatorPointer(f.countersignWith, operator); err != nil {
+		if err := site.SetOperatorPointer(storage.At(f.countersignWith), operator); err != nil {
 			fmt.Fprintf(os.Stderr, "[!] Could not write the operator pointer on %s: %v\n", f.countersignWith, err)
 		}
 	}
@@ -390,7 +393,7 @@ func handleActorRegister(args []string) {
 			Payload:  payload,
 			Asserted: r.Asserted,
 		}
-		id, err := attestation.Issue(dataDir, rec, privKey)
+		id, err := attestation.Issue(storage.At(dataDir), rec, privKey)
 		if err != nil {
 			exitError("Failed to record the disclosure: %v", err)
 		}
@@ -501,7 +504,7 @@ func handleActorWithdraw(args []string) {
 	// comparing the two has no way to tell a retirement from a tampered file.
 	withdrawn := 0
 	if !noAttest {
-		records, err := attestation.List(dataDir)
+		records, err := attestation.List(storage.At(dataDir))
 		if err != nil {
 			exitError("Failed to read the disclosure records: %v", err)
 		}
@@ -512,7 +515,7 @@ func handleActorWithdraw(args []string) {
 			if rec.Subject.ID != "https://"+domain {
 				continue
 			}
-			if _, err := attestation.Withdraw(dataDir, attestation.ID(rec), privKey); err != nil {
+			if _, err := attestation.Withdraw(storage.At(dataDir), attestation.ID(rec), privKey); err != nil {
 				// One withdrawal per claim; a second is refused and that is not
 				// a failure of this command.
 				fmt.Fprintf(os.Stderr, "[!] %v\n", err)
@@ -655,7 +658,7 @@ func handleActorVerify(args []string) {
 	if err != nil {
 		exitError("No registry to verify: %v", err)
 	}
-	wk, err := site.LoadWellKnown(dataDir)
+	wk, err := site.LoadWellKnown(getSite())
 	if err != nil {
 		exitError("Cannot read this site's published key: %v", err)
 	}
@@ -678,7 +681,7 @@ func handleActorVerify(args []string) {
 			// never from the registry, which deliberately holds no keys so that
 			// a rotation does not stale every entry.
 			handle := strings.SplitN(e.Domain, ".", 2)[0]
-			if awk, err := site.LoadWellKnown(tenantsDir + "/" + handle); err == nil {
+			if awk, err := site.LoadWellKnown(storage.At(tenantsDir + "/" + handle)); err == nil {
 				pub = []byte(awk.PublicKey)
 			}
 		}
@@ -734,6 +737,9 @@ func handleActorVerifyAction(source, operator string) {
 		}
 		body = []byte(s)
 	} else {
+		// NOT the storage interface: source is a path the user typed, which
+		// may be anywhere on their disk. The store addresses keys inside the
+		// site and refuses absolute paths by design.
 		b, err := os.ReadFile(source)
 		if err != nil {
 			exitError("Could not read the action: %v", err)
@@ -975,7 +981,6 @@ func announceActorEvent(eventType, targetDomain, dataDir string, privKey []byte,
 	}
 	cfg := &stream.DiscoveryConfig{
 		DiscoveryURL: discoveryURL,
-		DiscoveryKey: discoveryKey,
 		BaseURL:      baseURL,
 		DataDir:      dataDir,
 	}
@@ -1029,8 +1034,7 @@ func handleActorDeclareOperator(args []string) {
 		exitError("%q looks like a URL — name the operator's site ORIGIN as a domain", operator)
 	}
 
-	dataDir := getDataDir()
-	if err := site.SetOperatorPointer(dataDir, operator); err != nil {
+	if err := site.SetOperatorPointer(getSite(), operator); err != nil {
 		exitError("Failed to write the operator pointer: %v", err)
 	}
 
@@ -1118,7 +1122,7 @@ func checkAnnounceable(dataDir, domain string) error {
 	if r.Find(domain) == nil {
 		return fmt.Errorf("%s is not in this operator's registry — register it first", domain)
 	}
-	wk, err := site.LoadWellKnown(dataDir)
+	wk, err := site.LoadWellKnown(storage.At(dataDir))
 	if err != nil || wk.PublicKey == "" {
 		return fmt.Errorf("cannot read this site's published key, so the registry cannot be checked before announcing")
 	}
@@ -1126,7 +1130,7 @@ func checkAnnounceable(dataDir, domain string) error {
 	if status != actor.StatusValid {
 		return fmt.Errorf("the registry is %s against this site's published key — refusing to announce it", status)
 	}
-	if site.ActorRegistryPointer(dataDir) == "" {
+	if site.ActorRegistryPointer(storage.At(dataDir)) == "" {
 		return fmt.Errorf(".well-known/polis publishes no actor_registry pointer — a reader following the announcement could not find the file")
 	}
 	return nil

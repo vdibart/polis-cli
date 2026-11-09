@@ -248,6 +248,8 @@ _polis() {
                 unpublish)
                     _arguments \
                         '--json[Output in JSON format]' \
+                        '--yes[Skip the confirmation prompt]' \
+                        '-y[Skip the confirmation prompt]' \
                         ':file:_files'
                     ;;
                 about|version|index|register)

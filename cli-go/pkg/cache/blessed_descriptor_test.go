@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,14 +41,14 @@ func validVerify(body string) func(string) (*verify.VerificationResult, error) {
 func TestBlessedIngest_ValidStoresPinAndVerifiedAt(t *testing.T) {
 	dir := t.TempDir()
 	d := blessedDescForTest(validVerify(bdBody1))
-	store := Store{DataDir: dir, DSDomain: bdDS}
+	store := Store{Site: storage.At(dir), DSDomain: bdDS}
 
 	res := Ingest(store, d, bdURL1, IngestOptions{})
 	if !res.Stored || res.Verdict != "valid" {
 		t.Fatalf("expected stored+valid, got %+v", res)
 	}
 	// On-disk sidecar is the legacy BlessedSidecar (compat).
-	body, bsc, ok := ReadBlessed(dir, bdDS, bdURL1)
+	body, bsc, ok := ReadBlessed(storage.At(dir), bdDS, bdURL1)
 	if !ok {
 		t.Fatal("entry not readable via ReadBlessed (on-disk compat broken)")
 	}
@@ -73,13 +74,13 @@ func TestBlessedIngest_RefusesInvalidSignature(t *testing.T) {
 		return &verify.VerificationResult{Signature: verify.SignatureResult{Status: "invalid"}, Body: "tampered"}, nil
 	}
 	d := blessedDescForTest(vc)
-	store := Store{DataDir: dir, DSDomain: bdDS}
+	store := Store{Site: storage.At(dir), DSDomain: bdDS}
 
 	res := Ingest(store, d, bdURL1, IngestOptions{})
 	if res.Stored || !res.Refused || res.Verdict != "invalid" {
 		t.Fatalf("invalid signature must be refused, got %+v", res)
 	}
-	if _, _, ok := ReadBlessed(dir, bdDS, bdURL1); ok {
+	if _, _, ok := ReadBlessed(storage.At(dir), bdDS, bdURL1); ok {
 		t.Error("a refused entry must not be on disk")
 	}
 }
@@ -92,12 +93,12 @@ func TestBlessedIngest_MissingSignatureStillCaches(t *testing.T) {
 		return &verify.VerificationResult{CurrentVersion: "sha256:x", Signature: verify.SignatureResult{Status: "missing"}, Body: "legacy"}, nil
 	}
 	d := blessedDescForTest(vc)
-	store := Store{DataDir: dir, DSDomain: bdDS}
+	store := Store{Site: storage.At(dir), DSDomain: bdDS}
 
 	if res := Ingest(store, d, bdURL1, IngestOptions{}); !res.Stored {
 		t.Fatalf("missing-signature content should still cache, got %+v", res)
 	}
-	_, bsc, _ := ReadBlessed(dir, bdDS, bdURL1)
+	_, bsc, _ := ReadBlessed(storage.At(dir), bdDS, bdURL1)
 	if bsc.VerifiedAt != "" {
 		t.Error("VerifiedAt must be empty for an unverified entry")
 	}
@@ -108,7 +109,7 @@ func TestBlessedIngest_MissingSignatureStillCaches(t *testing.T) {
 // NOT raise an integrity failure.
 func TestBlessedIntegrity_KeyRotationNoFalseAlarm(t *testing.T) {
 	dir := t.TempDir()
-	store := Store{DataDir: dir, DSDomain: bdDS}
+	store := Store{Site: storage.At(dir), DSDomain: bdDS}
 	// Cache it under the old key.
 	Ingest(store, blessedDescForTest(validVerify(bdBody1)), bdURL1, IngestOptions{})
 
@@ -124,7 +125,7 @@ func TestBlessedIntegrity_KeyRotationNoFalseAlarm(t *testing.T) {
 // author's current key is a tamper signal.
 func TestBlessedIntegrity_FailOnTamper(t *testing.T) {
 	dir := t.TempDir()
-	store := Store{DataDir: dir, DSDomain: bdDS}
+	store := Store{Site: storage.At(dir), DSDomain: bdDS}
 	Ingest(store, blessedDescForTest(validVerify(bdBody1)), bdURL1, IngestOptions{})
 
 	tamper := func(string) (*verify.VerificationResult, error) {
@@ -140,46 +141,13 @@ func TestBlessedIntegrity_FailOnTamper(t *testing.T) {
 // "error", never a tamper signal (durability).
 func TestBlessedIntegrity_UnreachableIsNotTamper(t *testing.T) {
 	dir := t.TempDir()
-	store := Store{DataDir: dir, DSDomain: bdDS}
+	store := Store{Site: storage.At(dir), DSDomain: bdDS}
 	Ingest(store, blessedDescForTest(validVerify(bdBody1)), bdURL1, IngestOptions{})
 
 	offline := func(string) (*verify.VerificationResult, error) { return nil, os.ErrDeadlineExceeded }
 	v := VerifyIntegrity(store, blessedDescForTest(offline), bdURL1)
 	if v.Tampered() || v.Status != "error" {
 		t.Fatalf("an unreachable author must be 'error', not tamper, got %+v", v)
-	}
-}
-
-// TestBlessedRelocate_FallbackFromContentCopy: with the author unreachable AND
-// no cache entry yet, the migration relocate fallback builds the entry from the
-// tenant's local content/ cross-tenant copy.
-func TestBlessedRelocate_FallbackFromContentCopy(t *testing.T) {
-	dir := t.TempDir()
-	store := Store{DataDir: dir, DSDomain: bdDS}
-	// Seed a pre-existing local content/ copy (the Defect-3 byte the migration relocates).
-	rel := "content/pub.polis.core/comment/20260601/c1.md"
-	if err := os.MkdirAll(filepath.Join(dir, filepath.Dir(rel)), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, rel), []byte("relocated body"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	offline := func(string) (*verify.VerificationResult, error) { return nil, os.ErrDeadlineExceeded }
-	d := blessedDescForTest(offline)
-
-	// Without the flag: a fetch failure stays a fetch failure (no relocate).
-	if res := Ingest(store, d, bdURL1, IngestOptions{}); res.Stored {
-		t.Fatalf("steady-state must not relocate, got %+v", res)
-	}
-	// With the migration flag: relocate from the content/ copy.
-	res := Ingest(store, d, bdURL1, IngestOptions{RelocateFromContent: true})
-	if !res.Stored || !res.Relocated {
-		t.Fatalf("migration relocate should store from the content/ copy, got %+v", res)
-	}
-	body, _, ok := ReadBlessed(dir, bdDS, bdURL1)
-	if !ok || string(body) != "relocated body" {
-		t.Errorf("relocated body mismatch: %q ok=%v", body, ok)
 	}
 }
 
@@ -192,11 +160,11 @@ func TestBlessedDesiredSet_FromBlessedJSON(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	must(metadata.AddBlessedComment(dir, "posts/20260601/p.md", metadata.BlessedComment{URL: bdURL1}))
-	must(metadata.AddBlessedComment(dir, "posts/20260601/p.md", metadata.BlessedComment{URL: bdURL2}))
+	must(metadata.AddBlessedComment(storage.At(dir), "posts/20260601/p.md", metadata.BlessedComment{URL: bdURL1}))
+	must(metadata.AddBlessedComment(storage.At(dir), "posts/20260601/p.md", metadata.BlessedComment{URL: bdURL2}))
 
 	d := blessedDescForTest(validVerify(bdBody1))
-	desired, err := d.(*blessedDescriptor).DesiredSet(Store{DataDir: dir, DSDomain: bdDS})
+	desired, err := d.(*blessedDescriptor).DesiredSet(Store{Site: storage.At(dir), DSDomain: bdDS})
 	if err != nil {
 		t.Fatalf("DesiredSet: %v", err)
 	}
@@ -215,7 +183,7 @@ func TestBlessedDesiredSet_FromBlessedJSON(t *testing.T) {
 func TestBlessedDesiredSet_AbsentIsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	d := blessedDescForTest(validVerify(bdBody1))
-	desired, err := d.(*blessedDescriptor).DesiredSet(Store{DataDir: dir, DSDomain: bdDS})
+	desired, err := d.(*blessedDescriptor).DesiredSet(Store{Site: storage.At(dir), DSDomain: bdDS})
 	if err != nil {
 		t.Fatalf("absent blessed.json must be empty, not error: %v", err)
 	}
@@ -228,7 +196,7 @@ func TestBlessedDesiredSet_AbsentIsEmpty(t *testing.T) {
 // error — and therefore Reconcile does NOTHING (never evict on uncertainty).
 func TestBlessedDesiredSet_MalformedErrors(t *testing.T) {
 	dir := t.TempDir()
-	store := Store{DataDir: dir, DSDomain: bdDS}
+	store := Store{Site: storage.At(dir), DSDomain: bdDS}
 	d := blessedDescForTest(validVerify(bdBody1))
 
 	// Seed a real cached entry so we can prove a malformed index never evicts it.
@@ -253,7 +221,7 @@ func TestBlessedDesiredSet_MalformedErrors(t *testing.T) {
 	if rep.Evicted != 0 {
 		t.Errorf("Reconcile must evict NOTHING on a malformed index, got %+v", rep)
 	}
-	if _, _, ok := ReadBlessed(dir, bdDS, bdURL1); !ok {
+	if _, _, ok := ReadBlessed(storage.At(dir), bdDS, bdURL1); !ok {
 		t.Error("the cached entry must survive a malformed index (never evict on uncertainty)")
 	}
 }
@@ -262,10 +230,10 @@ func TestBlessedDesiredSet_MalformedErrors(t *testing.T) {
 // the one removed from blessed.json, and is idempotent on a second run.
 func TestBlessedReconcile_EndToEnd(t *testing.T) {
 	dir := t.TempDir()
-	store := Store{DataDir: dir, DSDomain: bdDS}
+	store := Store{Site: storage.At(dir), DSDomain: bdDS}
 	// blessed.json lists ONLY bdURL1; bdURL2 was denied/withdrawn → already removed
 	// from the index by the real-time path or Chaplain, so it is no longer desired.
-	if err := metadata.AddBlessedComment(dir, "posts/20260601/p.md", metadata.BlessedComment{URL: bdURL1}); err != nil {
+	if err := metadata.AddBlessedComment(storage.At(dir), "posts/20260601/p.md", metadata.BlessedComment{URL: bdURL1}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -282,10 +250,10 @@ func TestBlessedReconcile_EndToEnd(t *testing.T) {
 	if rep.Evicted != 1 {
 		t.Errorf("the entry no longer in blessed.json must be evicted, report=%+v", rep)
 	}
-	if _, _, ok := ReadBlessed(dir, bdDS, bdURL2); ok {
+	if _, _, ok := ReadBlessed(storage.At(dir), bdDS, bdURL2); ok {
 		t.Error("evicted entry still cached")
 	}
-	if _, _, ok := ReadBlessed(dir, bdDS, bdURL1); !ok {
+	if _, _, ok := ReadBlessed(storage.At(dir), bdDS, bdURL1); !ok {
 		t.Error("still-blessed entry must remain")
 	}
 
@@ -304,8 +272,8 @@ func TestBlessedReconcile_EndToEnd(t *testing.T) {
 // uncertainty, and a failed refetch is not an eviction).
 func TestBlessedReconcile_KeepsUnreachable(t *testing.T) {
 	dir := t.TempDir()
-	store := Store{DataDir: dir, DSDomain: bdDS}
-	if err := metadata.AddBlessedComment(dir, "posts/20260601/p.md", metadata.BlessedComment{URL: bdURL1}); err != nil {
+	store := Store{Site: storage.At(dir), DSDomain: bdDS}
+	if err := metadata.AddBlessedComment(storage.At(dir), "posts/20260601/p.md", metadata.BlessedComment{URL: bdURL1}); err != nil {
 		t.Fatal(err)
 	}
 	// Cache it while the author is reachable.
@@ -320,7 +288,7 @@ func TestBlessedReconcile_KeepsUnreachable(t *testing.T) {
 	if rep.Evicted != 0 {
 		t.Errorf("an unreachable-but-still-blessed entry must be kept, got %+v", rep)
 	}
-	if _, _, ok := ReadBlessed(dir, bdDS, bdURL1); !ok {
+	if _, _, ok := ReadBlessed(storage.At(dir), bdDS, bdURL1); !ok {
 		t.Error("cached entry must survive an unreachable author")
 	}
 }

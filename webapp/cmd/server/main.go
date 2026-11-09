@@ -32,7 +32,7 @@ func main() {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--help", "-h":
-			fmt.Print(`Polis server - run the local web app
+			fmt.Print(`polis server - run the local web app
 
 Usage:
   polis-server [options]

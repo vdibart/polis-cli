@@ -3,6 +3,7 @@ package site
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -58,7 +59,7 @@ func TestRecordWitnessPreservesUnmodelledMembersAtEveryLevel(t *testing.T) {
 	dir, path, before := seedWitnessSite(t, "witnesses.future.json")
 	w := discovery.Witness{Action: discovery.WitnessActionContent, Type: "pub.polis.post", URL: "https://a.example/r.md",
 		Version: "sha256:cc", DS: "https://ds.example", DSKeyID: "k1", WitnessedAt: "2026-09-04T00:00:00Z", Signature: "c2ln"}
-	changed, err := RecordWitness(dir, w.URL, w)
+	changed, err := RecordWitness(storage.At(dir), w.URL, w)
 	if err != nil || !changed {
 		t.Fatalf("changed=%v err=%v", changed, err)
 	}

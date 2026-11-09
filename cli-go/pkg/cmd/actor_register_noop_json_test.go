@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"os"
 	"strings"
@@ -64,7 +65,7 @@ func TestRegisterNoop_JSONFollowsTheSuccessContract(t *testing.T) {
 	if _, err := os.Stat(actor.RegistryPath(dir)); err == nil {
 		t.Error("the no-op must not create a registry")
 	}
-	if site.ActorRegistryPointer(dir) != "" {
+	if site.ActorRegistryPointer(storage.At(dir)) != "" {
 		t.Error("the no-op must not publish an actor_registry pointer")
 	}
 }

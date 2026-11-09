@@ -3,6 +3,7 @@ package cmd
 import (
 	"flag"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
@@ -28,8 +29,7 @@ func handleDiscover(args []string) {
 	myDomain := discovery.ExtractDomainFromURL(baseURL)
 
 	// Load following list
-	followingPath := following.DefaultPath(dir)
-	f, err := following.Load(followingPath)
+	f, err := following.LoadSite(getSite())
 	if err != nil {
 		exitError("Failed to load following.json: %v", err)
 	}
@@ -82,11 +82,11 @@ func handleDiscover(args []string) {
 	}
 
 	// Load feed cursor
-	cm := feed.NewCacheManager(dir, discoveryDomain)
+	cm := feed.NewCacheManager(storage.At(dir), discoveryDomain)
 	cursor, _ := cm.GetCursor()
 
 	// Query DS stream
-	client := discovery.NewClient(discoveryURL, discoveryKey)
+	client := discovery.NewClient(discoveryURL)
 	typeFilter := "pub.polis.post.published,pub.polis.post.republished,pub.polis.comment.published,pub.polis.comment.republished"
 	actorFilter := discovery.JoinDomains(domains)
 

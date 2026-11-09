@@ -47,18 +47,19 @@
 package license
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Version is set at startup by the cmd package.
@@ -262,21 +263,44 @@ const (
 // TypeName is the content type this file belongs to.
 const TypeName = "pub.polis.license"
 
-// DefaultPath returns the default on-disk location of license.json.
+// DefaultKey is the default location of license.json, relative to the site
+// root.
 //
 // It is only a DEFAULT. Discovery is by pointer — consumers read
 // `.well-known/polis` → `license` and follow it, never an assumed path. `dir`
 // and `mount` are per-type declarations in bundle.json, so site layout is
 // user-configurable and a hardcoded path would contradict a decision already
 // made. Everything in this package that needs the real location takes it from
-// the pointer; this function exists for provisioning and for defaults.
-func DefaultPath(dataDir string) string {
-	return filepath.Join(dataDir, "content", "pub.polis.core", "license", "license.json")
-}
+// the pointer; this exists for provisioning and for defaults.
+//
+// ⭐ A KEY, NOT A PATH. It replaced an exported path builder (DefaultPath) that
+// no production code called.
+const DefaultKey = "content/pub.polis.core/license/license.json"
 
 // Load reads and parses a licence file from disk.
 func Load(path string) (*File, error) {
-	data, err := os.ReadFile(path)
+	data, err := storage.ReadAtPath(path)
+	if err != nil {
+		return nil, fmt.Errorf("read licence file: %w", err)
+	}
+	f, err := Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse licence file: %w", err)
+	}
+	return f, nil
+}
+
+// LoadKey reads and parses a site's licence file through its store.
+//
+// ⭐ The licence lives at a key the SITE's bundle chooses, so the caller
+// resolves the key (pkg/site's LicenseKey) and hands it here. ⚠️ It exists
+// beside Load rather than replacing it because judge and sitecheck read
+// licences by path and are not on the serving path; the one caller that
+// matters for a blob-backed instance is stating terms, which reads the old file
+// to carry its Created date forward — and on a blob site a path read would
+// fail silently and drop it.
+func LoadKey(site storage.Site, key string) (*File, error) {
+	data, err := site.Store().Get(context.Background(), key)
 	if err != nil {
 		return nil, fmt.Errorf("read licence file: %w", err)
 	}
@@ -310,10 +334,12 @@ func canonicalJSON(f *File) ([]byte, error) {
 // licence file.
 //
 // ⛔ It REFUSES to rewrite a licence file carrying members this build does not
-// declare (signing.GuardRewrite): stating new terms over it would drop them and
+// declare (signing.GuardRewriteAt): stating new terms over it would drop them and
 // sign the rest with the user's key. The way past is RewriteUnsigned.
-func SignAndWrite(f *File, path string, privateKey []byte) error {
-	if err := signing.GuardRewrite("license.json", path, File{}); err != nil {
+func SignAndWrite(f *File, site storage.Site, key string, privateKey []byte) error {
+	// ⛔ The guard reads what is actually STORED, never f — it compares what
+	// this build models against the bytes really there.
+	if err := signing.GuardRewriteAt("license.json", site, key, File{}); err != nil {
 		return err
 	}
 	canonical, err := canonicalJSON(f)
@@ -330,7 +356,7 @@ func SignAndWrite(f *File, path string, privateKey []byte) error {
 	}
 	f.Signature = sig
 
-	return writeFile(f, path)
+	return writeFile(f, site, key)
 }
 
 // RewriteUnsigned is the ESCAPE HATCH for a user stranded by SignAndWrite's
@@ -342,8 +368,8 @@ func SignAndWrite(f *File, path string, privateKey []byte) error {
 // the site's terms read as unverified until the user states them again.
 // current_version is recomputed, being a hash rather than a claim. A file with
 // nothing unrecognised is left untouched.
-func RewriteUnsigned(path string) ([]string, error) {
-	f, err := Load(path)
+func RewriteUnsigned(site storage.Site, key string) ([]string, error) {
+	f, err := LoadKey(site, key)
 	if err != nil {
 		return nil, err
 	}
@@ -358,18 +384,14 @@ func RewriteUnsigned(path string) ([]string, error) {
 	hash := sha256.Sum256(canonical)
 	f.Version = "sha256:" + hex.EncodeToString(hash[:])
 	f.Signature = ""
-	if err := writeFile(f, path); err != nil {
+	if err := writeFile(f, site, key); err != nil {
 		return nil, err
 	}
 	return dropped, nil
 }
 
 // writeFile marshals and atomically writes a licence file as-is.
-func writeFile(f *File, path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("create licence directory: %w", err)
-	}
-
+func writeFile(f *File, site storage.Site, key string) error {
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal licence: %w", err)
@@ -379,7 +401,10 @@ func writeFile(f *File, path string) error {
 	// 0644: this is PUBLIC served content. Self-hosters serving
 	// content/pub.polis.core/ through nginx under a different user must be able
 	// to read it — don't tighten a public-facing file to 0600.
-	if err := atomicfile.WriteFile(path, data, 0644); err != nil {
+	//
+	// ⭐ Through the site: atomicfile.Write creates the parent the MkdirAll
+	// used to, and on a blob backend the Put is the atomic write.
+	if err := atomicfile.Write(context.Background(), site, key, data, 0644); err != nil {
 		return fmt.Errorf("write licence file: %w", err)
 	}
 	return nil

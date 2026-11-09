@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/index"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 func handleRebuild(args []string) {
@@ -49,7 +50,7 @@ func handleRebuild(args []string) {
 		Generator:     generator,
 	}
 
-	result, err := index.RebuildIndex(dir, opts)
+	result, err := index.RebuildIndex(storage.At(dir), opts)
 	if err != nil {
 		exitError("Failed to rebuild: %v", err)
 	}

@@ -2,24 +2,29 @@ package dm
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
+	pathpkg "path"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/jsonextra"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
-// Per-dmDir mutation lock (DM-14): the mailbox does load→mutate→save on messages.jsonl,
+// Per-DM-tree mutation lock (DM-14): the mailbox does load→mutate→save on messages.jsonl,
 // conversation.json, and inbox.json with no in-file locking. A Mailbox is created fresh per
-// request (NewMailbox(DMDir(...))), so the lock can't live on the struct — it must be keyed
-// by dmDir at package scope. In hosted mode the remote `deliver` path and the local `send`
+// request (NewMailbox(...)), so the lock can't live on the struct — it must be keyed
+// by the DM tree at package scope (Mailbox.lockKey: the site's identity and the tree's key). In hosted mode the remote `deliver` path and the local `send`
 // path run concurrently; without this, two simultaneous appends (or an append racing the
 // dedup scan, DM-3) can drop a line or double-store. Mirrors the package-level serialization
 // used for the reply-context cache (R19-1) and blessed.json (R22-1). Owned by R23-4.
@@ -28,12 +33,12 @@ var (
 	mailboxLocks   = map[string]*sync.Mutex{}
 )
 
-func lockDMDir(dmDir string) func() {
+func lockDMDir(tree string) func() {
 	mailboxLocksMu.Lock()
-	mu, ok := mailboxLocks[dmDir]
+	mu, ok := mailboxLocks[tree]
 	if !ok {
 		mu = &sync.Mutex{}
-		mailboxLocks[dmDir] = mu
+		mailboxLocks[tree] = mu
 	}
 	mailboxLocksMu.Unlock()
 	mu.Lock()
@@ -51,11 +56,66 @@ func lockDMDir(dmDir string) func() {
 //	  conversations/<peer-handle>/        (handle lowercased)
 //	    messages.jsonl                    (append-only)
 //	    conversation.json                 (metadata + read cursor)
-type Mailbox struct{ dmDir string }
+type Mailbox struct {
+	// ⭐ The site, so a mailbox lands in whatever the instance stores on. On a
+	// remote instance, DMs written to a container disk vanish at the next cold
+	// start.
+	site storage.Site
+}
 
-// NewMailbox returns a Mailbox rooted at a tenant DM dir
-// (.polis/bundles/pub.polis.core/dm).
-func NewMailbox(dmDir string) *Mailbox { return &Mailbox{dmDir: dmDir} }
+// NewMailbox returns a Mailbox for a site's DM tree.
+func NewMailbox(site storage.Site) *Mailbox { return &Mailbox{site: site} }
+
+// DMDirKey is the DM tree, relative to the site root.
+//
+// ⭐ A KEY, so a mailbox addresses the same place on any backend. It replaced
+// the exported DMDir path builder.
+const DMDirKey = ".polis/bundles/pub.polis.core/dm"
+
+// lockKey names this site's DM tree for lockDMDir. It is the site's identity
+// plus the tree's key, so two handles on one site take the same lock and no
+// path is needed to say which tree is meant.
+func (m *Mailbox) lockKey() string { return m.site.ID() + "|" + DMDirKey }
+
+// conversationsKey is the prefix every conversation directory sits under.
+const conversationsKey = DMDirKey + "/" + conversationsSubdir
+
+// conversationDirs lists the conversation directories.
+//
+// ⭐ A missing prefix is an empty listing, not an error: a site with no
+// conversations has no directory, and "nothing there" is the answer. A prefix
+// that could not be read is an error, because "could not look" is a different
+// answer. Store.List draws exactly that line.
+func (m *Mailbox) conversationDirs() ([]storage.Entry, error) {
+	entries, err := m.site.Store().List(context.Background(), conversationsKey)
+	if err != nil {
+		return nil, err
+	}
+	dirs := entries[:0]
+	for _, e := range entries {
+		if e.IsDir {
+			dirs = append(dirs, e)
+		}
+	}
+	return dirs, nil
+}
+
+// convKey is one conversation's prefix, relative to the site root.
+//
+// ⛔ THE PEER MUST BE A DOMAIN. It arrives from a PQL sentence and from
+// requests, and convKey("..") was the DM directory itself — so
+// DeleteConversation("..") would have deleted every conversation.
+func (m *Mailbox) convKey(peer string) (string, error) {
+	p := strings.ToLower(peer)
+	if !peerDomain.MatchString(p) || len(p) > 260 {
+		return "", fmt.Errorf("dm: %q is not a peer domain", peer)
+	}
+	return DMDirKey + "/" + conversationsSubdir + "/" + p, nil
+}
+
+// peerDomain is a hostname — dot-separated labels of letters, digits and
+// inner hyphens or underscores — with an optional port for local development.
+var peerDomain = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?)*(:[0-9]{1,5})?$`)
 
 const (
 	conversationsSubdir = "conversations"
@@ -114,10 +174,6 @@ type DecryptedMessage struct {
 	Plaintext     string
 	Locked        bool
 	Undecryptable bool
-}
-
-func (m *Mailbox) convDir(peer string) string {
-	return filepath.Join(m.dmDir, conversationsSubdir, strings.ToLower(peer))
 }
 
 // AppendSent seals plaintext to the sender's *own* epoch key (box to self) and appends
@@ -232,10 +288,6 @@ type messageLine struct {
 // MailboxMessage — DecryptedMessage embeds it, and promoted methods would take
 // over DecryptedMessage's own encoding (see pkg/jsonextra).
 func (m *Mailbox) writeMessages(peer string, lines []messageLine) error {
-	dir := m.convDir(peer)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create conversation dir: %w", err)
-	}
 	var out []byte
 	for i := range lines {
 		line := lines[i].raw
@@ -251,7 +303,11 @@ func (m *Mailbox) writeMessages(peer string, lines []messageLine) error {
 		out = append(out, line...)
 		out = append(out, '\n')
 	}
-	return atomicfile.WriteFile(filepath.Join(dir, messagesFile), out, 0o600)
+	key, err := m.convKey(peer)
+	if err != nil {
+		return err
+	}
+	return atomicfile.Write(context.Background(), m.site, key+"/"+messagesFile, out, 0o600)
 }
 
 var mailboxMessageType = reflect.TypeOf(MailboxMessage{})
@@ -269,22 +325,15 @@ var mailboxMessageType = reflect.TypeOf(MailboxMessage{})
 // This must run BEFORE ClearBootstrapServerDEK; it is the "re-encrypt bootstrap messages
 // forward" step of the set-password upgrade. It never writes plaintext to disk.
 func (m *Mailbox) ReencryptBootstrapForward(bootstrapEpoch int, bootstrapDEK [32]byte, currentEpoch int, currentEpochPub [32]byte) (int, error) {
-	unlock := lockDMDir(m.dmDir) // DM-14: atomic load→re-seal→rewrite across the corpus
+	unlock := lockDMDir(m.lockKey()) // DM-14: atomic load→re-seal→rewrite across the corpus
 	defer unlock()
-	base := filepath.Join(m.dmDir, conversationsSubdir)
-	dirs, err := os.ReadDir(base)
+	dirs, err := m.conversationDirs()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
 		return 0, fmt.Errorf("list conversations: %w", err)
 	}
 	total := 0
 	for _, d := range dirs {
-		if !d.IsDir() {
-			continue
-		}
-		peer := d.Name()
+		peer := pathpkg.Base(d.Key)
 		lines, err := m.loadMessageLines(peer)
 		if err != nil {
 			return total, fmt.Errorf("load %s: %w", peer, err)
@@ -347,13 +396,9 @@ func (m *Mailbox) ReencryptBootstrapForward(bootstrapEpoch int, bootstrapDEK [32
 func (m *Mailbox) appendMessage(peer string, msg *MailboxMessage) error {
 	// DM-14: serialize the dedup-scan → append → touchMeta sequence per tenant so a
 	// concurrent same-ID delivery (DM-3) or a parallel append can't drop/double a line.
-	unlock := lockDMDir(m.dmDir)
+	unlock := lockDMDir(m.lockKey())
 	defer unlock()
 
-	dir := m.convDir(peer)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create conversation dir: %w", err)
-	}
 	// Replay dedup (DM-3): a message ID is sha256(transport nonce), so a replayed wire
 	// envelope reuses the nonce → same ID. Skip the append if this ID is already stored —
 	// no second line, no meta touch, no unread bump. Restores the idempotency that lived in
@@ -373,12 +418,30 @@ func (m *Mailbox) appendMessage(peer string, msg *MailboxMessage) error {
 	if err != nil {
 		return fmt.Errorf("marshal message: %w", err)
 	}
-	f, err := os.OpenFile(filepath.Join(dir, messagesFile), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	// ⭐ A conversation log is appended to one message at a time. This used to
+	// be O_APPEND, with a comment warning that read-concat-write would turn
+	// "the kernel appends" into "last writer wins" and drop a message when two
+	// arrive at once.
+	//
+	// ⭐⭐ THAT RISK IS COVERED TWICE OVER HERE, which is why the conversion is
+	// safe: this function already runs under lockDMDir — a per-directory mutex
+	// that predates the storage seam and is the same shape as the per-key lock
+	// storage.AppendLine takes. ⚠️ Two locks, outer directory then inner
+	// file, always acquired in that order; nothing takes them the other way.
+	//
+	// ⛔ And the kernel's append bought less than the old comment implied: a
+	// re-seal rewrites this whole file (see the DM-14 sites), so an append was
+	// never atomic against the other writer either.
+	//
+	// ⭐ The append creates the conversation directory through the site's
+	// store, whose rule makes everything under .polis exactly 0700. A
+	// conversation directory is private, and TestMailboxDirectoriesArePrivate
+	// pins it.
+	key, err := m.convKey(peer)
 	if err != nil {
-		return fmt.Errorf("open messages.jsonl: %w", err)
+		return err
 	}
-	defer f.Close()
-	if _, err := f.Write(append(line, '\n')); err != nil {
+	if err := storage.AppendLine(context.Background(), m.site.Store(), key+"/"+messagesFile, line, storage.WithMode(0o600)); err != nil {
 		return fmt.Errorf("append message: %w", err)
 	}
 	return m.touchMeta(peer, msg.At)
@@ -389,7 +452,7 @@ func (m *Mailbox) appendMessage(peer string, msg *MailboxMessage) error {
 func (m *Mailbox) touchMeta(peer, at string) error {
 	meta, err := m.LoadMeta(peer)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		meta = &ConversationMeta{Peer: strings.ToLower(peer), CreatedAt: at}
@@ -399,9 +462,14 @@ func (m *Mailbox) touchMeta(peer, at string) error {
 	return m.saveMeta(peer, meta)
 }
 
-// LoadMeta reads a conversation's conversation.json. Missing → os.IsNotExist.
+// LoadMeta reads a conversation's conversation.json. Missing → an error
+// satisfying errors.Is(err, fs.ErrNotExist).
 func (m *Mailbox) LoadMeta(peer string) (*ConversationMeta, error) {
-	data, err := os.ReadFile(filepath.Join(m.convDir(peer), conversationFile))
+	key, err := m.convKey(peer)
+	if err != nil {
+		return nil, err
+	}
+	data, err := m.site.Store().Get(context.Background(), key+"/"+conversationFile)
 	if err != nil {
 		return nil, err
 	}
@@ -413,15 +481,19 @@ func (m *Mailbox) LoadMeta(peer string) (*ConversationMeta, error) {
 }
 
 func (m *Mailbox) saveMeta(peer string, meta *ConversationMeta) error {
-	dir := m.convDir(peer)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
+	// ⭐ No MkdirAll: atomicfile.Write asks the store to create the parent, at
+	// the store's own mode rule — and a conversation directory under .polis is
+	// a declared private prefix, so that rule is the exact 0700 this used to
+	// hard-code.
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal conversation.json: %w", err)
 	}
-	return atomicfile.WriteFile(filepath.Join(dir, conversationFile), data, 0o600)
+	key, err := m.convKey(peer)
+	if err != nil {
+		return err
+	}
+	return atomicfile.Write(context.Background(), m.site, key+"/"+conversationFile, data, 0o600)
 }
 
 // LoadMessages reads the raw (still-encrypted) message lines for a conversation.
@@ -439,9 +511,17 @@ func (m *Mailbox) LoadMessages(peer string) ([]MailboxMessage, error) {
 
 // loadMessageLines reads a conversation's messages.jsonl keeping each line's bytes.
 func (m *Mailbox) loadMessageLines(peer string) ([]messageLine, error) {
-	f, err := os.Open(filepath.Join(m.convDir(peer), messagesFile))
+	// ⭐ This STREAMS the conversation log line by line. A mailbox grows
+	// without bound, so on a filesystem it is the one DM read that must not
+	// become a whole-file Get; storage.OpenRead streams wherever the store has
+	// a real path.
+	key, err := m.convKey(peer)
 	if err != nil {
-		if os.IsNotExist(err) {
+		return nil, err
+	}
+	f, err := storage.OpenRead(m.site, key+"/"+messagesFile)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -522,7 +602,7 @@ func (m *Mailbox) ReadConversation(peer string, deks map[int][32]byte) ([]Decryp
 
 // MarkRead sets the conversation's read cursor to now.
 func (m *Mailbox) MarkRead(peer string) error {
-	unlock := lockDMDir(m.dmDir) // DM-14
+	unlock := lockDMDir(m.lockKey()) // DM-14
 	defer unlock()
 	meta, err := m.LoadMeta(peer)
 	if err != nil {
@@ -547,25 +627,18 @@ func unreadCount(msgs []MailboxMessage, readAt string) int {
 // RebuildInbox scans the conversation dirs and writes inbox.json — the derived index.
 // Source of truth is the per-conversation dirs; this just rebuilds the fast list.
 func (m *Mailbox) RebuildInbox() ([]InboxEntry, error) {
-	unlock := lockDMDir(m.dmDir) // DM-14
+	unlock := lockDMDir(m.lockKey()) // DM-14
 	defer unlock()
-	base := filepath.Join(m.dmDir, conversationsSubdir)
-	dirs, err := os.ReadDir(base)
+	dirs, err := m.conversationDirs()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, m.writeInbox(nil)
-		}
 		return nil, err
 	}
 	var entries []InboxEntry
 	for _, d := range dirs {
-		if !d.IsDir() {
-			continue
-		}
-		peer := d.Name()
+		peer := pathpkg.Base(d.Key)
 		meta, err := m.LoadMeta(peer)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
 			return nil, err
@@ -586,9 +659,6 @@ func (m *Mailbox) RebuildInbox() ([]InboxEntry, error) {
 }
 
 func (m *Mailbox) writeInbox(entries []InboxEntry) error {
-	if err := os.MkdirAll(m.dmDir, 0o700); err != nil {
-		return err
-	}
 	if entries == nil {
 		entries = []InboxEntry{} // marshal an empty inbox as [] (a non-nil slice), not null
 	}
@@ -596,5 +666,5 @@ func (m *Mailbox) writeInbox(entries []InboxEntry) error {
 	if err != nil {
 		return fmt.Errorf("marshal inbox.json: %w", err)
 	}
-	return atomicfile.WriteFile(filepath.Join(m.dmDir, inboxFile), data, 0o600)
+	return atomicfile.Write(context.Background(), m.site, DMDirKey+"/"+inboxFile, data, 0o600)
 }

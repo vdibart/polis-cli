@@ -16,7 +16,7 @@ func TestFetchLatestCommentsCtx_EmptyInputShortCircuits(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "")
+	c := NewClient(server.URL)
 	latest, err := c.FetchLatestCommentsCtx(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -58,7 +58,7 @@ func TestFetchLatestCommentsCtx_NormalizesHtmlToMdAndRekeys(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "")
+	c := NewClient(server.URL)
 	htmlURL := "https://discover.polis.pub/posts/a.html"
 	latest, err := c.FetchLatestCommentsCtx(context.Background(), []string{htmlURL})
 	if err != nil {
@@ -100,7 +100,7 @@ func TestFetchLatestCommentsCtx_OmitsPostsWithoutComments(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "")
+	c := NewClient(server.URL)
 	urls := []string{"https://x.example/a.md", "https://x.example/b.md"}
 	latest, err := c.FetchLatestCommentsCtx(context.Background(), urls)
 	if err != nil {
@@ -122,7 +122,7 @@ func TestFetchLatestCommentsCtx_HandlesContextCancellation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "")
+	c := NewClient(server.URL)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
@@ -139,7 +139,7 @@ func TestFetchLatestCommentsCtx_PropagatesDSError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := NewClient(server.URL, "")
+	c := NewClient(server.URL)
 	_, err := c.FetchLatestCommentsCtx(context.Background(), []string{"https://x.example/a.md"})
 	if err == nil {
 		t.Fatal("expected error for 400 response")

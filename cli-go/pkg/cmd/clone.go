@@ -17,7 +17,7 @@ func presence(ok bool) string {
 	return "not published"
 }
 
-// cloneUsage states what a clone is FOR. Vincent, 2026-09-17: a clone copies
+// cloneUsage states what a clone is FOR. Decided 2026-09-17: a clone copies
 // someone else's live site so it can be read and analysed offline — never so
 // their content or settings can be served as your own.
 const cloneUsage = `Usage: polis clone [--full|--diff] <url> [target-dir]

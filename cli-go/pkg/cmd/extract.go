@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +26,11 @@ func handleExtract(args []string) {
 		fullPath = filepath.Join(dir, file)
 	}
 
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+	// NOT the storage interface: `polis extract` accepts an absolute path, so
+	// fullPath may be outside the site entirely. The store refuses absolute
+	// keys by design, and routing this through it would break the documented
+	// behaviour rather than preserve it.
+	if _, err := os.Stat(fullPath); errors.Is(err, fs.ErrNotExist) {
 		exitError("File not found: %s", file)
 	}
 

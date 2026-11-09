@@ -45,14 +45,50 @@ const App = {
     // Webapp theme: 'light' or 'dark'
     webappTheme: 'dark',
 
-    // Hosted mode: set via window.__POLIS_HOSTED by the hosted service
-    isHosted: !!(window.__POLIS_HOSTED),
+    // ⛔⛔ CAPABILITIES ARE FETCHED, NEVER INJECTED, and the two globals this
+    // replaced (window.__POLIS_HOSTED, window.__POLIS_DEV) must not come back.
+    //
+    // An injected global is a privileged path no third party can have: this
+    // surface learned what the instance could do by a route unavailable to
+    // anyone else's. Fetching the descriptor means we go through the same door
+    // a third party would, which is the test the capability model exists to
+    // pass.
+    //
+    // ⛔ DO NOT ADD AN isHosted, isRemote OR isLocal HELPER. A mode is a closed
+    // set — every consumer must know all of it, and a fifth mode breaks anyone
+    // who enumerated four. Branch on the CAPABILITY that the code actually
+    // depends on; if none fits, the missing capability is the bug, not the
+    // absent mode check.
+    //
+    // ⚠️ THE DEFAULTS BELOW ARE THE SAFE SHAPE, NOT A GUESS AT LOCAL. They are
+    // what a SERVED EXPORT gets — someone unzipped a site and is serving the
+    // files, so there is no API to answer. ⭐ The descriptor's PRESENCE is the
+    // API-available signal; its absence is not an error and needs no flag.
+    capabilities: {
+        v: null,
+        hasPublicApi: false,
+        hasOperator: false,
+        canRunHooks: false,
+        actorsRunOnSchedule: false,
+        instanceCanSignUnattended: false,
+    },
 
-    // Developer mode: set via window.__POLIS_DEV by `polis serve --dev`. On
-    // localhost, DM messaging (compose/send) is read-only by default — DMs are a
-    // networked/hosted feature and a served export is offline. Dev mode re-enables
-    // the send/compose UI for development + testing. See docs/cli/user/command-reference.md (polis serve).
-    isDev: !!(window.__POLIS_DEV),
+    // _capabilityDefaults is the safe shape above, kept so a descriptor is
+    // always merged over the defaults, never over a previous descriptor.
+    get _capabilityDefaults() {
+        return {
+            v: null,
+            hasPublicApi: false,
+            hasOperator: false,
+            canRunHooks: false,
+            actorsRunOnSchedule: false,
+            instanceCanSignUnattended: false,
+        };
+    },
+
+    // capabilitiesUnavailable: the descriptor could not be fetched and none
+    // was remembered, so the defaults above are a stand-in, not a finding.
+    capabilitiesUnavailable: false,
 
     // Snippet state (used by about editor for preview)
     snippetState: {
@@ -120,6 +156,9 @@ const App = {
         // filter view. Bare `/_/` lands here; `/_/settings` switches
         // to the dashboard wrapper above.
         stream: document.getElementById('stream-screen'),
+        // Owner auth: setup (also recovery) and sign-in. owner-auth.js
+        // renders into it.
+        auth: document.getElementById('owner-auth-screen'),
     },
 
     // Site base URL for live links
@@ -330,7 +369,9 @@ const App = {
 
         // Show global nav for all screens except welcome/error
         const iconNav = document.getElementById('icon-nav');
-        if (iconNav) iconNav.classList.toggle('hidden', name === 'welcome' || name === 'error');
+        // ⭐ Not on the owner-auth screens either: every icon there would
+        // answer 401 to someone who is not signed in yet.
+        if (iconNav) iconNav.classList.toggle('hidden', name === 'welcome' || name === 'error' || name === 'auth');
 
         // Clear v4 stream-controller body classes when leaving the stream
         // view. Without this, a user who entered per-entry focus mode
@@ -468,6 +509,7 @@ const App = {
         const map = {
             'conversations': 'gateway',
             'settings': null,
+            'kay': null,
         };
         const active = map[view] || null;
         ['gateway', 'paragraph', 'comment', 'people', 'envelope', 'edit'].forEach(id => {
@@ -704,8 +746,9 @@ const App = {
         }
         const response = await fetch(path, options);
         if (!response.ok) {
-            // In hosted mode, redirect to login on 401
-            if (this.isHosted && response.status === 401) {
+            // ⭐ hasOperator: there is an operator login to redirect to. On an
+            // instance the owner runs, a 401 has no such destination.
+            if (this.capabilities.hasOperator && response.status === 401) {
                 window.location.href = '//' + window.__POLIS_BASE_DOMAIN;
                 return;
             }
@@ -729,7 +772,7 @@ const App = {
     // Route table: [pattern, config] pairs. Checked in order.
     // Parameterized segments: :id (single segment), :path+ (catch-all, one or more segments).
     // Routes left: bare `/_/` (default filter
-    // landing) and `/_/settings` (the only non-stream surface).
+    // landing), `/_/settings` and `/_/kay` (the two non-stream surfaces).
     // Every other filter view — including profiles — is reached via
     // the PQL URL form (`/_/pql/<sentence>`) the parser
     // handles. The people-icon click composes to
@@ -738,11 +781,13 @@ const App = {
     ROUTES: [
         ['/',                            { mode: 'social',  view: 'conversations',   screen: 'dashboard' }],
         ['/settings',                    { view: 'settings', screen: 'dashboard' }],
+        ['/kay',                         { view: 'kay', screen: 'dashboard' }],
     ],
 
     // Reverse lookup: view name → canonical path (for pushState).
     VIEW_PATHS: {
         'settings':            '/settings',
+        'kay':                 '/kay',
     },
 
     // SOCIAL_PLUGINS retired. The pulse plugin is gone (its
@@ -1029,6 +1074,13 @@ const App = {
         // unambiguous.
         document.body.classList.add('is-owner');
 
+        // ⛔ BEFORE FIRST RENDER, for the same reason as the theme: the settings
+        // screen and the 401 handler both branch on capabilities, and a render
+        // that ran first would draw the served-export shape and then correct
+        // itself visibly.
+        await this._loadCapabilities();
+        this._applyKayVisibility();
+
         // Apply theme before first render to avoid flash
         this._initTheme(null);
 
@@ -1057,9 +1109,21 @@ const App = {
                     this.authorName = status.author_name || '';
                     // Set site theme for nav variable contract
                     if (status.active_theme) {
-                        this.siteTheme = status.active_theme;
-                        document.documentElement.dataset.siteTheme = status.active_theme;
-                        try { localStorage.setItem('polis-site-theme', status.active_theme); } catch (e) {}
+                        // Before the nav renders, so no avatar render here.
+                        this.applySiteTheme(status.active_theme, { render: false });
+                        // The site's own CSS, over the theme; in the background.
+                        this.followSiteLook();
+                        // The owner's nav shortcuts; in the background.
+                        this.renderNavShortcuts();
+                    }
+                    // ⭐ Owner auth decides before anything privileged is
+                    // fetched: on an instance where nobody is signed in,
+                    // show setup or sign-in instead of an app whose every
+                    // call would be refused. ⛔ Never where an operator runs
+                    // the instance: its own login is the front door.
+                    if (!this.capabilities.hasOperator && window.PolisOwnerAuth &&
+                        await window.PolisOwnerAuth.gate()) {
+                        return;
                     }
                     // Now render nav with data available
                     this.updateDomainDisplay(status.base_url);
@@ -1086,8 +1150,9 @@ const App = {
                         followFooter.classList.remove('hidden');
                     }
 
-                    // Auto-issue widget token in hosted mode (fire and forget)
-                    if (this.isHosted) {
+                    // ⭐ hasOperator: a cross-tenant cookie needs a shared parent
+                    // domain, which is one of the facts hasOperator IS.
+                    if (this.capabilities.hasOperator) {
                         this.ensureWidgetToken();
                         // Set cross-tenant cookie so the widget on other tenants' post pages
                         // can detect this user's instance (localStorage is per-origin)
@@ -1110,8 +1175,9 @@ const App = {
                     break;
 
                 case 'not_found':
-                    if (this.isHosted) {
-                        // In hosted mode, site should always exist
+                    if (this.capabilities.hasOperator) {
+                        // ⭐ hasOperator: somebody else provisions the site, so a
+                        // missing one is transient rather than a real absence.
                         this.showToast('Site not ready yet. Refresh in a moment.', 'info');
                     }
                     this.showScreen('welcome');
@@ -1478,7 +1544,7 @@ const App = {
                     <p>Your comment has been delivered to the author.</p>
                     <div class="welcome-actions">
                         <button class="primary" onclick="App.toggleCompose()">Write your first post</button>
-                        ${intent.target ? `<a href="${this.escapeHtml(intent.target)}" class="secondary" target="_blank">Back to the post</a>` : ''}
+                        ${this.safeHref(intent.target) ? `<a href="${this.escapeHtml(this.safeHref(intent.target))}" class="secondary" target="_blank">Back to the post</a>` : ''}
                     </div>
                 </div>
             `;
@@ -1552,6 +1618,23 @@ const App = {
     async loadViewContent() {
         const contentHeader = document.querySelector('.content-header');
         const contentList = document.getElementById('content-list');
+
+        // The Kay page polls while Kay works; leaving it stops that.
+        if (window.PolisKay && this.currentView !== 'kay') window.PolisKay.stop();
+
+        if (this.currentView === 'kay') {
+            if (contentHeader) contentHeader.classList.add('hidden');
+            if (this.capabilities.hasOperator) {
+                if (contentList) contentList.innerHTML = '<p class="kay-error">Kay needs a site on its own instance; it is not available on a hosted site.</p>';
+                return;
+            }
+            if (window.PolisKay) {
+                window.PolisKay.render(contentList);
+            } else if (contentList) {
+                contentList.innerHTML = '<p class="kay-error">The Kay page did not load; reload to try again.</p>';
+            }
+            return;
+        }
 
         if (this.currentView === 'settings') {
             if (contentHeader) contentHeader.classList.add('hidden');
@@ -1675,17 +1758,6 @@ const App = {
         if (initCancelBtn) initCancelBtn.addEventListener('click', () => this.closeInitPanel());
         if (initExecuteBtn) initExecuteBtn.addEventListener('click', () => this.executeInit());
         if (initOverlay) initOverlay.addEventListener('click', () => this.closeInitPanel());
-
-        // Link panel events
-        const linkCloseBtn = document.getElementById('link-close-btn');
-        const linkCancelBtn = document.getElementById('link-cancel-btn');
-        const linkExecuteBtn = document.getElementById('link-execute-btn');
-        const linkOverlay = document.querySelector('#link-panel .wizard-overlay');
-
-        if (linkCloseBtn) linkCloseBtn.addEventListener('click', () => this.closeLinkPanel());
-        if (linkCancelBtn) linkCancelBtn.addEventListener('click', () => this.closeLinkPanel());
-        if (linkExecuteBtn) linkExecuteBtn.addEventListener('click', () => this.executeLink());
-        if (linkOverlay) linkOverlay.addEventListener('click', () => this.closeLinkPanel());
 
         // Sidebar mode toggle
         document.querySelectorAll('.sidebar-mode-toggle .mode-tab').forEach(tab => {
@@ -1865,68 +1937,6 @@ const App = {
         }
     },
 
-    // Show link flow panel
-    showLinkFlow() {
-        const panel = document.getElementById('link-panel');
-        if (panel) {
-            // Clear any previous values
-            const pathInput = document.getElementById('link-path');
-            if (pathInput) pathInput.value = '';
-            panel.classList.remove('hidden');
-        }
-    },
-
-    // Close link panel
-    closeLinkPanel() {
-        const panel = document.getElementById('link-panel');
-        if (panel) panel.classList.add('hidden');
-    },
-
-    // Execute site linking
-    async executeLink() {
-        const pathInput = document.getElementById('link-path');
-        const executeBtn = document.getElementById('link-execute-btn');
-
-        const path = pathInput ? pathInput.value.trim() : '';
-
-        if (!path) {
-            this.showToast('Please enter a path to your polis site', 'warning');
-            return;
-        }
-
-        // Disable button while processing
-        if (executeBtn) {
-            executeBtn.disabled = true;
-            executeBtn.textContent = 'Linking...';
-        }
-
-        try {
-            const result = await this.api('POST', '/api/link', {
-                path: path,
-            });
-
-            this.closeLinkPanel();
-            this.showToast('Site linked successfully!', 'success');
-
-            // Update display and show dashboard
-            { const dd = document.getElementById('domain-display'); if (dd) dd.textContent = result.site_title || ''; }
-            this.updateDomainDisplay(result.base_url);
-            this.initNotifications();
-            await this.loadAllCounts();
-            this.initSSE();
-            await this.loadViewContent();
-            this.showScreen('dashboard');
-            window.history.replaceState({}, '', this.basePath + '/');
-        } catch (err) {
-            this.showToast('Failed to link site: ' + err.message, 'error');
-        } finally {
-            if (executeBtn) {
-                executeBtn.disabled = false;
-                executeBtn.textContent = 'Link Site';
-            }
-        }
-    },
-
     // Toggle the post editor open/closed. Called by the ghost first
     // entry's click. Delegates to PolisOwnerExtras (owner-extras.js)
     // which owns the inline editor card mounted inside .stream — that's
@@ -1984,7 +1994,7 @@ const App = {
                                         ${h.basis === 'hosting-terms' ? 'switched on by polis.pub' : 'switched on by you'}
                                         &middot; <code>${this.escapeHtml(h.behaviours)}</code>
                                         ${h.state === 'withdrawn' ? `&middot; switched off ${this.escapeHtml(day(h.withdrawn_at))}` : ''}
-                                        &middot; <a href="${this.escapeHtml(h.url)}" target="_blank" rel="noopener">record</a></li>`).join('');
+                                        ${this.safeHref(h.url) ? `&middot; <a href="${this.escapeHtml(this.safeHref(h.url))}" target="_blank" rel="noopener">record</a>` : ''}</li>`).join('');
 
         return `
                     <div class="settings-section" id="settings-rosie">
@@ -2079,6 +2089,19 @@ const App = {
                                 </div>
                             </div>`;
 
+        // Hosted only: the hosted service turns AI training crawlers away from a
+        // site unless its terms allow training. A self-hosted site has no such
+        // gate, so the line would be false there.
+        const crawlerNote = this.capabilities.hasOperator ? `
+                            <div class="settings-row settings-row-stacked">
+                                <div class="license-nonretro">
+                                    polis.pub turns AI training crawlers away from your site unless your
+                                    terms allow training. Each post follows the terms it was published
+                                    with; everything else follows your current terms. With no terms
+                                    stated, they are turned away.
+                                </div>
+                            </div>` : '';
+
         return `
                     <div class="settings-section">
                         <div class="settings-section-label">Terms of use</div>
@@ -2090,7 +2113,7 @@ ${body}
                                     published keep the terms they were signed with &mdash; changing this
                                     applies from here on.
                                 </div>
-                            </div>
+                            </div>${crawlerNote}
                         </div>
                     </div>`;
     },
@@ -2117,6 +2140,17 @@ ${body}
     },
 
     async renderSettings(container) {
+        if (this.capabilitiesUnavailable) {
+            container.innerHTML = `
+                <div class="settings-section">
+                    <div class="empty-state" style="padding: 1.5rem;">
+                        <p style="color: var(--text-muted);">Can't reach this site's server, so some settings are hidden.</p>
+                        <button class="btn" onclick="App.retryCapabilities()">Retry</button>
+                    </div>
+                </div>
+            `;
+            return;
+        }
         try {
             const settings = await this.api('GET', '/api/settings');
             const site = settings.site || {};
@@ -2155,7 +2189,7 @@ ${body}
                                 ${this.escapeHtml(a.name)}
                             </div>
                             <div class="automation-actions">
-                                <button onclick="App.deleteAutomation('${this.escapeHtml(a.id)}')" class="danger">Remove</button>
+                                <button data-automation-id="${this.escapeHtml(a.id)}" class="danger">Remove</button>
                             </div>
                         </div>
                         <div class="automation-description">${this.escapeHtml(a.description)}</div>
@@ -2203,11 +2237,11 @@ ${body}
                                 <span class="settings-row-label">Public Key:</span>
                                 <span class="settings-row-value" id="public-key-display">${this.escapeHtml(this.truncateKey(site.public_key))}</span>
                                 <div class="settings-row-actions">
-                                    <button class="btn-copy" onclick="App.copyPublicKey('${this.escapeHtml(site.public_key || '')}')">Copy</button>
+                                    <button class="btn-copy" data-copy-public-key="${this.escapeHtml(site.public_key || '')}">Copy</button>
                                     <button class="btn-danger-sm" onclick="App.openRotatePanel()">Rotate</button>
                                 </div>
                             </div>
-                            ${this.isHosted ? `
+                            ${this.capabilities.hasOperator ? `
                             <div class="settings-row">
                                 <span class="settings-row-label">Discovery:</span>
                                 <span class="settings-row-value" id="registration-status">Checking...</span>
@@ -2253,7 +2287,7 @@ ${body}
 
                     ${this._licenseSectionHtml(licenseInfo)}
 
-                    ${!this.isHosted ? `
+                    ${!this.capabilities.hasOperator ? `
                     <div class="settings-section">
                         <div class="settings-section-label">Discovery Service</div>
                         <div class="settings-card">
@@ -2298,14 +2332,14 @@ ${body}
                     </div>
                     ` : ''}
 
-                    ${this.isHosted ? '' : `
+                    ${this.capabilities.canRunHooks ? `
                     <div class="settings-section">
                         <div class="settings-section-label">Active Automations</div>
                         <div class="settings-card">
                             ${automationsHtml}
                         </div>
                     </div>
-                    `}
+                    ` : ''}
 
                     <div class="settings-section">
                         <div class="settings-section-label">Troubleshooting</div>
@@ -2321,7 +2355,7 @@ ${body}
                         </div>
                     </div>
 
-                    ${this.isHosted ? `
+                    ${this.capabilities.hasOperator ? `
                     <div class="settings-section">
                         <div class="settings-section-label">Account</div>
                         <div class="settings-card">
@@ -2344,11 +2378,13 @@ ${body}
                     </div>
                     ` : ''}
 
+                    <div id="settings-ways-in-slot"></div>
+
                     <div class="settings-section">
                         <div class="settings-section-label">Your Data</div>
                         <div class="settings-card">
                             <div class="settings-row">
-                                ${this.isHosted ? `
+                                ${this.capabilities.hasOperator ? `
                                 <span class="settings-row-value" style="white-space: normal; color: var(--text-muted); font-family: inherit; text-align: left;">Download a zip archive of your entire site &mdash; posts, snippets, config, themes, and cryptographic keys.</span>
                                 <div class="settings-row-actions" style="flex-direction: column; align-items: flex-end; gap: 0.35rem;">
                                     <button class="btn-copy" id="export-btn" onclick="App.requestExport()">Export</button>
@@ -2366,6 +2402,19 @@ ${body}
                 </div>
             `;
 
+            // Wire the controls that carry a value. The value rides in a
+            // data- attribute and is read back through dataset, so it is never
+            // parsed as JavaScript. Escaping cannot make an inline handler
+            // safe: the HTML parser decodes entities in an attribute value
+            // before the JS inside it is parsed, so an escaped apostrophe
+            // becomes a real one and closes the string.
+            container.querySelectorAll('[data-automation-id]').forEach(btn => {
+                btn.addEventListener('click', () => this.deleteAutomation(btn.dataset.automationId));
+            });
+            container.querySelectorAll('[data-copy-public-key]').forEach(btn => {
+                btn.addEventListener('click', () => this.copyPublicKey(btn.dataset.copyPublicKey));
+            });
+
             // Fetch registration status after rendering
             if (site.discovery_configured) {
                 this.fetchRegistrationStatus();
@@ -2376,9 +2425,17 @@ ${body}
                 }
             }
 
-            // Fetch account info for hosted users
-            if (this.isHosted) {
+            // ⭐ hasOperator: an account is the operator's record of you.
+            if (this.capabilities.hasOperator) {
                 this.fetchAccountEmail();
+            }
+
+            // The ways to sign in: every provider, available or not, from the
+            // registry. Renders nothing if the list cannot be read.
+            // ⛔ hasOperator: the operator's accounts sign this owner in, so
+            // there is no list of ways to manage here (the screens skip it too).
+            if (window.PolisOwnerAuth && !this.capabilities.hasOperator) {
+                window.PolisOwnerAuth.renderProviderList(document.getElementById('settings-ways-in-slot'));
             }
 
             // Deep-link: if we arrived via the setup bar / a
@@ -2520,11 +2577,118 @@ ${body}
         }
     },
 
+    // _loadCapabilities fetches the instance's capability descriptor.
+    //
+    // ⭐ THREE OUTCOMES, NOT TWO (ruled 2026-10-10). Only a 404, or an answer
+    // that is not a descriptor (a static host's SPA fallback answers this path
+    // with index.html), means "no API": the safe defaults stand, which is what
+    // a served export should get, and no error is shown. ⛔ A network error,
+    // a 5xx or any other status is a FAILURE, not proof of a static site: on
+    // a serverless instance a cold start or a platform error on this one fetch
+    // is ordinary. Then the fetch is retried once, and if that fails too the
+    // last-known descriptor for this origin is used. With nothing remembered,
+    // capabilitiesUnavailable is set and the safe defaults are NOT presented
+    // as a static export (settings show an error card, the setup banner stays
+    // away). ⚠️ 401/403/429 count as failures: the descriptor is public, so a
+    // refusal comes from something in front of the instance.
+    async _loadCapabilities() {
+        let outcome = await this._fetchCapabilities();
+        if (outcome.state === 'failed') {
+            await new Promise(r => setTimeout(r, this._capabilitiesRetryMs));
+            outcome = await this._fetchCapabilities();
+        }
+        this.capabilitiesUnavailable = false;
+        if (outcome.state === 'known') {
+            this._applyCapabilities(outcome.json);
+            this._capabilitiesCache('set', outcome.json);
+        } else if (outcome.state === 'static') {
+            this._capabilitiesCache('remove');
+        } else {
+            const cached = this._capabilitiesCache('get');
+            if (cached) this._applyCapabilities(cached);
+            else this.capabilitiesUnavailable = true;
+        }
+        return outcome.state;
+    },
+
+    _capabilitiesRetryMs: 1000,
+
+    // Kay works by v0 calling the instance's /mcp, which polis.pub (the
+    // operator) never routes, so there the entries are hidden and /api/kay*
+    // answers 404 (server kayOnly).
+    _applyKayVisibility() {
+        const hide = !!this.capabilities.hasOperator;
+        // style.display, not el.hidden: the menu items' own display:flex beats [hidden].
+        document.querySelectorAll('[data-kay-entry]').forEach(el => { el.style.display = hide ? 'none' : ''; });
+    },
+
+    // retryCapabilities is the settings error card's Retry button.
+    async retryCapabilities() {
+        await this._loadCapabilities();
+        const contentList = document.getElementById('content-list');
+        if (contentList) this.renderSettings(contentList);
+        if (!this.capabilitiesUnavailable) this.checkSetupBanner();
+    },
+
+    // _fetchCapabilities makes one fetch and sorts its answer into known,
+    // static or failed. It never throws.
+    async _fetchCapabilities() {
+        let response;
+        try {
+            response = await fetch('/api/capabilities', { headers: { 'Accept': 'application/json' } });
+        } catch (e) {
+            return { state: 'failed' }; // offline, DNS, a reset connection
+        }
+        if (response.status === 404) return { state: 'static' };
+        if (!response.ok) return { state: 'failed' };
+        let json;
+        try {
+            json = await response.json();
+        } catch (e) {
+            return { state: 'static' }; // a 200 that is not JSON: a static host
+        }
+        if (json && typeof json === 'object' && typeof json.v === 'string') {
+            return { state: 'known', json };
+        }
+        return { state: 'static' };
+    },
+
+    // _applyCapabilities merges a descriptor over the defaults. ⭐ Merged
+    // rather than assigned, so a field this build does not know about is
+    // ignored and a field the server stops sending falls back to the safe
+    // value. Same tolerance a signature verifier gives an unrecognised field.
+    _applyCapabilities(json) {
+        this.capabilities = Object.assign({}, this._capabilityDefaults, json);
+    },
+
+    // _capabilitiesCache reads, writes or removes the last-known descriptor.
+    // localStorage is already per origin. ⛔ Every access is guarded: storage
+    // can be absent or throw (a private window, blocked site data), and a
+    // cached value is used only if it still looks like a descriptor.
+    _capabilitiesCache(op, json) {
+        const key = 'polis-capabilities';
+        try {
+            if (op === 'set') { localStorage.setItem(key, JSON.stringify(json)); return null; }
+            if (op === 'remove') { localStorage.removeItem(key); return null; }
+            const raw = localStorage.getItem(key);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            return (parsed && typeof parsed === 'object' && typeof parsed.v === 'string') ? parsed : null;
+        } catch (e) {
+            return null;
+        }
+    },
+
     // dmMessagingReadOnly reports whether the DM compose/send UI is disabled.
-    // True on plain localhost (a self-host or a served export); false when hosted
-    // or when `polis serve --dev` set window.__POLIS_DEV.
+    //
+    // ⛔ IT IS REACHABILITY, NOT UPTIME, AND THE OLD NAME LIED ABOUT IT. The
+    // comment here used to say "is there a server that stays up?" while the
+    // code tested whether we were hosted. ⭐ Those differ exactly where it
+    // matters: a serverless instance does NOT stay up but IS reachable, so the
+    // uptime reading would have switched messaging off on a remote instance
+    // that can receive messages perfectly well.
     dmMessagingReadOnly() {
-        return !(this.isHosted || this.isDev);
+        return !this.capabilities.hasPublicApi;
     },
 
     // ── Change password (Flow G) — O(1) re-wrap ──────────────────────────
@@ -3059,14 +3223,133 @@ ${body}
             // Show the "view site" link
             const link = document.getElementById('theme-view-link');
             if (link) link.style.display = 'flex';
-            // Apply new theme to nav immediately
-            this.siteTheme = name;
-            document.documentElement.dataset.siteTheme = name;
-            try { localStorage.setItem('polis-site-theme', name); } catch (e) {}
-            this._renderAvatar();
+            // Apply new theme to nav immediately, and the site's own CSS over it
+            this.applySiteTheme(name);
+            this.followSiteLook();
         } catch (err) {
             this.showToast('Failed to switch theme: ' + err.message, 'error');
         }
+    },
+
+    // followSiteLook makes the app's chrome follow the site's OWN CSS as well
+    // as its theme. ⭐ nav-themes.css gives each theme an app palette derived
+    // from that theme's colours by formula, so a colour the site's custom CSS
+    // replaced on :root is replaced wherever the app's palette used it (and in
+    // its rgba() tints). Nothing is interpreted beyond that: a rule the custom
+    // CSS writes for a selector stays on the public site.
+    async followSiteLook() {
+        let p;
+        try { p = await this.api('GET', '/api/site/palette'); } catch (e) { return; }
+        if (!p) return;
+        if (p.theme && p.theme !== this.siteTheme) this.applySiteTheme(p.theme);
+        const root = document.documentElement;
+        (this._siteLookVars || []).forEach(v => root.style.removeProperty(v));
+        this._siteLookVars = [];
+        const was = {};
+        (p.properties || []).forEach(x => { was[x.name] = String(x.value).trim().toLowerCase(); });
+        const swaps = [];
+        (p.custom || []).forEach(x => {
+            const old = was[x.name], nu = String(x.value).trim();
+            if (old && old !== nu.toLowerCase()) swaps.push([old, nu]);
+        });
+        if (!swaps.length) return;
+        const names = this._sitePaletteNames(p.theme || this.siteTheme);
+        const cs = getComputedStyle(root);
+        for (const name of names) {
+            const val = cs.getPropertyValue(name).trim();
+            if (!val) continue;
+            let out = val;
+            for (const [old, nu] of swaps) out = this._swapColour(out, old, nu);
+            if (out !== val) {
+                root.style.setProperty(name, out);
+                this._siteLookVars.push(name);
+            }
+        }
+        this._renderAvatar();
+    },
+
+    // _sitePaletteNames lists the variables nav-themes.css sets for a theme,
+    // read from the stylesheet itself so the list cannot drift from it.
+    _sitePaletteNames(themeName) {
+        const names = new Set();
+        const want = `[data-site-theme="${themeName}"]`;
+        for (const sheet of Array.from(document.styleSheets)) {
+            let rules;
+            try { rules = sheet.cssRules; } catch (e) { continue; } // a cross-origin sheet
+            for (const r of Array.from(rules || [])) {
+                if (!r.selectorText || !r.style || r.selectorText.indexOf(want) < 0) continue;
+                for (let i = 0; i < r.style.length; i++) {
+                    if (r.style[i].startsWith('--')) names.add(r.style[i]);
+                }
+            }
+        }
+        return Array.from(names);
+    },
+
+    // _swapColour replaces one colour with another inside a CSS value: the hex
+    // itself, and an rgba() of the same colour, keeping its alpha.
+    _swapColour(value, old, nu) {
+        const hex = (h) => {
+            const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(h);
+            if (!m) return null;
+            const x = m[1].length === 3 ? m[1].split('').map(c => c + c).join('') : m[1];
+            return [0, 2, 4].map(i => parseInt(x.slice(i, i + 2), 16));
+        };
+        let out = value.split(new RegExp(old.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')).join(nu);
+        const o = hex(old), n = hex(nu);
+        if (o && n) {
+            const re = new RegExp(`rgba\\(\\s*${o[0]}\\s*,\\s*${o[1]}\\s*,\\s*${o[2]}\\s*,`, 'g');
+            out = out.replace(re, `rgba(${n[0]}, ${n[1]}, ${n[2]},`);
+        }
+        return out;
+    },
+
+    // renderNavShortcuts draws the owner's nav shortcuts: buttons that each
+    // open one PQL sentence. ⭐ The shortcuts are data the server validated (a
+    // label, an icon from a closed set, a sentence that parses as PQL); this
+    // draws them from shipped icons and inserts the label as text only.
+    async renderNavShortcuts() {
+        const box = document.getElementById('nav-shortcuts');
+        if (!box) return;
+        let data;
+        try { data = await this.api('GET', '/api/nav-shortcuts'); } catch (e) { return; }
+        const icons = {
+            star: '<polygon points="12 3 14.6 9 21 9.3 16 13.6 17.6 20 12 16.6 6.4 20 8 13.6 3 9.3 9.4 9"/>',
+            bolt: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+            bookmark: '<path d="M6 3h12v18l-6-4-6 4z"/>',
+            flag: '<path d="M5 21V4M5 4h11l-2 4 2 4H5"/>',
+            sparkle: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>',
+            chat: '<path d="M4 5h16v11H9l-5 4z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="12" x2="13" y2="12"/>',
+        };
+        box.innerHTML = '';
+        // A shortcut that wasn't there at the last draw drops in; the first
+        // draw has nothing to compare with, so nothing animates on load.
+        const seen = this._navShortcutIds;
+        this._navShortcutIds = new Set();
+        for (const sc of (data && data.shortcuts) || []) {
+            this._navShortcutIds.add(sc.id);
+            const btn = document.createElement('button');
+            btn.className = 'nav-icon-btn nav-shortcut' + (seen && !seen.has(sc.id) ? ' nav-shortcut--new' : '');
+            btn.type = 'button';
+            btn.setAttribute('data-tip', sc.label);
+            btn.setAttribute('aria-label', sc.label);
+            btn.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+                (icons[sc.icon] || icons.star) + '</svg>';
+            btn.addEventListener('click', () => this.navigateTo('/pql/' + String(sc.sentence).trim().split(/\s+/).join('+')));
+            box.appendChild(btn);
+        }
+    },
+
+    // applySiteTheme makes the app's chrome follow the public site's theme
+    // (nav-themes.css keys every palette on data-site-theme). ⭐ One place, so
+    // the app and the site stay in step however the theme changed: Settings,
+    // first load, or Kay.
+    applySiteTheme(name, opts = {}) {
+        if (!name) return;
+        this.siteTheme = name;
+        document.documentElement.dataset.siteTheme = name;
+        try { localStorage.setItem('polis-site-theme', name); } catch (e) {}
+        if (opts.render !== false) this._renderAvatar();
     },
 
     // Open the site in a background tab
@@ -3569,7 +3852,7 @@ git commit -m "$POLIS_COMMIT_MESSAGE"`
                             <div class="hook-type-checkboxes">
                                 ${this.getHookTypeCheckboxes()}
                             </div>
-                            <p class="wizard-hint">Scripts will be created at <code>.polis/hooks/{event}.sh</code></p>
+                            <p class="wizard-hint">Scripts will be created at <code>.polis/webapp/hooks/{event}.sh</code></p>
                         </div>
                     `
                 };
@@ -3596,7 +3879,7 @@ git commit -m "$POLIS_COMMIT_MESSAGE"`
                 };
             } else if (step === 4) {
                 const createdFiles = this.wizard.selectedHookTypes.map(h =>
-                    `<div class="wizard-info-row"><span class="wizard-info-label">Created:</span><span class="wizard-info-value">.polis/hooks/${h}.sh</span></div>`
+                    `<div class="wizard-info-row"><span class="wizard-info-label">Created:</span><span class="wizard-info-value">.polis/webapp/hooks/${h}.sh</span></div>`
                 ).join('');
                 return {
                     title: 'Deploy my content using git',
@@ -3620,7 +3903,7 @@ git commit -m "$POLIS_COMMIT_MESSAGE"`
                                 <div class="wizard-help-title">If something goes wrong:</div>
                                 <ul class="wizard-help-list">
                                     <li>Check that <code>git</code> commands work from your terminal</li>
-                                    <li>Edit the scripts at <code>.polis/hooks/*.sh</code></li>
+                                    <li>Edit the scripts at <code>.polis/webapp/hooks/*.sh</code></li>
                                 </ul>
                             </div>
                         </div>
@@ -3636,7 +3919,7 @@ git commit -m "$POLIS_COMMIT_MESSAGE"`
                     title: 'Custom automation scripts',
                     body: `
                         <div class="wizard-section">
-                            <p>Polis supports three hook types that run shell scripts when events occur:</p>
+                            <p>polis supports three hook types that run shell scripts when events occur:</p>
                             <div class="hook-types-explained">
                                 <div class="hook-type-explained">
                                     <div class="hook-type-explained-name">post-publish</div>
@@ -3681,13 +3964,13 @@ set -e
 echo "Hook triggered: $POLIS_EVENT"
 echo "File: $POLIS_PATH"</code>
                             </div>
-                            <p class="wizard-hint">Scripts are saved to <code>.polis/hooks/{event}.sh</code></p>
+                            <p class="wizard-hint">Scripts are saved to <code>.polis/webapp/hooks/{event}.sh</code></p>
                         </div>
                     `
                 };
             } else if (step === 3) {
                 const createdFiles = this.wizard.selectedHookTypes.map(h =>
-                    `<div class="wizard-info-row"><span class="wizard-info-label">Created:</span><span class="wizard-info-value">.polis/hooks/${h}.sh</span></div>`
+                    `<div class="wizard-info-row"><span class="wizard-info-label">Created:</span><span class="wizard-info-value">.polis/webapp/hooks/${h}.sh</span></div>`
                 ).join('');
                 return {
                     title: 'Custom automation scripts',
@@ -4243,14 +4526,16 @@ echo "File: $POLIS_PATH"</code>
         // Strip protocol for analysis
         const bare = val.replace(/^https?:\/\//, '');
 
-        // Detect follow link: polis.pub/f/<handle> or <domain>/f/<handle>
-        const followMatch = bare.match(/^[^/]+\/f\/([a-z0-9][a-z0-9-]*[a-z0-9])$/i);
+        // Detect a polis.pub follow link: polis.pub/f/<handle>. ⛔ ONLY polis.pub's:
+        // another site may use the same path shape for something else, and
+        // rewriting it to <handle>.polis.pub would follow the wrong site.
+        const followMatch = bare.match(/^(?:www\.)?polis\.pub\/f\/([a-z0-9][a-z0-9-]*[a-z0-9])\/?$/i);
         if (followMatch) {
             return 'https://' + followMatch[1] + '.polis.pub/';
         }
 
-        // Detect follow page: polis.pub/follow?author=<domain>
-        if (bare.match(/^[^/]+\/follow\?author=/i)) {
+        // Detect polis.pub's follow page: polis.pub/follow?author=<domain>
+        if (bare.match(/^(?:www\.)?polis\.pub\/follow\?author=/i)) {
             try {
                 const u = new URL(val.startsWith('http') ? val : 'https://' + val);
                 const author = u.searchParams.get('author');
@@ -4400,14 +4685,14 @@ echo "File: $POLIS_PATH"</code>
         const domain = authorUrl.replace('https://', '').replace('http://', '').replace(/\/$/, '');
         metaEl.innerHTML = `
             <span class="remote-post-author">${this.escapeHtml(domain)}</span>
-            <a href="${this.escapeHtml(originalUrl)}" target="_blank" class="remote-post-link">Open original &#x2197;</a>
+            ${this.safeHref(originalUrl) ? `<a href="${this.escapeHtml(this.safeHref(originalUrl))}" target="_blank" class="remote-post-link">Open original &#x2197;</a>` : ''}
         `;
 
         try {
             const result = await this.api('GET', '/api/remote/post?url=' + encodeURIComponent(fullUrl));
             bodyEl.innerHTML = `<div class="parchment-preview">${result.content}</div>`;
         } catch (err) {
-            bodyEl.innerHTML = `<div class="empty-state"><h3>Failed to load post</h3><p>${this.escapeHtml(err.message)}</p><p><a href="${this.escapeHtml(fullUrl)}" target="_blank">Open in new tab</a></p></div>`;
+            bodyEl.innerHTML = `<div class="empty-state"><h3>Failed to load post</h3><p>${this.escapeHtml(err.message)}</p>${this.safeHref(fullUrl) ? `<p><a href="${this.escapeHtml(this.safeHref(fullUrl))}" target="_blank">Open in new tab</a></p>` : ''}</div>`;
         }
     },
 
@@ -4417,11 +4702,48 @@ echo "File: $POLIS_PATH"</code>
     },
 
 
+    // Escape text for interpolation into HTML. The quote characters matter as
+    // much as the angle brackets: output lands inside href="…" and similar
+    // attributes, where a bare " closes the attribute and lets the next token
+    // become a new one. The admin SPA's CSP sets script-src-attr
+    // 'unsafe-inline' (internal/server/middleware.go), so an injected inline
+    // handler would run — a nonce stops inline <script> elements, not inline
+    // handler attributes.
+    //
+    // & is replaced first; any other order double-escapes the entities the
+    // later replacements introduce.
     escapeHtml(text) {
         if (!text) return '';
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    },
+
+    // Utility: the only URLs allowed into an href.
+    //
+    // Returns the URL when it is absolute http(s), and '' otherwise — callers
+    // render no link at all rather than a dead or inert one. Rejecting is
+    // deliberately blunt: javascript:, data: and vbscript: are executable;
+    // scheme-relative //host inherits the page scheme and reads as a path; a
+    // relative URL has no scheme to check. Every value reaching the five call
+    // sites is an absolute site URL already, so nothing legitimate is lost.
+    safeHref(url) {
+        if (!url) return '';
+        const raw = String(url).trim();
+        // Require the scheme in the value itself. Parsing alone is not enough:
+        // `//evil.example/x` resolves to a perfectly valid https URL against
+        // any base, which is exactly the case that must not pass.
+        if (!/^https?:\/\//i.test(raw)) return '';
+        try {
+            const parsed = new URL(raw);
+            if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+            return raw;
+        } catch {
+            return '';
+        }
     },
 
     // Utility: convert .md URL to .html for browser-facing links
@@ -4463,7 +4785,11 @@ echo "File: $POLIS_PATH"</code>
         if (!el) return;
         if (!baseUrl) { el.textContent = ''; return; }
         const display = baseUrl.replace(/^https?:\/\//, '');
-        el.innerHTML = `<a href="${this.escapeHtml(baseUrl)}" target="_blank" rel="noopener">${this.escapeHtml(display)}</a>`;
+        // No usable URL: still show the domain, just not as a link.
+        const href = this.safeHref(baseUrl);
+        el.innerHTML = href
+            ? `<a href="${this.escapeHtml(href)}" target="_blank" rel="noopener">${this.escapeHtml(display)}</a>`
+            : this.escapeHtml(display);
     },
 
     initNotifications() {
@@ -4493,6 +4819,11 @@ echo "File: $POLIS_PATH"</code>
         const sseUrl = '/api/sse';
 
         this._eventSource = new EventSource(sseUrl);
+        let opened = false;
+        this._eventSource.addEventListener('open', () => {
+            opened = true;
+            this._sseRetryDelay = 5000;
+        });
 
         this._eventSource.addEventListener('counts', (e) => {
             try {
@@ -4504,11 +4835,22 @@ echo "File: $POLIS_PATH"</code>
         });
 
         this._eventSource.onerror = () => {
-            // Reconnect with backoff. EventSource auto-reconnects,
-            // but if it fails repeatedly we close and retry manually.
-            if (this._eventSource && this._eventSource.readyState === EventSource.CLOSED) {
-                setTimeout(() => this.initSSE(), 5000);
+            if (!this._eventSource || this._eventSource.readyState !== EventSource.CLOSED) {
+                return; // the browser is reconnecting a stream that dropped
             }
+            // ⛔ REFUSED, NOT DROPPED: a stream that closes without ever having
+            // opened was answered with something other than an event stream
+            // (204 where the platform cannot stream, as on Vercel, or an
+            // error). Reopening it every few seconds only fills the logs; the
+            // counts polling below keeps the badges current.
+            if (!opened) {
+                this._eventSource = null;
+                return;
+            }
+            // A stream that opened and then closed: retry, backing off.
+            const delay = this._sseRetryDelay || 5000;
+            this._sseRetryDelay = Math.min(delay * 2, 60000);
+            setTimeout(() => this.initSSE(), delay);
         };
 
         // Polling fallback: refresh counts every 30s regardless of SSE.
@@ -4644,7 +4986,7 @@ echo "File: $POLIS_PATH"</code>
         const ruleId = n.rule_id || '';
 
         div.innerHTML = `
-            <div class="notification-type-badge">${icon}</div>
+            <div class="notification-type-badge">${this.escapeHtml(icon)}</div>
             <div class="notification-body">
                 <div class="notification-message">${this.escapeHtml(n.message || '')}</div>
                 <div class="notification-meta">${this.formatRelativeTime(n.created_at)}</div>
@@ -4736,7 +5078,7 @@ echo "File: $POLIS_PATH"</code>
             const domain = this.siteBaseUrl ? new URL(this.siteBaseUrl).hostname : 'yourdomain.com';
             contentEl.innerHTML = `
                 <div class="wizard-section">
-                    <p>Push your site files so that <strong>${this.escapeHtml(domain)}</strong> serves them publicly. Polis works with any static host.</p>
+                    <p>Push your site files so that <strong>${this.escapeHtml(domain)}</strong> serves them publicly. polis works with any static host.</p>
                     <div class="deploy-example">
                         <div class="deploy-example-header">Example: Git-based deploy</div>
                         <pre class="setup-code"><span class="code-comment"># From your site directory</span>
@@ -4816,7 +5158,6 @@ git push</pre>
                 this.setupWizardDismissed = true;
                 // Dismiss the wizard
                 document.getElementById('setup-wizard-panel').classList.add('hidden');
-                document.getElementById('setup-banner').classList.add('hidden');
                 this.showToast('Site registered with discovery network!', 'success');
                 // Persist dismissal
                 try { await this.api('POST', '/api/site/setup-wizard-dismiss'); } catch {}
@@ -4836,22 +5177,13 @@ git push</pre>
         // Persist dismissal
         this.api('POST', '/api/site/setup-wizard-dismiss').catch(() => {});
         this.setupWizardDismissed = true;
-        // Show the banner on dashboard if not registered
-        if (!this.siteRegistered) {
-            document.getElementById('setup-banner').classList.remove('hidden');
-        }
-    },
-
-    dismissSetupBanner() {
-        document.getElementById('setup-banner').classList.add('hidden');
-        // Also persist wizard dismissal
-        this.api('POST', '/api/site/setup-wizard-dismiss').catch(() => {});
-        this.setupWizardDismissed = true;
     },
 
     async checkSetupBanner() {
-        // In hosted mode, setup is handled by the hosting service
-        if (this.isHosted) return;
+        // ⭐ hasOperator: setup was done for you, so there is nothing to prompt.
+        if (this.capabilities.hasOperator) return;
+        // ⛔ Unknown capabilities are not "self-hosted, needs setup".
+        if (this.capabilitiesUnavailable) return;
         // Check if wizard dismissed and site registered
         try {
             const settings = await this.api('GET', '/api/settings');
@@ -4870,23 +5202,16 @@ git push</pre>
                 this.siteRegistered = false;
             }
 
-            // Show banner if not dismissed AND not registered
+            // Auto-open the setup wizard on first load after init, until it is
+            // dismissed or the site is registered. (There was once a dashboard
+            // banner for the dismissed-but-unregistered case; the topbar layout
+            // removed it, and nothing replaces it.)
             if (!this.setupWizardDismissed && !this.siteRegistered) {
-                // Auto-open wizard on first load after init
                 this.openSetupWizard();
-            } else if (this.setupWizardDismissed && !this.siteRegistered) {
-                document.getElementById('setup-banner').classList.remove('hidden');
             }
         } catch {
-            // Can't check, don't show banner
+            // Can't check; don't open the wizard
         }
-    },
-
-    escapeHtml(str) {
-        if (!str) return '';
-        const div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
     },
 
     formatRelativeTime(isoString) {
@@ -5151,9 +5476,25 @@ git push</pre>
             if (resp.ok) {
                 const data = await resp.json();
                 if (data.token) {
-                    // Set cross-tenant cookie so the widget recognizes us on other tenants
+                    // R18-8: the token is scoped to THIS ORIGIN — no `domain=`.
+                    // It is a 30-day bearer token that can comment, follow and
+                    // sign up as this user; sharing it across *.polis.pub let
+                    // any tenant serving JS document.cookie-read it.
+                    //
+                    // Cross-tenant RECOGNITION is `polis_instance`, which
+                    // widget.js still shares. A visitor on a tenant they have
+                    // not connected to lands in the widget's `known` state and
+                    // sees the Connect button — a path that already existed.
+                    //
+                    // ⚠️ max-age matches widgetTokenDuration (30 days). It used
+                    // to be a year, so for eleven months the cookie advertised a
+                    // token the server had already expired, and the widget
+                    // rendered a connected state whose API calls all 401'd.
                     document.cookie = 'polis_widget_token=' + encodeURIComponent(data.token) +
-                        '; domain=.polis.pub; path=/; max-age=31536000; SameSite=Lax; Secure';
+                        '; path=/; max-age=2592000; SameSite=Lax; Secure';
+                    // Retire any apex-scoped token this browser still carries,
+                    // or the old one keeps working cross-tenant until it expires.
+                    document.cookie = 'polis_widget_token=; domain=.polis.pub; path=/; max-age=0; SameSite=Lax; Secure';
                 }
             }
         } catch (_) {

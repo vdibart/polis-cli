@@ -1,18 +1,17 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
-	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/did"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
-	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
 
@@ -26,33 +25,26 @@ func handleRotateKey(args []string) {
 		exitError("Not a polis site directory")
 	}
 
-	keysDir := filepath.Join(dir, ".polis", "keys")
-	privateKeyPath := filepath.Join(keysDir, "id_ed25519")
-	publicKeyPath := filepath.Join(keysDir, "id_ed25519.pub")
-
 	if !jsonOutput {
 		fmt.Println("[i] Rotating key pair...")
 	}
 
-	// Read old public key before any changes
-	oldPubKeyData, err := os.ReadFile(publicKeyPath)
-	if err != nil {
-		exitError("Failed to read current public key: %v", err)
-	}
-	oldPubKey := strings.TrimSpace(string(oldPubKeyData))
+	ctx := context.Background()
 
-	// Read old private key for transition signature
-	oldPrivKey, err := os.ReadFile(privateKeyPath)
+	// ⭐ What this rotation starts from: a fresh keypair, or an earlier
+	// rotation's staged key to resume (the discovery service may already hold
+	// it), signing with whichever key .well-known/polis publishes as current.
+	// ⛔ It refuses when the key on disk is not the published one: a handover
+	// signed by anything but the chain's head breaks the chain for good.
+	keys, err := site.PrepareRotation(ctx, getSite())
 	if err != nil {
-		exitError("Failed to read current private key: %v", err)
+		exitError("Key rotation not started: %v", err)
 	}
-
-	// Generate new keypair
-	privPEM, pubSSH, err := signing.GenerateKeypair()
-	if err != nil {
-		exitError("Failed to generate new keypair: %v", err)
+	resuming := keys.Resuming
+	newPubKey := keys.NewPub
+	if resuming && !jsonOutput {
+		fmt.Println("[i] Resuming an interrupted rotation with the staged key")
 	}
-	newPubKey := strings.TrimSpace(string(pubSSH))
 
 	// Get domain from POLIS_BASE_URL
 	polisBaseURL := os.Getenv("POLIS_BASE_URL")
@@ -64,60 +56,60 @@ func handleRotateKey(args []string) {
 		exitError("Could not extract domain from POLIS_BASE_URL")
 	}
 
-	// Build canonical rotation JSON and sign with OLD key
-	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	canonical, err := discovery.MakeKeyRotationCanonicalJSON(domain, oldPubKey, newPubKey, timestamp)
-	if err != nil {
-		exitError("Failed to build canonical rotation JSON: %v", err)
-	}
-
-	transitionSig, err := signing.SignContent(canonical, oldPrivKey)
-	if err != nil {
-		exitError("Failed to sign transition message with old key: %v", err)
-	}
-
 	// Notify DS of key rotation BEFORE local key swap (strict ordering)
 	dsURL := os.Getenv("DISCOVERY_SERVICE_URL")
-	dsKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if dsURL == "" {
 		dsURL = DefaultDiscoveryServiceURL
 	}
-
-	// SIGNET epic 32: the DS's countersignature over this rotation, when it
-	// issues one, rides inside the new key-history entry below.
-	var witnesses []discovery.Witness
 
 	// What happened at the DS, reported as-is in --json. "success" or
 	// "skipped" — never "failed": a rejected notification exits the command
 	// before any key changes, with an error envelope.
 	dsRotation := "skipped"
 
-	if discovery.IsRegisteredLocally(dir, dsURL) {
-		dsClient := discovery.NewClient(dsURL, dsKey)
+	// ⭐ The offline steps (sign, stage, install, record, finish, re-sign,
+	// republish did.json) are site.CompleteRotation, shared with `polis
+	// branch`. This command adds one thing around them: the discovery-service
+	// announcement, which runs after the new key is staged and before it is
+	// installed.
+	//
+	// SIGNET epic 32: the DS's countersignature over this rotation, when it
+	// issues one, rides inside the new key-history entry.
+	announce := func(req discovery.KeyRotationRequest, resuming bool) ([]discovery.Witness, error) {
+		if !discovery.IsRegisteredLocally(storage.At(dir), dsURL) {
+			if !jsonOutput {
+				fmt.Println("[i] DS notification skipped: site not registered with discovery service")
+			}
+			return nil, nil
+		}
+		dsClient := discovery.NewClient(dsURL)
 		if !jsonOutput {
 			fmt.Println("[i] Notifying discovery service of key rotation...")
 		}
 
-		witness, err := dsClient.RotateKey(discovery.KeyRotationRequest{
-			Domain:        domain,
-			OldKey:        oldPubKey,
-			NewKey:        newPubKey,
-			TransitionSig: transitionSig,
-			Timestamp:     timestamp,
-		})
+		// ⛔ Only a refusal drops the staged key; a lost answer keeps it
+		// (site.AnnounceRotation).
+		witness, already, err := site.AnnounceRotation(ctx, getSite(), dsClient, req, resuming)
+		if errors.Is(err, site.ErrRotationPending) || errors.Is(err, site.ErrRotationDiverged) {
+			exitError("Key rotation not finished: %v", err)
+		}
 		if err != nil {
 			exitError("Discovery service rejected key rotation: %v", err)
 		}
+		var witnesses []discovery.Witness
 		if witness != nil {
 			witnesses = append(witnesses, *witness)
 		}
 		dsRotation = "success"
 
 		if !jsonOutput {
-			fmt.Println("[✓] Discovery service acknowledged key rotation")
+			if already {
+				fmt.Println("[✓] Discovery service already holds the staged key; finishing the rotation")
+			} else {
+				fmt.Println("[✓] Discovery service acknowledged key rotation")
+			}
 		}
-	} else if !jsonOutput {
-		fmt.Println("[i] DS notification skipped: site not registered with discovery service")
+		return witnesses, nil
 	}
 
 	// No .old backup is made, and --delete-old-key is gone with it.
@@ -132,85 +124,70 @@ func handleRotateKey(args []string) {
 	// Existing .old files are left where they are. They stop being made; they are
 	// not cleaned up. (webapp/internal/hosted/reaper.go still excludes them from a
 	// departing user's archive, and must keep doing so for as long as any exist.)
-
-	// Write new keys
-	if err := os.WriteFile(privateKeyPath, privPEM, 0600); err != nil {
-		exitError("Failed to write new private key: %v", err)
-	}
-	if err := os.WriteFile(publicKeyPath, pubSSH, 0644); err != nil {
-		exitError("Failed to write new public key: %v", err)
-	}
-
-	// Update .well-known/polis: the new public_key AND the appended history
-	// entry, in one write, through the shared seam.
 	//
-	// ⛔ Do not inline either half here. This operation is implemented twice —
-	// the webapp has its own complete rotation handler — and a chain appended in
-	// one path and not the other is a site whose published key disagrees with
-	// its own history. site.RecordKeyRotation is the single place both go
-	// through, so the two facts cannot drift apart.
-	//
-	// timestamp is passed verbatim: it is the value the old key just signed, and
-	// it becomes the new entry's valid_from. Reformatting it would break the
-	// transition signature the chain is verified by.
-	if err := site.RecordKeyRotation(dir, newPubKey, transitionSig, timestamp, witnesses...); err != nil {
-		exitError("Failed to record the key rotation in .well-known/polis: %v", err)
-	}
-	epoch := 0
-	if block, herr := site.LoadKeyHistory(dir); herr == nil && block != nil {
-		epoch = block.Current.Epoch
-	}
-
-	// Re-sign the public_key_messages block under the NEW identity key. The DM messages
-	// keys themselves don't change (they're independent of the identity key) — only the
-	// signatures over them are refreshed, so no window has stale signatures. Skip tenants
-	// with no DM keyring. (Phase 2.6; Judge expects a one-time re-baseline.)
-	if _, err := os.Stat(filepath.Join(dm.DMDir(dir), "keyring.json")); err == nil {
-		if err := site.PublishMessagesKey(dir, privPEM); err != nil {
-			exitError("Failed to re-sign public_key_messages: %v", err)
+	// ⛔ public_key and public_key_history move only through
+	// site.RecordKeyRotation, inside CompleteRotation. Rotation is implemented
+	// more than once (the webapp has its own complete handler), and a chain
+	// appended in one path and not the other is a site whose published key
+	// disagrees with its own history.
+	res, err := site.CompleteRotation(ctx, getSite(), keys, site.RotationOptions{
+		SigningDomain: domain,
+		Announce:      announce,
+	})
+	if err != nil {
+		var re *site.RotationError
+		if !errors.As(err, &re) {
+			exitError("Key rotation failed: %v", err)
+		}
+		switch re.Stage {
+		case site.StageCanonical:
+			exitError("Failed to build canonical rotation JSON: %v", re.Err)
+		case site.StageSign:
+			exitError("Failed to sign transition message with old key: %v", re.Err)
+		case site.StageStage:
+			exitError("Key rotation not started: %v", re.Err)
+		case site.StageInstall:
+			exitError("Failed to install the new key (it is staged at %s): %v", site.StagedKeyKey, re.Err)
+		case site.StageRecord:
+			exitError("Failed to record the key rotation in .well-known/polis: %v. "+
+				"Run 'polis rotate-key' again to finish it: the retired key is kept at %s", re.Err, site.PreviousKeyKey)
+		case site.StageMessagesKey:
+			exitError("Failed to re-sign public_key_messages: %v", re.Err)
+		default:
+			exitError("Key rotation failed: %v", re.Err)
 		}
 	}
+	if res.FinishErr != nil && !jsonOutput {
+		// Not fatal: the rotation is recorded, and the next rotation removes
+		// what is left. But it is a private key on disk, so say so.
+		fmt.Printf("[!] %v\n", res.FinishErr)
+	}
+	epoch := res.Epoch
+	followResign, followErr := res.FollowResign, res.FollowErr
+	blessedResign, blessedErr := res.BlessedResign, res.BlessedErr
+	for _, r := range []struct {
+		file string
+		out  signing.ResignOutcome
+		err  error
+	}{{"following.json", followResign, followErr}, {"blessed.json", blessedResign, blessedErr}} {
+		fields := map[string]interface{}{"file": r.file, "outcome": string(r.out), "trigger": "rotate-key"}
+		if r.err != nil {
+			fields["error"] = r.err.Error()
+		}
+		logCLIAction("rotate_key.resign", fields)
+	}
 
-	// Republish the DID Document so it carries the new key — and, since SIGNET
-	// epic 16, the retired ones too.
-	//
-	// A DID document supports multiple verificationMethod entries, so the same
-	// history the site publishes natively projects into the standard shape: the
-	// retired key stays in verificationMethod (a resolver can still verify what
-	// it signed) and drops out of assertionMethod (it no longer speaks for this
-	// identity). Carry the standard, own the binding — epic 09's move, applied a
-	// second time to the same key.
-	//
-	// ⚠️ The native block is the source; this is the projection. The projection
-	// is rebuilt from .well-known/polis, so it must be republished AFTER
-	// RecordKeyRotation, never before.
-	//
-	// Not fatal, for the same reason as at init: the rotation itself has
-	// already succeeded and been announced to the DS by this point, so failing
-	// the command over a derived projection would report a rotation that did
-	// in fact happen as a failure. Medic republishes it on the next sweep.
-	didPublished := false
-	didRemoved := false
-	if err := site.PublishDIDDocument(dir, domain); err == nil {
-		didPublished = true
+	didPublished, didRemoved := res.DIDPublished, res.DIDRemoved
+	if didPublished {
 		logCLIAction("did.published", map[string]interface{}{
 			"did":     did.ID(domain),
 			"trigger": "rotate-key",
 		})
 	} else {
-		// Republishing failed, so whatever is on disk now names the RETIRED
-		// key. Remove it rather than leaving it: a stale document answers 200
-		// with a key the site no longer holds and a resolver cannot tell,
-		// while an absent one fails honestly. Deleting is safe because the
-		// document is derived — `polis did --write` rebuilds it — and the
-		// rotation itself is never blocked either way.
-		if rmErr := os.Remove(site.DIDDocumentPath(dir)); rmErr == nil {
-			didRemoved = true
-		}
 		logCLIAction("did.publish_failed", map[string]interface{}{
 			"host":    domain,
 			"trigger": "rotate-key",
-			"error":   err.Error(),
+			"error":   res.DIDErr.Error(),
 			"removed": didRemoved,
 		})
 	}
@@ -230,8 +207,10 @@ func handleRotateKey(args []string) {
 			fmt.Println("[!] Removed .well-known/did.json — it stated the old key")
 			fmt.Println("    Run `polis did --write` to republish it with the new one")
 		}
+		printResign("following.json", followResign, followErr)
+		printResign("blessed.json", blessedResign, blessedErr)
 		fmt.Println()
-		fmt.Println("[!] Deploy the updated .well-known/polis file")
+		fmt.Println("[!] Deploy the updated .well-known/polis file, and any re-signed follow file or blessing list")
 	}
 
 	if jsonOutput {
@@ -248,7 +227,28 @@ func handleRotateKey(args []string) {
 				"ds_rotation":       dsRotation,
 				"did_published":     didPublished,
 				"did_removed":       didRemoved,
+				"following_resign":  string(followResign),
+				"blessed_resign":    string(blessedResign),
 			},
 		})
+	}
+}
+
+// printResign reports what the rotation did with one signed list. Only the
+// outcomes a person might act on are printed.
+func printResign(file string, out signing.ResignOutcome, err error) {
+	switch out {
+	case signing.ResignDone:
+		fmt.Printf("[i] Re-signed %s under the new key\n", file)
+	case signing.ResignNotValid:
+		fmt.Printf("[!] Left %s as it was: its signature did not verify under the old key, so it was not re-signed\n", file)
+	case signing.ResignRefused:
+		fmt.Printf("[!] Left %s as it was: %v\n", file, err)
+	case signing.ResignAbsent, signing.ResignUnsigned:
+		// Nothing to say: there was nothing to re-sign.
+	default:
+		if err != nil {
+			fmt.Printf("[!] Could not re-sign %s: %v\n", file, err)
+		}
 	}
 }

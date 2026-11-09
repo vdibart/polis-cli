@@ -3,6 +3,7 @@ package sitecheck
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -239,7 +240,7 @@ func TestRemoteDerivesTheDomainTheSameWayARotationSignsIt(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".well-known", "polis"), data, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := site.WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := site.WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	khRotate(t, dir, "localhost", k0, k1, "2026-09-15T10:22:03Z")

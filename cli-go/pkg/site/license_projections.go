@@ -1,12 +1,13 @@
 package site
 
 import (
+	"context"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/license"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // The core bundle's post paths. Fixed by design — the core bundle's layout is
@@ -53,15 +54,15 @@ const (
 // detect tampering with no stored baseline. A caller-first ordering would put
 // the answer back in operator configuration, where Medic and the renderer can
 // disagree, and the write war would return by the back door.
-func LicenseProjections(siteDir, fallbackBaseURL string) (robots, rsl []byte, err error) {
-	terms, err := SiteTerms(siteDir)
+func LicenseProjections(site storage.Site, fallbackBaseURL string) (robots, rsl []byte, err error) {
+	terms, err := SiteTerms(site)
 	if err != nil || terms == nil {
 		return nil, nil, err
 	}
 
 	base := LicenseProjectionBase(terms, fallbackBaseURL)
 
-	overrides, err := licenseOverrides(siteDir, terms)
+	overrides, err := licenseOverrides(site, terms)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -112,45 +113,53 @@ func LicenseProjectionBase(terms *license.Terms, fallbackBaseURL string) string 
 // rules keyed by the CONTENT path instead of the mount path. Two writers of one
 // file with two ideas of the key is the same disagreement this file exists to
 // end, one level down.
-func licenseOverrides(siteDir string, siteTerms *license.Terms) (map[string]*license.Terms, error) {
+func licenseOverrides(site storage.Site, siteTerms *license.Terms) (map[string]*license.Terms, error) {
 	siteSignal := license.ContentUsage(siteTerms)
 
-	postsDir := filepath.Join(siteDir, filepath.FromSlash(corePostsDir))
+	ctx := context.Background()
 	overrides := map[string]*license.Terms{}
 
-	err := filepath.Walk(postsDir, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	// ⭐ A missing post directory lists empty, which is what the walk this
+	// replaced made of it (nothing to override). A tree that could not be
+	// read in full is an error, as it was: the overrides would be incomplete,
+	// and an incomplete robots.txt says the wrong thing about the works it
+	// leaves out.
+	entries, err := site.Store().List(ctx, corePostsDir, storage.Recursive())
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		if e.IsDir || !strings.HasSuffix(e.Key, ".md") {
+			continue
 		}
-		if info.IsDir() {
-			if info.Name() == ".versions" {
-				return filepath.SkipDir
-			}
-			return nil
+		rel := strings.TrimPrefix(e.Key, corePostsDir+"/")
+		if inVersionsDir(rel) {
+			continue
 		}
-		if !strings.HasSuffix(path, ".md") {
-			return nil
-		}
-		content, err := os.ReadFile(path)
+		content, err := site.Store().Get(ctx, e.Key)
 		if err != nil {
-			return nil // unreadable post: nothing to say about it
+			continue // unreadable post: nothing to say about it
 		}
 		workTerms := license.ParseBlock(string(content))
 		if license.ContentUsage(workTerms) == siteSignal {
-			return nil
+			continue
 		}
-		rel, err := filepath.Rel(postsDir, path)
-		if err != nil {
-			return nil
-		}
-		mount := filepath.ToSlash(filepath.Join(corePostsMount, rel))
+		mount := corePostsMount + "/" + rel
 		overrides["/"+strings.TrimSuffix(mount, ".md")+".html"] = workTerms
-		return nil
-	})
-	if err != nil && !os.IsNotExist(err) {
-		return nil, err
 	}
 	return overrides, nil
+}
+
+// inVersionsDir reports whether a site-relative key sits under a .versions
+// directory at any depth: the post history side-car, whose files are earlier
+// versions of a work and say nothing about what it is published under now.
+func inVersionsDir(rel string) bool {
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == ".versions" {
+			return true
+		}
+	}
+	return false
 }
 
 // licenseURL joins an origin and a site-relative path. With no origin the path

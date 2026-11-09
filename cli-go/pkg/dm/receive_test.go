@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -40,7 +41,7 @@ func testReceiver(t *testing.T) (*Receiver, []byte, []byte, []byte, []byte) {
 	senderPriv, senderPub, _ := signing.GenerateKeypair()
 
 	rl := NewRateLimiter(10, 100)
-	rcv := NewReceiver(privPEM, pubSSH, "bob.example.com", siteDir, rl)
+	rcv := NewReceiver(privPEM, pubSSH, "bob.example.com", storage.At(siteDir), rl)
 
 	// DM-1: inject a fake sender-key fetcher so box_pub authentication passes for the
 	// canonical test sender (epoch 0, key derived from senderPriv — matching buildEnvelope).
@@ -53,7 +54,7 @@ func testReceiver(t *testing.T) (*Receiver, []byte, []byte, []byte, []byte) {
 	if _, err := kr.AddBootstrapEpoch(); err != nil {
 		t.Fatalf("bootstrap epoch: %v", err)
 	}
-	if err := kr.Save(DMDir(siteDir)); err != nil {
+	if err := kr.Save(storage.At(siteDir)); err != nil {
 		t.Fatalf("save keyring: %v", err)
 	}
 
@@ -98,7 +99,7 @@ func buildEnvelope(t *testing.T, rcv *Receiver, senderPrivPEM, senderPubSSH []by
 	}
 
 	// Seal to the receiver's current epoch messages key.
-	kr, err := LoadKeyring(DMDir(rcv.SiteDir))
+	kr, err := LoadKeyring(rcv.Site)
 	if err != nil {
 		t.Fatalf("load receiver keyring: %v", err)
 	}
@@ -137,7 +138,7 @@ func buildEnvelope(t *testing.T, rcv *Receiver, senderPrivPEM, senderPubSSH []by
 // a box sealed under it) must be rejected at receive time, before storage.
 func TestReceiveMessage_RejectsUnauthenticatedBoxPub(t *testing.T) {
 	rcv, senderPriv, senderPub, _, _ := testReceiver(t)
-	policyPath := filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl")
+	policyPath := rcv.Site.Path(".polis", "policies", "rules.jsonl")
 	os.WriteFile(policyPath, []byte(`{"active":true,"policy":"allow pub.polis.dm from all"}`+"\n"), 0600)
 
 	// Forge: attacker mints their own keypair and seals a chosen message to the receiver's
@@ -146,7 +147,7 @@ func TestReceiveMessage_RejectsUnauthenticatedBoxPub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	kr, _ := LoadKeyring(DMDir(rcv.SiteDir))
+	kr, _ := LoadKeyring(rcv.Site)
 	cur, _ := kr.CurrentEpoch()
 	recvPKBytes, _ := base64.StdEncoding.DecodeString(cur.PublicKeyMessages)
 	var receiverPK [32]byte
@@ -178,7 +179,7 @@ func TestReceiveMessage_RejectsUnauthenticatedBoxPub(t *testing.T) {
 	}
 
 	// And nothing was stored.
-	msgs, _ := NewMailbox(DMDir(rcv.SiteDir)).LoadMessages("alice.example.com")
+	msgs, _ := NewMailbox(rcv.Site).LoadMessages("alice.example.com")
 	if len(msgs) != 0 {
 		t.Fatalf("forged message must not be stored, found %d", len(msgs))
 	}
@@ -190,7 +191,7 @@ func TestReceiveMessage_Success(t *testing.T) {
 	rcv.Logger = logger
 
 	// Write policy allowing DMs from all
-	policyPath := filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl")
+	policyPath := rcv.Site.Path(".polis", "policies", "rules.jsonl")
 	os.WriteFile(policyPath, []byte(`{"active":true,"policy":"allow pub.polis.dm from all"}`+"\n"), 0600)
 
 	envelope := buildEnvelope(t, rcv, senderPriv, senderPub, "alice.example.com", "bob.example.com", "Hello Bob!")
@@ -232,7 +233,7 @@ func TestReceiveMessage_Success(t *testing.T) {
 // that makes clearing the bootstrap server_dek safe.
 func TestReceiveMessage_StaleEpochRejected(t *testing.T) {
 	rcv, senderPriv, senderPub, _, _ := testReceiver(t)
-	policyPath := filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl")
+	policyPath := rcv.Site.Path(".polis", "policies", "rules.jsonl")
 	os.WriteFile(policyPath, []byte(`{"active":true,"policy":"allow pub.polis.dm from all"}`+"\n"), 0600)
 
 	envelope := buildEnvelope(t, rcv, senderPriv, senderPub, "alice.example.com", "bob.example.com", "stale")
@@ -257,7 +258,7 @@ func TestReceiveMessage_PolicyDenied(t *testing.T) {
 	rcv.Logger = logger
 
 	// Write policy denying DMs from all
-	policyPath := filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl")
+	policyPath := rcv.Site.Path(".polis", "policies", "rules.jsonl")
 	os.WriteFile(policyPath, []byte(`{"active":true,"policy":"deny pub.polis.dm from all"}`+"\n"), 0600)
 
 	_, err := rcv.ReceiveMessage("spam.example.com", []byte("{}"), nil)
@@ -289,7 +290,7 @@ func TestReceiveMessage_GlobalRateLimit(t *testing.T) {
 	rcv.RateLimiter = NewRateLimiter(100, 1)
 
 	// Allow all DMs via policy
-	policyPath := filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl")
+	policyPath := rcv.Site.Path(".polis", "policies", "rules.jsonl")
 	os.WriteFile(policyPath, []byte(`{"active":true,"policy":"allow pub.polis.dm from all"}`+"\n"), 0600)
 
 	// First request consumes the limit
@@ -322,7 +323,7 @@ func TestReceiveMessage_SenderRateLimit(t *testing.T) {
 	// Create rate limiter with per-sender limit of 1
 	rcv.RateLimiter = NewRateLimiter(1, 100)
 
-	policyPath := filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl")
+	policyPath := rcv.Site.Path(".polis", "policies", "rules.jsonl")
 	os.WriteFile(policyPath, []byte(`{"active":true,"policy":"allow pub.polis.dm from all"}`+"\n"), 0600)
 
 	// First request consumes sender limit
@@ -353,7 +354,7 @@ func TestReceiveMessage_SizeRejected(t *testing.T) {
 	rcv.Logger = logger
 	rcv.MaxMessageSize = 100 // very small for testing
 
-	policyPath := filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl")
+	policyPath := rcv.Site.Path(".polis", "policies", "rules.jsonl")
 	os.WriteFile(policyPath, []byte(`{"active":true,"policy":"allow pub.polis.dm from all"}`+"\n"), 0600)
 
 	bigPayload := make([]byte, 200)
@@ -380,7 +381,7 @@ func TestReceiveMessage_PolicyAllowFollowing(t *testing.T) {
 	rcv, senderPriv, senderPub, _, _ := testReceiver(t)
 
 	// Default DM policy: allow from following, deny from all
-	policyPath := filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl")
+	policyPath := rcv.Site.Path(".polis", "policies", "rules.jsonl")
 	os.WriteFile(policyPath, []byte(
 		`{"active":true,"policy":"allow pub.polis.dm from following"}`+"\n"+
 			`{"active":true,"policy":"deny pub.polis.dm from all"}`+"\n",
@@ -401,7 +402,7 @@ func TestReceiveMessage_PolicyAllowFollowing(t *testing.T) {
 func TestReceiveMessage_PolicyDenyNonFollowing(t *testing.T) {
 	rcv, _, _, _, _ := testReceiver(t)
 
-	policyPath := filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl")
+	policyPath := rcv.Site.Path(".polis", "policies", "rules.jsonl")
 	os.WriteFile(policyPath, []byte(
 		`{"active":true,"policy":"allow pub.polis.dm from following"}`+"\n"+
 			`{"active":true,"policy":"deny pub.polis.dm from all"}`+"\n",
@@ -631,9 +632,9 @@ func TestReceiveMessage_CaseInsensitiveDomains(t *testing.T) {
 	rcv, senderPriv, senderPub, _, _ := testReceiver(t)
 
 	// Write permissive DM policy
-	os.MkdirAll(filepath.Join(rcv.SiteDir, ".polis", "policies"), 0700)
+	os.MkdirAll(rcv.Site.Path(".polis", "policies"), 0700)
 	os.WriteFile(
-		filepath.Join(rcv.SiteDir, ".polis", "policies", "rules.jsonl"),
+		rcv.Site.Path(".polis", "policies", "rules.jsonl"),
 		[]byte("{\"active\":true,\"policy\":\"allow pub.polis.dm from all\"}\n"),
 		0600,
 	)

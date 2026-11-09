@@ -1,6 +1,9 @@
 package theme
 
 import (
+	"context"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -84,7 +87,7 @@ func TestLoad(t *testing.T) {
 	themesDir := filepath.Join(tempDir, "site", "themes")
 	createTestTheme(t, themesDir, "turbo")
 
-	templates, err := LoadShape(tempDir, "", "v3", "turbo")
+	templates, err := LoadShape(storage.At(tempDir), "", "v3", "turbo")
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -106,7 +109,7 @@ func TestLoadFallbackToCLI(t *testing.T) {
 	// Only create theme in CLI dir (not local)
 	createTestTheme(t, cliThemesDir, "sols")
 
-	templates, err := LoadShape(dataDir, cliThemesDir, "v3", "sols")
+	templates, err := LoadShape(storage.At(dataDir), cliThemesDir, "v3", "sols")
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -119,7 +122,7 @@ func TestLoadFallbackToCLI(t *testing.T) {
 func TestLoadMissingTheme(t *testing.T) {
 	tempDir := t.TempDir()
 
-	_, err := LoadShape(tempDir, "", "v3", "nonexistent")
+	_, err := LoadShape(storage.At(tempDir), "", "v3", "nonexistent")
 	if err == nil {
 		t.Error("Expected error for missing theme")
 	}
@@ -133,13 +136,13 @@ func TestGetActiveTheme(t *testing.T) {
 	os.WriteFile(filepath.Join(tempDir, ".well-known", "polis"), []byte(`{"active_theme":"initial","public_key":"test"}`), 0644)
 
 	// Set active theme
-	err := SetActiveTheme(tempDir, "zane")
+	err := SetActiveTheme(storage.At(tempDir), "zane")
 	if err != nil {
 		t.Fatalf("SetActiveTheme failed: %v", err)
 	}
 
 	// Get active theme
-	theme, err := GetActiveTheme(tempDir)
+	theme, err := GetActiveTheme(storage.At(tempDir))
 	if err != nil {
 		t.Fatalf("GetActiveTheme failed: %v", err)
 	}
@@ -154,7 +157,7 @@ func TestCopyCSS(t *testing.T) {
 	themesDir := filepath.Join(tempDir, "site", "themes")
 	createTestTheme(t, themesDir, "turbo")
 
-	err := CopyCSS(tempDir, "", "turbo")
+	err := CopyCSS(storage.At(tempDir), "", "turbo")
 	if err != nil {
 		t.Fatalf("CopyCSS failed: %v", err)
 	}
@@ -177,7 +180,7 @@ func TestListThemes(t *testing.T) {
 	createTestTheme(t, cliThemesDir, "cli-theme1")
 	createTestTheme(t, cliThemesDir, "cli-theme2")
 
-	themes, err := ListThemes(dataDir, cliThemesDir)
+	themes, err := ListThemes(storage.At(dataDir), cliThemesDir)
 	if err != nil {
 		t.Fatalf("ListThemes failed: %v", err)
 	}
@@ -195,7 +198,7 @@ func TestSelectRandomTheme_SavesChoice(t *testing.T) {
 	createTestTheme(t, cliThemesDir, "sols")
 	createTestTheme(t, cliThemesDir, "zane")
 
-	selected, err := SelectRandomTheme(dataDir, cliThemesDir)
+	selected, err := SelectRandomTheme(storage.At(dataDir), cliThemesDir)
 	if err != nil {
 		t.Fatalf("SelectRandomTheme failed: %v", err)
 	}
@@ -206,7 +209,7 @@ func TestSelectRandomTheme_SavesChoice(t *testing.T) {
 	}
 
 	// Verify the choice was persisted in the manifest
-	saved, err := GetActiveTheme(dataDir)
+	saved, err := GetActiveTheme(storage.At(dataDir))
 	if err != nil {
 		t.Fatalf("GetActiveTheme failed after SelectRandomTheme: %v", err)
 	}
@@ -219,7 +222,7 @@ func TestSelectRandomTheme_NoThemes(t *testing.T) {
 	dataDir := t.TempDir()
 	cliThemesDir := t.TempDir()
 
-	_, err := SelectRandomTheme(dataDir, cliThemesDir)
+	_, err := SelectRandomTheme(storage.At(dataDir), cliThemesDir)
 	if err == nil {
 		t.Error("Expected error when no themes available")
 	}
@@ -233,7 +236,7 @@ func TestSelectRandomTheme_SingleTheme(t *testing.T) {
 
 	// Run multiple times to verify single theme is always selected
 	for i := 0; i < 10; i++ {
-		selected, err := SelectRandomTheme(dataDir, cliThemesDir)
+		selected, err := SelectRandomTheme(storage.At(dataDir), cliThemesDir)
 		if err != nil {
 			t.Fatalf("SelectRandomTheme failed: %v", err)
 		}
@@ -252,7 +255,7 @@ func TestLoad_OptionalArchiveTemplate(t *testing.T) {
 	// Add posts.html to the theme (overrides shape)
 	os.WriteFile(filepath.Join(themesDir, "turbo", "posts.html"), []byte("<html>{{#posts}}{{title}}{{/posts}}</html>"), 0644)
 
-	templates, err := LoadShape(tempDir, "", "v3", "turbo")
+	templates, err := LoadShape(storage.At(tempDir), "", "v3", "turbo")
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -273,7 +276,7 @@ func TestLoad_MissingArchiveTemplate(t *testing.T) {
 	createTestTheme(t, themesDir, "turbo")
 
 	// Do NOT add posts.html — should fall through to shape's posts.html.
-	templates, err := LoadShape(tempDir, "", "v3", "turbo")
+	templates, err := LoadShape(storage.At(tempDir), "", "v3", "turbo")
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -294,7 +297,7 @@ func TestLoad_CSSOnlyThemeUsesShape(t *testing.T) {
 	// CSS-only theme (no HTML templates).
 	createCSSOnlyTheme(t, themesDir, "minimal")
 
-	templates, err := LoadShape(dataDir, "", "v3", "minimal")
+	templates, err := LoadShape(storage.At(dataDir), "", "v3", "minimal")
 	if err != nil {
 		t.Fatalf("Load failed for CSS-only theme: %v", err)
 	}
@@ -327,7 +330,7 @@ func TestLoad_ThemeOverridesShape(t *testing.T) {
 	os.WriteFile(filepath.Join(themeDir, "custom.css"), []byte("body {}"), 0644)
 	os.WriteFile(filepath.Join(themeDir, "post.html"), []byte("<html>CUSTOM POST</html>"), 0644)
 
-	templates, err := LoadShape(dataDir, "", "v3", "custom")
+	templates, err := LoadShape(storage.At(dataDir), "", "v3", "custom")
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -349,7 +352,7 @@ func TestLoad_NoShapeInstalledFails(t *testing.T) {
 	// Full theme, but no shape installed at .polis/bundles/...
 	createTestTheme(t, themesDir, "turbo")
 
-	_, err := LoadShape(dataDir, "", "v3", "turbo")
+	_, err := LoadShape(storage.At(dataDir), "", "v3", "turbo")
 	if err == nil {
 		t.Fatal("expected Load to fail when shape is not installed")
 	}
@@ -361,7 +364,7 @@ func TestLoadShape_UnknownShapeFails(t *testing.T) {
 	themesDir := filepath.Join(dataDir, "site", "themes")
 	createTestTheme(t, themesDir, "turbo")
 
-	_, err := LoadShape(dataDir, "", "v4", "turbo")
+	_, err := LoadShape(storage.At(dataDir), "", "v4", "turbo")
 	if err == nil {
 		t.Fatal("expected LoadShape to fail for undeclared shape v4")
 	}
@@ -375,7 +378,7 @@ func TestListThemes_ExcludesBase(t *testing.T) {
 	createBaseTheme(t, filepath.Join(dataDir, "site", "themes"))
 	createTestTheme(t, filepath.Join(dataDir, "site", "themes"), "turbo")
 
-	themes, err := ListThemes(dataDir, cliThemesDir)
+	themes, err := ListThemes(storage.At(dataDir), cliThemesDir)
 	if err != nil {
 		t.Fatalf("ListThemes failed: %v", err)
 	}
@@ -479,9 +482,9 @@ func TestListUserSelectableThemes_FiltersByShape_Blog(t *testing.T) {
 	installBundleThemes(t, dir, "vice", "studio13-nk")
 
 	// V3 picker should include vice (v3+v4) and studio13-nk (blog-only).
-	themes, err := ListUserSelectableThemes(dir, "", "v3")
+	themes, err := ListUserSelectableThemes(storage.At(dir), "", "v3")
 	if err != nil {
-		t.Fatalf("ListUserSelectableThemes(v3): %v", err)
+		t.Fatalf("ListUserSelectableThemes(storage.At(v3)): %v", err)
 	}
 	names := map[string]bool{}
 	for _, p := range themes {
@@ -500,9 +503,9 @@ func TestListUserSelectableThemes_EmptyShapeDefaultsToBlog(t *testing.T) {
 	installBundleThemes(t, dir, "vice", "studio13-nk")
 
 	// Empty active_shape → treated as v3 per bundle.GetActiveShapeName default.
-	themes, err := ListUserSelectableThemes(dir, "", "")
+	themes, err := ListUserSelectableThemes(storage.At(dir), "", "")
 	if err != nil {
-		t.Fatalf("ListUserSelectableThemes(empty): %v", err)
+		t.Fatalf("ListUserSelectableThemes(storage.At(empty)): %v", err)
 	}
 	if len(themes) == 0 {
 		t.Error("expected v3 themes when active_shape empty; got none")
@@ -516,7 +519,7 @@ func TestListUserSelectableThemes_ExcludesOrphansNotDeclared(t *testing.T) {
 	// Patrol check, not by the picker.
 	installBundleThemes(t, dir, "vice", "junk")
 
-	themes, err := ListUserSelectableThemes(dir, "", "v3")
+	themes, err := ListUserSelectableThemes(storage.At(dir), "", "v3")
 	if err != nil {
 		t.Fatalf("ListUserSelectableThemes: %v", err)
 	}
@@ -532,7 +535,7 @@ func TestListThemesWithPalettes_PopulatesDisplayName(t *testing.T) {
 	// studio13-nk carries DisplayName "studio13" in DefaultCoreBundle.
 	installBundleThemes(t, dir, "studio13-nk")
 
-	themes, err := ListThemesWithPalettes(dir, "")
+	themes, err := ListThemesWithPalettes(storage.At(dir), "")
 	if err != nil {
 		t.Fatalf("ListThemesWithPalettes: %v", err)
 	}
@@ -550,13 +553,32 @@ func TestListThemesWithPalettes_PopulatesDisplayName(t *testing.T) {
 	}
 }
 
-func TestGetThemeDir_ChecksBundleLocation(t *testing.T) {
+func TestResolveThemeSource_ChecksBundleLocation(t *testing.T) {
 	dir := t.TempDir()
 	installBundleThemes(t, dir, "vice")
-	got := GetThemeDir(dir, "", "vice")
-	want := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "themes", "vice")
-	if got != want {
-		t.Errorf("GetThemeDir = %q, want %q (bundle-installed path)", got, want)
+	got := resolveThemeSource(storage.At(dir), "", "vice")
+	if want := ".polis/bundles/pub.polis.core/themes/vice"; got.key != want || got.dir != "" {
+		t.Errorf("resolveThemeSource = %+v, want the site key %q (bundle-installed)", got, want)
+	}
+}
+
+// The palette comes through the store, so a theme inside a site backed by an
+// object store still shows its colors.
+func TestListThemesWithPalettes_OnAnObjectStore(t *testing.T) {
+	site := storage.On("/nonexistent-site-root", storage.NewObjectStore(""))
+	css := ":root {\n  --color-bg: #000000;\n  --color-text: #ffffff;\n  --color-cyan: #00ffff;\n}\n"
+	if err := site.Store().Put(context.Background(), bundleThemesKey+"/vice/vice.css", []byte(css)); err != nil {
+		t.Fatal(err)
+	}
+	palettes, err := ListThemesWithPalettes(site, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(palettes) != 1 || palettes[0].Name != "vice" {
+		t.Fatalf("palettes = %+v, want vice only", palettes)
+	}
+	if c := palettes[0].Colors; len(c) != 5 || c[0] != "#000000" || c[1] != "#ffffff" || c[4] != "#00ffff" {
+		t.Errorf("vice colors = %v, want bg #000000, text #ffffff, cyan #00ffff", c)
 	}
 }
 
@@ -578,9 +600,9 @@ func TestLoadShape_StreamLoadsTemplates(t *testing.T) {
 	tempDir := t.TempDir()
 	installStreamShapeFixture(t, tempDir)
 
-	templates, err := LoadShape(tempDir, "", "v4", "vice")
+	templates, err := LoadShape(storage.At(tempDir), "", "v4", "vice")
 	if err != nil {
-		t.Fatalf("LoadShape(v4): %v", err)
+		t.Fatalf("LoadShape(storage.At(v4)): %v", err)
 	}
 	if templates.Stream != "<html>V4 STREAM</html>" {
 		t.Errorf("Stream = %q, want shape-dir content", templates.Stream)
@@ -598,9 +620,9 @@ func TestLoadShape_BlogDoesNotLoadStreamFields(t *testing.T) {
 	tempDir := t.TempDir()
 	installShapeFixture(t, tempDir)
 
-	templates, err := LoadShape(tempDir, "", "v3", "vice")
+	templates, err := LoadShape(storage.At(tempDir), "", "v3", "vice")
 	if err != nil {
-		t.Fatalf("LoadShape(v3): %v", err)
+		t.Fatalf("LoadShape(storage.At(v3)): %v", err)
 	}
 	// stream fields must stay empty on blog shape.
 	if templates.Stream != "" || templates.StreamPost != "" {
@@ -619,9 +641,9 @@ func TestLoadShape_StreamMissingTemplatesErrors(t *testing.T) {
 	os.MkdirAll(dir, 0755)
 	os.WriteFile(filepath.Join(dir, "stream-post.html"), []byte("<a></a>"), 0644)
 
-	_, err := LoadShape(tempDir, "", "v4", "vice")
+	_, err := LoadShape(storage.At(tempDir), "", "v4", "vice")
 	if err == nil {
-		t.Error("LoadShape(v4) without stream.html should error")
+		t.Error("LoadShape(storage.At(v4)) without stream.html should error")
 	}
 }
 
@@ -632,9 +654,9 @@ func TestLoadShape_UnknownShapeErrors(t *testing.T) {
 	os.MkdirAll(dir, 0755)
 	os.WriteFile(filepath.Join(dir, "anything.html"), []byte(""), 0644)
 
-	_, err := LoadShape(tempDir, "", "v99", "vice")
+	_, err := LoadShape(storage.At(tempDir), "", "v99", "vice")
 	if err == nil {
-		t.Error("LoadShape(v99) should error — unsupported shape")
+		t.Error("LoadShape(storage.At(v99)) should error — unsupported shape")
 	}
 }
 
@@ -645,12 +667,65 @@ func TestLoadShape_StreamPartialsAreOptional(t *testing.T) {
 	// Only stream.html present — partials absent.
 	os.WriteFile(filepath.Join(dir, "stream.html"), []byte("<html></html>"), 0644)
 
-	templates, err := LoadShape(tempDir, "", "v4", "vice")
+	templates, err := LoadShape(storage.At(tempDir), "", "v4", "vice")
 	if err != nil {
-		t.Fatalf("LoadShape(v4) with only stream.html: %v", err)
+		t.Fatalf("LoadShape(storage.At(v4)) with only stream.html: %v", err)
 	}
 	if templates.Stream == "" {
 		t.Error("Stream should be populated")
 	}
 	// Partials may be empty — no error expected.
+}
+
+// ⭐ A choice that cannot be saved is the same every time. A registry.json
+// that does not parse refuses the save (a present-but-broken registry is
+// never overwritten with defaults), so each call chooses again, and a random
+// choice gave the site a different theme on every render.
+func TestSelectRandomTheme_UnsavedChoiceIsStable(t *testing.T) {
+	dataDir := t.TempDir()
+	cliThemesDir := t.TempDir()
+	for _, n := range []string{"zane", "turbo", "sols", "mint"} {
+		createTestTheme(t, cliThemesDir, n)
+	}
+	reg := filepath.Join(dataDir, ".polis", "bundles", "registry.json")
+	if err := os.MkdirAll(filepath.Dir(reg), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reg, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 20; i++ {
+		got, err := SelectRandomTheme(storage.At(dataDir), cliThemesDir)
+		if !errors.Is(err, ErrThemeNotSaved) {
+			t.Fatalf("call %d: err = %v, want ErrThemeNotSaved", i, err)
+		}
+		// "sols" is reserved, so the first eligible theme by name is "mint".
+		if got != "mint" {
+			t.Fatalf("call %d: got %q, want the first eligible theme by name, %q", i, got, "mint")
+		}
+	}
+	if b, _ := os.ReadFile(reg); string(b) != "{" {
+		t.Fatalf("the broken registry was overwritten: %q", b)
+	}
+}
+
+// And a healthy registry still gets a random choice: over many fresh sites,
+// more than one theme is picked.
+func TestSelectRandomTheme_SavedChoiceIsStillRandom(t *testing.T) {
+	cliThemesDir := t.TempDir()
+	for _, n := range []string{"zane", "turbo", "mint"} {
+		createTestTheme(t, cliThemesDir, n)
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 60 && len(seen) < 2; i++ {
+		got, err := SelectRandomTheme(storage.At(t.TempDir()), cliThemesDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[got] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("60 fresh sites all got %v; the saved choice should stay random", seen)
+	}
 }

@@ -11,7 +11,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 
@@ -52,6 +54,10 @@ func main() {
 		case "--version", "-v":
 			fmt.Printf("tailor v%s\n", Version)
 			os.Exit(0)
+		case "":
+			// An unset shell variable expands to ""; it names no directory.
+			fmt.Fprintf(os.Stderr, "error: empty argument at position %d\nUsage: tailor [--apply] [--json] [--quiet] [site-dir]\n", i+1)
+			os.Exit(2)
 		default:
 			if args[i][0] == '-' {
 				fmt.Fprintf(os.Stderr, "error: unknown flag: %s\n", args[i])
@@ -62,7 +68,7 @@ func main() {
 	}
 
 	// Verify directory exists
-	if _, err := os.Stat(siteDir); os.IsNotExist(err) {
+	if _, err := os.Stat(siteDir); errors.Is(err, fs.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "error: directory does not exist: %s\n", siteDir)
 		os.Exit(2)
 	}

@@ -84,3 +84,49 @@ func TestHandleRemotePost_MarkdownRendersAndIsSanitised(t *testing.T) {
 		t.Errorf("script survived rendering: %q", content)
 	}
 }
+
+// Following a URL that is not a polis site is the caller's mistake (4xx), an
+// unreachable or failing target is upstream (502), and neither is a 500: an
+// API client that retries on 5xx must not retry a URL that will never be a site.
+func TestHandleFollowing_Post_TargetFailuresAreNotServerErrors(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/notjson/.well-known/polis", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("<html>a page</html>"))
+	})
+	mux.HandleFunc("/broken/.well-known/polis", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	})
+	ts := httptest.NewTLSServer(mux)
+	t.Cleanup(ts.Close)
+
+	cases := []struct {
+		path string
+		want int
+	}{
+		{"/missing", http.StatusUnprocessableEntity},
+		{"/notjson", http.StatusUnprocessableEntity},
+		{"/broken", http.StatusBadGateway},
+	}
+	for _, c := range cases {
+		s := newConfiguredServer(t)
+		s.SharedHTTPClient = ts.Client()
+		req := httptest.NewRequest(http.MethodPost, "/api/following", jsonBody(t, map[string]string{"url": ts.URL + c.path}))
+		w := httptest.NewRecorder()
+		s.handleFollowing(w, req)
+		if w.Code != c.want {
+			t.Errorf("%s: got %d, want %d: %s", c.path, w.Code, c.want, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), ".well-known/polis") {
+			t.Errorf("%s: the message should name what failed: %s", c.path, w.Body.String())
+		}
+	}
+
+	// Unreachable: nothing listens.
+	s := newConfiguredServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/following", jsonBody(t, map[string]string{"url": "https://127.0.0.1:1/"}))
+	w := httptest.NewRecorder()
+	s.handleFollowing(w, req)
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("unreachable: got %d, want 502: %s", w.Code, w.Body.String())
+	}
+}

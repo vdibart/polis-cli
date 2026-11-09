@@ -1,18 +1,20 @@
 package publish
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
-	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	// ⚠️ ALIASED: `site` is the parameter name in the site-handle migration.
+	sitepkg "github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Discovery service configuration. Set by the calling application
@@ -23,7 +25,6 @@ import (
 // to RegisterPost/PublishPost/RepublishPost instead of using these globals.
 var (
 	DiscoveryURL string
-	DiscoveryKey string
 	BaseURL      string
 )
 
@@ -32,7 +33,6 @@ var (
 // the package-level globals, enabling safe multi-tenant operation.
 type DiscoveryConfig struct {
 	DiscoveryURL string
-	DiscoveryKey string
 	BaseURL      string
 	Generator    string // e.g. "polis-cli-go/0.59.0" — used in frontmatter metadata
 
@@ -49,11 +49,11 @@ type DiscoveryConfig struct {
 
 // resolveDiscoveryConfig returns the effective config: explicit if provided,
 // otherwise falls back to package-level globals.
-func resolveDiscoveryConfig(cfg *DiscoveryConfig) (dsURL, dsKey, baseURL string) {
+func resolveDiscoveryConfig(cfg *DiscoveryConfig) (dsURL, baseURL string) {
 	if cfg != nil {
-		return cfg.DiscoveryURL, cfg.DiscoveryKey, cfg.BaseURL
+		return cfg.DiscoveryURL, cfg.BaseURL
 	}
-	return DiscoveryURL, DiscoveryKey, BaseURL
+	return DiscoveryURL, BaseURL
 }
 
 // resolveGenerator returns the generator string from an explicit DiscoveryConfig,
@@ -70,8 +70,8 @@ func resolveGenerator(cfg *DiscoveryConfig) string {
 // Returns nil on success. Returns an error if registration fails.
 // If both dsURL and baseURL are empty (unconfigured), returns nil with a
 // diagnostic log. If cfg is nil, falls back to package-level globals.
-func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg *DiscoveryConfig) error {
-	dsURL, dsKey, baseURL := resolveDiscoveryConfig(cfg)
+func RegisterPost(site storage.Site, result *PublishResult, privateKey []byte, cfg *DiscoveryConfig) error {
+	dsURL, baseURL := resolveDiscoveryConfig(cfg)
 	if dsURL == "" || baseURL == "" {
 		var missing []string
 		if dsURL == "" {
@@ -86,7 +86,7 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 		return nil
 	}
 
-	if !discovery.IsRegisteredLocally(dataDir, dsURL) {
+	if !discovery.IsRegisteredLocally(site, dsURL) {
 		stream.LogSuppressedEmit("pub.polis.post.published", "not_registered_locally",
 			polisurl.ExtractDomain(baseURL),
 			map[string]interface{}{"ds_url": dsURL})
@@ -94,7 +94,7 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 	}
 
 	// Determine author identity: email from .well-known/polis, or domain from baseURL
-	wk, err := site.LoadWellKnown(dataDir)
+	wk, err := sitepkg.LoadWellKnown(site)
 	if err != nil {
 		return fmt.Errorf("load .well-known/polis: %w", err)
 	}
@@ -120,7 +120,7 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 	// `version` hashes. Inside metadata, so the registration signature covers it.
 	// ⚠️ published_at above is the REGISTRATION time, not the post's own
 	// `published:` — two different dates with similar names.
-	if data, rerr := os.ReadFile(filepath.Join(dataDir, result.Path)); rerr == nil {
+	if data, rerr := site.Store().Get(context.Background(), result.Path); rerr == nil {
 		metadata[discovery.MetadataArtifactHash] = discovery.ArtifactHash(
 			signing.MarkdownSigningBase(string(data), signing.TypePost))
 	}
@@ -138,7 +138,7 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 		return fmt.Errorf("sign: %w", err)
 	}
 
-	client := discovery.NewClient(dsURL, dsKey)
+	client := discovery.NewClient(dsURL)
 	req := &discovery.ContentRegisterRequest{
 		Type:      "pub.polis.post",
 		URL:       postURL,
@@ -178,7 +178,7 @@ func RegisterPost(dataDir string, result *PublishResult, privateKey []byte, cfg 
 	if registered != nil && registered.Witness != nil {
 		// Publishing the witness never fails the registration: it happened, and
 		// an unpublished witness is lost testimony, not a broken post.
-		if _, werr := site.RecordWitness(dataDir, postURL, *registered.Witness); werr != nil {
+		if _, werr := sitepkg.RecordWitness(site, postURL, *registered.Witness); werr != nil {
 			fmt.Printf("[!] Could not publish the discovery service's witness for %s: %v\n", postURL, werr)
 		}
 	}

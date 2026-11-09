@@ -140,14 +140,14 @@
     },
     {
       "name": "policy-content-converge",
-      "status": "fail",
-      "message": "Policy content drift: public",
-      "reason": "Policy files must match the canonical templates for consistent behavior",
+      "status": "pass",
+      "message": "Policy files left as the site's own rules: public",
+      "reason": "A policy file still holding a default an earlier release wrote is upgraded to the current default; one holding the site's own rules is never overwritten",
       "actions": [
         {
-          "op": "update",
+          "op": "flag",
           "path": "policies/rules.jsonl",
-          "detail": "converge to canonical template"
+          "detail": "the site's own rules (matches no default polis has shipped); left untouched"
         }
       ]
     },
@@ -221,6 +221,12 @@
       "name": "unpublished-emits-migration",
       "status": "pass",
       "message": "unpublished events already declared",
+      "reason": ""
+    },
+    {
+      "name": "theme-shapes-migration",
+      "status": "pass",
+      "message": "theme compatible shapes include the defaults",
       "reason": ""
     },
     {
@@ -336,14 +342,14 @@
     },
     {
       "name": "policy-content-converge",
-      "status": "fail",
-      "message": "Policy content drift: public",
-      "reason": "Policy files must match the canonical templates for consistent behavior",
+      "status": "pass",
+      "message": "Policy files left as the site's own rules: public",
+      "reason": "A policy file still holding a default an earlier release wrote is upgraded to the current default; one holding the site's own rules is never overwritten",
       "actions": [
         {
-          "op": "update",
+          "op": "flag",
           "path": "policies/rules.jsonl",
-          "detail": "converge to canonical template"
+          "detail": "the site's own rules (matches no default polis has shipped); left untouched"
         }
       ]
     },
@@ -435,14 +441,14 @@
     },
     {
       "name": "policy-content-converge",
-      "status": "fail",
-      "message": "Converged policy files: public",
-      "reason": "Policy files must match the canonical templates for consistent behavior",
+      "status": "pass",
+      "message": "Policy files left as the site's own rules: public",
+      "reason": "A policy file still holding a default an earlier release wrote is upgraded to the current default; one holding the site's own rules is never overwritten",
       "actions": [
         {
-          "op": "update",
+          "op": "flag",
           "path": "policies/rules.jsonl",
-          "detail": "converge to canonical template"
+          "detail": "the site's own rules (matches no default polis has shipped); left untouched"
         }
       ]
     },

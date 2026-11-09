@@ -3,6 +3,7 @@ package blessing
 import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // SyncResult contains the result of syncing blessed comments.
@@ -13,7 +14,7 @@ type SyncResult struct {
 }
 
 // streamPageLimit is the per-page size for stream pagination, matching the
-// mainline pattern (clerk.pageStreamQuery, following/reconcile, chaplain).
+// mainline pattern (following/reconcile, chaplain).
 const streamPageLimit = 1000
 
 // SyncBlessedComments rebuilds the local blessed.json from the discovery
@@ -39,7 +40,7 @@ func SyncBlessedComments(siteDir, domain string, client *discovery.Client) (*Syn
 	result := &SyncResult{}
 
 	// Load current local blessed comments so we can skip ones we already hold.
-	blessedFile, err := metadata.LoadBlessedComments(siteDir)
+	blessedFile, err := metadata.LoadBlessedComments(storage.At(siteDir))
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +91,7 @@ func SyncBlessedComments(siteDir, domain string, client *discovery.Client) (*Syn
 				URL:       commentURL,
 				BlessedAt: evt.Timestamp,
 			}
-			if err := metadata.AddBlessedComment(siteDir, extractPostPath(inReplyTo), bc); err != nil {
+			if err := metadata.AddBlessedComment(storage.At(siteDir), extractPostPath(inReplyTo), bc); err != nil {
 				// Best-effort: log-and-continue, as before.
 				continue
 			}

@@ -332,3 +332,32 @@ func TestOutputJSON_InjectsRequestID(t *testing.T) {
 		t.Errorf("expected command=version, got %v", result["command"])
 	}
 }
+
+// ⛔⛔ getSite MUST NOT CACHE, and this is why.
+//
+// ⚠️ The first version memoised it with sync.Once and broke the init tests at
+// once: several tests run commands against different temp directories in one
+// process, so the first call cached a site and every later caller got THAT one
+// — "private key already exists — refusing to overwrite", against a directory
+// the test never named.
+//
+// ⭐⭐⭐ That is exactly the failure a global root-to-store map would have, and
+// the reason this migration chose a type over a resolver: cached global state
+// serves the wrong site, and it compiles.
+func TestGetSiteDoesNotCacheAcrossDataDirs(t *testing.T) {
+	saved := dataDir
+	t.Cleanup(func() { dataDir = saved })
+
+	first := t.TempDir()
+	dataDir = first
+	if got := getSite().Dir(); got != first {
+		t.Fatalf("getSite() = %q, want %q", got, first)
+	}
+
+	second := t.TempDir()
+	dataDir = second
+	if got := getSite().Dir(); got != second {
+		t.Errorf("getSite() = %q, want %q — it cached the first site, and every "+
+			"caller after the first would operate on the wrong one", got, second)
+	}
+}

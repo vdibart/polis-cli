@@ -24,7 +24,7 @@ func TestTheTwoEscapersAgree(t *testing.T) {
 		"", " ", "  ", "plain title", "Foo: Bar", "Ends with colon:", "a: b: c",
 		"'Foo'", "''", "it's", `"quoted"`, `The "quoted" one`, `"Foo: Bar"`,
 		`a\b`, `a\\b: c`, `C:\path\to\thing`, `back\\slash: yes`,
-		" leading", "trailing ", "*star", "&amp", "!bang", "|pipe", ">gt",
+		" leading", "trailing ", "\tTabbed", "tabbed\t", "\r\ncrlf", "*star", "&amp", "!bang", "|pipe", ">gt",
 		"@at", "`tick", "#hash", "-dash", "?question", "%percent",
 		"null", "true", "~", "{}", "[]", "Résumé 🌱: notes", "日本語のタイトル",
 		strings.Repeat(`"`, 32), strings.Repeat(`\`, 32), strings.Repeat("a", 4096),
@@ -69,21 +69,19 @@ func TestTheTwoEscapersAgree(t *testing.T) {
 		t.Fatal("publish.UnquoteYAMLString no longer reverses this package's escaper")
 	}
 
-	// ⚠️ THE ONE BOUNDARY, stated rather than hidden behind a tidy alphabet.
-	// The escaper quotes a leading SPACE but not a leading TAB, and a tab-led
-	// title IS reachable: `# <tab>Tabbed` survives publish.ExtractTitle, which
-	// strips the `# ` prefix after trimming the line.
-	//
-	// ⛔ The loss is NOT in the inverse — it is publish.ParseFrontmatter, which
-	// trims every value on the way back, so the title changes before anything
-	// here is called. It is a known, pre-existing defect, not this test's
-	// subject; the fix is to quote leading whitespace in both escapers, or to
-	// stop trimming the value. Asserted so that a fix on either side is read
-	// against this note instead of surprising someone.
+	// THE TAB-LED TITLE, once the one boundary this test pinned as broken. A
+	// tab-led title IS reachable — `# <tab>Tabbed` survives
+	// publish.ExtractTitle — and publish.ParseFrontmatter trims every value on
+	// the way back, so while the escapers quoted only a leading SPACE the tab was
+	// lost. Both now quote any leading or trailing whitespace, so the title
+	// survives the whole frontmatter round trip. Asserted end to end, through
+	// the real parser, not just escape -> unquote.
 	if got := publish.ExtractTitle("# \tTabbed\n"); got != "\tTabbed" {
-		t.Errorf("ExtractTitle now yields %q for a tab-led heading — the tab-led title boundary moved; re-read the note above", got)
+		t.Errorf("ExtractTitle now yields %q for a tab-led heading; the case this pins moved", got)
 	}
-	if got := publish.ParseFrontmatter("---\ntitle: \tTabbed\n---\n")["title"]; got != "Tabbed" {
-		t.Errorf("ParseFrontmatter now yields %q, so the tab-led title round trip changed — the known defect may be fixed or newly broken; re-read the note above", got)
+	// (publish's own escaper is held to the same, in publish's tests.)
+	fm := publish.ParseFrontmatter("---\ntitle: " + escapeYAMLTitle("\tTabbed") + "\n---\n")
+	if got := publish.UnquoteYAMLString(fm["title"]); got != "\tTabbed" {
+		t.Errorf("a tab-led title did not survive the frontmatter round trip: got %q", got)
 	}
 }

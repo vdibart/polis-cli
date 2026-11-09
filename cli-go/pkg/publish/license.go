@@ -2,7 +2,9 @@ package publish
 
 import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/license"
-	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	// ⚠️ ALIASED: `site` is the parameter name in the site-handle migration.
+	sitepkg "github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // licenseFrontmatter resolves the terms for a work being published and returns
@@ -19,8 +21,8 @@ import (
 // Returns "" when nobody has said anything, which leaves the frontmatter
 // byte-identical to what it was before this feature existed. Absent means
 // unstated: not permitted, not denied.
-func licenseFrontmatter(dataDir, authoredProfile, baseURL string) (string, *license.Terms, error) {
-	siteTerms, err := site.SiteTerms(dataDir)
+func licenseFrontmatter(site storage.Site, authoredProfile, baseURL string) (string, *license.Terms, error) {
+	siteTerms, err := sitepkg.SiteTerms(site)
 	if err != nil {
 		// A site whose licence file is unreadable or invalid must not silently
 		// publish under NO terms — that would quietly widen the grant. Fail the

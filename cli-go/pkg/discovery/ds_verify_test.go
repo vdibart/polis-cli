@@ -428,7 +428,7 @@ func TestClient_VerifyResponse_SignedStream(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := NewClient(server.URL)
 	result, err := client.StreamQuery("0", 100, "", "", "")
 	if err != nil {
 		t.Fatalf("stream query with valid signature failed: %v", err)

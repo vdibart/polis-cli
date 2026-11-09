@@ -87,7 +87,6 @@ func handleBlessingRequests(args []string) {
 
 	// Load discovery config from env
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
-	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if discoveryURL == "" {
 		discoveryURL = "https://ds.polis.pub"
 	}
@@ -103,7 +102,7 @@ func handleBlessingRequests(args []string) {
 	}
 
 	privKey, _ := loadPrivateKey(dir)
-	client := discovery.NewAuthenticatedClient(discoveryURL, discoveryKey, domain, privKey)
+	client := discovery.NewAuthenticatedClient(discoveryURL, domain, privKey)
 
 	requests, err := blessing.FetchPendingRequests(client, domain)
 	if err != nil {
@@ -147,7 +146,6 @@ func handleBlessingGrant(args []string) {
 
 	// Load discovery config from env
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
-	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if discoveryURL == "" {
 		discoveryURL = "https://ds.polis.pub"
 	}
@@ -161,7 +159,7 @@ func handleBlessingGrant(args []string) {
 		exitError("Could not extract domain from POLIS_BASE_URL")
 	}
 
-	client := discovery.NewAuthenticatedClient(discoveryURL, discoveryKey, domain, privKey)
+	client := discovery.NewAuthenticatedClient(discoveryURL, domain, privKey)
 
 	// Grant the blessing. The version alone cannot be granted — the DS needs
 	// the comment URL and the post it replies to — so the pending request is
@@ -201,7 +199,6 @@ func handleBlessingDeny(args []string) {
 
 	// Load discovery config from env
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
-	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if discoveryURL == "" {
 		discoveryURL = "https://ds.polis.pub"
 	}
@@ -213,7 +210,7 @@ func handleBlessingDeny(args []string) {
 	}
 	domain := polisurl.ExtractDomain(baseURL)
 
-	client := discovery.NewAuthenticatedClient(discoveryURL, discoveryKey, domain, privKey)
+	client := discovery.NewAuthenticatedClient(discoveryURL, domain, privKey)
 
 	// Find the pending request matching this comment version
 	targetRequest, err := blessing.ResolvePendingRequest(client, domain, commentVersion)
@@ -234,65 +231,36 @@ func handleBlessingDeny(args []string) {
 	}
 }
 
+// beseechNotSupported is what `polis blessing beseech` says. The Go CLI has no
+// way to re-request a blessing for a version already sent, and the command used
+// to look the comment up, do nothing, and report success. The discovery service
+// keys a blessing on the comment URL and its reply target, and a re-registration
+// returns an earlier denied or granted answer unchanged, so neither alternative
+// named here can re-request a denied comment.
+const beseechNotSupported = "the Go CLI cannot re-request a blessing for a comment version. " +
+	"For a PENDING comment, re-request it from the web app, or republish the comment " +
+	"(polis republish <comment path>), which signs a new version and asks for the blessing again. " +
+	"A denied comment cannot be re-requested: the discovery service keeps the denial"
+
 func handleBlessingBeseech(args []string) {
 	if len(args) < 1 {
 		exitError("Usage: polis blessing beseech <comment-version>")
 	}
-
-	commentVersion := args[0]
-	dir := getDataDir()
-
-	if !isPolisSite(dir) {
-		exitError("Not a polis site directory")
-	}
-
-	// Load discovery config from env
-	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
-	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
-	if discoveryURL == "" {
-		discoveryURL = "https://ds.polis.pub"
-	}
-
-	client := discovery.NewClient(discoveryURL, discoveryKey)
-
-	// Check current content status via content-check
-	checkResp, err := client.CheckContent("pub.polis.comment", commentVersion)
-	if err != nil {
-		exitError("Failed to check comment status: %v", err)
-	}
-
-	if !checkResp.Exists {
-		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"status":  "error",
-				"command": "blessing-beseech",
-				"error": map[string]interface{}{
-					"code":    "NOT_FOUND",
-					"message": "Comment not found in discovery service",
-				},
-			})
-		} else {
-			fmt.Printf("[x] Comment %s not found in discovery service\n", commentVersion)
-		}
-		// A failure exits non-zero in both modes: scripts branch on the exit
-		// status, per the JSON contract.
-		os.Exit(1)
-	}
-
-	// For re-beseech, we need the original comment data
-	// This is typically handled by syncing from local comment files
+	// Refuse before touching the site or the discovery service: nothing this
+	// command could do would send the request.
 	if jsonOutput {
 		outputJSON(map[string]interface{}{
-			"status":  "success",
+			"status":  "error",
 			"command": "blessing-beseech",
-			"data": map[string]interface{}{
-				"comment_version": commentVersion,
-				"message":         "Use 'polis comment sync' to re-beseech pending comments",
+			"error": map[string]interface{}{
+				"code":    "NOT_SUPPORTED",
+				"message": beseechNotSupported,
 			},
 		})
 	} else {
-		fmt.Println("[i] Use 'polis comment sync' to re-beseech pending comments")
+		fmt.Fprintf(os.Stderr, "[x] Not supported: %s\n", beseechNotSupported)
 	}
+	os.Exit(1)
 }
 
 func handleBlessingSync(args []string) {
@@ -304,7 +272,6 @@ func handleBlessingSync(args []string) {
 
 	// Load discovery config from env
 	discoveryURL := os.Getenv("DISCOVERY_SERVICE_URL")
-	discoveryKey := os.Getenv("DISCOVERY_SERVICE_KEY")
 	if discoveryURL == "" {
 		discoveryURL = "https://ds.polis.pub"
 	}
@@ -318,7 +285,7 @@ func handleBlessingSync(args []string) {
 		exitError("Could not extract domain from POLIS_BASE_URL")
 	}
 
-	client := discovery.NewClient(discoveryURL, discoveryKey)
+	client := discovery.NewClient(discoveryURL)
 
 	// Sync blessed comments
 	result, err := blessing.SyncBlessedComments(dir, domain, client)

@@ -5,12 +5,16 @@
 package sitemap
 
 import (
+	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 	"sort"
 	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Filename is the on-disk basename emitted at the tenant root.
@@ -148,28 +152,26 @@ func Remove(body []byte, url string) ([]byte, error) {
 	return Build(kept)
 }
 
-// Write atomically writes the sitemap to <dataDir>/sitemap.xml via tmp+rename.
+// Write atomically writes the sitemap to sitemap.xml at the site root.
 // Per step-03/3.c: sitemap.xml is public (served at the tenant root) so
 // partial files on disk are worse than no change — atomicity is mandatory.
-func Write(dataDir string, body []byte) error {
-	target := filepath.Join(dataDir, Filename)
-	tmp := target + ".tmp"
-	if err := os.WriteFile(tmp, body, 0644); err != nil {
-		return fmt.Errorf("write tmp sitemap: %w", err)
-	}
-	if err := os.Rename(tmp, target); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename sitemap into place: %w", err)
+// atomicfile.Write keeps temp-and-rename on a filesystem and is a single
+// all-or-nothing Put on a store without one.
+func Write(site storage.Site, body []byte) error {
+	if err := atomicfile.Write(context.Background(), site, Filename, body, 0o644); err != nil {
+		return fmt.Errorf("write sitemap: %w", err)
 	}
 	return nil
 }
 
-// Read returns the on-disk sitemap. Missing file yields an empty sitemap (so
+// Read returns the site's sitemap. Missing file yields an empty sitemap (so
 // callers can do Read → InsertOrUpdate → Write idempotently on first publish).
-func Read(dataDir string) ([]byte, error) {
-	target := filepath.Join(dataDir, Filename)
-	body, err := os.ReadFile(target)
-	if os.IsNotExist(err) {
+func Read(site storage.Site) ([]byte, error) {
+	if !site.Valid() {
+		return nil, fmt.Errorf("read sitemap: site handle is not usable")
+	}
+	body, err := site.Store().Get(context.Background(), Filename)
+	if errors.Is(err, fs.ErrNotExist) {
 		return Build(nil)
 	}
 	if err != nil {

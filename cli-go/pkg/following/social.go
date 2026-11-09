@@ -2,6 +2,7 @@ package following
 
 import (
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
@@ -25,6 +26,9 @@ type FollowResult struct {
 	CommentsBlessed int    `json:"comments_blessed"`
 	CommentsFailed  int    `json:"comments_failed"`
 	AlreadyFollowed bool   `json:"already_followed"`
+	// BlessedComments names each comment granted, by its URL: a grant is a
+	// signed decision in the user's name, so the caller can say which.
+	BlessedComments []string `json:"blessed_comments"`
 }
 
 // UnfollowResult contains the result of an unfollow operation.
@@ -46,15 +50,17 @@ type UnfollowResult struct {
 // In a multi-tenant process (the hosted webapp serves every tenant from one
 // process) the package-level globals are last-writer-wins across tenants, so
 // they CANNOT be trusted per-request. Callers in that environment MUST pass a
-// fully-populated FollowConfig — DataDir, DiscoveryURL, DiscoveryKey AND
-// BaseURL — so the follow.announced/removed stream events carry the correct
-// actor and pass the registration check under the right domain. Omitting
-// BaseURL/DiscoveryKey strands the announce (the bug fixed for interactive
-// follows: see webapp handleFollowing / handleWidgetFollow).
+// FollowConfig with DiscoveryURL AND BaseURL — so the
+// follow.announced/removed stream events carry the correct actor and pass the
+// registration check under the right domain. Omitting BaseURL strands the
+// announce (the bug fixed for interactive follows: see webapp handleFollowing /
+// handleWidgetFollow).
+//
+// DataDir is optional: when empty, the site the operation was handed is the
+// one checked and announced from, which is what every caller means.
 type FollowConfig struct {
 	DataDir      string
 	DiscoveryURL string
-	DiscoveryKey string
 	BaseURL      string
 }
 
@@ -62,22 +68,46 @@ type FollowConfig struct {
 // FollowConfig so stream.PublishEvent never falls back to the (multi-tenant-
 // unsafe) package globals. Returns nil when no config was supplied, which keeps
 // single-tenant CLI callers on the global path.
-func streamConfig(cfg []*FollowConfig) *stream.DiscoveryConfig {
+//
+// ⭐ The site the operation runs on is the one the stream event's registration
+// check reads, unless the config names a directory explicitly.
+func streamConfig(site storage.Site, cfg []*FollowConfig) *stream.DiscoveryConfig {
 	if len(cfg) == 0 || cfg[0] == nil {
 		return nil
 	}
 	c := cfg[0]
-	return &stream.DiscoveryConfig{
+	dc := &stream.DiscoveryConfig{
 		DiscoveryURL: c.DiscoveryURL,
-		DiscoveryKey: c.DiscoveryKey,
 		BaseURL:      c.BaseURL,
 		DataDir:      c.DataDir,
 	}
+	if c.DataDir == "" {
+		dc.Site = site
+	}
+	return dc
 }
 
-func FollowWithBlessing(followingPath string, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy, cfg ...*FollowConfig) (*FollowResult, error) {
+// registrationSite is the site whose local registration marker gates the DS
+// writes: the config's directory when it names one, else the site the
+// operation runs on, else the process-wide DataDir.
+//
+// ⭐ The site handle comes before the package global because the global is
+// last-writer-wins across tenants in one process, and the handle is the
+// caller's own.
+func registrationSite(site storage.Site, cfg []*FollowConfig) storage.Site {
+	if len(cfg) > 0 && cfg[0] != nil && cfg[0].DataDir != "" {
+		return storage.At(cfg[0].DataDir)
+	}
+	if site.Valid() {
+		return site
+	}
+	return storage.At(DataDir)
+}
+
+func FollowWithBlessing(site storage.Site, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy, cfg ...*FollowConfig) (*FollowResult, error) {
 	result := &FollowResult{
-		AuthorURL: authorURL,
+		AuthorURL:       authorURL,
+		BlessedComments: []string{},
 	}
 
 	// Fetch author email from their site
@@ -88,7 +118,7 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 	result.AuthorEmail = remoteWK.Email
 
 	// Add to following.json first (so policy eval includes this author)
-	f, err := Load(followingPath)
+	f, err := LoadSite(site)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +136,7 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 
 	// SIGNET epic 02: sign after enrichment, so the signature covers the bytes
 	// that actually land on disk.
-	if err := SaveSigned(followingPath, f, privKey); err != nil {
+	if err := SaveSigned(site, f, privKey); err != nil {
 		return nil, err
 	}
 
@@ -122,16 +152,11 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 	// DS operations: reads (queries) are always allowed, writes (grants, stream
 	// events) require registration. This lets unregistered sites follow authors
 	// locally and pull their feed, without announcing to the network.
-	dd, du := DataDir, DiscoveryURL
-	if len(cfg) > 0 && cfg[0] != nil {
-		if cfg[0].DataDir != "" {
-			dd = cfg[0].DataDir
-		}
-		if cfg[0].DiscoveryURL != "" {
-			du = cfg[0].DiscoveryURL
-		}
+	du := DiscoveryURL
+	if len(cfg) > 0 && cfg[0] != nil && cfg[0].DiscoveryURL != "" {
+		du = cfg[0].DiscoveryURL
 	}
-	registered := discovery.IsRegisteredLocally(dd, du)
+	registered := discovery.IsRegisteredLocally(registrationSite(site, cfg), du)
 
 	// Fetch pending/denied blessings and re-evaluate against policies (DS read — always allowed)
 	pendingResp, err := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
@@ -174,6 +199,7 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 					continue
 				}
 				result.CommentsBlessed++
+				result.BlessedComments = append(result.BlessedComments, rel.SourceURL)
 			}
 		}
 
@@ -183,7 +209,7 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 		// corrupted across tenants in the hosted process).
 		stream.PublishEvent("pub.polis.follow.announced", map[string]interface{}{
 			"target_domain": discovery.ExtractDomainFromURL(authorURL),
-		}, privKey, streamConfig(cfg))
+		}, privKey, streamConfig(site, cfg))
 	} else {
 		stream.LogSuppressedEmit("pub.polis.follow.announced", "not_registered_locally",
 			"",
@@ -200,13 +226,13 @@ func FollowWithBlessing(followingPath string, authorURL string, discoveryClient 
 // UnfollowWithDenial removes an author from the following list and re-evaluates
 // granted blessings against policies. Blessings that no longer match an emit/allow
 // rule (because the author is no longer followed) get denied.
-func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy, cfg ...*FollowConfig) (*UnfollowResult, error) {
+func UnfollowWithDenial(site storage.Site, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy, cfg ...*FollowConfig) (*UnfollowResult, error) {
 	result := &UnfollowResult{
 		AuthorURL: authorURL,
 	}
 
 	// Remove from following.json first (so policy eval excludes this author)
-	f, err := Load(followingPath)
+	f, err := LoadSite(site)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +240,7 @@ func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient 
 	result.WasFollowing = f.Remove(authorURL)
 
 	// SIGNET epic 02: unfollowing is authorship too — re-sign over the new roster.
-	if err := SaveSigned(followingPath, f, privKey); err != nil {
+	if err := SaveSigned(site, f, privKey); err != nil {
 		return nil, err
 	}
 
@@ -228,16 +254,11 @@ func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient 
 	}
 
 	// DS operations: reads always allowed, writes require registration
-	dd, du := DataDir, DiscoveryURL
-	if len(cfg) > 0 && cfg[0] != nil {
-		if cfg[0].DataDir != "" {
-			dd = cfg[0].DataDir
-		}
-		if cfg[0].DiscoveryURL != "" {
-			du = cfg[0].DiscoveryURL
-		}
+	du := DiscoveryURL
+	if len(cfg) > 0 && cfg[0] != nil && cfg[0].DiscoveryURL != "" {
+		du = cfg[0].DiscoveryURL
 	}
-	registered := discovery.IsRegisteredLocally(dd, du)
+	registered := discovery.IsRegisteredLocally(registrationSite(site, cfg), du)
 
 	// Fetch granted blessings and re-evaluate against policies (DS read — always allowed)
 	grantedResp, err := discoveryClient.QueryRelationships("pub.polis.comment.blessing", map[string]string{
@@ -274,7 +295,7 @@ func UnfollowWithDenial(followingPath string, authorURL string, discoveryClient 
 		// shared package globals.
 		stream.PublishEvent("pub.polis.follow.removed", map[string]interface{}{
 			"target_domain": discovery.ExtractDomainFromURL(authorURL),
-		}, privKey, streamConfig(cfg))
+		}, privKey, streamConfig(site, cfg))
 	} else if !registered {
 		stream.LogSuppressedEmit("pub.polis.follow.removed", "not_registered_locally",
 			"",

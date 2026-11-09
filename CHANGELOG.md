@@ -5,6 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.70.0] - 2026-11-09
+
+A portability and hardening release. A site can now **branch**: an export of it becomes a new site at a new address, with a signed handover from the old key, so everything it signed still verifies. Polis can run as **your own instance on a host such as Vercel** (experimental), with owner sign-in by recovery key and passkey. An instance can be reached by your own AI through **scoped API keys and MCP**, and a site can carry **its own CSS**. Many security fixes.
+
+**About the version number.** There is no 0.69.0: during development the version number was advanced to 0.70.0 by mistake, and builds have reported 0.70.0 since, so this release keeps that number rather than go backwards. It follows 0.68.0 directly, and nothing was released in between.
+
+### Upgrading: read this first
+
+- **`--json` no longer skips a confirmation.** Under `--json`, `polis unpublish` requires `-y` (or `--yes`) and `polis unregister` requires `--force`. Without the flag both exit `1`, naming it, and change nothing. The Go CLI's `polis unregister` now asks before it unregisters, as the bash CLI always has; `--force` skips the question. Scripts that relied on `--json` to go ahead will stop.
+- **`polis follow` blesses only what your policies bless.** It used to bless every pending and denied comment from the author you followed, overturning your denies. With the default rules it still blesses the followed author's comments.
+- **`polis blessing beseech` exits `1` with `NOT_SUPPORTED`** instead of reporting a success it did not achieve. To ask again, use the web app, or `polis republish` the comment.
+- **A hook that is a symlink to a file outside the site no longer runs.** Call that script from a hook file inside the site instead.
+- **The self-hosted server answers `404` for a path it does not have**, instead of the app page with `200`. It serves the app at `/` and under `/_/` only.
+- **An invalid `POLIS_MODE` stops the server at start**, naming the variable. Unset still means a laptop (`local`), unless a setting only a remote instance uses (`POLIS_RECOVERY_KEY`) is present, in which case an unset mode also stops it.
+- **An interrupted key rotation is finished by rotating again.** Rotation now stages the new key (`id_ed25519.new`) and will not start a second rotation while one is staged; the message says how to finish or discard it.
+- **`polis-upgrade` no longer updates itself.** Download a newer `polis-upgrade` from the release.
+- **`DISCOVERY_SERVICE_KEY` is no longer read.** Neither CLI sends it; you can remove it from your `.env`.
+- **Tailor:** update it. See *Tailor* below.
+
+### Added
+
+- **[CLI] `polis branch`.** Turn an export of your site into a new site at a new address, ready to deploy there. Everything happens on your machine. It makes a new key and signs the handover to it with the exported key under the original domain, so every post you signed before still verifies at the new address, and nothing is re-signed except the follow and blessing lists. It refuses an export without the private key, or whose key is not the one the site publishes, and writes nothing if the result fails a check the export passes.
+- **[CLI] `polis branch deploy` (experimental).** Put a branched site live on a host at the address it was branched to: it creates the instance and its private store, seeds the site, sets its configuration (your recovery public key included) and waits for the instance to publish its own pages. Vercel is the first host.
+- **[CLI] `polis branch announce`.** Tell the discovery service where a branched site came from, so the software of people who follow the original can offer them the new address. Optional: a branch is valid without it.
+- **[CLI] `polis recover sign --domain HOST`.** Sign the recovery challenge your remote instance shows, with the recovery key `polis branch` made. `--domain` is required and must match the challenge, so a page pretending to be your site cannot have its challenge signed. A plain `ssh-keygen -Y sign` works too.
+- **[CLI] `polis validate <url>` asks the site for every file it must never serve** (`identity.private_files_served`): the identity key and the rest of `.polis/`, `.env`, `.git` and `.ssh` at any depth, key files and editor backups. It fails if one is served, naming the URL and status only. A request that is refused or rate-limited is reported as not checked, never as safe. This is the check for a site deployed to a static host.
+- **[Webapp] Your own instance on a host you choose (experimental).** The web app can run as a remote instance, for example as a Vercel function with its site in Vercel Blob. A server-signed instance makes its own identity key into its private store on first start, so no secret is injected into the platform. The owner signs in by signing a challenge with a recovery key, then enrols a passkey.
+- **[All] Every release attaches `vercel-function.tar.gz` and `vercel-function.json`** (experimental), the remote instance's function and its manifest, listed in `checksums.txt`. An instance pins the first manifest it accepts for a version and refuses a different one later, and for its own version requires the manifest to name the executable it is running. These assets are never replaced after a release is published; a bad release is fixed with a new version.
+- **[Webapp] API keys with scopes.** The owner mints, lists and revokes keys (`GET`/`POST /api/keys`, `DELETE /api/keys/{id}`). A new key states its scopes: `full`, or `render`, which reaches a site's rendered output and never an authored or signed source. A key made before this release keeps full access.
+- **[Webapp] MCP at `/mcp`**, authorised by an API key: your AI can read the site, list posts, switch the theme, read and set the site's CSS, and check what is published. Each key is bound to its own address, and an address that keeps failing to authenticate is refused. Every call is logged for the owner.
+- **[Webapp] A site's own CSS.** `site/custom.css` is layered after the theme on every render and survives a theme switch or a bundle update. It is checked when saved and at every render: no `@import`, `url()` only for the site's own files or `data:` images, no other fetching function, and at most 20,000 bytes. The bash CLI's render does not apply it.
+- **[Webapp] The Kay page (experimental)**, beside Settings: on a remote instance, the owner asks their AI (v0) for changes to the site, and sees each step it takes and each change it makes. Not available on polis.pub.
+- **[Webapp] Follow a site on any domain** from the avatar menu ("Follow a site"). A URL that is not a polis site is refused with `422`, and an unreachable one with `502`.
+- **[CLI] Key history entries record the domain each handover was signed under** (`signing_domain`), so a chain still verifies when it is read at a new address.
+- **[Docs]** Three recipes (prove a post is yours, state your terms and watch them travel, stand up an identity), the recipe book grouped by capability, `polis branch` and `polis recover sign` in the command reference, and the user manual on following a site anywhere, the Kay page and signing in to a remote instance. Report vulnerabilities to security@polis.pub.
+
+### Changed
+
+- **[CLI] A key rotation re-signs the follow file and blessing list** under the new key when they verify under the old one, in both rotation paths. The bash CLI, which cannot sign them, drops their signatures.
+- **[CLI] `polis help` lists every subcommand.** `polis unpublish` takes `--yes` as well as `-y`, on either side of the path.
+- **[All] Stream publishes carry a timestamp inside the signed payload**, so a captured request cannot be replayed indefinitely. Requests from earlier versions are still accepted for now.
+- **[Webapp]** An environment variable wins over `.env`. `LOG_LEVEL=0` turns logging off. The *Link Existing Site* flow is removed. Where a platform cannot stream, the live-update stream answers `204` and the app stops reopening it.
+- **[All] On polis.pub, AI training crawlers are held to each site's own terms.** A listed training crawler gets a page only if that page's terms, or failing those the site's current terms, allow training; a site that stated nothing is refused. It writes nothing on the site's behalf, and `robots.txt`, `rsl.xml`, `.well-known/` and the terms pages are served to everyone.
+- **[Bash] `polis-upgrade`** verifies each script against the `.sha256` published beside it at the same tag and installs nothing on a mismatch, downloads over HTTPS only, accepts only `MAJOR.MINOR.PATCH` versions and never moves backwards. A same-origin checksum proves integrity, not authenticity.
+
+### Fixed
+
+- **[CLI]** `polis validate` catches a theme or shape that is not installed, and reports a policy line that is not JSON. A title with leading or trailing whitespace is quoted. `rotate-key` decides whether a key was installed by the private key, not the `.pub`.
+- **[Webapp]** Settings buttons are readable on the dark themes. The web app reloads the key pair when the key file changes on disk. A blessing withdrawal updates the list before the cache, and says when it fails. Logging failures are no longer dropped silently.
+- **[Bash]** `rotate-key` appends to the key history instead of rebuilding it. A blessing read that rebuilt `blessed.json` from the wrong set is retired. `json_error` no longer emits a stray `}`.
+
+### Security
+
+- **[Security] The server no longer serves private files below the top level of a site.** `content/.git/config`, a nested `.ssh/` key or a bare `id_rsa` could be read through it. It now refuses one declared list of private names in every part of a path, without regard to case, and serves a file with no extension only under `.well-known/`. A site copied to a static host was never behind this server: run `polis validate <url>` against it.
+- **[Security] Key rotation can no longer leave an unrecoverable identity.** The new key was written over the old one in place after the network had been told, so a crash or full disk could destroy both. It is now staged, synced and installed by rename, always `0600`.
+- **[Security] Update if you run the web app locally.** `/pql/` served your drafts and decrypted direct messages with no owner check, so a page you visited could read them. An owner-private query is now refused unless the owner makes it, and always from another site's page.
+- **[Security]** A hook symlinked outside the site was run. A comment id, or a comment URL arriving from another site, could address a file outside the comment trees.
+- **[Security]** Custom CSS could make readers' browsers fetch from elsewhere through escapes, comments and `image-set()`; on polis.pub a visitor's identity is no longer written into the page they read. The app escapes quotes and refuses non-http(s) links, and media `poster` URLs are scheme-checked.
+- **[Security]** A remote instance's deploy publishes only what its server would serve. A branch no longer carries the origin's issued API keys.
+
+### Tailor
+
+**Self-hosters should update Tailor.** `tailor --apply` no longer overwrites a policy file you have customised: it replaces `policies/rules.jsonl` or `.polis/policies/rules.jsonl` only when the file still holds a default an earlier release wrote, and reports a customised or unparseable file instead. An empty argument is a usage error rather than a crash.
+
 ## [0.68.0] - 2026-09-19
 
 A trust-and-provenance release. A site can now state the **terms** its work may be used under, keeps a signed **history of its keys** so old posts keep verifying after a rotation, and signs its follow list and blessing list. **Auto-blessing moves to your own software**: the discovery service no longer blesses anything for you. `polis validate` now checks what it always documented. 0.67.0 was never published; this release follows 0.66.0.

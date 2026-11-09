@@ -21,10 +21,12 @@ package api
 
 import (
 	"bytes"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"net/http"
 	"strings"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 )
@@ -34,7 +36,7 @@ type SecurityLogger func(event string, fields map[string]interface{})
 
 // SetupRoutes registers the /v1/ API routes on the given ServeMux.
 // The optional securityLogger receives security events (auth failures, etc.).
-func SetupRoutes(mux *http.ServeMux, engine *ops.Engine, siteDir string, securityLogger ...SecurityLogger) {
+func SetupRoutes(mux *http.ServeMux, engine *ops.Engine, site storage.Site, securityLogger ...SecurityLogger) {
 	h := &handlers{engine: engine}
 	if len(securityLogger) > 0 {
 		h.securityLogger = securityLogger[0]
@@ -46,7 +48,7 @@ func SetupRoutes(mux *http.ServeMux, engine *ops.Engine, siteDir string, securit
 
 	// Content routes (auth depends on method)
 	mux.HandleFunc("/v1/content/", cors(limit(func(w http.ResponseWriter, r *http.Request) {
-		h.routeContent(w, r, siteDir)
+		h.routeContent(w, r, site)
 	})))
 }
 
@@ -85,7 +87,7 @@ func (h *handlers) handleBundleRoute(w http.ResponseWriter, r *http.Request) {
 
 // routeContent parses the content path and dispatches to the appropriate handler.
 // Path format: /v1/content/{type}[/{id-or-subresource}[/...]]
-func (h *handlers) routeContent(w http.ResponseWriter, r *http.Request, siteDir string) {
+func (h *handlers) routeContent(w http.ResponseWriter, r *http.Request, site storage.Site) {
 	path := strings.TrimPrefix(r.URL.Path, "/v1/content/")
 	if path == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "content type required")
@@ -97,12 +99,9 @@ func (h *handlers) routeContent(w http.ResponseWriter, r *http.Request, siteDir 
 	contentType := segments[0]
 
 	// Determine auth requirement based on the operation.
-	// All non-GET requests require auth. Additionally, some content types
-	// contain private data and require auth even for reads:
-	//   - drafts: unpublished content
-	//   - dm: private encrypted messages
-	//   - feed: private social feed
-	//   - follow: private social graph
+	// All non-GET requests require auth. Reads also require it for drafts
+	// (unpublished content) and for every type that is not declared public
+	// (isPrivateContentType: dm and follow today, and anything unknown).
 	isDraftPath := len(segments) >= 2 && segments[1] == "drafts"
 	isPrivateType := isPrivateContentType(contentType)
 	needsAuth := r.Method != http.MethodGet || isDraftPath || isPrivateType
@@ -173,7 +172,18 @@ func (h *handlers) routeContent(w http.ResponseWriter, r *http.Request, siteDir 
 			return
 		}
 		token := strings.TrimPrefix(auth, "Bearer ")
-		_, valid := ops.ValidateAPIKey(siteDir, token)
+		key, valid := ops.LookupAPIKey(site, token)
+		if valid && !key.Unscoped() {
+			// ⛔ Content is an authored source, and no scope covers sources yet,
+			// so only a full-access key may write it. A scoped key (render) is
+			// told which kind of key it is, not that it is invalid.
+			h.logSecurity("pub.polis.security.auth_failed", map[string]interface{}{
+				"path": r.URL.Path, "method": r.Method, "reason": "insufficient_scope",
+				"key_id": key.ID, "request_id": w.Header().Get("X-Request-Id"),
+			})
+			writeError(w, http.StatusForbidden, "insufficient_scope", "This API key is scoped ("+strings.Join(key.Scopes, ", ")+") and cannot act on content.")
+			return
+		}
 		if !valid {
 			h.logSecurity("pub.polis.security.auth_failed", map[string]interface{}{
 				"path": r.URL.Path, "method": r.Method, "reason": "invalid_key",
@@ -252,15 +262,21 @@ func (h *handlers) routeContent(w http.ResponseWriter, r *http.Request, siteDir 
 	}
 }
 
-// isPrivateContentType returns true for content types that contain private
-// data and should require auth even for GET/read operations.
+// isPrivateContentType reports whether reads of a content type require auth.
+//
+// ⛔ FAIL CLOSED, from the bundle's own declaration. A type is public only if
+// the core bundle declares it and does not mark it Private; anything else —
+// a private type, a type this build does not know, a misspelling — requires
+// auth. This used to be a hand-kept deny-list of private types (dm, follow),
+// so a new private type was public until someone remembered to add it.
 func isPrivateContentType(shortOrFull string) bool {
-	switch shortOrFull {
-	case "dm", "pub.polis.dm":
-		return true
-	case "follow", "pub.polis.follow":
-		return true
-	default:
-		return false
+	for fqn, ct := range coreTypes.Types {
+		if shortOrFull == fqn || shortOrFull == ct.Dir {
+			return ct.Private
+		}
 	}
+	return true
 }
+
+// coreTypes is the core bundle's declaration, read once.
+var coreTypes = bundle.DefaultCoreBundle()

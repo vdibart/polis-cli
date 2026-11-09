@@ -3,10 +3,11 @@ package template
 
 import (
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 var variableRe = regexp.MustCompile(`\{\{(\w+)\}\}`)
@@ -16,8 +17,8 @@ type MarkdownRenderer func(markdown string) (string, error)
 
 // Config holds template engine configuration.
 type Config struct {
-	DataDir          string           // Site data directory (for global snippets)
-	CLIThemesDir     string           // CLI themes directory (fallback for theme snippets)
+	Site             storage.Site     // The site (global, local-theme and shape snippets)
+	CLIThemesDir     string           // CLI themes directory (fallback for theme snippets); not a site, so a path
 	ActiveTheme      string           // Currently active theme name
 	ActiveShape      string           // Active shape name (e.g. "v3", "v4"); drives base-partial lookup
 	RenderMarkers    bool             // Whether to add snippet markers for editing
@@ -408,11 +409,6 @@ func (e *Engine) substituteVariables(template string, ctx *RenderContext) string
 		// Unknown variables are left as-is
 		return match
 	})
-}
-
-// GetGlobalSnippetsDir returns the path to global snippets directory.
-func (e *Engine) GetGlobalSnippetsDir() string {
-	return filepath.Join(e.config.DataDir, "site", "snippets")
 }
 
 // FormatHumanDate formats an ISO 8601 date string to human-readable format.

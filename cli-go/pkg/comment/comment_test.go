@@ -1,6 +1,9 @@
 package comment
 
 import (
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,11 +41,11 @@ func TestCommentURLDerivation_AllPathsConsistent(t *testing.T) {
 		InReplyTo: "https://alice.polis.pub/posts/20260101/hello.md",
 		Content:   "Consistency check.",
 	}
-	signed, err := SignComment(dataDir, draft, "bob.polis.pub", site, privKey)
+	signed, err := SignComment(storage.At(dataDir), draft, "bob.polis.pub", site, privKey)
 	if err != nil {
 		t.Fatalf("SignComment: %v", err)
 	}
-	if err := PublishComment(dataDir, signed.Meta.ID); err != nil {
+	if err := PublishComment(storage.At(dataDir), signed.Meta.ID); err != nil {
 		t.Fatalf("PublishComment: %v", err)
 	}
 
@@ -112,7 +115,7 @@ func TestEnsureUniqueCommentID_NoCollision(t *testing.T) {
 	os.MkdirAll(filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "denied"), 0755)
 	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "comment"), 0755)
 
-	result := ensureUniqueCommentID(dataDir, "alice-hello-20260101")
+	result := ensureUniqueCommentID(storage.At(dataDir), "alice-hello-20260101")
 	if result != "alice-hello-20260101" {
 		t.Errorf("expected original ID, got %s", result)
 	}
@@ -129,7 +132,7 @@ func TestEnsureUniqueCommentID_DraftCollision(t *testing.T) {
 	// Create existing draft
 	os.WriteFile(filepath.Join(draftsDir, "alice-hello-20260101.md"), []byte("draft"), 0644)
 
-	result := ensureUniqueCommentID(dataDir, "alice-hello-20260101")
+	result := ensureUniqueCommentID(storage.At(dataDir), "alice-hello-20260101")
 	if result != "alice-hello-20260101-2" {
 		t.Errorf("expected suffixed ID, got %s", result)
 	}
@@ -146,7 +149,7 @@ func TestEnsureUniqueCommentID_BlessedCollision(t *testing.T) {
 	// Create existing blessed comment
 	os.WriteFile(filepath.Join(blessedDir, "alice-hello-20260101.md"), []byte("blessed"), 0644)
 
-	result := ensureUniqueCommentID(dataDir, "alice-hello-20260101")
+	result := ensureUniqueCommentID(storage.At(dataDir), "alice-hello-20260101")
 	if result != "alice-hello-20260101-2" {
 		t.Errorf("expected suffixed ID, got %s", result)
 	}
@@ -180,14 +183,14 @@ This is a test comment.`
 	os.WriteFile(pendingPath, []byte(commentContent), 0644)
 
 	// Move to blessed
-	err := MoveComment(dataDir, commentID, StatusPending, StatusBlessed)
+	err := MoveComment(storage.At(dataDir), commentID, StatusPending, StatusBlessed)
 	if err != nil {
 		t.Fatalf("MoveComment failed: %v", err)
 	}
 
 	// Verify blessed.json was created/updated
 	blessedPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "blessed.json")
-	if _, err := os.Stat(blessedPath); os.IsNotExist(err) {
+	if _, err := os.Stat(blessedPath); errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("expected blessed.json to be created")
 	}
 }
@@ -220,14 +223,14 @@ This is a **test** comment.`
 	os.WriteFile(pendingPath, []byte(commentContent), 0644)
 
 	// Publish
-	err := PublishComment(dataDir, commentID)
+	err := PublishComment(storage.At(dataDir), commentID)
 	if err != nil {
 		t.Fatalf("PublishComment failed: %v", err)
 	}
 
 	// Verify .md file was copied to content/pub.polis.core/comment/YYYYMMDD/
 	mdPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260215", commentID+".md")
-	if _, err := os.Stat(mdPath); os.IsNotExist(err) {
+	if _, err := os.Stat(mdPath); errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected .md file in content/pub.polis.core/comment/20260215/")
 	}
 
@@ -245,7 +248,7 @@ This is a **test** comment.`
 	}
 
 	// Verify pending file is NOT removed (publish is a copy, not a move)
-	if _, err := os.Stat(pendingPath); os.IsNotExist(err) {
+	if _, err := os.Stat(pendingPath); errors.Is(err, fs.ErrNotExist) {
 		t.Error("pending file should still exist after publish (removed by MoveComment later)")
 	}
 }
@@ -278,14 +281,14 @@ signature: fakesig
 		t.Fatal(err)
 	}
 
-	if err := PublishComment(dataDir, commentID); err != nil {
+	if err := PublishComment(storage.At(dataDir), commentID); err != nil {
 		t.Fatalf("PublishComment failed: %v", err)
 	}
 
 	// The side-car should sit next to the published comment.
 	mdPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260215", commentID+".md")
 	versionsPath := verhist.GetVersionsFilePath(mdPath, ".versions")
-	if _, err := os.Stat(versionsPath); os.IsNotExist(err) {
+	if _, err := os.Stat(versionsPath); errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("expected version side-car at %s", versionsPath)
 	}
 
@@ -335,7 +338,7 @@ Body.`
 	pendingPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "pending", commentID+".md")
 	os.WriteFile(pendingPath, []byte(commentContent), 0644)
 
-	if err := PublishComment(dataDir, commentID); err != nil {
+	if err := PublishComment(storage.At(dataDir), commentID); err != nil {
 		t.Fatalf("first PublishComment failed: %v", err)
 	}
 	mdPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "20260215", commentID+".md")
@@ -350,7 +353,7 @@ Body.`
 	f.WriteString(sentinel)
 	f.Close()
 
-	if err := PublishComment(dataDir, commentID); err != nil {
+	if err := PublishComment(storage.At(dataDir), commentID); err != nil {
 		t.Fatalf("second PublishComment failed: %v", err)
 	}
 
@@ -394,7 +397,7 @@ func TestSignComment_DomainInFrontmatter(t *testing.T) {
 		Content:   "Great post!",
 	}
 
-	signed, err := SignComment(dataDir, draft, "bob.polis.pub", "https://bob.polis.pub", privKey)
+	signed, err := SignComment(storage.At(dataDir), draft, "bob.polis.pub", "https://bob.polis.pub", privKey)
 	if err != nil {
 		t.Fatalf("SignComment failed: %v", err)
 	}
@@ -432,7 +435,7 @@ func TestSignComment_CanonicalURL(t *testing.T) {
 		InReplyTo: "https://alice.polis.pub/posts/20260101/hello.md",
 		Content:   "Great post!",
 	}
-	signed, err := SignComment(dataDir, draft, "bob.polis.pub", "https://bob.polis.pub", privKey)
+	signed, err := SignComment(storage.At(dataDir), draft, "bob.polis.pub", "https://bob.polis.pub", privKey)
 	if err != nil {
 		t.Fatalf("SignComment failed: %v", err)
 	}
@@ -461,7 +464,7 @@ func TestSignComment_BackwardCompatWithEmail(t *testing.T) {
 	}
 
 	// Passing email as author identity should still work (backward compat)
-	signed, err := SignComment(dataDir, draft, "bob@example.com", "https://bob.example.com", privKey)
+	signed, err := SignComment(storage.At(dataDir), draft, "bob@example.com", "https://bob.example.com", privKey)
 	if err != nil {
 		t.Fatalf("SignComment with email should still work: %v", err)
 	}
@@ -507,18 +510,18 @@ Test comment ` + id
 	}
 
 	// Bless first comment
-	if err := MoveComment(dataDir, "comment-a", StatusPending, StatusBlessed); err != nil {
+	if err := MoveComment(storage.At(dataDir), "comment-a", StatusPending, StatusBlessed); err != nil {
 		t.Fatalf("MoveComment failed: %v", err)
 	}
 
 	// Bless second comment
-	if err := MoveComment(dataDir, "comment-b", StatusPending, StatusBlessed); err != nil {
+	if err := MoveComment(storage.At(dataDir), "comment-b", StatusPending, StatusBlessed); err != nil {
 		t.Fatalf("MoveComment failed: %v", err)
 	}
 
 	// Verify blessed.json exists after blessings
 	blessedPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "blessed.json")
-	if _, err := os.Stat(blessedPath); os.IsNotExist(err) {
+	if _, err := os.Stat(blessedPath); errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("expected blessed.json to exist after blessings")
 	}
 }

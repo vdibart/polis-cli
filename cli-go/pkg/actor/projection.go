@@ -7,8 +7,11 @@ import (
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
+	"github.com/vdibart/polis-cli/cli-go/pkg/secret"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Key projection — an actor's private key is held in a secret store and written
@@ -61,71 +64,78 @@ const (
 // ⛔ It returns an error rather than generating anything in every failure mode.
 // An actor that boots with the wrong identity is worse than one that does not
 // boot.
-func ProjectKey(siteDir, secret string) (ProjectionOutcome, error) {
+func ProjectKey(siteDir, secretValue string) (ProjectionOutcome, error) {
+	return ProjectKeyValue(siteDir, secret.New(secretValue))
+}
+
+// ProjectKeyValue is ProjectKey for a value already read through the secret
+// seam (secret.Resolve), so it never passes through a plain string on the way.
+func ProjectKeyValue(siteDir string, value secret.Value) (ProjectionOutcome, error) {
 	keyPath := filepath.Join(siteDir, ".polis", "keys", "id_ed25519")
 
-	if _, err := os.Stat(keyPath); err == nil {
-		// ⛔ NEVER OVERWRITE. See the package comment — the intuitive
-		// alternative destroys identities.
-		return ProjectionPresent, nil
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("cannot stat the actor key at %s: %w", keyPath, err)
-	}
+	// ⭐ THE DISCIPLINE LIVES IN pkg/secret NOW, and this is a caller of it.
+	//
+	// Every rule below used to be written out here, and all of it still
+	// applies — never overwrite, never generate, check staleness before
+	// writing, fatal on either. What changed is WHERE it is written: in the
+	// seam, so any later projected secret reuses it rather than reimplementing
+	// reasoning that took a live incident to get right. (The remote identity
+	// key, once planned as one, turned out not to be projected: it is
+	// generated into the instance's own store.)
+	//
+	// ⛔ The three operations the seam cannot do itself are supplied here
+	// because they are this tree's: real key parsing (pkg/signing), reading
+	// what the site publishes (pkg/site), and the write (atomicfile, which
+	// owns atomicity outside the storage interface and creates no parents).
+	outcome, err := secret.Project(secret.Projection{
+		Value:   value,
+		KeyPath: keyPath,
 
-	if strings.TrimSpace(secret) == "" {
-		return "", fmt.Errorf("actor key secret is absent or empty and the key file at %s does not exist: "+
-			"refusing to generate a new identity — restore the secret", keyPath)
-	}
+		Absent: func(path string) (bool, error) {
+			_, statErr := storage.StatAtPath(path)
+			return secret.AbsentFromStat(statErr)
+		},
 
-	privKey := []byte(secret)
-	if !strings.HasSuffix(secret, "\n") {
-		// A secret store round-trips values without a trailing newline more
-		// often than not, and the OpenSSH PEM parser wants one.
-		privKey = []byte(secret + "\n")
-	}
-	if err := signing.ValidatePrivateKey(privKey); err != nil {
-		return "", fmt.Errorf("actor key secret is not a valid private key: %w", err)
-	}
+		ValidateKey:  signing.ValidatePrivateKey,
+		PublicKeyFor: signing.PublicKeyFor,
 
-	pubKey, err := signing.PublicKeyFor(privKey)
+		// ⚠️ An unreadable or absent .well-known/polis yields "", which the
+		// seam reads as "nothing to compare against" — the normal state of a
+		// site being provisioned for the first time.
+		PublishedKey: func() (string, error) {
+			published, err := site.LoadWellKnown(storage.At(siteDir))
+			if err != nil || published == nil {
+				return "", err
+			}
+			return published.PublicKey, nil
+		},
+
+		SameKey: sameSSHKey,
+
+		Write: func(priv, pub []byte) error {
+			// Stays: atomicfile owns atomicity outside the storage interface
+			// and creates no parents, so the directory is made here. ⛔ 0700,
+			// because .polis must not be world-readable.
+			if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
+				return fmt.Errorf("create key directory: %w", err)
+			}
+			// ⛔ 0600, AND THE MODE IS LOAD-BEARING. Patrol checks key-file
+			// permissions on every sweep; a projection writing 0644 turns the
+			// fleet red on the first sweep — and would be right to.
+			if err := atomicfile.WriteFile(keyPath, priv, 0600); err != nil {
+				return err
+			}
+			// The public half is written too, so a projected site is
+			// byte-identical to a generated one and Patrol's key-match check
+			// has something to compare.
+			return atomicfile.WriteFile(keyPath+".pub", pub, 0644)
+		},
+	})
 	if err != nil {
-		return "", fmt.Errorf("derive public key from the secret: %w", err)
+		return "", err
 	}
-
-	// ⛔ THE STALE-SECRET CHECK, AND IT HAS TO BE HERE.
-	//
-	// A secret that was not updated after a rotation holds a RETIRED key. The
-	// plan assumed the key-history chain would catch that, and IT DOES NOT:
-	// Judge's chain-head check compares public_key_history's head against
-	// .well-known/polis's public_key — two fields in the SAME published
-	// document, neither of which is the key file. Both stay correct while the
-	// projected private key is wrong.
-	//
-	// What would eventually catch it is a signature failing to verify, i.e.
-	// AFTER the actor has already published something under a key nobody
-	// accepts. So the comparison is made HERE, against what the site itself
-	// publishes, before the key is written at all.
-	if published, err := site.LoadWellKnown(siteDir); err == nil && published != nil && published.PublicKey != "" {
-		if !sameSSHKey(published.PublicKey, string(pubKey)) {
-			return "", fmt.Errorf("the actor key secret does not match the key this site publishes: " +
-				"the secret is stale (a rotation was recorded and the secret was not updated) or it belongs to another site. " +
-				"Refusing to project a retired identity")
-		}
-	}
-
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
-		return "", fmt.Errorf("create key directory: %w", err)
-	}
-	// ⛔ 0600, AND THE MODE IS LOAD-BEARING. Patrol checks key-file permissions
-	// on every sweep; a projection writing 0644 turns the fleet red on the
-	// first sweep — and would be right to.
-	if err := atomicfile.WriteFile(keyPath, privKey, 0600); err != nil {
-		return "", fmt.Errorf("write projected key: %w", err)
-	}
-	// The public half is written too, so a projected site is byte-identical to
-	// a generated one and Patrol's key-match check has something to compare.
-	if err := atomicfile.WriteFile(keyPath+".pub", pubKey, 0644); err != nil {
-		return "", fmt.Errorf("write projected public key: %w", err)
+	if outcome == secret.Present {
+		return ProjectionPresent, nil
 	}
 	return ProjectionWritten, nil
 }

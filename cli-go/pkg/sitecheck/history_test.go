@@ -2,6 +2,7 @@ package sitecheck
 
 import (
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,7 +71,7 @@ func rotatedSite(t *testing.T, domain string, withDID bool) rotatedFixture {
 
 	khRotate(t, f.dir, domain, f.k0, f.k1, rotatedAt)
 	if withDID {
-		if err := site.PublishDIDDocument(f.dir, domain); err != nil {
+		if err := site.PublishDIDDocument(storage.At(f.dir), domain); err != nil {
 			t.Fatal(err)
 		}
 	}

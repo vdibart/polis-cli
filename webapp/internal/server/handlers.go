@@ -2,16 +2,20 @@ package server
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/contentpath"
 	"html"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -31,13 +35,16 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
+	"github.com/vdibart/polis-cli/cli-go/pkg/owner"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policycheck"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
+	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/snippet"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
@@ -49,11 +56,11 @@ var draftIDSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 
 // errPathTraversal indicates the path contains a traversal sequence (`..`) or
 // a null byte — a real security concern worth logging as a security event.
-var errPathTraversal = fmt.Errorf("invalid path: traversal not allowed")
+var errPathTraversal = contentpath.ErrTraversal
 
 // errPathDisallowed indicates the path is well-formed but outside the allowed
 // roots. Benign causes include stale clients or bad URLs; not a security event.
-var errPathDisallowed = fmt.Errorf("invalid path: outside allowed roots")
+var errPathDisallowed = contentpath.ErrDisallowed
 
 // isTraversal reports whether err came from a traversal/null-byte rejection
 // (as opposed to a prefix-mismatch). Call sites use this to decide whether to
@@ -81,31 +88,8 @@ func validatePostPath(path string) error {
 // Returns errPathTraversal for `..`/null-byte attempts and errPathDisallowed for
 // prefix-mismatches.
 func validateContentPath(path string) error {
-	// Canonicalize first to normalize encoded traversals (e.g., ./, //)
-	path = filepath.Clean(path)
-	if strings.Contains(path, "..") || strings.Contains(path, "\x00") {
-		return errPathTraversal
-	}
-
-	// Allow root-level markdown and html files (e.g., index.md, index.html, about.md)
-	if (strings.HasSuffix(path, ".md") || strings.HasSuffix(path, ".html")) && !strings.Contains(path, "/") {
-		return nil
-	}
-
-	// Must start with an allowed prefix
-	allowedPrefixes := []string{
-		"content/pub.polis.core/post/",
-		"content/pub.polis.core/comment/",
-		".polis/bundles/pub.polis.core/posts/drafts/",
-		"posts/",    // Mount point (rendered output)
-		"comments/", // Mount point (rendered output)
-	}
-	for _, prefix := range allowedPrefixes {
-		if strings.HasPrefix(path, prefix) {
-			return nil
-		}
-	}
-	return errPathDisallowed
+	// ⭐ The shared rule, so the ops engine (/v1/ actions) applies the same one.
+	return contentpath.Validate(path)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +101,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// Run validation to get current state
-	validation := site.Validate(s.DataDir)
+	validation := site.Validate(s.Site())
 
 	// For backwards compatibility, "configured" is true if site is valid
 	configured := validation.Status == site.StatusValid
@@ -126,15 +110,31 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"configured": configured,
 		"site_title": s.GetSiteTitle(),
 		"base_url":   s.GetBaseURL(),
-		"validation": map[string]interface{}{
-			"status": validation.Status,
-			"errors": validation.Errors,
-		},
 	}
 
-	// Include site info if valid
-	if validation.SiteInfo != nil {
-		response["site_info"] = validation.SiteInfo
+	// ⛔ THE VALIDATION DETAIL IS OWNER-ONLY, and this endpoint is on the
+	// public list because the logged-out SPA needs it to bootstrap.
+	//
+	// ⭐ "The SPA needs it before login" is a reason to TRIM the response, not
+	// to open the route. What stays is what the site already publishes — its
+	// title and base URL — and what goes is reconnaissance: a stranger
+	// learning that this site's .well-known is malformed, or which file is
+	// missing, is being handed a map of where to push.
+	//
+	// ⚠️ Owner-visible on a laptop exactly as before: the loopback provider
+	// answers there, so nothing a self-hoster sees today disappears.
+	if ok, _ := owner.IsOwner(s.instance(), r); ok {
+		response["validation"] = map[string]interface{}{
+			"status": validation.Status,
+			"errors": validation.Errors,
+		}
+		if validation.SiteInfo != nil {
+			response["site_info"] = validation.SiteInfo
+		}
+	} else {
+		// ⭐ The bare status still says WHETHER the site is configured, which
+		// the shell needs to choose a screen, without saying what is wrong.
+		response["validation"] = map[string]interface{}{"status": validation.Status}
 	}
 
 	showFrontmatter := true
@@ -144,7 +144,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	response["show_frontmatter"] = showFrontmatter
 
 	// Include avatar, author_name, and active_theme from .well-known/polis
-	if wk, err := site.LoadWellKnown(s.DataDir); err == nil {
+	if wk, err := site.LoadWellKnown(s.Site()); err == nil {
 		if wk.Avatar != nil {
 			response["avatar"] = wk.Avatar
 		}
@@ -152,7 +152,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			response["author_name"] = wk.AuthorName
 		}
 	}
-	if activeTheme, _ := theme.GetActiveTheme(s.DataDir); activeTheme != "" {
+	if activeTheme, _ := theme.GetActiveTheme(s.Site()); activeTheme != "" {
 		response["active_theme"] = activeTheme
 	}
 
@@ -166,7 +166,7 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	validation := site.Validate(s.DataDir)
+	validation := site.Validate(s.Site())
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(validation)
@@ -186,7 +186,6 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		Theme        string `json:"theme"`
 		BaseURL      string `json:"base_url"`
 		DiscoveryURL string `json:"discovery_url"`
-		DiscoveryKey string `json:"discovery_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		// Empty body is OK - all fields are optional
@@ -197,7 +196,6 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 			Theme        string `json:"theme"`
 			BaseURL      string `json:"base_url"`
 			DiscoveryURL string `json:"discovery_url"`
-			DiscoveryKey string `json:"discovery_key"`
 		}{}
 	}
 
@@ -210,7 +208,7 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.LogDebug("Initializing new site at: %s", s.DataDir)
-	result, err := site.Init(s.DataDir, opts)
+	result, err := site.Init(s.Site(), opts)
 	if err != nil {
 		s.LogError("Failed to initialize site: %v", err)
 		http.Error(w, "Failed to initialize site", http.StatusInternalServerError)
@@ -226,12 +224,11 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 
 	// Write .env with discovery URL and base URL.
 	// Use user-provided values when available, fall back to server defaults.
-	// Note: DISCOVERY_SERVICE_KEY is no longer written — all auth uses Ed25519 signatures.
+	// No DS credential is written: all DS auth uses Ed25519 signatures.
 	dsURL := req.DiscoveryURL
 	if dsURL == "" {
 		dsURL = s.DiscoveryURL
 	}
-	envPath := filepath.Join(s.DataDir, ".env")
 	envVars := map[string]string{
 		"DISCOVERY_SERVICE_URL": dsURL,
 	}
@@ -240,7 +237,7 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		envVars["POLIS_BASE_URL"] = req.BaseURL
 		s.BaseURL = req.BaseURL
 	}
-	s.writeEnvFile(envPath, envVars)
+	s.writeEnvFile(".env", envVars)
 
 	// Update server state with the (possibly user-provided) discovery config
 	s.DiscoveryURL = dsURL
@@ -265,11 +262,11 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// writeEnvFile writes or updates key=value pairs in a .env file.
+// writeEnvFile writes or updates key=value pairs in the .env file at envKey.
 // If the file exists, it updates existing keys in place and appends new ones.
 // Otherwise it creates a new file with all pairs.
-func (s *Server) writeEnvFile(envPath string, vars map[string]string) {
-	data, err := os.ReadFile(envPath)
+func (s *Server) writeEnvFile(envKey string, vars map[string]string) {
+	data, err := s.readKey(envKey)
 	if err == nil {
 		// File exists - update existing keys, track which ones we found
 		lines := strings.Split(string(data), "\n")
@@ -291,129 +288,23 @@ func (s *Server) writeEnvFile(envPath string, vars map[string]string) {
 		for key, val := range remaining {
 			lines = append(lines, key+"="+val)
 		}
-		if err := os.WriteFile(envPath, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+		if err := s.writeKey(envKey, []byte(strings.Join(lines, "\n")), 0644); err != nil {
 			s.LogWarn("Failed to update .env: %v", err)
 		}
 	} else {
 		// Create new .env file
 		var b strings.Builder
-		b.WriteString("# Polis Configuration\n")
+		b.WriteString("# polis configuration\n")
 		// Write in a stable order
-		for _, key := range []string{"POLIS_BASE_URL", "DISCOVERY_SERVICE_URL", "DISCOVERY_SERVICE_KEY", "LOG_LEVEL", "LOG_RETENTION_DAYS"} {
+		for _, key := range []string{"POLIS_BASE_URL", "DISCOVERY_SERVICE_URL", "LOG_LEVEL", "LOG_RETENTION_DAYS"} {
 			if val, ok := vars[key]; ok {
 				b.WriteString(key + "=" + val + "\n")
 			}
 		}
-		if err := os.WriteFile(envPath, []byte(b.String()), 0644); err != nil {
+		if err := s.writeKey(envKey, []byte(b.String()), 0644); err != nil {
 			s.LogWarn("Failed to create .env: %v", err)
 		}
 	}
-}
-
-// handleLink creates a symlink from data/ to an existing polis site.
-func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		Path string `json:"path"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if req.Path == "" {
-		http.Error(w, "Path is required", http.StatusBadRequest)
-		return
-	}
-
-	// Expand ~ to home directory
-	targetPath := req.Path
-	if strings.HasPrefix(targetPath, "~/") {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			targetPath = filepath.Join(home, targetPath[2:])
-		}
-	}
-
-	// Convert to absolute path
-	targetPath, err := filepath.Abs(targetPath)
-	if err != nil {
-		http.Error(w, "Invalid path", http.StatusBadRequest)
-		return
-	}
-
-	// Validate the target is a valid polis site
-	validation := site.Validate(targetPath)
-	if validation.Status != site.StatusValid {
-		errMsgs := []string{}
-		for _, e := range validation.Errors {
-			errMsgs = append(errMsgs, e.Message)
-		}
-		http.Error(w, "Target is not a valid polis site: "+strings.Join(errMsgs, "; "), http.StatusBadRequest)
-		return
-	}
-
-	// Get the current data directory path (before it's a symlink)
-	execPath, err := os.Executable()
-	if err != nil {
-		s.LogError("failed to get executable path: %v", err)
-		http.Error(w, "Failed to get executable path", http.StatusInternalServerError)
-		return
-	}
-	linkPath := filepath.Join(filepath.Dir(execPath), "data")
-
-	// Safety check: refuse if data/ already has content
-	entries, err := os.ReadDir(linkPath)
-	if err == nil && len(entries) > 0 {
-		// Check if it's already a symlink pointing somewhere
-		info, err := os.Lstat(linkPath)
-		if err == nil && info.Mode()&os.ModeSymlink != 0 {
-			// It's already a symlink - we can replace it
-		} else {
-			// It's a real directory with files
-			http.Error(w, "Data directory already contains files. Remove them first or use init instead.", http.StatusConflict)
-			return
-		}
-	}
-
-	// Remove existing data directory/symlink
-	if err := os.RemoveAll(linkPath); err != nil {
-		s.LogError("failed to remove existing data directory: %v", err)
-		http.Error(w, "Failed to remove existing data directory", http.StatusInternalServerError)
-		return
-	}
-
-	// Create symlink
-	s.LogDebug("Linking to existing site: %s", targetPath)
-	if err := os.Symlink(targetPath, linkPath); err != nil {
-		s.LogError("Failed to create symlink: %v", err)
-		http.Error(w, "Failed to create symlink", http.StatusInternalServerError)
-		return
-	}
-	s.LogEvent("pub.polis.site.link", map[string]interface{}{
-		"path": targetPath,
-	})
-
-	// Update server's data directory to the resolved path
-	s.DataDir = targetPath
-
-	// Reload keys and config from the linked site
-	s.LoadKeys()
-	s.LoadConfig()
-	s.LoadEnv()
-	s.ApplyDiscoveryDefaults()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":    true,
-		"linked_to":  targetPath,
-		"site_title": s.GetSiteTitle(),
-		"site_info":  validation.SiteInfo,
-	})
 }
 
 func (s *Server) handleRender(w http.ResponseWriter, r *http.Request) {
@@ -451,28 +342,26 @@ func (s *Server) handleRender(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sign the content
-	signature, err := signing.SignContent([]byte(req.Markdown), s.PrivateKey)
-	if err != nil {
-		s.LogError("sign content: %v", err)
-		http.Error(w, "Failed to sign content", http.StatusInternalServerError)
-		return
-	}
-
+	// ⛔⛔ A PREVIEW IS NEVER SIGNED. This used to sign whatever markdown it was
+	// given and hand the signature back: an oracle for signatures under the
+	// owner's key, over a DS key-rotation message naming an attacker's key, a
+	// grant, or (where the identity key doubled as the recovery key) a recovery
+	// proof. Nothing used the signature; every real write signs through its own
+	// path.
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"html":      html,
-		"signature": signature,
+		"html": html,
 	})
 }
 
 func (s *Server) handleDrafts(w http.ResponseWriter, r *http.Request) {
-	draftsDir := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
+	draftsDir := siteKey(".polis", "bundles", "pub.polis.core", "posts", "drafts")
 
 	switch r.Method {
 	case http.MethodGet:
 		// List drafts
-		entries, err := os.ReadDir(draftsDir)
+		entries := s.listKey(draftsDir)
+		var err error
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -487,21 +376,24 @@ func (s *Server) handleDrafts(w http.ResponseWriter, r *http.Request) {
 		}
 		var drafts []draftEntry
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			if entry.IsDir || !strings.HasSuffix(entry.Key, ".md") {
 				continue
 			}
-			info, err := entry.Info()
+			// ⚠️ Depends on ModTimes: a draft's mtime is its displayed
+			// "modified" time, so a backend without one shows nothing useful.
+			info, err := s.statKey(siteKey(entry.Key))
 			if err != nil {
 				continue
 			}
-			draftID := strings.TrimSuffix(entry.Name(), ".md")
+			name := pathpkg.Base(entry.Key)
+			draftID := strings.TrimSuffix(name, ".md")
 			d := map[string]interface{}{
 				"id":       draftID,
-				"name":     entry.Name(),
-				"modified": info.ModTime().Format(time.RFC3339),
+				"name":     name,
+				"modified": info.ModTime.Format(time.RFC3339),
 			}
 			// Extract title and excerpt from draft content
-			if content, err := os.ReadFile(filepath.Join(draftsDir, entry.Name())); err == nil {
+			if content, err := s.readKey(siteKey(entry.Key)); err == nil {
 				lines := strings.Split(string(content), "\n")
 				title := ""
 				bodyStart := 0
@@ -537,7 +429,7 @@ func (s *Server) handleDrafts(w http.ResponseWriter, r *http.Request) {
 			}
 			drafts = append(drafts, draftEntry{
 				data:    d,
-				modTime: info.ModTime(),
+				modTime: info.ModTime,
 			})
 		}
 
@@ -583,8 +475,8 @@ func (s *Server) handleDrafts(w http.ResponseWriter, r *http.Request) {
 		// Sanitize ID - whitelist only safe characters
 		req.ID = draftIDSanitizer.ReplaceAllString(req.ID, "-")
 
-		draftPath := filepath.Join(draftsDir, req.ID+".md")
-		if err := os.WriteFile(draftPath, []byte(req.Markdown), 0644); err != nil {
+		draftPath := siteKey(draftsDir, req.ID+".md")
+		if err := s.writeKey(draftPath, []byte(req.Markdown), 0644); err != nil {
 			s.LogError("failed to save draft: %v", err)
 			http.Error(w, "Failed to save draft", http.StatusInternalServerError)
 			return
@@ -612,11 +504,11 @@ func (s *Server) handleDraft(w http.ResponseWriter, r *http.Request) {
 	// Sanitize ID - whitelist only safe characters
 	id = draftIDSanitizer.ReplaceAllString(id, "-")
 
-	draftPath := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", id+".md")
+	draftPath := siteKey(".polis", "bundles", "pub.polis.core", "posts", "drafts", id+".md")
 
 	switch r.Method {
 	case http.MethodGet:
-		content, err := os.ReadFile(draftPath)
+		content, err := s.readKey(draftPath)
 		if err != nil {
 			http.Error(w, "Draft not found", http.StatusNotFound)
 			return
@@ -629,7 +521,7 @@ func (s *Server) handleDraft(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case http.MethodDelete:
-		if err := os.Remove(draftPath); err != nil {
+		if err := s.deleteKey(draftPath, false); err != nil {
 			s.LogError("failed to delete draft: %v", err)
 			http.Error(w, "Failed to delete draft", http.StatusInternalServerError)
 			return
@@ -690,7 +582,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.LogDebug("Publishing post with filename: %s", req.Filename)
-	result, err := publish.PublishPost(s.DataDir, markdown, req.Filename, s.PrivateKey,
+	result, err := publish.PublishPost(s.Site(), markdown, req.Filename, s.PrivateKey,
 		s.publishConfigWithLicense(authoredLicense))
 	if err != nil {
 		s.LogError("Failed to publish: %v", err)
@@ -714,8 +606,8 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	// Delete the draft if this was published from a draft
 	if req.DraftID != "" {
 		cleanID := draftIDSanitizer.ReplaceAllString(req.DraftID, "-")
-		draftPath := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", cleanID+".md")
-		if err := os.Remove(draftPath); err != nil && !os.IsNotExist(err) {
+		draftPath := siteKey(".polis", "bundles", "pub.polis.core", "posts", "drafts", cleanID+".md")
+		if err := s.deleteKey(draftPath, true); err != nil {
 			s.LogWarn("Failed to remove draft after publish: %v", err)
 		}
 	}
@@ -731,7 +623,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 			Timestamp:     time.Now().UTC().Format("2006-01-02T15:04:05Z"),
 			CommitMessage: hooks.GenerateCommitMessage(hooks.EventPostPublish, result.Title),
 		}
-		hookResult, err := hooks.RunHook(s.DataDir, hc, payload)
+		hookResult, err := hooks.RunHook(s.Site(), hc, payload)
 		if err != nil {
 			// Log hook error but don't fail the publish
 			log.Printf("[warning] post-publish hook failed: %v", err)
@@ -756,8 +648,8 @@ func (s *Server) handlePosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read posts from public.jsonl
-	indexPath := filepath.Join(s.DataDir, "content", "pub.polis.core", "index.jsonl")
-	data, err := os.ReadFile(indexPath)
+	indexPath := siteKey("content", "pub.polis.core", "index.jsonl")
+	data, err := s.readKey(indexPath)
 	if err != nil {
 		// No posts yet
 		w.Header().Set("Content-Type", "application/json")
@@ -769,7 +661,7 @@ func (s *Server) handlePosts(w http.ResponseWriter, r *http.Request) {
 
 	// Build blessed comment count map
 	commentCountMap := make(map[string]int)
-	if bc, err := metadata.LoadBlessedComments(s.DataDir); err == nil {
+	if bc, err := metadata.LoadBlessedComments(s.Site()); err == nil {
 		for _, pc := range bc.Comments {
 			commentCountMap[pc.Post] = len(pc.Blessed)
 		}
@@ -797,13 +689,15 @@ func (s *Server) handlePosts(w http.ResponseWriter, r *http.Request) {
 		}
 		// Generate excerpt and get modification time from source markdown
 		if path, ok := entry["path"].(string); ok {
-			srcPath := filepath.Join(s.DataDir, path)
-			if raw, err := os.ReadFile(srcPath); err == nil {
+			srcPath := siteKey(path)
+			if raw, err := s.readKey(srcPath); err == nil {
 				body := stripFrontmatter(string(raw))
 				entry["excerpt"] = makeExcerpt(body, feed.ExcerptCharCap)
 			}
-			if info, err := os.Stat(srcPath); err == nil {
-				entry["modified"] = info.ModTime().Format(time.RFC3339)
+			// ⚠️ Depends on ModTimes: the source file's mtime is used as
+			// the item's timestamp.
+			if info, err := s.statKey(srcPath); err == nil {
+				entry["modified"] = info.ModTime.Format(time.RFC3339)
 			}
 		}
 		// Attach blessed comment count
@@ -858,8 +752,8 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the post file
-	fullPath := filepath.Join(s.DataDir, postPath)
-	content, err := os.ReadFile(fullPath)
+	fullPath := siteKey(postPath)
+	content, err := s.readKey(fullPath)
 	if err != nil {
 		http.Error(w, "Post not found", http.StatusNotFound)
 		return
@@ -940,7 +834,7 @@ func (s *Server) handleRepublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.LogDebug("Republishing post: %s", req.Path)
-	result, err := publish.RepublishPost(s.DataDir, req.Path, markdown, s.PrivateKey, s.DiscoveryConfig())
+	result, err := publish.RepublishPost(s.Site(), req.Path, markdown, s.PrivateKey, s.DiscoveryConfig())
 	if err != nil {
 		s.LogError("Failed to republish %s: %v", req.Path, err)
 		http.Error(w, "Failed to republish", http.StatusInternalServerError)
@@ -970,7 +864,7 @@ func (s *Server) handleRepublish(w http.ResponseWriter, r *http.Request) {
 			Timestamp:     time.Now().UTC().Format("2006-01-02T15:04:05Z"),
 			CommitMessage: hooks.GenerateCommitMessage(hooks.EventPostRepublish, result.Title),
 		}
-		hookResult, err := hooks.RunHook(s.DataDir, hc, payload)
+		hookResult, err := hooks.RunHook(s.Site(), hc, payload)
 		if err != nil {
 			// Log hook error but don't fail the republish
 			log.Printf("[warning] post-republish hook failed: %v", err)
@@ -1006,18 +900,16 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve comment path from ID if provided (blessed comments are in date dirs)
 	if req.CommentID != "" && req.Path == "" {
-		found, absPath := comment.FindBlessedComment(s.DataDir, req.CommentID)
+		// ⭐ The lookup returns the comment's KEY, which is already the
+		// site-relative path this handler works in. ⚠️ It used to be made
+		// relative to the data directory here, and once the lookup returned a
+		// key that failed every time: unpublishing a comment by id answered 500.
+		found, key := comment.FindBlessedComment(s.Site(), req.CommentID)
 		if !found {
 			http.Error(w, "Comment not found", http.StatusNotFound)
 			return
 		}
-		// Convert absolute path to relative path from data dir
-		relPath, err := filepath.Rel(s.DataDir, absPath)
-		if err != nil {
-			http.Error(w, "Failed to resolve comment path", http.StatusInternalServerError)
-			return
-		}
-		req.Path = relPath
+		req.Path = key
 	}
 
 	if req.Path == "" {
@@ -1043,15 +935,18 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify file exists
-	fullPath := filepath.Join(s.DataDir, req.Path)
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+	// Verify file exists. req.Path is site-relative and checked for traversal
+	// above; the store refuses a key that escapes the site as well.
+	contentKey := filepath.ToSlash(req.Path)
+	// Only a GENUINE absence is a 404. Any other failure goes on to the read
+	// below, which reports it as the 500 it is.
+	if present, existsErr := s.existsKey(contentKey); existsErr == nil && !present {
 		http.Error(w, "Content not found", http.StatusNotFound)
 		return
 	}
 
 	// Read content for frontmatter extraction
-	contentBytes, err := os.ReadFile(fullPath)
+	contentBytes, err := s.readKey(contentKey)
 	if err != nil {
 		s.LogError("Failed to read content file %s: %v", req.Path, err)
 		http.Error(w, "Failed to read content file", http.StatusInternalServerError)
@@ -1137,21 +1032,18 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 
 	// Determine draft destination
 	baseName := filepath.Base(req.Path)
-	var draftsDir string
+	var draftsKey string
 	if isPost {
-		draftsDir = filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
+		draftsKey = siteKey(".polis", "bundles", "pub.polis.core", "posts", "drafts")
 	} else {
-		draftsDir = filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "comments", "drafts")
+		draftsKey = siteKey(".polis", "bundles", "pub.polis.core", "comments", "drafts")
 	}
 
-	// Create drafts directory and write draft
-	if err := os.MkdirAll(draftsDir, 0755); err != nil {
-		s.LogError("Failed to create drafts directory: %v", err)
-		http.Error(w, "Failed to create drafts directory", http.StatusInternalServerError)
-		return
-	}
-	draftPath := filepath.Join(draftsDir, baseName)
-	if err := os.WriteFile(draftPath, []byte(draftContent), 0644); err != nil {
+	// Write the draft. ⛔ Its directory is 0700, not 0755: it is under .polis,
+	// and drafts are private (the 0755 that used to be here was a real defect a
+	// reviewer found). The site's store creates every parent under .polis at
+	// 0700, which is what the MkdirAll here did.
+	if err := s.writeKey(siteKey(draftsKey, baseName), []byte(draftContent), 0644); err != nil {
 		s.LogError("Failed to write draft for %s: %v", req.Path, err)
 		http.Error(w, "Failed to write draft", http.StatusInternalServerError)
 		return
@@ -1160,12 +1052,12 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 	// Delete .versions/ history file (posts only)
 	if isPost {
 		dateDir := filepath.Base(filepath.Dir(req.Path))
-		versionsFile := filepath.Join(s.DataDir, "content", "pub.polis.core", "post", dateDir, ".versions", baseName)
-		os.Remove(versionsFile) // Ignore error — may not exist
+		versionsFile := siteKey("content", "pub.polis.core", "post", dateDir, ".versions", baseName)
+		_ = s.deleteKey(versionsFile, true)
 	}
 
 	// Delete the original published file
-	if err := os.Remove(fullPath); err != nil {
+	if err := s.deleteKey(contentKey, false); err != nil {
 		s.LogError("Failed to delete published file %s: %v", req.Path, err)
 		http.Error(w, "Failed to delete published file", http.StatusInternalServerError)
 		return
@@ -1173,25 +1065,23 @@ func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
 
 	// Delete rendered HTML if exists
 	if isPost {
-		htmlPath := strings.TrimSuffix(fullPath, ".md") + ".html"
-		os.Remove(htmlPath)
+		_ = s.deleteKey(strings.TrimSuffix(contentKey, ".md")+".html", true)
 		// Also check posts mount point
 		dateDir := filepath.Base(filepath.Dir(req.Path))
 		htmlName := strings.TrimSuffix(baseName, ".md") + ".html"
-		mountHtmlPath := filepath.Join(s.DataDir, "posts", dateDir, htmlName)
-		os.Remove(mountHtmlPath)
+		mountHtmlPath := siteKey("posts", dateDir, htmlName)
+		_ = s.deleteKey(mountHtmlPath, true)
 	} else {
-		htmlPath := strings.TrimSuffix(fullPath, ".md") + ".html"
-		os.Remove(htmlPath)
+		_ = s.deleteKey(strings.TrimSuffix(contentKey, ".md")+".html", true)
 	}
 
 	// Remove from index.jsonl
-	if err := metadata.RemoveIndexEntry(s.DataDir, req.Path); err != nil {
+	if err := metadata.RemoveIndexEntry(s.Site(), req.Path); err != nil {
 		s.LogWarn("Could not remove index entry for %s: %v", req.Path, err)
 	}
 
 	// Update manifest
-	if err := publish.UpdateManifest(s.DataDir); err != nil {
+	if err := publish.UpdateManifest(s.Site()); err != nil {
 		s.LogWarn("Failed to update manifest after unpublish: %v", err)
 	}
 
@@ -1238,18 +1128,26 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read old keys before any changes
-	oldPubKey := strings.TrimSpace(string(s.PublicKey))
-	oldPrivKey := s.PrivateKey
-
-	// Generate new keypair
-	newPrivPEM, newPubSSH, err := signing.GenerateKeypair()
+	// ⭐ What this rotation starts from: a fresh keypair, or an earlier
+	// rotation's staged key to resume (the discovery service may already hold
+	// it), signing with whichever key .well-known/polis publishes as current.
+	// The keys are read from disk, not from s.PrivateKey: after an interrupted
+	// rotation the key in memory is the INSTALLED one, which never signs its
+	// own handover. ⛔ It refuses when the key on disk is not the published one.
+	keys, err := site.PrepareRotation(r.Context(), s.Site())
 	if err != nil {
-		s.LogError("Key rotation failed: keypair generation: %v", err)
-		http.Error(w, "Failed to generate new keypair", http.StatusInternalServerError)
+		s.LogError("Key rotation not started: %v", err)
+		status := http.StatusInternalServerError
+		if errors.Is(err, site.ErrKeyNotPublished) || errors.Is(err, site.ErrRotationUnfinishable) ||
+			errors.Is(err, site.ErrRotationPending) {
+			status = http.StatusConflict
+		}
+		http.Error(w, "Key rotation not started: "+err.Error(), status)
 		return
 	}
-	newPubKey := strings.TrimSpace(string(newPubSSH))
+	resuming := keys.Resuming
+	oldPubKey, oldPrivKey := keys.OldPub, keys.OldPriv
+	newPrivPEM, newPubSSH, newPubKey := keys.NewPriv, keys.NewPubSSH, keys.NewPub
 
 	// Build canonical rotation JSON and sign with OLD key
 	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05Z")
@@ -1268,14 +1166,40 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Notify DS FIRST (strict ordering — if DS fails, do NOT proceed with local swap)
+	// ⛔ STAGE FIRST: the new key is durably on disk before anyone is told.
+	if !resuming {
+		if err := site.StageRotationKey(r.Context(), s.Site(), newPrivPEM); err != nil {
+			s.LogError("Key rotation not started: %v", err)
+			status := http.StatusInternalServerError // a full disk is not a conflict
+			if errors.Is(err, site.ErrRotationPending) {
+				status = http.StatusConflict
+			}
+			http.Error(w, "Key rotation not started: "+err.Error(), status)
+			return
+		}
+	}
 	dsClient := s.NewDSClient(r)
-	witness, err := dsClient.RotateKey(discovery.KeyRotationRequest{
+	// ⛔ Only a refusal drops the staged key; a lost answer keeps it
+	// (site.AnnounceRotation).
+	witness, _, err := site.AnnounceRotation(r.Context(), s.Site(), dsClient, discovery.KeyRotationRequest{
 		Domain:        domain,
 		OldKey:        oldPubKey,
 		NewKey:        newPubKey,
 		TransitionSig: transitionSig,
 		Timestamp:     timestamp,
-	})
+	}, resuming)
+	if errors.Is(err, site.ErrRotationDiverged) {
+		s.LogError("Key rotation not finished: %v", err)
+		http.Error(w, "Key rotation not finished: the discovery service holds neither this site's key nor the staged "+
+			"one. Nothing was changed.", http.StatusConflict)
+		return
+	}
+	if errors.Is(err, site.ErrRotationPending) {
+		s.LogError("Key rotation not finished: %v", err)
+		http.Error(w, "Key rotation not finished: the discovery service's answer was lost, so the new key is kept. "+
+			"Rotate again to finish: it checks which key the discovery service holds.", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		s.LogError("Key rotation failed: DS notification: %v", err)
 		http.Error(w, "Discovery service rejected key rotation", http.StatusBadGateway)
@@ -1290,16 +1214,11 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 	// No .old backup is made. The published key history replaces it — see the
 	// same note in cli-go/pkg/cmd/rotate_key.go. Existing .old files are left in
 	// place and reaper.go still excludes them from a departing user's archive.
-	keysDir := filepath.Join(s.DataDir, ".polis", "keys")
-
-	// Write new keys
-	if err := os.WriteFile(filepath.Join(keysDir, "id_ed25519"), newPrivPEM, 0600); err != nil {
-		s.LogError("Key rotation failed: writing new private key: %v", err)
-		http.Error(w, "Failed to write new keys", http.StatusInternalServerError)
-		return
-	}
-	if err := os.WriteFile(filepath.Join(keysDir, "id_ed25519.pub"), newPubSSH, 0644); err != nil {
-		s.LogError("Key rotation failed: writing new public key: %v", err)
+	// ⭐ Install the staged key: each file lands by rename, and the private key
+	// always ends 0600. The retired key and the staged copy stay until the
+	// rotation is recorded below.
+	if err := site.InstallRotationKey(r.Context(), s.Site(), newPrivPEM, newPubSSH); err != nil {
+		s.LogError("Key rotation failed: installing the new key (staged at %s): %v", site.StagedKeyKey, err)
 		http.Error(w, "Failed to write new keys", http.StatusInternalServerError)
 		return
 	}
@@ -1317,13 +1236,18 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 	//
 	// timestamp is passed verbatim: the old key signed it, and it becomes the new
 	// entry's valid_from. Reformatting it breaks the transition signature.
-	if err := site.RecordKeyRotation(s.DataDir, newPubKey, transitionSig, timestamp, witnesses...); err != nil {
+	if err := site.RecordKeyRotation(s.Site(), newPubKey, transitionSig, timestamp, domain, witnesses...); err != nil {
 		s.LogError("Key rotation failed: recording the rotation in .well-known/polis: %v", err)
 		http.Error(w, "Failed to update site identity", http.StatusInternalServerError)
 		return
 	}
+	// ⛔ Only now: the retired key and the staged copy are what a resume would
+	// sign the handover with. Not fatal; the next rotation removes leftovers.
+	if err := site.FinishRotation(r.Context(), s.Site()); err != nil {
+		s.LogError("Key rotation: %v", err)
+	}
 	keyEpoch := 0
-	if block, herr := site.LoadKeyHistory(s.DataDir); herr == nil && block != nil {
+	if block, herr := site.LoadKeyHistory(s.Site()); herr == nil && block != nil {
 		keyEpoch = block.Current.Epoch
 	}
 
@@ -1331,8 +1255,8 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 	// preserved block is still signed by the OLD key, which Judge would flag as
 	// forged (judge.alert.messages_key_forged); re-publishing re-signs it. Tenants
 	// without a keyring (pre-DM) have nothing to publish — skip silently.
-	if _, err := dm.LoadKeyring(dm.DMDir(s.DataDir)); err == nil {
-		if err := site.PublishMessagesKey(s.DataDir, newPrivPEM); err != nil {
+	if _, err := dm.LoadKeyring(s.Site()); err == nil {
+		if err := site.PublishMessagesKey(s.Site(), newPrivPEM); err != nil {
 			s.LogError("Key rotation: failed to re-publish messages key under new identity: %v", err)
 		}
 	}
@@ -1347,13 +1271,33 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 	// fails honestly. So: republish, and if that fails, remove. Never fatal —
 	// the rotation has already happened and been announced, and the document is
 	// derived, so `polis did --write` rebuilds it.
-	if err := site.PublishDIDDocument(s.DataDir, domain); err != nil {
-		removed := os.Remove(site.DIDDocumentPath(s.DataDir)) == nil
+	if err := site.PublishDIDDocument(s.Site(), domain); err != nil {
+		removed := s.Site().Store().Delete(context.Background(), site.DIDDocumentKey) == nil
 		s.LogError("Key rotation: did.json republish failed (removed=%v): %v", removed, err)
 	}
 
 	// Reload in-memory keys
 	s.LoadKeys()
+
+	// Re-sign the follow file and the blessing list under the NEW key. Neither
+	// carries a signing time, so each verifies against the current key only, and
+	// leaving them would turn both invalid until the next follow or bless.
+	//
+	// ⛔ Only a file that verifies under the OLD key is re-signed, so a rotation
+	// can never launder a list that was already failing (signing.ResignOutcome).
+	//
+	// ⚠️ AFTER LoadKeys, deliberately. Until then s.PrivateKey is the old key, and
+	// sync or Rosie may write the blessing list with it; that write passes the
+	// old-key gate and is re-signed here. Anything written after LoadKeys already
+	// carries the new key. Never fatal: a file not re-signed is the file it was.
+	followResign, err := following.ResignAfterRotation(s.Site(), []byte(oldPubKey), newPrivPEM)
+	if err != nil {
+		s.LogError("Key rotation: follow file not re-signed (%s): %v", followResign, err)
+	}
+	blessedResign, err := metadata.ResignBlessedAfterRotation(s.Site(), []byte(oldPubKey), newPrivPEM)
+	if err != nil {
+		s.LogError("Key rotation: blessing list not re-signed (%s): %v", blessedResign, err)
+	}
 
 	// Re-render site (non-fatal if fails)
 	if err := s.RenderSite(); err != nil {
@@ -1362,6 +1306,8 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 
 	s.LogEvent("pub.polis.site.key_rotate", map[string]interface{}{
 		"key_history_epoch": keyEpoch,
+		"following_resign":  string(followResign),
+		"blessed_resign":    string(blessedResign),
 	})
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1369,6 +1315,8 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 		"success":           true,
 		"public_key":        newPubKey,
 		"key_history_epoch": keyEpoch,
+		"following_resign":  string(followResign),
+		"blessed_resign":    string(blessedResign),
 	})
 }
 
@@ -1378,7 +1326,7 @@ func (s *Server) handleCommentDrafts(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		// List comment drafts
-		drafts, err := comment.ListDrafts(s.DataDir)
+		drafts, err := comment.ListDrafts(s.Site())
 		if err != nil {
 			s.LogError("failed to list drafts: %v", err)
 			http.Error(w, "Failed to list drafts", http.StatusInternalServerError)
@@ -1417,14 +1365,17 @@ func (s *Server) handleCommentDrafts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// ⛔ Sanitise the request-supplied ID. pkg/comment rejects a traversing id
+		// as well, which is the defence that matters, but this handler was the one
+		// that passed it through raw while its four siblings sanitised.
 		draft := &comment.CommentDraft{
-			ID:        req.ID,
+			ID:        sanitizeDraftID(req.ID),
 			InReplyTo: polisurl.NormalizeToMD(req.InReplyTo),
 			RootPost:  polisurl.NormalizeToMD(req.RootPost),
 			Content:   req.Content,
 		}
 
-		if err := comment.SaveDraft(s.DataDir, draft); err != nil {
+		if err := comment.SaveDraft(s.Site(), draft); err != nil {
 			s.LogError("failed to save draft: %v", err)
 			http.Error(w, "Failed to save draft", http.StatusInternalServerError)
 			return
@@ -1454,7 +1405,7 @@ func (s *Server) handleCommentDraft(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		draft, err := comment.LoadDraft(s.DataDir, id)
+		draft, err := comment.LoadDraft(s.Site(), id)
 		if err != nil {
 			http.Error(w, "Draft not found", http.StatusNotFound)
 			return
@@ -1464,7 +1415,7 @@ func (s *Server) handleCommentDraft(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(draft)
 
 	case http.MethodDelete:
-		if err := comment.DeleteDraft(s.DataDir, id); err != nil {
+		if err := comment.DeleteDraft(s.Site(), id); err != nil {
 			s.LogError("failed to delete draft: %v", err)
 			http.Error(w, "Failed to delete draft", http.StatusInternalServerError)
 			return
@@ -1514,7 +1465,7 @@ func (s *Server) handleCommentSign(w http.ResponseWriter, r *http.Request) {
 	var draft *comment.CommentDraft
 	if req.DraftID != "" {
 		var err error
-		draft, err = comment.LoadDraft(s.DataDir, req.DraftID)
+		draft, err = comment.LoadDraft(s.Site(), req.DraftID)
 		if err != nil {
 			http.Error(w, "Draft not found", http.StatusNotFound)
 			return
@@ -1545,7 +1496,7 @@ func (s *Server) handleCommentSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	signed, err := comment.SignComment(s.DataDir, draft, authorDomain, siteURL, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
+	signed, err := comment.SignComment(s.Site(), draft, authorDomain, siteURL, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
 	if err != nil {
 		s.LogError("failed to sign comment: %v", err)
 		http.Error(w, "Failed to sign comment", http.StatusInternalServerError)
@@ -1584,9 +1535,8 @@ func (s *Server) handleCommentBeseech(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Business logic is in the comment package (pass per-tenant config for hosted safety)
-	result, err := comment.BeseechComment(s.DataDir, req.CommentID, s.PrivateKey, &comment.DiscoveryConfig{
+	result, err := comment.BeseechComment(s.Site(), req.CommentID, s.PrivateKey, &comment.DiscoveryConfig{
 		DiscoveryURL: s.DiscoveryURL,
-		DiscoveryKey: s.DiscoveryKey,
 		BaseURL:      s.GetBaseURL(),
 	})
 
@@ -1620,7 +1570,7 @@ func (s *Server) handleCommentBeseech(w http.ResponseWriter, r *http.Request) {
 			Timestamp:     time.Now().UTC().Format("2006-01-02T15:04:05Z"),
 			CommitMessage: hooks.GenerateCommitMessage(hooks.EventPostComment, result.Comment.InReplyTo),
 		}
-		hooks.RunHook(s.DataDir, hc, payload)
+		hooks.RunHook(s.Site(), hc, payload)
 	}
 
 	s.LogEvent("pub.polis.comment.beseech", map[string]interface{}{
@@ -1642,7 +1592,7 @@ func (s *Server) handleCommentsPending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	comments, err := comment.ListComments(s.DataDir, comment.StatusPending)
+	comments, err := comment.ListComments(s.Site(), comment.StatusPending)
 	if err != nil {
 		s.LogError("failed to list pending comments: %v", err)
 		http.Error(w, "Failed to list pending comments", http.StatusInternalServerError)
@@ -1661,7 +1611,7 @@ func (s *Server) handleCommentsBlessed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	comments, err := comment.ListComments(s.DataDir, comment.StatusBlessed)
+	comments, err := comment.ListComments(s.Site(), comment.StatusBlessed)
 	if err != nil {
 		s.LogError("failed to list blessed comments: %v", err)
 		http.Error(w, "Failed to list blessed comments", http.StatusInternalServerError)
@@ -1680,7 +1630,7 @@ func (s *Server) handleCommentsDenied(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	comments, err := comment.ListComments(s.DataDir, comment.StatusDenied)
+	comments, err := comment.ListComments(s.Site(), comment.StatusDenied)
 	if err != nil {
 		s.LogError("failed to list denied comments: %v", err)
 		http.Error(w, "Failed to list denied comments", http.StatusInternalServerError)
@@ -1717,7 +1667,7 @@ func (s *Server) handleCommentByStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := comment.GetComment(s.DataDir, commentID, status)
+	result, err := comment.GetComment(s.Site(), commentID, status)
 	if err != nil {
 		http.Error(w, "Comment not found", http.StatusNotFound)
 		return
@@ -1762,7 +1712,7 @@ func (s *Server) handleCommentsSync(w http.ResponseWriter, r *http.Request) {
 
 	// Sync pending comments (pass nil hookConfig when hooks disabled to prevent execution)
 	hc := s.getHookConfig()
-	result, err := comment.SyncPendingComments(s.DataDir, s.GetBaseURL(), client, hc)
+	result, err := comment.SyncPendingComments(s.Site(), s.GetBaseURL(), client, hc)
 	if err != nil {
 		log.Printf("handleCommentsSync: failed for %s: %v", myDomain, err)
 		s.LogError("failed to sync comments: %v", err)
@@ -1875,7 +1825,7 @@ func (s *Server) handleBlessingGrant(w http.ResponseWriter, r *http.Request) {
 	s.LogDebug("Granting blessing for comment version: %s", req.CommentVersion)
 	bhc := s.getHookConfig()
 	result, err := blessing.GrantByVersion(
-		s.DataDir,
+		s.Site(),
 		req.CommentVersion,
 		polisurl.NormalizeToMD(req.CommentURL),
 		polisurl.NormalizeToMD(req.InReplyTo),
@@ -1971,7 +1921,7 @@ func (s *Server) handleBlessedComments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Load blessed comments from local metadata
-	bc, err := metadata.LoadBlessedComments(s.DataDir)
+	bc, err := metadata.LoadBlessedComments(s.Site())
 	if err != nil {
 		// Return empty list if file doesn't exist
 		w.Header().Set("Content-Type", "application/json")
@@ -2010,7 +1960,7 @@ func (s *Server) handleBlessedComments(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(localPostPath, ".md") {
 			localPostPath += ".md"
 		}
-		if raw, err := os.ReadFile(filepath.Join(s.DataDir, localPostPath)); err == nil {
+		if raw, err := s.readKey(siteKey(localPostPath)); err == nil {
 			epc.PostTitle = extractFrontmatterTitle(string(raw))
 		}
 		// Derive a readable title from the URL/path if no frontmatter title found
@@ -2041,8 +1991,8 @@ func (s *Server) handleBlessedComments(w http.ResponseWriter, r *http.Request) {
 				commentURL = strings.TrimSuffix(commentURL, ".html") + ".md"
 			}
 			if relPath := extractCommentRelPath(commentURL); relPath != "" {
-				localPath := filepath.Join(s.DataDir, relPath)
-				if raw, err := os.ReadFile(localPath); err == nil {
+				localPath := siteKey(relPath)
+				if raw, err := s.readKey(localPath); err == nil {
 					body := stripFrontmatter(string(raw))
 					ec.Excerpt = makeExcerpt(body, feed.ExcerptCharCap)
 				}
@@ -2084,7 +2034,7 @@ func (s *Server) handleBlessingRevoke(w http.ResponseWriter, r *http.Request) {
 	// Remove from blessed.json, SIGNED — an unbless is as much an authored act as
 	// a bless (SIGNET epic 14). A nil key writes unsigned, which is the safe
 	// direction: unsigned is a fact, a stale signature is a false alarm.
-	if err := metadata.RemoveBlessedCommentSigned(s.DataDir, normalizedURL, s.PrivateKey); err != nil {
+	if err := metadata.RemoveBlessedCommentSigned(s.Site(), normalizedURL, s.PrivateKey); err != nil {
 		s.LogError("failed to revoke blessing: %v", err)
 		http.Error(w, "Failed to revoke blessing", http.StatusInternalServerError)
 		return
@@ -2174,14 +2124,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	// on v3) are excluded from the picker. Undeclared-on-disk orphans are
 	// also excluded (disk drift is covered separately by the orphan-dir
 	// Patrol check).
-	activeShape, _ := bundle.GetActiveShapeName(s.DataDir)
-	themes, _ := theme.ListUserSelectableThemes(s.DataDir, s.CLIThemesDir, activeShape)
-	activeTheme, _ := theme.GetActiveTheme(s.DataDir)
+	activeShape, _ := bundle.GetActiveShapeName(s.Site())
+	themes, _ := theme.ListUserSelectableThemes(s.Site(), s.CLIThemesDir, activeShape)
+	activeTheme, _ := theme.GetActiveTheme(s.Site())
 
 	// Load avatar and author_name from .well-known/polis
 	var avatarConfig *site.AvatarConfig
 	var authorName string
-	if wk, err := site.LoadWellKnown(s.DataDir); err == nil {
+	if wk, err := site.LoadWellKnown(s.Site()); err == nil {
 		avatarConfig = wk.Avatar
 		authorName = wk.AuthorName
 	}
@@ -2232,7 +2182,7 @@ func (s *Server) getAutomations() []Automation {
 	}
 
 	for _, h := range allHooks {
-		path := hooks.GetHookPathWithDiscovery(hc, h.event, s.DataDir)
+		path := hooks.GetHookPathWithDiscovery(hc, h.event, s.Site())
 		if path != "" {
 			automations = append(automations, Automation{
 				ID:          h.id,
@@ -2365,15 +2315,12 @@ func (s *Server) handleAutomationsQuick(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) createHookScript(script string, hookType string) (string, error) {
 	// Create hooks directory (.polis/webapp/hooks — restricted)
-	hooksDir := filepath.Join(s.DataDir, ".polis", "webapp", "hooks")
-	if err := os.MkdirAll(hooksDir, 0700); err != nil {
-		return "", fmt.Errorf("failed to create hooks directory: %w", err)
-	}
+	hooksDir := siteKey(".polis", "webapp", "hooks")
 
 	// Write the script file
 	relativePath := ".polis/webapp/hooks/" + hookType + ".sh"
-	scriptPath := filepath.Join(hooksDir, hookType+".sh")
-	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+	scriptPath := siteKey(hooksDir, hookType+".sh")
+	if err := s.writeKey(scriptPath, []byte(script), 0755); err != nil {
 		return "", fmt.Errorf("failed to write hook script: %w", err)
 	}
 
@@ -2446,8 +2393,8 @@ func (s *Server) handleAutomation(w http.ResponseWriter, r *http.Request) {
 
 		// Optionally delete the script file (only if it's in our hooks directory)
 		if scriptPath != "" && strings.HasPrefix(scriptPath, ".polis/webapp/hooks/") {
-			fullPath := filepath.Join(s.DataDir, scriptPath)
-			os.Remove(fullPath) // Ignore error - file might not exist
+			fullPath := siteKey(scriptPath)
+			_ = s.deleteKey(fullPath, true)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -2476,12 +2423,12 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 // getExistingHooks returns a list of hook types that have existing hook files
 func (s *Server) getExistingHooks() []string {
 	var existing []string
-	hooksDir := filepath.Join(s.DataDir, ".polis", "webapp", "hooks")
+	hooksDir := siteKey(".polis", "webapp", "hooks")
 
 	hookTypes := []string{"post-publish", "post-republish", "post-comment"}
 	for _, hookType := range hookTypes {
-		scriptPath := filepath.Join(hooksDir, hookType+".sh")
-		if _, err := os.Stat(scriptPath); err == nil {
+		scriptPath := siteKey(hooksDir, hookType+".sh")
+		if present, _ := s.existsKey(scriptPath); present {
 			existing = append(existing, hookType)
 		}
 	}
@@ -2518,17 +2465,13 @@ func (s *Server) handleHooksGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create hooks directory (.polis/webapp/hooks — restricted)
-	hooksDir := filepath.Join(s.DataDir, ".polis", "webapp", "hooks")
-	if err := os.MkdirAll(hooksDir, 0700); err != nil {
-		s.LogError("failed to create hooks directory: %v", err)
-		http.Error(w, "Failed to create hooks directory", http.StatusInternalServerError)
-		return
-	}
+	// The hooks directory (.polis/webapp/hooks) is restricted: the site's
+	// store creates it at 0700 with the script below, as the MkdirAll that used
+	// to be here did.
+	scriptKey := siteKey(".polis", "webapp", "hooks", req.HookType+".sh")
 
 	// Check if file already exists
-	scriptPath := filepath.Join(hooksDir, req.HookType+".sh")
-	if _, err := os.Stat(scriptPath); err == nil {
+	if present, _ := s.existsKey(scriptKey); present {
 		http.Error(w, "Hook file already exists: .polis/webapp/hooks/"+req.HookType+".sh", http.StatusConflict)
 		return
 	}
@@ -2550,7 +2493,7 @@ set -e
 echo "Hook triggered: %s"
 `, req.HookType, req.HookType, req.HookType)
 
-	if err := os.WriteFile(scriptPath, []byte(script), 0755); err != nil {
+	if err := s.writeKey(scriptKey, []byte(script), 0755); err != nil {
 		s.LogError("failed to write hook script: %v", err)
 		http.Error(w, "Failed to write hook script", http.StatusInternalServerError)
 		return
@@ -2589,15 +2532,6 @@ echo "Hook triggered: %s"
 	})
 }
 
-// reservedThemes are system themes that must not be user-selectable: sols is the
-// logged-out landing theme; stardust is reserved for why.polis.pub. They are
-// also filtered out of the picker list in app.js. Reservation blocks selection
-// only — a tenant can still be put on one via registry.json directly.
-var reservedThemes = map[string]bool{
-	"sols":     true,
-	"stardust": true,
-}
-
 // handleThemeSwitch handles POST /api/settings/theme to switch the site theme.
 func (s *Server) handleThemeSwitch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -2620,13 +2554,13 @@ func (s *Server) handleThemeSwitch(w http.ResponseWriter, r *http.Request) {
 	// logged-out landing theme; stardust is reserved for why.polis.pub. (A
 	// tenant can still be put on a reserved theme via registry.json directly —
 	// this only blocks user selection.)
-	if reservedThemes[req.Theme] {
+	if theme.IsReserved(req.Theme) {
 		http.Error(w, req.Theme+" is reserved and cannot be selected as a personal theme", http.StatusBadRequest)
 		return
 	}
 
 	// Validate that the theme exists
-	themes, err := theme.ListThemes(s.DataDir, s.CLIThemesDir)
+	themes, err := theme.ListThemes(s.Site(), s.CLIThemesDir)
 	if err != nil {
 		s.LogError("theme switch: failed to list themes: %v", err)
 		http.Error(w, "Failed to list themes", http.StatusInternalServerError)
@@ -2645,12 +2579,12 @@ func (s *Server) handleThemeSwitch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update manifest and copy CSS
-	if err := theme.SetActiveTheme(s.DataDir, req.Theme); err != nil {
+	if err := theme.SetActiveTheme(s.Site(), req.Theme); err != nil {
 		s.LogError("theme switch: set active theme failed: %v", err)
 		http.Error(w, "Failed to set theme: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := theme.CopyCSS(s.DataDir, s.CLIThemesDir, req.Theme); err != nil {
+	if err := theme.CopyCSS(s.Site(), s.CLIThemesDir, req.Theme); err != nil {
 		s.LogError("theme switch: copy CSS failed: %v", err)
 		http.Error(w, "Failed to copy theme CSS: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -2845,7 +2779,7 @@ func (s *Server) handleUpdateAvatar(w http.ResponseWriter, r *http.Request) {
 
 	// site.SetAvatar saves through the one lossless writer (every member the
 	// struct does not model survives) and regenerates the favicon.
-	faviconErr, err := site.SetAvatar(s.DataDir, req.Avatar)
+	faviconErr, err := site.SetAvatar(s.Site(), req.Avatar)
 	if err != nil {
 		s.LogError("failed to save .well-known/polis: %v", err)
 		http.Error(w, "Failed to save site config", http.StatusInternalServerError)
@@ -2886,7 +2820,7 @@ func (s *Server) handleUpdateAuthorName(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// The one lossless writer, shared with `polis site set author-name`.
-	name, err := site.SetAuthorName(s.DataDir, req.AuthorName)
+	name, err := site.SetAuthorName(s.Site(), req.AuthorName)
 	if err != nil {
 		s.LogError("failed to save .well-known/polis: %v", err)
 		http.Error(w, "Failed to save site config", http.StatusInternalServerError)
@@ -2907,8 +2841,8 @@ func (s *Server) handleUpdateAuthorName(w http.ResponseWriter, r *http.Request) 
 // handleFavicon serves the generated favicon.svg from the data directory.
 // Falls back to 404 if no favicon has been generated yet.
 func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
-	faviconPath := filepath.Join(s.DataDir, "favicon.svg")
-	data, err := os.ReadFile(faviconPath)
+	faviconPath := siteKey("favicon.svg")
+	data, err := s.readKey(faviconPath)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -2979,8 +2913,8 @@ func (s *Server) handleContent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the content file (markdown)
-	fullPath := filepath.Join(s.DataDir, contentPath)
-	content, err := os.ReadFile(fullPath)
+	fullPath := siteKey(contentPath)
+	content, err := s.readKey(fullPath)
 	if err != nil {
 		http.Error(w, "Content not found", http.StatusNotFound)
 		return
@@ -3038,21 +2972,22 @@ func (s *Server) handleContent(w http.ResponseWriter, r *http.Request) {
 // handleHTMLContent serves pre-rendered HTML files for browser mode
 func (s *Server) handleHTMLContent(w http.ResponseWriter, contentPath string) {
 	// First check if the HTML file exists (to validate the path)
-	fullPath := filepath.Join(s.DataDir, contentPath)
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+	fullPath := siteKey(contentPath)
+	// Only a GENUINE absence is a 404, as it was when this asked os.IsNotExist.
+	if present, existsErr := s.existsKey(fullPath); existsErr == nil && !present {
 		http.Error(w, "Content not found", http.StatusNotFound)
 		return
 	}
 
 	// Try to find the corresponding .md source file
 	mdPath := strings.TrimSuffix(contentPath, ".html") + ".md"
-	fullMdPath := filepath.Join(s.DataDir, mdPath)
+	fullMdPath := siteKey(mdPath)
 	markdown := ""
 	editable := false
 	var metadata map[string]string
 	var html string
 
-	mdContent, err := os.ReadFile(fullMdPath)
+	mdContent, err := s.readKey(fullMdPath)
 	if err == nil {
 		// Found the source markdown - render it fresh for consistent preview styling
 		markdown = string(mdContent)
@@ -3072,7 +3007,7 @@ func (s *Server) handleHTMLContent(w http.ResponseWriter, contentPath string) {
 
 	// If we couldn't render from markdown, fall back to the pre-rendered HTML
 	if html == "" {
-		htmlContent, err := os.ReadFile(fullPath)
+		htmlContent, err := s.readKey(fullPath)
 		if err != nil {
 			http.Error(w, "Content not found", http.StatusNotFound)
 			return
@@ -3201,7 +3136,7 @@ func (s *Server) handleSiteRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Get author_name from .well-known/polis (email is private, not sent to DS)
 	var authorName string
-	if wk, err := site.LoadWellKnown(s.DataDir); err == nil {
+	if wk, err := site.LoadWellKnown(s.Site()); err == nil {
 		authorName = wk.AuthorName
 	}
 
@@ -3215,7 +3150,7 @@ func (s *Server) handleSiteRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write local registration marker
-	if err := discovery.WriteRegistrationMarker(s.DataDir, s.DiscoveryURL, domain, result.ServiceAttestation); err != nil {
+	if err := discovery.WriteRegistrationMarker(s.Site(), s.DiscoveryURL, domain, result.ServiceAttestation); err != nil {
 		s.LogWarn("Failed to write registration marker: %v", err)
 	}
 
@@ -3227,12 +3162,11 @@ func (s *Server) handleSiteRegister(w http.ResponseWriter, r *http.Request) {
 	// mirrors the cli register path.
 	reconciledFollows := 0
 	if reannounced, rerr := following.ReconcileFollowsToDS(
-		following.DefaultPath(s.DataDir), domain, client, s.PrivateKey,
+		s.Site(), domain, client, s.PrivateKey,
 		&stream.DiscoveryConfig{
 			DiscoveryURL: s.DiscoveryURL,
-			DiscoveryKey: s.DiscoveryKey,
 			BaseURL:      baseURL,
-			DataDir:      s.DataDir,
+			Site:         s.Site(),
 		},
 	); rerr != nil {
 		s.LogWarn("follow reconcile after register skipped: %v", rerr)
@@ -3305,7 +3239,7 @@ func (s *Server) handleSiteUnregister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Remove local registration marker
-	if err := discovery.RemoveRegistrationMarker(s.DataDir, s.DiscoveryURL); err != nil {
+	if err := discovery.RemoveRegistrationMarker(s.Site(), s.DiscoveryURL); err != nil {
 		s.LogWarn("Failed to remove registration marker: %v", err)
 	}
 
@@ -3407,8 +3341,8 @@ const defaultAboutContent = "Hi \u2014 I'm just getting set up here. A real abou
 func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		aboutPath := filepath.Join(s.DataDir, "site", "snippets", "about.md")
-		data, err := os.ReadFile(aboutPath)
+		aboutPath := siteKey("site", "snippets", "about.md")
+		data, err := s.readKey(aboutPath)
 		if err != nil {
 			// File doesn't exist — return default content
 			defaultHTML, _ := render.MarkdownToHTML(defaultAboutContent)
@@ -3447,15 +3381,10 @@ func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Ensure snippets directory exists
-		snippetsDir := filepath.Join(s.DataDir, "site", "snippets")
-		if err := os.MkdirAll(snippetsDir, 0755); err != nil {
-			s.LogError("failed to create snippets dir: %v", err)
-			http.Error(w, "Failed to create snippets directory", http.StatusInternalServerError)
-			return
-		}
+		snippetsDir := siteKey("site", "snippets")
 
-		aboutPath := filepath.Join(snippetsDir, "about.md")
-		if err := os.WriteFile(aboutPath, []byte(req.Content), 0644); err != nil {
+		aboutPath := siteKey(snippetsDir, "about.md")
+		if err := s.writeKey(aboutPath, []byte(req.Content), 0644); err != nil {
 			s.LogError("failed to write about.md: %v", err)
 			http.Error(w, "Failed to save about content", http.StatusInternalServerError)
 			return
@@ -3489,7 +3418,7 @@ func (s *Server) handleSnippets(w http.ResponseWriter, r *http.Request) {
 		filter := r.URL.Query().Get("filter") // "all", "global", or "theme"
 
 		// List snippets from both local site/themes/ and CLI themes (fallback)
-		tree, err := snippet.ListSnippets(s.DataDir, s.CLIThemesDir, "", path, filter)
+		tree, err := snippet.ListSnippets(s.Site(), s.CLIThemesDir, "", path, filter)
 		if err != nil {
 			s.LogError("failed to list snippets: %v", err)
 			http.Error(w, "Failed to list snippets", http.StatusInternalServerError)
@@ -3524,7 +3453,7 @@ func (s *Server) handleSnippets(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := snippet.CreateSnippet(s.DataDir, req.Path, req.Content); err != nil {
+		if err := snippet.CreateSnippet(s.Site(), req.Path, req.Content); err != nil {
 			s.LogError("failed to create snippet: %v", err)
 			http.Error(w, "Failed to create snippet", http.StatusInternalServerError)
 			return
@@ -3559,11 +3488,11 @@ func (s *Server) handleSnippet(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Read from local site/themes/ or CLI themes (fallback)
-		content, err := snippet.ReadSnippet(s.DataDir, s.CLIThemesDir, "", snippetPath, source)
+		content, err := snippet.ReadSnippet(s.Site(), s.CLIThemesDir, "", snippetPath, source)
 		if err != nil {
 			// Try the other source if not found
 			if source == "global" {
-				content, err = snippet.ReadSnippet(s.DataDir, s.CLIThemesDir, "", snippetPath, "theme")
+				content, err = snippet.ReadSnippet(s.Site(), s.CLIThemesDir, "", snippetPath, "theme")
 			}
 			if err != nil {
 				http.Error(w, "Snippet not found", http.StatusNotFound)
@@ -3599,7 +3528,7 @@ func (s *Server) handleSnippet(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Write to local site/themes/ or CLI themes (fallback)
-		if err := snippet.WriteSnippet(s.DataDir, s.CLIThemesDir, "", snippetPath, req.Content, req.Source); err != nil {
+		if err := snippet.WriteSnippet(s.Site(), s.CLIThemesDir, "", snippetPath, req.Content, req.Source); err != nil {
 			s.LogError("failed to save snippet: %v", err)
 			http.Error(w, "Failed to save snippet", http.StatusInternalServerError)
 			return
@@ -3614,7 +3543,7 @@ func (s *Server) handleSnippet(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodDelete:
 		// Delete snippet (global only)
-		if err := snippet.DeleteSnippet(s.DataDir, snippetPath); err != nil {
+		if err := snippet.DeleteSnippet(s.Site(), snippetPath); err != nil {
 			s.LogError("failed to delete snippet: %v", err)
 			http.Error(w, "Failed to delete snippet", http.StatusInternalServerError)
 			return
@@ -3660,7 +3589,7 @@ func (s *Server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
 
 	// Create page renderer using Go packages
 	renderer, err := render.NewPageRenderer(render.PageConfig{
-		DataDir:           s.DataDir,
+		Site:              s.Site(),
 		CLIThemesDir:      s.CLIThemesDir,
 		BaseURL:           baseURL,
 		RenderMarkers:     true, // Enable snippet markers for editing
@@ -3701,16 +3630,29 @@ func (s *Server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
 // Social handlers (following, feed, remote post)
 // ============================================================================
 
+// followErrorStatus maps a follow failure to its status. A target that is not
+// a polis site is the caller's mistake (422); a target that errored or could
+// not be reached is upstream (502); anything else failed here (500). An API
+// client that retries on 5xx must not retry a URL that will never be a site.
+func followErrorStatus(err error) int {
+	switch {
+	case remote.TargetIsNotPolis(err):
+		return http.StatusUnprocessableEntity
+	case remote.TargetUnavailable(err):
+		return http.StatusBadGateway
+	}
+	return http.StatusInternalServerError
+}
+
 // handleFollowing manages the following list.
 // GET: returns the list of followed authors.
 // POST: follows a new author (with blessing side-effect).
 // DELETE: unfollows an author (with denial side-effect).
 func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
-	followingPath := following.DefaultPath(s.DataDir)
 
 	switch r.Method {
 	case http.MethodGet:
-		f, err := following.Load(followingPath)
+		f, err := following.LoadSite(s.Site())
 		if err != nil {
 			s.LogError("following load failed: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -3741,7 +3683,7 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 				// actor signing on someone's behalf. Passing the key matters: a
 				// plain Save here would silently strip a good signature every time
 				// a title got filled in.
-				if err := following.SaveSigned(followingPath, f, s.PrivateKey); err != nil {
+				if err := following.SaveSigned(s.Site(), f, s.PrivateKey); err != nil {
 					s.LogError("following backfill: save failed: %v", err)
 				}
 			}
@@ -3752,7 +3694,7 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 		// regardless, because a follow list is how a person reaches their
 		// network and withholding it over a signature would disconnect them
 		// (D4). Unsigned is the normal state until the epic-11 backfill.
-		followSig, followSigErr := following.VerifySite(s.DataDir)
+		followSig, followSigErr := following.VerifySite(s.Site())
 		signature := map[string]interface{}{"status": string(followSig)}
 		if followSigErr != nil {
 			signature["message"] = followSigErr.Error()
@@ -3799,13 +3741,12 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 		discoveryClient := s.NewAuthDSClient(r, followDomain)
 		remoteClient := s.NewRemoteClient()
 
-		privPath, pubPath := policy.DefaultPaths(s.DataDir)
-		policies, _ := policy.LoadPolicies(privPath, pubPath)
+		policies, _ := policy.LoadPolicies(s.Site())
 
-		result, err := following.FollowWithBlessing(followingPath, req.URL, discoveryClient, remoteClient, s.PrivateKey, policies, s.FollowConfig())
+		result, err := following.FollowWithBlessing(s.Site(), req.URL, discoveryClient, remoteClient, s.PrivateKey, policies, s.FollowConfig())
 		if err != nil {
 			s.LogError("follow failed: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), followErrorStatus(err))
 			return
 		}
 
@@ -3853,10 +3794,9 @@ func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
 		discoveryClient := s.NewAuthDSClient(r, unfollowDomain)
 		remoteClient := s.NewRemoteClient()
 
-		privPath2, pubPath2 := policy.DefaultPaths(s.DataDir)
-		unfollowPolicies, _ := policy.LoadPolicies(privPath2, pubPath2)
+		unfollowPolicies, _ := policy.LoadPolicies(s.Site())
 
-		result, err := following.UnfollowWithDenial(followingPath, req.URL, discoveryClient, remoteClient, s.PrivateKey, unfollowPolicies, s.FollowConfig())
+		result, err := following.UnfollowWithDenial(s.Site(), req.URL, discoveryClient, remoteClient, s.PrivateKey, unfollowPolicies, s.FollowConfig())
 		if err != nil {
 			s.LogError("unfollow failed: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -3936,7 +3876,7 @@ func (s *Server) handleFeedViewed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 
 	// Catch the viewed cursor up to the feed-CONTENT high-water mark (the
 	// position of the last sync that actually added feed items), NOT the raw
@@ -3963,7 +3903,7 @@ func (s *Server) handleBlessingInboxViewed(w http.ResponseWriter, r *http.Reques
 	}
 
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 
 	syncCursor, _ := store.GetCursor("pub.polis.sync")
 	if syncCursor != "" {
@@ -3986,7 +3926,7 @@ func (s *Server) handleDMSurfaceViewed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 	_ = store.SetCursor("pub.polis.dm.viewed", time.Now().UTC().Format(time.RFC3339Nano))
 
 	w.Header().Set("Content-Type", "application/json")
@@ -4153,8 +4093,7 @@ func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build followed domains set
-	followingPath := following.DefaultPath(s.DataDir)
-	f, _ := following.Load(followingPath)
+	f, _ := following.LoadSite(s.Site())
 	followedDomains := make(map[string]bool)
 	if f != nil {
 		for _, entry := range f.Following {
@@ -4678,6 +4617,13 @@ func extractFrontmatterTitle(content string) string {
 }
 
 // stripFrontmatter removes YAML frontmatter (---...---) from content.
+//
+// It is deliberately NOT replaced by publish.StripFrontmatter, which reads
+// worse on markdown polis did not write: it leaves the frontmatter of a CRLF
+// file in place (its pattern needs "---\n"), so a remote post's frontmatter,
+// signature line included, would render as body; and it trims trailing
+// whitespace per line, dropping markdown hard breaks. Several callers here
+// read other sites' content, so the duplicate stays.
 func stripFrontmatter(content string) string {
 	if !strings.HasPrefix(content, "---") {
 		return content
@@ -4837,7 +4783,7 @@ func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
 
 	// 2. Blessing activity from cached state
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 	var blessingState stream.BlessingState
 	_ = store.LoadState("pub.polis.comment.blessing", &blessingState)
 
@@ -5046,7 +4992,7 @@ func (s *Server) handleFollowerCount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 
 	var state stream.FollowerState
 	_ = store.LoadState("pub.polis.follow", &state)
@@ -5083,7 +5029,7 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mgr := notification.NewManager(s.DataDir, s.GetDiscoveryDomain())
+	mgr := notification.NewManager(s.Site(), s.GetDiscoveryDomain())
 
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -5121,7 +5067,7 @@ func (s *Server) handleNotificationCount(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	mgr := notification.NewManager(s.DataDir, s.GetDiscoveryDomain())
+	mgr := notification.NewManager(s.Site(), s.GetDiscoveryDomain())
 	unread, err := mgr.CountUnread()
 	if err != nil {
 		s.LogError("Failed to count notifications: %v", err)
@@ -5152,7 +5098,7 @@ func (s *Server) handleNotificationRead(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	mgr := notification.NewManager(s.DataDir, s.GetDiscoveryDomain())
+	mgr := notification.NewManager(s.Site(), s.GetDiscoveryDomain())
 	marked, err := mgr.MarkRead(req.IDs, req.All)
 	if err != nil {
 		s.LogError("Failed to mark notifications as read: %v", err)
@@ -5268,7 +5214,7 @@ func (s *Server) handleWidgetPublishComment(w http.ResponseWriter, r *http.Reque
 		Content:   text,
 	}
 
-	signed, err := comment.SignComment(s.DataDir, draft, authorDomain, siteURL, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
+	signed, err := comment.SignComment(s.Site(), draft, authorDomain, siteURL, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
 	if err != nil {
 		s.LogError("widget publish comment: sign failed: %v", err)
 		http.Error(w, "Failed to sign comment", http.StatusInternalServerError)
@@ -5277,9 +5223,8 @@ func (s *Server) handleWidgetPublishComment(w http.ResponseWriter, r *http.Reque
 
 	// Attempt to send blessing request (beseech) — pass per-tenant config for hosted safety
 	blessingStatus := "pending"
-	result, err := comment.BeseechComment(s.DataDir, signed.Meta.ID, s.PrivateKey, &comment.DiscoveryConfig{
+	result, err := comment.BeseechComment(s.Site(), signed.Meta.ID, s.PrivateKey, &comment.DiscoveryConfig{
 		DiscoveryURL: s.DiscoveryURL,
-		DiscoveryKey: s.DiscoveryKey,
 		BaseURL:      s.GetBaseURL(),
 	})
 	if err != nil {
@@ -5341,20 +5286,18 @@ func (s *Server) handleWidgetFollow(w http.ResponseWriter, r *http.Request) {
 		authorURL = "https://" + authorURL
 	}
 
-	followingPath := following.DefaultPath(s.DataDir)
 	followDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
 	discoveryClient := s.NewAuthDSClient(r, followDomain)
 	remoteClient := s.NewRemoteClient()
 
 	switch r.Method {
 	case http.MethodPost:
-		privPath, pubPath := policy.DefaultPaths(s.DataDir)
-		widgetPolicies, _ := policy.LoadPolicies(privPath, pubPath)
+		widgetPolicies, _ := policy.LoadPolicies(s.Site())
 
-		result, err := following.FollowWithBlessing(followingPath, authorURL, discoveryClient, remoteClient, s.PrivateKey, widgetPolicies, s.FollowConfig())
+		result, err := following.FollowWithBlessing(s.Site(), authorURL, discoveryClient, remoteClient, s.PrivateKey, widgetPolicies, s.FollowConfig())
 		if err != nil {
 			s.LogError("widget follow failed: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), followErrorStatus(err))
 			return
 		}
 
@@ -5369,10 +5312,9 @@ func (s *Server) handleWidgetFollow(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case http.MethodDelete:
-		privPath, pubPath := policy.DefaultPaths(s.DataDir)
-		widgetUnfollowPolicies, _ := policy.LoadPolicies(privPath, pubPath)
+		widgetUnfollowPolicies, _ := policy.LoadPolicies(s.Site())
 
-		result, err := following.UnfollowWithDenial(followingPath, authorURL, discoveryClient, remoteClient, s.PrivateKey, widgetUnfollowPolicies, s.FollowConfig())
+		result, err := following.UnfollowWithDenial(s.Site(), authorURL, discoveryClient, remoteClient, s.PrivateKey, widgetUnfollowPolicies, s.FollowConfig())
 		if err != nil {
 			s.LogError("widget unfollow failed: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -5438,6 +5380,10 @@ func WriteZipArchive(w io.Writer, dataDir string, excludeDirs []string) error {
 
 	var totalWritten int64
 
+	// NOT the storage interface, for this walk and the os.Open below: this is
+	// the site EXPORT, which streams every file into a zip. The interface is
+	// whole-file over []byte because polis artifacts are small; a whole site
+	// is not one.
 	return filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // skip files we can't read
@@ -5453,6 +5399,13 @@ func WriteZipArchive(w io.Writer, dataDir string, excludeDirs []string) error {
 			if excludeSet[rel] {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+
+		// ⛔ REGULAR FILES ONLY. Walk reports a symlink without following it,
+		// but os.Open below would: a link in one site pointing at another
+		// tenant's .polis/keys/id_ed25519 put that key in this site's export.
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 
@@ -5535,7 +5488,12 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		// ⭐ 204, NEVER 500: the SSE spec makes 204 mean "stop reconnecting".
+		// A platform that buffers a function's whole response (Vercel) cannot
+		// stream, and a 500 here made the app reopen the stream every 5 s,
+		// forever: a red log row and a function invocation each time. The
+		// app's counts poll instead (initSSE).
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -5591,8 +5549,8 @@ func (s *Server) handleNavState(w http.ResponseWriter, r *http.Request) {
 	// Read author name + avatar from .well-known/polis
 	authorName := ""
 	var avatarConfig map[string]interface{}
-	wkPath := filepath.Join(s.DataDir, ".well-known", "polis")
-	if data, err := os.ReadFile(wkPath); err == nil {
+	wkPath := siteKey(".well-known", "polis")
+	if data, err := s.readKey(wkPath); err == nil {
 		var wk map[string]interface{}
 		if json.Unmarshal(data, &wk) == nil {
 			if name, ok := wk["author_name"].(string); ok {
@@ -5802,9 +5760,9 @@ func (s *Server) handleDMKeyring(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	kr, err := dm.LoadKeyring(dm.DMDir(s.DataDir))
+	kr, err := dm.LoadKeyring(s.Site())
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			http.Error(w, "No DM keyring (not provisioned)", http.StatusNotFound)
 			return
 		}
@@ -5852,10 +5810,9 @@ func (s *Server) handleDMSetPassword(w http.ResponseWriter, r *http.Request) {
 	s.dmKeyringMu.Lock()
 	defer s.dmKeyringMu.Unlock()
 
-	dmDir := dm.DMDir(s.DataDir)
-	kr, err := dm.LoadKeyring(dmDir)
+	kr, err := dm.LoadKeyring(s.Site())
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			http.Error(w, "No DM keyring (not provisioned)", http.StatusNotFound)
 			return
 		}
@@ -5876,7 +5833,7 @@ func (s *Server) handleDMSetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := kr.SaveCAS(dmDir, baseRev); err != nil {
+	if err := kr.SaveCAS(s.Site(), baseRev); err != nil {
 		if errors.Is(err, dm.ErrRevisionConflict) {
 			http.Error(w, "keyring changed concurrently; reload and retry", http.StatusConflict)
 			return
@@ -5887,7 +5844,7 @@ func (s *Server) handleDMSetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-sign + publish the messages-key block so the new epoch's pubkey is advertised.
-	if err := site.PublishMessagesKey(s.DataDir, s.PrivateKey); err != nil {
+	if err := site.PublishMessagesKey(s.Site(), s.PrivateKey); err != nil {
 		s.LogError("dm set-password publish: %v", err)
 		http.Error(w, "Failed to publish messages key", http.StatusInternalServerError)
 		return
@@ -5908,12 +5865,12 @@ func (s *Server) handleDMSetPassword(w http.ResponseWriter, r *http.Request) {
 			if perr == nil && len(newPubRaw) == 32 {
 				var newPub [32]byte
 				copy(newPub[:], newPubRaw)
-				mb := dm.NewMailbox(dmDir)
+				mb := dm.NewMailbox(s.Site())
 				if n, rerr := mb.ReencryptBootstrapForward(bootEp.ID, bootDEK, newEp.ID, newPub); rerr != nil {
 					s.LogError("dm set-password: re-seal bootstrap messages forward failed (server_dek retained, retriable): %v", rerr)
 				} else {
 					if kr.ClearBootstrapServerDEK() {
-						if err := kr.SaveCAS(dmDir, baseRev+1); err != nil {
+						if err := kr.SaveCAS(s.Site(), baseRev+1); err != nil {
 							s.LogError("dm set-password: clear server_dek save failed (retriable): %v", err)
 						}
 					}
@@ -5957,10 +5914,9 @@ func (s *Server) handleDMRewrapPassword(w http.ResponseWriter, r *http.Request) 
 	s.dmKeyringMu.Lock()
 	defer s.dmKeyringMu.Unlock()
 
-	dmDir := dm.DMDir(s.DataDir)
-	kr, err := dm.LoadKeyring(dmDir)
+	kr, err := dm.LoadKeyring(s.Site())
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			http.Error(w, "No DM keyring (not provisioned)", http.StatusNotFound)
 			return
 		}
@@ -5975,7 +5931,7 @@ func (s *Server) handleDMRewrapPassword(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := kr.SaveCAS(dmDir, baseRev); err != nil {
+	if err := kr.SaveCAS(s.Site(), baseRev); err != nil {
 		if errors.Is(err, dm.ErrRevisionConflict) {
 			http.Error(w, "keyring changed concurrently; reload and retry", http.StatusConflict)
 			return
@@ -6075,7 +6031,7 @@ func (s *Server) handleDMSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.DataDir, s.SharedHTTPClient)
+	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.Site(), s.SharedHTTPClient)
 	sender.Logger = dm.EventFunc(s.LogEvent)
 
 	msg, err := sender.SendMessage(req.RecipientURL, req.Content, req.ReplyToID)
@@ -6136,7 +6092,7 @@ func (s *Server) handleDMRecipientKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Site base URL not configured", http.StatusBadRequest)
 		return
 	}
-	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.DataDir, s.SharedHTTPClient)
+	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.Site(), s.SharedHTTPClient)
 	sender.Logger = dm.EventFunc(s.LogEvent)
 	pubB64, epoch, err := sender.ResolveRecipientKey(recipientURL)
 	if err != nil {
@@ -6210,7 +6166,7 @@ func (s *Server) handleDMSendSealed(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Site base URL not configured", http.StatusBadRequest)
 		return
 	}
-	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.DataDir, s.SharedHTTPClient)
+	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.Site(), s.SharedHTTPClient)
 	sender.Logger = dm.EventFunc(s.LogEvent)
 	msg, err := sender.SendSealed(req.RecipientURL, req.SenderEpoch, req.RecipientEpoch, req.BoxPub,
 		dm.SealedBox{Ciphertext: req.Delivery.Ciphertext, Nonce: req.Delivery.Nonce},
@@ -6273,7 +6229,7 @@ func (s *Server) handleDMProtectionStatus(w http.ResponseWriter, r *http.Request
 		http.Error(w, "Site base URL not configured", http.StatusBadRequest)
 		return
 	}
-	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.DataDir, s.SharedHTTPClient)
+	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.Site(), s.SharedHTTPClient)
 	sender.Logger = dm.EventFunc(s.LogEvent)
 	ps, err := sender.FetchProtectionStatus(recipientURL)
 	w.Header().Set("Content-Type", "application/json")
@@ -6395,8 +6351,7 @@ func (s *Server) handleDMRecipients(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	followingPath := following.DefaultPath(s.DataDir)
-	f, err := following.Load(followingPath)
+	f, err := following.LoadSite(s.Site())
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -6481,7 +6436,7 @@ func (s *Server) handleDMRecipients(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if followingChanged {
-		following.SaveSigned(followingPath, f, s.PrivateKey)
+		following.SaveSigned(s.Site(), f, s.PrivateKey)
 	}
 
 	// Resolve each recipient's avatar for the composer list. Uses the shared
@@ -6612,7 +6567,7 @@ func (s *Server) syncFollowerState(remoteDomain string, theyFollowUs bool) {
 	if dsDomain == "" {
 		return
 	}
-	store := stream.NewStore(s.DataDir, dsDomain, "pub.polis.core")
+	store := stream.NewStore(s.Site(), dsDomain, "pub.polis.core")
 	var fs stream.FollowerState
 	if err := store.LoadState("pub.polis.follow", &fs); err != nil {
 		return
@@ -6660,7 +6615,7 @@ func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
 
 // handleTagsList returns all tag files as JSON.
 func (s *Server) handleTagsList(w http.ResponseWriter, r *http.Request) {
-	tags, err := tag.ListTags(s.DataDir)
+	tags, err := tag.ListTags(s.Site())
 	if err != nil {
 		s.LogError("list tags: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -6696,7 +6651,7 @@ func (s *Server) handleTagApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tf, err := tag.ApplyTag(s.DataDir, req.Tag, req.TargetURI, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
+	tf, err := tag.ApplyTag(s.Site(), req.Tag, req.TargetURI, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
 	if err != nil {
 		s.LogError("apply tag: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -6706,7 +6661,7 @@ func (s *Server) handleTagApply(w http.ResponseWriter, r *http.Request) {
 	// Sync with discovery service
 	dsCfg := s.tagDiscoveryConfig()
 	if dsCfg != nil {
-		if err := tag.SyncTag(s.DataDir, tf, s.PrivateKey, dsCfg); err != nil {
+		if err := tag.SyncTag(s.Site(), tf, s.PrivateKey, dsCfg); err != nil {
 			s.LogWarn("tag DS sync failed: %v", err)
 		}
 	}
@@ -6743,7 +6698,7 @@ func (s *Server) handleTagRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tf, err := tag.RemoveTarget(s.DataDir, req.Tag, req.TargetURI, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
+	tf, err := tag.RemoveTarget(s.Site(), req.Tag, req.TargetURI, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
 	if err != nil {
 		s.LogError("remove tag target: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -6778,9 +6733,72 @@ func (s *Server) tagDiscoveryConfig() *tag.DiscoveryConfig {
 	}
 	return &tag.DiscoveryConfig{
 		DiscoveryURL: s.DiscoveryURL,
-		DiscoveryKey: s.DiscoveryKey,
 		BaseURL:      s.BaseURL,
+		Site:         s.Site(),
 		HTTPClient:   s.SharedHTTPClient,
 		Generator:    "polis-cli-go/" + s.CLIVersion,
 	}
+}
+
+// siteKey joins site-relative elements into a key. It does no filesystem
+// work: the store refuses a key that escapes the site, as the RelKey of a
+// joined path did.
+func siteKey(elem ...string) string {
+	return filepath.ToSlash(filepath.Join(elem...))
+}
+
+// The key-addressed file helpers: each goes through the site's own store, so
+// it reaches wherever the site is stored.
+func (s *Server) readKey(key string) ([]byte, error) {
+	return s.Site().Store().Get(context.Background(), key)
+}
+
+func (s *Server) statKey(key string) (storage.Info, error) {
+	return s.Site().Store().Stat(context.Background(), key)
+}
+
+func (s *Server) existsKey(key string) (bool, error) {
+	return s.Site().Store().Exists(context.Background(), key)
+}
+
+func (s *Server) writeKey(key string, data []byte, perm fs.FileMode) error {
+	return s.Site().Store().Put(context.Background(), key, data, storage.WithMode(perm))
+}
+
+// deleteKey removes key. ignoreMissing matches the callers that treated an
+// absent file as success.
+func (s *Server) deleteKey(key string, ignoreMissing bool) error {
+	var opts []storage.DeleteOption
+	if ignoreMissing {
+		opts = append(opts, storage.IgnoreMissing())
+	}
+	return s.Site().Store().Delete(context.Background(), key, opts...)
+}
+
+// listKey lists the direct children of key. A missing prefix yields no
+// entries, which is how every caller here already treated one.
+func (s *Server) listKey(key string) []storage.Entry {
+	entries, err := s.Site().Store().List(context.Background(), key)
+	if err != nil {
+		return nil
+	}
+	return entries
+}
+
+// sanitizeDraftID keeps only the base name of a client-supplied draft id, so it
+// can address nothing but a file in the directory the caller chose.
+//
+// ⚠️ Defence in depth: pkg/comment refuses a traversing id outright. Both exist
+// because a traversing id used to write into ANOTHER TENANT'S site directory on
+// the shared volume, and the detach made it worse by creating missing parents.
+func sanitizeDraftID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	id = pathpkg.Base(filepath.ToSlash(id))
+	if id == "." || id == ".." || id == "/" {
+		return ""
+	}
+	return id
 }

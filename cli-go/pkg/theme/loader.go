@@ -3,16 +3,22 @@ package theme
 
 import (
 	"bufio"
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
-	"io"
+	"io/fs"
 	"math/rand/v2"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Templates holds the loaded theme templates.
@@ -55,15 +61,15 @@ type Manifest struct {
 // LoadShape loads templates for the given shape with optional per-theme overrides.
 //
 // Template resolution, per file (checked in order):
-//  1. Theme dir — allows a theme to override specific templates (e.g. studio13
-//     overrides post.html). Resolved via resolveDir which checks
-//     <dataDir>/site/themes/<themeName>/ then <cliThemesDir>/<themeName>/.
-//  2. Shape dir — the tenant's installed shape fixtures at
-//     <dataDir>/.polis/bundles/pub.polis.core/shapes/<shapeName>/.
+//  1. Theme — allows a theme to override specific templates (e.g. studio13
+//     overrides post.html). Found by resolveThemeSource: the installed
+//     bundle theme, then site/themes/<themeName>/, then <cliThemesDir>/<themeName>/.
+//  2. Shape — the tenant's installed shape fixtures under
+//     .polis/bundles/pub.polis.core/shapes/<shapeName>/ in the site.
 //
 // If the shape dir is missing (tenant not yet installed), LoadShape returns a
 // clear error pointing at the expected path so operators can diagnose.
-func LoadShape(dataDir, cliThemesDir, shapeName, themeName string) (*Templates, error) {
+func LoadShape(site storage.Site, cliThemesDir, shapeName, themeName string) (*Templates, error) {
 	if shapeName == "" {
 		return nil, fmt.Errorf("shape name is required")
 	}
@@ -71,13 +77,19 @@ func LoadShape(dataDir, cliThemesDir, shapeName, themeName string) (*Templates, 
 		return nil, fmt.Errorf("theme name is required")
 	}
 
-	shapeDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "shapes", shapeName)
-	if _, err := os.Stat(shapeDir); err != nil {
-		return nil, fmt.Errorf("shape %q not found at %s (run polis init or wait for Patrol/Medic resync)", shapeName, shapeDir)
+	// ⭐ THE SHAPE LIVES IN THE SITE, so it is found through the STORE. This
+	// was storage.PathExists on a joined path, which made a blob-backed site
+	// unloadable: "shape v4 not found", because an object store has no
+	// directory to stat.
+	shapeKey := bundleShapesKey + "/" + shapeName
+	shapeEntries, _ := site.Store().List(context.Background(), shapeKey)
+	if len(shapeEntries) == 0 {
+		return nil, fmt.Errorf("shape %q not found at %s (run polis init or wait for Patrol/Medic resync)", shapeName, shapeKey)
 	}
+	shapeSrc := siteSource(site, shapeKey)
 
-	// Theme dir is optional — only used when a theme overrides shape markup.
-	themeDir := resolveThemeDir(dataDir, cliThemesDir, themeName)
+	// Theme source is optional — only used when a theme overrides shape markup.
+	themeSrc := resolveThemeSource(site, cliThemesDir, themeName)
 
 	// Dispatch on shape name. Each shape has its own filename set under
 	// shapeDir and populates distinct Templates fields. Cross-shape
@@ -86,55 +98,98 @@ func LoadShape(dataDir, cliThemesDir, shapeName, themeName string) (*Templates, 
 	// time keeps v3 consumers unaffected by v4 extensions.
 	switch shapeName {
 	case "v3":
-		return loadBlogTemplates(themeDir, shapeDir)
+		return loadBlogTemplates(themeSrc, shapeSrc)
 	case "v4":
-		return loadStreamTemplates(themeDir, shapeDir)
+		return loadStreamTemplates(themeSrc, shapeSrc)
 	default:
 		return nil, fmt.Errorf("unsupported shape %q (known: v3, v4)", shapeName)
 	}
 }
 
-// resolveThemeDir finds a theme directory across the locations valid during
-// the SHAPE refactor transition window:
+// resolveThemeSource finds a theme as a SOURCE across the locations valid
+// during the SHAPE refactor transition window, in order:
 //
 //  1. Installed bundle theme (post-refactor canonical):
-//     <dataDir>/.polis/bundles/pub.polis.core/themes/<name>/
+//     .polis/bundles/pub.polis.core/themes/<name>/ in the site
 //  2. Per-tenant override:
-//     <dataDir>/site/themes/<name>/   (legacy; consolidated by Patrol/Medic in 1.g)
-//  3. CLI-shipped repo theme (legacy, only for unmigrated themes —
-//     especial, sols, studio13, turbo, zane in step 1):
+//     site/themes/<name>/ in the site (legacy; consolidated by Patrol/Medic in 1.g)
+//  3. CLI-shipped repo theme (legacy, only for unmigrated themes):
 //     <cliThemesDir>/<name>/
 //
-// Returns "" if the theme isn't found in any location. Callers must handle this
-// case (e.g., LoadShape allows empty themeDir to mean "no theme overrides").
-func resolveThemeDir(dataDir, cliThemesDir, name string) string {
-	candidates := []string{
-		filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "themes", name),
-		filepath.Join(dataDir, "site", "themes", name),
+// Returns an empty source if the theme isn't found in any location. Callers
+// must handle this case (LoadShape treats it as "no theme overrides").
+//
+// ⭐ The first two live inside the site's store and the third is a path,
+// because the CLI's installed themes directory is not a site. Site-first, so
+// a tenant's own theme wins over a shipped one, on any backend.
+func resolveThemeSource(site storage.Site, cliThemesDir, name string) templateSource {
+	ctx := context.Background()
+	for _, dirKey := range []string{bundleThemesKey, localThemesKey} {
+		key := dirKey + "/" + name
+		if entries, err := site.Store().List(ctx, key); err == nil && len(entries) > 0 {
+			return siteSource(site, key)
+		}
 	}
 	if cliThemesDir != "" {
-		candidates = append(candidates, filepath.Join(cliThemesDir, name))
-	}
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			return c
+		d := filepath.Join(cliThemesDir, name)
+		if present, _ := storage.PathExists(d); present {
+			return dirSource(d)
 		}
 	}
-	return ""
+	return templateSource{}
 }
 
-// readWithFallback reads a template file from themeDir first, falling back to baseDir.
-// An empty themeDir is treated as "no theme overrides" — the shape/base dir is the sole source.
-func readWithFallback(themeDir, baseDir, filename string) (string, error) {
-	// Try theme directory first (if provided)
-	if themeDir != "" {
-		if content, err := os.ReadFile(filepath.Join(themeDir, filename)); err == nil {
-			return string(content), nil
-		}
+// templateSource is somewhere templates can be read from: a prefix inside a
+// site's store, or a directory on a filesystem.
+//
+// ⭐⭐⭐ IT EXISTS BECAUSE THE FALLBACK MUST STAY ONE FUNCTION. Templates are
+// looked up theme-first then shape, and a blob-backed site keeps both inside
+// its store while the CLI's installed themes directory is genuinely a path.
+// Writing the fallback twice is how the two drift, and a theme override that
+// silently stops applying on one backend is the kind of difference nobody
+// reports as a bug.
+type templateSource struct {
+	// site is set when this source lives inside a site's store.
+	site storage.Site
+	key  string
+
+	// dir is set when this source is a plain directory outside any site.
+	dir string
+}
+
+func siteSource(site storage.Site, key string) templateSource {
+	return templateSource{site: site, key: key}
+}
+
+func dirSource(dir string) templateSource { return templateSource{dir: dir} }
+
+func (t templateSource) empty() bool { return t.key == "" && t.dir == "" }
+
+func (t templateSource) read(filename string) ([]byte, error) {
+	if t.key != "" {
+		return t.site.Store().Get(context.Background(), t.key+"/"+filename)
 	}
-	// Fall back to shape/base directory
-	if baseDir != "" {
-		if content, err := os.ReadFile(filepath.Join(baseDir, filename)); err == nil {
+	if t.dir != "" {
+		return storage.NewPOSIX(t.dir).Get(context.Background(), filename)
+	}
+	return nil, fmt.Errorf("template source is empty")
+}
+
+func (t templateSource) String() string {
+	if t.key != "" {
+		return t.key
+	}
+	return t.dir
+}
+
+// readFromSources reads a template from the theme first, then the shape. An
+// empty theme source means "no theme overrides".
+func readFromSources(theme, base templateSource, filename string) (string, error) {
+	for _, src := range []templateSource{theme, base} {
+		if src.empty() {
+			continue
+		}
+		if content, err := src.read(filename); err == nil {
 			return string(content), nil
 		}
 	}
@@ -144,7 +199,7 @@ func readWithFallback(themeDir, baseDir, filename string) (string, error) {
 // loadBlogTemplates loads the blog shape template set from themeDir (if present)
 // falling back to baseDir (the shape fixture dir). Original pre-step-02
 // behavior preserved verbatim.
-func loadBlogTemplates(themeDir, baseDir string) (*Templates, error) {
+func loadBlogTemplates(themeDir, baseDir templateSource) (*Templates, error) {
 	templates := &Templates{}
 
 	// Load required templates (theme dir first, then shape dir)
@@ -156,7 +211,7 @@ func loadBlogTemplates(themeDir, baseDir string) (*Templates, error) {
 	}
 
 	for filename, dest := range required {
-		content, err := readWithFallback(themeDir, baseDir, filename)
+		content, err := readFromSources(themeDir, baseDir, filename)
 		if err != nil {
 			return nil, fmt.Errorf("required template %q: %w", filename, err)
 		}
@@ -164,13 +219,13 @@ func loadBlogTemplates(themeDir, baseDir string) (*Templates, error) {
 	}
 
 	// Load optional templates (same fallback pattern)
-	if content, err := readWithFallback(themeDir, baseDir, "posts.html"); err == nil {
+	if content, err := readFromSources(themeDir, baseDir, "posts.html"); err == nil {
 		templates.Archive = content
 	}
-	if content, err := readWithFallback(themeDir, baseDir, "tag.html"); err == nil {
+	if content, err := readFromSources(themeDir, baseDir, "tag.html"); err == nil {
 		templates.Tag = content
 	}
-	if content, err := readWithFallback(themeDir, baseDir, "tag-index.html"); err == nil {
+	if content, err := readFromSources(themeDir, baseDir, "tag-index.html"); err == nil {
 		templates.TagIndex = content
 	}
 
@@ -183,11 +238,11 @@ func loadBlogTemplates(themeDir, baseDir string) (*Templates, error) {
 // sibling posts. Comment/profile/mention/dm entries render client-side in
 // stream.js, so their SSR templates were removed. Themes may override via
 // themeDir but most v4 themes are CSS-only and use the shape-shipped markup.
-func loadStreamTemplates(themeDir, baseDir string) (*Templates, error) {
+func loadStreamTemplates(themeDir, baseDir templateSource) (*Templates, error) {
 	templates := &Templates{}
 
 	// stream.html is the only required template.
-	content, err := readWithFallback(themeDir, baseDir, "stream.html")
+	content, err := readFromSources(themeDir, baseDir, "stream.html")
 	if err != nil {
 		return nil, fmt.Errorf("required template %q: %w", "stream.html", err)
 	}
@@ -199,7 +254,7 @@ func loadStreamTemplates(themeDir, baseDir string) (*Templates, error) {
 		"stream-post.html": &templates.StreamPost,
 	}
 	for filename, dest := range optional {
-		if content, err := readWithFallback(themeDir, baseDir, filename); err == nil {
+		if content, err := readFromSources(themeDir, baseDir, filename); err == nil {
 			*dest = content
 		}
 	}
@@ -210,28 +265,70 @@ func loadStreamTemplates(themeDir, baseDir string) (*Templates, error) {
 // GetActiveTheme returns the active theme name. Reads from
 // .polis/bundles/registry.json (post-1e canonical) with a legacy fallback to
 // active_theme in .well-known/polis for pre-migration sites.
-func GetActiveTheme(dataDir string) (string, error) {
-	return bundle.GetActiveThemeName(dataDir)
+func GetActiveTheme(site storage.Site) (string, error) {
+	return bundle.GetActiveThemeName(site)
 }
 
+// reservedThemes are system themes a user never gets by chance or by choice:
+// sols is the logged-out landing theme, stardust is why.polis.pub's. The
+// webapp refuses them in its theme picker (and the SPA filters them from its
+// list); SelectRandomTheme never picks them. Reservation blocks selection
+// only: a site can still be put on one through registry.json directly.
+var reservedThemes = map[string]bool{
+	"sols":     true,
+	"stardust": true,
+}
+
+// IsReserved reports whether a theme name — short ("sols") or fully qualified
+// ("pub.polis.themes.sols") — is a reserved system theme.
+func IsReserved(name string) bool {
+	return reservedThemes[strings.TrimPrefix(name, "pub.polis.themes.")]
+}
+
+// ErrThemeNotSaved means a theme was chosen but the choice could not be saved.
+// The returned name is still usable for this render.
+var ErrThemeNotSaved = errors.New("theme chosen but not saved")
+
 // SelectRandomTheme picks a random theme from available themes and persists the choice.
+// It never picks a reserved theme, unless reserved themes are all there is.
 // This matches the bash CLI's select_theme() behavior.
-func SelectRandomTheme(dataDir, cliThemesDir string) (string, error) {
-	themes, err := ListThemes(dataDir, cliThemesDir)
+//
+// ⭐ A CHOICE THAT CANNOT BE SAVED IS NOT RANDOM. Nothing remembers it, so the
+// next render chooses again, and a random choice would give the site a
+// different theme on every render: exactly what a registry.json that does not
+// parse produced, since the save refuses to overwrite a present-but-broken
+// registry. So when the save fails it returns the first eligible theme by
+// name, the same one every time, wrapped in ErrThemeNotSaved. A caller that
+// only needs a theme to render with (render) uses the name; a caller that
+// reports a repair (Tailor, Medic) reports the failure, because nothing was
+// repaired.
+func SelectRandomTheme(site storage.Site, cliThemesDir string) (string, error) {
+	themes, err := ListThemes(site, cliThemesDir)
 	if err != nil || len(themes) == 0 {
 		return "", fmt.Errorf("no themes found")
 	}
-	selected := themes[rand.IntN(len(themes))]
+	var eligible []string
+	for _, t := range themes {
+		if !IsReserved(t) {
+			eligible = append(eligible, t)
+		}
+	}
+	if len(eligible) == 0 {
+		eligible = themes
+	}
+	selected := eligible[rand.IntN(len(eligible))]
 	// Persist the choice so future renders use the same theme
-	if err := SetActiveTheme(dataDir, selected); err != nil {
-		// Non-fatal: theme works even if not saved
+	if err := SetActiveTheme(site, selected); err != nil {
+		stable := append([]string(nil), eligible...)
+		sort.Strings(stable)
+		return stable[0], fmt.Errorf("%w: %v", ErrThemeNotSaved, err)
 	}
 	return selected, nil
 }
 
 // SetActiveTheme updates the active theme in .polis/bundles/registry.json.
-func SetActiveTheme(dataDir, themeName string) error {
-	return bundle.SetActiveThemeName(dataDir, themeName)
+func SetActiveTheme(site storage.Site, themeName string) error {
+	return bundle.SetActiveThemeName(site, themeName)
 }
 
 // RemoveLegacyThemeLocations blindly deletes theme directories from the legacy
@@ -244,13 +341,11 @@ func SetActiveTheme(dataDir, themeName string) error {
 // .polis/bundles/pub.polis.core/themes/ via bundle.EnsureReferencePayload.
 //
 // One-time migration; idempotent (no-op when neither dir exists).
-func RemoveLegacyThemeLocations(dataDir string) error {
-	for _, root := range []string{
-		filepath.Join(dataDir, "site", "themes"),
-		filepath.Join(dataDir, ".polis", "themes"),
-	} {
-		if err := os.RemoveAll(root); err != nil {
-			return fmt.Errorf("remove %s: %w", root, err)
+func RemoveLegacyThemeLocations(site storage.Site) error {
+	for _, key := range legacyThemeKeys {
+		if err := site.Store().Delete(context.Background(), key,
+			storage.DeleteRecursive(), storage.IgnoreMissing()); err != nil {
+			return fmt.Errorf("remove %s: %w", key, err)
 		}
 	}
 	return nil
@@ -258,12 +353,27 @@ func RemoveLegacyThemeLocations(dataDir string) error {
 
 // LegacyThemeLocationsExist reports whether either legacy theme directory
 // is present on the tenant. Used by Patrol to flag tenants needing migration.
-func LegacyThemeLocationsExist(dataDir string) bool {
-	for _, root := range []string{
-		filepath.Join(dataDir, "site", "themes"),
-		filepath.Join(dataDir, ".polis", "themes"),
-	} {
-		if info, err := os.Stat(root); err == nil && info.IsDir() {
+func LegacyThemeLocationsExist(site storage.Site) bool {
+	st := site.Store()
+	for _, key := range legacyThemeKeys {
+		if st.Capabilities().RealPath {
+			// NOT the storage interface: this asks whether a legacy directory
+			// is THERE, and an EMPTY one still means the tenant needs
+			// migrating. A prefix listing cannot see an empty directory, so
+			// on a filesystem it would answer "no" for exactly the case
+			// Patrol is looking for.
+			root, err := st.RealPath(key)
+			if err != nil {
+				continue
+			}
+			if info, err := os.Stat(root); err == nil && info.IsDir() {
+				return true
+			}
+			continue
+		}
+		// ⭐ No filesystem, so no empty directories: a legacy location exists
+		// exactly when something is stored under it.
+		if entries, err := st.List(context.Background(), key); err == nil && len(entries) > 0 {
 			return true
 		}
 	}
@@ -273,22 +383,20 @@ func LegacyThemeLocationsExist(dataDir string) bool {
 // CopyBaseCSS copies the shared base CSS file to base.css at the site root.
 // Shared CSS lives in the installed bundle's _shared theme — pre-refactor it
 // was at themes/_base/base.css.
-func CopyBaseCSS(dataDir, cliThemesDir string) error {
-	destPath := filepath.Join(dataDir, "base.css")
-
-	// Installed bundle (post-refactor canonical).
-	bundlePath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "themes", "_shared", "base.css")
-	if _, err := os.Stat(bundlePath); err == nil {
-		return copyFile(bundlePath, destPath)
+func CopyBaseCSS(site storage.Site, cliThemesDir string) error {
+	// ⚠️ TRY-IN-ORDER, not check-then-copy. The old form read PathExists and
+	// DISCARDED its error, so an unreadable candidate fell through to the next
+	// one; a missing one did too. Copying and treating any failure as "try the
+	// next" preserves that exactly, with one read instead of two.
+	candidates := []string{
+		bundleThemesKey + "/_shared/base.css", // installed bundle (canonical)
+		localThemesKey + "/_base/base.css",    // legacy local override
 	}
-
-	// Legacy local _base override (pre-refactor sites that haven't been
-	// resynced yet — safe to keep during the transition window).
-	localPath := filepath.Join(dataDir, "site", "themes", "_base", "base.css")
-	if _, err := os.Stat(localPath); err == nil {
-		return copyFile(localPath, destPath)
+	for _, key := range candidates {
+		if err := copySiteFile(site, key, "base.css"); err == nil {
+			return nil
+		}
 	}
-
 	// No base.css found — not an error (older themes may not have it).
 	return nil
 }
@@ -296,27 +404,26 @@ func CopyBaseCSS(dataDir, cliThemesDir string) error {
 // CopyCSS copies the active theme's CSS file to styles.css at the site root.
 // The CSS filename matches the theme name ({themename}.css). Looked up in the
 // installed bundle first, then legacy locations during the transition.
-func CopyCSS(dataDir, cliThemesDir, themeName string) error {
+func CopyCSS(site storage.Site, cliThemesDir, themeName string) error {
 	cssFilename := themeName + ".css"
-	destPath := filepath.Join(dataDir, "styles.css")
 
-	// Installed bundle (post-refactor canonical).
-	bundlePath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "themes", themeName, cssFilename)
-	if _, err := os.Stat(bundlePath); err == nil {
-		return copyFile(bundlePath, destPath)
+	// ⚠️ Try-in-order; see the note in CopyBaseCSS for why this is equivalent
+	// to the old check-then-copy and not a behaviour change.
+	for _, key := range []string{
+		bundleThemesKey + "/" + themeName + "/" + cssFilename, // installed bundle
+		localThemesKey + "/" + themeName + "/" + cssFilename,  // legacy override
+	} {
+		if data, err := site.Store().Get(context.Background(), key); err == nil {
+			return writeStyles(site, data)
+		}
 	}
 
-	// Legacy per-tenant override.
-	localCSSPath := filepath.Join(dataDir, "site", "themes", themeName, cssFilename)
-	if _, err := os.Stat(localCSSPath); err == nil {
-		return copyFile(localCSSPath, destPath)
-	}
-
-	// Legacy CLI-shipped theme (unmigrated themes in step 1).
+	// ⚠️ The ONE candidate outside the site: a legacy CLI-shipped theme. That
+	// root is not a site, so the source stays a path.
 	if cliThemesDir != "" {
 		cliCSSPath := filepath.Join(cliThemesDir, themeName, cssFilename)
-		if _, err := os.Stat(cliCSSPath); err == nil {
-			return copyFile(cliCSSPath, destPath)
+		if data, err := storage.ReadAtPath(cliCSSPath); err == nil {
+			return writeStyles(site, data)
 		}
 	}
 
@@ -330,25 +437,68 @@ func CopyCSS(dataDir, cliThemesDir, themeName string) error {
 // The tenant-installed bundle tree is the source of truth. Legacy CLI-shipped
 // fallbacks are not consulted here because v4 support only exists in post-
 // refactor sites (Patrol/Medic guarantees the shape payload is installed).
-func CopyStreamCSS(dataDir, themeName string) error {
-	shapeCSSPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "shapes", "v4", "stream.css")
-	shapeCSS, err := os.ReadFile(shapeCSSPath)
+func CopyStreamCSS(site storage.Site, themeName string) error {
+	ctx := context.Background()
+	shapeCSS, err := site.Store().Get(ctx, bundleShapesKey+"/v4/stream.css")
 	if err != nil {
 		return fmt.Errorf("read stream shape CSS: %w", err)
 	}
 
-	themeCSSPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "themes", themeName, themeName+".css")
-	themeCSS, err := os.ReadFile(themeCSSPath)
+	themeCSS, err := site.Store().Get(ctx, bundleThemesKey+"/"+themeName+"/"+themeName+".css")
 	if err != nil {
 		return fmt.Errorf("read v4 theme CSS %q: %w", themeName, err)
 	}
 
-	destPath := filepath.Join(dataDir, "styles.css")
 	out := make([]byte, 0, len(shapeCSS)+len(themeCSS)+64)
 	out = append(out, shapeCSS...)
 	out = append(out, '\n')
 	out = append(out, themeCSS...)
-	return os.WriteFile(destPath, out, 0644)
+	return writeStyles(site, out)
+}
+
+// CustomCSSKey is the site's own CSS, layered after the theme in styles.css on
+// every render. ⭐ A SOURCE, AND THE SITE'S OWN: it sits beside the site's
+// snippets rather than in the installed bundle, so a bundle resync never
+// touches it, and a theme switch keeps it. Nothing interprets it; the render
+// appends it verbatim.
+const CustomCSSKey = "site/custom.css"
+
+// customCSSMarker opens the custom layer in styles.css, so a reader of the
+// generated file can see where the theme ends.
+const customCSSMarker = "\n/* ── site/custom.css: the site's own CSS, layered after the theme ── */\n"
+
+// customCSSWithheld replaces the custom layer when site/custom.css fails
+// ValidateCustomCSS at render.
+const customCSSWithheld = "\n/* ── site/custom.css withheld: it does not pass the custom CSS check (set it again to see why) ── */\n"
+
+// writeStyles writes styles.css: the theme's CSS, then the site's custom CSS
+// when it has any. ⛔ Every writer of styles.css goes through here, or a
+// render path would silently drop the owner's change.
+func writeStyles(site storage.Site, themeCSS []byte) error {
+	ctx := context.Background()
+	out := themeCSS
+	custom, err := site.Store().Get(ctx, CustomCSSKey)
+	switch {
+	case err == nil && len(bytes.TrimSpace(custom)) > 0 && ValidateCustomCSS(string(custom)) != nil:
+		// ⛔ Checked again here, at every render, and not only when it was set:
+		// a file written by any other path (by hand, a restore, an older build
+		// with a weaker check) must not reach readers. It is withheld, not
+		// deleted, and the render goes on with the theme alone.
+		out = make([]byte, 0, len(themeCSS)+len(customCSSWithheld))
+		out = append(out, themeCSS...)
+		out = append(out, customCSSWithheld...)
+	case err == nil && len(bytes.TrimSpace(custom)) > 0:
+		out = make([]byte, 0, len(themeCSS)+len(customCSSMarker)+len(custom)+1)
+		out = append(out, themeCSS...)
+		out = append(out, customCSSMarker...)
+		out = append(out, custom...)
+		if custom[len(custom)-1] != '\n' {
+			out = append(out, '\n')
+		}
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("read %s: %w", CustomCSSKey, err)
+	}
+	return site.Store().Put(ctx, "styles.css", out)
 }
 
 // CopyStreamController copies the stream shape's stream.js placeholder (WS-2 stub) to
@@ -361,66 +511,88 @@ func CopyStreamCSS(dataDir, themeName string) error {
 //	(installed by Patrol/Medic from the embedded reference payload).
 //
 // Destination: <dataDir>/stream.js
-func CopyStreamController(dataDir string) error {
-	srcPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "shapes", "v4", "stream.js")
-	src, err := os.ReadFile(srcPath)
-	if err != nil {
+func CopyStreamController(site storage.Site) error {
+	if err := copySiteFile(site, bundleShapesKey+"/v4/stream.js", "stream.js"); err != nil {
 		return fmt.Errorf("read v4 controller stub: %w", err)
 	}
-	destPath := filepath.Join(dataDir, "stream.js")
-	return os.WriteFile(destPath, src, 0644)
+	return nil
 }
 
-// copyFile copies a file from src to dst.
-func copyFile(src, dst string) error {
-	source, err := os.Open(src)
+// Site-relative keys. ⭐ KEYS, NOT PATHS: every reader and writer addresses
+// these the same way, on any backend.
+const (
+	bundleThemesKey = ".polis/bundles/pub.polis.core/themes"
+	bundleShapesKey = ".polis/bundles/pub.polis.core/shapes"
+	localThemesKey  = "site/themes"
+)
+
+// legacyThemeKeys are the two theme locations the step-01 forced upgrade
+// retired: the per-tenant override and the old CLI-managed copy under .polis.
+var legacyThemeKeys = []string{localThemesKey, ".polis/themes"}
+
+// copySiteFile copies one file WITHIN a site, through its store.
+//
+// ⭐ Most of this package's copying is site-to-site — the installed bundle to
+// the served root — so it needs no filesystem at all. ⚠️ Only a copy whose
+// SOURCE is the CLI themes directory crosses roots, and that one is CopyCSS's
+// last candidate, read with storage.ReadAtPath.
+func copySiteFile(site storage.Site, srcKey, dstKey string) error {
+	data, err := site.Store().Get(context.Background(), srcKey)
 	if err != nil {
 		return err
 	}
-	defer source.Close()
+	return site.Store().Put(context.Background(), dstKey, data)
+}
 
-	dest, err := os.Create(dst)
+// ListShapes returns the names of the shapes installed in the site — the
+// directories under .polis/bundles/pub.polis.core/shapes/, which is where
+// LoadShape looks and the only place it looks.
+func ListShapes(site storage.Site) ([]string, error) {
+	entries, err := site.Store().List(context.Background(), bundleShapesKey)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer dest.Close()
-
-	_, err = io.Copy(dest, source)
-	return err
+	var shapes []string
+	for _, entry := range entries {
+		if entry.IsDir {
+			shapes = append(shapes, pathpkg.Base(entry.Key))
+		}
+	}
+	return shapes, nil
 }
 
 // ListThemes returns the names of all available themes.
 // It combines themes from the installed bundle, the per-tenant override
 // directory, and the CLI themes directory (legacy fallback for unmigrated themes).
-func ListThemes(dataDir, cliThemesDir string) ([]string, error) {
+func ListThemes(site storage.Site, cliThemesDir string) ([]string, error) {
 	themeSet := make(map[string]bool)
 
-	// Installed bundle themes (post-refactor canonical).
-	bundleThemesDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "themes")
-	if entries, err := os.ReadDir(bundleThemesDir); err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() && isValidTheme(filepath.Join(bundleThemesDir, entry.Name())) {
-				themeSet[entry.Name()] = true
-			}
+	// ⭐ Both site-rooted lookups go through the STORE, so a site backed by an
+	// object store finds its themes. Only the CLI themes directory below stays
+	// on a path, because that root is not a site.
+	ctx := context.Background()
+	for _, dirKey := range []string{bundleThemesKey, localThemesKey} {
+		entries, err := site.Store().List(ctx, dirKey)
+		if err != nil {
+			continue
 		}
-	}
-
-	// Per-tenant overrides (legacy).
-	localThemesDir := filepath.Join(dataDir, "site", "themes")
-	if entries, err := os.ReadDir(localThemesDir); err == nil {
 		for _, entry := range entries {
-			if entry.IsDir() && isValidTheme(filepath.Join(localThemesDir, entry.Name())) {
-				themeSet[entry.Name()] = true
+			if !entry.IsDir {
+				continue
+			}
+			name := pathpkg.Base(entry.Key)
+			if isValidThemeKey(site, dirKey+"/"+name) {
+				themeSet[name] = true
 			}
 		}
 	}
 
 	// CLI-shipped themes (legacy — only the unmigrated ones in step 1).
 	if cliThemesDir != "" {
-		if entries, err := os.ReadDir(cliThemesDir); err == nil {
+		if entries, err := storage.ListDir(cliThemesDir); err == nil {
 			for _, entry := range entries {
-				if entry.IsDir() && isValidTheme(filepath.Join(cliThemesDir, entry.Name())) {
-					themeSet[entry.Name()] = true
+				if name := pathpkg.Base(entry.Key); entry.IsDir && isValidTheme(filepath.Join(cliThemesDir, name)) {
+					themeSet[name] = true
 				}
 			}
 		}
@@ -438,6 +610,37 @@ func ListThemes(dataDir, cliThemesDir string) ([]string, error) {
 // A theme is valid if it has either all required HTML templates (legacy full theme)
 // or at least a CSS file (CSS-only theme that inherits templates from the shape).
 // System dirs (_base, _shared) are excluded — they're not selectable themes.
+// isValidThemeKey is isValidTheme for a theme INSIDE a site, addressed by key.
+//
+// ⛔⛔ IT EXISTS BECAUSE THEME DISCOVERY WAS THE ONE THING STILL ON THE
+// FILESYSTEM, and that made a blob-backed site unrenderable: NewPageRenderer
+// failed with "no theme available: no themes found", because ListThemes walked
+// directories that an object store does not have. ⚠️ Rendering itself already
+// wrote through the seam — the claim that a blob instance could render "with no
+// render-specific work" was true of the WRITES and false of the LOOKUP.
+//
+// ⭐ The rules are identical to isValidTheme: a CSS-only theme has
+// {name}.css, a legacy full theme has all four templates, and `_base` and
+// `_shared` are not themes.
+func isValidThemeKey(site storage.Site, themeKey string) bool {
+	name := pathpkg.Base(themeKey)
+	if name == "_base" || name == "_shared" {
+		return false
+	}
+	ctx := context.Background()
+	if present, _ := site.Store().Exists(ctx, themeKey+"/"+name+".css"); present {
+		return true
+	}
+	for _, file := range []string{"post.html", "comment.html", "comment-inline.html", "index.html"} {
+		if present, _ := site.Store().Exists(ctx, themeKey+"/"+file); !present {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidTheme is the same question for a theme outside any site — the CLI's
+// installed themes directory, which is legitimately a path.
 func isValidTheme(themeDir string) bool {
 	name := filepath.Base(themeDir)
 	if name == "_base" || name == "_shared" {
@@ -446,50 +649,19 @@ func isValidTheme(themeDir string) bool {
 
 	// CSS-only theme: has a {name}.css file (templates come from _base)
 	cssFile := filepath.Join(themeDir, name+".css")
-	if _, err := os.Stat(cssFile); err == nil {
+	if present, _ := storage.PathExists(cssFile); present {
 		return true
 	}
 
 	// Legacy full theme: has all 4 required templates
 	required := []string{"post.html", "comment.html", "comment-inline.html", "index.html"}
+	st := storage.NewPOSIX(themeDir)
 	for _, file := range required {
-		if _, err := os.Stat(filepath.Join(themeDir, file)); err != nil {
+		if present, _ := st.Exists(context.Background(), file); !present {
 			return false
 		}
 	}
 	return true
-}
-
-// GetThemeDir returns the path to a theme's directory.
-//
-// Checks in post-step-01 canonical order:
-//  1. Installed bundle theme at .polis/bundles/pub.polis.core/themes/<name>/
-//  2. Legacy per-tenant override at site/themes/<name>/
-//  3. CLI-shipped theme (legacy, transition-only)
-//
-// Returns "" if the theme isn't found in any location. Mirrors resolveThemeDir
-// but kept as a separate exported function for palette-extraction callers
-// (resolveThemeDir is internal and has different fallback semantics for
-// template loading).
-func GetThemeDir(dataDir, cliThemesDir, themeName string) string {
-	bundleDir := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "themes", themeName)
-	if _, err := os.Stat(bundleDir); err == nil {
-		return bundleDir
-	}
-
-	localDir := filepath.Join(dataDir, "site", "themes", themeName)
-	if _, err := os.Stat(localDir); err == nil {
-		return localDir
-	}
-
-	if cliThemesDir != "" {
-		cliDir := filepath.Join(cliThemesDir, themeName)
-		if _, err := os.Stat(cliDir); err == nil {
-			return cliDir
-		}
-	}
-
-	return ""
 }
 
 // CalculateCSSPath returns the relative path to styles.css from a given file path.
@@ -558,22 +730,31 @@ type ThemePalette struct {
 // cssColorVar matches CSS custom property declarations like --color-bg: #1a1525;
 var cssColorVar = regexp.MustCompile(`^\s*--color-([a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{3,8})\s*;`)
 
-// ExtractPalette reads a theme's CSS file and extracts 5 representative colors.
-// Returns bg, text, two accent colors, and cyan.
+// ExtractPalette reads a theme's CSS file from a directory and extracts 5
+// representative colors: bg, text, two accent colors, and cyan.
 func ExtractPalette(themeDir, themeName string) ThemePalette {
-	palette := ThemePalette{Name: themeName}
+	return extractPalette(dirSource(themeDir), themeName)
+}
 
-	cssPath := filepath.Join(themeDir, themeName+".css")
-	f, err := os.Open(cssPath)
+// extractPalette is ExtractPalette over a source, so a theme inside a site's
+// store is read through the store. An empty or unreadable source yields a
+// palette with no colors.
+func extractPalette(src templateSource, themeName string) ThemePalette {
+	palette := ThemePalette{Name: themeName}
+	if src.empty() {
+		return palette
+	}
+
+	// Whole-file rather than streamed: a theme's CSS is a few kilobytes.
+	css, err := src.read(themeName + ".css")
 	if err != nil {
 		return palette
 	}
-	defer f.Close()
 
 	// Parse all --color-* variables from the :root block
 	vars := make(map[string]string)
 	inRoot := false
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(bytes.NewReader(css))
 	for scanner.Scan() {
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
@@ -632,19 +813,20 @@ func ExtractPalette(themeDir, themeName string) ThemePalette {
 // The active theme is marked with Active=true. DisplayName is populated from
 // the bundle declaration (bundle.Theme.DisplayName) when available, so picker
 // UIs can show a friendlier label than the internal theme name.
-func ListThemesWithPalettes(dataDir, cliThemesDir string) ([]ThemePalette, error) {
-	themes, err := ListThemes(dataDir, cliThemesDir)
+func ListThemesWithPalettes(site storage.Site, cliThemesDir string) ([]ThemePalette, error) {
+	themes, err := ListThemes(site, cliThemesDir)
 	if err != nil {
 		return nil, err
 	}
 
-	activeTheme, _ := GetActiveTheme(dataDir)
+	activeTheme, _ := GetActiveTheme(site)
 	defaults := bundle.DefaultCoreBundle()
 
 	var palettes []ThemePalette
 	for _, name := range themes {
-		themeDir := GetThemeDir(dataDir, cliThemesDir, name)
-		p := ExtractPalette(themeDir, name)
+		// ⭐ The same resolver template loading uses, so the palette shown for
+		// a theme comes from the copy that renders.
+		p := extractPalette(resolveThemeSource(site, cliThemesDir, name), name)
 		p.Active = (name == activeTheme)
 		if th, ok := defaults.Themes[name]; ok && th.DisplayName != "" {
 			p.DisplayName = th.DisplayName
@@ -669,12 +851,12 @@ func ListThemesWithPalettes(dataDir, cliThemesDir string) ([]ThemePalette, error
 // Themes not declared in DefaultCoreBundle (orphans on disk) are excluded —
 // installed-but-undeclared is a disk-drift condition covered by Patrol's
 // orphan-dir check.
-func ListUserSelectableThemes(dataDir, cliThemesDir, activeShape string) ([]ThemePalette, error) {
+func ListUserSelectableThemes(site storage.Site, cliThemesDir, activeShape string) ([]ThemePalette, error) {
 	if activeShape == "" {
 		activeShape = "v3"
 	}
 	wantFQN := bundle.QualifyShape(activeShape)
-	all, err := ListThemesWithPalettes(dataDir, cliThemesDir)
+	all, err := ListThemesWithPalettes(site, cliThemesDir)
 	if err != nil {
 		return nil, err
 	}

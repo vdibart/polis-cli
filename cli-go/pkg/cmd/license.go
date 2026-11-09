@@ -133,7 +133,7 @@ func handleLicense(args []string) {
 
 	// No argument: report the current state rather than changing anything.
 	if len(remaining) == 0 {
-		terms, err := site.SiteTerms(dir)
+		terms, err := site.SiteTerms(getSite())
 		if err != nil {
 			exitError("Failed to read licence: %v", err)
 		}
@@ -141,7 +141,7 @@ func handleLicense(args []string) {
 			outputJSON(map[string]interface{}{
 				"status":  "success",
 				"command": "license",
-				"data":    map[string]interface{}{"terms": terms, "pointer": site.LicensePointer(dir)},
+				"data":    map[string]interface{}{"terms": terms, "pointer": site.LicensePointer(getSite())},
 			})
 			return
 		}
@@ -156,7 +156,7 @@ func handleLicense(args []string) {
 			return
 		}
 		describeLicenseChoice("", terms)
-		fmt.Printf("    Signed source: %s\n", site.LicensePointer(dir))
+		fmt.Printf("    Signed source: %s\n", site.LicensePointer(getSite()))
 		return
 	}
 
@@ -171,7 +171,7 @@ func handleLicense(args []string) {
 	}
 
 	if strings.EqualFold(choice, "none") || strings.EqualFold(choice, "unstated") {
-		if err := site.WithdrawLicense(dir); err != nil {
+		if err := site.WithdrawLicense(getSite()); err != nil {
 			exitError("Failed to withdraw licence: %v", err)
 		}
 		if jsonOutput {
@@ -183,7 +183,7 @@ func handleLicense(args []string) {
 			outputJSON(map[string]interface{}{
 				"status":  "success",
 				"command": "license",
-				"data":    map[string]interface{}{"terms": nil, "pointer": site.LicensePointer(dir)},
+				"data":    map[string]interface{}{"terms": nil, "pointer": site.LicensePointer(getSite())},
 			})
 			return
 		}
@@ -193,10 +193,10 @@ func handleLicense(args []string) {
 		return
 	}
 
-	if _, err := site.StateLicense(dir, choice, baseURL, privKey); err != nil {
+	if _, err := site.StateLicense(getSite(), choice, baseURL, privKey); err != nil {
 		exitError("Failed to state licence: %v", err)
 	}
-	terms, err := site.SiteTerms(dir)
+	terms, err := site.SiteTerms(getSite())
 	if err != nil {
 		exitError("Failed to read back licence: %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"strings"
 	"testing"
 
@@ -47,7 +48,7 @@ func TestTier1_EveryDidWebvhLogEntryFieldHasAPopulatedPolisSource(t *testing.T) 
 	dsPub := strings.TrimSpace(string(dsPubSSH))
 
 	dir := writeSite(t, k0.pub, "2026-03-03T05:35:09Z")
-	if _, err := WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	ts := "2026-09-15T10:22:03Z"
@@ -65,7 +66,7 @@ func TestTier1_EveryDidWebvhLogEntryFieldHasAPopulatedPolisSource(t *testing.T) 
 	if w.Signature, err = signing.SignContent(wc, dsPriv); err != nil {
 		t.Fatal(err)
 	}
-	if err := RecordKeyRotation(dir, k1.pub, transitionSig, ts, w); err != nil {
+	if err := RecordKeyRotation(storage.At(dir), k1.pub, transitionSig, ts, "", w); err != nil {
 		t.Fatal(err)
 	}
 

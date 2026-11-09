@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 func handleRender(args []string) {
@@ -33,7 +35,7 @@ func handleRender(args []string) {
 	// shape dir until the next Medic cycle. EnsureReferencePayload is
 	// mtime-idempotent (skips writes when bytes match) so the production
 	// case is a no-op when versions already align.
-	if err := bundle.EnsureReferencePayload(dir, "pub.polis.core"); err != nil {
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		exitError("Failed to refresh reference payload: %v", err)
 	}
 
@@ -61,7 +63,7 @@ func handleRender(args []string) {
 
 	// Create renderer
 	renderer, err := render.NewPageRenderer(render.PageConfig{
-		DataDir:           dir,
+		Site:              getSite(),
 		CLIThemesDir:      themesDir,
 		BaseURL:           url,
 		RenderMarkers:     false, // CLI rendering doesn't need edit markers
@@ -101,14 +103,12 @@ func handleRender(args []string) {
 }
 
 func isPolisSite(dir string) bool {
-	wellKnown := filepath.Join(dir, ".well-known", "polis")
-	_, err := os.Stat(wellKnown)
-	return err == nil
+	ok, _ := storage.NewPOSIX(dir).Exists(context.Background(), ".well-known/polis")
+	return ok
 }
 
 func getBaseURLFromSite(dir string) string {
-	wellKnown := filepath.Join(dir, ".well-known", "polis")
-	data, err := os.ReadFile(wellKnown)
+	data, err := storage.NewPOSIX(dir).Get(context.Background(), ".well-known/polis")
 	if err != nil {
 		return ""
 	}
@@ -133,6 +133,10 @@ func loadOrDefaultBundle(dir string) *bundle.Bundle {
 }
 
 func findCLIThemesDir() string {
+	// NOT the storage interface, for either candidate loop below: these probe
+	// for a themes directory shipped BESIDE THE BINARY or under the working
+	// directory, neither of which is inside the site. The store addresses the
+	// site and nothing else.
 	// Try paths relative to the executable
 	execPath, err := os.Executable()
 	if err == nil {

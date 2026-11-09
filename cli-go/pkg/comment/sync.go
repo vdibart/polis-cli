@@ -1,7 +1,10 @@
 package comment
 
 import (
-	"os"
+	"context"
+	"errors"
+	"io/fs"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -9,6 +12,8 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // SyncResult contains the results of syncing pending comments.
@@ -25,7 +30,7 @@ type SyncResult struct {
 // Pending/denied comments are in .polis/bundles/pub.polis.core/comments/, blessed go to content/pub.polis.core/comment/YYYYMMDD/.
 // baseURL is this site's base URL (e.g. "https://follower1.polis.pub"), used to
 // reconstruct comment URLs from frontmatter when the flat comment_url field is absent.
-func SyncPendingComments(dataDir, baseURL string, discoveryClient *discovery.Client, hookConfig *hooks.HookConfig) (*SyncResult, error) {
+func SyncPendingComments(site storage.Site, baseURL string, discoveryClient *discovery.Client, hookConfig *hooks.HookConfig) (*SyncResult, error) {
 	result := &SyncResult{
 		Blessed:      []string{},
 		Denied:       []string{},
@@ -33,25 +38,25 @@ func SyncPendingComments(dataDir, baseURL string, discoveryClient *discovery.Cli
 		Errors:       []string{},
 	}
 
-	pendingDir := getCommentDir(dataDir, StatusPending)
-	entries, err := os.ReadDir(pendingDir)
+	// ⭐ List answers an absent prefix with nothing and a failed read with an
+	// error, so the ErrNotExist branch below is kept only as belt and braces.
+	entries, err := site.Store().List(context.Background(), commentDirKey(StatusPending))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return result, nil // No pending directory, nothing to sync
 		}
 		return nil, err
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+		if entry.IsDir || !strings.HasSuffix(pathpkg.Base(entry.Key), ".md") {
 			continue
 		}
 
-		commentID := strings.TrimSuffix(entry.Name(), ".md")
+		commentID := strings.TrimSuffix(pathpkg.Base(entry.Key), ".md")
 
 		// Read comment to get version and URL
-		commentPath := filepath.Join(pendingDir, entry.Name())
-		data, err := os.ReadFile(commentPath)
+		data, err := site.Store().Get(context.Background(), entry.Key)
 		if err != nil {
 			result.Errors = append(result.Errors, "failed to read "+commentID+": "+err.Error())
 			continue
@@ -103,7 +108,7 @@ func SyncPendingComments(dataDir, baseURL string, discoveryClient *discovery.Cli
 		switch status {
 		case "granted":
 			// Move to blessed directory (public comments/YYYY/MM/)
-			if err := MoveComment(dataDir, commentID, StatusPending, StatusBlessed); err != nil {
+			if err := MoveComment(site, commentID, StatusPending, StatusBlessed); err != nil {
 				result.Errors = append(result.Errors, "failed to move "+commentID+" to blessed: "+err.Error())
 				continue
 			}
@@ -129,7 +134,7 @@ func SyncPendingComments(dataDir, baseURL string, discoveryClient *discovery.Cli
 					Timestamp:     time.Now().UTC().Format("2006-01-02T15:04:05Z"),
 					CommitMessage: hooks.GenerateCommitMessage(hooks.EventPostComment, fm["in_reply_to"]),
 				}
-				if _, err := hooks.RunHook(dataDir, hookConfig, payload); err != nil {
+				if _, err := hooks.RunHook(site, hookConfig, payload); err != nil {
 					// Log error but don't fail sync
 					result.Errors = append(result.Errors, "hook failed for "+commentID+": "+err.Error())
 				}
@@ -137,7 +142,7 @@ func SyncPendingComments(dataDir, baseURL string, discoveryClient *discovery.Cli
 
 		case "denied":
 			// Move to denied directory
-			if err := MoveComment(dataDir, commentID, StatusPending, StatusDenied); err != nil {
+			if err := MoveComment(site, commentID, StatusPending, StatusDenied); err != nil {
 				result.Errors = append(result.Errors, "failed to move "+commentID+" to denied: "+err.Error())
 				continue
 			}
@@ -158,7 +163,7 @@ func SyncPendingComments(dataDir, baseURL string, discoveryClient *discovery.Cli
 // pending comment files without making per-comment HTTP calls. This is the
 // primary event-driven path used by the unified sync loop; SyncPendingComments
 // remains as a catch-up fallback for startup.
-func SyncFromEvents(dataDir, baseURL string, events []discovery.StreamEvent, hookConfig *hooks.HookConfig) (*SyncResult, error) {
+func SyncFromEvents(site storage.Site, baseURL string, events []discovery.StreamEvent, hookConfig *hooks.HookConfig) (*SyncResult, error) {
 	result := &SyncResult{
 		Blessed:      []string{},
 		Denied:       []string{},
@@ -194,23 +199,23 @@ func SyncFromEvents(dataDir, baseURL string, events []discovery.StreamEvent, hoo
 	}
 
 	// Scan pending comments and match against events
-	pendingDir := getCommentDir(dataDir, StatusPending)
-	entries, err := os.ReadDir(pendingDir)
+	// ⭐ List answers an absent prefix with nothing and a failed read with an
+	// error, so the ErrNotExist branch below is kept only as belt and braces.
+	entries, err := site.Store().List(context.Background(), commentDirKey(StatusPending))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return result, nil
 		}
 		return nil, err
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+		if entry.IsDir || !strings.HasSuffix(pathpkg.Base(entry.Key), ".md") {
 			continue
 		}
 
-		commentID := strings.TrimSuffix(entry.Name(), ".md")
-		commentPath := filepath.Join(pendingDir, entry.Name())
-		data, err := os.ReadFile(commentPath)
+		commentID := strings.TrimSuffix(pathpkg.Base(entry.Key), ".md")
+		data, err := site.Store().Get(context.Background(), entry.Key)
 		if err != nil {
 			result.Errors = append(result.Errors, "failed to read "+commentID+": "+err.Error())
 			continue
@@ -243,7 +248,7 @@ func SyncFromEvents(dataDir, baseURL string, events []discovery.StreamEvent, hoo
 
 		switch status {
 		case "granted":
-			if err := MoveComment(dataDir, commentID, StatusPending, StatusBlessed); err != nil {
+			if err := MoveComment(site, commentID, StatusPending, StatusBlessed); err != nil {
 				result.Errors = append(result.Errors, "failed to move "+commentID+" to blessed: "+err.Error())
 				continue
 			}
@@ -268,13 +273,13 @@ func SyncFromEvents(dataDir, baseURL string, events []discovery.StreamEvent, hoo
 					Timestamp:     time.Now().UTC().Format("2006-01-02T15:04:05Z"),
 					CommitMessage: hooks.GenerateCommitMessage(hooks.EventPostComment, fm["in_reply_to"]),
 				}
-				if _, err := hooks.RunHook(dataDir, hookConfig, payload); err != nil {
+				if _, err := hooks.RunHook(site, hookConfig, payload); err != nil {
 					result.Errors = append(result.Errors, "hook failed for "+commentID+": "+err.Error())
 				}
 			}
 
 		case "denied":
-			if err := MoveComment(dataDir, commentID, StatusPending, StatusDenied); err != nil {
+			if err := MoveComment(site, commentID, StatusPending, StatusDenied); err != nil {
 				result.Errors = append(result.Errors, "failed to move "+commentID+" to denied: "+err.Error())
 				continue
 			}

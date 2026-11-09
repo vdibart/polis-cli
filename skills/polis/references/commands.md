@@ -82,7 +82,8 @@ polis --json blessing deny f4bac5-350fd2
 ```
 
 ### `polis blessing beseech <id>`
-Re-request blessing for a comment (retry). Looks up request by database ID.
+Re-request blessing for a comment (retry). Looks up request by database ID. **Bash CLI only:** the Go CLI
+refuses with `NOT_SUPPORTED` — re-request from the web app, or `polis republish` the comment.
 
 ```bash
 polis --json blessing beseech 42
@@ -171,17 +172,13 @@ polis --json tag delete rust
 ## Social Commands
 
 ### `polis follow <author-url>`
-Follow an author (auto-bless their future comments).
+Follow an author. Blesses the waiting comments your policies bless (by default, the followed author's) and
+announces the follow when the site is registered. The Go CLI reports which comments it blessed in
+`blessed_comments`.
 
 ```bash
 polis --json follow https://alice.com
-
-# Announce follow to discovery service (opt-in)
-polis --json follow https://alice.com --announce
 ```
-
-Options:
-- `--announce` - Broadcast follow to discovery service (others can see you follow this author)
 
 ### `polis unfollow <author-url>`
 Stop following an author and hide their comments.
@@ -466,15 +463,15 @@ Required for:
 Unregister your site from the discovery service (hard delete).
 
 ```bash
-# Requires confirmation
-polis --json unregister
+# Interactive: asks for confirmation
+polis unregister
 
-# Skip confirmation
+# Under --json, --force is REQUIRED (it cannot ask; without it the command refuses)
 polis --json unregister --force
 ```
 
 Options:
-- `--force` - Skip confirmation prompt
+- `--force`, `-f` - Skip confirmation prompt (required under `--json`)
 
 ### `polis clone <url>`
 Clone a remote polis site for local analysis or backup.

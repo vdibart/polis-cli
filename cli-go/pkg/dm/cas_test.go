@@ -2,11 +2,12 @@ package dm
 
 import (
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"testing"
 )
 
 func TestSaveCASHappyPath(t *testing.T) {
-	dir := t.TempDir()
+	dir := storage.At(t.TempDir())
 	base := &Keyring{Revision: 5, Epochs: []Epoch{{ID: 0, Kind: EpochKindBootstrap}}, Current: 0}
 	if err := base.Save(dir); err != nil {
 		t.Fatal(err)
@@ -27,7 +28,7 @@ func TestSaveCASHappyPath(t *testing.T) {
 }
 
 func TestSaveCASConflictDoesNotWrite(t *testing.T) {
-	dir := t.TempDir()
+	dir := storage.At(t.TempDir())
 	(&Keyring{Revision: 6, Epochs: []Epoch{{ID: 0, Kind: EpochKindBootstrap}}, Current: 0}).Save(dir)
 
 	// Our session read at 6 and mutated to 7.
@@ -53,13 +54,13 @@ func TestSaveCASConflictDoesNotWrite(t *testing.T) {
 }
 
 func TestSaveCASFirstWrite(t *testing.T) {
-	dir := t.TempDir()
+	dir := storage.At(t.TempDir())
 	k := &Keyring{Revision: 0}
 	if err := k.SaveCAS(dir, 0); err != nil {
 		t.Fatalf("first write (no file, expected 0) should succeed: %v", err)
 	}
 	// But claiming a prior revision when no file exists is a conflict.
-	dir2 := t.TempDir()
+	dir2 := storage.At(t.TempDir())
 	if err := (&Keyring{Revision: 3}).SaveCAS(dir2, 2); !errors.Is(err, ErrRevisionConflict) {
 		t.Errorf("expected-nonzero with no file should conflict, got %v", err)
 	}

@@ -1,0 +1,387 @@
+/* Point and ask (kay-point.js): the Kay icon, the spotlight that picks a
+   component, and Kay's terminal.
+
+   ⭐ One palette, whatever the site's theme: a soft homage to the terminals
+   of the early eighties. Phosphor green for Kay (WarGames), cyan neon lines
+   and a grid floor for the frame (Tron), never a copy of either's screens.
+   The tokens live here, not on the theme, because the terminal must read the
+   same over a light site and a dark one. */
+
+.kp-layer {
+    --kp-bg: rgba(3, 10, 16, 0.94);
+    --kp-bg-solid: #030a10;
+    --kp-phosphor: #8dffbf;
+    --kp-phosphor-dim: #4fae80;
+    --kp-neon: #5fe3ff;
+    --kp-neon-soft: rgba(95, 227, 255, 0.35);
+    --kp-ink: #e6f7ff;
+    --kp-dim: #5d8fa0;
+    --kp-warn: #ffb36b;
+    --kp-err: #ff7b6e;
+    --kp-shade: rgba(2, 8, 14, 0.5);
+    --kp-font: 'VT323', 'Share Tech Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+    --kp-font-small: 'Share Tech Mono', 'VT323', ui-monospace, Menlo, monospace;
+}
+.kp-layer.hidden, .kp-layer .hidden { display: none !important; }
+
+/* ── the icon ─────────────────────────────────────────────────────────── */
+
+.kp-icon {
+    position: fixed;
+    left: 20px;
+    bottom: 20px;
+    z-index: 9600;
+    width: 56px;
+    height: 56px;
+    border-radius: 14px;
+    border: 1.5px solid var(--kp-neon);
+    background: var(--kp-bg-solid);
+    color: var(--kp-phosphor);
+    font: 30px/1 var(--kp-font);
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    box-shadow: 0 0 0 1px rgba(95, 227, 255, 0.15), 0 0 18px rgba(95, 227, 255, 0.35), inset 0 0 14px rgba(95, 227, 255, 0.18);
+    text-shadow: 0 0 8px rgba(141, 255, 191, 0.7);
+    transition: transform 160ms ease, box-shadow 160ms ease;
+}
+.kp-icon:hover { transform: translateY(-2px) scale(1.04); box-shadow: 0 0 0 1px rgba(95, 227, 255, 0.3), 0 0 28px rgba(95, 227, 255, 0.55), inset 0 0 16px rgba(95, 227, 255, 0.25); }
+.kp-icon:focus-visible { outline: 2px solid var(--kp-phosphor); outline-offset: 3px; }
+/* The cursor blinks a few times as the page loads, then holds. */
+.kp-icon-cursor { animation: kp-blink 1.2s steps(1) 4; }
+.kp-icon-tip {
+    position: fixed;
+    left: 88px;
+    bottom: 34px;
+    z-index: 9600;
+    padding: 5px 11px 4px;
+    border: 1px solid var(--kp-neon);
+    border-radius: 7px;
+    background: var(--kp-bg-solid);
+    color: var(--kp-phosphor);
+    font: 20px/1 var(--kp-font);
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    text-shadow: 0 0 6px rgba(141, 255, 191, 0.45);
+    box-shadow: 0 0 14px rgba(95, 227, 255, 0.3);
+    pointer-events: none;
+    opacity: 0;
+    transform: translateX(-6px);
+    transition: opacity 140ms ease, transform 140ms ease;
+}
+.kp-key { margin-left: 8px; color: var(--kp-dim); font-size: 16px; }
+.kp-icon:hover + .kp-icon-tip, .kp-icon:focus-visible + .kp-icon-tip { opacity: 1; transform: none; }
+.kp-icon.kp-active + .kp-icon-tip { display: none; }
+.kp-icon-esc { display: none; font-size: 20px; letter-spacing: 0.06em; color: var(--kp-neon); text-shadow: 0 0 8px var(--kp-neon-soft); }
+.kp-icon.kp-active .kp-icon-glyph { display: none; }
+.kp-icon.kp-active .kp-icon-esc { display: block; }
+.kp-icon.kp-active { border-color: var(--kp-phosphor); }
+
+@keyframes kp-blink { 50% { opacity: 0; } }
+
+/* ── select mode ──────────────────────────────────────────────────────── */
+
+/* The catcher takes every pointer event, so nothing under it can be clicked;
+   it does not scroll, so the wheel still scrolls the page. */
+.kp-catcher {
+    position: fixed;
+    inset: 0;
+    z-index: 9500;
+    cursor: crosshair;
+    background:
+        repeating-linear-gradient(to bottom, rgba(95, 227, 255, 0.03) 0 1px, transparent 1px 3px);
+}
+
+.kp-ring {
+    position: fixed;
+    z-index: 9510;
+    pointer-events: none;
+    border: 1.5px solid var(--kp-neon);
+    border-radius: 10px;
+    box-shadow: 0 0 22px rgba(95, 227, 255, 0.55), inset 0 0 18px rgba(95, 227, 255, 0.2);
+    transition: left 110ms ease, top 110ms ease, width 110ms ease, height 110ms ease, border-color 110ms ease;
+}
+/* The shade: the viewport with a hole cut for each of the component's rects
+   (kay-point.js paint), so a component in two parts reads as one shape. */
+.kp-shade {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 9505;
+    pointer-events: none;
+}
+.kp-shade path { fill: var(--kp-shade); }
+.kp-ring.kp-greyed { border-style: dashed; border-color: rgba(160, 175, 185, 0.7); box-shadow: none; }
+.kp-ring.kp-greyed .kp-corner { border-color: rgba(160, 175, 185, 0.7); }
+/* A component in several rects: one outline round their union (kay-point.js
+   unionOutline), so the timeline and the filter read as one shape. */
+.kp-outline {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 9510;
+    pointer-events: none;
+    fill: none;
+    filter: drop-shadow(0 0 8px rgba(95, 227, 255, 0.55));
+}
+.kp-outline-edge { stroke: var(--kp-neon); stroke-width: 1.5; stroke-linecap: square; }
+.kp-outline-corners { stroke: var(--kp-phosphor); stroke-width: 2; stroke-linecap: square; }
+.kp-outline.kp-greyed { filter: none; }
+.kp-outline.kp-greyed path { stroke: rgba(160, 175, 185, 0.7); }
+.kp-outline.kp-greyed .kp-outline-edge { stroke-dasharray: 5 4; }
+.kp-outline.kp-flash { animation: kp-outline-pulse 900ms ease-out 2; }
+@keyframes kp-outline-pulse {
+    0% { filter: drop-shadow(0 0 0 rgba(141, 255, 191, 0.9)); }
+    50% { filter: drop-shadow(0 0 14px rgba(141, 255, 191, 0.9)); }
+    100% { filter: drop-shadow(0 0 8px rgba(95, 227, 255, 0.55)); }
+}
+.kp-corner { position: absolute; width: 12px; height: 12px; border: 2px solid var(--kp-phosphor); }
+.kp-tl { left: -5px; top: -5px; border-right: 0; border-bottom: 0; }
+.kp-tr { right: -5px; top: -5px; border-left: 0; border-bottom: 0; }
+.kp-bl { left: -5px; bottom: -5px; border-right: 0; border-top: 0; }
+.kp-br { right: -5px; bottom: -5px; border-left: 0; border-top: 0; }
+.kp-ring.kp-flash { animation: kp-pulse 900ms ease-out 2; }
+@keyframes kp-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(141, 255, 191, 0.9); }
+    100% { box-shadow: 0 0 0 22px rgba(141, 255, 191, 0); }
+}
+
+.kp-chip {
+    position: fixed;
+    z-index: 9520;
+    pointer-events: none;
+    white-space: nowrap;
+    padding: 4px 10px 3px;
+    border: 1px solid var(--kp-neon);
+    border-radius: 6px;
+    background: var(--kp-bg-solid);
+    color: var(--kp-neon);
+    font: 19px/1.15 var(--kp-font);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    text-shadow: 0 0 6px var(--kp-neon-soft);
+    box-shadow: 0 0 14px rgba(95, 227, 255, 0.3);
+}
+.kp-chip.kp-greyed { color: #b8c4cc; border-color: rgba(160, 175, 185, 0.7); text-shadow: none; box-shadow: none; }
+.kp-chip.kp-flash { animation: kp-shake 320ms ease; }
+@keyframes kp-shake { 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+
+/* ── the terminal ─────────────────────────────────────────────────────── */
+
+.kp-term {
+    position: fixed;
+    left: 16px;
+    right: 16px;
+    bottom: 16px;
+    z-index: 9550;
+    height: min(56vh, 560px);
+    max-width: 1120px;
+    margin: 0 auto;
+    transition: height 420ms cubic-bezier(.2, .8, .2, 1);
+}
+.kp-term.kp-rising .kp-crt { animation: kp-power 520ms cubic-bezier(.2, .8, .2, 1); }
+@keyframes kp-power {
+    0% { transform: translateY(40px) scaleY(0.02); opacity: 0; filter: brightness(3); }
+    45% { transform: translateY(0) scaleY(0.04); opacity: 1; filter: brightness(2.2); }
+    100% { transform: none; filter: none; }
+}
+/* Docked: the change is live, so the terminal steps aside to a strip with
+   its last line, and the shade lifts so the whole stream shows the result. */
+.kp-term.kp-docked { height: 184px; cursor: pointer; }
+.kp-term.kp-docked .kp-screen { padding-top: 6px; }
+.kp-term.kp-docked .kp-prompt { opacity: 0.7; }
+
+
+.kp-crt {
+    position: relative;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: 16px;
+    border: 1.5px solid var(--kp-neon);
+    background:
+        radial-gradient(120% 90% at 50% 0%, rgba(95, 227, 255, 0.07), transparent 60%),
+        var(--kp-bg);
+    color: var(--kp-ink);
+    box-shadow: 0 0 0 1px rgba(95, 227, 255, 0.12), 0 0 40px rgba(95, 227, 255, 0.28), 0 30px 80px rgba(0, 0, 0, 0.55), inset 0 0 60px rgba(95, 227, 255, 0.08);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+}
+
+/* The grid floor, receding toward a horizon. */
+.kp-grid {
+    position: absolute;
+    left: -30%;
+    right: -30%;
+    bottom: -8%;
+    height: 62%;
+    pointer-events: none;
+    background:
+        repeating-linear-gradient(to right, rgba(95, 227, 255, 0.16) 0 1px, transparent 1px 56px),
+        repeating-linear-gradient(to bottom, rgba(95, 227, 255, 0.16) 0 1px, transparent 1px 56px);
+    transform: perspective(320px) rotateX(62deg);
+    transform-origin: 50% 100%;
+    -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.75), transparent 85%);
+    mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.75), transparent 85%);
+    animation: kp-floor 6s linear infinite;
+}
+@keyframes kp-floor { to { background-position: 0 56px, 0 56px; } }
+
+.kp-scan {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 3px);
+    animation: kp-flicker 4s steps(2) infinite;
+}
+@keyframes kp-flicker { 50% { opacity: 0.85; } }
+
+.kp-bar {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 14px 8px 18px;
+    border-bottom: 1px solid rgba(95, 227, 255, 0.28);
+    font: 22px/1 var(--kp-font);
+    letter-spacing: 0.08em;
+    color: var(--kp-neon);
+    text-shadow: 0 0 8px var(--kp-neon-soft);
+}
+.kp-brand { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kp-dim { color: var(--kp-dim); text-shadow: none; }
+.kp-target-label { display: flex; align-items: center; gap: 8px; color: var(--kp-dim); text-shadow: none; }
+.kp-target {
+    appearance: none;
+    -webkit-appearance: none;
+    padding: 4px 30px 3px 10px;
+    border: 1px solid var(--kp-phosphor);
+    border-radius: 6px;
+    background:
+        linear-gradient(45deg, transparent 50%, var(--kp-phosphor) 50%) right 14px center / 6px 6px no-repeat,
+        linear-gradient(-45deg, transparent 50%, var(--kp-phosphor) 50%) right 9px center / 6px 6px no-repeat,
+        rgba(141, 255, 191, 0.06);
+    color: var(--kp-phosphor);
+    font: 22px/1 var(--kp-font);
+    letter-spacing: 0.06em;
+    text-shadow: 0 0 6px rgba(141, 255, 191, 0.5);
+    cursor: pointer;
+}
+.kp-target:focus-visible { outline: 2px solid var(--kp-neon); outline-offset: 2px; }
+.kp-target option { background: var(--kp-bg-solid); color: var(--kp-phosphor); }
+.kp-target option:disabled { color: #6b7b84; }
+.kp-x {
+    width: 30px;
+    height: 30px;
+    border: 1px solid rgba(95, 227, 255, 0.4);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--kp-neon);
+    display: grid;
+    place-items: center;
+    padding: 0;
+    cursor: pointer;
+}
+.kp-x svg { width: 12px; height: 12px; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.kp-x:hover { background: rgba(95, 227, 255, 0.1); }
+
+.kp-screen {
+    position: relative;
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px 20px 8px;
+    font: 23px/1.28 var(--kp-font);
+    letter-spacing: 0.02em;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(95, 227, 255, 0.4) transparent;
+}
+.kp-line { white-space: pre-wrap; word-break: break-word; margin: 0 0 4px; }
+.kp-sys { color: var(--kp-neon); text-shadow: 0 0 8px var(--kp-neon-soft); }
+.kp-kay { color: var(--kp-phosphor); text-shadow: 0 0 9px rgba(141, 255, 191, 0.55); }
+.kp-you { color: var(--kp-ink); margin-top: 10px; }
+.kp-line.kp-dim { color: var(--kp-dim); }
+.kp-err { color: var(--kp-err); text-shadow: 0 0 8px rgba(255, 123, 110, 0.45); }
+.kp-turn { margin: 6px 0 10px; }
+.kp-reply:empty { display: none; }
+.kp-reply::after { content: '█'; margin-left: 2px; animation: kp-blink 1.05s steps(1) infinite; opacity: 0.8; }
+.kp-turn:not(:last-child) .kp-reply::after, .kp-term:not(.kp-busy) .kp-reply::after { content: none; }
+.kp-dots::after { content: '...'; display: inline-block; width: 1.6em; overflow: hidden; vertical-align: bottom; animation: kp-dots 1.2s steps(4) infinite; }
+@keyframes kp-dots { from { width: 0; } to { width: 1.6em; } }
+
+.kp-step {
+    display: grid;
+    grid-template-columns: auto 1fr auto auto;
+    align-items: baseline;
+    column-gap: 10px;
+    color: var(--kp-ink);
+    font-size: 21px;
+}
+.kp-step-name { color: var(--kp-neon); }
+.kp-leader { border-bottom: 2px dotted rgba(95, 227, 255, 0.3); transform: translateY(-5px); }
+.kp-ok { color: var(--kp-phosphor); }
+.kp-fail { color: var(--kp-err); }
+.kp-run { color: var(--kp-warn); animation: kp-blink 1.05s steps(1) infinite; }
+.kp-tool { font: 14px/1 var(--kp-font-small); color: var(--kp-dim); }
+.kp-why { grid-column: 1 / -1; padding-left: 22px; font: 15px/1.35 var(--kp-font-small); color: var(--kp-dim); }
+
+.kp-prompt {
+    position: relative;
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    margin: 0 14px 14px;
+    padding: 10px 10px 10px 14px;
+    border: 1px solid rgba(141, 255, 191, 0.55);
+    border-radius: 10px;
+    background: rgba(141, 255, 191, 0.05);
+    box-shadow: inset 0 0 18px rgba(141, 255, 191, 0.07);
+}
+.kp-prompt:focus-within { border-color: var(--kp-phosphor); box-shadow: inset 0 0 18px rgba(141, 255, 191, 0.12), 0 0 16px rgba(141, 255, 191, 0.25); }
+.kp-caret { font: 26px/1.2 var(--kp-font); color: var(--kp-phosphor); text-shadow: 0 0 8px rgba(141, 255, 191, 0.6); }
+.kp-input {
+    flex: 1;
+    min-height: 32px;
+    resize: none;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--kp-phosphor);
+    caret-color: var(--kp-phosphor);
+    font: 24px/1.25 var(--kp-font);
+    letter-spacing: 0.02em;
+    text-shadow: 0 0 6px rgba(141, 255, 191, 0.45);
+}
+.kp-layer .kp-input:focus,
+.kp-layer .kp-input:focus-visible { outline: none; border: 0; box-shadow: none; }
+.kp-input::placeholder { color: rgba(141, 255, 191, 0.35); text-shadow: none; }
+.kp-send {
+    padding: 6px 16px 4px;
+    border: 1px solid var(--kp-phosphor);
+    border-radius: 7px;
+    background: rgba(141, 255, 191, 0.12);
+    color: var(--kp-phosphor);
+    font: 22px/1 var(--kp-font);
+    letter-spacing: 0.12em;
+    cursor: pointer;
+    text-shadow: 0 0 6px rgba(141, 255, 191, 0.5);
+}
+.kp-send:hover:not(:disabled) { background: rgba(141, 255, 191, 0.22); }
+.kp-send:disabled { cursor: default; border-color: var(--kp-warn); color: var(--kp-warn); background: rgba(255, 179, 107, 0.08); animation: kp-blink 1.6s steps(1) infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+    .kp-grid, .kp-scan, .kp-icon-cursor, .kp-reply::after, .kp-run, .kp-send:disabled { animation: none; }
+    .kp-term.kp-rising .kp-crt { animation: none; }
+    .kp-ring { transition: none; }
+}
+
+@media (max-width: 640px) {
+    .kp-icon { left: 12px; bottom: 12px; width: 48px; height: 48px; font-size: 26px; }
+    .kp-term { left: 8px; right: 8px; bottom: 8px; height: 62vh; }
+    .kp-bar { flex-wrap: wrap; gap: 8px; font-size: 19px; }
+    .kp-screen { font-size: 20px; padding: 10px 14px 6px; }
+    .kp-step { grid-template-columns: 1fr auto; }
+    .kp-leader, .kp-tool { display: none; }
+}

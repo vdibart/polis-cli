@@ -6,12 +6,13 @@ The webapp's own endpoints under `/api/`. The web app calls them for everything 
 a few of them are **site operations**: settings, registration, identity, terms and following, which a
 script may call too.
 
-> **The webapp serves three HTTP surfaces, and this page is one of them.**
+> **The webapp serves four HTTP surfaces, and this page covers two of them.**
 >
 > | Prefix | What | Documented |
 > |---|---|---|
 > | `/v1/` | The **Content Type API**: posts, comments, follows, DMs, tags. Public reads, bearer-token writes | [`reference.md`](reference.md) |
 > | `/api/` | **The web app's own endpoints**: site operations, and the plumbing the web app runs on | this page |
+> | `/mcp` | The owner's AI acting on the site, over MCP, with an API key. Not on the hosted service | [this page](#mcp-outside-api) |
 > | `/pql/<sentence>` | The stream's data path | [the PQL reference](../../general/reference/pql.md) |
 >
 > ⚠️ `/api/` has its own DM routes (`/api/dm/*`) and its own tag route (`/api/tags`). Those are the web
@@ -26,10 +27,11 @@ internal route.
 
 | Mode | How the caller is authorised |
 |---|---|
-| **owner** | **Localhost:** nothing per request. The webapp binds to `localhost` and has no login, so if you can reach the port you are the owner, by design (see [the security model](../../general/security/security-model.md)). **Hosted:** a session cookie whose handle matches the tenant. Anything else gets `401` with the body `{"error": "unauthorized"}` |
+| **owner** | **Localhost:** nothing per request. The webapp binds to `localhost` and has no login, so if you can reach the port you are the owner, by design (see [the security model](../../general/security/security-model.md)). **Hosted:** a session cookie whose handle matches the tenant. Anything else gets `401` with the body `{"error": "unauthorized"}`. **Remote** (your own instance on a host such as Vercel, made with `polis branch`): a sign-in session, set up through the [sign-in routes](#signing-in-to-a-remote-instance). A refusal is JSON with a machine-readable `reason`: `403` `no-provider` while no way to sign in is set up yet, `401` `not-signed-in` otherwise |
 | **public** | No authentication; rate-limited per IP |
 | **session** | Hosted only: the tenant's session cookie |
 | **widget token** | `Authorization: Bearer <token>`, issued to the embeddable widget. Cross-origin |
+| **API key** | `Authorization: Bearer <key>`, a key minted at `/api/keys` ([keys and scopes](reference.md#authentication)). Used by [`/mcp`](#mcp-outside-api) |
 
 ## Conventions
 
@@ -46,19 +48,23 @@ internal route.
 
 ## Route index
 
-Every `/api/` route the webapp serves: **104** in all, 97 registered in
+Every `/api/` route the webapp serves: **125** in all, 118 registered in
 [`routes.go`](../../../webapp/internal/server/routes.go) and 7 that only the hosted service answers.
+`routes.go` also registers [`/mcp` and `/mcp/c/<id>`](#mcp-outside-api), which are outside `/api/`.
 
-**Columns.** *Auth* uses the modes above. *Where* is `both`, `local` (localhost webapp only) or
-`hosted` (the hosted service only). *Audience* is **site op**, a site operation written up below that
-a script may rely on, or ⚠️ **internal**, which the web app uses itself and **may change without
-notice**.
+**Columns.** *Auth* uses the modes above. *Where* is `both` (any instance: localhost, a remote
+instance, or the hosted service), `local` (localhost webapp only), `hosted` (the hosted service only),
+`remote` (a remote instance; elsewhere the route answers but has nothing to do, as its note says) or
+`not hosted` (`404` on the hosted service). *Audience* is **site op**, a site operation written up
+below or on another page that a script may rely on, or ⚠️ **internal**, which the web app uses itself
+and **may change without notice**.
 
 ### Site and identity
 
 | Route | Method | Auth | Where | Audience |
 |---|---|---|---|---|
-| `/api/status` | GET | owner | both | **[site op](#get-apistatus)** |
+| `/api/capabilities` | GET, HEAD | public, on hosted too | both | ⚠️ internal |
+| `/api/status` | GET | public, trimmed for anyone but the owner (hosted: owner) | both | **[site op](#get-apistatus)** |
 | `/api/validate` | GET | owner | both | **[site op](#get-apivalidate)** |
 | `/api/settings` | GET | owner | both | **[site op](#get-apisettings)** |
 | `/api/settings/avatar` | POST | owner | both | **[site op](#post-apisettingsavatar)** |
@@ -69,6 +75,10 @@ notice**.
 | `/api/settings/hide-read` | POST | owner | both | ⚠️ internal |
 | `/api/settings/webapp-theme` | POST | owner | both | ⚠️ internal |
 | `/api/settings/editor-panel-mode` | POST | owner | both | ⚠️ internal |
+| `/api/settings/custom-css` | GET, POST | owner | both | ⚠️ internal |
+| `/api/site/palette` | GET | owner | both | ⚠️ internal |
+| `/api/keys` | GET, POST | owner | both | **[site op](reference.md#authentication)** |
+| `/api/keys/{id}` | DELETE | owner | both | **[site op](reference.md#authentication)** |
 | `/api/about` | GET, POST | owner | both | **[site op](#get-post-apiabout)** |
 | `/api/rotate-key` | POST | owner | both | **[site op](#post-apirotate-key)** |
 | `/api/download-site` | GET | owner | both (hosted: `403`) | **[site op](#get-apidownload-site)** |
@@ -79,7 +89,27 @@ notice**.
 | `/api/site/license` | POST | owner | both | **[site op](#post-apisitelicense)** |
 | `/api/site/setup-wizard-dismiss` | POST | owner | both | ⚠️ internal |
 | `/api/init` | POST | owner | both | ⚠️ internal |
-| `/api/link` | POST | owner | both | ⚠️ internal |
+| `/api/deploy-status` | GET | owner | remote: elsewhere `{"state": "not-applicable"}` | ⚠️ internal |
+| `/api/deploy/apply` | POST | owner | remote: elsewhere `409` | ⚠️ internal |
+
+The two deploy routes do something only on an instance that publishes by deploying, which today means
+one running on Vercel.
+
+### Signing in to a remote instance
+
+A laptop needs no sign-in and the hosted service has its own, so these do their work only on a remote
+instance. Elsewhere the recovery routes answer `404` (no recovery key is configured) and sign-in has no
+provider to offer. Errors are JSON.
+
+| Route | Method | Auth | Where | Audience |
+|---|---|---|---|---|
+| `/api/recover/challenge` | GET, POST | public, rate-limited | remote | ⚠️ internal |
+| `/api/recover/verify` | POST | public: a recovery-key signature over that challenge | remote | ⚠️ internal |
+| `/api/enrol/{provider}/begin` · `/complete` | POST | the enrolment session `/api/recover/verify` gives, or the owner signed in recently | remote | ⚠️ internal |
+| `/api/providers` | GET, DELETE | owner | remote | ⚠️ internal |
+| `/api/signin/begin` | GET, POST | public, rate-limited | remote | ⚠️ internal |
+| `/api/signin/complete` | POST | public: an assertion over that challenge | remote | ⚠️ internal |
+| `/api/signout` | POST | owner | remote | ⚠️ internal |
 
 ### Content
 
@@ -173,6 +203,23 @@ For DMs from a script, use `pub.polis.dm` on the [Content Type API](reference.md
 | `/api/sse` | GET | owner | both | ⚠️ internal |
 | `/api/counts` | GET | owner | both | ⚠️ internal |
 | `/api/nav/state` | GET | owner; on hosted, a widget token or a session, answered by the hosted service | both | ⚠️ internal |
+| `/api/nav-shortcuts` | GET, POST | owner | both | ⚠️ internal |
+| `/api/stream-marks` | GET, POST | owner | both | ⚠️ internal |
+
+### Kay and the owner's AI
+
+Kay is the web app's page for asking an AI for changes to the site
+([user manual](../../webapp/user/user-manual.md#kay-have-your-ai-change-your-site-experimental)). The AI acts
+through [`/mcp`](#mcp-outside-api).
+
+| Route | Method | Auth | Where | Audience |
+|---|---|---|---|---|
+| `/api/kay` | GET | owner | not hosted | ⚠️ internal |
+| `/api/kay/connect` | POST, DELETE | owner | not hosted | ⚠️ internal |
+| `/api/kay/ask` | POST | owner | not hosted | ⚠️ internal |
+| `/api/kay/chats/{id}` | GET | owner | not hosted | ⚠️ internal |
+| `/api/kay/components` | GET | owner | not hosted; `{"enabled": false}` except on a remote instance | ⚠️ internal |
+| `/api/mcp/calls` | GET | owner | both | ⚠️ internal |
 
 ### Automations (localhost only)
 
@@ -206,6 +253,23 @@ Hooks run scripts on the server, so the hosted service does not register these r
 | `/api/export/request` | POST | session | hosted | ⚠️ internal |
 | `/api/export/download` | GET | the one-time link that `/api/export/request` emails | hosted | ⚠️ internal |
 
+### `/mcp` (outside `/api/`)
+
+| Route | Method | Auth | Where | Audience |
+|---|---|---|---|---|
+| `/mcp` | MCP over HTTP | API key | not hosted (the hosted service does not route it) | ⚠️ internal |
+| `/mcp/c/{component}` | MCP over HTTP | API key | remote; `404` elsewhere | ⚠️ internal |
+
+`/mcp` is where the owner's AI acts on the site. It is not under `/api/`, so the owner's sign-in does not
+apply: **the API key is its whole authorisation**, checked on every request, and a request without a
+valid one gets `401`. Every tool that changes the site needs a key with the `render` scope or full
+access. `/mcp/c/{component}` is the
+same server limited to the tools for one part of the site (the nav, a card, the timeline, the theme),
+for Kay's point and ask; it answers `404` for a component Kay cannot change yet. A key **bound** to one of
+these addresses works only there, and an address whose requests keep failing to authenticate is refused
+with `429` for the rest of the minute ([keys, scopes and binding](reference.md#scopes)).
+`/api/mcp/calls?since=<RFC 3339>` lists the tool calls served since then, oldest first, at most 200.
+
 ---
 
 ## Site operations
@@ -220,8 +284,8 @@ Whether the site is set up, and the basics about it. No side effects.
 |---|---|---|
 | `configured` | bool | `true` when `validation.status` is `valid` |
 | `site_title` · `base_url` | string | |
-| `validation` | object | `{status, errors}`, as [`/api/validate`](#get-apivalidate) returns |
-| `site_info` | object | present when the site could be read |
+| `validation` | object | `{status, errors}`, as [`/api/validate`](#get-apivalidate) returns. To anyone but the owner, only `{status}` |
+| `site_info` | object | present when the site could be read, and only to the owner |
 | `show_frontmatter` | bool | |
 | `avatar` · `author_name` · `active_theme` | | present only when set |
 
@@ -367,7 +431,7 @@ text, `content` is the default and `has_custom` is `false`.
 
 Replace the site's identity key. **Signs with both keys**, and is not reversible. No request body.
 
-**Response** — `200` `{"success": true, "public_key": "ssh-ed25519 …", "key_history_epoch": 2}`
+**Response** — `200` `{"success": true, "public_key": "ssh-ed25519 …", "key_history_epoch": 2, "following_resign": "resigned", "blessed_resign": "absent"}`
 
 **What it does, in order:**
 
@@ -379,7 +443,12 @@ Replace the site's identity key. **Signs with both keys**, and is not reversible
 5. Updates `public_key` and appends to `public_key_history` in `.well-known/polis`
    ([key history](../../signet/spec/key-history.md)).
 6. Re-signs the DM messages-key block with the new key, if the site has a DM keyring.
-7. Republishes `did.json`, and re-renders the site.
+7. Republishes `did.json`.
+8. Re-signs the follow file and the blessing list with the new key, ⛔ **only if each verified under
+   the old key**, then re-renders the site. `following_resign` and `blessed_resign` report what
+   happened to each: `resigned`, `absent`, `unsigned` (left unsigned),
+   `not-valid-under-old-key` (left exactly as it was), or `refused` (the file carries fields this
+   version does not understand, and was left as it was). None of them fails the rotation.
 
 | Status | When |
 |---|---|

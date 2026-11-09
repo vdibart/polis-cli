@@ -41,7 +41,6 @@ polis --json <command> [options]
 The following environment variables should be configured:
 - `POLIS_BASE_URL` - Your polis site URL (e.g., https://yourdomain.com)
 - `DISCOVERY_SERVICE_URL` - Discovery service URL
-- `DISCOVERY_SERVICE_KEY` - API authentication key
 
 ---
 

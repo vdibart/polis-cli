@@ -2,6 +2,7 @@ package site
 
 import (
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"regexp"
 	"strings"
 )
@@ -39,17 +40,17 @@ func ValidateAuthorName(name string) (string, error) {
 //
 // ⚠️ This changes .well-known/polis, which Judge snapshots: expect one
 // judge.alert.wellknown_change per call.
-func SetAuthorName(siteDir, name string) (string, error) {
+func SetAuthorName(site storage.Site, name string) (string, error) {
 	name, err := ValidateAuthorName(name)
 	if err != nil {
 		return "", err
 	}
-	wk, err := LoadWellKnown(siteDir)
+	wk, err := LoadWellKnown(site)
 	if err != nil {
 		return "", fmt.Errorf("load .well-known/polis: %w", err)
 	}
 	wk.AuthorName = name
-	if err := SaveWellKnown(siteDir, wk); err != nil {
+	if err := SaveWellKnown(site, wk); err != nil {
 		return "", err
 	}
 	return name, nil
@@ -85,17 +86,17 @@ func ValidateAvatar(a *AvatarConfig) error {
 //
 // The favicon is a projection: a failure there is returned as a warning, not
 // an error, because the identity document is already written.
-func SetAvatar(siteDir string, a *AvatarConfig) (faviconErr error, err error) {
+func SetAvatar(site storage.Site, a *AvatarConfig) (faviconErr error, err error) {
 	if err := ValidateAvatar(a); err != nil {
 		return nil, err
 	}
-	wk, err := LoadWellKnown(siteDir)
+	wk, err := LoadWellKnown(site)
 	if err != nil {
 		return nil, fmt.Errorf("load .well-known/polis: %w", err)
 	}
 	wk.Avatar = a
-	if err := SaveWellKnown(siteDir, wk); err != nil {
+	if err := SaveWellKnown(site, wk); err != nil {
 		return nil, err
 	}
-	return WriteFavicon(siteDir), nil
+	return WriteFavicon(site), nil
 }

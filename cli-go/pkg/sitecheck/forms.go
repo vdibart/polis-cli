@@ -36,15 +36,16 @@ type formReach struct {
 // check ID. ⛔ A check missing from this table fails CompareForms — so nobody
 // can add a check to one form without saying what the other one does.
 var formParity = map[string]formReach{
-	"identity.well_known":          {local: true, remote: true},
-	"identity.did_document":        {local: true, remote: true},
-	"identity.key_history":         {local: true, remote: true},
-	"identity.key_history_head":    {local: true, remote: true},
-	"identity.key_history_witness": {local: true, remote: true},
-	"identity.messages_key":        {local: true, remote: true},
-	"identity.key_files":           {local: true, why: "private keys are never served over HTTP"},
-	"identity.key_perms":           {local: true, why: "file permissions are never served over HTTP"},
-	"identity.key_match":           {local: true, why: "the key file the published key is compared with is never served over HTTP"},
+	"identity.well_known":           {local: true, remote: true},
+	"identity.did_document":         {local: true, remote: true},
+	"identity.key_history":          {local: true, remote: true},
+	"identity.key_history_head":     {local: true, remote: true},
+	"identity.key_history_witness":  {local: true, remote: true},
+	"identity.messages_key":         {local: true, remote: true},
+	"identity.key_files":            {local: true, why: "private keys are never served over HTTP"},
+	"identity.key_perms":            {local: true, why: "file permissions are never served over HTTP"},
+	"identity.key_match":            {local: true, why: "the key file the published key is compared with is never served over HTTP"},
+	"identity.private_files_served": {remote: true, why: onlyAServerCanAnswer},
 
 	"bundle.declared": {local: true, remote: true},
 	"bundle.json":     {local: true, remote: true},

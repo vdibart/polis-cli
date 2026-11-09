@@ -2,6 +2,7 @@ package publish
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,11 +13,10 @@ import (
 
 func TestRegisterPost_NotConfigured(t *testing.T) {
 	// Reset config
-	oldURL, oldKey, oldBase := DiscoveryURL, DiscoveryKey, BaseURL
-	defer func() { DiscoveryURL, DiscoveryKey, BaseURL = oldURL, oldKey, oldBase }()
+	oldURL, oldBase := DiscoveryURL, BaseURL
+	defer func() { DiscoveryURL, BaseURL = oldURL, oldBase }()
 
 	DiscoveryURL = ""
-	DiscoveryKey = ""
 	BaseURL = ""
 
 	result := &PublishResult{
@@ -27,22 +27,21 @@ func TestRegisterPost_NotConfigured(t *testing.T) {
 	}
 
 	// Should silently return nil when not configured
-	err := RegisterPost(t.TempDir(), result, nil, nil)
+	err := RegisterPost(storage.At(t.TempDir()), result, nil, nil)
 	if err != nil {
 		t.Errorf("expected nil error when not configured, got: %v", err)
 	}
 }
 
 func TestRegisterPost_NoEmailButHasBaseURL(t *testing.T) {
-	oldURL, oldKey, oldBase := DiscoveryURL, DiscoveryKey, BaseURL
-	defer func() { DiscoveryURL, DiscoveryKey, BaseURL = oldURL, oldKey, oldBase }()
+	oldURL, oldBase := DiscoveryURL, BaseURL
+	defer func() { DiscoveryURL, BaseURL = oldURL, oldBase }()
 
 	DiscoveryURL = "https://discovery.example.com"
-	DiscoveryKey = "test-key"
 	BaseURL = "https://test.polis.pub"
 
 	dataDir := t.TempDir()
-	discovery.WriteRegistrationMarker(dataDir, DiscoveryURL, "test.polis.pub", "")
+	discovery.WriteRegistrationMarker(storage.At(dataDir), DiscoveryURL, "test.polis.pub", "")
 
 	// Create .well-known/polis WITHOUT email — author derived from BaseURL
 	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
@@ -61,7 +60,7 @@ func TestRegisterPost_NoEmailButHasBaseURL(t *testing.T) {
 
 	// Will fail at signing (nil key) but should NOT fail at author resolution
 	// because domain is derived from BaseURL
-	err := RegisterPost(dataDir, result, nil, nil)
+	err := RegisterPost(storage.At(dataDir), result, nil, nil)
 	if err == nil {
 		t.Error("expected error (nil private key), got nil")
 	}
@@ -72,15 +71,14 @@ func TestRegisterPost_NoEmailButHasBaseURL(t *testing.T) {
 }
 
 func TestRegisterPost_BaseURLDomainFallback(t *testing.T) {
-	oldURL, oldKey, oldBase := DiscoveryURL, DiscoveryKey, BaseURL
-	defer func() { DiscoveryURL, DiscoveryKey, BaseURL = oldURL, oldKey, oldBase }()
+	oldURL, oldBase := DiscoveryURL, BaseURL
+	defer func() { DiscoveryURL, BaseURL = oldURL, oldBase }()
 
 	DiscoveryURL = "https://discovery.example.com"
-	DiscoveryKey = "test-key"
 	BaseURL = "https://alice.polis.pub"
 
 	dataDir := t.TempDir()
-	discovery.WriteRegistrationMarker(dataDir, DiscoveryURL, "alice.polis.pub", "")
+	discovery.WriteRegistrationMarker(storage.At(dataDir), DiscoveryURL, "alice.polis.pub", "")
 
 	// Create .well-known/polis without email — domain from BaseURL
 	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
@@ -98,7 +96,7 @@ func TestRegisterPost_BaseURLDomainFallback(t *testing.T) {
 	}
 
 	// Will fail at signing (nil key) but should NOT fail at author resolution
-	err := RegisterPost(dataDir, result, nil, nil)
+	err := RegisterPost(storage.At(dataDir), result, nil, nil)
 	if err == nil {
 		t.Error("expected error (nil private key), got nil")
 	}
@@ -109,15 +107,14 @@ func TestRegisterPost_BaseURLDomainFallback(t *testing.T) {
 }
 
 func TestRegisterPost_EmailPreferredOverDomain(t *testing.T) {
-	oldURL, oldKey, oldBase := DiscoveryURL, DiscoveryKey, BaseURL
-	defer func() { DiscoveryURL, DiscoveryKey, BaseURL = oldURL, oldKey, oldBase }()
+	oldURL, oldBase := DiscoveryURL, BaseURL
+	defer func() { DiscoveryURL, BaseURL = oldURL, oldBase }()
 
 	DiscoveryURL = "https://discovery.example.com"
-	DiscoveryKey = "test-key"
 	BaseURL = "https://alice.polis.pub"
 
 	dataDir := t.TempDir()
-	discovery.WriteRegistrationMarker(dataDir, DiscoveryURL, "alice.polis.pub", "")
+	discovery.WriteRegistrationMarker(storage.At(dataDir), DiscoveryURL, "alice.polis.pub", "")
 
 	// Create .well-known/polis with email (email preferred over BaseURL-derived domain)
 	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
@@ -136,7 +133,7 @@ func TestRegisterPost_EmailPreferredOverDomain(t *testing.T) {
 	}
 
 	// Will fail at signing (nil key) but should NOT fail at author resolution
-	err := RegisterPost(dataDir, result, nil, nil)
+	err := RegisterPost(storage.At(dataDir), result, nil, nil)
 	if err == nil {
 		t.Error("expected error (nil private key), got nil")
 	}
@@ -147,26 +144,24 @@ func TestRegisterPost_EmailPreferredOverDomain(t *testing.T) {
 }
 
 func TestRegisterPost_PartialConfig(t *testing.T) {
-	oldURL, oldKey, oldBase := DiscoveryURL, DiscoveryKey, BaseURL
-	defer func() { DiscoveryURL, DiscoveryKey, BaseURL = oldURL, oldKey, oldBase }()
+	oldURL, oldBase := DiscoveryURL, BaseURL
+	defer func() { DiscoveryURL, BaseURL = oldURL, oldBase }()
 
 	tests := []struct {
 		name string
 		url  string
-		key  string
 		base string
 	}{
-		{"no URL", "", "key", "https://test.polis.pub"},
-		{"no base URL", "https://discovery.example.com", "key", ""},
+		{"no URL", "", "https://test.polis.pub"},
+		{"no base URL", "https://discovery.example.com", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			DiscoveryURL = tt.url
-			DiscoveryKey = tt.key
 			BaseURL = tt.base
 
-			err := RegisterPost(t.TempDir(), &PublishResult{}, nil, nil)
+			err := RegisterPost(storage.At(t.TempDir()), &PublishResult{}, nil, nil)
 			if err != nil {
 				t.Errorf("expected nil when partially configured, got: %v", err)
 			}
@@ -176,21 +171,19 @@ func TestRegisterPost_PartialConfig(t *testing.T) {
 
 func TestRegisterPost_WithExplicitConfig(t *testing.T) {
 	// Ensure package globals are empty — the explicit config should be used
-	oldURL, oldKey, oldBase := DiscoveryURL, DiscoveryKey, BaseURL
-	defer func() { DiscoveryURL, DiscoveryKey, BaseURL = oldURL, oldKey, oldBase }()
+	oldURL, oldBase := DiscoveryURL, BaseURL
+	defer func() { DiscoveryURL, BaseURL = oldURL, oldBase }()
 
 	DiscoveryURL = ""
-	DiscoveryKey = ""
 	BaseURL = ""
 
 	cfg := &DiscoveryConfig{
 		DiscoveryURL: "https://ds.polis.pub",
-		DiscoveryKey: "test-key",
 		BaseURL:      "https://alice.polis.pub",
 	}
 
 	dataDir := t.TempDir()
-	discovery.WriteRegistrationMarker(dataDir, cfg.DiscoveryURL, "alice.polis.pub", "")
+	discovery.WriteRegistrationMarker(storage.At(dataDir), cfg.DiscoveryURL, "alice.polis.pub", "")
 
 	// Create .well-known/polis with email
 	os.MkdirAll(filepath.Join(dataDir, ".well-known"), 0755)
@@ -210,7 +203,7 @@ func TestRegisterPost_WithExplicitConfig(t *testing.T) {
 
 	// This will attempt to reach ds.polis.pub which won't work in tests,
 	// but it should NOT silently skip (which would happen if globals were used)
-	err := RegisterPost(dataDir, result, nil, cfg)
+	err := RegisterPost(storage.At(dataDir), result, nil, cfg)
 	// We expect a signing error (nil privateKey) or network error — not nil
 	if err == nil {
 		t.Error("expected error when using explicit config (can't sign with nil key), got nil")

@@ -17,6 +17,7 @@ package feed
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -108,7 +109,7 @@ func TestE2E_DSStreamToFeedCache(t *testing.T) {
 	// Configure a discovery client. DSKeyCache=nil skips response
 	// envelope verification — needed because the mock server doesn't
 	// produce DS-signed responses.
-	client := discovery.NewClient(ds.URL, "test-key")
+	client := discovery.NewClient(ds.URL)
 	client.DSKeyCache = nil
 
 	// === Pull events from DS via the same query path syncFeed uses. ===
@@ -154,7 +155,7 @@ func TestE2E_DSStreamToFeedCache(t *testing.T) {
 	}
 
 	// === Persist items through CacheManager. ===
-	cm := NewCacheManager(t.TempDir(), "ds.example.com")
+	cm := NewCacheManager(storage.At(t.TempDir()), "ds.example.com")
 	added, err := cm.MergeItems(items)
 	if err != nil {
 		t.Fatalf("MergeItems: %v", err)
@@ -227,7 +228,7 @@ func TestE2E_DSStreamToFeedCache_SelfEventsSkipped(t *testing.T) {
 	ds := fakeDSStream(t, dsEvents)
 	defer ds.Close()
 
-	client := discovery.NewClient(ds.URL, "test-key")
+	client := discovery.NewClient(ds.URL)
 	client.DSKeyCache = nil
 
 	resp, _ := client.StreamQuery("0", 100, "", "", "")
@@ -265,7 +266,7 @@ func TestE2E_DSStreamToFeedCache_IncludeSelf(t *testing.T) {
 	ds := fakeDSStream(t, dsEvents)
 	defer ds.Close()
 
-	client := discovery.NewClient(ds.URL, "test-key")
+	client := discovery.NewClient(ds.URL)
 	client.DSKeyCache = nil
 
 	resp, _ := client.StreamQuery("0", 100, "", "", "")
@@ -307,7 +308,7 @@ func TestE2E_DSStreamToFeedCache_UnknownEventTypeIgnored(t *testing.T) {
 	ds := fakeDSStream(t, dsEvents)
 	defer ds.Close()
 
-	client := discovery.NewClient(ds.URL, "test-key")
+	client := discovery.NewClient(ds.URL)
 	client.DSKeyCache = nil
 
 	resp, _ := client.StreamQuery("0", 100, "", "", "")

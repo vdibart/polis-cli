@@ -19,14 +19,18 @@
 package cache
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/sitecheck"
+	"io/fs"
 	neturl "net/url"
-	"os"
-	"path/filepath"
 	"strings"
 
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // BlessedSidecar is the provenance metadata written alongside each cached
@@ -42,11 +46,26 @@ type BlessedSidecar struct {
 	FetchedAt          string `json:"fetched_at"`           // when the body was fetched
 	VerifiedAt         string `json:"verified_at"`          // when sig+hash last verified
 	EventID            string `json:"event_id,omitempty"`   // triggering DS event id, if any
+
+	// KeyUsed — which of the author's keys verified the comment when it was
+	// cached (see Sidecar.KeyUsed). Omitted when unknown, so sidecars written
+	// before it existed load unchanged.
+	KeyUsed *sitecheck.KeyUsed `json:"key_used,omitempty"`
 }
 
-// blessedDir is the cache root for the blessed kind under a DS scope.
-func blessedDir(dataDir, dsDomain string) string {
-	return filepath.Join(dataDir, ".polis", "ds", dsDomain, "pub.polis.core", "cache", "blessed")
+// blessedKey is the cache root for the blessed kind under a DS scope, relative
+// to the site root.
+//
+// ⭐ A KEY, so every reader and writer of this cache addresses it the same way
+// on any backend.
+func blessedKey(dsDomain string) string {
+	return ".polis/ds/" + dsDomain + "/pub.polis.core/cache/blessed"
+}
+
+// safeSegment reports whether s can be ONE path segment: a host or a DS domain
+// taken from a URL. ⛔ A host of ".." would otherwise walk out of the cache.
+func safeSegment(s string) bool {
+	return s != "" && !strings.HasPrefix(s, ".") && !strings.ContainsAny(s, "/\\\x00")
 }
 
 // AuthorDomainFromURL returns the host of a comment URL (the author's domain),
@@ -59,39 +78,61 @@ func AuthorDomainFromURL(commentURL string) string {
 	return parsed.Host
 }
 
-// BlessedPaths derives the cache .md and .meta.json sidecar paths for a blessed
+// blessedKeys derives the cache .md and .meta.json sidecar KEYS for a blessed
 // comment from its URL (canonical or mount form — tolerant during the Defect-1
 // transition). Returns ok=false if the URL isn't a recognizable comment URL or
 // lacks a host.
-func BlessedPaths(dataDir, dsDomain, commentURL string) (mdPath, metaPath string, ok bool) {
+//
+// ⭐ KEYS, NOT PATHS, and no site is needed to compute them: the layout is a
+// fact about the cache, not about where the site happens to be stored. This
+// replaced an exported path builder whose callers read and wrote the bytes by
+// path, which is the pair that cannot cross a backend boundary.
+func blessedKeys(dsDomain, commentURL string) (mdKey, metaKey string, ok bool) {
+	suffix, author, ok := blessedSuffix(commentURL)
+	if !ok || !safeSegment(dsDomain) {
+		return "", "", false
+	}
+	mdKey = blessedKey(dsDomain) + "/" + author + "/" + suffix
+	// ⛔ Proven still inside this DS's cache before anything uses it.
+	if !storage.Within(mdKey, blessedKey(dsDomain)) {
+		return "", "", false
+	}
+	return mdKey, mdKey + ".meta.json", true
+}
+
+// blessedSuffix is the part of a cache key below the DS scope: the author
+// domain and the comment's <date>/<id>.md.
+func blessedSuffix(commentURL string) (suffix, author string, ok bool) {
 	rel := polisurl.CommentURLToContentRel(commentURL) // content/pub.polis.core/comment/<date>/<id>.md
 	if rel == "" {
 		return "", "", false
 	}
-	author := AuthorDomainFromURL(commentURL)
-	if author == "" {
+	author = AuthorDomainFromURL(commentURL)
+	if !safeSegment(author) {
 		return "", "", false
 	}
-	suffix := strings.TrimPrefix(rel, "content/pub.polis.core/comment/") // <date>/<id>.md
-	mdPath = filepath.Join(blessedDir(dataDir, dsDomain), author, filepath.FromSlash(suffix))
-	metaPath = mdPath + ".meta.json"
-	return mdPath, metaPath, true
+	return strings.TrimPrefix(rel, "content/pub.polis.core/comment/"), author, true
 }
 
 // StoreBlessed writes a verified blessed-comment body + its provenance sidecar
 // to the isolated cache. The caller is responsible for having verified the
 // body's signature against the author's key and that its hash matches the
 // blessed version BEFORE calling — the sidecar records the result. The cache
-// path is derived from sc.SourceURL.
-func StoreBlessed(dataDir, dsDomain string, sc BlessedSidecar, body []byte) error {
-	mdPath, metaPath, ok := BlessedPaths(dataDir, dsDomain, sc.SourceURL)
+// key is derived from sc.SourceURL.
+func StoreBlessed(site storage.Site, dsDomain string, sc BlessedSidecar, body []byte) error {
+	mdKey, metaKey, ok := blessedKeys(dsDomain, sc.SourceURL)
 	if !ok {
 		return fmt.Errorf("cache: unrecognized comment URL %q", sc.SourceURL)
 	}
-	if err := os.MkdirAll(filepath.Dir(mdPath), 0o755); err != nil {
-		return fmt.Errorf("cache: mkdir: %w", err)
-	}
-	if err := os.WriteFile(mdPath, body, 0o644); err != nil {
+	// ⛔ A SITE STORE, which TIGHTENS the parents from 0755 to 0700 — a declared
+	// change, not an accident. The blessed cache lives under .polis
+	// (.polis/ds/<domain>/pub.polis.core/cache/blessed), where the invariant is
+	// 0700 and every other writer already obeys it; this path was creating
+	// world-readable directories inside a tree whose gate is closed. The FILE
+	// modes are unchanged at 0644, because the cache holds blessed comments,
+	// which are published content rather than secrets.
+	st := site.Store()
+	if err := st.Put(context.Background(), mdKey, body, storage.WithMode(0o644)); err != nil {
 		return fmt.Errorf("cache: write body: %w", err)
 	}
 	sc.Kind = "blessed"
@@ -102,7 +143,7 @@ func StoreBlessed(dataDir, dsDomain string, sc BlessedSidecar, body []byte) erro
 	if err != nil {
 		return fmt.Errorf("cache: marshal sidecar: %w", err)
 	}
-	if err := os.WriteFile(metaPath, meta, 0o644); err != nil {
+	if err := st.Put(context.Background(), metaKey, meta, storage.WithMode(0o644)); err != nil {
 		return fmt.Errorf("cache: write sidecar: %w", err)
 	}
 	return nil
@@ -111,16 +152,24 @@ func StoreBlessed(dataDir, dsDomain string, sc BlessedSidecar, body []byte) erro
 // ReadBlessed returns the cached body + sidecar for a blessed comment, or
 // ok=false if not cached. A missing/corrupt sidecar still returns the body with
 // a zero-value sidecar (best-effort), so display degrades gracefully.
-func ReadBlessed(dataDir, dsDomain, commentURL string) (body []byte, sc BlessedSidecar, ok bool) {
-	mdPath, metaPath, derived := BlessedPaths(dataDir, dsDomain, commentURL)
+//
+// ⚠️ ANY read error is "not cached", as it was when this read by path: the
+// caller re-fetches, which is the safe direction.
+func ReadBlessed(site storage.Site, dsDomain, commentURL string) (body []byte, sc BlessedSidecar, ok bool) {
+	mdKey, metaKey, derived := blessedKeys(dsDomain, commentURL)
 	if !derived {
 		return nil, BlessedSidecar{}, false
 	}
-	body, err := os.ReadFile(mdPath)
+	return readBlessedKey(site, mdKey, metaKey)
+}
+
+func readBlessedKey(site storage.Site, mdKey, metaKey string) (body []byte, sc BlessedSidecar, ok bool) {
+	ctx := context.Background()
+	body, err := site.Store().Get(ctx, mdKey)
 	if err != nil {
 		return nil, BlessedSidecar{}, false
 	}
-	if data, err := os.ReadFile(metaPath); err == nil {
+	if data, err := site.Store().Get(ctx, metaKey); err == nil {
 		_ = json.Unmarshal(data, &sc)
 	}
 	return body, sc, true
@@ -129,64 +178,71 @@ func ReadBlessed(dataDir, dsDomain, commentURL string) (body []byte, sc BlessedS
 // EvictBlessed removes a cached blessed comment + its sidecar. Idempotent: a
 // missing entry is not an error. Used to honor a signed withdrawal/unpublish or
 // a post-author un-bless.
-func EvictBlessed(dataDir, dsDomain, commentURL string) error {
-	mdPath, metaPath, ok := BlessedPaths(dataDir, dsDomain, commentURL)
+func EvictBlessed(site storage.Site, dsDomain, commentURL string) error {
+	mdKey, metaKey, ok := blessedKeys(dsDomain, commentURL)
 	if !ok {
 		return nil
 	}
-	_ = os.Remove(metaPath)
-	if err := os.Remove(mdPath); err != nil && !os.IsNotExist(err) {
+	return evictBlessedKey(site, mdKey, metaKey)
+}
+
+func evictBlessedKey(site storage.Site, mdKey, metaKey string) error {
+	ctx := context.Background()
+	_ = site.Store().Delete(ctx, metaKey, storage.IgnoreMissing())
+	if err := site.Store().Delete(ctx, mdKey); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("cache: evict: %w", err)
 	}
 	return nil
 }
 
-// blessedGlob returns a glob matching a comment's cache .md across ALL DS scopes
-// (there is effectively one DS today). Lets read/evict callers that don't have
-// the DS domain handy — e.g. the render path — avoid threading it everywhere.
-func blessedGlob(dataDir, commentURL string) (string, bool) {
-	rel := polisurl.CommentURLToContentRel(commentURL)
-	author := AuthorDomainFromURL(commentURL)
-	if rel == "" || author == "" {
-		return "", false
+// blessedKeysAnyDS returns a comment's cache .md key under EVERY DS scope that
+// exists on the site (there is effectively one DS today). Lets read/evict
+// callers that don't have the DS domain handy — e.g. the render path — avoid
+// threading it everywhere.
+//
+// ⭐ This was a filesystem glob over ".polis/ds/*/…". A glob is not something a
+// store can answer, but the only wildcard was the DS scope, and that is one
+// shallow List of .polis/ds. A missing .polis/ds is an empty result, which is
+// what the glob returned too.
+func blessedKeysAnyDS(site storage.Site, commentURL string) []string {
+	suffix, author, ok := blessedSuffix(commentURL)
+	if !ok {
+		return nil
 	}
-	suffix := strings.TrimPrefix(rel, "content/pub.polis.core/comment/")
-	return filepath.Join(dataDir, ".polis", "ds", "*", "pub.polis.core", "cache", "blessed", author, filepath.FromSlash(suffix)), true
+	entries, _ := site.Store().List(context.Background(), ".polis/ds")
+	var keys []string
+	for _, e := range entries {
+		if !e.IsDir {
+			continue
+		}
+		base := e.Key + "/pub.polis.core/cache/blessed"
+		k := base + "/" + author + "/" + suffix
+		// ⛔ Only keys proven inside a cache: a forged event can then delete
+		// nothing but a cache entry.
+		if storage.Within(k, base) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
 }
 
 // FindBlessed locates a cached blessed comment across DS scopes without needing
 // the DS domain (convenient for render-time reads). Returns body + sidecar or
 // ok=false.
-func FindBlessed(dataDir, commentURL string) (body []byte, sc BlessedSidecar, ok bool) {
-	glob, derived := blessedGlob(dataDir, commentURL)
-	if !derived {
-		return nil, BlessedSidecar{}, false
-	}
-	matches, _ := filepath.Glob(glob)
-	for _, mdPath := range matches {
-		data, err := os.ReadFile(mdPath)
-		if err != nil {
-			continue
+func FindBlessed(site storage.Site, commentURL string) (body []byte, sc BlessedSidecar, ok bool) {
+	for _, mdKey := range blessedKeysAnyDS(site, commentURL) {
+		if body, sc, ok := readBlessedKey(site, mdKey, mdKey+".meta.json"); ok {
+			return body, sc, true
 		}
-		if m, err := os.ReadFile(mdPath + ".meta.json"); err == nil {
-			_ = json.Unmarshal(m, &sc)
-		}
-		return data, sc, true
 	}
 	return nil, BlessedSidecar{}, false
 }
 
 // EvictBlessedAnyDS evicts a cached blessed comment across all DS scopes.
-func EvictBlessedAnyDS(dataDir, commentURL string) error {
-	glob, ok := blessedGlob(dataDir, commentURL)
-	if !ok {
-		return nil
-	}
-	matches, _ := filepath.Glob(glob)
-	for _, mdPath := range matches {
-		_ = os.Remove(mdPath + ".meta.json")
-		if err := os.Remove(mdPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("cache: evict: %w", err)
+func EvictBlessedAnyDS(site storage.Site, commentURL string) error {
+	for _, mdKey := range blessedKeysAnyDS(site, commentURL) {
+		if err := evictBlessedKey(site, mdKey, mdKey+".meta.json"); err != nil {
+			return err
 		}
 	}
 	return nil

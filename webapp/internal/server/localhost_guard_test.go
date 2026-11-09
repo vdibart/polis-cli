@@ -221,7 +221,7 @@ func TestRemoteIPIgnoresProxyHeadersWithoutATrustedProxy(t *testing.T) {
 	req.RemoteAddr = "192.0.2.50:9999"
 	req.Header.Set("Fly-Client-IP", "203.0.113.42")
 	req.Header.Set("X-Forwarded-For", "198.51.100.7")
-	if got := remoteIP(req, false); got != "192.0.2.50" {
+	if got := remoteIP(req, ProxyNone); got != "192.0.2.50" {
 		t.Errorf("remoteIP without a trusted proxy = %q, want RemoteAddr 192.0.2.50", got)
 	}
 }
@@ -235,7 +235,7 @@ func TestSelfHostedLimiterCountsTheConnectionNotTheHeader(t *testing.T) {
 		req.Header.Set("Fly-Client-IP", spoof)
 		req.Header.Set("X-Forwarded-For", spoof)
 		w := httptest.NewRecorder()
-		publicContentMiddleware(limiter, false, ok)(w, req)
+		publicContentMiddleware(limiter, ProxyNone, ok)(w, req)
 		want := http.StatusOK
 		if i == 1 {
 			want = http.StatusTooManyRequests

@@ -2,6 +2,7 @@ package attestation
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -31,23 +32,23 @@ func TestRegisterIssuedAnnouncesAnAlreadySignedRecord(t *testing.T) {
 	cfg := &DiscoveryConfig{DiscoveryURL: srv.URL, BaseURL: "https://vdibart.polis.pub"}
 
 	rec := sampleRecord()
-	id, err := Issue(site, rec, priv) // written, never announced
+	id, err := Issue(storage.At(site), rec, priv) // written, never announced
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Not registered with the DS: refused by name, nothing sent.
-	if _, err := RegisterIssued(site, id, priv, cfg); err == nil || !strings.Contains(err.Error(), "not registered") {
+	if _, err := RegisterIssued(storage.At(site), id, priv, cfg); err == nil || !strings.Contains(err.Error(), "not registered") {
 		t.Fatalf("unregistered site: err = %v", err)
 	}
 	if calls != 0 {
 		t.Fatal("the DS was called for an unregistered site")
 	}
 
-	if err := discovery.WriteRegistrationMarker(site, srv.URL, "vdibart.polis.pub", ""); err != nil {
+	if err := discovery.WriteRegistrationMarker(storage.At(site), srv.URL, "vdibart.polis.pub", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RegisterIssued(site, id, priv, cfg); err != nil {
+	if _, err := RegisterIssued(storage.At(site), id, priv, cfg); err != nil {
 		t.Fatalf("RegisterIssued: %v", err)
 	}
 	if calls != 1 || captured["url"] != RecordURL(cfg.BaseURL, id) || captured["version"] != rec.Version {
@@ -55,15 +56,15 @@ func TestRegisterIssuedAnnouncesAnAlreadySignedRecord(t *testing.T) {
 	}
 
 	// Someone else's record, and a record that does not verify: refused.
-	if _, err := RegisterIssued(site, id, priv, &DiscoveryConfig{DiscoveryURL: srv.URL, BaseURL: "https://other.example"}); err == nil || !strings.Contains(err.Error(), "only its issuer") {
+	if _, err := RegisterIssued(storage.At(site), id, priv, &DiscoveryConfig{DiscoveryURL: srv.URL, BaseURL: "https://other.example"}); err == nil || !strings.Contains(err.Error(), "only its issuer") {
 		t.Fatalf("foreign issuer: err = %v", err)
 	}
-	tampered, _ := Load(Path(site, id))
+	tampered, _ := Load(storage.At(site), id)
 	tampered.Payload = map[string]string{"added": "later"}
-	if err := writeRecord(Path(site, id), tampered); err != nil {
+	if err := writeRecord(storage.At(site), Key(id), tampered); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RegisterIssued(site, id, priv, cfg); err == nil || !strings.Contains(err.Error(), "invalid") {
+	if _, err := RegisterIssued(storage.At(site), id, priv, cfg); err == nil || !strings.Contains(err.Error(), "invalid") {
 		t.Fatalf("tampered record: err = %v", err)
 	}
 	if calls != 1 {

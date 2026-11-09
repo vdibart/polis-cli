@@ -1,17 +1,19 @@
 package cache
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 	"github.com/vdibart/polis-cli/cli-go/pkg/verify"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // KindBlessed is the cache kind for blessed comments authored by another tenant
@@ -56,12 +58,12 @@ func (b *blessedDescriptor) EvictionSignals() []string {
 // expire by time — they leave only on a signed revocation.
 func (b *blessedDescriptor) TTL() time.Duration { return 0 }
 
-func (b *blessedDescriptor) Paths(st Store, key string) (string, string, bool) {
-	return BlessedPaths(st.DataDir, st.DSDomain, key)
+func (b *blessedDescriptor) Keys(st Store, key string) (string, string, bool) {
+	return blessedKeys(st.DSDomain, key)
 }
 
 func (b *blessedDescriptor) Read(st Store, key string) ([]byte, Sidecar, bool) {
-	body, bsc, ok := ReadBlessed(st.DataDir, st.DSDomain, key)
+	body, bsc, ok := ReadBlessed(st.Site, st.DSDomain, key)
 	if !ok {
 		return nil, Sidecar{}, false
 	}
@@ -69,21 +71,21 @@ func (b *blessedDescriptor) Read(st Store, key string) ([]byte, Sidecar, bool) {
 }
 
 func (b *blessedDescriptor) Store(st Store, sc Sidecar, body []byte) error {
-	return StoreBlessed(st.DataDir, st.DSDomain, sidecarToBlessed(sc), body)
+	return StoreBlessed(st.Site, st.DSDomain, sidecarToBlessed(sc), body)
 }
 
 // Evict removes the entry across ALL DS scopes (EvictBlessedAnyDS), preserving
 // the WS3·d real-time eviction behavior where the caller may not know the DS
 // domain. Idempotent.
 func (b *blessedDescriptor) Evict(st Store, key string) error {
-	return EvictBlessedAnyDS(st.DataDir, key)
+	return EvictBlessedAnyDS(st.Site, key)
 }
 
 // Fetch fetches + verifies the author's canonical comment and prepares a
 // generic sidecar. It is the single source of the verify-and-gate policy that
-// both the real-time grant path and Rosie's Reconcile now share.
+// both the real-time grant path and the cache upkeep's Reconcile now share.
 func (b *blessedDescriptor) Fetch(st Store, key string, opts IngestOptions) FetchOutcome {
-	if _, _, ok := BlessedPaths(st.DataDir, st.DSDomain, key); !ok {
+	if _, _, ok := blessedKeys(st.DSDomain, key); !ok {
 		return FetchOutcome{Verdict: "unsupported_key"}
 	}
 	mdURL := polisurl.NormalizeToMD(key)
@@ -94,17 +96,6 @@ func (b *blessedDescriptor) Fetch(st Store, key string, opts IngestOptions) Fetc
 		result, verr = b.verifyContent(mdURL)
 	}
 	if verr != nil {
-		// RELOCATE fallback (migration only): author unreachable + no entry yet
-		// → build from the tenant's pre-existing local content/ copy so the WS4
-		// rebuild-then-clean migration doesn't lose the entry. The daily actor
-		// never sets this (steady-state has no content/ copies to relocate from).
-		if opts.RelocateFromContent {
-			if body, ok := readLocalContentCopy(st.DataDir, key); ok {
-				now := b.now().UTC().Format(time.RFC3339)
-				sc := b.makeSidecar(key, "", now, "") // unverified — provenance-marked relocate
-				return FetchOutcome{Body: body, Sidecar: sc, Cacheable: true, Verdict: "relocated", Source: "relocate", Relocated: true}
-			}
-		}
 		return FetchOutcome{Verdict: "fetch_failed", Source: source, Err: verr}
 	}
 
@@ -123,6 +114,9 @@ func (b *blessedDescriptor) Fetch(st Store, key string, opts IngestOptions) Fetc
 		verifiedAt = now
 	}
 	sc := b.makeSidecar(key, result.CurrentVersion, now, verifiedAt)
+	if verdict == "valid" {
+		sc.KeyUsed = result.Signature.Key
+	}
 	return FetchOutcome{Body: []byte(result.Body), Sidecar: sc, Cacheable: true, Verdict: verdict, Source: source}
 }
 
@@ -178,25 +172,21 @@ func (b *blessedDescriptor) VerifyCached(st Store, key string, body []byte, sc S
 // including sidecar-less orphan bodies (HasSidecar=false) so GC can reclaim
 // them. Keys are normalized to match DesiredSet.
 func (b *blessedDescriptor) List(st Store) ([]CachedItem, error) {
-	root := blessedDir(st.DataDir, st.DSDomain)
+	root := blessedKey(st.DSDomain)
+	ctx := context.Background()
+	// ⚠️ A recursive List returns what it could read plus the first error.
+	// The error is ignored ON PURPOSE: the walk this replaced skipped every
+	// unreadable entry and a missing root alike and never failed, and GC and
+	// Reconcile were written against that. A missing root is an empty result.
+	entries, _ := st.Site.Store().List(ctx, root, storage.Recursive())
 	var items []CachedItem
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil // no cache yet — empty list, not an error
-			}
-			return nil
+	for _, e := range entries {
+		if e.IsDir || !strings.HasSuffix(e.Key, ".md") {
+			continue
 		}
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") || strings.HasSuffix(d.Name(), ".meta.json") {
-			return nil
-		}
-		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil {
-			return nil
-		}
-		normKey := filepath.ToSlash(rel) // <author>/<date>/<id>.md — matches blessedNormKey
-		item := CachedItem{Key: normKey, MDPath: path}
-		if metaRaw, e := os.ReadFile(path + ".meta.json"); e == nil {
+		normKey := strings.TrimPrefix(e.Key, root+"/") // <author>/<date>/<id>.md — matches blessedNormKey
+		item := CachedItem{Key: normKey, MDKey: e.Key}
+		if metaRaw, err := st.Site.Store().Get(ctx, e.Key+".meta.json"); err == nil {
 			var bsc BlessedSidecar
 			if json.Unmarshal(metaRaw, &bsc) == nil {
 				item.Sidecar = blessedToSidecar(bsc)
@@ -204,10 +194,6 @@ func (b *blessedDescriptor) List(st Store) ([]CachedItem, error) {
 			}
 		}
 		items = append(items, item)
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 	return items, nil
 }
@@ -220,7 +206,7 @@ func (b *blessedDescriptor) List(st Store) ([]CachedItem, error) {
 // Why blessed.json (not a DS query): blessed.json is the post author's own
 // decision about what to display, and it is kept correct + complete by the
 // real-time sync path (grants/denials) and the periodic Clerk(detect) +
-// Chaplain(repair) reconcile. Sourcing the desired set from it lets Rosie
+// Chaplain(repair) reconcile. Sourcing the desired set from it lets the cache upkeep
 // reconstitute the cache offline of the DS and at any scale (no per-comment
 // query, no `maxDSResponseRecords` cliff). The descriptor's Fetch/VerifyCached
 // still dereference the comment author's canonical URL to fetch+verify the
@@ -234,7 +220,7 @@ func (b *blessedDescriptor) List(st Store) ([]CachedItem, error) {
 // an error → Reconcile does NOTHING (never evict on uncertainty); an absent
 // blessed.json is an empty desired set (nothing blessed locally).
 func (b *blessedDescriptor) DesiredSet(st Store) (map[string]DesiredEntry, error) {
-	blessed, err := metadata.LoadBlessedComments(st.DataDir)
+	blessed, err := metadata.LoadBlessedComments(st.Site)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return map[string]DesiredEntry{}, nil // nothing blessed locally
@@ -259,13 +245,13 @@ func (b *blessedDescriptor) DesiredSet(st Store) (map[string]DesiredEntry, error
 // ----------------------------------------------------------------------------
 
 // blessedNormKey maps a comment URL (canonical OR mount form) to the cache's
-// relative key "<author>/<date>/<id>.md" — the same layout BlessedPaths writes,
+// relative key "<author>/<date>/<id>.md" — the same layout blessedKeys writes,
 // so List() entries and DesiredSet() entries compare equal. Returns "" for a
 // non-comment / hostless URL.
 func blessedNormKey(commentURL string) string {
 	rel := polisurl.CommentURLToContentRel(commentURL)
 	author := AuthorDomainFromURL(commentURL)
-	if rel == "" || author == "" {
+	if rel == "" || !safeSegment(author) {
 		return ""
 	}
 	suffix := strings.TrimPrefix(rel, "content/pub.polis.core/comment/")
@@ -296,7 +282,7 @@ func sourceURLOf(key string, sc Sidecar) string {
 }
 
 // blessedToSidecar projects the on-disk BlessedSidecar (the WS3 format, a
-// forward-compatible subset) up into the generalized Sidecar Rosie reads. This
+// forward-compatible subset) up into the generalized Sidecar the cache upkeep reads. This
 // is what keeps the generalization additive: the disk format is unchanged, so
 // old blessed sidecars still load.
 func blessedToSidecar(bsc BlessedSidecar) Sidecar {
@@ -315,6 +301,7 @@ func blessedToSidecar(bsc BlessedSidecar) Sidecar {
 		Provenance:  Provenance{AuthorDomain: bsc.AuthorDomain, CanonicalURL: bsc.SourceURL},
 		EvictOn:     []string{"pub.polis.comment.unpublished", "pub.polis.comment.blessing.denied"},
 		DesiredFrom: "blessed.json",
+		KeyUsed:     bsc.KeyUsed,
 	}
 }
 
@@ -332,20 +319,6 @@ func sidecarToBlessed(sc Sidecar) BlessedSidecar {
 		BlessedVersionHash: sc.Pin,
 		FetchedAt:          sc.FetchedAt,
 		VerifiedAt:         sc.VerifiedAt,
+		KeyUsed:            sc.KeyUsed,
 	}
-}
-
-// readLocalContentCopy reads a tenant's pre-existing local content/ cross-tenant
-// copy of a comment (the Defect-3 copy the WS4 migration relocates into the
-// cache). Returns ok=false if absent.
-func readLocalContentCopy(dataDir, commentURL string) ([]byte, bool) {
-	rel := polisurl.CommentURLToContentRel(commentURL)
-	if rel == "" {
-		return nil, false
-	}
-	body, err := os.ReadFile(filepath.Join(dataDir, filepath.FromSlash(rel)))
-	if err != nil {
-		return nil, false
-	}
-	return body, true
 }

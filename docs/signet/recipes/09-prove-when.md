@@ -125,6 +125,6 @@ polis --json validate https://alice.example \
 | the date is not the author's to choose | anything about the service's honesty — you are trusting its key and its clock, which is one party rather than none |
 | | that the content was not seen earlier somewhere else, or that nothing was left unregistered |
 
-⚠️ Attestation records are witnessed on registration too, but `polis preview` and the remote
-`polis validate` check witnesses on **posts and comments** only — see the
-[gap list](README.md#what-you-cannot-build-yet).
+⚠️ Attestation records are witnessed on registration too. `polis preview` reads posts and comments
+only, so check an attestation's witness with `polis validate` — see
+[recipe 18](18-prove-when-an-attestation-existed.md).

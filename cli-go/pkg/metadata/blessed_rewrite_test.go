@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,15 +21,15 @@ func blessedWithFutureMember(t *testing.T) (string, []byte, []byte) {
 	t.Helper()
 	dir := t.TempDir()
 	priv, _ := newTestKeys(t)
-	if err := AddBlessedCommentSigned(dir, "posts/a.md", BlessedComment{URL: "https://bob.example/c/1.md"}, priv); err != nil {
+	if err := AddBlessedCommentSigned(storage.At(dir), "posts/a.md", BlessedComment{URL: "https://bob.example/c/1.md"}, priv); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := os.ReadFile(blessedPath(dir))
+	raw, _ := os.ReadFile(filepath.Join(dir, BlessedKey))
 	var m map[string]interface{}
 	_ = json.Unmarshal(raw, &m)
 	m["com.example.future"] = "a newer writer said this"
 	patched, _ := json.MarshalIndent(m, "", "  ")
-	if err := os.WriteFile(blessedPath(dir), patched, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, BlessedKey), patched, 0644); err != nil {
 		t.Fatal(err)
 	}
 	return dir, patched, priv
@@ -36,16 +38,16 @@ func blessedWithFutureMember(t *testing.T) (string, []byte, []byte) {
 func TestABlessingListWithAnUnknownMemberRefusesEveryRewrite(t *testing.T) {
 	writes := map[string]func(dir string, priv []byte) error{
 		"AddBlessedCommentSigned": func(d string, k []byte) error {
-			return AddBlessedCommentSigned(d, "posts/a.md", BlessedComment{URL: "https://carol.example/c/2.md"}, k)
+			return AddBlessedCommentSigned(storage.At(d), "posts/a.md", BlessedComment{URL: "https://carol.example/c/2.md"}, k)
 		},
 		"AddBlessedComment (unsigned)": func(d string, _ []byte) error {
-			return AddBlessedComment(d, "posts/a.md", BlessedComment{URL: "https://carol.example/c/2.md"})
+			return AddBlessedComment(storage.At(d), "posts/a.md", BlessedComment{URL: "https://carol.example/c/2.md"})
 		},
 		"RemoveBlessedCommentSigned": func(d string, k []byte) error {
-			return RemoveBlessedCommentSigned(d, "https://bob.example/c/1.md", k)
+			return RemoveBlessedCommentSigned(storage.At(d), "https://bob.example/c/1.md", k)
 		},
 		"SaveBlessedCommentsSigned(fresh list)": func(d string, k []byte) error {
-			return SaveBlessedCommentsSigned(d, sampleBlessed(), k)
+			return SaveBlessedCommentsSigned(storage.At(d), sampleBlessed(), k)
 		},
 	}
 	for name, write := range writes {
@@ -56,7 +58,7 @@ func TestABlessingListWithAnUnknownMemberRefusesEveryRewrite(t *testing.T) {
 			if !errors.As(err, &refusal) || strings.Join(refusal.Fields, ",") != "com.example.future" {
 				t.Fatalf("want a refusal naming com.example.future, got %v", err)
 			}
-			if after, _ := os.ReadFile(blessedPath(dir)); !bytes.Equal(after, patched) {
+			if after, _ := os.ReadFile(filepath.Join(dir, BlessedKey)); !bytes.Equal(after, patched) {
 				t.Fatal("a refused write changed blessed.json — the member was dropped")
 			}
 		})
@@ -65,15 +67,15 @@ func TestABlessingListWithAnUnknownMemberRefusesEveryRewrite(t *testing.T) {
 
 func TestRewriteBlessedUnsignedIsTheOnlyWayPast(t *testing.T) {
 	dir, _, priv := blessedWithFutureMember(t)
-	dropped, err := RewriteBlessedUnsigned(dir)
+	dropped, err := RewriteBlessedUnsigned(storage.At(dir))
 	if err != nil || strings.Join(dropped, ",") != "com.example.future" {
 		t.Fatalf("RewriteBlessedUnsigned = %v, %v", dropped, err)
 	}
-	after, _ := os.ReadFile(blessedPath(dir))
+	after, _ := os.ReadFile(filepath.Join(dir, BlessedKey))
 	if bytes.Contains(after, []byte("com.example.future")) {
 		t.Fatal("the escape hatch kept the member it reported dropping")
 	}
-	bc, _ := LoadBlessedComments(dir)
+	bc, _ := LoadBlessedComments(storage.At(dir))
 	if bc.Signature != "" {
 		t.Fatal("⛔ the escape hatch signed a list it rewrote because it could not read it")
 	}
@@ -81,10 +83,10 @@ func TestRewriteBlessedUnsignedIsTheOnlyWayPast(t *testing.T) {
 		t.Fatalf("the escape hatch lost modelled content: %+v", bc.Comments)
 	}
 	// Nothing unreadable remains, so an ordinary signed write proceeds.
-	if err := AddBlessedCommentSigned(dir, "posts/a.md", BlessedComment{URL: "https://carol.example/c/2.md"}, priv); err != nil {
+	if err := AddBlessedCommentSigned(storage.At(dir), "posts/a.md", BlessedComment{URL: "https://carol.example/c/2.md"}, priv); err != nil {
 		t.Fatalf("after the escape hatch, a normal bless must work: %v", err)
 	}
-	if again, err := RewriteBlessedUnsigned(dir); err != nil || again != nil {
+	if again, err := RewriteBlessedUnsigned(storage.At(dir)); err != nil || again != nil {
 		t.Fatalf("a list with nothing unrecognised must be left alone: %v, %v", again, err)
 	}
 }

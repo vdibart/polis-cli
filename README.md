@@ -3,33 +3,67 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/vdibart/polis-cli?tab=AGPL-3.0-1-ov-file)
 [![Platform: Linux | macOS | Windows](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)]()
 
-**A decentralized social network that makes the open web fun again.**
+**Your identity is your domain and a key only you hold. Everything you publish is signed with it, so it stays yours wherever it lives.**
 
-Polis helps you publish, follow, and have conversations — without losing control over your content. Your posts are signed markdown files. Your identity is a keypair. Easily deploy to GitHub Pages, Netlify, or any static host and own everything you create.
-
----
-
-## Why Polis
-
-- **Your content can't be deplatformed.** Posts are markdown files signed with your Ed25519 key, hosted on your domain. No API to shut off, no account to suspend.
-
-- **Comments without spam.** Anyone can comment on your posts (published on *their* domain). You bless the ones you want your audience to see. Unblessed comments still exist — just not on your site.
-
-- **Move hosts anytime.** Everything is flat files. Switch from GitHub Pages to Netlify to a VPS — your content, keys, and followers come with you.
-
-- **Your terms, signed; your history, provable.** State the terms your work may be used under, including whether AI may train on it, as a signed licence your site publishes where crawlers look. Your site keeps a signed history of its keys, so posts you signed years ago still verify after you rotate a key.
-
-- **No algorithms, no fees, no lock-in.** No engagement metrics, no 10% platform cut, no terms of service that change under your feet.
+Polis is a social network where you publish, follow and have conversations from your own site. There is no account to suspend and no platform in the middle deciding who sees what.
 
 ---
 
-## Two ways to get started
+## Who you are, and why anyone should believe it
 
-**Polis CLI** — A single binary you run on your machine. Publish from your own domain, sign everything locally, deploy to any static host. Full control, no dependencies on us.
+- **Identity: a domain plus a private key.** Your address says where to find you; your key proves it's you. Nobody issues it, and nobody can take it back.
 
-**polis.pub** — A hosted service where you get `yourname.polis.pub` and start publishing immediately. Same features, managed infrastructure, no server to maintain.
+- **Trust you can check, not trust you're asked for.** Every post, comment, follow and licence is signed with your key. A reader doesn't have to trust your host, or us, that you said it.
 
-**Why both?** Decentralized networks need a critical mass of participants before they become self-sustaining. polis.pub bootstraps that network — it gives people a way to join and start writing today, without setting up hosting first. The goal is a future where most authors self-host and polis.pub is just one node among many. Think of it as scaffolding: necessary now, designed to become optional.
+- **Transparency: anyone can audit it.** A stranger can fetch a post, fetch your key, walk your site's key history back to its first key, and check every signature, without asking any central service. The background services that keep polis.pub healthy are listed publicly with what each is expected to do, so what they do can be compared with what they say.
+
+## What you control
+
+- **Consent: you decide what happens to you and your work.** Anyone can reply to your posts, on their own site; you choose which replies your readers see, and you can let a helper decide for you within rules you set. You state, in a signed licence, the terms your work may be used under, including whether AI may train on it, and polis publishes those terms where crawlers look.
+
+## Where it lives, and how it behaves
+
+- **Portability: no host is privileged.** Run polis on your laptop, on a host you choose, or on polis.pub. A site can move to a new host and a new address and keep its history: every post you signed still verifies, no post is re-signed, and anyone can check the handover from your old key to your new one.
+
+- **Durability: hard to break, hard to take away, hard to make extinct.** A post is a text file with a signature, served over HTTP. There is no database to corrupt, no account to suspend, and no format that stops being readable.
+
+## How others find it
+
+- **Discoverability.** A discovery service helps people find conversations across sites. It records and relays, and it never decides anything on your behalf.
+
+---
+
+## Three ways to run it
+
+**On your own machine** (`local`): the polis CLI, a single binary. Sign everything locally and deploy to any static host: GitHub Pages, Netlify, a VPS. [Get started](#get-started) in a few commands.
+
+**On polis.pub** (`custodied`): sign up, get `yourname.polis.pub` and start writing. Same signed artifacts, managed for you.
+
+**On a host you run** (`remote`): your own polis instance on a platform such as Vercel, signing for you while you're away. ⚠️ Experimental.
+
+**Why more than one?** A decentralized network needs people in it before it sustains itself. polis.pub is how people join and start writing today without setting up hosting first. The goal is a network where polis.pub is one node among many, and leaving it costs you nothing you signed.
+
+---
+
+## Get started
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vdibart/polis-cli/main/scripts/install.sh | bash
+
+mkdir my-site && cd my-site
+export POLIS_BASE_URL="https://yourdomain.com"
+polis init
+
+echo "# Hello World" > hello.md
+polis post hello.md
+polis render                    # Generate HTML
+
+# Deploy
+git init && git add . && git commit -m "First post"
+git push                        # To GitHub Pages, Netlify, etc.
+```
+
+`polis post`, `polis follow`, `polis discover`, `polis comment`, and more. All support `--json` for scripting and automation. See the [full command reference](docs/cli/user/command-reference.md).
 
 ---
 
@@ -72,28 +106,6 @@ $ polis follow https://alice.dev
 
 ---
 
-## Get started
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/vdibart/polis-cli/main/scripts/install.sh | bash
-
-mkdir my-site && cd my-site
-export POLIS_BASE_URL="https://yourdomain.com"
-polis init
-
-echo "# Hello World" > hello.md
-polis post hello.md
-polis render                    # Generate HTML
-
-# Deploy
-git init && git add . && git commit -m "First post"
-git push                        # To GitHub Pages, Netlify, etc.
-```
-
-`polis post`, `polis follow`, `polis discover`, `polis comment`, and more. All support `--json` for scripting and automation. See the [full command reference](docs/cli/user/command-reference.md).
-
----
-
 ## The blessing model
 
 Polis replaces top-down moderation with author-controlled curation.
@@ -119,9 +131,9 @@ Four binaries are available on [GitHub Releases](https://github.com/vdibart/poli
 
 | Binary | What you get | Size |
 |--------|-------------|------|
-| **`polis`** (recommended) | CLI | ~10 MB |
-| `polis-full` | CLI + local web UI | ~13 MB |
-| `polis-server` | Web UI only | ~12 MB |
+| **`polis`** (recommended) | CLI | ~12 MB |
+| `polis-full` | CLI + local web UI | ~19 MB |
+| `polis-server` | Web UI only | ~18 MB |
 | `tailor` | Site migration & health tool for self-hosters | ~9 MB |
 
 ### Build from source

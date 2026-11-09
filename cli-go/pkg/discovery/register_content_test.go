@@ -39,7 +39,7 @@ func TestRegisterContent_RateLimitObjectError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := NewClient(server.URL)
 	_, err := client.RegisterContent(testRegisterRequest())
 	if err == nil {
 		t.Fatal("expected error for 429 object-shaped response")
@@ -67,7 +67,7 @@ func TestRegisterContent_ObjectErrorSurfaced(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := NewClient(server.URL)
 	_, err := client.RegisterContent(testRegisterRequest())
 	if err == nil {
 		t.Fatal("expected error for 400 object-shaped response")
@@ -103,8 +103,10 @@ func TestRegisterContent_Success(t *testing.T) {
 		if r.URL.Path != "/v1/content" {
 			t.Errorf("expected /v1/content, got %s", r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
-			t.Errorf("expected Authorization header, got %q", got)
+		// DS auth is the Ed25519 signature in the body; a bearer token
+		// authenticates nothing and must not be sent.
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("expected no Authorization header, got %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -117,7 +119,7 @@ func TestRegisterContent_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := NewClient(server.URL)
 	resp, err := client.RegisterContent(testRegisterRequest())
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
@@ -139,7 +141,7 @@ func TestRegisterContent_ServerError5xx(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := NewClient(server.URL)
 	_, err := client.RegisterContent(testRegisterRequest())
 	if err == nil {
 		t.Fatal("expected error for 5xx response, got nil")
@@ -162,7 +164,7 @@ func TestRegisterContent_ClientError4xx(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := NewClient(server.URL)
 	_, err := client.RegisterContent(testRegisterRequest())
 	if err == nil {
 		t.Fatal("expected error for 401 response")
@@ -175,7 +177,7 @@ func TestRegisterContent_ClientError4xx(t *testing.T) {
 // Network failures (DS unreachable) must produce errors. This is the
 // other class the retry wrapper exists for.
 func TestRegisterContent_NetworkError(t *testing.T) {
-	client := NewClient("http://127.0.0.1:1", "test-key") // unreachable
+	client := NewClient("http://127.0.0.1:1") // unreachable
 	_, err := client.RegisterContent(testRegisterRequest())
 	if err == nil {
 		t.Error("expected network error, got nil")
@@ -192,7 +194,7 @@ func TestRegisterContent_RequestTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := NewClient(server.URL)
 	client.HTTPClient = &http.Client{Timeout: 50 * time.Millisecond}
 
 	_, err := client.RegisterContent(testRegisterRequest())
@@ -219,7 +221,7 @@ func TestRegisterContent_GatewayErrors(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewClient(server.URL, "test-key")
+			client := NewClient(server.URL)
 			_, err := client.RegisterContent(testRegisterRequest())
 			if err == nil {
 				t.Errorf("status %d: expected error, got nil", code)
@@ -237,7 +239,7 @@ func TestRegisterContent_MalformedResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := NewClient(server.URL)
 	_, err := client.RegisterContent(testRegisterRequest())
 	if err == nil {
 		t.Error("expected parse error, got nil")
@@ -272,7 +274,7 @@ func TestRegisterContent_TransientThenSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "test-key")
+	client := NewClient(server.URL)
 
 	// First attempt fails.
 	if _, err := client.RegisterContent(testRegisterRequest()); err == nil {

@@ -2,6 +2,9 @@ package site
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,7 +16,7 @@ import (
 func initSite(t *testing.T, opts InitOptions) (dir string, priv []byte) {
 	t.Helper()
 	dir = t.TempDir()
-	if _, err := Init(dir, opts); err != nil {
+	if _, err := Init(storage.At(dir), opts); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	priv, err := os.ReadFile(filepath.Join(dir, ".polis", "keys", "id_ed25519"))
@@ -29,13 +32,13 @@ func TestInitStatesNoTermsUnlessAsked(t *testing.T) {
 	// never made asserts they said something they did not.
 	dir, _ := initSite(t, InitOptions{})
 
-	if _, err := os.Stat(LicensePath(dir)); !os.IsNotExist(err) {
+	if _, err := os.Stat(storage.At(dir).Path(LicenseKey(storage.At(dir)))); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("init created a licence nobody chose")
 	}
-	if p := LicensePointer(dir); p != "" {
+	if p := LicensePointer(storage.At(dir)); p != "" {
 		t.Errorf("init wrote a licence pointer nobody chose: %q", p)
 	}
-	terms, err := SiteTerms(dir)
+	terms, err := SiteTerms(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,15 +50,15 @@ func TestInitStatesNoTermsUnlessAsked(t *testing.T) {
 func TestInitWithAChoiceStatesTermsAndPointsAtThem(t *testing.T) {
 	dir, _ := initSite(t, InitOptions{License: "reserved", BaseURL: "https://maya.example"})
 
-	if _, err := os.Stat(LicensePath(dir)); err != nil {
+	if _, err := os.Stat(storage.At(dir).Path(LicenseKey(storage.At(dir)))); err != nil {
 		t.Fatalf("licence document not written: %v", err)
 	}
-	pointer := LicensePointer(dir)
+	pointer := LicensePointer(storage.At(dir))
 	if pointer == "" {
 		t.Fatal("licence written but .well-known/polis does not point at it")
 	}
 
-	terms, err := SiteTerms(dir)
+	terms, err := SiteTerms(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +73,7 @@ func TestInitWithAChoiceStatesTermsAndPointsAtThem(t *testing.T) {
 func TestTheLicenceDocumentIsSigned(t *testing.T) {
 	dir, _ := initSite(t, InitOptions{License: "reserved", BaseURL: "https://maya.example"})
 
-	f, err := license.Load(LicensePath(dir))
+	f, err := license.Load(storage.At(dir).Path(LicenseKey(storage.At(dir))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +96,7 @@ func TestMovingTheLicenceAndUpdatingThePointerKeepsEverythingWorking(t *testing.
 	// — a hardcoded discovery path would contradict a decision already made.
 	dir, _ := initSite(t, InitOptions{License: "reserved", BaseURL: "https://maya.example"})
 
-	before, err := SiteTerms(dir)
+	before, err := SiteTerms(storage.At(dir))
 	if err != nil || before == nil {
 		t.Fatalf("setup: %v %+v", err, before)
 	}
@@ -103,28 +106,28 @@ func TestMovingTheLicenceAndUpdatingThePointerKeepsEverythingWorking(t *testing.
 	if err := os.MkdirAll(filepath.Dir(moved), 0755); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(LicensePath(dir))
+	data, err := os.ReadFile(storage.At(dir).Path(LicenseKey(storage.At(dir))))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(moved, data, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(LicensePath(dir)); err != nil {
+	if err := os.Remove(storage.At(dir).Path(LicenseKey(storage.At(dir)))); err != nil {
 		t.Fatal(err)
 	}
 
 	// Before the pointer is updated, discovery correctly reports nothing —
 	// it does not go hunting down assumed paths.
-	if terms, _ := SiteTerms(dir); terms != nil {
+	if terms, _ := SiteTerms(storage.At(dir)); terms != nil {
 		t.Error("discovery found the licence at a path the pointer no longer names")
 	}
 
-	if err := SetLicensePointer(dir, "/legal/terms.json"); err != nil {
+	if err := SetLicensePointer(storage.At(dir), "/legal/terms.json"); err != nil {
 		t.Fatal(err)
 	}
 
-	after, err := SiteTerms(dir)
+	after, err := SiteTerms(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,11 +148,11 @@ func TestDiscoveryIsByPointerNotByConvention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := license.SignAndWrite(f, LicensePath(dir), priv); err != nil {
+	if err := license.SignAndWrite(f, storage.At(dir), LicenseKey(storage.At(dir)), priv); err != nil {
 		t.Fatal(err)
 	}
 
-	terms, err := SiteTerms(dir)
+	terms, err := SiteTerms(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +176,7 @@ func TestLicensePathFollowsTheSitesOwnBundleDeclaration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := LicensePath(dir)
+	got := storage.At(dir).Path(LicenseKey(storage.At(dir)))
 	want := filepath.Join(dir, "content", "pub.polis.core", "terms", LicenseFilename)
 	if got != want {
 		t.Errorf("LicensePath = %q, want %q — the declaration must win over the default", got, want)
@@ -183,18 +186,18 @@ func TestLicensePathFollowsTheSitesOwnBundleDeclaration(t *testing.T) {
 func TestWithdrawReturnsTheSiteToUnstated(t *testing.T) {
 	dir, _ := initSite(t, InitOptions{License: "reserved", BaseURL: "https://maya.example"})
 
-	if err := WithdrawLicense(dir); err != nil {
+	if err := WithdrawLicense(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
-	if p := LicensePointer(dir); p != "" {
+	if p := LicensePointer(storage.At(dir)); p != "" {
 		t.Errorf("pointer survived withdrawal: %q", p)
 	}
-	if _, err := os.Stat(LicensePath(dir)); !os.IsNotExist(err) {
+	if _, err := os.Stat(storage.At(dir).Path(LicenseKey(storage.At(dir)))); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("licence document survived withdrawal")
 	}
 
 	// And the key must actually be gone from the document, not present-but-empty.
-	raw, err := LoadWellKnownRaw(dir)
+	raw, err := LoadWellKnownRaw(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,11 +250,11 @@ func TestNothingNewIsCreatedUnderDotPolisOrWellKnown(t *testing.T) {
 	// with a canonical host, and it would gain a did.json for that reason
 	// rather than for the licence — which is not what this test is about.
 	plain := t.TempDir()
-	if _, err := Init(plain, InitOptions{BaseURL: "https://maya.example"}); err != nil {
+	if _, err := Init(storage.At(plain), InitOptions{BaseURL: "https://maya.example"}); err != nil {
 		t.Fatal(err)
 	}
 	licensed := t.TempDir()
-	if _, err := Init(licensed, InitOptions{License: "reserved", BaseURL: "https://maya.example"}); err != nil {
+	if _, err := Init(storage.At(licensed), InitOptions{License: "reserved", BaseURL: "https://maya.example"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -287,7 +290,7 @@ func listNames(t *testing.T, dir string) []string {
 func TestRestatingKeepsTheOriginalCreatedDate(t *testing.T) {
 	dir, priv := initSite(t, InitOptions{License: "reserved"})
 
-	first, err := license.Load(LicensePath(dir))
+	first, err := license.Load(storage.At(dir).Path(LicenseKey(storage.At(dir))))
 	if err != nil {
 		t.Fatalf("load first: %v", err)
 	}
@@ -299,15 +302,15 @@ func TestRestatingKeepsTheOriginalCreatedDate(t *testing.T) {
 	// one. Without this the two are seconds apart and the test proves nothing.
 	const original = "2020-01-01T00:00:00Z"
 	first.Created = original
-	if err := license.SignAndWrite(first, LicensePath(dir), priv); err != nil {
+	if err := license.SignAndWrite(first, storage.At(dir), LicenseKey(storage.At(dir)), priv); err != nil {
 		t.Fatalf("rewrite backdated: %v", err)
 	}
 
-	if _, err := StateLicense(dir, "open", "https://alice.example", priv); err != nil {
+	if _, err := StateLicense(storage.At(dir), "open", "https://alice.example", priv); err != nil {
 		t.Fatalf("restate: %v", err)
 	}
 
-	second, err := license.Load(LicensePath(dir))
+	second, err := license.Load(storage.At(dir).Path(LicenseKey(storage.At(dir))))
 	if err != nil {
 		t.Fatalf("load second: %v", err)
 	}
@@ -330,14 +333,14 @@ func TestRestatingKeepsTheOriginalCreatedDate(t *testing.T) {
 // must not turn "no previous file" into a failure or an empty date.
 func TestFirstStatementOnASiteWithNoLicenceStillGetsAFreshCreated(t *testing.T) {
 	dir, priv := initSite(t, InitOptions{})
-	if _, err := os.Stat(LicensePath(dir)); !os.IsNotExist(err) {
+	if _, err := os.Stat(storage.At(dir).Path(LicenseKey(storage.At(dir)))); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("expected no licence to start from, got err=%v", err)
 	}
 
-	if _, err := StateLicense(dir, "reserved", "https://alice.example", priv); err != nil {
+	if _, err := StateLicense(storage.At(dir), "reserved", "https://alice.example", priv); err != nil {
 		t.Fatalf("state: %v", err)
 	}
-	f, err := license.Load(LicensePath(dir))
+	f, err := license.Load(storage.At(dir).Path(LicenseKey(storage.At(dir))))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

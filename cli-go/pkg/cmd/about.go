@@ -1,13 +1,17 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 func handleAbout(args []string) {
@@ -18,13 +22,13 @@ func handleAbout(args []string) {
 	}
 
 	// Load .well-known/polis
-	wk, err := site.LoadWellKnown(dir)
+	wk, err := site.LoadWellKnown(getSite())
 	if err != nil {
 		exitError("Failed to load .well-known/polis: %v", err)
 	}
 
 	// Active theme from .polis/bundles/registry.json (with legacy fallback).
-	activeTheme := site.GetActiveTheme(dir)
+	activeTheme := site.GetActiveTheme(getSite())
 
 	// Get environment config
 	baseURL := os.Getenv("POLIS_BASE_URL")
@@ -37,8 +41,7 @@ func handleAbout(args []string) {
 	var registrationStatus string
 	var registeredAt string
 	if baseURL != "" {
-		apiKey := os.Getenv("DISCOVERY_SERVICE_KEY")
-		client := discovery.NewClient(discoveryURL, apiKey)
+		client := discovery.NewClient(discoveryURL)
 		domain := extractDomain(baseURL)
 		if domain != "" {
 			resp, err := client.CheckSiteRegistration(domain)
@@ -52,13 +55,13 @@ func handleAbout(args []string) {
 	}
 
 	// Count posts and comments
-	postCount := countFiles(filepath.Join(dir, "content", "pub.polis.core", "post"), ".md")
-	commentCount := countFiles(filepath.Join(dir, "content", "pub.polis.core", "comment"), ".md")
+	postCount := countFiles(dir, filepath.Join(dir, "content", "pub.polis.core", "post"), ".md")
+	commentCount := countFiles(dir, filepath.Join(dir, "content", "pub.polis.core", "comment"), ".md")
 
 	// Count following
 	followingCount := 0
-	followingPath := filepath.Join(dir, "content", "pub.polis.core", "follow", "following.json")
-	if data, err := os.ReadFile(followingPath); err == nil {
+	st := storage.NewPOSIX(dir)
+	if data, err := st.Get(context.Background(), following.DefaultKey); err == nil {
 		var f struct {
 			Following []interface{} `json:"following"`
 		}
@@ -164,17 +167,29 @@ func handleAbout(args []string) {
 	}
 }
 
-func countFiles(dir, ext string) int {
+// countFiles counts files with ext beneath absDir, which is a path under the
+// site root. It takes the root separately because the store addresses keys
+// relative to it.
+func countFiles(root, absDir, ext string) int {
+	prefix, err := storage.RelKey(root, absDir)
+	if err != nil {
+		return 0
+	}
+	// ⛔ The error is ignored ON PURPOSE. A recursive List returns what it could
+	// read plus the first failure, and the walk this replaced skipped an entry it
+	// could not read and counted the rest. Returning 0 on any error made one
+	// unreadable subdirectory read as "Posts: 0".
+	entries, _ := storage.NewPOSIX(root).List(context.Background(), prefix, storage.Recursive())
 	count := 0
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && filepath.Ext(path) == ext {
-			// Skip .versions directories
-			if filepath.Base(filepath.Dir(path)) != ".versions" {
-				count++
-			}
+	for _, e := range entries {
+		if e.IsDir || path.Ext(e.Key) != ext {
+			continue
 		}
-		return nil
-	})
+		// Skip .versions directories
+		if path.Base(path.Dir(e.Key)) != ".versions" {
+			count++
+		}
+	}
 	return count
 }
 

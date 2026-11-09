@@ -3,6 +3,7 @@ package sitecheck
 import (
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,13 +26,13 @@ func rotatedIssuerWellKnown(t *testing.T) (wk []byte, oldKey, newKey []byte) {
 	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
 	body, _ := json.Marshal(map[string]string{"public_key": pub0, "created": "2026-03-03T05:35:09Z"})
 	os.WriteFile(filepath.Join(dir, ".well-known", "polis"), body, 0644)
-	if _, err := site.WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := site.WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		t.Fatal(err)
 	}
 	const rotatedAt = "2026-09-15T10:22:03Z"
 	canonical, _ := discovery.MakeKeyRotationCanonicalJSON("issuer.example", pub0, pub1, rotatedAt)
 	sig, _ := signing.SignContent(canonical, k0)
-	if err := site.RecordKeyRotation(dir, pub1, sig, rotatedAt); err != nil {
+	if err := site.RecordKeyRotation(storage.At(dir), pub1, sig, rotatedAt, ""); err != nil {
 		t.Fatal(err)
 	}
 	wk, err := os.ReadFile(filepath.Join(dir, ".well-known", "polis"))

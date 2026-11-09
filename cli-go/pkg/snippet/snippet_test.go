@@ -1,6 +1,9 @@
 package snippet
 
 import (
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,7 +70,7 @@ func TestValidatePath(t *testing.T) {
 
 func TestActiveThemeOrDefault_ReadsFromManifest(t *testing.T) {
 	dir := setupDataDir(t, "turbo")
-	theme, err := activeThemeOrDefault(dir)
+	theme, err := activeThemeOrDefault(storage.At(dir))
 	if err != nil {
 		t.Fatalf("activeThemeOrDefault: %v", err)
 	}
@@ -78,7 +81,7 @@ func TestActiveThemeOrDefault_ReadsFromManifest(t *testing.T) {
 
 func TestActiveThemeOrDefault_DefaultsToZane_MissingFile(t *testing.T) {
 	dir := t.TempDir() // no .well-known
-	theme, err := activeThemeOrDefault(dir)
+	theme, err := activeThemeOrDefault(storage.At(dir))
 	if err != nil {
 		t.Fatalf("activeThemeOrDefault: %v", err)
 	}
@@ -92,7 +95,7 @@ func TestActiveThemeOrDefault_DefaultsToZane_InvalidJSON(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
 	os.WriteFile(filepath.Join(dir, ".well-known", "polis"), []byte("not json"), 0644)
 
-	theme, err := activeThemeOrDefault(dir)
+	theme, err := activeThemeOrDefault(storage.At(dir))
 	if err != nil {
 		t.Fatalf("activeThemeOrDefault: %v", err)
 	}
@@ -106,7 +109,7 @@ func TestActiveThemeOrDefault_DefaultsToZane_EmptyTheme(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, ".well-known"), 0755)
 	os.WriteFile(filepath.Join(dir, ".well-known", "polis"), []byte(`{"active_theme":""}`), 0644)
 
-	theme, err := activeThemeOrDefault(dir)
+	theme, err := activeThemeOrDefault(storage.At(dir))
 	if err != nil {
 		t.Fatalf("activeThemeOrDefault: %v", err)
 	}
@@ -117,11 +120,20 @@ func TestActiveThemeOrDefault_DefaultsToZane_EmptyTheme(t *testing.T) {
 
 // --- resolveSnippetFile ---
 
+// resolveIn resolves a snippet in a root at dir and returns its path, or "".
+func resolveIn(dir, snippetPath string) string {
+	key := resolveSnippetFile(snippetRoot{store: storage.NewPOSIX(dir)}, snippetPath)
+	if key == "" {
+		return ""
+	}
+	return filepath.Join(dir, filepath.FromSlash(key))
+}
+
 func TestResolveSnippetFile_ExactHTML(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "about.html"), "html content")
 
-	got := resolveSnippetFile(dir, "about.html")
+	got := resolveIn(dir, "about.html")
 	if got != filepath.Join(dir, "about.html") {
 		t.Errorf("got %q, want exact .html path", got)
 	}
@@ -131,7 +143,7 @@ func TestResolveSnippetFile_ExactMD(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "about.md"), "md content")
 
-	got := resolveSnippetFile(dir, "about.md")
+	got := resolveIn(dir, "about.md")
 	if got != filepath.Join(dir, "about.md") {
 		t.Errorf("got %q, want exact .md path", got)
 	}
@@ -139,7 +151,7 @@ func TestResolveSnippetFile_ExactMD(t *testing.T) {
 
 func TestResolveSnippetFile_ExactExtension_Missing(t *testing.T) {
 	dir := t.TempDir()
-	got := resolveSnippetFile(dir, "about.html")
+	got := resolveIn(dir, "about.html")
 	if got != "" {
 		t.Errorf("got %q, want empty for missing file", got)
 	}
@@ -150,7 +162,7 @@ func TestResolveSnippetFile_NoExtension_PrefersMarkdown(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "about.md"), "md")
 	writeFile(t, filepath.Join(dir, "about.html"), "html")
 
-	got := resolveSnippetFile(dir, "about")
+	got := resolveIn(dir, "about")
 	// Per TEMPLATING.md: .md -> .html -> exact, so .md wins
 	if got != filepath.Join(dir, "about.md") {
 		t.Errorf("got %q, want .md (higher priority)", got)
@@ -161,7 +173,7 @@ func TestResolveSnippetFile_NoExtension_FallsToHTML(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "about.html"), "html")
 
-	got := resolveSnippetFile(dir, "about")
+	got := resolveIn(dir, "about")
 	if got != filepath.Join(dir, "about.html") {
 		t.Errorf("got %q, want .html fallback", got)
 	}
@@ -171,7 +183,7 @@ func TestResolveSnippetFile_NoExtension_FallsToExact(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "about"), "exact")
 
-	got := resolveSnippetFile(dir, "about")
+	got := resolveIn(dir, "about")
 	if got != filepath.Join(dir, "about") {
 		t.Errorf("got %q, want exact path", got)
 	}
@@ -179,7 +191,7 @@ func TestResolveSnippetFile_NoExtension_FallsToExact(t *testing.T) {
 
 func TestResolveSnippetFile_NoExtension_NotFound(t *testing.T) {
 	dir := t.TempDir()
-	got := resolveSnippetFile(dir, "nonexistent")
+	got := resolveIn(dir, "nonexistent")
 	if got != "" {
 		t.Errorf("got %q, want empty", got)
 	}
@@ -189,7 +201,7 @@ func TestResolveSnippetFile_NestedPath(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "widgets", "header.html"), "nested")
 
-	got := resolveSnippetFile(dir, "widgets/header.html")
+	got := resolveIn(dir, "widgets/header.html")
 	if got != filepath.Join(dir, "widgets", "header.html") {
 		t.Errorf("got %q, want nested path", got)
 	}
@@ -202,7 +214,7 @@ func TestListSnippets_GlobalOnly(t *testing.T) {
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "header.html"), "global header")
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "footer.md"), "global footer")
 
-	tree, err := ListSnippets(dataDir, "", "turbo", "", "global")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "", "global")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -221,7 +233,7 @@ func TestListSnippets_ThemeOnly(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	writeFile(t, filepath.Join(dataDir, "site", "themes", "turbo", "snippets", "nav.html"), "theme nav")
 
-	tree, err := ListSnippets(dataDir, "", "turbo", "", "theme")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "", "theme")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -239,7 +251,7 @@ func TestListSnippets_MergedGlobalOverridesTheme(t *testing.T) {
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "header.html"), "global header")
 	writeFile(t, filepath.Join(dataDir, "site", "themes", "turbo", "snippets", "header.html"), "theme header")
 
-	tree, err := ListSnippets(dataDir, "", "turbo", "", "all")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "", "all")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -261,7 +273,7 @@ func TestListSnippets_SkipsHiddenFiles(t *testing.T) {
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", ".hidden.html"), "hidden")
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "visible.html"), "visible")
 
-	tree, err := ListSnippets(dataDir, "", "turbo", "", "global")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "", "global")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -280,7 +292,7 @@ func TestListSnippets_SkipsNonHTMLMD(t *testing.T) {
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "image.png"), "skip")
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "data.json"), "skip")
 
-	tree, err := ListSnippets(dataDir, "", "turbo", "", "global")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "", "global")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -295,7 +307,7 @@ func TestListSnippets_DirectoriesFirst(t *testing.T) {
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "aaa.html"), "file")
 	os.MkdirAll(filepath.Join(dataDir, "site", "snippets", "zzz"), 0755)
 
-	tree, err := ListSnippets(dataDir, "", "turbo", "", "global")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "", "global")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -312,7 +324,7 @@ func TestListSnippets_SubDirectory(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "widgets", "header.html"), "nested")
 
-	tree, err := ListSnippets(dataDir, "", "turbo", "widgets", "global")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "widgets", "global")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -332,7 +344,7 @@ func TestListSnippets_ParentPathCalculation(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	os.MkdirAll(filepath.Join(dataDir, "site", "snippets", "a", "b"), 0755)
 
-	tree, err := ListSnippets(dataDir, "", "turbo", "a/b", "global")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "a/b", "global")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -346,7 +358,7 @@ func TestListSnippets_ThemeFallbackToCLI(t *testing.T) {
 	cliThemesDir := t.TempDir()
 	writeFile(t, filepath.Join(cliThemesDir, "turbo", "snippets", "nav.html"), "cli theme nav")
 
-	tree, err := ListSnippets(dataDir, cliThemesDir, "turbo", "", "theme")
+	tree, err := ListSnippets(storage.At(dataDir), cliThemesDir, "turbo", "", "theme")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -360,7 +372,7 @@ func TestListSnippets_EmptyDirectory(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	os.MkdirAll(filepath.Join(dataDir, "site", "snippets"), 0755)
 
-	tree, err := ListSnippets(dataDir, "", "turbo", "", "global")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "", "global")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -371,7 +383,7 @@ func TestListSnippets_EmptyDirectory(t *testing.T) {
 
 func TestListSnippets_PathTraversal(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
-	_, err := ListSnippets(dataDir, "", "turbo", "../secret", "global")
+	_, err := ListSnippets(storage.At(dataDir), "", "turbo", "../secret", "global")
 	if err == nil {
 		t.Error("expected error for path traversal")
 	}
@@ -383,7 +395,7 @@ func TestListSnippets_DefaultFilter(t *testing.T) {
 	writeFile(t, filepath.Join(dataDir, "site", "themes", "turbo", "snippets", "theme.html"), "t")
 
 	// Empty filter should return both
-	tree, err := ListSnippets(dataDir, "", "turbo", "", "")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "", "")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -397,7 +409,7 @@ func TestListSnippets_DefaultThemeFromManifest(t *testing.T) {
 	writeFile(t, filepath.Join(dataDir, "site", "themes", "sols", "snippets", "nav.html"), "sols nav")
 
 	// Pass empty activeTheme - should read from manifest
-	tree, err := ListSnippets(dataDir, "", "", "", "theme")
+	tree, err := ListSnippets(storage.At(dataDir), "", "", "", "theme")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -415,7 +427,7 @@ func TestReadSnippet_GlobalSource(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "header.html"), "<header>hello</header>")
 
-	sc, err := ReadSnippet(dataDir, "", "turbo", "header.html", "global")
+	sc, err := ReadSnippet(storage.At(dataDir), "", "turbo", "header.html", "global")
 	if err != nil {
 		t.Fatalf("ReadSnippet: %v", err)
 	}
@@ -434,7 +446,7 @@ func TestReadSnippet_ThemeSource(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	writeFile(t, filepath.Join(dataDir, "site", "themes", "turbo", "snippets", "nav.html"), "<nav/>")
 
-	sc, err := ReadSnippet(dataDir, "", "turbo", "nav.html", "theme")
+	sc, err := ReadSnippet(storage.At(dataDir), "", "turbo", "nav.html", "theme")
 	if err != nil {
 		t.Fatalf("ReadSnippet: %v", err)
 	}
@@ -448,7 +460,7 @@ func TestReadSnippet_ThemeFallbackToCLI(t *testing.T) {
 	cliThemesDir := t.TempDir()
 	writeFile(t, filepath.Join(cliThemesDir, "turbo", "snippets", "footer.html"), "<footer/>")
 
-	sc, err := ReadSnippet(dataDir, cliThemesDir, "turbo", "footer.html", "theme")
+	sc, err := ReadSnippet(storage.At(dataDir), cliThemesDir, "turbo", "footer.html", "theme")
 	if err != nil {
 		t.Fatalf("ReadSnippet: %v", err)
 	}
@@ -462,7 +474,7 @@ func TestReadSnippet_ExtensionResolution(t *testing.T) {
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "about.md"), "# About")
 
 	// Request without extension - should resolve to .md
-	sc, err := ReadSnippet(dataDir, "", "turbo", "about", "global")
+	sc, err := ReadSnippet(storage.At(dataDir), "", "turbo", "about", "global")
 	if err != nil {
 		t.Fatalf("ReadSnippet: %v", err)
 	}
@@ -473,7 +485,7 @@ func TestReadSnippet_ExtensionResolution(t *testing.T) {
 
 func TestReadSnippet_NotFound(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
-	_, err := ReadSnippet(dataDir, "", "turbo", "nonexistent.html", "global")
+	_, err := ReadSnippet(storage.At(dataDir), "", "turbo", "nonexistent.html", "global")
 	if err == nil {
 		t.Error("expected error for missing snippet")
 	}
@@ -484,7 +496,7 @@ func TestReadSnippet_NotFound(t *testing.T) {
 
 func TestReadSnippet_InvalidSource(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
-	_, err := ReadSnippet(dataDir, "", "turbo", "header.html", "invalid")
+	_, err := ReadSnippet(storage.At(dataDir), "", "turbo", "header.html", "invalid")
 	if err == nil {
 		t.Error("expected error for invalid source")
 	}
@@ -495,7 +507,7 @@ func TestReadSnippet_InvalidSource(t *testing.T) {
 
 func TestReadSnippet_PathTraversal(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
-	_, err := ReadSnippet(dataDir, "", "turbo", "../../../etc/passwd", "global")
+	_, err := ReadSnippet(storage.At(dataDir), "", "turbo", "../../../etc/passwd", "global")
 	if err == nil {
 		t.Error("expected error for path traversal")
 	}
@@ -505,7 +517,7 @@ func TestReadSnippet_DefaultThemeFromManifest(t *testing.T) {
 	dataDir := setupDataDir(t, "sols")
 	writeFile(t, filepath.Join(dataDir, "site", "themes", "sols", "snippets", "nav.html"), "sols nav")
 
-	sc, err := ReadSnippet(dataDir, "", "", "nav.html", "theme")
+	sc, err := ReadSnippet(storage.At(dataDir), "", "", "nav.html", "theme")
 	if err != nil {
 		t.Fatalf("ReadSnippet: %v", err)
 	}
@@ -519,7 +531,7 @@ func TestReadSnippet_DefaultThemeFromManifest(t *testing.T) {
 func TestWriteSnippet_GlobalNew(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 
-	err := WriteSnippet(dataDir, "", "turbo", "header.html", "<header>new</header>", "global")
+	err := WriteSnippet(storage.At(dataDir), "", "turbo", "header.html", "<header>new</header>", "global")
 	if err != nil {
 		t.Fatalf("WriteSnippet: %v", err)
 	}
@@ -537,7 +549,7 @@ func TestWriteSnippet_GlobalOverwrite(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "header.html"), "old")
 
-	err := WriteSnippet(dataDir, "", "turbo", "header.html", "new", "global")
+	err := WriteSnippet(storage.At(dataDir), "", "turbo", "header.html", "new", "global")
 	if err != nil {
 		t.Fatalf("WriteSnippet: %v", err)
 	}
@@ -552,7 +564,7 @@ func TestWriteSnippet_GlobalDefaultsToHTML(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 
 	// Write without extension
-	err := WriteSnippet(dataDir, "", "turbo", "header", "content", "global")
+	err := WriteSnippet(storage.At(dataDir), "", "turbo", "header", "content", "global")
 	if err != nil {
 		t.Fatalf("WriteSnippet: %v", err)
 	}
@@ -568,7 +580,7 @@ func TestWriteSnippet_GlobalResolvesExisting(t *testing.T) {
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "about.md"), "old md")
 
 	// Write without extension - should find existing .md file
-	err := WriteSnippet(dataDir, "", "turbo", "about", "new md", "global")
+	err := WriteSnippet(storage.At(dataDir), "", "turbo", "about", "new md", "global")
 	if err != nil {
 		t.Fatalf("WriteSnippet: %v", err)
 	}
@@ -582,7 +594,7 @@ func TestWriteSnippet_GlobalResolvesExisting(t *testing.T) {
 func TestWriteSnippet_ThemeWritesToLocalDir(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 
-	err := WriteSnippet(dataDir, "", "turbo", "nav.html", "<nav/>", "theme")
+	err := WriteSnippet(storage.At(dataDir), "", "turbo", "nav.html", "<nav/>", "theme")
 	if err != nil {
 		t.Fatalf("WriteSnippet: %v", err)
 	}
@@ -601,7 +613,7 @@ func TestWriteSnippet_ThemeResolvesExistingInCLI(t *testing.T) {
 	cliThemesDir := t.TempDir()
 	writeFile(t, filepath.Join(cliThemesDir, "turbo", "snippets", "footer.html"), "cli footer")
 
-	err := WriteSnippet(dataDir, cliThemesDir, "turbo", "footer.html", "updated footer", "theme")
+	err := WriteSnippet(storage.At(dataDir), cliThemesDir, "turbo", "footer.html", "updated footer", "theme")
 	if err != nil {
 		t.Fatalf("WriteSnippet: %v", err)
 	}
@@ -615,7 +627,7 @@ func TestWriteSnippet_ThemeResolvesExistingInCLI(t *testing.T) {
 
 func TestWriteSnippet_InvalidSource(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
-	err := WriteSnippet(dataDir, "", "turbo", "header.html", "x", "invalid")
+	err := WriteSnippet(storage.At(dataDir), "", "turbo", "header.html", "x", "invalid")
 	if err == nil {
 		t.Error("expected error for invalid source")
 	}
@@ -623,7 +635,7 @@ func TestWriteSnippet_InvalidSource(t *testing.T) {
 
 func TestWriteSnippet_PathTraversal(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
-	err := WriteSnippet(dataDir, "", "turbo", "../../../etc/evil", "x", "global")
+	err := WriteSnippet(storage.At(dataDir), "", "turbo", "../../../etc/evil", "x", "global")
 	if err == nil {
 		t.Error("expected error for path traversal")
 	}
@@ -632,7 +644,7 @@ func TestWriteSnippet_PathTraversal(t *testing.T) {
 func TestWriteSnippet_NestedPath(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 
-	err := WriteSnippet(dataDir, "", "turbo", "widgets/header.html", "<h1/>", "global")
+	err := WriteSnippet(storage.At(dataDir), "", "turbo", "widgets/header.html", "<h1/>", "global")
 	if err != nil {
 		t.Fatalf("WriteSnippet: %v", err)
 	}
@@ -646,7 +658,7 @@ func TestWriteSnippet_NestedPath(t *testing.T) {
 func TestWriteSnippet_DefaultThemeFromManifest(t *testing.T) {
 	dataDir := setupDataDir(t, "sols")
 
-	err := WriteSnippet(dataDir, "", "", "nav.html", "nav", "theme")
+	err := WriteSnippet(storage.At(dataDir), "", "", "nav.html", "nav", "theme")
 	if err != nil {
 		t.Fatalf("WriteSnippet: %v", err)
 	}
@@ -662,7 +674,7 @@ func TestWriteSnippet_DefaultThemeFromManifest(t *testing.T) {
 func TestCreateSnippet_Success(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 
-	err := CreateSnippet(dataDir, "header.html", "<header/>")
+	err := CreateSnippet(storage.At(dataDir), "header.html", "<header/>")
 	if err != nil {
 		t.Fatalf("CreateSnippet: %v", err)
 	}
@@ -679,7 +691,7 @@ func TestCreateSnippet_Success(t *testing.T) {
 func TestCreateSnippet_Markdown(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 
-	err := CreateSnippet(dataDir, "about.md", "# About")
+	err := CreateSnippet(storage.At(dataDir), "about.md", "# About")
 	if err != nil {
 		t.Fatalf("CreateSnippet: %v", err)
 	}
@@ -694,7 +706,7 @@ func TestCreateSnippet_AlreadyExists(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "header.html"), "exists")
 
-	err := CreateSnippet(dataDir, "header.html", "new content")
+	err := CreateSnippet(storage.At(dataDir), "header.html", "new content")
 	if err == nil {
 		t.Error("expected error when snippet already exists")
 	}
@@ -706,7 +718,7 @@ func TestCreateSnippet_AlreadyExists(t *testing.T) {
 func TestCreateSnippet_InvalidExtension(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 
-	err := CreateSnippet(dataDir, "data.json", "{}")
+	err := CreateSnippet(storage.At(dataDir), "data.json", "{}")
 	if err == nil {
 		t.Error("expected error for invalid extension")
 	}
@@ -718,7 +730,7 @@ func TestCreateSnippet_InvalidExtension(t *testing.T) {
 func TestCreateSnippet_NoExtension(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 
-	err := CreateSnippet(dataDir, "header", "content")
+	err := CreateSnippet(storage.At(dataDir), "header", "content")
 	if err == nil {
 		t.Error("expected error for no extension")
 	}
@@ -727,7 +739,7 @@ func TestCreateSnippet_NoExtension(t *testing.T) {
 func TestCreateSnippet_PathTraversal(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 
-	err := CreateSnippet(dataDir, "../evil.html", "x")
+	err := CreateSnippet(storage.At(dataDir), "../evil.html", "x")
 	if err == nil {
 		t.Error("expected error for path traversal")
 	}
@@ -736,7 +748,7 @@ func TestCreateSnippet_PathTraversal(t *testing.T) {
 func TestCreateSnippet_NestedDirectory(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 
-	err := CreateSnippet(dataDir, "widgets/sidebar.html", "<aside/>")
+	err := CreateSnippet(storage.At(dataDir), "widgets/sidebar.html", "<aside/>")
 	if err != nil {
 		t.Fatalf("CreateSnippet: %v", err)
 	}
@@ -749,7 +761,7 @@ func TestCreateSnippet_NestedDirectory(t *testing.T) {
 
 func TestCreateSnippet_AbsolutePath(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
-	err := CreateSnippet(dataDir, "/etc/evil.html", "x")
+	err := CreateSnippet(storage.At(dataDir), "/etc/evil.html", "x")
 	if err == nil {
 		t.Error("expected error for absolute path")
 	}
@@ -761,12 +773,12 @@ func TestDeleteSnippet_Success(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "header.html"), "content")
 
-	err := DeleteSnippet(dataDir, "header.html")
+	err := DeleteSnippet(storage.At(dataDir), "header.html")
 	if err != nil {
 		t.Fatalf("DeleteSnippet: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(dataDir, "site", "snippets", "header.html")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dataDir, "site", "snippets", "header.html")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected file to be deleted")
 	}
 }
@@ -774,7 +786,7 @@ func TestDeleteSnippet_Success(t *testing.T) {
 func TestDeleteSnippet_NotFound(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 
-	err := DeleteSnippet(dataDir, "nonexistent.html")
+	err := DeleteSnippet(storage.At(dataDir), "nonexistent.html")
 	if err == nil {
 		t.Error("expected error for missing snippet")
 	}
@@ -787,7 +799,7 @@ func TestDeleteSnippet_CannotDeleteDirectory(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	os.MkdirAll(filepath.Join(dataDir, "site", "snippets", "widgets"), 0755)
 
-	err := DeleteSnippet(dataDir, "widgets")
+	err := DeleteSnippet(storage.At(dataDir), "widgets")
 	if err == nil {
 		t.Error("expected error when trying to delete directory")
 	}
@@ -798,7 +810,7 @@ func TestDeleteSnippet_CannotDeleteDirectory(t *testing.T) {
 
 func TestDeleteSnippet_PathTraversal(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
-	err := DeleteSnippet(dataDir, "../../../etc/passwd")
+	err := DeleteSnippet(storage.At(dataDir), "../../../etc/passwd")
 	if err == nil {
 		t.Error("expected error for path traversal")
 	}
@@ -806,7 +818,7 @@ func TestDeleteSnippet_PathTraversal(t *testing.T) {
 
 func TestDeleteSnippet_AbsolutePath(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
-	err := DeleteSnippet(dataDir, "/etc/passwd")
+	err := DeleteSnippet(storage.At(dataDir), "/etc/passwd")
 	if err == nil {
 		t.Error("expected error for absolute path")
 	}
@@ -816,7 +828,7 @@ func TestDeleteSnippet_Nested(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "widgets", "old.html"), "old")
 
-	err := DeleteSnippet(dataDir, "widgets/old.html")
+	err := DeleteSnippet(storage.At(dataDir), "widgets/old.html")
 	if err != nil {
 		t.Fatalf("DeleteSnippet: %v", err)
 	}
@@ -828,13 +840,13 @@ func TestCRUD_RoundTrip(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 
 	// Create
-	err := CreateSnippet(dataDir, "header.html", "<header>v1</header>")
+	err := CreateSnippet(storage.At(dataDir), "header.html", "<header>v1</header>")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
 	// Read
-	sc, err := ReadSnippet(dataDir, "", "turbo", "header.html", "global")
+	sc, err := ReadSnippet(storage.At(dataDir), "", "turbo", "header.html", "global")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -843,7 +855,7 @@ func TestCRUD_RoundTrip(t *testing.T) {
 	}
 
 	// List
-	tree, err := ListSnippets(dataDir, "", "turbo", "", "global")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "", "global")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -852,12 +864,12 @@ func TestCRUD_RoundTrip(t *testing.T) {
 	}
 
 	// Update (Write)
-	err = WriteSnippet(dataDir, "", "turbo", "header.html", "<header>v2</header>", "global")
+	err = WriteSnippet(storage.At(dataDir), "", "turbo", "header.html", "<header>v2</header>", "global")
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 
-	sc, err = ReadSnippet(dataDir, "", "turbo", "header.html", "global")
+	sc, err = ReadSnippet(storage.At(dataDir), "", "turbo", "header.html", "global")
 	if err != nil {
 		t.Fatalf("Read after write: %v", err)
 	}
@@ -866,13 +878,13 @@ func TestCRUD_RoundTrip(t *testing.T) {
 	}
 
 	// Delete
-	err = DeleteSnippet(dataDir, "header.html")
+	err = DeleteSnippet(storage.At(dataDir), "header.html")
 	if err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
 	// Verify gone
-	_, err = ReadSnippet(dataDir, "", "turbo", "header.html", "global")
+	_, err = ReadSnippet(storage.At(dataDir), "", "turbo", "header.html", "global")
 	if err == nil {
 		t.Error("expected error reading deleted snippet")
 	}
@@ -884,7 +896,7 @@ func TestListSnippets_EntryFields(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	writeFile(t, filepath.Join(dataDir, "site", "snippets", "header.html"), "hello world")
 
-	tree, err := ListSnippets(dataDir, "", "turbo", "", "global")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "", "global")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -918,7 +930,7 @@ func TestListSnippets_DirectoryEntry(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	os.MkdirAll(filepath.Join(dataDir, "site", "snippets", "widgets"), 0755)
 
-	tree, err := ListSnippets(dataDir, "", "turbo", "", "global")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "", "global")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -942,7 +954,7 @@ func TestListSnippets_TreeFields(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
 	os.MkdirAll(filepath.Join(dataDir, "site", "snippets"), 0755)
 
-	tree, err := ListSnippets(dataDir, "", "turbo", "", "all")
+	tree, err := ListSnippets(storage.At(dataDir), "", "turbo", "", "all")
 	if err != nil {
 		t.Fatalf("ListSnippets: %v", err)
 	}
@@ -962,7 +974,7 @@ func TestListSnippets_TreeFields(t *testing.T) {
 
 func TestReadSnippet_NullByte(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
-	_, err := ReadSnippet(dataDir, "", "turbo", "file\x00.html", "global")
+	_, err := ReadSnippet(storage.At(dataDir), "", "turbo", "file\x00.html", "global")
 	if err == nil {
 		t.Error("expected error for null byte in path")
 	}
@@ -970,7 +982,7 @@ func TestReadSnippet_NullByte(t *testing.T) {
 
 func TestWriteSnippet_NullByte(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
-	err := WriteSnippet(dataDir, "", "turbo", "file\x00.html", "x", "global")
+	err := WriteSnippet(storage.At(dataDir), "", "turbo", "file\x00.html", "x", "global")
 	if err == nil {
 		t.Error("expected error for null byte in path")
 	}
@@ -978,7 +990,7 @@ func TestWriteSnippet_NullByte(t *testing.T) {
 
 func TestCreateSnippet_NullByte(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
-	err := CreateSnippet(dataDir, "file\x00.html", "x")
+	err := CreateSnippet(storage.At(dataDir), "file\x00.html", "x")
 	if err == nil {
 		t.Error("expected error for null byte in path")
 	}
@@ -986,7 +998,7 @@ func TestCreateSnippet_NullByte(t *testing.T) {
 
 func TestDeleteSnippet_NullByte(t *testing.T) {
 	dataDir := setupDataDir(t, "turbo")
-	err := DeleteSnippet(dataDir, "file\x00.html")
+	err := DeleteSnippet(storage.At(dataDir), "file\x00.html")
 	if err == nil {
 		t.Error("expected error for null byte in path")
 	}

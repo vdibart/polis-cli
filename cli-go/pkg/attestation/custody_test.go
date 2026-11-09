@@ -3,7 +3,9 @@ package attestation
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -44,11 +46,11 @@ func TestCustodyDeclarationIssuesAndVerifies(t *testing.T) {
 
 			r := custodyDeclaration()
 			r.Payload[CustodyKeyAttribution] = attribution
-			id, err := Issue(dir, r, priv)
+			id, err := Issue(storage.At(dir), r, priv)
 			if err != nil {
 				t.Fatalf("Issue: %v", err)
 			}
-			if st, err := VerifyFile(dir, Path(dir, id)); st != StatusValid {
+			if st, err := VerifyFile(storage.At(dir), id); st != StatusValid {
 				t.Fatalf("status = %s (%v), want valid", st, err)
 			}
 		})
@@ -60,7 +62,7 @@ func TestCustodyDeclarationIssuesAndVerifies(t *testing.T) {
 func TestCustodyDeclarationAcceptsAsTenant(t *testing.T) {
 	dir := t.TempDir()
 	priv, _ := newTestKeys(t)
-	if _, err := Issue(dir, custodyDeclaration(), priv); err != nil {
+	if _, err := Issue(storage.At(dir), custodyDeclaration(), priv); err != nil {
 		t.Fatalf("as-tenant must be a legal attribution: %v", err)
 	}
 }
@@ -110,7 +112,7 @@ func TestCustodyWriterRulesHaveNoDefaults(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := Issue(t.TempDir(), c.record(), priv)
+			_, err := Issue(storage.At(t.TempDir()), c.record(), priv)
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("err = %v, want one naming %q", err, c.want)
 			}
@@ -132,10 +134,10 @@ func TestAMalformedCustodyRecordStillLoadsAndVerifies(t *testing.T) {
 	if err := signAndStamp(r, priv); err != nil {
 		t.Fatal(err)
 	}
-	if err := write(Path(dir, ID(r)), r); err != nil {
+	if err := write(storage.At(dir), Key(ID(r)), r); err != nil {
 		t.Fatal(err)
 	}
-	if st, err := VerifyFile(dir, Path(dir, ID(r))); st != StatusValid {
+	if st, err := VerifyFile(storage.At(dir), ID(r)); st != StatusValid {
 		t.Fatalf("status = %s (%v), want valid — readers accept what writers refuse", st, err)
 	}
 }
@@ -147,21 +149,21 @@ func TestWithdrawingAGrantWritesAForwardReference(t *testing.T) {
 	priv, pub := newTestKeys(t)
 	writeWellKnown(t, dir, pub)
 
-	grantID, err := Issue(dir, custodyGrant(), priv)
+	grantID, err := Issue(storage.At(dir), custodyGrant(), priv)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	before, err := Load(Path(dir, grantID))
+	before, err := Load(storage.At(dir), grantID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	wID, err := Withdraw(dir, grantID, priv)
+	wID, err := Withdraw(storage.At(dir), grantID, priv)
 	if err != nil {
 		t.Fatalf("Withdraw: %v", err)
 	}
 
-	after, err := Load(Path(dir, grantID))
+	after, err := Load(storage.At(dir), grantID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,20 +175,20 @@ func TestWithdrawingAGrantWritesAForwardReference(t *testing.T) {
 	if after.Version != before.Version || after.Signature != before.Signature || ID(after) != grantID {
 		t.Fatal("the forward reference changed the signed record's version, signature or id")
 	}
-	if st, err := VerifyRecord(dir, after); st != StatusValid {
+	if st, err := VerifyRecord(storage.At(dir), after); st != StatusValid {
 		t.Fatalf("a withdrawn grant must still verify: %s (%v)", st, err)
 	}
 
 	// The pointer is discovery: following it reaches a withdrawal that is signed
 	// and names this exact record and version.
-	w, err := Load(Path(dir, wID))
+	w, err := Load(storage.At(dir), wID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if w.Predicate != PredicateWithdrawal || w.Subject.ID != RecordURL(before.Issuer, grantID) || w.Subject.Version != before.Version {
 		t.Fatalf("the pointer leads to %+v, which does not name the grant", w)
 	}
-	if st, _ := VerifyRecord(dir, w); st != StatusValid {
+	if st, _ := VerifyRecord(storage.At(dir), w); st != StatusValid {
 		t.Fatalf("the withdrawal the pointer names does not verify: %s", st)
 	}
 }
@@ -198,11 +200,11 @@ func TestForwardReferenceSurvivesAGoRoundTrip(t *testing.T) {
 	priv, pub := newTestKeys(t)
 	writeWellKnown(t, dir, pub)
 
-	grantID, _ := Issue(dir, custodyGrant(), priv)
-	if _, err := Withdraw(dir, grantID, priv); err != nil {
+	grantID, _ := Issue(storage.At(dir), custodyGrant(), priv)
+	if _, err := Withdraw(storage.At(dir), grantID, priv); err != nil {
 		t.Fatal(err)
 	}
-	r, err := Load(Path(dir, grantID))
+	r, err := Load(storage.At(dir), grantID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,11 +212,11 @@ func TestForwardReferenceSurvivesAGoRoundTrip(t *testing.T) {
 
 	// A writer that loads and saves — what Medic, Patrol or a later rebuild
 	// would do.
-	if err := write(Path(dir, grantID), r); err != nil {
+	if err := write(storage.At(dir), Key(grantID), r); err != nil {
 		t.Fatal(err)
 	}
 	// And the listing path every reader uses.
-	listed, err := List(dir)
+	listed, err := List(storage.At(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,28 +244,28 @@ func TestForwardReferenceSurvivesAGoRoundTrip(t *testing.T) {
 func TestAnUndeclaredFieldMakesTheGoWriterRefuse(t *testing.T) {
 	dir := t.TempDir()
 	priv, _ := newTestKeys(t)
-	id, _ := Issue(dir, custodyGrant(), priv)
+	id, _ := Issue(storage.At(dir), custodyGrant(), priv)
 
-	raw, _ := os.ReadFile(Path(dir, id))
+	raw, _ := os.ReadFile(filepath.Join(dir, filepath.FromSlash(Key(id))))
 	var m map[string]interface{}
 	_ = json.Unmarshal(raw, &m)
 	m["superseded_by"] = "https://alice.polis.pub/content/pub.polis.core/attestation/x.json"
 	patched, _ := json.MarshalIndent(m, "", "  ")
-	if err := os.WriteFile(Path(dir, id), patched, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(Key(id))), patched, 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	r, err := Load(Path(dir, id))
+	r, err := Load(storage.At(dir), id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out, _ := json.Marshal(r); bytes.Contains(out, []byte("superseded_by")) {
 		t.Fatal("an undeclared field survived Load — D7's model of Load is wrong")
 	}
-	if err := write(Path(dir, id), r); err == nil {
+	if err := write(storage.At(dir), Key(id), r); err == nil {
 		t.Fatal("the writer rewrote a record carrying a field it could not read")
 	}
-	after, _ := os.ReadFile(Path(dir, id))
+	after, _ := os.ReadFile(filepath.Join(dir, filepath.FromSlash(Key(id))))
 	if !bytes.Equal(after, patched) {
 		t.Fatal("a refused write still changed the file")
 	}
@@ -285,11 +287,11 @@ func TestIssueNeverWritesAForwardReference(t *testing.T) {
 	priv, _ := newTestKeys(t)
 	r := custodyGrant()
 	r.WithdrawnBy = "https://example.com/forged.json"
-	id, err := Issue(dir, r, priv)
+	id, err := Issue(storage.At(dir), r, priv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, _ := Load(Path(dir, id))
+	got, _ := Load(storage.At(dir), id)
 	if got.WithdrawnBy != "" {
 		t.Fatalf("Issue wrote withdrawn_by=%q onto a new record", got.WithdrawnBy)
 	}

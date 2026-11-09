@@ -1,6 +1,9 @@
 package index
 
 import (
+	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +32,7 @@ Hello World content.
 	// Create a version file that should NOT be indexed
 	os.WriteFile(filepath.Join(versionsDir, "hello.md"), []byte("version data"), 0644)
 
-	result, err := RebuildContentIndex(dataDir, []string{EntryTypePost})
+	result, err := RebuildContentIndex(storage.At(dataDir), []string{EntryTypePost})
 	if err != nil {
 		t.Fatalf("rebuild failed: %v", err)
 	}
@@ -43,7 +46,7 @@ func TestRebuildCommentsIndex_EmptyWhenNoDiscovery(t *testing.T) {
 	dataDir := t.TempDir()
 
 	opts := RebuildOptions{Comments: true}
-	count, err := rebuildCommentsIndex(dataDir, opts)
+	count, err := rebuildCommentsIndex(storage.At(dataDir), opts)
 	if err != nil {
 		t.Fatalf("rebuild failed: %v", err)
 	}
@@ -53,7 +56,7 @@ func TestRebuildCommentsIndex_EmptyWhenNoDiscovery(t *testing.T) {
 
 	// Verify file was created
 	blessedPath := filepath.Join(dataDir, "content", "pub.polis.core", "comment", "blessed.json")
-	if _, err := os.Stat(blessedPath); os.IsNotExist(err) {
+	if _, err := os.Stat(blessedPath); errors.Is(err, fs.ErrNotExist) {
 		t.Error("expected blessed.json to be created")
 	}
 }
@@ -62,7 +65,7 @@ func TestRebuildCommentsIndex_UsesPackageVersion(t *testing.T) {
 	dataDir := t.TempDir()
 
 	opts := RebuildOptions{Comments: true}
-	_, err := rebuildCommentsIndex(dataDir, opts)
+	_, err := rebuildCommentsIndex(storage.At(dataDir), opts)
 	if err != nil {
 		t.Fatalf("rebuild failed: %v", err)
 	}

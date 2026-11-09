@@ -3,6 +3,7 @@ package actor
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -383,7 +384,7 @@ func (w *strangerWorld) rotate(domain, operator, rotatedAt string) (oldKey []byt
 	if err := os.WriteFile(filepath.Join(dir, ".well-known", "polis"), wk, 0644); err != nil {
 		w.t.Fatal(err)
 	}
-	if _, err := site.WriteGenesisKeyHistory(dir); err != nil {
+	if _, err := site.WriteGenesisKeyHistory(storage.At(dir)); err != nil {
 		w.t.Fatal(err)
 	}
 	priv, pub, err := signing.GenerateKeypair()
@@ -399,7 +400,7 @@ func (w *strangerWorld) rotate(domain, operator, rotatedAt string) (oldKey []byt
 	if err != nil {
 		w.t.Fatal(err)
 	}
-	if err := site.RecordKeyRotation(dir, newPub, sig, rotatedAt); err != nil {
+	if err := site.RecordKeyRotation(storage.At(dir), newPub, sig, rotatedAt, ""); err != nil {
 		w.t.Fatal(err)
 	}
 	body, err := os.ReadFile(filepath.Join(dir, ".well-known", "polis"))

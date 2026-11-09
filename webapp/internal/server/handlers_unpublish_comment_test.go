@@ -52,7 +52,7 @@ My reply.
 		t.Fatalf("unpublish = %d: %s", w.Code, w.Body.String())
 	}
 
-	draft, err := comment.LoadDraft(s.DataDir, "a-comment")
+	draft, err := comment.LoadDraft(s.Site(), "a-comment")
 	if err != nil {
 		t.Fatalf("LoadDraft: %v", err)
 	}
@@ -62,7 +62,7 @@ My reply.
 	if draft.RootPost != "https://someone.example/posts/20260901/root.md" {
 		t.Errorf("root_post = %q — the thread root must survive", draft.RootPost)
 	}
-	if _, err := comment.SignComment(s.DataDir, draft, "owner.example", s.BaseURL, s.PrivateKey); err != nil {
+	if _, err := comment.SignComment(s.Site(), draft, "owner.example", s.BaseURL, s.PrivateKey); err != nil {
 		t.Fatalf("comment sign after unpublish: %v", err)
 	}
 }
@@ -119,7 +119,7 @@ func TestUnpublishedPostSurvivesTwoPublishUnpublishCycles(t *testing.T) {
 	draftPath := filepath.Join(s.DataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", "foo-bar.md")
 
 	for cycle := 1; cycle <= 2; cycle++ {
-		result, err := publish.PublishPost(s.DataDir, markdown, "foo-bar", s.PrivateKey)
+		result, err := publish.PublishPost(s.Site(), markdown, "foo-bar", s.PrivateKey)
 		if err != nil {
 			t.Fatalf("cycle %d: PublishPost: %v", cycle, err)
 		}

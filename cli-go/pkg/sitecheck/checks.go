@@ -2,9 +2,11 @@ package sitecheck
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,6 +18,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
 )
 
@@ -42,16 +45,32 @@ type PolicyWarning struct {
 // Only answerable where the key is present: a clone and a remote site have no
 // .polis/ at all, and the caller must report that as not-applicable rather than
 // letting "private key not found" read as a defect on a site that is fine.
-func KeyPerms(siteDir string) CheckStatus {
-	privKeyPath := filepath.Join(siteDir, ".polis", "keys", "id_ed25519")
-	info, err := os.Stat(privKeyPath)
-	if os.IsNotExist(err) {
+func KeyPerms(site storage.Site) CheckStatus {
+	// ⛔⛔ THE STORE COMES FROM THE HANDLE, NOT FROM A ROOT.
+	//
+	// ⚠️ This used to be storage.NewSite(siteDir) — it CONSTRUCTED A POSIX
+	// STORE regardless of what the site was actually stored on. So the one
+	// consumer of Capabilities().Modes could never see a backend without
+	// modes: on a blob-backed site it would stat a local filesystem that holds
+	// none of the site's data, and report whatever it found there.
+	//
+	// ⭐ The capability check below is only meaningful once the store is the
+	// site's own.
+	st := site.Store()
+	// A backend without modes cannot answer this. Saying so is the point:
+	// a permission check that quietly stops checking is worse than one that
+	// reports it cannot run.
+	if !st.Capabilities().Modes {
+		return CheckStatus{OK: false, Message: "file modes are not available on this storage backend"}
+	}
+	info, err := st.Stat(context.Background(), ".polis/keys/id_ed25519")
+	if errors.Is(err, storage.ErrNotFound) {
 		return CheckStatus{OK: false, Message: "private key not found"}
 	}
 	if err != nil {
 		return CheckStatus{OK: false, Message: fmt.Sprintf("failed to stat: %v", err)}
 	}
-	mode := info.Mode().Perm()
+	mode := info.Mode.Perm()
 	if mode != 0600 && mode != 0400 {
 		return CheckStatus{OK: false, Message: fmt.Sprintf("unsafe permissions %04o (expected 0600 or 0400)", mode)}
 	}
@@ -63,7 +82,7 @@ func KeyPerms(siteDir string) CheckStatus {
 // BundleJSON checks that the core bundle declaration exists, parses, and
 // carries the two fields everything else keys off.
 func BundleJSON(siteDir string) CheckStatus {
-	return BundleJSONBytes(readOrNil(filepath.Join(siteDir, "content", "pub.polis.core", "bundle.json")))
+	return BundleJSONBytes(readOrNil(siteDir, filepath.Join(siteDir, "content", "pub.polis.core", "bundle.json")))
 }
 
 // BundleJSONBytes is BundleJSON over bytes already in hand — the same
@@ -71,7 +90,7 @@ func BundleJSON(siteDir string) CheckStatus {
 // it off disk. A nil slice means absent.
 func BundleJSONBytes(data []byte, readErr error) CheckStatus {
 	if readErr != nil {
-		if os.IsNotExist(readErr) {
+		if errors.Is(readErr, storage.ErrNotFound) {
 			return CheckStatus{OK: false, Message: "missing"}
 		}
 		return CheckStatus{OK: false, Message: fmt.Sprintf("failed to read: %v", readErr)}
@@ -89,8 +108,13 @@ func BundleJSONBytes(data []byte, readErr error) CheckStatus {
 	return CheckStatus{OK: true}
 }
 
-func readOrNil(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
+// readOrNil reads absPath, which is under root, through the storage interface.
+func readOrNil(root, absPath string) ([]byte, error) {
+	key, keyErr := storage.RelKey(root, absPath)
+	if keyErr != nil {
+		return nil, keyErr
+	}
+	data, err := storage.NewPOSIX(root).Get(context.Background(), key)
 	if err != nil {
 		return nil, err
 	}
@@ -178,9 +202,11 @@ func IndexConsistency(siteDir string) CheckStatus {
 	// ⭐ ReadPublicIndex, not LoadPublicIndex: a line that does not parse is a
 	// finding here, never a silent skip — otherwise a half-garbage index reads
 	// as clean over the half that parses (Signet epic 44 C1, close-out E2).
-	entries, report, err := metadata.ReadPublicIndex(siteDir)
+	// ⚠️ storage.At at the boundary — see the note in publish: this package
+	// still holds a path and converts later.
+	entries, report, err := metadata.ReadPublicIndex(storage.At(siteDir))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, storage.ErrNotFound) {
 			return CheckStatus{OK: true, Message: "no index file"}
 		}
 		return CheckStatus{OK: false, Message: "cannot load index.jsonl: " + err.Error()}
@@ -210,9 +236,9 @@ func IndexConsistency(siteDir string) CheckStatus {
 
 		// Check file exists
 		absPath := filepath.Join(siteDir, entry.Path)
-		data, err := os.ReadFile(absPath)
+		data, err := readOrNil(siteDir, absPath)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, storage.ErrNotFound) {
 				issues = append(issues, fmt.Sprintf("orphan: %s (indexed but missing)", entry.Path))
 			} else {
 				issues = append(issues, fmt.Sprintf("read error: %s: %s", entry.Path, err.Error()))
@@ -236,25 +262,26 @@ func IndexConsistency(siteDir string) CheckStatus {
 	for _, entryType := range sortedKeys(indexEntryRules) {
 		rule := indexEntryRules[entryType]
 		dir := filepath.Join(siteDir, filepath.FromSlash(rule.Dir))
-		if _, err := os.Stat(dir); err != nil {
+		dirKey, dirKeyErr := storage.RelKey(siteDir, dir)
+		dirPresent := false
+		if dirKeyErr == nil {
+			dirPresent, _ = storage.NewSite(siteDir).Exists(context.Background(), dirKey)
+		}
+		if !dirPresent {
 			continue
 		}
-		filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return nil
+		phantomEntries, _ := storage.NewSite(siteDir).List(context.Background(), dirKey, storage.Recursive())
+		for _, pe := range phantomEntries {
+			// A recursive List has no SkipDir, so .versions is filtered by key.
+			if pe.IsDir || strings.Contains(pe.Key, "/.versions/") || !strings.HasSuffix(pe.Key, rule.Suffix) {
+				continue
 			}
-			if d.IsDir() && d.Name() == ".versions" {
-				return filepath.SkipDir
+			// The key is already site-relative; the walk this replaced
+			// handed out absolute paths and relativised them here.
+			if !indexedPaths[pe.Key] {
+				issues = append(issues, fmt.Sprintf("phantom: %s (on disk but not indexed)", pe.Key))
 			}
-			if d.IsDir() || !strings.HasSuffix(d.Name(), rule.Suffix) {
-				return nil
-			}
-			relPath, _ := filepath.Rel(siteDir, path)
-			if !indexedPaths[relPath] {
-				issues = append(issues, fmt.Sprintf("phantom: %s (on disk but not indexed)", relPath))
-			}
-			return nil
-		})
+		}
 	}
 
 	if len(issues) > 0 {
@@ -318,7 +345,7 @@ func PolicySyntax(siteDir string) []PolicyWarning {
 	var warnings []PolicyWarning
 	for _, path := range policyFilePaths(siteDir) {
 		relPath, _ := filepath.Rel(siteDir, path)
-		warnings = append(warnings, validatePolicyFile(path, relPath)...)
+		warnings = append(warnings, validatePolicyFile(siteDir, path, relPath)...)
 	}
 	warnings = append(warnings, policySemantics(siteDir)...)
 	return warnings
@@ -331,8 +358,8 @@ func policyFilePaths(siteDir string) []string {
 	}
 }
 
-func validatePolicyFile(path, relPath string) []PolicyWarning {
-	data, err := os.ReadFile(path)
+func validatePolicyFile(root, path, relPath string) []PolicyWarning {
+	data, err := readOrNil(root, path)
 	if err != nil {
 		return nil
 	}
@@ -354,7 +381,15 @@ func ParsePolicyLines(body, relPath string) []PolicyWarning {
 		}
 		var raw map[string]interface{}
 		if err := json.Unmarshal([]byte(line), &raw); err != nil {
-			continue // Not valid JSON, skip (IndexJSONL already validates)
+			// policy.LoadPolicies skips a line it cannot parse, so a typo makes
+			// the rule silently vanish. Say so; loading is unchanged.
+			warnings = append(warnings, PolicyWarning{
+				File:  relPath,
+				Line:  lineNum,
+				Rule:  line,
+				Error: "not valid JSON, so this rule is ignored: " + err.Error(),
+			})
+			continue
 		}
 		// Skip metadata lines (version/generator headers)
 		if _, hasVersion := raw["version"]; hasVersion {
@@ -392,11 +427,11 @@ func policySemantics(siteDir string) []PolicyWarning {
 
 	for _, path := range policyFilePaths(siteDir) {
 		relPath, _ := filepath.Rel(siteDir, path)
-		f, err := os.Open(path)
+		raw, err := readOrNil(siteDir, path)
 		if err != nil {
 			continue
 		}
-		scanner := bufio.NewScanner(f)
+		scanner := bufio.NewScanner(bytes.NewReader(raw))
 		lineNum := 0
 		for scanner.Scan() {
 			lineNum++
@@ -446,7 +481,6 @@ func policySemantics(siteDir string) []PolicyWarning {
 				byKey[k] = entry
 			}
 		}
-		_ = f.Close()
 	}
 	return warnings
 }
@@ -497,14 +531,19 @@ func LicenseIntegrity(siteDir string, pubKey []byte) CheckStatus {
 // ⚠️ pkg/license cannot import pkg/site (site imports license), so the history is
 // consulted here, around license.Verify, rather than inside the package.
 func LicenseIntegrityWithHistory(siteDir string, pubKey []byte, chain *site.KeyHistoryBlock) CheckStatus {
-	pointer := site.LicensePointer(siteDir)
+	pointer := site.LicensePointer(storage.At(siteDir))
 	if pointer == "" {
 		// No pointer, no claim. Silence is a defined state.
 		return CheckStatus{OK: true, Message: "no terms stated"}
 	}
 
 	path := filepath.Join(siteDir, filepath.FromSlash(strings.TrimLeft(pointer, "/")))
-	if _, err := os.Stat(path); err != nil {
+	pointerKey, pointerKeyErr := storage.RelKey(siteDir, path)
+	pointerPresent := false
+	if pointerKeyErr == nil {
+		pointerPresent, _ = storage.NewSite(siteDir).Exists(context.Background(), pointerKey)
+	}
+	if !pointerPresent {
 		// A dangling pointer is NOT benign: the site advertises terms and
 		// serves nothing, so a consumer sees "unstated" for an author who
 		// stated something. That is a lost claim of intent.
@@ -525,15 +564,8 @@ func LicenseIntegrityWithHistory(siteDir string, pubKey []byte, chain *site.KeyH
 	if len(pubKey) == 0 {
 		return CheckStatus{OK: false, Message: "cannot read public key to verify licence"}
 	}
-	ok, retired, err := site.VerifyWithHistory(func(key []byte) (bool, error) {
-		return license.Verify(f, key)
-	}, pubKey, chain, f.Updated, "updated")
-
-	// SIGNET epic 47 — the tolerance rule, through the package's own decision
-	// point. The walk has to live out here (pkg/license cannot import pkg/site)
-	// but the RULE must not: license.Status is the one place this type maps an
-	// outcome onto a status.
-	switch status, why := license.Status(f, ok); status {
+	status, retired, why, err := LicenseSignatureWithHistory(f, pubKey, chain)
+	switch status {
 	case license.StatusUnknown:
 		// ⚠️ `OK: true` because having failed to look is not the same as having
 		// looked and found a problem — the posture Judge takes on items 9 and
@@ -570,6 +602,23 @@ func LicenseIntegrityWithHistory(siteDir string, pubKey []byte, chain *site.KeyH
 	return CheckStatus{OK: true}
 }
 
+// LicenseSignatureWithHistory answers one question about a loaded licence: does
+// its signature verify — against the current key, or the retired key the site's
+// history resolves for its `updated`? LicenseIntegrityWithHistory and Judge's
+// licence-signature check both ask it here, so they cannot disagree.
+//
+// SIGNET epic 47 — the tolerance rule goes through the package's own decision
+// point. The walk has to live out here (pkg/license cannot import pkg/site)
+// but the RULE must not: license.Status is the one place this type maps an
+// outcome onto a status. why explains an unknown; err an invalid.
+func LicenseSignatureWithHistory(f *license.File, pubKey []byte, chain *site.KeyHistoryBlock) (license.SignatureStatus, *site.KeyHistoryEntry, string, error) {
+	ok, retired, err := site.VerifyWithHistory(func(key []byte) (bool, error) {
+		return license.Verify(f, key)
+	}, pubKey, chain, f.Updated, "updated")
+	status, why := license.Status(f, ok)
+	return status, retired, why, err
+}
+
 // PublishedKey returns the identity key a site publishes in .well-known/polis —
 // the key a third party on the network would fetch and use.
 //
@@ -578,7 +627,7 @@ func LicenseIntegrityWithHistory(siteDir string, pubKey []byte, chain *site.KeyH
 // they answer the question the network asks instead of a locally convenient
 // approximation. This is that lookup, once.
 func PublishedKey(siteDir string) ([]byte, error) {
-	data, err := os.ReadFile(filepath.Join(siteDir, ".well-known", "polis"))
+	data, err := storage.NewSite(siteDir).Get(context.Background(), ".well-known/polis")
 	if err != nil {
 		return nil, fmt.Errorf("no .well-known/polis to verify against")
 	}

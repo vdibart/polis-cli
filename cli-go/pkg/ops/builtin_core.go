@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/contentpath"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,8 +17,11 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
-	"github.com/vdibart/polis-cli/cli-go/pkg/site"
+	// ⚠️ ALIASED: `site` is the parameter name in the site-handle migration.
+	sitepkg "github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // BuiltinCoreHandler handles operations for the pub.polis.core bundle.
@@ -94,7 +99,7 @@ func (h *BuiltinCoreHandler) Actions(contentType string) []string {
 func (h *BuiltinCoreHandler) handleLicense(ctx context.Context, req ActionRequest, env HandlerEnv) (*ActionResult, error) {
 	switch req.Action {
 	case "get":
-		terms, err := site.SiteTerms(env.Resolver.SiteDir())
+		terms, err := sitepkg.SiteTerms(env.Resolver.Site())
 		if err != nil {
 			return nil, fmt.Errorf("read licence: %w", err)
 		}
@@ -105,7 +110,7 @@ func (h *BuiltinCoreHandler) handleLicense(ctx context.Context, req ActionReques
 			Data: map[string]any{
 				"stated":  terms != nil,
 				"terms":   terms,
-				"pointer": site.LicensePointer(env.Resolver.SiteDir()),
+				"pointer": sitepkg.LicensePointer(env.Resolver.Site()),
 			},
 		}, nil
 	default:
@@ -128,12 +133,11 @@ func (h *BuiltinCoreHandler) handlePost(ctx context.Context, req ActionRequest, 
 
 // listPosts reads from content/pub.polis.core/index.jsonl and returns post entries.
 func (h *BuiltinCoreHandler) listPosts(env HandlerEnv) (*ActionResult, error) {
-	siteDir := env.Resolver.SiteDir()
-	indexPath := filepath.Join(siteDir, "content", "pub.polis.core", "index.jsonl")
+	site := env.Resolver.Site()
 
-	data, err := os.ReadFile(indexPath)
+	data, err := site.Store().Get(context.Background(), "content/pub.polis.core/index.jsonl")
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return &ActionResult{
 				Status: "success",
 				Data:   map[string]any{"posts": []any{}, "count": 0},
@@ -207,13 +211,12 @@ func (h *BuiltinCoreHandler) publishPost(req ActionRequest, env HandlerEnv) (*Ac
 	if env.DiscoveryURL != "" && env.BaseURL != "" {
 		dsCfg = &publish.DiscoveryConfig{
 			DiscoveryURL: env.DiscoveryURL,
-			DiscoveryKey: env.DiscoveryKey,
 			BaseURL:      env.BaseURL,
 		}
 	}
 
-	siteDir := env.Resolver.SiteDir()
-	result, err := publish.PublishPost(siteDir, markdown, filename, env.PrivateKey, dsCfg)
+	site := env.Resolver.Site()
+	result, err := publish.PublishPost(site, markdown, filename, env.PrivateKey, dsCfg)
 	if err != nil {
 		return nil, fmt.Errorf("publish: %w", err)
 	}
@@ -254,6 +257,16 @@ func (h *BuiltinCoreHandler) republishComment(req ActionRequest, env HandlerEnv)
 	if path == "" {
 		return nil, fmt.Errorf("path is required")
 	}
+	// ⛔ The editor's rule, and a comment must be a comment: this rewrites the
+	// file it names into a signed comment, so an unchecked path could turn any
+	// in-site file with a published: line into one.
+	if err := contentpath.Validate(path); err != nil {
+		return nil, err
+	}
+	if clean := filepath.ToSlash(filepath.Clean(path)); !strings.HasSuffix(clean, ".md") ||
+		!(strings.HasPrefix(clean, "content/pub.polis.core/comment/") || strings.HasPrefix(clean, "comments/")) {
+		return nil, fmt.Errorf("path is not a published comment")
+	}
 	if strings.TrimSpace(markdown) == "" {
 		return nil, fmt.Errorf("markdown content required")
 	}
@@ -263,13 +276,12 @@ func (h *BuiltinCoreHandler) republishComment(req ActionRequest, env HandlerEnv)
 	if env.DiscoveryURL != "" && env.BaseURL != "" {
 		dsCfg = &comment.DiscoveryConfig{
 			DiscoveryURL: env.DiscoveryURL,
-			DiscoveryKey: env.DiscoveryKey,
 			BaseURL:      env.BaseURL,
 		}
 	}
 
-	siteDir := env.Resolver.SiteDir()
-	result, err := comment.RepublishComment(siteDir, path, markdown, env.PrivateKey, dsCfg)
+	site := env.Resolver.Site()
+	result, err := comment.RepublishComment(site, path, markdown, env.PrivateKey, dsCfg)
 	if err != nil {
 		return nil, fmt.Errorf("republish: %w", err)
 	}
@@ -299,13 +311,12 @@ func (h *BuiltinCoreHandler) beseechComment(req ActionRequest, env HandlerEnv) (
 	if env.DiscoveryURL != "" && env.BaseURL != "" {
 		dsCfg = &comment.DiscoveryConfig{
 			DiscoveryURL: env.DiscoveryURL,
-			DiscoveryKey: env.DiscoveryKey,
 			BaseURL:      env.BaseURL,
 		}
 	}
 
-	siteDir := env.Resolver.SiteDir()
-	result, err := comment.BeseechComment(siteDir, commentID, env.PrivateKey, dsCfg)
+	site := env.Resolver.Site()
+	result, err := comment.BeseechComment(site, commentID, env.PrivateKey, dsCfg)
 	if err != nil {
 		return nil, fmt.Errorf("beseech: %w", err)
 	}
@@ -334,10 +345,9 @@ func (h *BuiltinCoreHandler) handleFollow(ctx context.Context, req ActionRequest
 
 // listFollowing reads the following.json file and returns the list.
 func (h *BuiltinCoreHandler) listFollowing(env HandlerEnv) (*ActionResult, error) {
-	siteDir := env.Resolver.SiteDir()
-	followingPath := following.DefaultPath(siteDir)
+	site := env.Resolver.Site()
 
-	f, err := following.Load(followingPath)
+	f, err := following.LoadSite(site)
 	if err != nil {
 		return nil, fmt.Errorf("load following: %w", err)
 	}
@@ -369,7 +379,7 @@ func (h *BuiltinCoreHandler) listFollowing(env HandlerEnv) (*ActionResult, error
 	// status says. Whether "unsigned" or "invalid" is acceptable belongs to
 	// whoever is asking (Law 2), and an unsigned follow file is the normal
 	// state until the epic-11 backfill.
-	sigStatus, sigErr := following.VerifySite(siteDir)
+	sigStatus, sigErr := following.VerifySite(site)
 	signature := map[string]any{"status": string(sigStatus)}
 	if sigErr != nil {
 		signature["message"] = sigErr.Error()
@@ -414,12 +424,12 @@ func (h *BuiltinCoreHandler) handleDM(ctx context.Context, req ActionRequest, en
 // the epoch DEKs the server can open without a password (bootstrap server_dek; password
 // epochs stay locked until the SPA unlock).
 func (h *BuiltinCoreHandler) dmMailbox(env HandlerEnv) (*dm.Mailbox, string, map[int][32]byte, error) {
-	siteDir := env.Resolver.SiteDir()
-	deks, err := dm.LoadAvailableDEKs(siteDir)
+	site := env.Resolver.Site()
+	deks, err := dm.LoadAvailableDEKs(site)
 	if err != nil {
 		return nil, "", nil, err
 	}
-	return dm.NewMailbox(dm.DMDir(siteDir)), dm.ExtractDomainFromURL(env.BaseURL), deks, nil
+	return dm.NewMailbox(site), dm.ExtractDomainFromURL(env.BaseURL), deks, nil
 }
 
 func (h *BuiltinCoreHandler) listDMConversations(env HandlerEnv) (*ActionResult, error) {
@@ -524,7 +534,7 @@ func (h *BuiltinCoreHandler) sendDM(req ActionRequest, env HandlerEnv) (*ActionR
 		return nil, fmt.Errorf("invalid recipient_url: %w", err)
 	}
 
-	sender := dm.NewSender(env.PrivateKey, env.PublicKey, env.BaseURL, env.Resolver.SiteDir())
+	sender := dm.NewSender(env.PrivateKey, env.PublicKey, env.BaseURL, env.Resolver.Site())
 	// Extract domain from BaseURL
 	sender.Domain = dm.ExtractDomainFromURL(env.BaseURL)
 
@@ -562,12 +572,12 @@ func (h *BuiltinCoreHandler) deliverDM(req ActionRequest, env HandlerEnv) (*Acti
 	}
 
 	// Load following domains for policy check
-	siteDir := env.Resolver.SiteDir()
-	followingDomains := loadFollowingDomains(siteDir)
+	site := env.Resolver.Site()
+	followingDomains := loadFollowingDomains(site)
 
 	// One limiter per recipient site, for the life of the process — see
 	// dm_ratelimit.go. Built per call, it limited nothing.
-	receiver := dm.NewReceiver(env.PrivateKey, env.PublicKey, env.BaseURL, siteDir, dmRateLimiterFor(siteDir))
+	receiver := dm.NewReceiver(env.PrivateKey, env.PublicKey, env.BaseURL, site, dmRateLimiterFor(site))
 	if maxSize := envInt("POLIS_DM_MAX_SIZE", 0); maxSize > 0 {
 		receiver.MaxMessageSize = maxSize
 	}
@@ -591,9 +601,9 @@ func (h *BuiltinCoreHandler) deliverDM(req ActionRequest, env HandlerEnv) (*Acti
 
 // loadFollowingDomains returns the set of domains this site follows, keyed lowercase.
 // Shared by the deliver policy gate and the protection_status follow-file front-check.
-func loadFollowingDomains(siteDir string) map[string]bool {
+func loadFollowingDomains(site storage.Site) map[string]bool {
 	followingDomains := make(map[string]bool)
-	if f, err := following.Load(following.DefaultPath(siteDir)); err == nil {
+	if f, err := following.LoadSite(site); err == nil {
 		for _, e := range f.All() {
 			if domain := dm.ExtractDomainFromURL(e.URL); domain != "" {
 				followingDomains[strings.ToLower(domain)] = true
@@ -613,11 +623,11 @@ func (h *BuiltinCoreHandler) protectionStatusDM(req ActionRequest, env HandlerEn
 		return nil, fmt.Errorf("sender_domain required (set by signed-request auth)")
 	}
 
-	siteDir := env.Resolver.SiteDir()
+	site := env.Resolver.Site()
 	responderDomain := dm.ExtractDomainFromURL(env.BaseURL)
-	followingDomains := loadFollowingDomains(siteDir)
+	followingDomains := loadFollowingDomains(site)
 
-	ps, err := dm.BuildProtectionStatus(siteDir, responderDomain, env.PrivateKey, callerDomain, followingDomains)
+	ps, err := dm.BuildProtectionStatus(site, responderDomain, env.PrivateKey, callerDomain, followingDomains)
 	if err != nil {
 		if errors.Is(err, dm.ErrProtectionStatusForbidden) {
 			return nil, fmt.Errorf("forbidden: caller not in follow relationship")
@@ -746,12 +756,18 @@ func (h *BuiltinCoreHandler) handleTag(ctx context.Context, req ActionRequest, e
 }
 
 func (h *BuiltinCoreHandler) listTags(req ActionRequest, env HandlerEnv) (*ActionResult, error) {
-	siteDir := env.Resolver.SiteDir()
+	site := env.Resolver.Site()
 
 	// If a specific tag name is requested, load just that one
 	if tagName, ok := req.Payload["tag"].(string); ok && tagName != "" {
-		path := tag.TagPath(siteDir, tagName)
-		tf, err := tag.Load(path)
+		// ⭐ Normalised as the webapp does, so "Go" finds the go tag; a name
+		// that does not normalise ("../x") is refused here, and LoadTag refuses
+		// anything unnormalised on its own as well.
+		tagName, err := tag.NormalizeTagName(tagName)
+		if err != nil {
+			return nil, fmt.Errorf("invalid tag name: %w", err)
+		}
+		tf, err := tag.LoadTag(site, tagName)
 		if err != nil {
 			return nil, fmt.Errorf("load tag: %w", err)
 		}
@@ -772,7 +788,7 @@ func (h *BuiltinCoreHandler) listTags(req ActionRequest, env HandlerEnv) (*Actio
 		}, nil
 	}
 
-	tags, err := tag.ListTags(siteDir)
+	tags, err := tag.ListTags(site)
 	if err != nil {
 		return nil, fmt.Errorf("list tags: %w", err)
 	}
@@ -806,8 +822,8 @@ func (h *BuiltinCoreHandler) applyTag(req ActionRequest, env HandlerEnv) (*Actio
 		return nil, fmt.Errorf("target_uri required")
 	}
 
-	siteDir := env.Resolver.SiteDir()
-	tf, err := tag.ApplyTag(siteDir, tagName, targetURI, env.PrivateKey)
+	site := env.Resolver.Site()
+	tf, err := tag.ApplyTag(site, tagName, targetURI, env.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("apply tag: %w", err)
 	}
@@ -815,13 +831,16 @@ func (h *BuiltinCoreHandler) applyTag(req ActionRequest, env HandlerEnv) (*Actio
 	// DS sync (non-fatal)
 	var dsCfg *tag.DiscoveryConfig
 	if env.DiscoveryURL != "" && env.BaseURL != "" {
+		// ⛔ THE SITE, EXPLICITLY. Without it the check falls back to the
+		// process-wide tag.DefaultSite, which on hosted is whichever tenant
+		// initialised last — so one tenant read another's registration marker.
 		dsCfg = &tag.DiscoveryConfig{
 			DiscoveryURL: env.DiscoveryURL,
-			DiscoveryKey: env.DiscoveryKey,
 			BaseURL:      env.BaseURL,
+			Site:         site,
 		}
 	}
-	if err := tag.SyncTag(siteDir, tf, env.PrivateKey, dsCfg); err != nil {
+	if err := tag.SyncTag(site, tf, env.PrivateKey, dsCfg); err != nil {
 		fmt.Printf("[!] Tag DS sync skipped: %v\n", err)
 	}
 
@@ -846,8 +865,8 @@ func (h *BuiltinCoreHandler) removeTag(req ActionRequest, env HandlerEnv) (*Acti
 		return nil, fmt.Errorf("target_uri required")
 	}
 
-	siteDir := env.Resolver.SiteDir()
-	tf, err := tag.RemoveTarget(siteDir, tagName, targetURI, env.PrivateKey)
+	site := env.Resolver.Site()
+	tf, err := tag.RemoveTarget(site, tagName, targetURI, env.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("remove tag target: %w", err)
 	}
@@ -855,10 +874,13 @@ func (h *BuiltinCoreHandler) removeTag(req ActionRequest, env HandlerEnv) (*Acti
 	// DS unregister (non-fatal)
 	var dsCfg *tag.DiscoveryConfig
 	if env.DiscoveryURL != "" && env.BaseURL != "" {
+		// ⛔ THE SITE, EXPLICITLY. Without it the check falls back to the
+		// process-wide tag.DefaultSite, which on hosted is whichever tenant
+		// initialised last — so one tenant read another's registration marker.
 		dsCfg = &tag.DiscoveryConfig{
 			DiscoveryURL: env.DiscoveryURL,
-			DiscoveryKey: env.DiscoveryKey,
 			BaseURL:      env.BaseURL,
+			Site:         site,
 		}
 	}
 	if err := tag.UnregisterTarget(tagName, targetURI, env.PrivateKey, dsCfg); err != nil {
@@ -880,28 +902,34 @@ func (h *BuiltinCoreHandler) deleteTag(req ActionRequest, env HandlerEnv) (*Acti
 	if tagName == "" {
 		return nil, fmt.Errorf("tag name required")
 	}
+	tagName, err := tag.NormalizeTagName(tagName)
+	if err != nil {
+		return nil, fmt.Errorf("invalid tag name: %w", err)
+	}
 
-	siteDir := env.Resolver.SiteDir()
+	site := env.Resolver.Site()
 
 	// Load tag to get all targets for DS cleanup
-	path := tag.TagPath(siteDir, tagName)
-	tf, err := tag.Load(path)
+	tf, err := tag.LoadTag(site, tagName)
 	if err != nil {
 		return nil, fmt.Errorf("load tag for deletion: %w", err)
 	}
 
 	// Delete local file
-	if err := tag.DeleteTag(siteDir, tagName); err != nil {
+	if err := tag.DeleteTag(site, tagName); err != nil {
 		return nil, fmt.Errorf("delete tag: %w", err)
 	}
 
 	// DS unregister all targets (non-fatal)
 	var dsCfg *tag.DiscoveryConfig
 	if env.DiscoveryURL != "" && env.BaseURL != "" {
+		// ⛔ THE SITE, EXPLICITLY. Without it the check falls back to the
+		// process-wide tag.DefaultSite, which on hosted is whichever tenant
+		// initialised last — so one tenant read another's registration marker.
 		dsCfg = &tag.DiscoveryConfig{
 			DiscoveryURL: env.DiscoveryURL,
-			DiscoveryKey: env.DiscoveryKey,
 			BaseURL:      env.BaseURL,
+			Site:         site,
 		}
 	}
 	for _, target := range tf.Targets {

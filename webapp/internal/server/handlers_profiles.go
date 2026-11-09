@@ -106,8 +106,7 @@ type profileRecentPost struct {
 // Extracted in Phase 3 so the all-polis path can compute relationship
 // + following flags per profile without duplicating the loader.
 func (s *Server) loadFollowSets() (outbound map[string]*following.FollowingEntry, inbound map[string]string) {
-	followingPath := following.DefaultPath(s.DataDir)
-	followFile, ferr := following.Load(followingPath)
+	followFile, ferr := following.LoadSite(s.Site())
 	if ferr != nil {
 		s.LogDebug("loadFollowSets: following.Load: %v", ferr)
 		followFile = &following.FollowingFile{}
@@ -126,7 +125,7 @@ func (s *Server) loadFollowSets() (outbound map[string]*following.FollowingEntry
 	inbound = make(map[string]string)
 	discoveryDomain := s.GetDiscoveryDomain()
 	if discoveryDomain != "" {
-		store := stream.NewStore(s.DataDir, discoveryDomain, "pub.polis.core")
+		store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
 		var fs stream.FollowerState
 		if err := store.LoadState("pub.polis.follow", &fs); err == nil {
 			for _, follower := range fs.Followers {

@@ -1,13 +1,15 @@
 package metadata
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // SIGNET epic 14 — the blessing list is signed.
@@ -166,8 +168,8 @@ func VerifyBlessed(bc *BlessedComments, publicKeySSH []byte) (SignatureStatus, e
 // An absent blessing list, an absent .well-known/polis, or an absent public_key
 // all yield a non-finding status, never an error-shaped failure: they are
 // ordinary states of a site that has not done a thing yet.
-func VerifyBlessedSite(siteDir string) (SignatureStatus, error) {
-	bc, err := loadBlessedCommentsRaw(siteDir)
+func VerifyBlessedSite(site storage.Site) (SignatureStatus, error) {
+	bc, err := loadBlessedCommentsRaw(site)
 	if err != nil {
 		// loadBlessedCommentsRaw wraps with %w, so errors.Is sees through it.
 		// Without this a site that has never blessed anything would report
@@ -183,7 +185,7 @@ func VerifyBlessedSite(siteDir string) (SignatureStatus, error) {
 		return StatusUnsigned, nil
 	}
 
-	data, err := os.ReadFile(filepath.Join(siteDir, ".well-known", "polis"))
+	data, err := site.Store().Get(context.Background(), ".well-known/polis")
 	if err != nil {
 		return StatusUnknown, fmt.Errorf("no .well-known/polis to verify against")
 	}
@@ -198,9 +200,4 @@ func VerifyBlessedSite(siteDir string) (SignatureStatus, error) {
 	}
 
 	return VerifyBlessed(bc, []byte(wk.PublicKey))
-}
-
-// BlessedPath returns the path to a site's blessing list.
-func BlessedPath(siteDir string) string {
-	return filepath.Join(siteDir, BundleContentDir, "comment", BlessedCommentsFilename)
 }

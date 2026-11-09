@@ -4,7 +4,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"os"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io/fs"
 )
 
 // ErrMessagesLocked is returned when an operation needs an epoch's DEK that is not
@@ -33,10 +34,10 @@ func AvailableDEKs(kr *Keyring) (map[int][32]byte, error) {
 
 // LoadAvailableDEKs is AvailableDEKs over a tenant's on-disk keyring. A missing keyring
 // yields an empty set (nothing readable yet), not an error.
-func LoadAvailableDEKs(siteDir string) (map[int][32]byte, error) {
-	kr, err := LoadKeyring(DMDir(siteDir))
+func LoadAvailableDEKs(site storage.Site) (map[int][32]byte, error) {
+	kr, err := LoadKeyring(site)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return map[int][32]byte{}, nil
 		}
 		return nil, fmt.Errorf("load keyring: %w", err)
@@ -55,9 +56,9 @@ type sealingKey struct {
 // loadCurrentSealing resolves the sender's current-epoch sealing material from the
 // keyring. Bootstrap epoch → server_dek. Password epoch with no server-held DEK →
 // ErrMessagesLocked (sending awaits the SPA unlock, phase 4).
-func loadCurrentSealing(siteDir string) (sealingKey, error) {
+func loadCurrentSealing(site storage.Site) (sealingKey, error) {
 	var sk sealingKey
-	kr, err := LoadKeyring(DMDir(siteDir))
+	kr, err := LoadKeyring(site)
 	if err != nil {
 		return sk, fmt.Errorf("load keyring: %w", err)
 	}

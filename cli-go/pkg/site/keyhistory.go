@@ -1,14 +1,15 @@
 package site
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/jsonextra"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // The site's own key history, published inside .well-known/polis as
@@ -87,6 +88,22 @@ type KeyHistoryEntry struct {
 	// site that never rotated, or rotated before witnessing, publishes a
 	// byte-identical document. Absent means unwitnessed, never invalid.
 	Witnesses []discovery.Witness `json:"witnesses,omitempty"`
+
+	// SigningDomain is the domain that went into this entry's canonical
+	// rotation message: the domain the predecessor key signed the handover
+	// under. VerifyChain rebuilds the message with it.
+	//
+	// ⛔ ABSENT MEANS THE DOMAIN THE CHAIN IS READ FROM, which is what every
+	// entry meant before this field existed and is right for any handover
+	// signed where the chain is now published. Legacy entries, bash-written
+	// entries and genesis (nothing was signed) carry none. ⛔ omitempty ON
+	// PURPOSE: every chain written before this field is byte-identical.
+	//
+	// ⚠️ IT DOES NOT SAY WHERE THIS KEY IS PUBLISHED. A site rotated at one
+	// domain and then published at another (a branch) has a current entry
+	// naming the OLD domain. Covered by no signature: transition_sig covers the
+	// fixed rotation message, in which this value is an input, not the entry.
+	SigningDomain string `json:"signing_domain,omitempty"`
 
 	// Extra holds members of this entry this build does not model. A rotation
 	// carries them through untouched (see KeyHistoryBlock.Extra).
@@ -207,8 +224,8 @@ func (b *KeyHistoryBlock) Keys() []string {
 //
 // Returns (nil, nil) when the site publishes none. That is a real state — every
 // site was in it until this shipped — and it is not an error.
-func LoadKeyHistory(siteDir string) (*KeyHistoryBlock, error) {
-	raw, err := LoadWellKnownRaw(siteDir)
+func LoadKeyHistory(site storage.Site) (*KeyHistoryBlock, error) {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil {
 		return nil, err
 	}
@@ -255,13 +272,13 @@ func keyHistoryFromRaw(raw map[string]interface{}) (*KeyHistoryBlock, error) {
 //
 // allow names the protected members this write means to change (see
 // SaveWellKnownRaw): a rotation moves the key and the chain; genesis only adds.
-func saveKeyHistory(siteDir string, block *KeyHistoryBlock, extra map[string]interface{}, allow ...IdentityChange) error {
-	raw, err := LoadWellKnownRaw(siteDir)
+func saveKeyHistory(site storage.Site, block *KeyHistoryBlock, extra map[string]interface{}, allow ...IdentityChange) error {
+	raw, err := LoadWellKnownRaw(site)
 	if err != nil {
 		return fmt.Errorf("load well-known: %w", err)
 	}
 	if raw == nil {
-		return fmt.Errorf(".well-known/polis not found in %s", siteDir)
+		return errNoWellKnown(site, "")
 	}
 	if block.History == nil {
 		block.History = []KeyHistoryEntry{}
@@ -270,7 +287,7 @@ func saveKeyHistory(siteDir string, block *KeyHistoryBlock, extra map[string]int
 	for k, v := range extra {
 		raw[k] = v
 	}
-	return SaveWellKnownRaw(siteDir, raw, allow...)
+	return SaveWellKnownRaw(site, raw, allow...)
 }
 
 // GenesisKeyHistory builds the one-entry chain for a site that has never
@@ -309,15 +326,15 @@ func GenesisKeyHistory(publicKey, created string) *KeyHistoryBlock {
 // the DS first and skip a domain the DS reports more than one key for; see
 // medic.healKeyHistory. A caller creating a brand-new site (polis init) needs no
 // such check, because a key generated seconds ago has no history to contradict.
-func WriteGenesisKeyHistory(siteDir string) (bool, error) {
-	existing, err := LoadKeyHistory(siteDir)
+func WriteGenesisKeyHistory(site storage.Site) (bool, error) {
+	existing, err := LoadKeyHistory(site)
 	if err != nil {
 		return false, err
 	}
 	if existing != nil {
 		return false, nil
 	}
-	wk, err := LoadWellKnown(siteDir)
+	wk, err := LoadWellKnown(site)
 	if err != nil {
 		return false, fmt.Errorf("load well-known: %w", err)
 	}
@@ -330,7 +347,7 @@ func WriteGenesisKeyHistory(siteDir string) (bool, error) {
 		// would be wrong for every artifact signed before it.
 		return false, fmt.Errorf("no created timestamp in .well-known/polis to date the genesis key from")
 	}
-	if err := saveKeyHistory(siteDir, GenesisKeyHistory(wk.PublicKey, wk.Created), nil); err != nil {
+	if err := saveKeyHistory(site, GenesisKeyHistory(wk.PublicKey, wk.Created), nil); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -359,10 +376,16 @@ func WriteGenesisKeyHistory(siteDir string) (bool, error) {
 // if it is ever wrong the chain is incomplete rather than invalid, which is
 // precisely the omission case the DS parity check exists to catch.
 //
+// signingDomain is the domain that went into the canonical rotation message —
+// the same value the caller gave discovery.MakeKeyRotationCanonicalJSON. It is
+// recorded on the new entry as signing_domain, so the handover still verifies
+// when the chain is later read at another domain. Empty records nothing, which
+// reads as the domain the chain is published at (KeyHistoryEntry.SigningDomain).
+//
 // witnesses are the discovery service's countersignatures over this rotation,
 // when it returned any (SIGNET epic 32). They ride inside the new entry. None is
 // fine: an unwitnessed rotation is a weaker claim, not an invalid one.
-func RecordKeyRotation(siteDir, newPublicKey, transitionSig, validFrom string, witnesses ...discovery.Witness) error {
+func RecordKeyRotation(site storage.Site, newPublicKey, transitionSig, validFrom, signingDomain string, witnesses ...discovery.Witness) error {
 	if newPublicKey == "" {
 		return fmt.Errorf("no new public key to record")
 	}
@@ -373,7 +396,7 @@ func RecordKeyRotation(siteDir, newPublicKey, transitionSig, validFrom string, w
 		return fmt.Errorf("no rotation timestamp to record")
 	}
 
-	wk, err := LoadWellKnown(siteDir)
+	wk, err := LoadWellKnown(site)
 	if err != nil {
 		return fmt.Errorf("load well-known: %w", err)
 	}
@@ -382,7 +405,7 @@ func RecordKeyRotation(siteDir, newPublicKey, transitionSig, validFrom string, w
 		return fmt.Errorf("no public_key in .well-known/polis to rotate away from")
 	}
 
-	block, err := LoadKeyHistory(siteDir)
+	block, err := LoadKeyHistory(site)
 	if err != nil {
 		return err
 	}
@@ -401,6 +424,7 @@ func RecordKeyRotation(siteDir, newPublicKey, transitionSig, validFrom string, w
 		Key:           newPublicKey,
 		ValidFrom:     validFrom,
 		TransitionSig: &sig,
+		SigningDomain: signingDomain,
 	}
 	if len(witnesses) > 0 {
 		next.Witnesses, _ = discovery.MergeWitnesses(nil, witnesses...)
@@ -410,7 +434,7 @@ func RecordKeyRotation(siteDir, newPublicKey, transitionSig, validFrom string, w
 	block.Current = next
 
 	// public_key and the chain head move together, in one write, on purpose.
-	return saveKeyHistory(siteDir, block, map[string]interface{}{"public_key": newPublicKey},
+	return saveKeyHistory(site, block, map[string]interface{}{"public_key": newPublicKey},
 		ChangePublicKey, ChangeKeyHistory)
 }
 
@@ -424,11 +448,17 @@ func RecordKeyRotation(siteDir, newPublicKey, transitionSig, validFrom string, w
 // anyone. Each entry's transition_sig is checked against the key it succeeded,
 // back to genesis.
 //
-// domain is needed because it is inside the canonical rotation message. When
-// the chain has no rotations there is nothing signed and domain is ignored — so
-// a genesis-only site (every site today) verifies without knowing its own host.
-// A caller that cannot determine the domain for a chain that DOES have
-// rotations must report that it could not check, never that the chain passed.
+// A domain is needed because it is inside the canonical rotation message. Each
+// entry's message is rebuilt with that entry's own signing_domain when it
+// carries one, and with domain — the domain the chain is read from — when it
+// does not. So a handover signed at one domain still verifies when the chain is
+// published at another, and every entry written before signing_domain existed
+// reads exactly as it always did. When the chain has no rotations there is
+// nothing signed and domain is ignored — so a genesis-only site verifies
+// without knowing its own host. A caller that cannot determine the domain for a
+// chain that DOES have rotations must report that it could not check, never
+// that the chain passed; an entry that names its own signing_domain needs no
+// domain from the caller.
 func VerifyChain(block *KeyHistoryBlock, domain string) error {
 	if block == nil {
 		return fmt.Errorf("no key history to verify")
@@ -469,11 +499,15 @@ func VerifyChain(block *KeyHistoryBlock, domain string) error {
 		if e.TransitionSig == nil || *e.TransitionSig == "" {
 			return fmt.Errorf("epoch %d carries no transition_sig, so nothing shows epoch %d handed over to it", e.Epoch, prev.Epoch)
 		}
-		if domain == "" {
+		signedUnder := e.SigningDomain
+		if signedUnder == "" {
+			signedUnder = domain
+		}
+		if signedUnder == "" {
 			return fmt.Errorf("the chain records a rotation but the site's domain is unknown, so the transition signature cannot be rebuilt")
 		}
 		// valid_from does double duty: the boundary AND the signed timestamp.
-		canonical, err := discovery.MakeKeyRotationCanonicalJSON(domain, prev.Key, e.Key, e.ValidFrom)
+		canonical, err := discovery.MakeKeyRotationCanonicalJSON(signedUnder, prev.Key, e.Key, e.ValidFrom)
 		if err != nil {
 			return fmt.Errorf("epoch %d: cannot rebuild the rotation message: %w", e.Epoch, err)
 		}
@@ -530,22 +564,64 @@ func (b *KeyHistoryBlock) EntryAt(when string) (KeyHistoryEntry, bool) {
 	return KeyHistoryEntry{}, false
 }
 
-// PublishedKeyHistoryPath is where the block lives, for messages that need to
-// name it. It is inside the identity document rather than a file of its own:
-// a verifier already opens .well-known/polis first, so the history costs no new
-// pointer and no second fetch.
-func PublishedKeyHistoryPath(siteDir string) string {
-	return filepath.Join(siteDir, ".well-known", "polis")
-}
-
 // HasKeyHistory reports whether a site publishes a chain at all. Used by the
 // actors to tell "not provisioned yet" from "provisioned and wrong", which are
 // different events to whoever is watching.
-func HasKeyHistory(siteDir string) bool {
-	block, err := LoadKeyHistory(siteDir)
+func HasKeyHistory(site storage.Site) bool {
+	block, err := LoadKeyHistory(site)
 	if err != nil || block == nil {
 		return false
 	}
-	_, statErr := os.Stat(PublishedKeyHistoryPath(siteDir))
-	return statErr == nil
+	// The block lives inside the identity document rather than a file of its
+	// own: a verifier already opens .well-known/polis first, so the history
+	// costs no new pointer and no second fetch.
+	present, _ := site.Store().Exists(context.Background(), WellKnownKey)
+	return present
+}
+
+// AnnotateSigningDomains writes signing_domain onto every handover in the chain
+// that carries none, naming domain, and reports how many it annotated. A branch
+// calls it with the ORIGIN's domain before the chain is read anywhere else.
+//
+// ⭐ IT STATES NOTHING NEW. An entry with no signing_domain reads as the domain
+// the chain is read from; while the chain lived at the origin, that WAS the
+// origin. Writing it down keeps the meaning when the chain moves: read at the
+// new address, an unannotated handover would rebuild its message with the new
+// domain and fail.
+//
+// ⛔ Only entries with a transition_sig are touched. Genesis signed nothing and
+// carries none. No entry is removed or reordered, no signed value changes
+// (transition_sig covers the five-field rotation message, in which the domain is
+// an input, not the entry), and every member this build does not model rides
+// through in Extra. It is still a change to a published chain, so the write
+// names ChangeKeyHistory.
+func AnnotateSigningDomains(site storage.Site, domain string) (int, error) {
+	if domain == "" {
+		return 0, fmt.Errorf("no domain to annotate the key history with")
+	}
+	block, err := LoadKeyHistory(site)
+	if err != nil {
+		return 0, err
+	}
+	if block == nil {
+		return 0, nil
+	}
+	n := 0
+	annotate := func(e *KeyHistoryEntry) {
+		if e.TransitionSig != nil && e.SigningDomain == "" {
+			e.SigningDomain = domain
+			n++
+		}
+	}
+	for i := range block.History {
+		annotate(&block.History[i])
+	}
+	annotate(&block.Current)
+	if n == 0 {
+		return 0, nil
+	}
+	if err := saveKeyHistory(site, block, nil, ChangeKeyHistory); err != nil {
+		return 0, err
+	}
+	return n, nil
 }

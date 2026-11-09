@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,7 +97,7 @@ func TestRunUnpublish_PostSurvivesTwoPublishUnpublishCycles(t *testing.T) {
 
 	draftPath := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", "foo-bar.md")
 	for cycle := 1; cycle <= 2; cycle++ {
-		result, err := publish.PublishPost(dir, markdown, "foo-bar", privKey)
+		result, err := publish.PublishPost(storage.At(dir), markdown, "foo-bar", privKey)
 		if err != nil {
 			t.Fatalf("cycle %d: PublishPost: %v", cycle, err)
 		}
@@ -143,7 +144,7 @@ func TestRunUnpublish_PostKeepsTitlePunctuationTheEscaperLeavesAlone(t *testing.
 		draftPath := filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "posts", "drafts", slug+".md")
 
 		for cycle := 1; cycle <= 2; cycle++ {
-			result, err := publish.PublishPost(dir, markdown, slug, privKey)
+			result, err := publish.PublishPost(storage.At(dir), markdown, slug, privKey)
 			if err != nil {
 				t.Fatalf("%q cycle %d: PublishPost: %v", title, cycle, err)
 			}
@@ -175,7 +176,7 @@ func TestRunUnpublish_PostKeepsQuotesTheAuthorTyped(t *testing.T) {
 	t.Setenv("DISCOVERY_SERVICE_URL", "http://localhost:1/fake-ds")
 
 	const title = `The "quoted" one`
-	result, err := publish.PublishPost(dir, "# "+title+"\n\nHello world.\n", "quoted", privKey)
+	result, err := publish.PublishPost(storage.At(dir), "# "+title+"\n\nHello world.\n", "quoted", privKey)
 	if err != nil {
 		t.Fatalf("PublishPost: %v", err)
 	}

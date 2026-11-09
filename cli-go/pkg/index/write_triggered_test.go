@@ -2,6 +2,7 @@ package index_test
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,7 +46,7 @@ func TestWritesProduceTheIndexARebuildWould(t *testing.T) {
 
 	// An attestation dated BEFORE the post, so an append-at-the-end write
 	// would disagree with the rebuild's ordering.
-	early, err := attestation.Issue(dataDir, &attestation.Record{
+	early, err := attestation.Issue(storage.At(dataDir), &attestation.Record{
 		Issuer:    "https://alice.polis.pub",
 		Predicate: attestation.PredicateAgentDisclosure,
 		Subject:   attestation.Subject{Type: attestation.SubjectIdentity, ID: "https://judge.alice.polis.pub"},
@@ -54,31 +55,31 @@ func TestWritesProduceTheIndexARebuildWould(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	if _, err := attestation.Issue(dataDir, &attestation.Record{
+	if _, err := attestation.Issue(storage.At(dataDir), &attestation.Record{
 		Issuer:    "https://alice.polis.pub",
 		Predicate: attestation.PredicateEndorsement,
 		Subject:   attestation.Subject{Type: attestation.SubjectIdentity, ID: "https://bob.polis.pub"},
 	}, priv); err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
-	withdrawal, err := attestation.Withdraw(dataDir, early, priv)
+	withdrawal, err := attestation.Withdraw(storage.At(dataDir), early, priv)
 	if err != nil {
 		t.Fatalf("Withdraw: %v", err)
 	}
 
-	if _, err := tag.ApplyTag(dataDir, "reading", "https://bob.polis.pub/posts/a.html", priv); err != nil {
+	if _, err := tag.ApplyTag(storage.At(dataDir), "reading", "https://bob.polis.pub/posts/a.html", priv); err != nil {
 		t.Fatalf("ApplyTag: %v", err)
 	}
-	if _, err := tag.ApplyTag(dataDir, "reading", "https://bob.polis.pub/posts/b.html", priv); err != nil {
+	if _, err := tag.ApplyTag(storage.At(dataDir), "reading", "https://bob.polis.pub/posts/b.html", priv); err != nil {
 		t.Fatalf("ApplyTag: %v", err)
 	}
-	if _, err := tag.RemoveTarget(dataDir, "reading", "https://bob.polis.pub/posts/b.html", priv); err != nil {
+	if _, err := tag.RemoveTarget(storage.At(dataDir), "reading", "https://bob.polis.pub/posts/b.html", priv); err != nil {
 		t.Fatalf("RemoveTarget: %v", err)
 	}
-	if _, err := tag.ApplyTag(dataDir, "gone", "https://bob.polis.pub/posts/a.html", priv); err != nil {
+	if _, err := tag.ApplyTag(storage.At(dataDir), "gone", "https://bob.polis.pub/posts/a.html", priv); err != nil {
 		t.Fatalf("ApplyTag: %v", err)
 	}
-	if err := tag.DeleteTag(dataDir, "gone"); err != nil {
+	if err := tag.DeleteTag(storage.At(dataDir), "gone"); err != nil {
 		t.Fatalf("DeleteTag: %v", err)
 	}
 
@@ -108,7 +109,7 @@ func TestWritesProduceTheIndexARebuildWould(t *testing.T) {
 	}
 
 	// ⭐ THE GUARD: a full rebuild has nothing to change.
-	result, err := index.RebuildContentIndex(dataDir, nil)
+	result, err := index.RebuildContentIndex(storage.At(dataDir), nil)
 	if err != nil {
 		t.Fatalf("RebuildContentIndex: %v", err)
 	}

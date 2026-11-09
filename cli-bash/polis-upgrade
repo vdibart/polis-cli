@@ -4,7 +4,13 @@
 #
 # Handles version migrations and binary updates via CURL (no git dependency).
 # Fetches migration scripts from GitHub (tag-pinned) and verifies SHA-256
-# checksums before execution.
+# checksums before execution. An updated polis/polis-tui script is installed
+# only after it matches the .sha256 published beside it at the same tag.
+# Every download is https-only, including redirects.
+#
+# The checksums come from the same origin as the files they cover, so they
+# prove integrity (the bytes arrived as published), not authenticity (who
+# published them).
 #
 # Usage:
 #   polis-upgrade [OPTIONS]
@@ -106,6 +112,112 @@ compute_sha256() {
     fi
 }
 
+# A version is used to build download URLs and is compared arithmetically,
+# so accept only plain MAJOR.MINOR.PATCH.
+is_valid_version() {
+    [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+# Refuse any download URL that is not https://
+require_https() {
+    local url="$1"
+    if [[ "$url" != https://* ]]; then
+        error "Refusing to download over a non-https URL: ${url}"
+        return 1
+    fi
+}
+
+# Download a URL to a file over https only, including across redirects.
+# Usage: fetch_https URL DEST [MAX_TIME]
+fetch_https() {
+    local url="$1" dest="$2" max_time="${3:-60}"
+    require_https "$url" || return 1
+    curl -s -f --proto '=https' --proto-redir '=https' \
+        --max-time "$max_time" -L -o "$dest" "$url"
+}
+
+# Check a downloaded file against the .sha256 published beside it
+# (same URL plus ".sha256", format "<64 hex>  <name>").
+#
+# This proves the file arrived intact and matches what the release published.
+# It does NOT prove who published it: the checksum comes from the same origin
+# as the file, so anyone able to change one can change the other.
+verify_published_sha256() {
+    local file="$1" url="$2"
+    local sum_url="${url}.sha256"
+
+    local sum_file
+    sum_file=$(mktemp) || return 1
+    if ! fetch_https "$sum_url" "$sum_file" 30; then
+        error "Could not fetch the published checksum: ${sum_url}"
+        rm -f "$sum_file"
+        return 1
+    fi
+
+    local expected
+    expected=$(awk 'NR==1 {print tolower($1)}' "$sum_file")
+    rm -f "$sum_file"
+
+    if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+        error "The published checksum is malformed: ${sum_url}"
+        return 1
+    fi
+
+    local actual
+    actual=$(compute_sha256 "$file")
+    if [[ "$actual" != "$expected" ]]; then
+        error "Checksum mismatch for ${url}"
+        echo "  Expected: ${expected}" >&2
+        echo "  Got:      ${actual}" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Download a script, verify it against its published checksum, and only then
+# replace the installed copy. On any failure the installed file is untouched.
+# Usage: install_verified_script URL INSTALL_PATH NAME
+install_verified_script() {
+    local url="$1" install_path="$2" name="$3"
+
+    require_https "$url" || return 1
+
+    local tmp_file
+    tmp_file=$(mktemp) || return 1
+
+    if ! fetch_https "$url" "$tmp_file" 60; then
+        error "Failed to download ${name} from ${url}"
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    if ! verify_published_sha256 "$tmp_file" "$url"; then
+        error "Refusing to install ${name}; ${install_path} was not changed"
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    # Verify it's a valid script
+    if ! head -1 "$tmp_file" | grep -q '^#!/'; then
+        error "Downloaded file is not a valid script"
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    # Check if we can write to the install path
+    if [[ -f "$install_path" ]] && [[ ! -w "$install_path" ]]; then
+        warn "Cannot write to ${install_path} (permission denied)"
+        echo "  The verified download is at ${tmp_file}" >&2
+        echo "  Try: sudo cp ${tmp_file} ${install_path} && sudo chmod +x ${install_path}" >&2
+        return 1
+    fi
+
+    cp "$tmp_file" "$install_path"
+    chmod +x "$install_path"
+    rm -f "$tmp_file"
+    return 0
+}
+
 # Prompt user for yes/no (default: no)
 confirm() {
     local prompt="$1"
@@ -205,12 +317,11 @@ query_latest_version() {
     local component="$1"
     local current="${2:-}"
 
-    # Need DISCOVERY_SERVICE_URL and DISCOVERY_SERVICE_KEY
+    # Need DISCOVERY_SERVICE_URL
     if [[ -z "${DISCOVERY_SERVICE_URL:-}" ]]; then
         # Try to read from .env
         if [[ -f "${SITE_DIR:-.}/.env" ]]; then
             DISCOVERY_SERVICE_URL=$(grep -E '^DISCOVERY_SERVICE_URL=' "${SITE_DIR:-.}/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
-            DISCOVERY_SERVICE_KEY=$(grep -E '^DISCOVERY_SERVICE_KEY=' "${SITE_DIR:-.}/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
         fi
     fi
 
@@ -247,68 +358,6 @@ query_latest_version() {
 }
 
 # ============================================================================
-# SELF-UPDATE CHECK
-# ============================================================================
-
-check_self_update() {
-    info "Checking for polis-upgrade updates..."
-
-    local response
-    response=$(query_latest_version "upgrade" "$UPGRADE_VERSION") || return 1
-
-    local latest
-    latest=$(echo "$response" | jq -r '.latest // empty')
-    local upgrade_available
-    upgrade_available=$(echo "$response" | jq -r '.upgrade_available // false')
-
-    if [[ "$upgrade_available" != "true" ]]; then
-        return 0
-    fi
-
-    local download_url
-    download_url=$(echo "$response" | jq -r '.download_url // empty')
-
-    warn "polis-upgrade ${UPGRADE_VERSION} is outdated (latest: ${latest})"
-
-    if confirm "Download latest polis-upgrade first?"; then
-        info "Downloading polis-upgrade ${latest}..."
-
-        local tmp_file
-        tmp_file=$(mktemp)
-        trap "rm -f '$tmp_file'" EXIT
-
-        if ! curl -s --max-time 30 -L -o "$tmp_file" "$download_url"; then
-            error "Failed to download polis-upgrade ${latest}"
-            rm -f "$tmp_file"
-            exit 1
-        fi
-
-        # Verify it's a valid bash script
-        if ! head -1 "$tmp_file" | grep -q '^#!/'; then
-            error "Downloaded file is not a valid script"
-            rm -f "$tmp_file"
-            exit 1
-        fi
-
-        # Replace self
-        local self_path
-        self_path="$(realpath "$0")"
-        cp "$tmp_file" "$self_path"
-        chmod +x "$self_path"
-        rm -f "$tmp_file"
-
-        success "Updated polis-upgrade to ${latest}"
-        info "Restarting..."
-        echo ""
-
-        # Re-exec with same args
-        exec "$self_path" "$@"
-    else
-        warn "Continuing with outdated polis-upgrade (some migrations may not work correctly)"
-    fi
-}
-
-# ============================================================================
 # MIGRATION FUNCTIONS
 # ============================================================================
 
@@ -319,8 +368,11 @@ fetch_manifest() {
 
     local manifest_url="${GITHUB_RAW_BASE}/v${tag}/migrations/${component}/manifest.json"
 
+    require_https "$manifest_url" || exit 1
+
     local response
-    response=$(curl -s --max-time 15 -L "$manifest_url" 2>/dev/null)
+    response=$(curl -s --proto '=https' --proto-redir '=https' \
+        --max-time 15 -L "$manifest_url" 2>/dev/null)
 
     if [[ -z "$response" ]] || echo "$response" | jq -e '.message' &>/dev/null 2>&1; then
         error "Failed to fetch migration manifest from: $manifest_url"
@@ -380,7 +432,7 @@ download_migration() {
 
     local script_url="${GITHUB_RAW_BASE}/v${tag}/migrations/${component}/${script_name}"
 
-    if ! curl -s --max-time 30 -L -o "$dest" "$script_url"; then
+    if ! fetch_https "$script_url" "$dest" 30; then
         error "Failed to download migration script: $script_name"
         return 1
     fi
@@ -497,10 +549,7 @@ main() {
     # Step 1: Resolve site directory
     resolve_site_dir
 
-    # Step 2: Self-update check
-    check_self_update "$@"
-
-    # Step 3: Resolve polis CLI path and determine current version
+    # Step 2: Resolve polis CLI path and determine current version
     if [[ -z "$FROM_VERSION" ]]; then
         resolve_polis_path
 
@@ -528,7 +577,7 @@ main() {
         info "Using specified version: ${FROM_VERSION}"
     fi
 
-    # Step 4: Determine target version
+    # Step 3: Determine target version
     if [[ -z "$TO_VERSION" ]]; then
         info "Checking latest ${COMPONENT} version..."
         local version_response
@@ -550,18 +599,30 @@ main() {
         info "Latest ${COMPONENT} version: ${TO_VERSION}"
     else
         info "Target version: ${TO_VERSION}"
+    fi
 
-        # Validate target is newer than current
-        if compare_versions "$TO_VERSION" "$FROM_VERSION"; then
-            success "${COMPONENT} is already at or above ${TO_VERSION}"
-            exit 0
-        fi
-        # compare_versions returns 2 if TO > FROM, which is what we want
+    # Both versions are compared arithmetically and the target is used to
+    # build the pinned download URLs, so accept only MAJOR.MINOR.PATCH.
+    if ! is_valid_version "$FROM_VERSION"; then
+        error "Invalid current version: ${FROM_VERSION} (expected MAJOR.MINOR.PATCH)"
+        exit 1
+    fi
+    if ! is_valid_version "$TO_VERSION"; then
+        error "Invalid target version: ${TO_VERSION} (expected MAJOR.MINOR.PATCH)"
+        exit 1
+    fi
+
+    # Only move forward. compare_versions returns 1 when TO > FROM.
+    local cmp=0
+    compare_versions "$TO_VERSION" "$FROM_VERSION" || cmp=$?
+    if [[ "$cmp" -ne 1 ]]; then
+        success "${COMPONENT} is already at or above ${TO_VERSION}"
+        exit 0
     fi
 
     echo ""
 
-    # Step 5: Fetch manifest and identify migrations
+    # Step 4: Fetch manifest and identify migrations
     info "Fetching migration manifest..."
     local manifest
     manifest=$(fetch_manifest "$COMPONENT" "$TO_VERSION")
@@ -595,7 +656,7 @@ main() {
         exit 0
     fi
 
-    # Step 6: Apply migrations
+    # Step 5: Apply migrations
     if [[ "$migration_count" -gt 0 ]]; then
         if ! confirm "Proceed with migrations?"; then
             info "Upgrade cancelled."
@@ -620,6 +681,13 @@ main() {
             script_name=$(echo "$migration" | jq -r '.script')
             from_ver=$(echo "$migration" | jq -r '.from')
             sha256=$(echo "$migration" | jq -r '.sha256')
+
+            # The name becomes a local path and part of a URL: a bare file
+            # name only.
+            if [[ ! "$script_name" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+                error "Invalid migration script name in manifest: ${script_name}"
+                exit 1
+            fi
 
             local dest="${tmp_dir}/${script_name}"
             if ! download_migration "$COMPONENT" "$TO_VERSION" "$script_name" "$sha256" "$dest"; then
@@ -668,7 +736,7 @@ main() {
         echo ""
     fi
 
-    # Step 7: Offer to download updated binary
+    # Step 6: Offer to download updated binary
     local binary_name="polis"
     if [[ "$COMPONENT" == "tui" ]]; then
         binary_name="polis-tui"
@@ -679,39 +747,18 @@ main() {
 
     echo -e "Download updated ${COMPONENT} (v${TO_VERSION}) to ${DIM}${install_path}${NC}?"
     if confirm "Proceed?"; then
-        local tmp_binary
-        tmp_binary=$(mktemp)
-
-        if ! curl -s --max-time 60 -L -o "$tmp_binary" "$download_url"; then
-            error "Failed to download ${binary_name} v${TO_VERSION}"
-            rm -f "$tmp_binary"
+        if ! install_verified_script "$download_url" "$install_path" "$binary_name"; then
+            error "Did not install ${binary_name} v${TO_VERSION}"
             exit 1
         fi
-
-        # Verify it's a valid script
-        if ! head -1 "$tmp_binary" | grep -q '^#!/'; then
-            error "Downloaded file is not a valid script"
-            rm -f "$tmp_binary"
-            exit 1
-        fi
-
-        # Check if we can write to the install path
-        if [[ -f "$install_path" ]] && [[ ! -w "$install_path" ]]; then
-            warn "Cannot write to ${install_path} (permission denied)"
-            echo "  Try: sudo cp ${tmp_binary} ${install_path} && sudo chmod +x ${install_path}" >&2
-            rm -f "$tmp_binary"
-            exit 1
-        fi
-
-        cp "$tmp_binary" "$install_path"
-        chmod +x "$install_path"
-        rm -f "$tmp_binary"
-
-        success "Downloaded ${binary_name} v${TO_VERSION}"
+        success "Downloaded and verified ${binary_name} v${TO_VERSION}"
     fi
 
     echo ""
     success "Upgrade complete!"
 }
 
-main "$@"
+# Run only when executed, so the functions above can be sourced by tests.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

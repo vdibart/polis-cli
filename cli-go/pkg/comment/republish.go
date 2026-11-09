@@ -1,8 +1,10 @@
 package comment
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"time"
@@ -12,6 +14,8 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	verhist "github.com/vdibart/polis-cli/cli-go/pkg/version"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // RepublishResult describes the outcome of a comment republish.
@@ -46,7 +50,7 @@ type RepublishResult struct {
 // (content/pub.polis.core/comment/YYYYMMDD/<id>.md). markdown is the new body with
 // frontmatter already stripped. DS registration failures are non-fatal — the local
 // republish still succeeds — matching RepublishPost.
-func RepublishComment(dataDir, commentPath, markdown string, privateKey []byte, dsCfg ...*DiscoveryConfig) (*RepublishResult, error) {
+func RepublishComment(site storage.Site, commentPath, markdown string, privateKey []byte, dsCfg ...*DiscoveryConfig) (*RepublishResult, error) {
 	var cfg *DiscoveryConfig
 	if len(dsCfg) > 0 {
 		cfg = dsCfg[0]
@@ -56,8 +60,7 @@ func RepublishComment(dataDir, commentPath, markdown string, privateKey []byte, 
 		gen = cfg.Generator
 	}
 
-	fullPath := filepath.Join(dataDir, commentPath)
-	existing, err := os.ReadFile(fullPath)
+	existing, err := site.Store().Get(context.Background(), commentPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read comment: %w", err)
 	}
@@ -158,34 +161,34 @@ signature: %s
 	finalContent := finalFrontmatter + "\n\n" + newBody
 
 	// Overwrite the public canonical file.
-	if err := os.WriteFile(fullPath, []byte(finalContent), 0644); err != nil {
+	if err := site.Store().Put(context.Background(), commentPath, []byte(finalContent)); err != nil {
 		return nil, fmt.Errorf("failed to write comment: %w", err)
 	}
 
 	// Update the version history side-car. Lazy-init a base from the prior content
 	// for comments published before side-cars existed, so the blessed/prior version
 	// remains reconstructable.
-	versionsPath := verhist.GetVersionsFilePath(fullPath, ".versions")
-	if _, statErr := os.Stat(versionsPath); os.IsNotExist(statErr) && oldHash != "" {
-		if err := verhist.InitializeHistory(versionsPath, commentPath, oldBody, oldHash, published); err != nil {
+	versionsKey := verhist.VersionsKey(commentPath, ".versions")
+	if _, statErr := site.Store().Stat(context.Background(), versionsKey); errors.Is(statErr, fs.ErrNotExist) && oldHash != "" {
+		if err := verhist.InitializeHistory(site, versionsKey, commentPath, oldBody, oldHash, published); err != nil {
 			_ = err // non-fatal
 		}
 	}
-	if err := verhist.AppendHistory(versionsPath, commentPath, oldHash, newHash, updateTimestamp, oldBody, newBody); err != nil {
+	if err := verhist.AppendHistory(site, versionsKey, commentPath, oldHash, newHash, updateTimestamp, oldBody, newBody); err != nil {
 		_ = err // non-fatal; version history is best-effort
 	}
 
 	// Keep the private pending/denied copy in sync so a later MoveComment doesn't
 	// resurrect stale content.
-	syncPrivateCommentCopy(dataDir, commentID, finalContent)
+	syncPrivateCommentCopy(site, commentID, finalContent)
 
 	// Advance current_version in the index (upsert by path preserves type +
 	// in_reply_to). blessed.json is intentionally left untouched.
-	if err := metadata.AppendCommentToIndex(dataDir, commentPath, title, published, "sha256:"+newHash, inReplyToURL); err != nil {
+	if err := metadata.AppendCommentToIndex(site, commentPath, title, published, "sha256:"+newHash, inReplyToURL); err != nil {
 		_ = err // non-fatal
 	}
 
-	state := localBlessingState(dataDir, commentID)
+	state := localBlessingState(site, commentID)
 
 	result := &RepublishResult{
 		CommentID:     commentID,
@@ -197,11 +200,11 @@ signature: %s
 
 	// Re-register with the DS (non-fatal). This emits pub.polis.comment.republished
 	// and lets the DS preserve granted/denied state.
-	dsURL, dsKey, base := resolveDiscovery(cfg)
+	dsURL, base := resolveDiscovery(cfg)
 	if dsURL == "" || base == "" {
 		return result, nil // DS not configured — local-only republish
 	}
-	if !discovery.IsRegisteredLocally(dataDir, dsURL) {
+	if !discovery.IsRegisteredLocally(site, dsURL) {
 		result.Deferred = true
 		return result, nil
 	}
@@ -216,7 +219,7 @@ signature: %s
 	}
 	// Republish always re-registers + re-evaluates blessing (beseech=true),
 	// preserving the historical behavior.
-	resp, err := registerCommentContent(dataDir, meta, commentID, privateKey, dsURL, dsKey, base, true)
+	resp, err := registerCommentContent(site, meta, commentID, privateKey, dsURL, base, true)
 	if err != nil {
 		result.RegisterError = err.Error()
 		return result, nil // non-fatal, mirroring RepublishPost
@@ -227,7 +230,7 @@ signature: %s
 	if state == StatusPending {
 		result.Rebeseeched = true
 		if resp.RelationshipStatus == "granted" {
-			if err := MoveComment(dataDir, commentID, StatusPending, StatusBlessed); err == nil {
+			if err := MoveComment(site, commentID, StatusPending, StatusBlessed); err == nil {
 				result.BlessingState = StatusBlessed
 			}
 		}
@@ -246,8 +249,8 @@ signature: %s
 // This is the single source of truth for the "edited since blessing" UI signal;
 // callers (webapp, themes, stream renderer) should use it rather than
 // reimplementing the comparison. commentPath is the content-relative path.
-func IsEditedSinceBlessing(dataDir, commentPath string) (bool, error) {
-	data, err := os.ReadFile(filepath.Join(dataDir, commentPath))
+func IsEditedSinceBlessing(site storage.Site, commentPath string) (bool, error) {
+	data, err := site.Store().Get(context.Background(), commentPath)
 	if err != nil {
 		return false, fmt.Errorf("read comment: %w", err)
 	}
@@ -257,7 +260,7 @@ func IsEditedSinceBlessing(dataDir, commentPath string) (bool, error) {
 		current = fm["comment_version"]
 	}
 
-	blessed, err := metadata.LoadBlessedComments(dataDir)
+	blessed, err := metadata.LoadBlessedComments(site)
 	if err != nil {
 		// No (or unreadable) blessed.json => treat as not blessed.
 		return false, nil
@@ -296,13 +299,16 @@ func commentKey(urlOrPath string) string {
 // localBlessingState infers a comment's blessing state from its on-disk location:
 // a private pending/ or denied/ copy wins; otherwise the comment is treated as
 // blessed (or published-but-unregistered, which behaves the same for republish).
-func localBlessingState(dataDir, commentID string) string {
-	pendingPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", StatusPending, commentID+".md")
-	if _, err := os.Stat(pendingPath); err == nil {
+func localBlessingState(site storage.Site, commentID string) string {
+	if lookupCommentID(commentID) != nil {
+		return StatusBlessed
+	}
+	pendingKey := ".polis/bundles/pub.polis.core/comments/" + StatusPending + "/" + commentID + ".md"
+	if _, err := site.Store().Stat(context.Background(), pendingKey); err == nil {
 		return StatusPending
 	}
-	deniedPath := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", StatusDenied, commentID+".md")
-	if _, err := os.Stat(deniedPath); err == nil {
+	deniedKey := ".polis/bundles/pub.polis.core/comments/" + StatusDenied + "/" + commentID + ".md"
+	if _, err := site.Store().Stat(context.Background(), deniedKey); err == nil {
 		return StatusDenied
 	}
 	return StatusBlessed
@@ -310,20 +316,23 @@ func localBlessingState(dataDir, commentID string) string {
 
 // syncPrivateCommentCopy rewrites the private pending/ or denied/ copy (whichever
 // exists) with the republished content, keeping it consistent with the public file.
-func syncPrivateCommentCopy(dataDir, commentID, content string) {
+func syncPrivateCommentCopy(site storage.Site, commentID, content string) {
+	if lookupCommentID(commentID) != nil {
+		return
+	}
 	for _, status := range []string{StatusPending, StatusDenied} {
-		p := filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", status, commentID+".md")
-		if _, err := os.Stat(p); err == nil {
-			_ = os.WriteFile(p, []byte(content), 0644)
+		pKey := ".polis/bundles/pub.polis.core/comments/" + status + "/" + commentID + ".md"
+		if _, err := site.Store().Stat(context.Background(), pKey); err == nil {
+			_ = site.Store().Put(context.Background(), pKey, []byte(content))
 		}
 	}
 }
 
 // resolveDiscovery resolves DS settings from the per-call config or the package
 // globals, mirroring BeseechComment.
-func resolveDiscovery(cfg *DiscoveryConfig) (dsURL, dsKey, baseURL string) {
+func resolveDiscovery(cfg *DiscoveryConfig) (dsURL, baseURL string) {
 	if cfg != nil {
-		return cfg.DiscoveryURL, cfg.DiscoveryKey, cfg.BaseURL
+		return cfg.DiscoveryURL, cfg.BaseURL
 	}
-	return DiscoveryURL, DiscoveryKey, BaseURL
+	return DiscoveryURL, BaseURL
 }

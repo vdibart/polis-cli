@@ -137,7 +137,6 @@ create_test_env() {
     cat > "$full_path" << 'EOF'
 # Test environment configuration
 POLIS_BASE_URL=https://test.example.com
-DISCOVERY_SERVICE_KEY=test-api-key-for-testing
 EOF
     echo "$full_path"
 }

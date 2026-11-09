@@ -2,16 +2,19 @@
 package metadata
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Version is set at startup by the cmd package.
@@ -163,14 +166,14 @@ type BlessedComment struct {
 // never a partial write. For load+modify+save callers, use
 // AddBlessedComment / RemoveBlessedComment to get the right
 // serialization; direct LoadBlessedComments is for read-only paths.
-func LoadBlessedComments(siteDir string) (*BlessedComments, error) {
-	return loadBlessedCommentsRaw(siteDir)
+func LoadBlessedComments(site storage.Site) (*BlessedComments, error) {
+	return loadBlessedCommentsRaw(site)
 }
 
 // loadBlessedCommentsRaw is the unsynchronized read path; reused from
 // inside the locked Add/Remove flows.
-func loadBlessedCommentsRaw(siteDir string) (*BlessedComments, error) {
-	data, err := os.ReadFile(blessedPath(siteDir))
+func loadBlessedCommentsRaw(site storage.Site) (*BlessedComments, error) {
+	data, err := site.Store().Get(context.Background(), BlessedKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read blessed-comments.json: %w", err)
 	}
@@ -183,10 +186,11 @@ func loadBlessedCommentsRaw(siteDir string) (*BlessedComments, error) {
 	return bc, nil
 }
 
-// blessedPath is where the blessing list lives.
-func blessedPath(siteDir string) string {
-	return filepath.Join(siteDir, BundleContentDir, "comment", BlessedCommentsFilename)
-}
+// BlessedKey is the blessing list relative to the site root.
+//
+// ⭐ A KEY, so every reader and writer addresses it the same way on any
+// backend — and the per-key lock they share names one thing.
+const BlessedKey = BundleContentDir + "/comment/" + BlessedCommentsFilename
 
 // RewriteBlessedUnsigned is the ESCAPE HATCH for a user stranded by the refusal
 // in saveBlessedLocked: it rewrites blessed.json from the members this build
@@ -198,10 +202,10 @@ func blessedPath(siteDir string) string {
 // nothing this build cannot read.
 //
 // A list with nothing unrecognised is left untouched, and nil is returned.
-func RewriteBlessedUnsigned(siteDir string) ([]string, error) {
+func RewriteBlessedUnsigned(site storage.Site) ([]string, error) {
 	blessedMu.Lock()
 	defer blessedMu.Unlock()
-	bc, err := loadBlessedCommentsRaw(siteDir)
+	bc, err := loadBlessedCommentsRaw(site)
 	if err != nil {
 		return nil, err
 	}
@@ -211,10 +215,48 @@ func RewriteBlessedUnsigned(siteDir string) ([]string, error) {
 	}
 	stampBlessedGenerator(bc, "")
 	bc.Signature = ""
-	if err := writeBlessedFile(siteDir, bc); err != nil {
+	if err := writeBlessedFile(site, bc); err != nil {
 		return nil, err
 	}
 	return dropped, nil
+}
+
+// ResignBlessedAfterRotation re-signs the blessing list with newPrivateKeyPEM,
+// but only when it is present, signed, and verifies under oldPublicKey. Every
+// other list is left exactly as it was; the outcome says why. See
+// signing.ResignOutcome for the rule and the reason for the old-key gate.
+//
+// ⚠️ Load, verify and save happen under ONE hold of blessedMu. Loading first and
+// then calling SaveBlessedCommentsSigned would silently drop a bless that landed
+// in between (Rosie or sync).
+//
+// Entries — agent markers included — pass through the struct unchanged; only
+// the generator is restamped, as on every signed write. Re-signing the list is
+// not an agent act, so it carries no marker of its own.
+func ResignBlessedAfterRotation(site storage.Site, oldPublicKey, newPrivateKeyPEM []byte) (signing.ResignOutcome, error) {
+	blessedMu.Lock()
+	defer blessedMu.Unlock()
+	bc, err := loadBlessedCommentsRaw(site)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return signing.ResignAbsent, nil
+		}
+		return "", err
+	}
+	if bc.Signature == "" {
+		return signing.ResignUnsigned, nil
+	}
+	if status, _ := VerifyBlessed(bc, oldPublicKey); status != StatusValid {
+		return signing.ResignNotValid, nil
+	}
+	if err := saveBlessedLocked(site, bc, "", newPrivateKeyPEM); err != nil {
+		var refused *signing.RewriteRefusedError
+		if errors.As(err, &refused) {
+			return signing.ResignRefused, err
+		}
+		return "", err
+	}
+	return signing.ResignDone, nil
 }
 
 // SaveBlessedComments writes the blessing list UNSIGNED, atomically.
@@ -228,25 +270,25 @@ func RewriteBlessedUnsigned(siteDir string) ([]string, error) {
 //
 // Takes blessedMu so callers doing their own load+modify+save sequence are
 // serialized against AddBlessedComment / RemoveBlessedComment.
-func SaveBlessedComments(siteDir string, bc *BlessedComments) error {
+func SaveBlessedComments(site storage.Site, bc *BlessedComments) error {
 	blessedMu.Lock()
 	defer blessedMu.Unlock()
-	return saveBlessedCommentsLocked(siteDir, bc)
+	return saveBlessedCommentsLocked(site, bc)
 }
 
 // SaveBlessedCommentsSigned signs the blessing list with privateKeyPEM and
 // writes it. An empty key falls through to the unsigned path — the safe
 // direction (see SaveBlessedComments).
-func SaveBlessedCommentsSigned(siteDir string, bc *BlessedComments, privateKeyPEM []byte) error {
+func SaveBlessedCommentsSigned(site storage.Site, bc *BlessedComments, privateKeyPEM []byte) error {
 	blessedMu.Lock()
 	defer blessedMu.Unlock()
-	return saveBlessedLocked(siteDir, bc, "", privateKeyPEM)
+	return saveBlessedLocked(site, bc, "", privateKeyPEM)
 }
 
 // saveBlessedCommentsLocked is the unsigned write path. Caller must hold
 // blessedMu.
-func saveBlessedCommentsLocked(siteDir string, bc *BlessedComments) error {
-	return saveBlessedLocked(siteDir, bc, "", nil)
+func saveBlessedCommentsLocked(site storage.Site, bc *BlessedComments) error {
+	return saveBlessedLocked(site, bc, "", nil)
 }
 
 // saveBlessedLocked is THE single write point for blessed.json. Every path that
@@ -258,10 +300,10 @@ func saveBlessedCommentsLocked(siteDir string, bc *BlessedComments) error {
 // deliberate and is the safe direction — see SaveBlessedComments.
 //
 // ⛔ IT REFUSES to rewrite a file carrying members this build does not declare
-// (signing.GuardRewrite), signed or not: either write would drop them. The one
+// (signing.GuardRewriteAt, which reads what is stored), signed or not: either write would drop them. The one
 // way past is RewriteBlessedUnsigned, which the user asks for by name.
-func saveBlessedLocked(siteDir string, bc *BlessedComments, generator string, privateKeyPEM []byte) error {
-	if err := signing.GuardRewrite(BlessedCommentsFilename, blessedPath(siteDir), BlessedComments{}); err != nil {
+func saveBlessedLocked(site storage.Site, bc *BlessedComments, generator string, privateKeyPEM []byte) error {
+	if err := signing.GuardRewriteAt(BlessedCommentsFilename, site, BlessedKey, BlessedComments{}); err != nil {
 		return err
 	}
 	// BEFORE signing, so the signature covers the version string that lands on
@@ -270,41 +312,28 @@ func saveBlessedLocked(siteDir string, bc *BlessedComments, generator string, pr
 
 	if len(privateKeyPEM) == 0 {
 		bc.Signature = ""
-		return writeBlessedFile(siteDir, bc)
+		return writeBlessedFile(site, bc)
 	}
 	if err := SignBlessed(bc, privateKeyPEM); err != nil {
 		return err
 	}
-	return writeBlessedFile(siteDir, bc)
+	return writeBlessedFile(site, bc)
 }
 
 // writeBlessedFile marshals and atomically writes the blessing list as-is,
 // signature field included if set.
-func writeBlessedFile(siteDir string, bc *BlessedComments) error {
-	metadataDir := filepath.Join(siteDir, BundleContentDir, "comment")
-	if err := os.MkdirAll(metadataDir, 0755); err != nil {
-		return fmt.Errorf("failed to create metadata directory: %w", err)
-	}
-
+func writeBlessedFile(site storage.Site, bc *BlessedComments) error {
 	data, err := json.MarshalIndent(bc, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal blessed comments: %w", err)
 	}
-
-	// Write atomically via temp file. The shared `.tmp` filename is
-	// safe under blessedMu — only one goroutine holds it at a time.
-	filePath := filepath.Join(metadataDir, BlessedCommentsFilename)
-	tmpPath := filePath + ".tmp"
-
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
+	// ⛔ ATOMIC: this is the file Rosie's cache reads, where a truncated write
+	// is worse than no write. atomicfile.Write keeps temp-and-rename on a
+	// filesystem (its shared temp name is safe under blessedMu, which the
+	// caller holds) and is a single all-or-nothing Put on a store without one.
+	if err := atomicfile.Write(context.Background(), site, BlessedKey, data, 0o644); err != nil {
+		return fmt.Errorf("failed to write blessed comments: %w", err)
 	}
-
-	if err := os.Rename(tmpPath, filePath); err != nil {
-		os.Remove(tmpPath) // Clean up temp file on failure
-		return fmt.Errorf("failed to rename temp file: %w", err)
-	}
-
 	return nil
 }
 
@@ -317,23 +346,23 @@ func writeBlessedFile(siteDir string, bc *BlessedComments) error {
 // ⚠️ Callers holding the site's private key want AddBlessedCommentSigned. This
 // one clears any existing signature — see SaveBlessedComments for why that is
 // the safe direction rather than an omission.
-func AddBlessedComment(siteDir string, postPath string, comment BlessedComment, generator ...string) error {
+func AddBlessedComment(site storage.Site, postPath string, comment BlessedComment, generator ...string) error {
 	gen := ""
 	if len(generator) > 0 {
 		gen = generator[0]
 	}
-	return addBlessedComment(siteDir, postPath, comment, gen, nil)
+	return addBlessedComment(site, postPath, comment, gen, nil)
 }
 
 // AddBlessedCommentSigned adds a comment to the blessing list and signs the
 // result with the site's identity key. This is the path a user-initiated
 // blessing takes, which is why epic 14 needs no migration: anything the author
 // touches after this ships is signed BECAUSE THE AUTHOR ACTED.
-func AddBlessedCommentSigned(siteDir string, postPath string, comment BlessedComment, privateKeyPEM []byte) error {
-	return addBlessedComment(siteDir, postPath, comment, "", privateKeyPEM)
+func AddBlessedCommentSigned(site storage.Site, postPath string, comment BlessedComment, privateKeyPEM []byte) error {
+	return addBlessedComment(site, postPath, comment, "", privateKeyPEM)
 }
 
-func addBlessedComment(siteDir string, postPath string, comment BlessedComment, generator string, privateKeyPEM []byte) error {
+func addBlessedComment(site storage.Site, postPath string, comment BlessedComment, generator string, privateKeyPEM []byte) error {
 	blessedMu.Lock()
 	defer blessedMu.Unlock()
 
@@ -343,7 +372,7 @@ func addBlessedComment(siteDir string, postPath string, comment BlessedComment, 
 	}
 	// Load current state. loadBlessedCommentsRaw bypasses the mutex
 	// since we already hold it.
-	bc, err := loadBlessedCommentsRaw(siteDir)
+	bc, err := loadBlessedCommentsRaw(site)
 	if err != nil {
 		// If file doesn't exist, create new structure
 		if errors.Is(err, os.ErrNotExist) {
@@ -387,7 +416,7 @@ func addBlessedComment(siteDir string, postPath string, comment BlessedComment, 
 		})
 	}
 
-	return saveBlessedLocked(siteDir, bc, gen, privateKeyPEM)
+	return saveBlessedLocked(site, bc, gen, privateKeyPEM)
 }
 
 // RemoveBlessedComment removes a comment from the blessing list, writing the
@@ -396,21 +425,21 @@ func addBlessedComment(siteDir string, postPath string, comment BlessedComment, 
 // Holds blessedMu for the full load+modify+save cycle.
 //
 // ⚠️ Callers holding the site's private key want RemoveBlessedCommentSigned.
-func RemoveBlessedComment(siteDir string, commentURL string) error {
-	return removeBlessedComment(siteDir, commentURL, nil)
+func RemoveBlessedComment(site storage.Site, commentURL string) error {
+	return removeBlessedComment(site, commentURL, nil)
 }
 
 // RemoveBlessedCommentSigned removes a comment from the blessing list and signs
 // the result. An unbless is as much an authored act as a bless.
-func RemoveBlessedCommentSigned(siteDir string, commentURL string, privateKeyPEM []byte) error {
-	return removeBlessedComment(siteDir, commentURL, privateKeyPEM)
+func RemoveBlessedCommentSigned(site storage.Site, commentURL string, privateKeyPEM []byte) error {
+	return removeBlessedComment(site, commentURL, privateKeyPEM)
 }
 
-func removeBlessedComment(siteDir string, commentURL string, privateKeyPEM []byte) error {
+func removeBlessedComment(site storage.Site, commentURL string, privateKeyPEM []byte) error {
 	blessedMu.Lock()
 	defer blessedMu.Unlock()
 
-	bc, err := loadBlessedCommentsRaw(siteDir)
+	bc, err := loadBlessedCommentsRaw(site)
 	if err != nil {
 		return err
 	}
@@ -427,7 +456,7 @@ func removeBlessedComment(siteDir string, commentURL string, privateKeyPEM []byt
 					bc.Comments = append(bc.Comments[:i], bc.Comments[i+1:]...)
 				}
 
-				return saveBlessedLocked(siteDir, bc, "", privateKeyPEM)
+				return saveBlessedLocked(site, bc, "", privateKeyPEM)
 			}
 		}
 	}
@@ -438,8 +467,8 @@ func removeBlessedComment(siteDir string, commentURL string, privateKeyPEM []byt
 
 // GetBlessedCommentsForPost returns all blessed comments for a specific post.
 // Uses flexible path matching: tries exact match, .md/.html swap, and URL-to-path extraction.
-func GetBlessedCommentsForPost(siteDir string, postPath string) ([]BlessedComment, error) {
-	bc, err := LoadBlessedComments(siteDir)
+func GetBlessedCommentsForPost(site storage.Site, postPath string) ([]BlessedComment, error) {
+	bc, err := LoadBlessedComments(site)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return []BlessedComment{}, nil

@@ -2,6 +2,7 @@ package site
 
 import (
 	"bytes"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
 	"testing"
@@ -80,14 +81,14 @@ func TestKeyHistoryWritersEmitTheBytesTheyAlwaysHave(t *testing.T) {
 
 func writeGenesis(t *testing.T, dir string) {
 	t.Helper()
-	if wrote, err := WriteGenesisKeyHistory(dir); err != nil || !wrote {
+	if wrote, err := WriteGenesisKeyHistory(storage.At(dir)); err != nil || !wrote {
 		t.Fatalf("genesis: wrote=%v err=%v", wrote, err)
 	}
 }
 
 func rotateOnce(t *testing.T, dir string) {
 	t.Helper()
-	if err := RecordKeyRotation(dir, goldenRotationKey, goldenRotationSig, goldenValidFrom, goldenRotationWitness()); err != nil {
+	if err := RecordKeyRotation(storage.At(dir), goldenRotationKey, goldenRotationSig, goldenValidFrom, "", goldenRotationWitness()); err != nil {
 		t.Fatal(err)
 	}
 }

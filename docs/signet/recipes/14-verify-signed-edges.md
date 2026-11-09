@@ -157,5 +157,5 @@ is specified, with byte-exact examples, in [signing base §5.3](../spec/signing-
 |---|---|
 | the roster served is the one signed by the key the site publishes now | that the author made those follows. A key is not a person, and an operator who holds a tenant's key can sign as that tenant ([custody](../spec/custody.md)) |
 | a changed roster no longer verifies, whoever changed it | who changed it, or why. A software bug fails the same way |
-| | anything about a roster signed before the site rotated its key: a follow file carries no signing time, so it verifies only against the current key until its author next follows or unfollows someone ([spec §4](../spec/attestation.md#4-verifying)) |
+| | anything about a roster signed before the site rotated its key: a follow file carries no signing time, so it verifies only against the current key. The author's rotation re-signs it if it verified under the old key; otherwise it waits for their next follow or unfollow ([spec §4](../spec/attestation.md#4-verifying)) |
 | | that following someone means trusting them. What a follow is worth is your judgment ([trust](../concepts/trust.md)) |

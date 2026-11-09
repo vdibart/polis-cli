@@ -100,7 +100,6 @@ const maxDSResponseRecords = 10_000
 // Client is an HTTP client for the discovery service.
 type Client struct {
 	BaseURL       string
-	APIKey        string
 	Domain        string // optional: for signed GET requests
 	PrivateKeyPEM []byte // optional: for signed GET requests
 	HTTPClient    *http.Client
@@ -111,10 +110,9 @@ type Client struct {
 }
 
 // NewClient creates a new discovery service client (unauthenticated GET requests).
-func NewClient(baseURL, apiKey string) *Client {
+func NewClient(baseURL string) *Client {
 	return &Client{
 		BaseURL: baseURL,
-		APIKey:  apiKey,
 		HTTPClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -124,10 +122,9 @@ func NewClient(baseURL, apiKey string) *Client {
 
 // NewAuthenticatedClient creates a discovery client that signs GET requests
 // with domain ownership proof via X-Polis-Domain/Signature/Timestamp headers.
-func NewAuthenticatedClient(baseURL, apiKey, domain string, privateKeyPEM []byte) *Client {
+func NewAuthenticatedClient(baseURL, domain string, privateKeyPEM []byte) *Client {
 	return &Client{
 		BaseURL:       baseURL,
-		APIKey:        apiKey,
 		Domain:        domain,
 		PrivateKeyPEM: privateKeyPEM,
 		HTTPClient: &http.Client{
@@ -140,13 +137,12 @@ func NewAuthenticatedClient(baseURL, apiKey, domain string, privateKeyPEM []byte
 // NewClientWithHTTP creates a discovery client using a shared HTTP client.
 // This enables connection pooling when multiple Client instances share the same
 // underlying http.Client (and its transport).
-func NewClientWithHTTP(baseURL, apiKey string, hc *http.Client) *Client {
+func NewClientWithHTTP(baseURL string, hc *http.Client) *Client {
 	if hc == nil {
-		return NewClient(baseURL, apiKey)
+		return NewClient(baseURL)
 	}
 	return &Client{
 		BaseURL:    baseURL,
-		APIKey:     apiKey,
 		HTTPClient: hc,
 		DSKeyCache: NewDSKeyCacheWithHTTP(baseURL, 0, hc),
 	}
@@ -154,13 +150,12 @@ func NewClientWithHTTP(baseURL, apiKey string, hc *http.Client) *Client {
 
 // NewAuthenticatedClientWithHTTP creates an authenticated discovery client
 // using a shared HTTP client for connection pooling.
-func NewAuthenticatedClientWithHTTP(baseURL, apiKey, domain string, privateKeyPEM []byte, hc *http.Client) *Client {
+func NewAuthenticatedClientWithHTTP(baseURL, domain string, privateKeyPEM []byte, hc *http.Client) *Client {
 	if hc == nil {
-		return NewAuthenticatedClient(baseURL, apiKey, domain, privateKeyPEM)
+		return NewAuthenticatedClient(baseURL, domain, privateKeyPEM)
 	}
 	return &Client{
 		BaseURL:       baseURL,
-		APIKey:        apiKey,
 		Domain:        domain,
 		PrivateKeyPEM: privateKeyPEM,
 		HTTPClient:    hc,
@@ -420,9 +415,6 @@ func (c *Client) RegisterContent(req *ContentRegisterRequest) (*ContentRegisterR
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 
 	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
@@ -486,9 +478,6 @@ func (c *Client) UnregisterContent(contentType, contentURL, timestamp, signature
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 
 	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
@@ -531,9 +520,6 @@ func (c *Client) UnpublishContent(contentType, contentURL, timestamp, signature 
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 
 	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
@@ -559,10 +545,6 @@ func (c *Client) CheckContent(contentType, contentURL string) (*ContentCheckResp
 	httpReq, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
 	resp, err := c.doWithTiming(httpReq)
@@ -602,9 +584,6 @@ func (c *Client) QueryContent(contentType string, filters map[string]string) (*C
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 	if err := c.addAuthHeaders(httpReq); err != nil {
 		return nil, err
 	}
@@ -669,9 +648,6 @@ func (c *Client) FollowedTargets(domain string) ([]string, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 	if err := c.addAuthHeaders(httpReq); err != nil {
 		return nil, err
 	}
@@ -771,9 +747,6 @@ func (c *Client) FetchCommentCountsCtx(ctx context.Context, urls []string) (map[
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 
 	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
@@ -865,9 +838,6 @@ func (c *Client) FetchLatestCommentsCtx(ctx context.Context, urls []string) (map
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 
 	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
@@ -973,9 +943,6 @@ func (c *Client) UpdateRelationshipMarked(relType, sourceURL, targetURL, action 
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 
 	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
@@ -1005,9 +972,6 @@ func (c *Client) QueryRelationships(relType string, filters map[string]string) (
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 	if err := c.addAuthHeaders(httpReq); err != nil {
 		return nil, err
 	}
@@ -1248,9 +1212,6 @@ func (c *Client) CheckSiteRegistration(domain string) (*SiteCheckResponse, error
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.doWithTiming(httpReq)
@@ -1312,9 +1273,6 @@ func (c *Client) ListSites(opts SiteListOptions) (*SiteListResponse, error) {
 	httpReq, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -1392,9 +1350,6 @@ func (c *Client) RegisterSite(domain string, privateKey []byte, email, authorNam
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 
 	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
@@ -1469,9 +1424,6 @@ func (c *Client) UnregisterSite(domain string, privateKey []byte) (*SiteUnregist
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 
 	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
@@ -1656,9 +1608,6 @@ func (c *Client) StreamQuery(since string, limit int, typeFilter string, actorFi
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 	if err := c.addAuthHeaders(httpReq); err != nil {
 		return nil, err
 	}
@@ -1710,9 +1659,6 @@ func (c *Client) StreamQueryInvolved(since string, limit int, domain string) (*S
 	httpReq, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 	if err := c.addAuthHeaders(httpReq); err != nil {
 		return nil, err
@@ -1784,9 +1730,6 @@ func (c *Client) StreamQueryBatch(queries []StreamBatchFilter) (*StreamBatchResp
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 	if err := c.addAuthHeaders(httpReq); err != nil {
 		return nil, err
 	}
@@ -1847,9 +1790,6 @@ func (c *Client) StreamQueryUnified(since string, limit int, involvedDomain stri
 	httpReq, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 	if err := c.addAuthHeaders(httpReq); err != nil {
 		return nil, err
@@ -1912,9 +1852,6 @@ func (c *Client) StreamPublish(eventType, actor string, payload map[string]inter
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 
 	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
@@ -1937,9 +1874,6 @@ func (c *Client) StreamHealth() (*StreamHealthResponse, error) {
 	httpReq, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
 	resp, err := c.doWithTiming(httpReq)
@@ -2054,9 +1988,6 @@ func (c *Client) KeyHistory(domain string) (*KeyHistoryResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.doWithTiming(httpReq)
@@ -2096,6 +2027,22 @@ func (r *KeyHistoryResponse) PublicKeys() []string {
 	return out
 }
 
+// RotationRefusedError is a 4xx answer to a key rotation: the DS read the
+// request and did not take the new key, so the site still holds the key the DS
+// knows.
+//
+// ⛔ ONLY THIS ERROR MEANS "REFUSED". Any other error from RotateKey — no
+// response, a timeout after the request was sent, a 5xx — leaves it unknown
+// whether the DS took the new key, and the new private key must be kept.
+type RotationRefusedError struct {
+	Status int
+	Body   string
+}
+
+func (e *RotationRefusedError) Error() string {
+	return fmt.Sprintf("key rotation refused with status %d: %s", e.Status, e.Body)
+}
+
 // RotateKey sends a key rotation request to the discovery service.
 //
 // It returns the DS's countersignature over the rotation when the DS issued one
@@ -2116,9 +2063,6 @@ func (c *Client) RotateKey(req KeyRotationRequest) (*Witness, error) {
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	if c.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 
 	resp, err := c.doWithTiming(httpReq)
 	if err != nil {
@@ -2127,8 +2071,15 @@ func (c *Client) RotateKey(req KeyRotationRequest) (*Witness, error) {
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("key rotation failed with status %d: %s", resp.StatusCode, string(respBody))
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		return nil, &RotationRefusedError{Status: resp.StatusCode, Body: string(respBody)}
+	}
+	if resp.StatusCode >= 500 {
+		// ⛔ NOT a refusal: a 5xx can come after the row was written (a proxy
+		// timeout, a crash mid-response). The caller must not assume the DS
+		// kept the old key.
+		return nil, fmt.Errorf("key rotation answered status %d; the discovery service may or may not have taken the new key: %s",
+			resp.StatusCode, string(respBody))
 	}
 
 	// The rotation already happened; a response we cannot parse costs the
@@ -2158,4 +2109,96 @@ func ExtractDomainFromURL(rawURL string) string {
 // JoinDomains joins domain strings with commas for the stream actor filter.
 func JoinDomains(domains []string) string {
 	return strings.Join(domains, ",")
+}
+
+// BranchHandover is the handover a branched site's key history carries: the
+// source's key (OldKey) signing over to the site's key (NewKey) at Timestamp,
+// under the source's domain. Every field is carried verbatim.
+type BranchHandover struct {
+	OldKey        string `json:"old_key"`
+	NewKey        string `json:"new_key"`
+	Timestamp     string `json:"timestamp"`
+	TransitionSig string `json:"transition_sig"`
+}
+
+// siteBranchedCanonical is what the branched site signs for the request.
+// ⛔ Field order is alphabetical: it must equal the DS's
+// buildSiteBranchedCanonicalJSON byte for byte (pinned by a test).
+type siteBranchedCanonical struct {
+	Action        string `json:"action"`
+	Domain        string `json:"domain"`
+	SourceDomain  string `json:"source_domain"`
+	Timestamp     string `json:"timestamp"`
+	TransitionSig string `json:"transition_sig"`
+}
+
+// MakeSiteBranchedCanonicalJSON returns the bytes a branch announcement's
+// request signature covers.
+func MakeSiteBranchedCanonicalJSON(domain, sourceDomain, transitionSig, timestamp string) ([]byte, error) {
+	return marshalCanonical(siteBranchedCanonical{
+		Action: "site-branched", Domain: domain, SourceDomain: sourceDomain,
+		Timestamp: timestamp, TransitionSig: transitionSig,
+	})
+}
+
+// BranchRefusedError is a 4xx from POST /v1/sites/branched: the DS checked
+// the announcement and declined it, and said why.
+type BranchRefusedError struct {
+	Status int
+	Body   string
+}
+
+func (e *BranchRefusedError) Error() string {
+	return fmt.Sprintf("branch announcement refused with status %d: %s", e.Status, e.Body)
+}
+
+// AnnounceBranch tells the discovery service that domain was branched from
+// sourceDomain, presenting the handover from domain's own key history and
+// signing the request with domain's current private key. It returns the DS's
+// site-branched witness, or nil when the DS returned none.
+//
+// ⛔ It shows descent, never the source's consent, and it changes nothing of
+// the source's. A 404 from a DS that predates the route is reported as a
+// refusal like any other.
+func (c *Client) AnnounceBranch(domain, sourceDomain string, h BranchHandover, privateKey []byte) (*Witness, error) {
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+	canonical, err := MakeSiteBranchedCanonicalJSON(domain, sourceDomain, h.TransitionSig, timestamp)
+	if err != nil {
+		return nil, err
+	}
+	signature, err := signing.SignContent(canonical, privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign the announcement: %w", err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"domain": domain, "source_domain": sourceDomain, "handover": h,
+		"timestamp": timestamp, "signature": signature,
+	})
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequest("POST", c.BaseURL+"/v1/sites/branched", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.doWithTiming(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxDSResponseSize))
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		return nil, &BranchRefusedError{Status: resp.StatusCode, Body: string(respBody)}
+	}
+	if resp.StatusCode >= 500 {
+		return nil, fmt.Errorf("branch announcement answered status %d: %s", resp.StatusCode, string(respBody))
+	}
+	var result struct {
+		Witness *Witness `json:"witness"`
+	}
+	if json.Unmarshal(respBody, &result) != nil {
+		return nil, nil
+	}
+	return result.Witness, nil
 }

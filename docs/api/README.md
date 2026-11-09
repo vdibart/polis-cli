@@ -10,7 +10,7 @@ Those webapp-owned operations live under `/api/` on a **separate, owner-authenti
 
 ## Authentication, CORS, limits and a quick start
 
-All in [developer/reference.md](developer/reference.md): reads are mostly public, writes take a Bearer API key you create by hand ([§ Authentication](developer/reference.md#authentication)), and the site-to-site DM actions take signed request headers instead. That page is the contract; this index does not restate it.
+All in [developer/reference.md](developer/reference.md): reads are mostly public, writes take a Bearer API key the site's owner mints ([§ Authentication](developer/reference.md#authentication)), and the site-to-site DM actions take signed request headers instead. That page is the contract; this index does not restate it.
 
 ## Documentation
 

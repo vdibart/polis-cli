@@ -1,6 +1,7 @@
 package sitecheck
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -54,7 +55,7 @@ func licensedSite(t *testing.T, profile string) (*remoteSite, *httptest.Server, 
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "license.json")
-	if err := license.SignAndWrite(f, path, priv); err != nil {
+	if err := license.SignAndWrite(f, storage.At(filepath.Dir(path)), filepath.Base(path), priv); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)

@@ -2,9 +2,13 @@ package feed
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +19,8 @@ import (
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/atomicfile"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // ParsePublished parses a published timestamp that may be in ISO 8601 or
@@ -166,46 +172,56 @@ func (cfg *FeedConfig) effectiveMaxAgeDays() int {
 
 // CacheManager handles feed cache operations.
 type CacheManager struct {
-	mu         sync.Mutex
-	cacheFile  string        // state/pub.polis.feed.jsonl (or scoped variant)
-	configFile string        // config/feed.json
-	cursorKey  string        // cursor key in cursors.json (e.g. "pub.polis.feed" or "pub.polis.feed.global")
-	store      *stream.Store // for cursor operations
+	mu sync.Mutex
+
+	// ⭐ The struct was already the right shape; only the identity was missing.
+	site storage.Site
+
+	cacheKey  string        // state/pub.polis.feed.jsonl (or scoped variant), as a KEY
+	configKey string        // config/feed.json, as a KEY
+	cursorKey string        // cursor key in cursors.json (e.g. "pub.polis.feed" or "pub.polis.feed.global")
+	store     *stream.Store // for cursor operations
 }
 
-// CacheFile returns the path to pub.polis.feed.jsonl for a given DS domain.
-func CacheFile(dataDir, discoveryDomain string) string {
-	return filepath.Join(dataDir, ".polis", "ds", discoveryDomain, "pub.polis.core", "state", "pub.polis.feed.jsonl")
+// CacheKey is pub.polis.feed.jsonl for a DS domain, relative to the site root.
+//
+// ⭐ KEYS, NOT PATHS. These replaced exported path builders (CacheFile,
+// ScopedCacheFile, ConfigFile) whose callers read the files by path.
+func CacheKey(discoveryDomain string) string {
+	return ".polis/ds/" + discoveryDomain + "/pub.polis.core/state/pub.polis.feed.jsonl"
 }
 
-// ScopedCacheFile returns the path to a scoped feed cache file (e.g. pub.polis.feed.followers.jsonl).
-func ScopedCacheFile(dataDir, discoveryDomain, scope string) string {
-	return filepath.Join(dataDir, ".polis", "ds", discoveryDomain, "pub.polis.core", "state", "pub.polis.feed."+scope+".jsonl")
+// ScopedCacheKey is a scoped feed cache file (e.g. pub.polis.feed.followers.jsonl),
+// relative to the site root.
+func ScopedCacheKey(discoveryDomain, scope string) string {
+	return ".polis/ds/" + discoveryDomain + "/pub.polis.core/state/pub.polis.feed." + scope + ".jsonl"
 }
 
-// ConfigFile returns the path to config/feed.json for a given DS domain.
-func ConfigFile(dataDir, discoveryDomain string) string {
-	return filepath.Join(dataDir, ".polis", "ds", discoveryDomain, "pub.polis.core", "config", "feed.json")
+// ConfigFileKey is config/feed.json for a DS domain, relative to the site root.
+func ConfigFileKey(discoveryDomain string) string {
+	return ".polis/ds/" + discoveryDomain + "/pub.polis.core/config/feed.json"
 }
 
 // NewCacheManager creates a new feed cache manager scoped to a discovery service domain.
-func NewCacheManager(dataDir, discoveryDomain string) *CacheManager {
+func NewCacheManager(site storage.Site, discoveryDomain string) *CacheManager {
 	return &CacheManager{
-		cacheFile:  CacheFile(dataDir, discoveryDomain),
-		configFile: ConfigFile(dataDir, discoveryDomain),
-		cursorKey:  "pub.polis.feed",
-		store:      stream.NewStore(dataDir, discoveryDomain, "pub.polis.core"),
+		site:      site,
+		cacheKey:  CacheKey(discoveryDomain),
+		configKey: ConfigFileKey(discoveryDomain),
+		cursorKey: "pub.polis.feed",
+		store:     stream.NewStore(site, discoveryDomain, "pub.polis.core"),
 	}
 }
 
 // NewScopedCacheManager creates a feed cache manager for a specific scope (e.g. "followers", "global").
 // Each scope gets its own JSONL file and cursor key.
-func NewScopedCacheManager(dataDir, discoveryDomain, scope string) *CacheManager {
+func NewScopedCacheManager(site storage.Site, discoveryDomain, scope string) *CacheManager {
 	return &CacheManager{
-		cacheFile:  ScopedCacheFile(dataDir, discoveryDomain, scope),
-		configFile: ConfigFile(dataDir, discoveryDomain),
-		cursorKey:  "pub.polis.feed." + scope,
-		store:      stream.NewStore(dataDir, discoveryDomain, "pub.polis.core"),
+		site:      site,
+		cacheKey:  ScopedCacheKey(discoveryDomain, scope),
+		configKey: ConfigFileKey(discoveryDomain),
+		cursorKey: "pub.polis.feed." + scope,
+		store:     stream.NewStore(site, discoveryDomain, "pub.polis.core"),
 	}
 }
 
@@ -224,9 +240,18 @@ func (cm *CacheManager) List() ([]CachedFeedItem, error) {
 }
 
 func (cm *CacheManager) listLocked() ([]CachedFeedItem, error) {
-	file, err := os.Open(cm.cacheFile)
+	// NOT a whole Get on a filesystem: this STREAMS THE BYTES with a
+	// bufio.Scanner rather than reading the file whole, which is what matters
+	// for a file that grows without bound. storage.OpenRead streams wherever
+	// the store has a real path, and reads whole only where there is no file.
+	//
+	// ⚠️ A review called this a rationalisation because the PARSED entries are
+	// accumulated into a slice. That is true and is a different question: the
+	// parsed form is bounded by what the caller needs, while Get would hold the
+	// raw bytes as well. Converting is possible and is not free.
+	file, err := storage.OpenRead(cm.site, cm.cacheKey)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return []CachedFeedItem{}, nil
 		}
 		return nil, fmt.Errorf("failed to open cache file: %w", err)
@@ -393,9 +418,9 @@ func (cm *CacheManager) MarkChecked() error {
 
 // LoadConfig loads the feed configuration, returning defaults if not found.
 func (cm *CacheManager) LoadConfig() (*FeedConfig, error) {
-	data, err := os.ReadFile(cm.configFile)
+	data, err := cm.site.Store().Get(context.Background(), cm.configKey)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			cfg := DefaultFeedConfig()
 			return &cfg, nil
 		}
@@ -412,10 +437,6 @@ func (cm *CacheManager) LoadConfig() (*FeedConfig, error) {
 
 // SaveConfig writes the feed configuration to disk.
 func (cm *CacheManager) SaveConfig(cfg *FeedConfig) error {
-	if err := os.MkdirAll(filepath.Dir(cm.configFile), 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
 	// Ensure defaults for required fields
 	if cfg.StalenessMinutes <= 0 {
 		cfg.StalenessMinutes = 5
@@ -430,7 +451,7 @@ func (cm *CacheManager) SaveConfig(cfg *FeedConfig) error {
 		return fmt.Errorf("failed to marshal feed config: %w", err)
 	}
 
-	return atomicfile.WriteFile(cm.configFile, append(data, '\n'), 0600)
+	return atomicfile.Write(context.Background(), cm.site, cm.configKey, append(data, '\n'), 0600)
 }
 
 // IsStale returns true if the cache needs refreshing based on staleness_minutes.
@@ -827,11 +848,31 @@ func (cm *CacheManager) SetStalenessMinutes(minutes int) error {
 
 // writeAll rewrites all items to the cache file.
 func (cm *CacheManager) writeAll(items []CachedFeedItem) error {
-	if err := os.MkdirAll(filepath.Dir(cm.cacheFile), 0700); err != nil {
+	st := cm.site.Store()
+	// ⭐ A store with no filesystem takes the whole value in one Put, which
+	// creates its own parents; there is no file handle to stream to.
+	if !st.Capabilities().RealPath {
+		var buf bytes.Buffer
+		for _, item := range items {
+			data, err := json.Marshal(item)
+			if err != nil {
+				continue
+			}
+			buf.Write(data)
+			buf.WriteByte('\n')
+		}
+		return st.Put(context.Background(), cm.cacheKey, buf.Bytes(), storage.WithMode(0o644))
+	}
+	path, err := st.RealPath(cm.cacheKey)
+	if err != nil {
+		return err
+	}
+	// Stays: paired with the append/stream handle below, which creates no parents.
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	file, err := os.Create(cm.cacheFile)
+	file, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("failed to create cache file: %w", err)
 	}

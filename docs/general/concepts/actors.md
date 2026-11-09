@@ -151,11 +151,12 @@ it.
 
 ⭐ **What DOES exist now is the audit trail on the operator's side: events for an act that signs name which
 identity signed.** Chaplain's events carry `attribution: as-tenant` without exception, because that is
-what Chaplain does. Judge's publishing events, the custody declarations and actor-key projection carry
-`as-self`. ⚠️ **Medic's one signing act is the exception**: its event for the DM keyring carries no
-attribution yet. Before actors had identities of their own there was one possible answer to *"whose key
-signed this"*, so nothing recorded it. There are now two, and an event that does not say which is not an
-audit trail.
+what Chaplain does. Judge's publishing events and the custody declarations carry `as-self`; projecting an
+actor's key signs nothing, so its event carries no attribution. Medic's one signing act, provisioning a tenant's DM keyring and publishing the messages key it
+signs, carries `attribution: as-tenant` on its `medic.provision` event; Medic's keyless provisions carry
+none. Before actors had identities of their own there was one possible answer to *"whose key signed
+this"*, so nothing recorded it. There are now two, and an event that does not say which is not an audit
+trail.
 
 ### 2a. Actors have identities of their own — and that NARROWS what they can do
 
@@ -226,7 +227,7 @@ detected tamper into a clean-looking site).
 ### 5. What a signature actually covers — and where that is written down
 
 Four things verify signatures — **Patrol** (local posts and comments, the licence), **Judge** (checks 1,
-6, 8, 9, 10, 13), **Medic** (before it heals anything), and `polis validate` — and all four reconstruct
+6, 8, 9, 10, 13 and 16–19), **Medic** (before it heals anything), and `polis validate` — and all four reconstruct
 the **signing base**: the exact bytes a signature covers, which is never simply "the file". A `signature:`
 line cannot cover itself, and a comment's `author:` line is written *after* signing, so both are outside
 the bytes.
@@ -348,7 +349,11 @@ protocol rule, and a site that fails one still verifies. Each fails the check:
 - **Key permissions**: the private key is `0600` (or `0400`). Medic `chmod`s it back
 - **Key leak**: no private key in a public-facing directory. ⛔ **Medic does not touch it**: the key is
   exposed, and the fix is a rotation only the tenant can make
-- **Directory exposure**: `.polis/` and `.git/` are not world-accessible. Medic `chmod`s them to `0700`
+- **Directory exposure**: no directory under `.polis/`, at any depth, is world-accessible, and neither
+  is `.git/` itself. Every such directory is named, not just the first, and Medic `chmod`s exactly
+  those to `0700`. A symbolic link is never followed: not into the walk, and never by a `chmod`. A
+  `.polis/` or `.git/` that is itself a link fails the check and is named, and nothing behind it is
+  walked. A directory that cannot be read fails the check rather than being skipped
 
 **Content integrity:**
 - Every post under `content/pub.polis.core/post/` has a valid Ed25519 signature, and every comment under
@@ -359,6 +364,17 @@ protocol rule, and a site that fails one still verifies. Each fails the check:
   instead of arriving at Medic as non-correctable failures. Passes through a retired key are listed in the
   result.
 - Every post content hash matches the frontmatter hash
+- **Unchanged posts are not verified again.** Every post is read and hashed (SHA-256) on every sweep, and
+  a post whose bytes match the last sweep that verified it skips the signature check, which is the
+  expensive part. The record of verified bytes (path, mtime, size, hash) lives in the snapshot beside the
+  other baselines. ⚠️ **Only a post that verifies is recorded**, so a failing post is checked and reported
+  again on every sweep. Every post is checked in full at least once a day (every 24 sweeps), and at once
+  when the site's `public_key` or `public_key_history` changes. The record is written as the one
+  verified-content record other actors can consult, not a Patrol-private cache.
+- **Suspected tampering**: a post whose content changed while its mtime **and** size stayed the same is
+  reported in its own right, whatever its verification says. Nothing in polis rewrites a post that way,
+  and the signature may still verify if whoever changed it holds the key, which is when this is the only
+  signal.
 - **Foreign content**: a post or comment on disk whose frontmatter `author` is not this tenant's own domain
   is alerted, and Medic quarantines it, with its rendered page, on its next sweep. Another author's words
   belong only in the isolated comment cache, never in this site's public tree.
@@ -469,8 +485,18 @@ anyone.*
 
 **Permission fixes:**
 - `chmod 0600` on private keys with wrong permissions
-- `chmod 0700` on `.polis/` and `.git/` when they are world-accessible (directory exposure)
-- `chmod 0700` on DM directories with wrong permissions
+- `chmod 0700` on every directory Patrol reported world-accessible, at any depth under `.polis/`, and
+  on `.git/` (directory exposure). It refuses a symbolic link, or anything outside those two trees,
+  and reports the refusal instead. Every `chmod` Medic makes first checks each component of the
+  path from the tenant root, and refuses (and reports) one reached through a link. When `.polis/`
+  itself is a link, Medic changes nothing in that tenant, the DID Document and key-history genesis
+  below included, and reports it once
+- ⛔ **When Patrol did not finish checking a tenant** (its check timed out or panicked), Medic changes
+  nothing in that tenant, the DID Document and key-history genesis below included, and reports it
+  once. An unfinished result reports every check as failed although none ran, so healing from it
+  would run every repair against a tenant nobody looked at. Patrol checks again next sweep
+- `chmod 0700` on DM directories with wrong permissions, unless the directory-exposure repair already
+  did it in the same pass
 
 ⚠️ **The first two are security-posture repairs, not protocol repairs**, the same split as
 [Patrol's *Security posture*](#what-it-checks). ⛔ **The third posture finding, a key leak, is never
@@ -478,7 +504,9 @@ repaired**: moving the file does not un-expose the key.
 
 **Quarantine:**
 - Moves suspicious files (executables, symlinks, oversized, suspicious extensions) to a quarantine
-  directory outside the site, with a manifest recording what was moved and why
+  directory outside the site, with a manifest recording what was moved and why. It moves one entry
+  below the tenant root and ⛔ **refuses a path that names the root itself**; a move that does not
+  happen is reported as failed, never as done
 
 **Provisioning (transparent upgrades):**
 - Creates missing public policy files (`policies/rules.jsonl`)
@@ -491,6 +519,10 @@ repaired**: moving the file does not un-expose the key.
   (no password), so this runs **without the user**. Gated on the legacy-content-path migration completing
   first, to avoid racing the rename of the old `dm/` subtree.
 - Creates missing `bundle.json`, and merges in content-type declarations a release has added
+- **Adds to each core theme in `bundle.json` the compatible shapes the core bundle now declares for it.**
+  A site created before the stream shape existed lists its themes as blog-only, and merging declarations never
+  updates an entry that exists. Add only: a shape the tenant lists itself is kept, no other field changes, and
+  an up-to-date file is not rewritten. Tailor's `theme-shapes-migration` check does the same on a self-hosted site.
 - **Rebuilds `robots.txt` / `rsl.xml`** from the tenant's signed licence whenever they are **missing _or no
   longer say what that licence says_**. Content comparison, not a presence check: a projection edited to
   contradict the signed terms is repaired exactly like a deleted one. **`robots.txt` is what crawlers
@@ -508,7 +540,9 @@ repaired**: moving the file does not un-expose the key.
 - **Provisions the `public_key_history` genesis entry**: one entry naming the key the tenant already
   publishes, dated from the tenant's own `created`, with a `null` transition signature because nothing
   preceded it. ⛔ **Behind a guard, and PROVISION-ONLY — see below.**
-- Generates missing avatars and favicons
+- Generates missing avatars and favicons. ⛔ **An existing avatar is never replaced**: it is the
+  tenant's own choice and a generated one is random. One that lacks `bg` or `fg` gains only that
+  member and keeps the rest
 - Creates missing theme directories
 
 > **The key history is two different artifacts wearing one name, and Medic treats them differently.**
@@ -569,7 +603,10 @@ repaired**: moving the file does not un-expose the key.
 
 **Content fixes:**
 - Removes deprecated/stale files (scoped feed caches, registration flags, old field names)
-- Upgrades policy files to the current format
+- Removes the temp files an interrupted write left behind, once they are an hour old. **Not in a directory
+  Patrol watches** (keys, hooks, policies): there it reports the file and leaves it, so a file planted
+  there is noticed rather than cleaned up
+- Upgrades a policy file that still holds a default an earlier release wrote to the current default
 - Re-renders tenant sites if theme files were cleaned up or the active shape was upgraded, and when Chaplain
   asks after changing `blessed.json`
 
@@ -586,6 +623,9 @@ repaired**: moving the file does not un-expose the key.
   `agents.json` except a grant or withdrawal write.
 - **It does not repair a bundle declaration that disagrees with the default**; that may be a legitimate
   tenant edit.
+- **It never overwrites a policy file holding the site's own rules**, or one that does not parse. It
+  reports either (`medic.report`, `report_kind` `policy_authored` or `policy_unparseable`) and leaves the
+  file byte for byte as it is.
 - **It no longer registers tenants with the discovery service.** Registration repair moved to
   Clerk/Chaplain, where cross-boundary consistency belongs.
 - **It never forces a fix it isn't confident about.** Non-correctable issues are counted and skipped.
@@ -725,26 +765,35 @@ attestations.*
 
 | # | Check | I/O | Purpose |
 |---|-------|-----|---------|
-| 1 | **HTTP content verification** | Local loopback | Fetches posts via localhost HTTP, verifies signatures + hashes match disk — tests the full serving pipeline. Signing base: [the signing-base spec](../../signet/spec/signing-base.md) §4. ⭐ **Current key first, then the key the tenant's own published history resolves for the artifact's claimed signing time**, so a tenant's rotation does not report every earlier post as tampering. A retired-key pass is **named** in the check message (*"n/m content items verified against a RETIRED key"*), never folded into a silent OK |
+| 1 | **HTTP content verification** | Local loopback | Fetches posts, comments and tag files via localhost HTTP, verifies signatures (+ hashes, for posts and comments) match disk — tests the full serving pipeline. Signing base: [the signing-base spec](../../signet/spec/signing-base.md) §4. ⭐ **Current key first, then the key the tenant's own published history resolves for the artifact's claimed signing time**, so a tenant's rotation does not report every earlier post as tampering. A retired-key pass is **named** in the check message (*"n/m content items verified against a RETIRED key"*), never folded into a silent OK |
 | 2 | **DS attestation audit** | HTTP to DS | **Registration service attestation**: for each discovery-service registration on disk, fetches the DS's site-check, rebuilds the register canonical, fetches the DS key **by `attestation_key_id`** and verifies the signature. ⛔ **A signature that does not verify fails the check.** ⚠️ **A DS or key that cannot be reached is `NOT VERIFIED`, not a failure**: an unreachable DS says nothing about the attestation. A missing attestation is backfilled from the DS **only when the DS's copy verifies**. ⚠️ **Blessed comments are COUNTED here, not verified, and the message says so** (*"n blessed comments counted, NOT verified"*). ⭐ **Nothing on disk can be verified:** `blessed.json` records a comment's url, version and blessed_at, never the DS's blessing attestation, which rides only a stream event, and the stream is retention-pruned, so a sweep over it could never cover every blessing either. `blessed.json`'s own signature is check 10 |
 | 3 | **Public key continuity** | Local FS | Tracks key fingerprints over time; alerts on unexpected changes (proto-TOFU) |
 | 4 | **Policy snapshot verification** | Local FS | Hashes the tenant's policy files and alerts once on any change. It compares hashes and knows nothing about blessings |
 | 5 | **Index consistency** | Local FS | Verifies `index.jsonl` entries match real signed files — detects orphans, phantoms, hash mismatches — for **every entry type: post, comment, tag, attestation**. Each type is hashed by its own rule (a markdown body hash, or the canonical signing JSON), declared in one table. A clean result **names what it checked** (*"34 entries checked (attestation 2, comment 23, post 8, tag 1)"*); an entry of a type with no rule is counted as **NOT checked**. Same predicate as `polis validate <dir>` |
 | 6 | **Cross-site comment verification** | External HTTP | Verifies every comment file in the tenant's own comment directory against the key of the author it names. ⚠️ **Those are the tenant's own comments**: a commenter publishes on their own site, and another author's copy there is quarantined. So the author is normally the tenant itself; the name predates the comment cache. Key order: ⭐ **current key first, then the key the author's published history resolves for the comment's claimed signing time**, read from the same `.well-known/polis` fetch. A retired-key pass is named in the message. A comment whose author's key could not be read is **disclosed** (*"n of m signed comments verified, k could not be checked"*), never counted as checked and never a failure. ⚠️ Uses the **comment** signing base, which excludes the `author:` line written after signing; applying the post base here reports every valid comment as invalid, which is exactly how the blessed-comment cache once starved |
-| 7 | **Well-known snapshot verification** | Local FS | Hashes `.well-known/polis` and alerts on tampering with identity metadata (handle, base_url, display_name, default_theme, etc.); complements check 3, which covers `public_key` specifically |
+| 7 | **Well-known snapshot verification** | Local FS | Hashes `.well-known/polis` and alerts on tampering with identity metadata (handle, base_url, display_name, default_theme, etc.); complements check 3, which covers `public_key` specifically. A change the key history proves to be a rotation is accepted at once; any other is held pending and alerts. ⚠️ **Report-only**: it never moves a site's health, so Judge publishes nothing because of it, since it cannot yet tell an honest edit from a tamper |
 | 8 | **Messages-key signature verification** | Local FS | Verifies every `public_key_messages` entry carries a valid identity-key signature, detecting a forged or unsigned DM messages key (an operator or man-in-the-middle key swap). Stateless (no baseline): verifies against the current `public_key`, so an identity rotation that re-signs the block passes with no re-baseline; an absent block (pre-DM-encryption or mid-upgrade) is not an alarm |
-| 9 | **Follow-file signature verification** | Local FS | Verifies `content/pub.polis.core/follow/following.json` against the identity key published in `.well-known/polis`. The follow graph is what the trust layer weights by, so an unsigned-and-editable roster is a hole under every attestation. Stateless, like check 8. ⚠️ **An unsigned follow file reports OK**: signing happens on the tenant's next follow or unfollow, so unsigned is the expected majority state and is a fact, not a defect. Only a *present-and-failing* signature is a finding |
-| 10 | **Blessing-list signature verification** | Local FS | Verifies `content/pub.polis.core/comment/blessed.json` against the identity key published in `.well-known/polis`. The blessing list is what a site says it has admitted onto its own pages, so an unsigned-and-editable list is a way to put words on someone's site under their name. Stateless, like checks 8 and 9. ⚠️ **An unsigned blessing list reports OK**: signing happens on the tenant's next bless or unbless, so unsigned is the expected majority state for a long while and is a fact, not a defect. Only a *present-and-failing* signature is a finding |
+| 9 | **Follow-file signature verification** | Local FS | Verifies `content/pub.polis.core/follow/following.json` against the identity key published in `.well-known/polis`. The follow graph is what the trust layer weights by, so an unsigned-and-editable roster is a hole under every attestation. Stateless, like check 8. ⚠️ **An unsigned follow file reports OK**: signing happens on the tenant's next follow or unfollow, so unsigned is the expected majority state and is a fact, not a defect. Only a *present-and-failing* signature is a finding. The file carries no signing time, so it is checked against the current key only; the tenant's key rotation re-signs it, but only if it verified under the old key, so a rotation neither raises this check nor silences it |
+| 10 | **Blessing-list signature verification** | Local FS | Verifies `content/pub.polis.core/comment/blessed.json` against the identity key published in `.well-known/polis`. The blessing list is what a site says it has admitted onto its own pages, so an unsigned-and-editable list is a way to put words on someone's site under their name. Stateless, like checks 8 and 9. ⚠️ **An unsigned blessing list reports OK**: signing happens on the tenant's next bless or unbless, so unsigned is the expected majority state for a long while and is a fact, not a defect. Only a *present-and-failing* signature is a finding. Re-signed by the tenant's key rotation on the same terms as check 9 |
 | 11 | **Served-artifact verification** | Local loopback | Fetches `.well-known/did.json`, `.well-known/polis`, `robots.txt`, `rsl.xml` and the licence type's mount over loopback and compares each to the file it must have come from. Writing a file and serving a file are different things that can disagree: `robots.txt` was generated correctly for weeks while the handler refused it, every unit test green throughout. ⚠️ **Absence means different things for different artifacts.** `did.json` and `.well-known/polis` are DERIVED and provisioned for everyone, so absent is a finding; the licence surfaces are AUTHORED-CONDITIONAL and exist only for a tenant who stated terms, so absent is the normal state and only a disk/serve disagreement is a finding. ⛔ **Loopback only**: see [*What Judge does NOT check*](#what-judge-does-not-check) |
 | 12 | **Licence origin** | Local FS | Compares the host in the signed licence's `terms` URL against the host this tenant is served at. `robots.txt`'s `Sitemap:` line and `rsl.xml`'s `License:` URLs are built from that address, so a site that has moved origin keeps publishing URLs pointing at an origin it may no longer control. **Report only, and it must stay that way**: `license.json` is authored and signed, and no actor may restate an author's terms |
 | 13 | **Key-chain validity** | Local FS | Walks the tenant's published `public_key_history`: every `transition_sig` must verify against the key it succeeded, back to genesis, plus the structural rules (contiguous epochs, no gap or overlap between a key's `valid_until` and its successor's `valid_from`, genesis carries a null signature, `current` carries no end). ⭐ **Pure crypto over published bytes: the predicate lives in `pkg/sitecheck`, so `polis validate` runs the identical check** and a self-hoster is not left with less. ⚠️ **A tenant with no chain reports OK**: absence is honest, most sites had none before it shipped, and Medic provisions it. ⛔ **Never repaired** |
 | 14 | **Key-head agreement** | Local FS | The three places a site states its current key must be the same key: the head of `public_key_history`, `public_key`, and the key `did.json`'s `assertionMethod` points at. Follows the `assertionMethod` **pointer** rather than taking `verificationMethod[0]`: since the DID document carries retired keys, those are no longer the same entry. ⛔ **Report only, and this one is a judgment no actor may make**: picking a winner decides which key is a person's identity |
 | 15 | **Unrecognised signed fields** | Local FS | Parses every signed JSON artifact on the tenant and reports any member this build does not declare. Verifiers are tolerant: a file that fails and carries an unrecognised member reads `unknown`, never `invalid`; one that verifies reads `valid`, with the member flagged. So a tamperer can add a junk member and quiet an alarm; this check is the mitigation. ⭐ **It is a finding only because these are hosted tenants**, whose signed files were all written by this same build; the same observation about a stranger's site is not a finding. ⛔ **Report only**: the member sits inside bytes the author signed |
+| 16 | **Attestation signature verification** | Local FS | Verifies the signature on every attestation record the site has issued — grants, custody declarations, agent disclosures and withdrawals among them — against the published identity key, resolving a retired key through the site's key history by the record's `asserted`. An unsigned record, or one that cannot be checked, is not a failure; a record that does not parse is Patrol's and Medic's finding, not this one. ⛔ **Report only** |
+| 17 | **Licence signature verification** | Local FS | Verifies the signature on `license.json`, found by the `license` pointer, resolving a retired key by its `updated`. A licence with no signature fails: its signature is the whole of its authority. A pointer that resolves to nothing or a file that cannot be read is Patrol's licence-integrity alert, not this check. ⛔ **Report only**: only the author can restate terms |
+| 18 | **Tag-file signature verification** | Local FS | Verifies the signature on every tag file, resolving a retired key by its `updated`. Check 1 fetches tags over the wire; this is the signature over the file on disk. ⛔ **Report only** |
+| 19 | **Actor-registry signature verification** | Local FS | On an operator's site, verifies the operator's signature over its actor registry, resolving a retired key by its `asserted`. The entries' countersignatures are not checked here. ⛔ **Report only** |
+| 20 | **Private files are not served** | Local loopback | Asks the tenant, through its own host name, for every name a site must never serve: the identity key and the rest of `.polis/`, `.env`, a `.git` or `.ssh` directory at any depth, key files, editor backups, and encoded spellings of the key path. A `2xx` that is not the home page, or any response holding a private key, is an exposure. This is the one check that asks the server rather than the filesystem: a key file with the right mode is still served if the handler lets its path through. ⛔ **Never published, and never part of a site's health.** A public record naming a site whose key can be downloaded would point at the open file before anyone had closed it, so an exposure goes to the operator's security log only. ⛔ **The response is never kept**: the probe reads only far enough to look for a key header. ⛔ **Report only** |
 
-⭐ **Plus one global probe per sweep, before the per-tenant checks:** a TLS dial to each hostname the
-operator configures (the apex, the discovery service and the tenant wildcard among them), reporting a
-certificate expiring within 14 days, an expired certificate, or a failed handshake. Healthy certificates
-report nothing.
+⭐ **Plus two global probes per sweep, before the per-tenant checks:**
+
+- a TLS dial to each hostname the operator configures (the apex, the discovery service and the tenant
+  wildcard among them), reporting a certificate expiring within 14 days, an expired certificate, or a
+  failed handshake. Healthy certificates report nothing;
+- check 20 **over the public wire**: the identity key's path on every tenant host, and the full list of
+  private names on one host (Judge's own site), over HTTPS. An edge rule that rewrote a path into a
+  private one would be invisible from the loopback. Exposures go to the security log, like check 20's.
 
 ### Scheduling and publishing
 
@@ -785,7 +834,8 @@ record is permanent.**
 ### What Judge does NOT check
 
 **Judge fetches over LOOPBACK**, from inside the machine, upstream of any CDN or edge. Everything in check 1
-and check 11 is therefore a statement about **the origin**, never about the public wire.
+and check 11 is therefore a statement about **the origin**, never about the public wire. (The one
+exception is the public-wire half of check 20, which asks only whether private names are refused.)
 
 **So Judge cannot see, and will never report:**
 
@@ -843,7 +893,8 @@ Clerk's job.
 
 - No timestamp plausibility check (future-dated or backdated content): **designed, not built**
 - No tombstone tracking (indexed content removed without signalling): **designed, not built**
-- Nothing Judge checks can see the public wire (see [*What Judge does NOT check*](#what-judge-does-not-check)).
+- Apart from the public-wire half of check 20, which asks only whether private names are refused, nothing
+  Judge checks can see the public wire (see [*What Judge does NOT check*](#what-judge-does-not-check)).
 - An honest consequence of baselining: **a change made before Judge's first sweep of a site, or a
   well-known change after its one alert, passes without a further finding.**
 
@@ -1100,7 +1151,7 @@ at a time.*
 
 ### What it does
 
-Tailor runs **51 ordered checks** (`allChecks` in `cli-go/pkg/tailor/tailor.go`), each with a reason
+Tailor runs **53 ordered checks** (`allChecks` in `cli-go/pkg/tailor/tailor.go`), each with a reason
 explaining **why** the change is needed. They are grouped in phases, listed here in the order they run:
 
 | Phase | Checks |
@@ -1114,7 +1165,7 @@ explaining **why** the change is needed. They are grouped in phases, listed here
 | 5. Derived data | Index rebuild, then site re-render |
 | 6. Provisioning | Public/private policies, policy content convergence, tag directory, storage salt, DM directories, epoch-0 DM keyring, theme consolidation |
 | 7. Config migration | Webapp config, view mode settings |
-| 6.5 Content-aware integrity | Reference payload integrity, registry integrity, key consistency, bundle path integrity, bundle declarations, index entries, blessed/following structure |
+| 6.5 Content-aware integrity | Reference payload integrity, registry integrity, key consistency, bundle path integrity, unpublished-emits migration, theme compatible-shapes migration, bundle declarations, index entries, blessed/following structure |
 | 6.7 Tailor-only self-heal | Active theme unset, registry schema version, registry theme/shape name sanity |
 | 8. Cleanup | Obsolete manifests, empty metadata dirs, foreign content in public paths, blessed-cache GC, stale scoped feed files, stale feed viewed_at, legacy feed scaffolding, orphaned theme dirs, studio13 rename migration |
 | 9. CLI binary | Check for CLI updates (network call, runs last) |
