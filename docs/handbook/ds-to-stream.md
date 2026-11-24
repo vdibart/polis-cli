@@ -2,6 +2,8 @@
 
 *For* [Contributors](../README.md#contributing-to-polis) — *Kind* [Tour](../README.md#kinds-of-page) — *See also* [concept](../general/concepts/infinity-stream.md)
 
+⚠️ **This page describes the v4 owner app and the stream shape, both replaced.** Since 2026-11-22 every site's owner app is the **v5 app** (at `/_/`, on `/v1` only), and every site on polis.pub is on the **v5 shape**; the v4 app (its stream-screen) is deleted, and the stream shape is no longer supported though a site that records it still renders as before. What follows is kept as the record of how v4 worked. For the current model see [shapes](../general/concepts/shapes.md) and [architecture](../general/concepts/architecture.md).
+
 > A guided tour of how content flows from the Discovery Service into the stream-screen you see in your browser. Source-of-truth concept docs live in [`../general/`](../general/); this tour walks the source code with you. Map of all threads: [`../../AGENTS.md`](../../AGENTS.md).
 >
 > **Scope note.** The Discovery Service source is not in the public repository, so the DS-side files this tour names (under `discovery-service/`, such as `stream.ts` and `counts.ts`) cannot be opened here. The [DS API reference](../ds/developer/api-reference.md) and the [stream architecture doc](../ds/developer/stream-architecture.md) specify the same behaviour as a public contract. The webapp and CLI files in this tour are all in this repository.
@@ -24,7 +26,7 @@ The infinity stream draws content from the DS through **two distinct paths** tha
    │   Path A — continuous sync (background, push-ish)                    │
    │   ────────────────────────────────────────────                       │
    │                                                                      │
-   │   webapp sync loop (every ~30s while a tab is open)                  │
+   │   webapp sync loop (on wake, after a write, on a stale read)         │
    │       │                                                              │
    │       │ HTTP GET /v1/stream/unified?since=<cursor>&...                │
    │       ▼                                                              │
@@ -70,7 +72,7 @@ We'll walk each path through the source.
 
 ### A.1 Producer: [`webapp/internal/server/sync.go`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/server/sync.go)
 
-The webapp runs a background sync goroutine that ticks every ~30 seconds whenever at least one browser tab has an SSE connection open. The core entry point is `runUnifiedSync()`:
+The webapp runs a background sync goroutine. No timer syncs: it runs once at start, whenever it is asked (`TriggerSync`: after a write, or when the DS wakes the site for an event about it), and when the owner reads their network and the last sync is more than two minutes old (`syncIfStale`, called from the stream-items pipeline that the owner app, an agent over `/v1/query` and MCP all read through). Its 30-second ticker only prunes logs. The core entry point is `runUnifiedSync()`:
 
 ```go
 // runUnifiedSync performs a single unified sync cycle: queries the DS stream
@@ -157,7 +159,7 @@ The split is deliberate. `config/` carries things you set ("notify me when X hap
 
 The materialized files match cursor keys: cursor `pub.polis.feed` → file `pub.polis.feed.jsonl`. The exception is feed *scopes* — `network` and `global` are separate cached files (the global scope has its own cursor because it's a different DS query), but `followers` and `me` are computed at render time by filtering the network cache via `FilterOptions.AuthorDomains`.
 
-### A.5 Consumer: [`webapp/internal/webui/www/app.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/app.js) → [`stream.js`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js)
+### A.5 Consumer: `webapp/internal/webui/www/app.js` (the previous owner app, since retired) → [`stream.js`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js)
 
 When the SPA renders the stream-screen, `stream.js` fetches `GET /pql/<sentence>` with `Accept: application/json`. The webapp's `handleStreamPQL` (`webapp/internal/server/handlers_pql.go`) parses the sentence and delegates to the stream-items pipeline in `handlers_stream.go`, which reads from the JSONL cache populated by the sync loop. The PQL sentence in the URL is the filter applied at fetch time. See the [URL-as-filter tour](url-as-filter.md) for that side of the story.
 
@@ -261,7 +263,7 @@ And one architecture-of-concern doc:
 
 If you followed the tour end-to-end:
 
-- The DS doesn't push to your browser. The webapp pulls. The continuous "your stream stays current" feeling is a 30-second polling loop, not a websocket.
+- The DS doesn't push to your browser. The webapp pulls: when the DS wakes it for an event about the site, after a write, and when you read your network and the last sync is more than two minutes old. There is no websocket and no timer.
 - The webapp's local JSONL cache is the source of truth for what your stream shows. The cache is rebuilt from DS events, so it's deletable / regeneratable without data loss.
 - Cross-tenant data (comment counts) that no individual site can know is exposed via batched aggregation queries on the DS, fetched for the whole rendered page in one call so a badge shows the same number every time it renders.
 - Cursor-paginated events + on-demand aggregation queries together compose the "live network feed" experience without any actual real-time push infrastructure.

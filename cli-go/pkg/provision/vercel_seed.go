@@ -29,7 +29,7 @@ import (
 
 // blobTokenSetting is the setting Vercel injects for a connected Blob store.
 // ⛔ Vercel's name; it appears nowhere outside this file.
-const blobTokenSetting = "BLOB_READ_WRITE_TOKEN"
+const blobTokenSetting = "BLOB_READ_WRITE_TOKEN" //nolint:gosec // G101: a setting's or path's name, not a credential
 
 // seedTarget is an instance's private store opened for writing from outside
 // a deployment, and how to discard the credential that opened it.

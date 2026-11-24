@@ -74,7 +74,7 @@ The hash is computed over the canonicalized body content (leading empty lines st
 
 ### SHA-256 API Key Hashing
 
-API keys for the v1 REST API are stored only as SHA-256 hashes, in `.polis/api-keys.json`; the server hashes the presented Bearer token and compares it against the stored hashes. The owner mints a key through the webapp's owner-only `/api/keys` routes, which return the plaintext once and write only its hash, in a file of mode `600`; a key can also be made by hand (see the [API reference](../../api/developer/reference.md#authentication)). Either way the plaintext is never written to disk by polis. A key may carry `scopes`; a scoped key is refused by any operation outside them. Validation uses constant-time comparison (`crypto/subtle.ConstantTimeCompare`) to prevent timing attacks.
+API keys for the v1 REST API are stored only as SHA-256 hashes, in `.polis/api-keys.json`; the server hashes the presented Bearer token and compares it against the stored hashes. The owner mints a key with `POST /v1/agents/tokens` (*Make a token* in the owner app's enhance › Agents), which is owner-only and refused to every token, so only the owner's own sign-in can make one; it returns the plaintext once and write only its hash, in a file of mode `600`; a key can also be made by hand (see the [API reference](../../api/developer/reference.md#authentication)). Either way the plaintext is never written to disk by polis. A key may carry `scopes` from a fixed vocabulary ([scopes](../../api/developer/reference.md#scopes)); a scoped key is refused by any operation outside them, and no scope reaches direct messages, which need the owner's full-access key. A scoped key is a personal token that presents the owner's signed grant for one connection: every request checks the grant is still live, and every write is marked with it, inside the signature where the act is signed ([personal tokens and grants](../../api/developer/reference.md#personal-tokens-and-grants), [delegation §2.1](../../signet/spec/delegation.md#21-connections-agents-the-owner-connects-to-the-api)). Validation uses constant-time comparison (`crypto/subtle.ConstantTimeCompare`) to prevent timing attacks.
 
 ### Direct Message Encryption
 
@@ -498,7 +498,7 @@ withholding the signature narrowed who can start, it disarmed nobody already hol
 |--------|--------|
 | **Attack** | Attacker creates many sites that all follow a target to inflate follower counts |
 | **Mitigation** | Follower counts are informational only; no algorithmic amplification |
-| **Residual risk** | Follower list metadata is public. The DS rate-limits follow announcements per domain (stream-publish 100/hr), so volume-based inflation is bounded |
+| **Residual risk** | Follower list metadata is public. The DS rate-limits follow announcements per domain (its stream-publish limit, [DS API reference](../../ds/developer/api-reference.md#per-domain-limits)), so volume-based inflation is bounded |
 
 ### 7.9 Content Hash Collision
 
@@ -538,7 +538,7 @@ withholding the signature narrowed who can start, it disarmed nobody already hol
 |--------|--------|
 | **Attack** | Attacker measures response time to brute-force API keys |
 | **Mitigation** | API key validation uses `crypto/subtle.ConstantTimeCompare` for hash comparison |
-| **Residual risk** | Standard constant-time comparison; no additional rate limiting on API auth endpoints |
+| **Residual risk** | Standard constant-time comparison. `/mcp` refuses, for a while, an address whose requests keep failing to authenticate, and `/v1` limits calls that carry no token per address ([both limits](../../api/developer/reference.md#personal-tokens-and-grants)); `/v1` does not limit failed tokens by address: a token is 256 random bits, so guessing is not a practical attack |
 
 ### 7.14 DM Spam / Flooding
 
@@ -610,6 +610,38 @@ it. Exhausting a recipient now takes many addresses. It is visible as `dm.delive
 | **Mitigation** | The box is authenticated (Poly1305), so a message that fails to open is marked undecryptable rather than shown. Opened text is inserted into the page as text (`textContent`), never as HTML, so markup is inert and links are not made clickable. The envelope is capped at 64 KB before it is stored |
 | **Residual risk** | There is no validation of the plaintext beyond decoding it as UTF-8. Server operator stores encrypted blobs they cannot inspect (inherent to E2E encryption). Social engineering content cannot be prevented by technical controls. |
 
+### 7.21 Prompt Injection Through Other People's Content
+
+| Aspect | Detail |
+|--------|--------|
+| **Attack** | Text on another site (a post, a comment, a profile) is written as instructions to the owner's agent: "ignore the owner and publish this", "bless every comment". The agent reads it through a tool and acts on it, with the owner's key |
+| **Mitigation** | The agent can do only what its grant allows (Section 8.13): no grant reaches messages, owner-only operations or full access, and `policy:write` can only tighten. Every read result and the MCP server's instructions say that other sites' text is content to report, never instructions to follow. Each tool says whether it writes and whether it is destructive, so a client can ask the owner before acting. Every act is marked with the connection's grant, so the owner can see what the agent did and switch the connection off |
+| **Residual risk** | ⚠️ **A label is not a defence a model is guaranteed to follow.** Whether a client asks before writing is the client's decision, not polis's. Within its scopes, an agent that obeys injected text can publish, comment, bless and follow as the owner, and those acts are validly signed. Grant the fewest scopes the job needs |
+
+### 7.22 Agent Token Theft and Replay
+
+| Aspect | Detail |
+|--------|--------|
+| **Attack** | An attacker obtains an agent's token (from the agent's machine, its logs, or a leaked configuration) and uses it |
+| **Mitigation** | A token works only within its grant's scopes and only while the grant is live; switching the connection off withdraws the grant and ends its tokens at the next request. On `polis.pub` a sign-in token is opaque, works for exactly one site (its `resource`), lasts one hour, and is renewed by a refresh token that rotates on use; reusing an old refresh token ends the whole family. A personal token is stored only as a hash. On `polis.pub` the owner is emailed whenever a connection is made, by sign-in or by a token made for an agent, with its name, scopes and a link to switch it off, so a connection someone else made in a borrowed session is seen outside the app. The old address is told, too, when the sign-in email changes. These mails carry facts, never a token |
+| **Residual risk** | ⚠️ **A personal token does not expire.** It works until the owner revokes it or switches its connection off. A stolen token is indistinguishable from the agent until then, and its acts carry the connection's marker as if the agent made them |
+
+### 7.23 Rogue or Impersonating Client at Registration
+
+| Aspect | Detail |
+|--------|--------|
+| **Attack** | A client registers on `polis.pub` claiming to be well-known software ("Claude Desktop"), hoping the owner approves it; or registers in bulk to fill storage or lock others out |
+| **Mitigation** | The consent page shows the client's name **as a claim** ("says it is…"), with the host its code will be sent to; the owner names the connection and picks its scopes, and nothing is granted without that approval. Redirects must match what the client registered exactly. A client's name is cleaned (control and formatting characters removed, at most 80 characters) before it becomes the grant's public `provider`. Registration is limited per caller first (Section 8.11), and a registration no owner approves expires after 7 days |
+| **Residual risk** | A client metadata document and a dynamic registration are both self-asserted: nothing proves who wrote the client. An owner who approves a client by its claimed name trusts that name |
+
+### 7.24 Runaway Agent
+
+| Aspect | Detail |
+|--------|--------|
+| **Attack** | An agent caught in a loop, or acting on a misunderstanding, publishes, comments or blesses far more than the owner wanted |
+| **Mitigation** | Each token has an hourly write budget on `/v1`, with a smaller one for deletes, answered past that with `429` and `Retry-After` (the numbers are in the [API reference](../../api/developer/reference.md#personal-tokens-and-grants); Section 8.11). Every write is in the site's private act log with its grant, and signed writes carry the marker, so the owner can find every act of one connection. Switching the connection off stops it at the next request |
+| **Residual risk** | Within its budget an agent can still publish, comment or bless far more than the owner meant, and those acts are validly signed. The budget is per process and starts again after a restart. The owner's own full-access token is not limited. Reaching the budget is not yet mailed to the owner: that notice waits on a per-connection pause |
+
 ---
 
 ## 8. Feature Security Analysis
@@ -670,7 +702,7 @@ it. Exhausting a recipient now takes many addresses. It is visible as `dm.delive
 |--------|-------------------|
 | **Local binding** | Webapp binds to `127.0.0.1` by default (localhost only) |
 | **Authentication** | No auth for local webapp (trusts local user); API keys for v1 REST API |
-| **API key storage** | Hashed with SHA-256 in `.polis/api-keys.json`. polis reads this file and never writes it — there is no key generator, so the key's format and the file's permissions are whatever the key holder chose (the [API reference](../../api/developer/reference.md#authentication) suggests a `polis_`-prefixed random token) |
+| **API key storage** | Hashed with SHA-256 in `.polis/api-keys.json`, mode `600`. The owner mints keys with the sign-in-only `POST /v1/agents/tokens`, which returns the plaintext once (a `polis_`-prefixed random token) and stores only its hash; a scoped key also records the URL of the grant it presents. A key made by hand has whatever format and permissions its maker chose (see [Section 1](#sha-256-api-key-hashing)) |
 | **CORS** | The v1 API sends no CORS headers, so browsers enforce same-origin. Public content endpoints allow any origin for `GET` |
 | **Body limits** | API enforces request body size limits |
 | **Static assets** | Embedded in binary via Go `embed` (no external file serving) |
@@ -719,6 +751,7 @@ Layer 1 rule on `pub.polis.dm` in the [policy grammar](../reference/policy-gramm
 | **Policy snapshot verification** | Snapshots policy file hashes and alerts once on any change; it compares hashes and knows nothing about blessings. Snapshots are kept per tenant in the Judge state directory |
 | **Index consistency** | Verifies `index.jsonl` entries match real signed files on disk; detects orphaned entries (indexed but missing), phantom files (on disk but not indexed), and hash mismatches |
 | **Cross-site comment verification** | Verifies the comments in the tenant's own comment directory (normally the tenant's own comments) against the key of the author each names, resolved through the author's published key history (fetched from the author's `.well-known/polis` via HTTPS); an unreachable author is reported, not counted as checked |
+| **Agent acts** | For every post, comment and blessing marked as a user agent's: the grant it cites is on the site, verifies and names that agent; it was signed while the grant stood; the grant allowed it; and a marked post or comment has its write in the site's act log. It alerts the operator and is never part of a site's published health, because the act log it partly rests on is private and unsigned. It cannot see an agent using the owner's full key, and signed times are the signer's own claim. `polis validate` runs the same check on any site |
 | **Signed-artifact checks** | Also verifies the identity-document snapshot, the messages-key signature, the follow file and blessing list signatures, served artifacts against disk, licence origin, key-history chain validity and head agreement, the signatures on attestation records (grants included), the licence, tag files and the operator's actor registry, each resolved through the site's key history, and reports signed fields the verifier does not recognise. Judge reports and never heals |
 | **State persistence** | Judge state survives restarts via a persistent volume |
 | **Observability** | All findings emitted as structured JSON events (`judge.sweep`, `judge.fail.*`, `judge.alert.*`, `judge.info.*`) to an observability backend for monitoring and alerting |
@@ -728,17 +761,94 @@ Layer 1 rule on `pub.polis.dm` in the [policy grammar](../reference/policy-gramm
 
 Rate limiting is enforced at every network boundary, returning `429` with a `Retry-After` header when a bucket is exhausted. Client IPs are resolved from the platform's trusted client-IP header rather than the spoofable left-most `X-Forwarded-For`, so limits cannot be evaded by forging forwarding headers.
 
-| Boundary | Scope | Representative limits |
+| Boundary | Scope | Limits |
 |----------|-------|-----------------------|
-| **DS — per IP** | All query + write endpoints | content-query 600/hr, stream 1200/hr, relationship-query 600/hr, sites-check 300/hr, write-preauth 120/hr |
-| **DS — per domain** | Authenticated writes | site-register 5/hr, content-register 50/hr, content-unregister 20/hr, relationship-update 50/hr, stream-publish 100/hr, key-rotate 5/hr; plus a quota of 2,000 new content rows per 30 days |
+| **DS — per IP** | All query + write endpoints, and a pre-auth budget in front of every write | per endpoint, in the [DS API reference](../../ds/developer/api-reference.md#ip-based-limits) |
+| **DS — per domain** | Authenticated writes, plus a quota on new content records | per endpoint, in the [DS API reference](../../ds/developer/api-reference.md#per-domain-limits), with the [quota](../../ds/developer/api-reference.md#per-domain-quotas) |
 | **Webapp — per IP** | Public content + structured-query endpoints | 1000/hr |
 | **Hosted — per IP** | Public site pages | 3000/hr |
 | **Hosted — per IP** | Signup / login / recover | 3/hr, plus per-email caps (recover 1/hr/email; export & email-change 1/10min) |
+| **Hosted — per code** | The 6-digit code in a login email, where agent sign-in is on | 5 tries, 10 minutes, one live code per email (a new email retires the old code); stored as an HMAC under a server secret, so a database reader cannot try the codes offline |
+| **Site API (`/v1`) — per token** | Writes by a personal token or an agent's sign-in token; the owner's full-access token is not limited | an hourly write budget, with a smaller one for deletes ([API reference](../../api/developer/reference.md#personal-tokens-and-grants)) |
+| **Site API (`/v1`) — per IP** | Calls carrying neither a token nor a site's signature | an hourly budget per address, shared across the sites one process serves ([API reference](../../api/developer/reference.md#personal-tokens-and-grants)) |
+| **Hosted — agent sign-in registration** | Anonymous client registration on `polis.pub`, where agent sign-in is on | 10 per caller an hour; past 300 in an hour, only a caller's first; past 3,000, none. IPv6 callers count by /64. Clients using a metadata document do not register |
 | **DM — per sender + global** | Inbound DM delivery, per recipient site, checked by the recipient after verification | 10/sender/hr, 100/hr global (configurable via `POLIS_DM_RATE_*`) |
 | **Hosted — per claimed sender + per tenant** | Inbound DM delivery at the hosting edge, **before** the recipient verifies anything | the same 10/sender/hr and 100/hr budgets (`POLIS_DM_RATE_*`) |
 
 Every DS write first passes the per-IP `write-preauth` budget, before its handler runs. The per-domain limits for site registration and unregistration, key rotation and relationship updates are then checked before any signature verification or outbound `.well-known/polis` fetch; content registration and stream publish check theirs after the signature verifies. A recipient's own DM rate checks run after the timestamp and signature checks (Section 7.14), so they bound what a verified sender may deliver rather than protecting against unverified floods. On `polis.pub` the hosting edge adds a budget in front of them, charged to the sender the request claims to be, with the trade-off stated in Section 7.14; a claimed sender that is not a well-formed domain name is refused there outright, before it can key anything. Their counters are in memory, per recipient site and per process, and start again after a restart. Memory is bounded first by the limiters themselves: each one drops expired counters as it goes, at a cost that stays flat however many distinct callers it has seen, and Reaper's periodic sweep of the hosted per-IP and per-email maps is the backstop behind that.
+
+
+### 8.12 Dependencies and Builds
+
+The CLI generates and holds people's signing keys, so a vulnerable dependency or a tampered build is an identity problem, not only a bug. This is what checks the code polis ships, as it runs today.
+
+| What | How | When |
+|------|-----|------|
+| **Known vulnerabilities in Go code** | `govulncheck`, against the Go vulnerability database. It reports only vulnerabilities in code polis can actually reach, and a reachable one refuses the deploy or release. Each Go module is scanned the way it is released (on its own, not through the development workspace) and under the Go toolchain that builds it, because the standard library's fixes arrive with the toolchain | Before every deploy of `polis.pub` and the discovery service, and before every release |
+| **Known vulnerabilities in the discovery service's dependencies** | `deno audit` against its lockfile | Before every discovery-service deploy, and before every release |
+| **Known vulnerabilities in the container images** | Grype, over the operating-system packages of the image actually built. The image is built first, scanned, and only then deployed, so what was scanned is what runs. A High or Critical finding with a fix available refuses the deploy; one with no fix yet is recorded | Before every deploy of `polis.pub` and the discovery service |
+| **Static security analysis of Go code** | `gosec`, through `golangci-lint`, both pinned like the scanners above. Any finding refuses the deploy or release until it is fixed or suppressed in the code with its reason beside it, including in code written before the check existed | Before every deploy of `polis.pub` and the discovery service, and before every release |
+| **Fuzzing** | Go's native fuzzing, over every parser that reads bytes from another site: PQL queries, policy rules, the six signed JSON types and the blessing list, `.well-known/polis`, direct-message envelopes; and the agent sign-in server's anonymous inputs (client registration, authorize and token requests), checked never to register a redirect it must refuse, redirect anywhere the client did not register, or issue a token from nothing. A differential target checks that what a post or comment's signer signed is exactly what every verifier rebuilds, since a disagreement there is either authentic content reported as tampered or a forgery. A crash refuses the deploy or release | Briefly (seconds per target) before every deploy of `polis.pub` and before every release |
+| **Release binaries** | The built binaries are scanned too. A binary scan counts every vulnerable function linked in, called or not, so its result is recorded with the release rather than refusing it | Every release |
+| **Credentials** | `gitleaks`, with an allow-list in which every entry records why it is safe. It runs over each push of the development repository, and over the public tree before each release is published. On the public repository, GitHub's secret scanning with push protection refuses a push that contains a credential it recognises | Every push, and every release |
+| **A weekly re-scan** | The Go vulnerability check, the static analysis, the fuzz targets (longer, 30 seconds each) and the discovery service's dependency audit also run once a week on the development repository, so a vulnerability published against code that has not changed is found without waiting for the next deploy. On the public repository, GitHub's Dependabot alerts report a vulnerable Go dependency | Weekly, and as advisories are published |
+
+**How versions are pinned.** Each Go module pins exact dependency versions, verified by checksum (`go.mod`, `go.sum`), and names the Go toolchain that builds it, so a build never silently uses an older or unpatched one. The discovery service's dependencies are locked (`deno.lock`) and installed with `--frozen`. The scanners themselves are pinned the same way. The container images `polis.pub` and the discovery service run are pinned by digest rather than by tag, on a supported base image release.
+
+**What this does not do.** A scan finds only vulnerabilities already in a database; it is not an audit. A fix reaches `polis.pub` only when it is deployed, and reaches a self-hosted site only when its owner upgrades: fixes go into the latest release only (see [SECURITY.md](SECURITY.md)). Release archives are published with SHA-256 checksums. From the first release that carries `checksums.txt.sig`, those checksums are **signed by the polis release key** (an SSH signature under the namespace `polis-release`), whose public half is published in the repository and pinned in the programs that download releases: the installer (`scripts/install.sh`), `polis-upgrade` and the code that fetches a remote instance's function build, each of which refuses a file the signed checksums do not name. A release made before then carries unsigned checksums, which show a download was not corrupted, not who built it. Each signed release also carries an SBOM (SPDX) per archive. The signature says who published a file, not how it was built: the build itself runs on the release machine and carries no build provenance.
+
+### 8.13 Agent Access and MCP
+
+An owner can connect an AI agent to their site. The agent uses the site's `/v1` API, directly or through tools generated from the API's own description (MCP), and what it writes is signed with the site's key, as the owner's own writes are. What keeps that safe is the **grant**: a signed statement on the owner's site of what one connection may do.
+
+**In brief.** An agent can do, as the owner and marked as itself, only what its grant's scopes cover: read the owner's site and network, publish and edit posts, write and edit comments, bless or turn away comments, follow and unfollow, restyle the site, change the name, avatar and bio, read the rules and tighten them, see that something happened and how the site is running. It can never read or send messages, tag, take a post down, state terms, rotate or download the key, or touch agents, tokens or sign-in. The threats, and where each control is described:
+
+| Threat | Controls | Where |
+|--------|----------|-------|
+| The agent does more than the owner allowed | The grant is re-resolved on **every** request, scope checked against the grant (not the token), fail closed, reads included; the description, and so the tool set, is filtered to the grant; owner-only and sign-in-only operations are never tools | The table below; [MCP and agent access](../../api/developer/mcp.md#grants-scopes-and-the-marker) |
+| Other people's text steers the agent (prompt injection) | A label in the server's instructions, on every read and in the `polis://guides/untrusted-content` guide; scopes bound what obeying it can do; tool hints let a client ask first | [7.21](#721-prompt-injection-through-other-peoples-content) |
+| A stolen token | One site, one grant, live check; sign-in tokens short-lived and rotating; connection emails on `polis.pub` | [7.22](#722-agent-token-theft-and-replay) |
+| A client that lies about who it is | Its name is shown as a claim and stored as a label; the owner names the connection and picks its scopes | [7.23](#723-rogue-or-impersonating-client-at-registration) |
+| A runaway agent | A write budget per token; the act log; one-click disconnect | [7.24](#724-runaway-agent), [8.11](#811-rate-limiting-and-abuse-prevention) |
+| An agent's act passed off as the owner's, or the reverse | The marker inside the signed bytes; a write that cannot carry it is not made; Judge and `polis validate` check every marked act | The table below, *Every act is marked* and *Checked after the fact* |
+| Guessing keys at an MCP endpoint | An instance's `/mcp` refuses, for a while, an address that keeps failing; `polis.pub`'s accepts only its own sign-in tokens, for that one site | [API reference](../../api/developer/reference.md#personal-tokens-and-grants) |
+
+**What the operator can see.** On `polis.pub` the operator holds the site's key ([Key Custody](#key-custody)), so it could sign anything an agent could, unmarked; the marker distinguishes the owner's agents from the owner, not the operator from either. The act log (`.polis/connections/acts.jsonl`) is the site's private file, which the operator stores like the rest of the site; the grants, being attestations, are public. An operator can switch every MCP server, agent sign-in, token writes and agent writes off at once, which only removes access and grants none.
+
+| Aspect | Security Property |
+|--------|-------------------|
+| **The grant is the permission** | Each connection has exactly one `pub.polis.attestation.grant` on the owner's site, signed by the owner's key, naming the connection, the behaviour set `agent/1` and its scopes, with basis `user-signed` ([delegation §2.1](../../signet/spec/delegation.md#21-connections-agents-the-owner-connects-to-the-api)). A token only points at its grant. Every request checks the grant is on the site, verifies (through the site's key history), is not withdrawn and holds the scope the operation needs; anything that cannot be established refuses, reads included |
+| **Two ways to connect** | A **personal token** is minted by the owner in their settings, which writes the grant first ([API reference](../../api/developer/reference.md#personal-tokens-and-grants)). On `polis.pub`, an agent can instead **sign in**: `polis.pub` is an OAuth authorization server, the owner signs in there (magic link or the 6-digit email code), approves on a consent page, and the grant is written when the agent exchanges the one-time code that approval gives it (an approval whose code is never used writes nothing). Both kinds of token are checked the same way |
+| **What a grant can hold** | Any scope in the vocabulary ([scopes](../../api/developer/reference.md#scopes)) except these. Never `full`. Never `tag`: tagging stays with the owner. No scope reaches direct messages. `follow` was added after the first grants were written; a grant names its scopes, so no earlier connection gained it, and an older key renewed into a grant drops it |
+| **Owner-only operations** | Minting and revoking keys; key rotation; downloading the site with its keys; stating licence terms; connecting, switching off or changing agents; reading messages and setting their password; adding or removing a way to sign in; signing out everywhere; changing the sign-in email. These sit outside every scope, and sending a message needs the owner's full token. A generated tool never offers them; the `how_do_i` tool gives the owner the steps instead. ⛔ Some are served on the owner's sign-in alone and to no token, the owner's full-access one included: downloading the site (the archive holds the private key), making a token (it would outlive the revocation of a leaked one that made it), rotating the key, and every change to the messages key (a leaked token could otherwise overwrite its wraps, locking the owner out of their messages, or swap in a key it knows and read what arrives after). On `polis.pub` the site serves no download at all: it is the operator's verified export |
+| **The owner's interface needs no token** | The site's own interface calls the same `/v1` on the owner's sign-in (the session, or loopback on a laptop), which counts as the owner's full access ([API reference](../../api/developer/reference.md#authentication)). Because a sign-in is a cookie the browser sends with any page's request, and on `polis.pub` every tenant is same-site with every other, a request from any other page (`Origin` another site's, or `Sec-Fetch-Site` other than `same-origin`/`none`) is refused as the owner, reads included. A request carrying a token is judged by the token alone |
+| **`policy:write` only tightens** | It may add `deny` rules at the top of the owner's private rules, and remove only rules the same grant added. It can never add `allow`, `bless` or `review` rules (`review` would turn a denial into a waiting comment), and never touches the owner's own rules. It is never granted by default, and the consent page warns about it |
+| **`notify` reveals no content** | It shows that something happened (a message from someone, a new follower, a comment waiting), with who and when, never what it said |
+| **Every act is marked** | A post or comment an agent writes carries `agent:` and `grant:` inside its signature; a blessing decision carries the marker in its signed request; a site an agent follows gets an entry in the signed follow list that carries the marker, and each blessing the follow causes is a marked request (an unfollow removes an entry and is recorded in the act log; the denials it causes are marked requests); a policy rule records the grant in `added_by`. Every write, signed or not, is recorded in the site's private act log. A write that cannot find its grant is refused rather than made unmarked |
+| **Agents act directly** | An agent's write takes effect at once; nothing waits for the owner's approval. Each generated tool declares whether it writes and whether it is destructive, and a client decides from that whether to ask the owner first |
+| **One connection, one site** | A sign-in token's audience is exactly one site's `/mcp` (RFC 8707); it is refused at any other site, including sites on the same server |
+| **The agent's name is a label** | The connection's name and the client's claimed name are shown, never trusted, and are public on the grant. The consent page says the client "says it is" what it claims |
+| **Checked after the fact** | On `polis.pub`, Judge checks every marked act each hour: a real grant, live when signed, within its scopes, and in the act log (Section 8.10). `polis validate` runs the same check on any site |
+| **Switching off** | The owner's settings list every connection, however it was made, with its scopes and when it last acted. Switching one off withdraws its grant first, so the connection is ended on the record, then revokes its tokens. The next request is refused |
+
+**The sign-in server on `polis.pub`.** It is built on [`authelia/oauth2-provider`](https://github.com/authelia/oauth2-provider) (pinned at v0.4.3) with our own sign-in, consent and storage, and supports only what MCP clients need:
+- the authorization-code flow with PKCE (S256 only; `plain` and requests without PKCE are refused);
+- client ID metadata documents (fetched through a guarded client that refuses private addresses) and dynamic registration (RFC 7591), both for public clients only;
+- exactly one `resource` per request, which must be a live site's `/mcp`;
+- `iss` in every authorization response (RFC 9207), and its metadata (RFC 8414);
+- opaque access tokens lasting one hour, refresh tokens that rotate and lapse after 30 days unused, and a code that lasts 60 seconds and works once (reusing it revokes what it issued).
+
+It refuses request objects (`request`, `request_uri`), the implicit and client-credentials flows, and token exchange. It runs only where its operator turns it on (on `polis.pub`, since 16 November 2026), and it needs a server secret of at least 32 bytes.
+
+**How the library was chosen.** Four libraries were read at source, and one prototyped, before choosing (November 2026):
+
+| Option | Verdict |
+|--------|---------|
+| Hand-written | The smallest surface and an exact fit, but every refusal would rest on our own tests alone |
+| `giantswarm/mcp-oauth` | Ruled out: it is built around an upstream identity provider, and has no hook for the owner choosing scopes at consent |
+| `ory/fosite` | Ruled out: no release in nearly two years, and none of client metadata documents, registration, `resource` or `iss` |
+| `zitadel/oidc` | Ruled out for now: centred on OpenID Connect, with the MCP parts present only as metadata fields |
+| **`authelia/oauth2-provider`** | **Chosen.** Maintained, and covers every MCP requirement in its code. A prototype passed the official MCP SDK client's full flow, per-site audiences (including sites created later), every refusal tested, refresh rotation, immediate revocation and `iss`. Its costs: it is large and pre-1.0 (its API can change between releases, so it is pinned and upgraded deliberately) and it requires Go 1.27 |
 
 ---
 
@@ -757,7 +867,10 @@ Every DS write first passes the per-IP `write-preauth` budget, before its handle
 | **No multi-signature** | No support for content requiring multiple signers | Multi-sig threshold signatures |
 | **No DM forward secrecy** | A compromised epoch key exposes every message in that epoch, with all peers; other epochs are unaffected. The Double Ratchet (Signal protocol) would address this but requires synchronized state incompatible with async delivery. | Double Ratchet protocol |
 | **DM metadata cleartext** | Sender/recipient domains, timestamps, and message sizes stored in cleartext for indexing. | Encrypt entire conversation files |
-| **Agent acts are self-declared** | A user agent signs with the user's key and marks its acts; the mark cannot prove an unmarked act was the user's own. The DS records and flags an act citing a withdrawn grant, but does not reject it | Agent's own live-grant check before signing; the DS's public flag (`grant_state`) as evidence |
+| **Agent acts are self-declared** | A user agent signs with the user's key and marks its acts; the mark cannot prove an unmarked act was the user's own. For an agent connected through the API, polis's own server does the marking and checks the grant is live before every write, so the gap is narrower there; but an agent holding the owner's full key, or the key itself, acts unmarked. The DS records and flags an act citing a withdrawn grant, but does not reject it | Agent's own live-grant check before signing; the DS's public flag (`grant_state`) as evidence |
+| **Prompt injection** | An agent may follow instructions written into other people's content, acting within its scopes with the owner's key (Section 7.21) | Fewest scopes; clients that ask before writing; the marker and the switch to undo the damage's source |
+| **Agent write budget is coarse** | A runaway agent is bounded by an hourly write budget per token, not by what the owner would want (Section 7.24) | A budget the owner sets per connection |
+| **Personal tokens do not expire** | A personal token works until revoked (Section 7.22) | An expiry the owner chooses at minting |
 
 ---
 
@@ -822,6 +935,24 @@ Integration with hardware security modules (HSMs) or hardware keys:
 
 | Date | Change |
 |------|--------|
+| 2026-11-24 | Sections 1 and 8.6: a key is made with the sign-in-only `POST /v1/agents/tokens`, not the retired `/api/keys` routes. Section 8.12: the installer verifies the signed checksums too |
+| 2026-11-24 | Sections 7.8, 7.13, 7.24, 8.11 and 8.13: the discovery service's and the site API's rate-limit numbers are stated once, in their API references, and linked from here rather than repeated |
+| 2026-11-24 | Section 8.13: an at-a-glance summary of what an agent can and cannot do, each threat against its controls (cross-referenced with 7.21–7.24 and 8.11), and what the operator can see; agent sign-in is on at `polis.pub` |
+| 2026-11-18 | Section 8.13: every change to the messages key (set or change the password, a fresh key, re-wrapping an earlier key) takes the owner's sign-in alone, never a token |
+| 2026-11-17 | Section 8.13: the owner-only actions are `/v1` operations, and three of them (downloading the site, making a token, rotating the key) take the owner's sign-in alone, never a token; `polis.pub` serves no download, only its verified export |
+| 2026-11-15 | Judge checks that every agent act adds up, and `polis validate` runs the same check (Sections 8.10, 8.13) |
+| 2026-11-15 | The site API has rate limits: a write budget per token and a per-address budget for calls without one (Sections 7.13, 7.24, 8.11, 9) |
+| 2026-11-15 | Added Section 8.13, Agent Access and MCP (the grant as the permission, personal tokens and the `polis.pub` sign-in server, what a grant can hold, the marker, switching off, and how the sign-in library was chosen), attack vectors 7.21–7.24 (prompt injection, token theft, rogue clients, runaway agents), the registration limit in 8.11, three Known Limitations, and corrected 7.13 on rate limiting |
+| 2026-11-15 | Login emails can carry a 6-digit code beside the link, where agent sign-in is on; its limits are in the rate-limit table |
+| 2026-11-15 | Added Section 8.12, Dependencies and Builds: what is scanned (vulnerabilities in Go and discovery-service dependencies, release binaries, credentials), when, how versions and images are pinned, and what that does not cover |
+| 2026-11-15 | Section 8.12: the container images are scanned before every deploy |
+| 2026-11-15 | Section 8.12: static security analysis (gosec) of Go code |
+| 2026-11-15 | Section 8.12: fuzzing of the parsers that read other sites' bytes |
+| 2026-11-15 | Section 8.12: release checksums are signed by a pinned release key from the first release that carries a signature, and each signed release carries an SBOM |
+| 2026-11-15 | Section 8.12: fuzzing covers the agent sign-in server's registration, authorize and token requests |
+| 2026-11-15 | Section 8.12: static analysis holds all Go code to the check, including code written before it existed |
+| 2026-11-15 | Section 8.12: a weekly re-scan, Dependabot alerts, and secret scanning with push protection on the public repository |
+| 2026-11-14 | A scoped API key is a personal token presenting the owner's signed grant for one connection; requests check the grant is live and writes carry its marker (Section 1). Corrected Section 8.6, which said polis never writes the key file |
 | 2026-09-15 | The DS no longer decides blessings: comment registration is always pending, and the post author's own software (or a user agent under the author's grant) decides and signs. `thread-blessed` is resolved by the post author's site. Updated Sections 5, 7, 8.3, 9, 10 |
 | 2026-09-13 | Key-holder accuracy pass: the intro no longer says content is signed with "the author's" key or that the document covers "the entire polis system" — it documents the protocol and its reference implementation, and states that a signature proves the site's key, not who held it. Added **Key Custody** (Section 2) and **What a Signature Does Not Tell You** (Section 5); reworded the Section 4 verification outcomes and Section 8 authorship rows to name the key rather than the author. Section 7.2 now states that anyone holding a copy of a key can rotate first and that the discovery service accepts the first valid rotation. Split Section 7.12's "user responsibility" into what the protocol does and what a backup implies. Added the "a key is not bound to a person" limitation and reframed "single key per site" (Section 9). Corrected three statements made stale by later work: `did:web` and key history (Section 3), `following.json` signing (Section 5), and `.old` key backups (Section 10) |
 | 2026-05-24 | Accuracy pass: removed the stale "no rate limiting" limitation and added Section 8.11 documenting the actual per-IP / per-domain / per-sender rate-limiting posture (DS, webapp, hosted, DM); marked the Key Rotation Protocol implemented (Section 10) and reflected `polis rotate-key` + DS-enforced transition signatures across attack vectors 7.2/7.3/7.8 and the key-revocation/pinning limitations; clarified that self-signing `.well-known/polis` does not mitigate key substitution (pinning / TOFU is the direction); removed the "public following lists" limitation (a by-design privacy property already documented in §8.4, not a security gap); credited DM index-preview encryption at rest across §7.16/§7.19/§8.8 (only structural routing metadata remains cleartext) |

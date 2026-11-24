@@ -28,6 +28,13 @@ func TestNoOperatorWritesAMarkerAndNoRosieActLacksOne(t *testing.T) {
 		"cli-go/pkg/blessing/grant.go":    true, // the shared helper; unmarked callers pass the zero marker
 		"cli-go/pkg/discovery/client.go":  true,
 		"webapp/internal/server/rosie.go": true,
+		// ⭐ An agent's blessing decision over the API: the live grant comes
+		// from the request's slot, which only the token check fills, with a
+		// grant only the resolver can construct.
+		"webapp/internal/server/handlers.go": true,
+		// ⭐ A follow or unfollow an agent made: the marker is the one ops
+		// read from the request's slot (zero for the owner's own), passed in.
+		"cli-go/pkg/following/social.go": true,
 	}
 
 	for _, root := range roots {

@@ -28,7 +28,7 @@ set -eo pipefail
 #   4. Hardcoded defaults
 
 # Fixed constants (never configurable - required for discovery)
-VERSION="0.70.0"
+VERSION="0.71.0"
 WELL_KNOWN_DIR=".well-known"
 WELL_KNOWN_FILE="polis"
 
@@ -6493,6 +6493,16 @@ cmd_post() {
     }
     trap cleanup_stdin EXIT ERR
 
+    # REFUSE a source that states its own licence terms, for the reason
+    # republish does (frontmatter_has_license): this CLI would publish the post
+    # without them, and the author's per-work terms would be silently dropped.
+    # Checked before the already-published test so a file source is told why,
+    # and on stdin, where that test is skipped.
+    if frontmatter_has_license "$input_file"; then
+        json_error "post" "UNSUPPORTED_CONTENT" \
+            "This source states licence terms, which this CLI cannot publish. Posting it here would drop them. Use the Go CLI: polis post <file>"
+    fi
+
     # Check if file already has frontmatter (already published)
     # Skip this check for stdin mode as stdin content is always new
     if [ "$stdin_mode" = false ] && has_frontmatter "$input_file"; then
@@ -7721,10 +7731,15 @@ read_active_theme() {
     fi
 }
 
-# Write the active theme name into the registry (FQN-qualified).
+# Write the active theme name into the registry (FQN-qualified). Takes the
+# short name or the fully-qualified one; a qualified name is not prefixed again.
 write_active_theme() {
     local theme_name="$1"
-    local fqn="pub.polis.themes.$theme_name"
+    local fqn
+    case "$theme_name" in
+        pub.polis.themes.*) fqn="$theme_name" ;;
+        *) fqn="pub.polis.themes.$theme_name" ;;
+    esac
     if [ ! -f "$REGISTRY" ]; then
         # Bootstrap a minimal registry if missing (init usually creates it).
         mkdir -p "$(dirname "$REGISTRY")"

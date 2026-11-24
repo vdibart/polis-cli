@@ -20,12 +20,15 @@ polis.pub (root domain)
   /recover, /legal/*, /for/*, /llms.txt, widget and nav scripts, /health
 
 {handle}.polis.pub (tenant subdomain)
-  /_/ , /_/*             Owner SPA (session must match handle; otherwise a login page or a
-                         redirect to the public equivalent) with __POLIS_HOSTED=true injected
+  /_/ , /_/*             The v5 owner app (session must match handle; otherwise polis.pub's
+                         sign-in, or a redirect to the public equivalent)
   /v1/wake               Wake the tenant's server (public, 204)
-  /v1/*                  Tenant server's public protocol routes
-  /api/*, /pql/*         Authenticated API (session cookie must match handle) — except the
-                         public stream and PQL reads and /api/capabilities, which need no session
+  /v1/*                  The site's API, forwarded to the tenant server, which authenticates
+                         each request itself (session, token, or a signed DM delivery)
+  /api/*, /pql/*         What remains under /api/ (sign-in, enrolment, recovery, the widget's
+                         routes, polis.pub's account and export routes) and owner-private PQL:
+                         session must match handle — except the stream shape's two public reads,
+                         public PQL and /api/capabilities, which need no session
   /*                     The tenant's published site, served from its data directory
 ```
 
@@ -40,7 +43,7 @@ All hosted service code lives in `webapp/internal/hosted/`:
 | `hosted.go` | `HostedService` struct, top-level HTTP routing, SPA serving, tenant handler loading |
 | `handlers.go` | Auth handlers (signup, login, verify, logout), site provisioning logic |
 | `store.go` | Postgres persistence; the service refuses to start without a Postgres `DATABASE_URL` (`hosted_tenants`, `hosted_sessions`, `hosted_magic_links`, `hosted_widget_tokens`, `hosted_pending_blessings`, `hosted_email_history`) |
-| `email.go` | Resend API client for transactional email (magic links) |
+| `email.go` | Resend API client for transactional email: magic links, sign-in codes, and the notices an owner is sent (an agent connected, a passkey added or removed, the old address told when the sign-in email changes), each with a plain-text part |
 | `tenant_cache.go` | Per-tenant handler cache with double-checked locking and LRU eviction (500 tenants); holds each tenant's wake callback |
 | `landing.go` | Landing page HTML and JS, generated (the share image is in `landing_assets.go`) |
 | `follow.go` | Embedded follow page HTML (`{{AUTHOR}}` placeholder replaced at serve time) |
@@ -58,7 +61,7 @@ internal/server/           <--  hosted/hosted.go (loadTenantHandler)
 internal/webui/            <--  cmd/hosted/main.go (embedded SPA assets)
 ```
 
-The hosted service imports the same `server.NewServer()` used by the standalone webapp. Each tenant gets its own `Server` instance with `dataDir` set to `{DATA_DIR}/tenants/{handle}`. The tenant server handles `/api/*`, `/pql/*` and `/v1/*`; the published site and the SPA assets are served by the hosted service directly (the published site from the tenant's data directory, the SPA from the shared embedded filesystem).
+The hosted service imports the same `server.NewServer()` used by the standalone webapp. Each tenant gets its own `Server` instance with `dataDir` set to `{DATA_DIR}/tenants/{handle}`. The tenant server handles `/v1/*`, `/pql/*` and what remains of `/api/*`; the published site and the owner app's assets are served by the hosted service directly (the published site from the tenant's data directory, the owner app from the shared embedded filesystem).
 
 ## Tenant Lifecycle
 
@@ -80,7 +83,7 @@ The hosted service imports the same `server.NewServer()` used by the standalone 
 `License`, so a new tenant publishes no `license.json`, no `robots.txt` and no `rsl.xml` — byte-identical
 to a site created before terms shipped. Signup does not prompt for terms either: licence vocabulary
 mid-registration is a bounce risk, and a signed statement of intent may only come from the author.
-Tenants set terms afterwards in **Settings → Terms of use**. Do not "fix" this by applying a default.
+Tenants set terms afterwards in the owner app, under **enhance → Terms of use**. Do not "fix" this by applying a default.
 
 ### Login
 
@@ -101,9 +104,9 @@ Tenants set terms afterwards in **Settings → Terms of use**. Do not "fix" this
 When a request arrives at `{handle}.polis.pub`:
 
 - **Public paths** (`/`, `/posts/...`, etc.): The tenant's rendered site is served from its data directory, rate-limited per IP. A signed-in visitor from another tenant gets the nav widget injected.
-- **Owner SPA** (`/_/`): served from the shared embedded filesystem when the session's handle matches the subdomain; the HTML gets a nonce-bearing `<script>` setting `window.__POLIS_HOSTED=true` and `window.__POLIS_BASE_DOMAIN`. Without a matching session, `/_/` shows the tenant login page and deeper SPA paths redirect.
-- **API paths** (`/api/*`, and `/pql/*` owner queries): The `polis_session` cookie is validated -- the session must exist, be non-expired, and its handle must match the subdomain. If valid, the request is forwarded to the tenant's cached `server.Server` handler. If not, a 401 JSON error is returned. The public stream reads (`/api/v1/stream/focus-comment` and `/api/v1/stream/body`) and public PQL queries skip the session check. So does the capability descriptor, `/api/capabilities`: a third party reads it to learn how to talk to the site, and a `401` there would read as "this site has no API". (`/api/v1/stream/items` was retired when the stream moved to PQL; its data path is `GET /pql/<sentence>`.)
-- **Protocol paths** (`/v1/*`): forwarded to the tenant's server without a session.
+- **Owner app** (`/_/`): every tenant's owner app is the v5 app, whatever its shape, served from the shared embedded filesystem (`server.ServeV5Owner`, the same code every instance uses) when the session's handle matches the subdomain. Without a matching session, `/_/` redirects to polis.pub's own sign-in (there is no per-site login page), a path that names a published post or comment goes to that public page, and anything deeper goes to the site's root. A signed-in visitor at another tenant's `/_/` is sent to the same place on their own site.
+- **`/api/*` and owner-private `/pql/*`**: the `polis_session` cookie is validated -- the session must exist, be non-expired, and its handle must match the subdomain. If valid, the request is forwarded to the tenant's cached `server.Server` handler. If not, a 401 JSON error is returned. What a tenant's server still serves under `/api/` is sign-in, sign-out, enrolment and recovery, the capability descriptor and the widget's token-authorised routes; anything else answers `404`. polis.pub's account and export routes (`/api/account/*`, `/api/export/*`) are answered by the hosted service itself. Two reads the stream shape's public pages call (`/api/v1/stream/focus-comment` and `/api/v1/stream/body`) and public PQL queries skip the session check. So does the capability descriptor, `/api/capabilities`: a third party reads it to learn how to talk to the site, and a `401` there would read as "this site has no API".
+- **The site's API** (`/v1/*`): forwarded to the tenant's server without a session check here; the API layer authenticates each request itself (the owner's session, a token, or a signed DM delivery).
 
 Tenant handlers are lazily loaded and cached in `TenantCache` (LRU, 500 entries; an evicted tenant's sync goroutine is stopped). Use `Cache.Invalidate(handle)` to force reload after config changes.
 
@@ -112,6 +115,15 @@ Tenant handlers are lazily loaded and cached in `TenantCache` (LRU, 500 entries;
 - Sessions use 32-byte cryptographically random tokens (hex-encoded), stored as rows in `hosted_sessions`. Nothing is signed with a server secret: a session is valid only while its row exists and is unexpired, so deleting rows revokes sessions.
 - Magic links expire after 15 minutes and are single-use.
 - The `polis_session` cookie is `HttpOnly`, `Secure`, `SameSite=Lax`, scoped to `.polis.pub`.
+- A request carrying more than one `polis_session` cookie is treated as signed out, and logged as
+  `pub.polis.security.cookie_tossing`. A second cookie of that name can only have been set by another page under
+  `.polis.pub`, so neither is trusted.
+- No tenant can serve script from its subdomain. Every tenant is the same site as every other and shares the
+  `.polis.pub` cookies, so a tenant's own `.js` or `.svg` could reach its visitors' sessions and widget tokens. The
+  tenant pages' Content-Security-Policy allows script only from the tenant's own origin and `polis.pub`, and no
+  write a tenant can make produces a `.js` or `.svg` file in its directory; a test drives every write path to check.
+- The listener (hosted and self-hosted alike) drops a client that takes more than 10 seconds to send its request headers, and closes idle
+  keep-alive connections after 120 seconds, so a slow client cannot hold connections open.
 - API requests require the session handle to match the subdomain -- a user authenticated as `alice` cannot call the API on `bob.polis.pub`.
 - Because the cookie is scoped to `.polis.pub`, every tenant is the same *site* as every other, and `SameSite=Lax` does not stop one tenant's page sending a request to another's API. So a state-changing `/api/*` request whose `Origin` is not the tenant's own, or whose `Sec-Fetch-Site` is anything but `same-origin` or `none`, is refused with `403` before the session is read. The widget routes (`/api/widget/*`, other than `connect` and `token`) are exempt: they authenticate with a widget token, never the cookie.
 - Handle validation rejects reserved subdomains — every 1–3 character handle (`www`, `api`, `ds`, `app`, `ftp` …) plus named ones such as `admin`, `auth`, `static`, `assets`, `discover`, `validate`, `help`, `about`, `blog`, `mail`, `smtp` (`handle_policy.go`).
@@ -138,9 +150,9 @@ Anyone can call it, for any tenant. What a call can cost, and the two defences t
 - **A cold load: the per-client limit.** A call for a tenant that is not in the cache loads its server, which starts its sync goroutine and can evict another tenant from the cache (500 entries). This is the expensive part, and the **per-client limit** bounds it: 60 wakes per minute per client address, across all tenants, checked before the cache is touched (`wake_limit.go`). A refusal logs `rate_limit.hit` with `scope: wake`.
 - **A sync cycle: the per-tenant cooldown.** Every accepted call asks for one, and each cycle calls the discovery service. `TriggerSync` merges only wakes that arrive while a sync is still queued, and an empty sync takes about 42 ms, so on its own it merges almost nothing: on 2026-09-27, 70 wakes from one address ran 56 empty sync cycles in eight seconds. So a tenant has a **wake cooldown of 30 seconds** (`wakeSyncCooldown`, `wake_limit.go`): a wake triggers a sync only if no wake has triggered one for that tenant in the last 30 seconds. A wake inside the cooldown is not dropped; one sync runs when the cooldown ends, and every wake before then joins it. The cooldown belongs to the tenant, not to an address, so it holds however many addresses call: at most two wake syncs a minute per tenant.
 
-The cooldown starts only from syncs that wakes triggered, not from the regular 30-second sync, which would otherwise swallow every wake for a tenant with a browser tab open. A wake is deferred rather than dropped because that regular sync runs only while a tab is connected: for an idle tenant, a dropped wake would wait for the next wake.
+The cooldown starts only from syncs that wakes triggered, not from the other syncs a tenant runs (at start, after a write, and when the owner reads their network and the last sync is more than two minutes old), which would otherwise swallow wakes for a tenant in use. A wake is deferred rather than dropped because no timer syncs a site: for an idle tenant, a dropped wake would wait for the next wake or the owner's next read.
 
-Neither defence holds back the DS in practice. Its own limit, one wake per domain per 30 seconds, already spaces its wakes a cooldown apart, and a wake deferred by the cooldown arrives at most 30 seconds late, the same as the regular sync interval. That DS limit is not itself a defence here: it constrains only the wakes the DS sends, not anyone calling `/v1/wake` directly.
+Neither defence holds back the DS in practice. Its own limit, one wake per domain per 30 seconds, already spaces its wakes a cooldown apart, and a wake deferred by the cooldown arrives at most 30 seconds late. That DS limit is not itself a defence here: it constrains only the wakes the DS sends, not anyone calling `/v1/wake` directly.
 
 The per-client limit is set from the observed rate of legitimate wakes, which all come from the DS and so from one address. Over 2026-08-26 to 2026-09-27 Axiom shows 2 `wake.received` events in total (peak 2 in one minute, 1 per tenant), and every DS registration that could trigger a wake peaked at 34 in one minute, so 60 leaves headroom without refusing the DS. `POLIS_WAKE_RATE_PER_CLIENT` overrides it if the DS's wake volume grows; watch for `rate_limit.hit` with `scope: wake` from the DS before raising it.
 
@@ -148,7 +160,7 @@ The client address is the one every hosted limiter uses (`clientIP`): the visito
 
 ### Self-hosted sites
 
-Self-hosted polis sites do not implement `/v1/wake` (the standalone webapp registers no such route). The DS tolerates 404 and connection refused responses. No configuration is needed — sites that don't support the endpoint continue to discover events through their regular polling cycle (every 30 seconds while a browser tab is connected).
+Self-hosted polis sites do not implement `/v1/wake` (the standalone webapp registers no such route). The DS tolerates 404 and connection refused responses. No configuration is needed — sites that don't support the endpoint discover events when they sync: at start, after a write, and when the owner reads their network (the owner app, an agent over `/v1/query` or MCP) and the last sync is more than two minutes old.
 
 ---
 

@@ -1,0 +1,13 @@
+<!--
+    v5 shape · about.html — the site's profile (spec 2.5, at /about): the
+    owner's name and bio (the mark and handle are the top bar's, which
+    lead here, so the card does not repeat them), then what a reader can check for themselves (the
+    facts render writes: the terms, the key, the site's other name). Always open and
+    still: a click does nothing to it, so it shows no rollover (spec 1.5).
+-->
+<article class="item about still open" data-path="/about">
+  <div class="stick" aria-hidden="true"><div class="srow"><div class="sin"><span class="sdate"></span><span class="sttl">{{name}}</span></div></div></div>
+  <h1 class="name">{{name}}</h1>
+  <div class="bio">{{bio}}</div>
+  <div class="facts">{{facts}}</div>
+</article>

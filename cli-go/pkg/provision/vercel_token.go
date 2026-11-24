@@ -67,7 +67,7 @@ type tokenRenewal struct {
 // token most recently handed over and then any earlier ones not yet revoked,
 // space-separated. ⭐ An id is not a credential; it is how a renewal in a later
 // process knows which token it replaces. The instance never reads it.
-const deployTokenIDSetting = "POLIS_DEPLOY_TOKEN_ID"
+const deployTokenIDSetting = "POLIS_DEPLOY_TOKEN_ID" //nolint:gosec // G101: a setting's or path's name, not a credential
 
 // IssueDeployToken mints a project-only token for inst with the provisioner's
 // own credential and sets it as the write-only setting the instance adopts.

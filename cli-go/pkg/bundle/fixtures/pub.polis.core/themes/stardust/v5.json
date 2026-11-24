@@ -1,0 +1,27 @@
+{
+  "note": "stardust: back to Bowie (revisited 2026-11-16). Ziggy and Aladdin Sane: stage-light silver,\nthe bolt's red and electric blue, glam gold, and glitter. Cool and loud where Elwood is warm and literary.",
+  "tokens": {
+    "site": "#2b4ea2",
+    "bg": "#f3f1f6",
+    "surface": "#ffffff",
+    "card-hover": "#faf9fc",
+    "panel": "#e6e2ee",
+    "text": "#221d2e",
+    "text-soft": "#48425a",
+    "text-muted": "#625c72",
+    "ink": "#ffffff",
+    "wordmark": "#2b4ea2",
+    "accent-2": "#b8860b",
+    "rollover-color": "#d4302f",
+    "heading-color": "#c4282a",
+    "heading-weight": "bold",
+    "font-heading": "Space Grotesk",
+    "mark": "#d4302f",
+    "mark-style": "split",
+    "mark-2": "#2b4ea2",
+    "mark-ink": "#ffffff",
+    "texture": "glitter",
+    "texture-colors": "#d4302f, #2b4ea2, #b8860b",
+    "texture-strength": "faint"
+  }
+}

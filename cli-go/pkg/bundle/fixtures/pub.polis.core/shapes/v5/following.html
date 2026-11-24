@@ -1,0 +1,18 @@
+<!--
+    v5 shape · following.html — the sites this site follows, one card (spec
+    2.5's following view). Its list is the site's own follow file, and the
+    card says so (and that it is signed, only when it is: render decides
+    the sentence). Always open and still, like about.
+
+    The controller draws it from the view's JSON: render puts this template
+    and person.html into index.html as <template>s with ⟪name⟫ slots, and
+    /v5.js fills each slot with an escaped value. So the card's markup lives
+    here, once, and never in the script.
+-->
+<article class="item people still open" data-path="{{path}}">
+  <div class="stick" aria-hidden="true"><div class="srow"><div class="sin">{{mark}}<span class="sdate">{{count}}</span><span class="sttl">Who {{site_name}} reads</span></div></div></div>
+  <div class="hd">{{mark}}<span class="hh">{{count}}</span></div>
+  <h3>Who {{site_name}} reads</h3>
+  <p class="sum">{{sum}}</p>
+  <div class="rows">{{rows}}</div>
+</article>

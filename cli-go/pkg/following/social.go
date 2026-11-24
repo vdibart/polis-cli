@@ -105,6 +105,22 @@ func registrationSite(site storage.Site, cfg []*FollowConfig) storage.Site {
 }
 
 func FollowWithBlessing(site storage.Site, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy, cfg ...*FollowConfig) (*FollowResult, error) {
+	return FollowWithBlessingMarked(site, authorURL, discoveryClient, remoteClient, privKey, policies, discovery.AgentMarker{}, cfg...)
+}
+
+// FollowWithBlessingMarked is FollowWithBlessing as a user agent's act under
+// the owner's grant: the new follow-list entry carries the marker inside the
+// list's signature, and each blessing the follow causes goes to the discovery
+// service as a marked relationship request. The zero marker is the owner's own
+// follow, byte for byte what FollowWithBlessing writes.
+//
+// ⛔ The marker comes from the act (the request's live grant), never from a
+// file. ⚠️ The follow.announced stream event stays unmarked: it is a delivery
+// notice, not the record; the signed follow list is the record.
+func FollowWithBlessingMarked(site storage.Site, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy, marker discovery.AgentMarker, cfg ...*FollowConfig) (*FollowResult, error) {
+	if (marker.Agent == "") != (marker.Grant == "") {
+		return nil, fmt.Errorf("an agent marker needs both agent and grant")
+	}
 	result := &FollowResult{
 		AuthorURL:       authorURL,
 		BlessedComments: []string{},
@@ -123,7 +139,7 @@ func FollowWithBlessing(site storage.Site, authorURL string, discoveryClient *di
 		return nil, err
 	}
 
-	added := f.Add(authorURL)
+	added := f.AddMarked(authorURL, marker.Agent, marker.Grant)
 	if !added {
 		result.AlreadyFollowed = true
 	}
@@ -194,7 +210,7 @@ func FollowWithBlessing(site storage.Site, authorURL string, discoveryClient *di
 			}
 			decision, matched := policy.EvaluateExplicit(policies, evt, ctx)
 			if matched && (decision == policy.Bless || decision == policy.Allow || decision == policy.Emit) {
-				if err := discoveryClient.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "grant", privKey); err != nil {
+				if err := discoveryClient.UpdateRelationshipMarked("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "grant", marker, privKey); err != nil {
 					result.CommentsFailed++
 					continue
 				}
@@ -207,7 +223,7 @@ func FollowWithBlessing(site storage.Site, authorURL string, discoveryClient *di
 		// Pass the per-tenant config so the announce uses this tenant's
 		// BaseURL/DataDir instead of the shared package globals (which are
 		// corrupted across tenants in the hosted process).
-		stream.PublishEvent("pub.polis.follow.announced", map[string]interface{}{
+		_ = stream.PublishEvent("pub.polis.follow.announced", map[string]interface{}{ // non-fatal, as above: the follow is already saved
 			"target_domain": discovery.ExtractDomainFromURL(authorURL),
 		}, privKey, streamConfig(site, cfg))
 	} else {
@@ -227,6 +243,17 @@ func FollowWithBlessing(site storage.Site, authorURL string, discoveryClient *di
 // granted blessings against policies. Blessings that no longer match an emit/allow
 // rule (because the author is no longer followed) get denied.
 func UnfollowWithDenial(site storage.Site, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy, cfg ...*FollowConfig) (*UnfollowResult, error) {
+	return UnfollowWithDenialMarked(site, authorURL, discoveryClient, remoteClient, privKey, policies, discovery.AgentMarker{}, cfg...)
+}
+
+// UnfollowWithDenialMarked is UnfollowWithDenial as a user agent's act. ⚠️
+// Removing an entry leaves no entry to carry the marker, so the unfollow
+// itself is recorded in the site's act log by the host; each denial it causes
+// goes to the discovery service as a marked relationship request.
+func UnfollowWithDenialMarked(site storage.Site, authorURL string, discoveryClient *discovery.Client, remoteClient *remote.Client, privKey []byte, policies []policy.Policy, marker discovery.AgentMarker, cfg ...*FollowConfig) (*UnfollowResult, error) {
+	if (marker.Agent == "") != (marker.Grant == "") {
+		return nil, fmt.Errorf("an agent marker needs both agent and grant")
+	}
 	result := &UnfollowResult{
 		AuthorURL: authorURL,
 	}
@@ -282,7 +309,7 @@ func UnfollowWithDenial(site storage.Site, authorURL string, discoveryClient *di
 			// If no emit/allow rule matches, deny the blessing
 			if !matched || decision == policy.Deny || decision == policy.Omit {
 				result.CommentsFound++
-				if err := discoveryClient.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "deny", privKey); err != nil {
+				if err := discoveryClient.UpdateRelationshipMarked("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "deny", marker, privKey); err != nil {
 					result.CommentsFailed++
 					continue
 				}
@@ -293,7 +320,7 @@ func UnfollowWithDenial(site storage.Site, authorURL string, discoveryClient *di
 		// Emit unfollow event to discovery stream (DS write — non-fatal).
 		// Per-tenant config (see FollowWithBlessing) keeps the announce off the
 		// shared package globals.
-		stream.PublishEvent("pub.polis.follow.removed", map[string]interface{}{
+		_ = stream.PublishEvent("pub.polis.follow.removed", map[string]interface{}{ // non-fatal, as above: the unfollow is already saved
 			"target_domain": discovery.ExtractDomainFromURL(authorURL),
 		}, privKey, streamConfig(site, cfg))
 	} else if !registered {

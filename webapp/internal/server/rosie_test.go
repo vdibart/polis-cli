@@ -432,21 +432,3 @@ func TestRosiesOwnEchoLeavesTheListSignedAndMarked(t *testing.T) {
 		t.Fatalf("list status after the echo = %s", st)
 	}
 }
-
-// D11: Settings renders the ONE source text.
-func TestSettingsServesTheOneRosieText(t *testing.T) {
-	s, _ := rosieServer(t, "bless pub.polis.comment from all")
-	rec := httptest.NewRecorder()
-	s.handleSettings(rec, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
-	var resp struct {
-		Rosie struct {
-			Text agent.Text `json:"text"`
-		} `json:"rosie"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatal(err)
-	}
-	if resp.Rosie.Text != agent.RosieText {
-		t.Fatalf("settings text = %+v, want agent.RosieText", resp.Rosie.Text)
-	}
-}

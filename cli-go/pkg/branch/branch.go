@@ -215,7 +215,7 @@ func Run(opts Options) (*Result, error) {
 	// ⭐ Stage beside the output, so the finished directory lands by rename on
 	// the same filesystem. Removed on every exit, which is what removes the
 	// unpacked copy of the exported key.
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil { //nolint:gosec // G301: the parent of the output the owner named; the staging directory inside it is MkdirTemp's 0700
 		return nil, fmt.Errorf("create the output's parent directory: %w", err)
 	}
 	removeStaleStaging(filepath.Dir(target))
@@ -630,7 +630,7 @@ func copySite(in, out string, withResidue bool) ([]string, error) {
 			left[kind] = true
 			return nil
 		}
-		data, err := os.ReadFile(p)
+		data, err := os.ReadFile(p) //nolint:gosec // G304: a file inside the export the owner named, walked from its root
 		if err != nil {
 			return fmt.Errorf("read %s from the export: %w", key, err)
 		}
@@ -874,13 +874,13 @@ func unzip(archive, dir string) error {
 		if err != nil {
 			return err
 		}
-		w, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		w, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: a destination inside the staging directory, from a checked archive name
 		if err != nil {
-			rc.Close()
+			_ = rc.Close() // the open failed; that error is the one returned
 			return err
 		}
 		n, cerr := io.Copy(w, io.LimitReader(rc, maxExportBytes-written+1))
-		rc.Close()
+		_ = rc.Close() // read side
 		written += n
 		if cerr == nil && written > maxExportBytes {
 			cerr = fmt.Errorf("the export unpacks to more than %d bytes; refusing it", maxExportBytes)
@@ -933,7 +933,7 @@ func writeArchive(dir, target string) error {
 		if err != nil {
 			return err
 		}
-		f, err := os.Open(p)
+		f, err := os.Open(p) //nolint:gosec // G304: a file this walk found under the site
 		if err != nil {
 			return err
 		}
@@ -947,7 +947,7 @@ func writeArchive(dir, target string) error {
 	if err == nil {
 		err = tmp.Close()
 	} else {
-		tmp.Close()
+		_ = tmp.Close() // the write already failed; that error is the one returned
 	}
 	if err != nil {
 		return fmt.Errorf("write the archive: %w", err)

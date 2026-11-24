@@ -39,7 +39,7 @@ func handleClone(args []string) {
 		fmt.Fprint(fs.Output(), cloneUsage)
 		fs.PrintDefaults()
 	}
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 	remaining := fs.Args()
 	if len(remaining) < 1 {

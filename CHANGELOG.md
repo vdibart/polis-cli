@@ -5,6 +5,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.71.0] - 2026-11-24
+
+The first **signed** release, and the release where **v5** becomes polis's shape and owner app. Every release from this one on signs its `checksums.txt` with the polis release key, and attaches an SBOM for every archive; `install.sh`, `polis-upgrade` and a remote instance all verify that signature before they install anything. A new site starts on the v5 shape, and `polis serve`'s owner app is the v5 app for every site. Sites on the blog or stream shape keep rendering exactly as before.
+
+### Upgrading: read this first
+
+- **Downloads are now verified against a signature.** `install.sh` and `polis-upgrade` refuse a release whose `checksums.txt` is not signed by the release key pinned in them, and need `ssh-keygen` (OpenSSH 8.0+) to check it. A release made before this one has no signature: `install.sh` refuses it unless `POLIS_ALLOW_UNSIGNED=1` is set, and `polis-upgrade` unless `--allow-unsigned` is given.
+- **The owner app is the v5 app.** `polis serve` serves it at `/_/` for every site, and the root redirects there. The previous owner app, its `/api` routes and the experimental page for asking your AI for changes are gone. A site on the blog (v3) or stream (v4) shape keeps rendering exactly as before, but those shapes are no longer supported or offered; Tailor says how to move.
+- **A new site starts on the v5 shape.** `polis init` records `pub.polis.shapes.v5`, and a site whose registry names no shape, or one its bundle does not declare, renders with v5. A site that already records a shape keeps it.
+- **`polis comment sign` now sends the comment.** It publishes the comment and asks for its blessing, and exits `1` (keeping the comment signed in pending) when the send fails or the site is not registered yet. Under `--json`, `success` now means the comment was sent.
+- **`polis post` (bash) refuses a source that states its own licence terms**, with `UNSUPPORTED_CONTENT`; publish it with the Go CLI.
+- **Tailor:** update it. See *Tailor* below.
+
+### Added
+
+- **[All] Signed releases.** Each release's `checksums.txt` is signed with the polis release key (`checksums.txt.sig`, an SSH signature in the `polis-release` namespace). The key's public half is `release/release-signing-key.pub` in this repository. `checksums.txt` also lists the files `polis-upgrade` fetches from the tree. SECURITY.md shows how to verify a download by hand.
+- **[All] An SBOM for every archive** (`<archive>.sbom.json`, SPDX), listed in the signed `checksums.txt`.
+- **[CLI] `polis comment send <id>`** sends a pending comment again. `polis blessing beseech <version>` sends a pending comment of yours again by its full version.
+- **[Webapp] The owner can unpublish a post** from the owner app (asked first) and through the API (`post.unpublish`, owner only). `polis unpublish` runs the same code. No agent tool offers it.
+- **[Webapp] The site API lists the scopes a token can carry** (`x-polis-scopes`), and "Make a token" offers every scope an agent may hold.
+- **[Docs] The v5 style guide**, at `docs/webapp/designer/style-guide.md`. An MCP client is told to read it (`polis://style-guide`) before changing how a site looks, and every instance serves it at `/for/agents/style-guide`.
+
+### Changed
+
+- **[Webapp] The site API states what its preview promises.** `/v1` stays a preview until every site action has one implementation; until then any change is listed here. Then it changes only by addition, a breaking change goes to `/v2`, and `/v1` is served for three months after `/v2` is announced. The developer reference names the routes it does not offer, each with its described equivalent.
+- **[Webapp] A v5 site renders only what a change touches** when a post is published, republished or unpublished; a change to the theme, shape or site name still renders the whole site.
+- **[Webapp] The v5 site follows its theme's motion everywhere**, draws its initial in the theme's `mark-ink`, and takes a gradient direction (`bg-gradient-angle`).
+- **[Webapp] On their own v5 site, the owner's menu offers home and each post offers edit.** In the owner app, clicking the section you are in goes back to its top.
+- **[Webapp] A v5 site's about page** names its key and how to check it, and nothing more. Its pages and the owner app open their source with a short note naming the files and documents that explain them.
+- **[All] An agent's post or comment reaches the discovery service marked**, with the same marker as its frontmatter. It needs a discovery service that accepts the marker.
+- **[Webapp] Search matches at the start of a word**, and a handle is matched without the shared hosting suffix.
+- **[Webapp] The query operation's description states PQL's grammar**, generated from the parser.
+- **[CLI] Tailor's note for a blog-shape site names v5** as the shape to switch to.
+
+### Fixed
+
+- **[CLI] A reply written with the Go CLI reaches the post's author.** `polis comment sign` signed the comment but no Go command sent it; it now publishes and registers it with its blessing request.
+- **[CLI] `polis comment sign <id>` signs under the draft's own id**, not `<id>-2`.
+- **[CLI] A post whose first line is a lower heading** (`## Notes`) gets that heading's text as its title, and a long first line is cut at 60 characters, never inside one. Only posts published from now on.
+- **[All] `polis init --theme` takes a fully-qualified theme name**, in both CLIs.
+- **[All] An edited comment keeps its licence terms**, inside its signature.
+- **[Webapp] A draft is listed under the title publishing it would give.** A PQL sentence that does not parse is answered with the reason.
+- **[Webapp] In the owner app, "show less" brings you back to the folded post's header.** The messages key's scripts load at addresses that change with their contents, so a fix reaches a browser that cached them.
+- **[Webapp] A failed fetch of another site's avatar is logged** (`pub.polis.render.avatar_fetch_failed`) and no longer sticks until a restart.
+- **[Bash] `polis post` no longer drops a source's `license:` block without a word**; it refuses it.
+
+### Security
+
+- **[Security] `install.sh` verifies what it installs.** It checks the release's `checksums.txt.sig` with the pinned release key, then the archive against the signed list, and installs nothing if either fails. Without `ssh-keygen` it stops and points at the manual steps.
+- **[Security] Direct messages connect only to public addresses.** Sending a message, and checking who sent one, refuses a loopback, private, link-local (cloud metadata included), carrier-grade NAT, unspecified or multicast address, except for an instance in local mode. A remote instance now follows the same rule for the browser-sealed send and a recipient's key.
+
+### Tailor
+
+**Self-hosters should update Tailor.** Install the new `polis` and `tailor` binaries from this release yourself (Tailor's `cli-update` check only reports a newer release), then run `tailor` as a dry run first; `--list` shows the changes, and `--only` and `--skip` choose them. Tailor never deletes, overwrites or switches off a theme of your own, backs up a file under `.polis/tailor-backup/` before it changes or removes it, never moves a self-hosted site off the blog layout, and reports what it will not decide for you. A check that did not apply is reported as not applied, never as fixed. `polis render` now copies a shipped file you edited to `.polis/render-backup/` before it replaces it. The upgrade guide walks through every change: `docs/cli/user/upgrade-a-site.md`.
+
 ## [0.70.0] - 2026-11-09
 
 A portability and hardening release. A site can now **branch**: an export of it becomes a new site at a new address, with a signed handover from the old key, so everything it signed still verifies. Polis can run as **your own instance on a host such as Vercel** (experimental), with owner sign-in by recovery key and passkey. An instance can be reached by your own AI through **scoped API keys and MCP**, and a site can carry **its own CSS**. Many security fixes.

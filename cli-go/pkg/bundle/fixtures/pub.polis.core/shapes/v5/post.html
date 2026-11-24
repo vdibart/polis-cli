@@ -1,0 +1,28 @@
+<!--
+    v5 shape · post.html — a post's card (spec 1.5): the mark, the first row
+    (the date, which is the post's own page), the title, the body, then the
+    footer (comments; at its right, its terms where it states its own and a
+    button that copies its address). Open on the
+    post's own page, with its blessed comments in the thread and the place
+    to reply under them (the widget's); folded in a view, where the
+    stylesheet shows its opening lines.
+
+    edit (spec 1.5, 3.8) is the owner's only: hidden unless the page's body
+    carries pn-owner, which the visitor nav sets for the site's own author.
+
+    Its pinned row (spec 1.5) is the card's own first line, kept for when the
+    open card's heading scrolls under the menu: the controller only marks the
+    card stuck. State rides on the article (data-path), never in its words.
+-->
+<article class="item post{{open}}{{title_class}}" data-path="{{path}}"{{role}}{{agent}}>
+  <div class="stick" aria-hidden="true"><div class="srow"><div class="sin">{{mark}}<span class="sdate">{{date}}</span><span class="sttl">{{lead}}</span></div></div></div>
+  <div class="hd">{{mark}}<a class="hdt perma" href="{{path}}"><time datetime="{{iso}}">{{date}}</time></a><a class="own-only edit" href="/_/write#edit:{{path}}">edit</a></div>
+  <{{hx}}><a class="perma" href="{{path}}">{{title}}</a></{{hx}}>
+  <div class="ex">{{body}}</div>
+  <div class="ifoot">
+    <a class="n" href="{{path}}#comments"><b>{{comment_count}}</b> {{comment_noun}}</a>
+    {{terms}}
+    <button class="copy" type="button" data-path="{{path}}" aria-label="Copy the link" title="Copy the link"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg></button>
+  </div>
+  <div class="thread" id="comments">{{thread}}{{reply}}</div>
+</article>

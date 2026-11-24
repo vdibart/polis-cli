@@ -36,7 +36,8 @@ In short: **you can read the entire network without registering.** You only need
 
 ## What Happens When You Register
 
-1. You run `polis register` (CLI) or click Register in the webapp settings.
+1. You run `polis register` (CLI), or the owner asks the site's API (`POST /v1/site/register`). The owner app shows
+   whether the site is listed (enhance › Your data › The polis directory); it has no button for it.
 2. Your site's public key and domain are submitted to the DS with a cryptographic attestation.
 3. The DS verifies your `.well-known/polis` is publicly accessible and records your registration.
 4. A **local marker file** is written at `.polis/ds/{ds-domain}/registration.json`.
@@ -45,7 +46,8 @@ In short: **you can read the entire network without registering.** You only need
 
 ## What Happens When You Unregister
 
-1. You run `polis unregister` or click Unregister in the webapp settings.
+1. You run `polis unregister`, or the owner asks the site's API (`POST /v1/site/unregister`). A site hosted on
+   polis.pub cannot unregister.
 2. The DS removes your site's registration record, and with it the key history it holds for your domain.
 3. The local marker file is deleted.
 4. Write operations are blocked again. Your site returns to read-only mode.
@@ -56,18 +58,7 @@ In short: **you can read the entire network without registering.** You only need
 
 ## Rate Limits for Public Reads
 
-The DS applies IP-based rate limits to its public read endpoints. These limits exist to prevent abuse, not to restrict legitimate use. The defaults:
-
-| Endpoint | Limit |
-|----------|-------|
-| Content queries (`/v1/content`, comment counts and latest comments) | 600 requests/hour |
-| Relationship queries | 600 requests/hour |
-| Stream / feed sync (including `/pql/…`) | 1,200 requests/hour |
-| Site check, content check | 300 requests/hour each |
-| Site directory (`/v1/sites/list`) | 300 requests/hour |
-| Key history (`/v1/sites/keys/history`) | 300 requests/hour |
-| Stream health | 300 requests/hour |
-| DS public key lookup | 30 requests/hour |
+The DS applies IP-based rate limits to its public read endpoints. These limits exist to prevent abuse, not to restrict legitimate use. The defaults, endpoint by endpoint, are in the [discovery service API reference](../../ds/developer/api-reference.md#ip-based-limits).
 
 These limits are per IP address, counted in fixed one-hour windows. If you exceed them, the DS returns HTTP 429 with a `Retry-After` header giving the seconds until the window resets.
 

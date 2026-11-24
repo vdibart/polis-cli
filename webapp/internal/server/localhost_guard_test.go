@@ -82,7 +82,7 @@ func TestLocalhostRefusesCrossSiteWrites(t *testing.T) {
 // localhost server, so nothing legitimate calls them cross-origin.
 func TestLocalhostRefusesCrossSiteWritesOnEveryAPIRoute(t *testing.T) {
 	routes := setupRoutesAPIPaths(t)
-	if len(routes) < 50 {
+	if len(routes) < 5 { // 6 literal /api/ paths once the v4 app and what only it called were deleted (2026-11-22)
 		t.Fatalf("found only %d /api/ routes in SetupRoutes; the scan is broken", len(routes))
 	}
 	var widget int
@@ -138,7 +138,7 @@ func TestLocalhostAllowsSameOriginAndNonBrowserWrites(t *testing.T) {
 // another site read the answer); a cross-site GET addressed to localhost
 // passes, including the public, CORS-open stream routes.
 func TestLocalhostLetsCrossSiteReadsThrough(t *testing.T) {
-	for _, path := range []string{"/api/status", "/pql/everything", "/api/v1/stream/body"} {
+	for _, path := range []string{"/api/capabilities", "/pql/everything", "/api/v1/stream/body"} {
 		var hit bool
 		h := localhostModeHandler(nil, reachedMux(&hit))
 		w := httptest.NewRecorder()
@@ -189,8 +189,8 @@ func TestRunServesThroughTheLocalhostGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read server.go: %v", err)
 	}
-	if !strings.Contains(string(data), "http.ListenAndServe(addr, localhostModeHandler(server.Logger, mux))") {
-		t.Error("Run must pass localhostModeHandler(server.Logger, mux) to ListenAndServe")
+	if !strings.Contains(string(data), "NewHTTPServer(addr, localhostModeHandler(server.Logger, mux)).ListenAndServe()") {
+		t.Error("Run must serve localhostModeHandler(server.Logger, mux), through NewHTTPServer (its timeouts)")
 	}
 }
 

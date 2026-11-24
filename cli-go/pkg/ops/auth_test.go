@@ -183,3 +183,32 @@ func TestMintAPIKey_PreservesWhatItDoesNotModel(t *testing.T) {
 		}
 	}
 }
+
+// ⭐ A scoped key allows exactly its scopes; render and appearance are one
+// scope under two names; no list of scopes ever adds up to full.
+func TestScopedKeysAllowExactlyTheirScopes(t *testing.T) {
+	appearance := APIKey{Scopes: []string{"appearance"}}
+	render := APIKey{Scopes: []string{"render"}}
+	if !appearance.Allows("render") || !render.Allows("appearance") {
+		t.Error("render and appearance must be the same scope")
+	}
+	if appearance.Allows("publish") {
+		t.Error("appearance must not allow publish")
+	}
+	many := APIKey{Scopes: []string{"read", "publish", "comment", "bless", "follow", "tag", "appearance", "profile", "policy:read", "policy:write", "notify", "status"}}
+	if many.Allows("full") {
+		t.Error("no set of scopes may stand for the owner's full token")
+	}
+	if !(APIKey{}).Allows("full") {
+		t.Error("an unscoped key is the owner's full token")
+	}
+	site := storage.At(t.TempDir())
+	if _, _, err := MintAPIKey(site, "agent", []string{"publish", "notify"}); err != nil {
+		t.Errorf("minting with vocabulary scopes: %v", err)
+	}
+	for _, bad := range []string{"full", "messages", "everything"} {
+		if _, _, err := MintAPIKey(site, "agent", []string{bad}); err == nil {
+			t.Errorf("minting with scope %q succeeded", bad)
+		}
+	}
+}

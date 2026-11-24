@@ -34,7 +34,41 @@ import (
 //
 // (The wire-format shape name remains "pub.polis.shapes.v4" / map key "v4"
 // for backwards compatibility with installed tenants.)
-const StreamShapeVersion = "1.8.65"
+const StreamShapeVersion = "1.8.67"
+
+// reservedMounts are addresses the site's own pages answer: the owner's app
+// (/_), the views (/pql) and the profile (/about). No content type may be
+// mounted at one; content there would shadow the page, or the page the
+// content (v5 spec 2.5 and 3.9).
+var reservedMounts = map[string]bool{"_": true, "pql": true, "about": true}
+
+// ReservedMount reports whether a content type may not be mounted at mount:
+// one of the site's own pages (reservedMounts), or anywhere under /_, every
+// address of which is the owner's interface and asks for a sign-in (v5 spec
+// 3.9), so content there would be unreachable to readers or would collide
+// with an owner route.
+func ReservedMount(mount string) bool {
+	m := strings.Trim(mount, "/")
+	return reservedMounts[m] || strings.HasPrefix(m, "_/")
+}
+
+// checkMounts refuses a bundle with a type mounted where the site's own
+// pages are. Every writer of bundle.json calls it, as every reader does
+// through Validate.
+func checkMounts(b *Bundle) error {
+	for typeName, ct := range b.Types {
+		if ct.Mount != "" && ReservedMount(ct.Mount) {
+			return fmt.Errorf("type %s: mount %q is reserved for the site's own pages", typeName, ct.Mount)
+		}
+	}
+	return nil
+}
+
+// V5ShapeVersion is the v5 shape's own version: the cards-and-menu public
+// site. It is never StreamShapeVersion, which every v4 page carries in its
+// controller URL: sharing it would change v4 output whenever v5 moved.
+// Bump it with any change under fixtures/pub.polis.core/shapes/v5/.
+const V5ShapeVersion = "0.3.16"
 
 // Bundle represents a bundle.json declaration.
 type Bundle struct {
@@ -290,7 +324,7 @@ func SaveBundle(path string, b *Bundle) error {
 	// It stays off the interface because WriteAtPath creates parents at 0755
 	// anyway, so this line is belt and braces for a caller that passes a path
 	// whose parent does not exist.
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil { //nolint:gosec // G301: served content, not .polis (see above)
 		return fmt.Errorf("create bundle dir: %w", err)
 	}
 	data, err := marshalBundle(b)
@@ -319,6 +353,9 @@ func SaveBundleAt(site storage.Site, key string, b *Bundle) error {
 }
 
 func marshalBundle(b *Bundle) ([]byte, error) {
+	if err := checkMounts(b); err != nil {
+		return nil, fmt.Errorf("refusing to write bundle: %w", err)
+	}
 	data, err := json.MarshalIndent(b, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal bundle: %w", err)
@@ -374,6 +411,9 @@ func (b *Bundle) Validate() error {
 		dirs[ct.Dir] = true
 
 		if ct.Mount != "" {
+			if ReservedMount(ct.Mount) {
+				return fmt.Errorf("type %s: mount %q is reserved for the site's own pages", typeName, ct.Mount)
+			}
 			if mounts[ct.Mount] {
 				return fmt.Errorf("type %s: duplicate mount %q", typeName, ct.Mount)
 			}
@@ -669,6 +709,25 @@ func (b *Bundle) NotificationRules() []notification.Rule {
 // Patrol/Medic relocates notifications from existing tenants'
 // bundle.json on each healing cycle (see medic.go
 // migrateNotificationRulesToRegistry).
+// RetiredThemeNames are theme names earlier releases shipped that the current
+// bundle no longer declares: _base (folded into _shared) and classic (renamed
+// daryl, 2026-11-18). ⛔ A site's own bundle.json only ever gains themes
+// (MergeDefaults is add-only), so an old site still declares a retired name;
+// nothing may offer one as a choice (theme.Selectable), and its leftover
+// directory is cleared as drift, never kept as the user's own theme.
+var RetiredThemeNames = []string{"_base", "classic"}
+
+// IsRetiredTheme reports whether name, short or fully qualified, is retired.
+func IsRetiredTheme(name string) bool {
+	n := strings.TrimPrefix(name, "pub.polis.themes.")
+	for _, r := range RetiredThemeNames {
+		if n == r {
+			return true
+		}
+	}
+	return false
+}
+
 func DefaultCoreBundle() *Bundle {
 	return &Bundle{
 		Name:        "pub.polis.core",
@@ -890,6 +949,27 @@ func DefaultCoreBundle() *Bundle {
 				},
 				DefaultCSS: "themes/_shared/base.css",
 			},
+			"v5": {
+				// v5 SHAPE — the public site as cards under a menu (posts ·
+				// comments · about · following), drawn from the theme token
+				// contract. Installed everywhere, active nowhere until a site
+				// is switched to it: nothing in the code selects v5.
+				//
+				// Every item renders to one canonical page; a view is the
+				// frame with every card of its sentence. The frame and each
+				// kind of item are one template each, and a card is the same
+				// HTML wherever it appears.
+				Name:    "v5",
+				Version: V5ShapeVersion,
+				Entry: map[string]string{
+					"frame":     "frame.html",
+					"post":      "post.html",
+					"comment":   "comment.html",
+					"about":     "about.html",
+					"following": "following.html",
+					"person":    "person.html",
+				},
+			},
 		},
 		Themes: map[string]*Theme{
 			// _shared holds CSS extracted from the per-theme files —
@@ -908,19 +988,44 @@ func DefaultCoreBundle() *Bundle {
 				Name:             "especial",
 				Version:          "1.1.0",
 				CSS:              "especial.css",
-				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4"},
+				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4", "pub.polis.shapes.v5"},
 			},
 			"especial-light": {
 				Name:             "especial-light",
 				Version:          "1.1.0",
 				CSS:              "especial-light.css",
-				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4"},
+				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4", "pub.polis.shapes.v5"},
 			},
 			"sols": {
 				Name:             "sols",
 				Version:          "1.1.0",
 				CSS:              "sols.css",
-				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4"},
+				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4", "pub.polis.shapes.v5"},
+			},
+			// daryl and the Elwood pair: v5 only, defined by their v5.json
+			// alone (the token contract; no v3/v4 CSS). Declared here so every
+			// tenant's registry lists them: an installed theme dir the manifest
+			// does not declare is an orphan, which Medic quarantines and Tailor
+			// flags. daryl is offered to v5 sites; the Elwood pair is reserved
+			// (theme.IsReserved) until it joins v5.
+			"daryl": {
+				Name:             "daryl",
+				Version:          "1.0.0",
+				CSS:              "v5.json",
+				DisplayName:      "daryl",
+				CompatibleShapes: []string{"pub.polis.shapes.v5"},
+			},
+			"elwood-signal": {
+				Name:             "elwood-signal",
+				Version:          "1.0.0",
+				CSS:              "v5.json",
+				CompatibleShapes: []string{"pub.polis.shapes.v5"},
+			},
+			"elwood-noise": {
+				Name:             "elwood-noise",
+				Version:          "1.0.0",
+				CSS:              "v5.json",
+				CompatibleShapes: []string{"pub.polis.shapes.v5"},
 			},
 			// stardust: reserved light theme for why.polis.pub (v4 stream only).
 			// CSS-only delta from the shape; reserved from the picker like sols.
@@ -928,7 +1033,7 @@ func DefaultCoreBundle() *Bundle {
 				Name:             "stardust",
 				Version:          "1.0.0",
 				CSS:              "stardust.css",
-				CompatibleShapes: []string{"pub.polis.shapes.v4"},
+				CompatibleShapes: []string{"pub.polis.shapes.v4", "pub.polis.shapes.v5"},
 			},
 			// studio13 + studio13-nk: paired themes preserving brand
 			// identity across the v3→v4 split. studio13 (stream-only) is
@@ -943,32 +1048,32 @@ func DefaultCoreBundle() *Bundle {
 				Name:             "studio13",
 				Version:          "1.0.0",
 				CSS:              "studio13.css",
-				CompatibleShapes: []string{"pub.polis.shapes.v4"},
+				CompatibleShapes: []string{"pub.polis.shapes.v4", "pub.polis.shapes.v5"},
 			},
 			"studio13-nk": {
 				Name:             "studio13-nk",
 				Version:          "1.0.1",
 				CSS:              "studio13-nk.css",
 				DisplayName:      "studio13",
-				CompatibleShapes: []string{"pub.polis.shapes.v3"},
+				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v5"},
 			},
 			"turbo": {
 				Name:             "turbo",
 				Version:          "1.1.0",
 				CSS:              "turbo.css",
-				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4"},
+				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4", "pub.polis.shapes.v5"},
 			},
 			"vice": {
 				Name:             "vice",
 				Version:          "1.1.0",
 				CSS:              "vice.css",
-				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4"},
+				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4", "pub.polis.shapes.v5"},
 			},
 			"zane": {
 				Name:             "zane",
 				Version:          "1.1.0",
 				CSS:              "zane.css",
-				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4"},
+				CompatibleShapes: []string{"pub.polis.shapes.v3", "pub.polis.shapes.v4", "pub.polis.shapes.v5"},
 			},
 		},
 		Artifacts: []string{"index.jsonl"},

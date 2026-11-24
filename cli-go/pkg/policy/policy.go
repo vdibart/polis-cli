@@ -167,6 +167,22 @@ func LoadPolicies(site storage.Site) ([]Policy, error) {
 	return policies, nil
 }
 
+// LoadPolicyFiles loads a site's private and public rules separately, each in
+// file order: the private rules are evaluated first, then the public, and the
+// first rule that matches decides.
+func LoadPolicyFiles(site storage.Site) (private, public []Policy, err error) {
+	if !site.Valid() {
+		return nil, nil, errors.New("load policies: site handle is not usable")
+	}
+	if private, err = loadJSONL(site, PrivateRulesKey); err != nil {
+		return nil, nil, err
+	}
+	if public, err = loadJSONL(site, PublicRulesKey); err != nil {
+		return nil, nil, err
+	}
+	return private, public, nil
+}
+
 // loadJSONL reads one policy file and returns its parsed entries.
 // Returns empty slice on a missing file. Skips malformed lines.
 //

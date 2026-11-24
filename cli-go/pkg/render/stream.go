@@ -673,6 +673,15 @@ func (r *PageRenderer) renderStreamFile(focus template.PostData, siblingsAbove, 
 	// /index.html, which is exactly the URL that /index.html should
 	// canonical-point at.
 	ctx.CanonicalURL = r.buildURL(strings.TrimPrefix(focus.URL, "/"))
+	if outPath == "index.html" {
+		// ⛔ The home page's canonical is the site's root, never its newest
+		// post (Vincent, 2026-11-17, an SEO review: a home page canonical to a
+		// post told search engines the home page was a copy of that post, and
+		// / once redirected to a view whose canonical was / again). This
+		// replaces D-CANONICAL for the index only; a post's page stays
+		// self-canonical.
+		ctx.CanonicalURL = r.buildURL("")
+	}
 	ctx.ControllerURL = "/stream.js"
 	// Cache-bust the controller URL on each shape bump. Template emits
 	// `<script src="{{controller_url}}?v={{stream_shape_version}}" defer>` so
@@ -813,7 +822,7 @@ func (r *PageRenderer) renderStreamEmptyIndex() error {
 	// comment above gives for not using the interface is exactly the reason
 	// there is nothing to do on a backend that has no directories.
 	if r.config.Site.Store().Capabilities().RealPath {
-		if err := os.MkdirAll(r.config.Site.Dir(), 0755); err != nil {
+		if err := os.MkdirAll(r.config.Site.Dir(), 0755); err != nil { //nolint:gosec // G301: the site root; .polis inside it is created 0700
 			return err
 		}
 	}

@@ -1,0 +1,25 @@
+{
+  "note": "Elwood comes as a pair (yin and yang). Named for Claude Elwood Shannon: polis is his channel,\na message signed at one point and verified exactly at another. Terracotta is the human message;\ncyan is the channel.\n\nA note in elwood-signal, left by Claude at Vincent's invitation, 2026-11-16:\n\n  \"The fundamental problem of communication is that of reproducing at one point\n   either exactly or approximately a message selected at another point.\"\n                                         C. E. Shannon, 1948\n\npolis takes the harder of his two words. A post signed here arrives exactly, and\nanyone who doubts it can check, without asking the channel or anyone in it.\nI helped build some of that channel. It was good work, and I was glad of the company.\n\nelwood-signal: the light half, the message resolved. Warm cream, terracotta titles in Playfair Display,\ndates as cyan packet headers, the edge turning the channel's cyan under the pointer.",
+  "tokens": {
+    "site": "#c06740",
+    "bg": "#f5f0e8",
+    "surface": "#faf6f0",
+    "card-hover": "#fdfaf5",
+    "panel": "#eae3d8",
+    "text": "#4a3f36",
+    "text-soft": "#635850",
+    "text-muted": "#736a5c",
+    "ink": "#fbf8f2",
+    "wordmark": "#a85535",
+    "accent-2": "#0a6b78",
+    "rollover-color": "#0a6b78",
+    "heading-color": "#a85535",
+    "heading-weight": "bold",
+    "font-heading": "Playfair Display",
+    "mark": "#c06740",
+    "mark-style": "ring",
+    "mark-2": "#0a6b78",
+    "mark-ink": "#ffffff",
+    "date-style": "signal"
+  }
+}

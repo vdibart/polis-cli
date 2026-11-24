@@ -73,7 +73,7 @@ func initCLILogger() {
 	// which is what the platform captures; the hosted service already ships
 	// stdout to its log pipeline. That is a different answer, not a missing
 	// conversion.
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) //nolint:gosec // G304: POLIS_LOG_FILE, set by the user running the command
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[!] Failed to open log file %s: %v\n", logPath, err)
 		return
@@ -111,7 +111,7 @@ func Execute(args []string) {
 	initCLILogger()
 	defer func() {
 		if cliLogFile != nil {
-			cliLogFile.Close()
+			_ = cliLogFile.Close() // the optional audit log, at exit
 		}
 	}()
 
@@ -204,7 +204,7 @@ func Execute(args []string) {
 	// named on the command line, and the working directory is not one of them.
 	// Nor for recover, which signs with a key outside every site.
 	if command != "branch" && command != "recover" {
-		site.MigrateAuthorField(storage.At(resolvedDataDir))
+		_ = site.MigrateAuthorField(storage.At(resolvedDataDir)) // best effort, and retried by every command
 	}
 	cmdArgs := filteredArgs[1:]
 
@@ -241,6 +241,8 @@ func Execute(args []string) {
 		handleIndex(cmdArgs)
 	case "about":
 		handleAbout(cmdArgs)
+	case "mcp":
+		handleMCP(cmdArgs)
 	case "follow":
 		handleFollow(cmdArgs)
 	case "unfollow":
@@ -317,9 +319,11 @@ Global Flags:
 Commands related to creating or viewing content:
   polis post <file>               Create a new post
   polis comment draft <url>       Create a comment draft replying to <url>
-  polis comment sign <id>         Sign a draft comment
+  polis comment sign <id>         Sign a draft comment, publish it and send it
+                                  to the post's author for blessing
+  polis comment send <id>         Send a pending comment again
   polis comment list [status]     List comments (drafts, pending, blessed, denied)
-  polis comment sync              Check pending comments against the discovery service
+  polis comment sync              Check pending comments' blessing status
   polis republish <file>          Update an already-published file
   polis preview <url>             Preview a post or comment with signature verification
   polis extract <file> <hash>     Reconstruct a specific version of a file
@@ -328,7 +332,7 @@ Commands related to requesting, reviewing, or granting blessings:
   polis blessing requests         List pending blessing requests
   polis blessing grant <hash>     Grant a blessing request by content hash
   polis blessing deny <hash>      Deny a blessing request by content hash
-  polis blessing beseech <hash>   Not supported in the Go CLI (bash only)
+  polis blessing beseech <hash>   Send a pending comment of yours again, by version
   polis blessing sync             Sync blessed comments from discovery service
 
 Commands related to following or unfollowing an author:
@@ -352,7 +356,7 @@ Commands related to direct messages:
   polis dm config                 Show the DM rules in your policy files
   polis dm decrypt [--phrase] [--conversation <id>]
                                   Decrypt and print your messages from a local or exported site
-  polis dm publish-key            Re-publish your DM messages key into .well-known/polis (repair)
+  polis dm publish-key [--create] Publish your DM messages key, creating the keyring if absent
 
 Commands related to your terms:
   polis license                    Show or set the terms your work is offered under
@@ -440,6 +444,9 @@ Commands related to local configuration:
                                   dropping what this version cannot read and
                                   leaving it UNSIGNED
   polis serve [-d|--data-dir PATH] Start local web server (bundled binary only)
+  polis mcp [--site ADDRESS]      Serve MCP over stdio for an agent on this
+                                  machine, with tools generated from the
+                                  site's API (token in POLIS_TOKEN)
 
 Examples:
   polis init
@@ -496,7 +503,7 @@ func exitError(format string, args ...interface{}) {
 			"success": false,
 			"error":   msg,
 		}
-		json.NewEncoder(os.Stdout).Encode(output)
+		_ = json.NewEncoder(os.Stdout).Encode(output) // stdout gone: nobody left to tell, and the exit status still says it failed
 	} else {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
 	}
@@ -509,7 +516,7 @@ func outputJSON(data interface{}) {
 	if m, ok := data.(map[string]interface{}); ok && requestID != "" {
 		m["request_id"] = requestID
 	}
-	json.NewEncoder(os.Stdout).Encode(data)
+	_ = json.NewEncoder(os.Stdout).Encode(data) // stdout gone: nobody left to tell
 }
 
 // loadEnv loads a .env file into the process environment.
@@ -536,7 +543,7 @@ func loadEnv() {
 // user home, neither of which is inside the site, so there is no root for a key
 // to be relative to. The read is a streaming line scan.
 func loadEnvFile(path string) bool {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // G304: .env in the working directory or the user's home
 	if err != nil {
 		return false
 	}
@@ -561,7 +568,7 @@ func loadEnvFile(path string) bool {
 		}
 		// Don't override existing env vars
 		if os.Getenv(key) == "" {
-			os.Setenv(key, value)
+			_ = os.Setenv(key, value) // fails only for a key with "=" or NUL, which the split above cannot produce
 		}
 	}
 	return true

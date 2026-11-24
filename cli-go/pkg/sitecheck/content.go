@@ -164,6 +164,15 @@ type Frontmatter struct {
 	// signature as invalid.
 	Type      string
 	InReplyTo bool
+
+	// Updated is a republished artifact's signing time, inside the signature
+	// like Published; empty on a first version.
+	Updated string
+
+	// Agent and Grant are the agent marker, inside the signature; both empty
+	// on an act nobody delegated.
+	Agent string
+	Grant string
 }
 
 // ObjectType reports which signing base this artifact was signed under. The
@@ -217,6 +226,12 @@ func ParseFrontmatter(content string) (*Frontmatter, string, error) {
 				fm.Type = value
 			case "in-reply-to":
 				fm.InReplyTo = true
+			case "updated":
+				fm.Updated = value
+			case "agent":
+				fm.Agent = value
+			case "grant":
+				fm.Grant = value
 			}
 		}
 	}

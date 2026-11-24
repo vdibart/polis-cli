@@ -7,18 +7,54 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
+	"github.com/vdibart/polis-cli/cli-go/pkg/sitecheck"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
+
+// keepDriftedPayload copies every installed shape/theme file whose bytes
+// differ from the embedded copy into .polis/render-backup/<timestamp>/ (0700,
+// files 0600), before the refresh replaces it. It returns the site-relative
+// paths kept and the directory, or nothing when no file differs.
+func keepDriftedPayload(dir string, now time.Time) ([]string, string, error) {
+	drift, installed, err := sitecheck.ReferencePayloadDrift(dir)
+	if err != nil {
+		return nil, "", err
+	}
+	if !installed || len(drift) == 0 {
+		return nil, "", nil
+	}
+	keptRel := ".polis/render-backup/" + now.Format("20060102-150405")
+	// NOT the storage interface for the root: created 0700 because it is under
+	// .polis and may hold copies of the owner's edits.
+	if err := os.MkdirAll(filepath.Join(dir, filepath.FromSlash(keptRel)), 0o700); err != nil {
+		return nil, "", err
+	}
+	out := storage.NewPOSIX(filepath.Join(dir, filepath.FromSlash(keptRel)), storage.WithDirMode(0o700))
+	var kept []string
+	for _, rel := range drift {
+		key := ".polis/bundles/pub.polis.core/" + rel
+		data, err := storage.At(dir).Store().Get(context.Background(), key)
+		if err != nil {
+			continue // missing on disk: nothing of the owner's to keep
+		}
+		if err := out.Put(context.Background(), key, data, storage.WithMode(0o600)); err != nil {
+			return nil, "", err
+		}
+		kept = append(kept, key)
+	}
+	return kept, keptRel, nil
+}
 
 func handleRender(args []string) {
 	fs := flag.NewFlagSet("render", flag.ExitOnError)
 	force := fs.Bool("force", false, "Force re-render all files")
 	cliThemesDir := fs.String("cli-themes-dir", "", "CLI themes directory")
 	baseURL := fs.String("base-url", "", "Site base URL")
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 	dir := getDataDir()
 
@@ -35,8 +71,18 @@ func handleRender(args []string) {
 	// shape dir until the next Medic cycle. EnsureReferencePayload is
 	// mtime-idempotent (skips writes when bytes match) so the production
 	// case is a no-op when versions already align.
+	// ⛔ An edited shipped file is about to be replaced: keep a copy first, and
+	// say where. A refresh that would destroy the only copy of an edit refuses.
+	kept, keptDir, err := keepDriftedPayload(dir, time.Now())
+	if err != nil {
+		exitError("Not refreshing the installed shapes and themes: could not keep a copy of the ones that differ: %v", err)
+	}
 	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		exitError("Failed to refresh reference payload: %v", err)
+	}
+	if len(kept) > 0 && !jsonOutput {
+		fmt.Fprintf(os.Stderr, "[!] %d installed shape/theme file(s) differed from this polis's copy (an older version, or edited by hand) and were replaced; the previous copies are in %s\n", len(kept), keptDir)
+		fmt.Fprintf(os.Stderr, "    To keep a change to a shipped theme, make it in a theme of your own.\n")
 	}
 
 	// Find CLI themes directory if not specified

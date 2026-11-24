@@ -413,7 +413,7 @@ without requiring centralized approval.
 | 1. Registration gate | Actor must be registered with discovery service | `POST /v1/stream` and the Service mutation handlers |
 | 2. Signature verification | Ed25519 signature over canonical payload | `POST /v1/stream` |
 | 3. Namespace restriction | `pub.polis.*` types restricted to server-side emission, except follow and actor-registry events | `POST /v1/stream` validation |
-| 4. Rate limiting | 100 events/hour/actor | `POST /v1/stream` |
+| 4. Rate limiting | events per hour per actor ([stream publish](api-reference.md#per-domain-limits)) | `POST /v1/stream` |
 | 5. Payload constraints | JSON object, < 8KB serialized | `POST /v1/stream` validation |
 | 6. Operator controls | Allow/deny policy rules, event purging | Admin handlers; every emission |
 | 7. Community reporting | (Deferred—designed but not yet implemented) | — |

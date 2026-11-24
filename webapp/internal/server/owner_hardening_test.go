@@ -209,7 +209,7 @@ func TestOwnerGateCrossSiteRefusalSparesOwnPagesAndWidgets(t *testing.T) {
 	// ⛔ On an instance with no operator nothing checks a widget token, so a
 	// sibling page carrying the owner's cookie is refused on the widget
 	// routes like on any other.
-	for _, path := range []string{"/api/widget/publish", "/api/widget/comment", "/api/widget/follow"} {
+	for _, path := range []string{"/api/widget/comment", "/api/widget/follow"} {
 		r = httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
 		r.Header.Set("Content-Type", "text/plain")
 		r.Header.Set("Origin", "https://sibling.example.test")
@@ -258,5 +258,43 @@ func TestSessionCookiesAndScope(t *testing.T) {
 	other.SiteID = inst.SiteID + "-copy"
 	if owner.SignedIn(other, tok) {
 		t.Error("⛔ a session opened for one site was valid for another with the same base URL")
+	}
+}
+
+// ⭐ Removing one passkey of several is not removing the last way in: the
+// guard counts the credentials that would remain, and asks for the
+// acknowledgement only for the last one.
+func TestRemovingOneOfSeveralPasskeysNeedsNoAcknowledgement(t *testing.T) {
+	s, _ := passkeyServer(t, "AQ==", "Ag==", "Aw==")
+	// Removal ends every session, so each removal signs in afresh.
+	fresh := func(s *Server) *http.Cookie {
+		tok, _, err := owner.OpenSignIn(s.instance(), passkeyName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Cookie{Name: signInCookiePlain, Value: tok}
+	}
+	w := call(t, s, http.MethodDelete, ProvidersPath+"?name="+passkeyName+"&credential=Ag", s.handleProviders, fresh(s))
+	if w.Code != http.StatusOK {
+		t.Fatalf("removing one of three passkeys: %d %s", w.Code, w.Body.String())
+	}
+	w = call(t, s, http.MethodDelete, ProvidersPath+"?name="+passkeyName+"&credential=Aw", s.handleProviders, fresh(s))
+	if w.Code != http.StatusOK {
+		t.Fatalf("removing one of two passkeys: %d %s", w.Code, w.Body.String())
+	}
+	// The last credential of the last provider: the acknowledgement again.
+	w = call(t, s, http.MethodDelete, ProvidersPath+"?name="+passkeyName+"&credential=AQ", s.handleProviders, fresh(s))
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "the last way you can sign in") {
+		t.Fatalf("removing the last passkey: %d %s, want the 409 acknowledgement", w.Code, w.Body.String())
+	}
+	w = call(t, s, http.MethodDelete, ProvidersPath+"?name="+passkeyName+"&credential=AQ&acknowledge=recovery", s.handleProviders, fresh(s))
+	if w.Code != http.StatusOK {
+		t.Fatalf("acknowledged removal of the last passkey: %d %s", w.Code, w.Body.String())
+	}
+	// Without ?credential= the provider-level check is unchanged.
+	s2, _ := passkeyServer(t, "AQ==", "Ag==")
+	w = call(t, s2, http.MethodDelete, ProvidersPath+"?name="+passkeyName, s2.handleProviders, fresh(s2))
+	if w.Code != http.StatusConflict {
+		t.Errorf("removing the whole passkey provider, the only one: %d, want 409", w.Code)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io/fs"
 	pathpkg "path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,43 @@ type StateEntry struct {
 	EventIDs  []int                  `json:"event_ids"`
 	CreatedAt string                 `json:"created_at"`
 	ReadAt    string                 `json:"read_at,omitempty"`
+}
+
+// PublishedRFC3339 is an entry's time as RFC 3339 in UTC, or "" when it
+// cannot be read as a time. Every reader of an entry's time goes through it,
+// because the state file is older than its writers: entries written in the
+// JavaScript era carry a Date.toString ("Wed Mar 04 2026 20:22:19 GMT+0000
+// (Coordinated Universal Time)"), and nothing rewrites a state file, so the
+// old forms are read, never trusted to be gone.
+func PublishedRFC3339(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// A JavaScript Date.toString ends in the zone's name in parentheses,
+	// which may hold spaces and is not a time; the offset before it is.
+	if i := strings.Index(s, " ("); i > 0 && strings.HasSuffix(s, ")") {
+		s = s[:i]
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		"Mon Jan 02 2006 15:04:05 GMT-0700", // JavaScript Date.toString
+		time.RFC1123Z, time.RFC1123,         // JavaScript Date.toUTCString, HTTP dates
+		"2006-01-02 15:04:05.999999999 -0700 MST", // Go's time.String
+		"2006-01-02T15:04:05.999999999",           // no zone: read as UTC
+		"2006-01-02",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil && n > 0 {
+		if n > 1e11 { // milliseconds, as JavaScript's Date.now
+			return time.UnixMilli(n).UTC().Format(time.RFC3339)
+		}
+		return time.Unix(n, 0).UTC().Format(time.RFC3339)
+	}
+	return ""
 }
 
 // StateDirKey is the state directory for a DS domain, relative to the site

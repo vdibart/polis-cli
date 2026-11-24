@@ -420,6 +420,48 @@ func TestSignComment_DomainInFrontmatter(t *testing.T) {
 	}
 }
 
+// Signing a saved draft keeps the draft's id. The id check used to see the
+// draft being signed as a collision, so every signed draft came out "<id>-2";
+// another comment that holds the id still pushes it on.
+func TestSigningADraftKeepsItsID(t *testing.T) {
+	dataDir := t.TempDir()
+	for _, d := range []string{"drafts", "pending", "denied"} {
+		os.MkdirAll(filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", d), 0755)
+	}
+	os.MkdirAll(filepath.Join(dataDir, "content", "pub.polis.core", "comment"), 0755)
+	privKey := generateTestKey(t)
+	s := storage.At(dataDir)
+
+	draft := &CommentDraft{InReplyTo: "https://alice.polis.pub/posts/20260101/hello.md", Content: "Great post!"}
+	if err := SaveDraft(s, draft); err != nil {
+		t.Fatal(err)
+	}
+	id := draft.ID
+	signed, err := SignComment(s, draft, "bob.polis.pub", "https://bob.polis.pub", privKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signed.Meta.ID != id {
+		t.Errorf("signed as %q, want the draft's id %q", signed.Meta.ID, id)
+	}
+
+	// A second draft with the id of a comment already signed is pushed on.
+	again := &CommentDraft{ID: id, InReplyTo: draft.InReplyTo, Content: "Again."}
+	if err := SaveDraft(s, again); err != nil {
+		t.Fatal(err)
+	}
+	if again.ID == id {
+		t.Fatalf("a draft took the id of a signed comment: %q", again.ID)
+	}
+	second, err := SignComment(s, again, "bob.polis.pub", "https://bob.polis.pub", privKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Meta.ID == id {
+		t.Errorf("a second comment was signed with the first's id %q", id)
+	}
+}
+
 // TestSignComment_CanonicalURL is the regression guard for Defect 1: a comment
 // must self-declare (and later register) the CANONICAL source-path URL
 // (content/pub.polis.core/comment/...), NOT the legacy /comments/ mount path.

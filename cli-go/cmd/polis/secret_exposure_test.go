@@ -36,12 +36,15 @@ var allowedExposureSites = map[string]struct {
 	reasons []string
 }{
 	// path relative to the repo root : why each exposure there is correct
-	"webapp/cmd/hosted/main.go": {2, []string{
+	"webapp/cmd/hosted/main.go": {3, []string{
 		"NewStore wants a DSN string and NewEmailClient wants an API key string. ⭐ Both " +
 			"exposures are at the point of use: the value goes straight into the client " +
 			"that needs it and is not kept. ⚠️ If either constructor is ever changed to " +
 			"take a secret.Value, DELETE the matching exposure rather than leaving it — " +
 			"an exposure that is no longer needed is the kind that gets logged later.",
+		"NewAgentSignIn wants the sign-in server's signing secret as bytes: it is handed " +
+			"straight to agentauth.New, which derives its keys from it and keeps only those. " +
+			"Read only when POLIS_AGENT_SIGNIN=1.",
 	}},
 	"webapp/cmd/hosted/main_test.go": {1, []string{
 		"reads the resolved DSN back to assert the boot path does not alter it",
@@ -64,6 +67,13 @@ var allowedExposureSites = map[string]struct {
 			"and ends in one function: the value is written, hashed and passed to one " +
 			"client, never kept in a field or returned, and every message names the " +
 			"setting, never the value.",
+	}},
+	"webapp/internal/admin/secret.go": {1, []string{
+		"CheckActorSecret proves the actor-key secret polis-hosted booted with is the key " +
+			"on the volume: the exposed value goes straight into signing.PublicKeyFor and only " +
+			"the derived PUBLIC key is compared. ⭐ The result is one word (match / no match); " +
+			"the value is never printed, logged, stored or returned, and a validation failure " +
+			"names the problem, never the value.",
 	}},
 	"cli-go/pkg/provision/vercel_seed.go": {1, []string{
 		"openSeedStore hands a Blob store's read-write token, read back from the project's " +

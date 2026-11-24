@@ -3,6 +3,7 @@ package theme
 import (
 	"context"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 	"path/filepath"
@@ -700,9 +701,10 @@ func TestSelectRandomTheme_UnsavedChoiceIsStable(t *testing.T) {
 		if !errors.Is(err, ErrThemeNotSaved) {
 			t.Fatalf("call %d: err = %v, want ErrThemeNotSaved", i, err)
 		}
-		// "sols" is reserved, so the first eligible theme by name is "mint".
-		if got != "mint" {
-			t.Fatalf("call %d: got %q, want the first eligible theme by name, %q", i, got, "mint")
+		// "sols" is reserved and "mint" is not a theme polis ships, so the
+		// first eligible theme by name is "turbo".
+		if got != "turbo" {
+			t.Fatalf("call %d: got %q, want the first eligible theme by name, %q", i, got, "turbo")
 		}
 	}
 	if b, _ := os.ReadFile(reg); string(b) != "{" {
@@ -727,5 +729,40 @@ func TestSelectRandomTheme_SavedChoiceIsStillRandom(t *testing.T) {
 	}
 	if len(seen) < 2 {
 		t.Fatalf("60 fresh sites all got %v; the saved choice should stay random", seen)
+	}
+}
+
+// ⛔ A random pick never chooses a theme of the owner's. Over many fresh picks
+// on a site whose site/themes/ holds the owner's own theme beside a shipped
+// one, only the shipped one is ever chosen, on either shape.
+func TestSelectRandomThemeNeverPicksAnOwnTheme(t *testing.T) {
+	for _, shape := range []string{"v3", "v4"} {
+		seen := map[string]bool{}
+		for i := 0; i < 40; i++ {
+			dir := t.TempDir()
+			createTestTheme(t, filepath.Join(dir, "site", "themes"), "mine")
+			createTestTheme(t, filepath.Join(dir, "site", "themes"), "zane")
+			if err := bundle.SetActiveShapeName(storage.At(dir), shape); err != nil {
+				t.Fatal(err)
+			}
+			got, err := SelectRandomTheme(storage.At(dir), "")
+			if err != nil {
+				t.Fatalf("%s: %v", shape, err)
+			}
+			seen[got] = true
+		}
+		if seen["mine"] || len(seen) != 1 || !seen["zane"] {
+			t.Errorf("%s: picked %v, want only zane", shape, seen)
+		}
+	}
+}
+
+// With only the owner's own themes installed there is nothing to pick by
+// chance: an error, never one of theirs.
+func TestSelectRandomThemeWithOnlyOwnThemesPicksNothing(t *testing.T) {
+	dir := t.TempDir()
+	createTestTheme(t, filepath.Join(dir, "site", "themes"), "mine")
+	if got, err := SelectRandomTheme(storage.At(dir), ""); err == nil {
+		t.Errorf("picked %q, want an error", got)
 	}
 }

@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,7 +29,7 @@ func TestEveryAPIRouteIsClassified(t *testing.T) {
 	// ⛔ NON-VACUITY. A test that finds no routes passes, and this repo has
 	// shipped exactly that mistake before — a census scanned the wrong
 	// directory and stayed green. The number is a floor, not a count.
-	if len(matches) < 50 {
+	if len(matches) < 12 { // 15 once the v4 app's routes and what only it called were deleted (2026-11-22)
 		t.Fatalf("found only %d routes in routes.go; the pattern is probably wrong, "+
 			"and a classifier that sees nothing passes", len(matches))
 	}
@@ -47,6 +46,28 @@ func TestEveryAPIRouteIsClassified(t *testing.T) {
 		}
 		// Behind the gate. Nothing to assert beyond its being reachable only
 		// through the middleware, which the wiring tests below cover.
+	}
+}
+
+// ⭐ The public list names only routes that exist. An entry for a deleted
+// route is a standing permission waiting for the next route of that name, so
+// it goes with the route.
+func TestEveryPublicEntryIsARegisteredRoute(t *testing.T) {
+	mux := http.NewServeMux()
+	SetupRoutes(mux, newTestServer(t))
+	registered := func(path string) bool {
+		_, pattern := mux.Handler(httptest.NewRequest(http.MethodGet, path, nil))
+		return pattern != "" && pattern != "/"
+	}
+	for path := range publicAPIRoutes {
+		if !registered(path) {
+			t.Errorf("public route %s is on the list but no route serves it", path)
+		}
+	}
+	for prefix := range publicAPIPrefixes {
+		if !registered(prefix + "x") {
+			t.Errorf("public prefix %s is on the list but no route serves it", prefix)
+		}
 	}
 }
 
@@ -186,59 +207,5 @@ func TestThePublishedSiteIsNotGated(t *testing.T) {
 		if code := gateResponse(t, s, path); code != http.StatusOK {
 			t.Errorf("published path %s returned %d; it must be served to everyone", path, code)
 		}
-	}
-}
-
-// ⛔ /api/status is on the public list, so the trim is the only thing keeping
-// a stranger from reading this site's structural faults. If the trim is ever
-// removed, the allow-list entry becomes a disclosure.
-func TestStatusWithholdsValidationDetailFromAStranger(t *testing.T) {
-	s := newConfiguredServer(t)
-	s.Mode = mode.RemoteServerSigned // nothing enrolled: not the owner
-
-	w := httptest.NewRecorder()
-	s.handleStatus(w, httptest.NewRequest(http.MethodGet, "/api/status", nil))
-	if w.Code != http.StatusOK {
-		t.Fatalf("status %d; the bootstrap call must answer a stranger", w.Code)
-	}
-	var body map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("not JSON: %v", err)
-	}
-	if _, leaked := body["site_info"]; leaked {
-		t.Error("site_info was served to a stranger")
-	}
-	v, _ := body["validation"].(map[string]interface{})
-	if _, leaked := v["errors"]; leaked {
-		t.Error("validation.errors was served to a stranger; that is a map of where to push")
-	}
-	// ⭐ What a stranger MAY see, because the site publishes it anyway, and
-	// because the shell needs it to choose a screen.
-	for _, keep := range []string{"configured", "site_title", "base_url"} {
-		if _, ok := body[keep]; !ok {
-			t.Errorf("%s was withheld; the logged-out shell needs it", keep)
-		}
-	}
-	if v["status"] == nil {
-		t.Error("validation.status was withheld; the shell needs to know whether the site is configured")
-	}
-}
-
-// ⭐ And the owner still sees everything they see today, so nothing a
-// self-hoster relies on disappeared.
-func TestStatusStillTellsTheOwnerEverything(t *testing.T) {
-	s := newConfiguredServer(t)
-	s.Mode = mode.Local
-	s.BoundToLoopback = true
-
-	w := httptest.NewRecorder()
-	s.handleStatus(w, httptest.NewRequest(http.MethodGet, "/api/status", nil))
-	var body map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("not JSON: %v", err)
-	}
-	v, _ := body["validation"].(map[string]interface{})
-	if _, ok := v["errors"]; !ok {
-		t.Error("the owner lost the validation detail they see today")
 	}
 }

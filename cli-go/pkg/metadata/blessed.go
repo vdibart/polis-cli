@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"sync"
@@ -440,6 +441,10 @@ func removeBlessedComment(site storage.Site, commentURL string, privateKeyPEM []
 	defer blessedMu.Unlock()
 
 	bc, err := loadBlessedCommentsRaw(site)
+	if errors.Is(err, fs.ErrNotExist) {
+		// No blessed list at all: the comment is not blessed, nothing to do.
+		return nil
+	}
 	if err != nil {
 		return err
 	}

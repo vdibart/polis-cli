@@ -382,6 +382,7 @@ func TestTheReleaseManifestIsFetchedForTheInstancesOwnVersion(t *testing.T) {
 	other, _ := FunctionManifestFor(code, "9.9.9")
 	ob, _ := json.Marshal(other)
 	served["/"+ReleaseRepo+"/releases/download/v1.2.4/"+FunctionManifestAsset] = ob
+	signRelease(t, served, "1.2.3", "1.2.4")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, ok := served[r.URL.Path]
 		if !ok {

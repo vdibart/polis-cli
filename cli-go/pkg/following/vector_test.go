@@ -86,3 +86,50 @@ func assertSpecPublishes(t *testing.T, vector string) {
 			signingBaseSpec, vector)
 	}
 }
+
+// goldenFollowingMarked is an entry a user agent added: only that entry
+// carries the marker, after the existing fields; the unmarked entry beside it
+// is byte-identical to goldenFollowing's.
+const goldenFollowingMarked = `{"version":"polis-cli-go/0.67.0","following":[{"url":"https://bob.example","added_at":"2026-08-28T09:15:00Z","site_title":"Bob's Notes","author_name":"Bob"},{"url":"https://carol.example","added_at":"2026-11-23T12:00:00Z","agent":"Claude Desktop","grant":"https://alice.example/content/pub.polis.core/attestation/20261123T120000Z-0123456789abcdef.json"}]}`
+
+// ⭐ The agent marker on a follow entry is omitted when absent, so an entry the
+// owner made signs exactly as before, and a marked entry's bytes are pinned
+// and published.
+func TestCanonicalJSON_MarkedVector(t *testing.T) {
+	f := &FollowingFile{
+		Version: "polis-cli-go/0.67.0",
+		Following: []FollowingEntry{{
+			URL: "https://bob.example", AddedAt: "2026-08-28T09:15:00Z", SiteTitle: "Bob's Notes", AuthorName: "Bob",
+		}, {
+			URL: "https://carol.example", AddedAt: "2026-11-23T12:00:00Z",
+			Agent: "Claude Desktop", Grant: "https://alice.example/content/pub.polis.core/attestation/20261123T120000Z-0123456789abcdef.json",
+		}},
+	}
+	got, err := canonicalJSON(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != goldenFollowingMarked {
+		t.Errorf("marked canonical bytes moved:\n got: %s\nwant: %s", got, goldenFollowingMarked)
+	}
+	assertSpecPublishes(t, goldenFollowingMarked)
+}
+
+// ⭐ AddMarked marks only the entry it adds, and leaves an entry already
+// followed as it was.
+func TestAddMarkedMarksOnlyTheNewEntry(t *testing.T) {
+	f := &FollowingFile{}
+	f.Add("https://bob.example")
+	if !f.AddMarked("https://carol.example", "Claude Desktop", "https://alice.example/g.json") {
+		t.Fatal("carol not added")
+	}
+	if f.AddMarked("https://bob.example", "Claude Desktop", "https://alice.example/g.json") {
+		t.Error("bob added twice")
+	}
+	if b := f.Get("https://bob.example"); b.Agent != "" || b.Grant != "" {
+		t.Errorf("the owner's entry gained a marker: %+v", b)
+	}
+	if c := f.Get("https://carol.example"); c.Agent != "Claude Desktop" || c.Grant != "https://alice.example/g.json" {
+		t.Errorf("the agent's entry is not marked: %+v", c)
+	}
+}

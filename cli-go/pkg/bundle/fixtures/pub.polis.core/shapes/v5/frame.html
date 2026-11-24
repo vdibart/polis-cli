@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<!--! polis · trail marker. A polis site: signed posts on the author's own domain
+     (/.well-known/polis is its identity). This page is the v5 shape, rendered by
+     cli-go/pkg/render/v5.go from cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v5/
+     (frame.html, its card templates, v5.js, v5.css); a theme supplies tokens only.
+     Pull the thread: https://github.com/vdibart/polis-cli/blob/main/docs/README.md (start here) ·
+     https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/shapes.md ·
+     https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/themes.md ·
+     https://github.com/vdibart/polis-cli/blob/main/docs/handbook/foreign-site-widget.md · https://github.com/vdibart/polis-cli/blob/main/AGENTS.md -->
+<!--
+    v5 shape · frame.html — every page of a v5 site.
+
+    The frame is the same on every page: the top bar (the author's mark and
+    handle, which go to the site's front page; the site's menu in its box; the visitor's corner,
+    Follow's place for the widget), the content
+    column holding the page's cards, and the site's footer. A page differs
+    only by its cards, the lit menu item, and whether it is one item's own
+    page ("single": one card, open).
+
+    Variables (render/v5.go writeV5Page): page_title, canonical_url, section,
+    body_class, menu, cards, head (description, Open Graph, JSON-LD and the
+    licence tags: render/v5.go v5Head), fonts_href (the theme's fonts, an address
+    the shape builds from the font catalog), templates (index.html's: the following card's,
+    for the controller), site_domain, v5_version, widget_version.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{page_title}}</title>
+<link rel="canonical" href="{{canonical_url}}">
+{{head}}
+<link rel="icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="{{fonts_href}}">
+<link rel="stylesheet" href="/styles.css?v={{v5_version}}">
+<script src="/v5.js?v={{v5_version}}" defer></script>
+</head>
+<body class="v5{{body_class}}" data-sec="{{section}}" data-site="{{site_domain}}">
+
+<header class="topbar">
+  <!-- Whose site this is: the author's mark and handle, top left. Either goes home: the site's front page. -->
+  <a class="author" href="/" aria-label="{{site_domain}}, home">{{mark}}<span class="ah">{{site_domain}}</span></a>
+  <nav class="menu" aria-label="{{site_domain}}">{{menu}}</nav>
+  <!-- The visitor's corner: Follow (a visitor) or Enhance your site (the owner), the widget's, drawn
+       when it loads. Nothing of the visitor's own is drawn in the bar. -->
+  <div class="you"><div id="polis-widget-follow" data-author="{{site_domain}}" data-shape="v5"></div></div>
+</header>
+
+<main class="col">
+{{site_h1}}{{cards}}
+</main>
+
+<footer class="foot">
+  <a href="/license">terms of use</a>
+  <a href="/.well-known/polis">check the signatures</a>
+  <span class="spacer"></span>
+  <span class="made">a <b>polis</b> site</span>
+</footer>
+<!-- A signed-in visitor's way home, floating at the lower left, which polis.pub fills (nav.js); never
+     the owner's on their own site. The tag must open exactly so; the server finds it by that. -->
+<div id="polis-nav-root"></div>
+{{templates}}
+<script src="https://polis.pub/widget-{{widget_version}}.js" crossorigin="anonymous" defer></script>
+
+</body>
+</html>

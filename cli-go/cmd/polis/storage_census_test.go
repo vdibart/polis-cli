@@ -44,6 +44,8 @@ var detachedPackages = []string{
 	// them failed nothing — verified by injecting os.ReadFile into pkg/cache and
 	// watching the census pass.
 	"pkg/cache", "pkg/discovery", "pkg/sitemap", "pkg/signing",
+	// Written storage-first from the start.
+	"pkg/seen", "pkg/apidesc",
 }
 
 // detachedWebappPackages are the webapp side of the same list.

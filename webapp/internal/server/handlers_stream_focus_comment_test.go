@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
 	"net/http"
@@ -318,6 +319,13 @@ func TestHandleStreamFocusComment_CachesResult(t *testing.T) {
 
 func TestHandleStreamBody_CrossTenantFetchesRemoteBody(t *testing.T) {
 	s := newConfiguredServer(t)
+	// A visitor may have the site fetch only its own or a followed site's
+	// post (TestTheStreamBodyRouteIsNoOnesFetchingProxy).
+	ff := &following.FollowingFile{Version: "1"}
+	ff.Add("https://other.example")
+	if err := following.Save(s.Site(), ff); err != nil {
+		t.Fatal(err)
+	}
 
 	orig := render.DefaultHTTPClient
 	render.DefaultHTTPClient = &http.Client{Transport: focusBodyRoundTripper{body: "The full cross-tenant post body."}}

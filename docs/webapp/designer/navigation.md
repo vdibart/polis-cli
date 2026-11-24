@@ -2,6 +2,8 @@
 
 *For* [Contributors](../../README.md#contributing-to-polis) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [Webapp](../README.md) — *Code* [`webapp/internal/webui/www`](../../../webapp/internal/webui/www) — *See also* [tour](../../handbook/stream-overview.md)
 
+⚠️ **This page describes the v4 owner app and the stream shape, both replaced.** Since 2026-11-22 every site's owner app is the **v5 app** (at `/_/`, on `/v1` only), and every site on polis.pub is on the **v5 shape**; the v4 app (its topbar, icon presets and dots) is deleted, and the stream shape is no longer supported though a site that records it still renders as before. What follows is kept as the record of how v4 worked. For the current model see [shapes](../../general/concepts/shapes.md) and [architecture](../../general/concepts/architecture.md).
+
 ## Overview
 
 The nav is a 64px topbar (`--topbar-height`) that persists across all logged-in pages. It is the connective tissue of the polis experience — the one element that tells the user "you're still here, you're still logged in, your stuff is one gesture away."

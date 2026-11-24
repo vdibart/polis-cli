@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<!--! polis · trail marker. A polis site: signed posts on the author's own domain
+     (/.well-known/polis is its identity). This page is the v5 shape, rendered by
+     cli-go/pkg/render/v5.go from cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v5/
+     (frame.html, its card templates, v5.js, v5.css); a theme supplies tokens only.
+     Pull the thread: https://github.com/vdibart/polis-cli/blob/main/docs/README.md (start here) ·
+     https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/shapes.md ·
+     https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/themes.md ·
+     https://github.com/vdibart/polis-cli/blob/main/docs/handbook/foreign-site-widget.md · https://github.com/vdibart/polis-cli/blob/main/AGENTS.md -->
+
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charlie — V4 Test</title>
+<link rel="canonical" href="https://example.com/posts/20260325/charlie.html">
+<meta name="description" content="Third body text.">
+<link rel="sitemap" type="application/xml" title="Sitemap" href="/sitemap.xml">
+<meta property="og:title" content="Charlie">
+<meta property="og:description" content="Third body text.">
+<meta property="og:url" content="https://example.com/posts/20260325/charlie.html">
+<meta property="og:type" content="article">
+<meta property="og:image" content="https://example.com/favicon.svg">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Charlie">
+<meta name="twitter:description" content="Third body text.">
+<meta name="twitter:image" content="https://example.com/favicon.svg">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BlogPosting",
+  "headline": "Charlie",
+  "datePublished": "2026-03-25T12:00:00Z",
+  "dateModified": "2026-03-25T12:00:00Z",
+  "author": {
+    "@type": "Person",
+    "name": "V4 Author",
+    "url": "https://example.com/"
+  },
+  "url": "https://example.com/posts/20260325/charlie.html",
+  "mainEntityOfPage": "https://example.com/posts/20260325/charlie.html"
+}
+</script>
+
+<link rel="icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,500&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<link rel="stylesheet" href="/styles.css?v=0.3.16">
+<script src="/v5.js?v=0.3.16" defer></script>
+</head>
+<body class="v5 single" data-sec="posts" data-site="example.com">
+
+<header class="topbar">
+  
+  <a class="author" href="/" aria-label="example.com, home"><span class="avatar-initial">V</span><span class="ah">example.com</span></a>
+  <nav class="menu" aria-label="example.com"><div class="box"><div class="tbar" data-for="posts"><button class="sq" type="button" data-find="posts" aria-label="search posts" data-label="search posts" aria-expanded="false" title="search posts"><svg class="lens" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg><svg class="x" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button><label class="find" data-find="posts"><input type="search" autocomplete="off" spellcheck="false" placeholder="search posts" aria-label="search posts"></label><div class="views"><a class="on" data-v="posts" href="/"><b data-count="posts">3</b> <span data-noun="post">posts</span></a><a data-v="cm" href="/pql/all+posts+with+comments"><b data-count="with-comments">0</b> with comments</a></div></div><div class="tbar" data-for="comments"><button class="sq" type="button" data-find="comments" aria-label="search comments" data-label="search comments" aria-expanded="false" title="search comments"><svg class="lens" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg><svg class="x" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button><label class="find" data-find="comments"><input type="search" autocomplete="off" spellcheck="false" placeholder="search comments" aria-label="search comments"></label><span class="note"><b data-count="comments">2</b> <span data-noun="comment">comments</span></span></div><div class="tbar" data-for="following"><button class="sq" type="button" data-find="following" aria-label="search sites" data-label="search sites" aria-expanded="false" title="search sites"><svg class="lens" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg><svg class="x" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button><label class="find" data-find="following"><input type="search" autocomplete="off" spellcheck="false" placeholder="search sites" aria-label="search sites"></label><span class="note"></span></div><a class="way on" href="/" data-way="posts" title="posts" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 11h14M5 16h9"/></svg><span class="lbl">posts</span></a></div><div class="trail"><a class="way" href="/pql/all+comments+by+date" data-way="comments" title="comments"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/></svg><span class="lbl">comments</span></a><a class="way" href="/about" data-way="about" title="about"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.6"/><path d="M5 20c.8-3.8 3.6-5.6 7-5.6s6.2 1.8 7 5.6"/></svg><span class="lbl">about</span></a><a class="way" href="/pql/all+profiles+from+example.com%27s+network" data-way="following" title="following"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="9" r="3"/><path d="M3.5 19c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5"/><circle cx="16.5" cy="8" r="2.5"/><path d="M15.8 13.6c2.3.1 4.1 1.6 4.7 4.4"/></svg><span class="lbl">following</span></a><a class="way own-only" href="/_/" data-way="home" title="home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11l8-6.5 8 6.5"/><path d="M6.5 9.5V19h11V9.5"/></svg><span class="lbl">home</span></a></div></nav>
+  
+  <div class="you"><div id="polis-widget-follow" data-author="example.com" data-shape="v5"></div></div>
+</header>
+
+<main class="col">
+
+<article class="item post open" data-path="/posts/20260325/charlie.html" data-focus>
+  <div class="stick" aria-hidden="true"><div class="srow"><div class="sin"><span class="avatar-initial">V</span><span class="sdate">25 Mar 2026</span><span class="sttl">Charlie</span></div></div></div>
+  <div class="hd"><span class="avatar-initial">V</span><a class="hdt perma" href="/posts/20260325/charlie.html"><time datetime="2026-03-25T12:00:00Z">25 Mar 2026</time></a><a class="own-only edit" href="/_/write#edit:/posts/20260325/charlie.html">edit</a></div>
+  <h1><a class="perma" href="/posts/20260325/charlie.html">Charlie</a></h1>
+  <div class="ex"><p>Third body text.</p>
+</div>
+  <div class="ifoot">
+    <a class="n" href="/posts/20260325/charlie.html#comments"><b>0</b> comments</a>
+    
+    <button class="copy" type="button" data-path="/posts/20260325/charlie.html" aria-label="Copy the link" title="Copy the link"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg></button>
+  </div>
+  <div class="thread" id="comments"><div class="cm-none">No comments yet.</div><div data-polis-widget="reply" data-page-type="post" data-post-url="https://example.com/posts/20260325/charlie.html" data-author="example.com"><p class="reply-fallback"><a href="https://polis.pub/?intent=comment&amp;author=example.com" rel="nofollow">Reply from your own polis site</a></p></div></div>
+</article>
+
+<article class="item post" data-path="/posts/20260320/bravo.html" data-neighbour>
+  <div class="stick" aria-hidden="true"><div class="srow"><div class="sin"><span class="avatar-initial">V</span><span class="sdate">20 Mar 2026</span><span class="sttl">Bravo</span></div></div></div>
+  <div class="hd"><span class="avatar-initial">V</span><a class="hdt perma" href="/posts/20260320/bravo.html"><time datetime="2026-03-20T12:00:00Z">20 Mar 2026</time></a><a class="own-only edit" href="/_/write#edit:/posts/20260320/bravo.html">edit</a></div>
+  <h3><a class="perma" href="/posts/20260320/bravo.html">Bravo</a></h3>
+  <div class="ex"><p>A heading Second body. A quotation.</p></div>
+  <div class="ifoot">
+    <a class="n" href="/posts/20260320/bravo.html#comments"><b>0</b> comments</a>
+    
+    <button class="copy" type="button" data-path="/posts/20260320/bravo.html" aria-label="Copy the link" title="Copy the link"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg></button>
+  </div>
+  <div class="thread" id="comments"></div>
+</article>
+
+<article class="item post" data-path="/posts/20260315/alpha.html" data-neighbour>
+  <div class="stick" aria-hidden="true"><div class="srow"><div class="sin"><span class="avatar-initial">V</span><span class="sdate">15 Mar 2026</span><span class="sttl">Alpha</span></div></div></div>
+  <div class="hd"><span class="avatar-initial">V</span><a class="hdt perma" href="/posts/20260315/alpha.html"><time datetime="2026-03-15T12:00:00Z">15 Mar 2026</time></a><a class="own-only edit" href="/_/write#edit:/posts/20260315/alpha.html">edit</a></div>
+  <h3><a class="perma" href="/posts/20260315/alpha.html">Alpha</a></h3>
+  <div class="ex"><p>First body, with a link and code.</p></div>
+  <div class="ifoot">
+    <a class="n" href="/posts/20260315/alpha.html#comments"><b>0</b> comments</a>
+    
+    <button class="copy" type="button" data-path="/posts/20260315/alpha.html" aria-label="Copy the link" title="Copy the link"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg></button>
+  </div>
+  <div class="thread" id="comments"></div>
+</article>
+
+</main>
+
+<footer class="foot">
+  <a href="/license">terms of use</a>
+  <a href="/.well-known/polis">check the signatures</a>
+  <span class="spacer"></span>
+  <span class="made">a <b>polis</b> site</span>
+</footer>
+
+<div id="polis-nav-root"></div>
+
+<script src="https://polis.pub/widget-1.6.2.js" crossorigin="anonymous" defer></script>
+
+</body>
+</html>

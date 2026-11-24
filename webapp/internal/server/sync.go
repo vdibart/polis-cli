@@ -4,24 +4,29 @@
 // This file is the *producer* of the continuous sync path. runUnifiedSync()
 // pulls a cursor-paginated batch of events from the DS, fans them out to
 // per-content-type handlers (feed / follow / blessing / notification), and
-// advances the cursor. Runs every ~30 seconds while any browser tab has an
-// SSE connection open.
+// advances the cursor. It runs when the server starts, when asked
+// (TriggerSync: on polis.pub, the discovery service's GET /v1/wake for an
+// event about this site), and when the owner reads a first-person view
+// (my-network, my-mutuals, …) and the last sync is over two minutes old
+// (syncIfStale, below).
 //
 // Trail across files (DS-to-stream, continuous sync):
 //   producer (this file)  — webapp/internal/server/sync.go: runUnifiedSync()
-//   DS endpoint           — discovery-service/core/handlers/stream.ts (queryStream)
+//   DS endpoint           — the discovery service's GET /v1/stream (its source is not published; docs/ds/developer/api-reference.md)
 //   event-to-FeedItem     — cli-go/pkg/feed/handler.go (FeedHandler.Process)
 //   cursor + cache        — cli-go/pkg/stream/store.go (Store)
-//   webapp HTTP surface   — webapp/internal/server/handlers_stream.go
+//   webapp HTTP surface   — webapp/internal/server/handlers_stream.go, read
+//                           through /pql/<sentence> (handlers_pql.go) and /v1/query
 //
 // Aggregation path (Path B, complementary): handlers_stream.go batches URLs
-// to discovery-service/core/handlers/counts.ts for cross-tenant decoration.
+// to the discovery service's POST /v1/content/comments/counts for cross-tenant
+// decoration (docs/ds/developer/api-reference.md).
 //
 // Pull the thread:
-//   github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md      (tour)
-//   github.com/vdibart/polis-cli/blob/main/docs/ds/developer/stream-architecture.md
-//   github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md
-//   github.com/vdibart/polis-cli/blob/main/AGENTS.md                          (map)
+//   https://github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md      (tour)
+//   https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/stream-architecture.md
+//   https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md
+//   https://github.com/vdibart/polis-cli/blob/main/AGENTS.md                          (map)
 // =============================================================================
 
 package server
@@ -42,6 +47,29 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 )
+
+// networkStaleAfter is how old the last sync may be before an owner's read of
+// their network asks for another.
+const networkStaleAfter = 2 * time.Minute
+
+// syncIfStale asks the background loop for a sync when none has run or been
+// asked for within networkStaleAfter. It never waits: the read that calls it
+// answers from the cache as it is, and the next read sees what the sync found.
+//
+// ⭐ This is what keeps an owner's network current: no timer syncs, and the
+// DS wakes a site only for events about it, not when a site it follows posts.
+// The owner app, an agent over /v1/query and MCP all read through here.
+func (s *Server) syncIfStale() {
+	now := time.Now().UnixNano()
+	last := s.lastSyncAsked.Load()
+	if last != 0 && time.Duration(now-last) < networkStaleAfter {
+		return
+	}
+	if !s.lastSyncAsked.CompareAndSwap(last, now) {
+		return // another read asked first
+	}
+	s.TriggerSync()
+}
 
 // SyncResult aggregates results from all handlers in a unified sync run.
 type SyncResult struct {
@@ -73,6 +101,7 @@ func generateSyncID() string {
 
 func (s *Server) runUnifiedSync() SyncResult {
 	result := SyncResult{}
+	s.lastSyncAsked.Store(time.Now().UnixNano())
 	s.ReloadKeysIfChanged() // the cycle may sign; never with a retired key
 
 	if s.DiscoveryURL == "" {
@@ -117,10 +146,6 @@ func (s *Server) runUnifiedSync() SyncResult {
 				s.LogWarn("sync: could not save the pub.polis.sync cursor (the next cycle re-reads from the old one): %v", err)
 			}
 		}
-		// Broadcast counts even with 0 events — feed items may have been
-		// added by other paths (e.g. manual feed refresh) since the last
-		// broadcast, and SSE clients need the updated counts.
-		s.broadcastCounts(result)
 		s.LogEvent("pub.polis.sync.complete", map[string]interface{}{
 			"sync_id":          syncID,
 			"events_processed": 0,
@@ -182,9 +207,6 @@ func (s *Server) runUnifiedSync() SyncResult {
 			log.Printf("[warning] unified sync render failed: %v", err)
 		}
 	}
-
-	// Broadcast counts via SSE
-	s.broadcastCounts(result)
 
 	// Log sync completion
 	s.LogEvent("pub.polis.sync.complete", map[string]interface{}{

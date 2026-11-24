@@ -7,19 +7,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/vdibart/polis-cli/cli-go/pkg/contentpath"
-	"html"
+	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
+	"github.com/vdibart/polis-cli/webapp/internal/api"
 	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
-	pathpkg "path"
 	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,133 +27,17 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
-	"github.com/vdibart/polis-cli/cli-go/pkg/hooks"
-	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
-	"github.com/vdibart/polis-cli/cli-go/pkg/notification"
-	"github.com/vdibart/polis-cli/cli-go/pkg/owner"
-	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policycheck"
-	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
-	"github.com/vdibart/polis-cli/cli-go/pkg/snippet"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
-	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
 	"github.com/vdibart/polis-cli/cli-go/pkg/theme"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
-
-// draftIDSanitizer strips all characters except alphanumeric, hyphens, and underscores.
-var draftIDSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
-
-// errPathTraversal indicates the path contains a traversal sequence (`..`) or
-// a null byte — a real security concern worth logging as a security event.
-var errPathTraversal = contentpath.ErrTraversal
-
-// errPathDisallowed indicates the path is well-formed but outside the allowed
-// roots. Benign causes include stale clients or bad URLs; not a security event.
-var errPathDisallowed = contentpath.ErrDisallowed
-
-// isTraversal reports whether err came from a traversal/null-byte rejection
-// (as opposed to a prefix-mismatch). Call sites use this to decide whether to
-// emit a security event.
-func isTraversal(err error) bool { return err == errPathTraversal }
-
-// validatePostPath ensures the path is safe and within the posts content directory.
-// Returns errPathTraversal for `..`/null-byte attempts and errPathDisallowed for
-// everything else.
-func validatePostPath(path string) error {
-	// Canonicalize first to normalize encoded traversals (e.g., ./, //)
-	path = filepath.Clean(path)
-	// Check for traversal/null bytes first so they classify as security events
-	// even when combined with a missing prefix.
-	if strings.Contains(path, "..") || strings.Contains(path, "\x00") {
-		return errPathTraversal
-	}
-	if !strings.HasPrefix(path, "content/pub.polis.core/post/") {
-		return errPathDisallowed
-	}
-	return nil
-}
-
-// validateContentPath ensures the path is safe and within allowed directories.
-// Returns errPathTraversal for `..`/null-byte attempts and errPathDisallowed for
-// prefix-mismatches.
-func validateContentPath(path string) error {
-	// ⭐ The shared rule, so the ops engine (/v1/ actions) applies the same one.
-	return contentpath.Validate(path)
-}
-
-func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-
-	// Run validation to get current state
-	validation := site.Validate(s.Site())
-
-	// For backwards compatibility, "configured" is true if site is valid
-	configured := validation.Status == site.StatusValid
-
-	response := map[string]interface{}{
-		"configured": configured,
-		"site_title": s.GetSiteTitle(),
-		"base_url":   s.GetBaseURL(),
-	}
-
-	// ⛔ THE VALIDATION DETAIL IS OWNER-ONLY, and this endpoint is on the
-	// public list because the logged-out SPA needs it to bootstrap.
-	//
-	// ⭐ "The SPA needs it before login" is a reason to TRIM the response, not
-	// to open the route. What stays is what the site already publishes — its
-	// title and base URL — and what goes is reconnaissance: a stranger
-	// learning that this site's .well-known is malformed, or which file is
-	// missing, is being handed a map of where to push.
-	//
-	// ⚠️ Owner-visible on a laptop exactly as before: the loopback provider
-	// answers there, so nothing a self-hoster sees today disappears.
-	if ok, _ := owner.IsOwner(s.instance(), r); ok {
-		response["validation"] = map[string]interface{}{
-			"status": validation.Status,
-			"errors": validation.Errors,
-		}
-		if validation.SiteInfo != nil {
-			response["site_info"] = validation.SiteInfo
-		}
-	} else {
-		// ⭐ The bare status still says WHETHER the site is configured, which
-		// the shell needs to choose a screen, without saying what is wrong.
-		response["validation"] = map[string]interface{}{"status": validation.Status}
-	}
-
-	showFrontmatter := true
-	if s.Config != nil && s.Config.ShowFrontmatter != nil {
-		showFrontmatter = *s.Config.ShowFrontmatter
-	}
-	response["show_frontmatter"] = showFrontmatter
-
-	// Include avatar, author_name, and active_theme from .well-known/polis
-	if wk, err := site.LoadWellKnown(s.Site()); err == nil {
-		if wk.Avatar != nil {
-			response["avatar"] = wk.Avatar
-		}
-		if wk.AuthorName != "" {
-			response["author_name"] = wk.AuthorName
-		}
-	}
-	if activeTheme, _ := theme.GetActiveTheme(s.Site()); activeTheme != "" {
-		response["active_theme"] = activeTheme
-	}
-
-	json.NewEncoder(w).Encode(response)
-}
 
 // handleValidate returns the validation status of the site directory.
 func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
@@ -169,97 +49,7 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	validation := site.Validate(s.Site())
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(validation)
-}
-
-// handleInit initializes a new polis site in the data directory.
-func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		SiteTitle    string `json:"site_title"`
-		Author       string `json:"author"`
-		Email        string `json:"email"`
-		Theme        string `json:"theme"`
-		BaseURL      string `json:"base_url"`
-		DiscoveryURL string `json:"discovery_url"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		// Empty body is OK - all fields are optional
-		req = struct {
-			SiteTitle    string `json:"site_title"`
-			Author       string `json:"author"`
-			Email        string `json:"email"`
-			Theme        string `json:"theme"`
-			BaseURL      string `json:"base_url"`
-			DiscoveryURL string `json:"discovery_url"`
-		}{}
-	}
-
-	opts := site.InitOptions{
-		SiteTitle: req.SiteTitle,
-		Author:    req.Author,
-		Email:     req.Email,
-		Theme:     req.Theme,
-		Generator: "polis-cli-go/" + s.CLIVersion,
-	}
-
-	s.LogDebug("Initializing new site at: %s", s.DataDir)
-	result, err := site.Init(s.Site(), opts)
-	if err != nil {
-		s.LogError("Failed to initialize site: %v", err)
-		http.Error(w, "Failed to initialize site", http.StatusInternalServerError)
-		return
-	}
-	s.LogEvent("pub.polis.site.init", map[string]interface{}{
-		"site_dir": result.SiteDir,
-		"title":    req.SiteTitle,
-	})
-
-	// Reload keys after successful init
-	s.LoadKeys()
-
-	// Write .env with discovery URL and base URL.
-	// Use user-provided values when available, fall back to server defaults.
-	// No DS credential is written: all DS auth uses Ed25519 signatures.
-	dsURL := req.DiscoveryURL
-	if dsURL == "" {
-		dsURL = s.DiscoveryURL
-	}
-	envVars := map[string]string{
-		"DISCOVERY_SERVICE_URL": dsURL,
-	}
-	if req.BaseURL != "" {
-		req.BaseURL = strings.TrimSuffix(req.BaseURL, "/")
-		envVars["POLIS_BASE_URL"] = req.BaseURL
-		s.BaseURL = req.BaseURL
-	}
-	s.writeEnvFile(".env", envVars)
-
-	// Update server state with the (possibly user-provided) discovery config
-	s.DiscoveryURL = dsURL
-
-	// Create config file (for webapp settings like hooks, discovery)
-	// SetupWizardDismissed defaults to false so wizard shows after init
-	s.Config = &Config{
-		SetupWizardDismissed: false,
-	}
-	s.ApplyDiscoveryDefaults()
-	if err := s.SaveConfig(); err != nil {
-		log.Printf("[warning] Failed to save config: %v", err)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":    result.Success,
-		"site_dir":   result.SiteDir,
-		"public_key": result.PublicKey,
-		"site_title": s.GetSiteTitle(),
-		"base_url":   s.BaseURL,
-	})
+	_ = json.NewEncoder(w).Encode(validation)
 }
 
 // writeEnvFile writes or updates key=value pairs in the .env file at envKey.
@@ -305,803 +95,6 @@ func (s *Server) writeEnvFile(envKey string, vars map[string]string) {
 			s.LogWarn("Failed to create .env: %v", err)
 		}
 	}
-}
-
-func (s *Server) handleRender(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.PrivateKey == nil {
-		http.Error(w, "Not configured - please complete setup first", http.StatusBadRequest)
-		return
-	}
-
-	var req struct {
-		Markdown string `json:"markdown"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if s.handleBodyTooLarge(w, r, err) {
-			return
-		}
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if len(req.Markdown) > MaxPostBodySize {
-		http.Error(w, "Post content too large (max 256KB)", http.StatusRequestEntityTooLarge)
-		return
-	}
-
-	// Render markdown to HTML
-	html, err := render.MarkdownToHTML(req.Markdown)
-	if err != nil {
-		s.LogError("render markdown: %v", err)
-		http.Error(w, "Failed to render markdown", http.StatusInternalServerError)
-		return
-	}
-
-	// ⛔⛔ A PREVIEW IS NEVER SIGNED. This used to sign whatever markdown it was
-	// given and hand the signature back: an oracle for signatures under the
-	// owner's key, over a DS key-rotation message naming an attacker's key, a
-	// grant, or (where the identity key doubled as the recovery key) a recovery
-	// proof. Nothing used the signature; every real write signs through its own
-	// path.
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"html": html,
-	})
-}
-
-func (s *Server) handleDrafts(w http.ResponseWriter, r *http.Request) {
-	draftsDir := siteKey(".polis", "bundles", "pub.polis.core", "posts", "drafts")
-
-	switch r.Method {
-	case http.MethodGet:
-		// List drafts
-		entries := s.listKey(draftsDir)
-		var err error
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"drafts": []interface{}{},
-			})
-			return
-		}
-
-		type draftEntry struct {
-			data    map[string]interface{}
-			modTime time.Time
-		}
-		var drafts []draftEntry
-		for _, entry := range entries {
-			if entry.IsDir || !strings.HasSuffix(entry.Key, ".md") {
-				continue
-			}
-			// ⚠️ Depends on ModTimes: a draft's mtime is its displayed
-			// "modified" time, so a backend without one shows nothing useful.
-			info, err := s.statKey(siteKey(entry.Key))
-			if err != nil {
-				continue
-			}
-			name := pathpkg.Base(entry.Key)
-			draftID := strings.TrimSuffix(name, ".md")
-			d := map[string]interface{}{
-				"id":       draftID,
-				"name":     name,
-				"modified": info.ModTime.Format(time.RFC3339),
-			}
-			// Extract title and excerpt from draft content
-			if content, err := s.readKey(siteKey(entry.Key)); err == nil {
-				lines := strings.Split(string(content), "\n")
-				title := ""
-				bodyStart := 0
-				for i, line := range lines {
-					trimmed := strings.TrimSpace(line)
-					if title == "" && strings.HasPrefix(trimmed, "# ") {
-						title = strings.TrimPrefix(trimmed, "# ")
-						bodyStart = i + 1
-					} else if title == "" && trimmed != "" {
-						// First non-empty line without # prefix
-						bodyStart = i
-						break
-					}
-				}
-				if title != "" {
-					d["title"] = title
-				}
-				// Build excerpt from body lines (skip blank lines after title)
-				var excerptLines []string
-				for i := bodyStart; i < len(lines) && len(excerptLines) < 3; i++ {
-					trimmed := strings.TrimSpace(lines[i])
-					if trimmed != "" {
-						excerptLines = append(excerptLines, trimmed)
-					}
-				}
-				if len(excerptLines) > 0 {
-					excerpt := strings.Join(excerptLines, " ")
-					if len(excerpt) > 200 {
-						excerpt = excerpt[:200] + "..."
-					}
-					d["excerpt"] = excerpt
-				}
-			}
-			drafts = append(drafts, draftEntry{
-				data:    d,
-				modTime: info.ModTime,
-			})
-		}
-
-		// Sort by most recently modified first
-		sort.Slice(drafts, func(i, j int) bool {
-			return drafts[i].modTime.After(drafts[j].modTime)
-		})
-
-		draftList := make([]map[string]interface{}, len(drafts))
-		for i, d := range drafts {
-			draftList[i] = d.data
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"drafts": draftList,
-		})
-
-	case http.MethodPost:
-		// Save draft
-		var req struct {
-			ID       string `json:"id"`
-			Markdown string `json:"markdown"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			if isBodyTooLargeError(err) {
-				http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, "Invalid request", http.StatusBadRequest)
-			return
-		}
-
-		if len(req.Markdown) > MaxPostBodySize {
-			http.Error(w, "Draft content too large (max 256KB)", http.StatusRequestEntityTooLarge)
-			return
-		}
-
-		if req.ID == "" {
-			req.ID = fmt.Sprintf("draft-%d", time.Now().Unix())
-		}
-
-		// Sanitize ID - whitelist only safe characters
-		req.ID = draftIDSanitizer.ReplaceAllString(req.ID, "-")
-
-		draftPath := siteKey(draftsDir, req.ID+".md")
-		if err := s.writeKey(draftPath, []byte(req.Markdown), 0644); err != nil {
-			s.LogError("failed to save draft: %v", err)
-			http.Error(w, "Failed to save draft", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"id":      req.ID,
-		})
-
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *Server) handleDraft(w http.ResponseWriter, r *http.Request) {
-	// Extract ID from path: /api/drafts/{id}
-	id := strings.TrimPrefix(r.URL.Path, "/api/drafts/")
-	if id == "" {
-		http.Error(w, "Draft ID required", http.StatusBadRequest)
-		return
-	}
-
-	// Sanitize ID - whitelist only safe characters
-	id = draftIDSanitizer.ReplaceAllString(id, "-")
-
-	draftPath := siteKey(".polis", "bundles", "pub.polis.core", "posts", "drafts", id+".md")
-
-	switch r.Method {
-	case http.MethodGet:
-		content, err := s.readKey(draftPath)
-		if err != nil {
-			http.Error(w, "Draft not found", http.StatusNotFound)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id":       id,
-			"markdown": string(content),
-		})
-
-	case http.MethodDelete:
-		if err := s.deleteKey(draftPath, false); err != nil {
-			s.LogError("failed to delete draft: %v", err)
-			http.Error(w, "Failed to delete draft", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-		})
-
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.PrivateKey == nil {
-		http.Error(w, "Not configured - please complete setup first", http.StatusBadRequest)
-		return
-	}
-
-	var req struct {
-		Markdown string `json:"markdown"`
-		Filename string `json:"filename"`
-		DraftID  string `json:"draft_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if s.handleBodyTooLarge(w, r, err) {
-			return
-		}
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if len(req.Markdown) > MaxPostBodySize {
-		http.Error(w, "Post content too large (max 256KB)", http.StatusRequestEntityTooLarge)
-		return
-	}
-
-	if strings.TrimSpace(req.Markdown) == "" {
-		http.Error(w, "Markdown content required", http.StatusBadRequest)
-		return
-	}
-
-	// Read the author's per-work licence override BEFORE stripping — it lives
-	// in the frontmatter that is about to be discarded.
-	authoredLicense, _ := license.AuthoredProfile(req.Markdown)
-
-	// Strip existing frontmatter if present
-	markdown := req.Markdown
-	if publish.HasFrontmatter(markdown) {
-		markdown = publish.StripFrontmatter(markdown)
-	}
-
-	s.LogDebug("Publishing post with filename: %s", req.Filename)
-	result, err := publish.PublishPost(s.Site(), markdown, req.Filename, s.PrivateKey,
-		s.publishConfigWithLicense(authoredLicense))
-	if err != nil {
-		s.LogError("Failed to publish: %v", err)
-		http.Error(w, "Failed to publish", http.StatusInternalServerError)
-		return
-	}
-	s.LogEvent("pub.polis.post.publish", map[string]interface{}{
-		"path":  result.Path,
-		"title": result.Title,
-	})
-	s.logLicenseMaterialised(result.Path)
-
-	// Render site to generate HTML files. stream-shape tenants get the incremental
-	// cascade (bounded work per publish per step-03/3.a); v3 falls through
-	// to the full RenderSite path for byte-identical legacy behavior.
-	if err := s.RenderSiteAfterPublish(result.Path); err != nil {
-		// Log but don't fail - the post was published successfully
-		log.Printf("[warning] post-publish render failed: %v", err)
-	}
-
-	// Delete the draft if this was published from a draft
-	if req.DraftID != "" {
-		cleanID := draftIDSanitizer.ReplaceAllString(req.DraftID, "-")
-		draftPath := siteKey(".polis", "bundles", "pub.polis.core", "posts", "drafts", cleanID+".md")
-		if err := s.deleteKey(draftPath, true); err != nil {
-			s.LogWarn("Failed to remove draft after publish: %v", err)
-		}
-	}
-
-	// Run post-publish hook (checks explicit config, then auto-discovers .polis/webapp/hooks/)
-	if s.EnableHooks {
-		hc := s.getHookConfig()
-		payload := &hooks.HookPayload{
-			Event:         hooks.EventPostPublish,
-			Path:          result.Path,
-			Title:         result.Title,
-			Version:       result.Version,
-			Timestamp:     time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-			CommitMessage: hooks.GenerateCommitMessage(hooks.EventPostPublish, result.Title),
-		}
-		hookResult, err := hooks.RunHook(s.Site(), hc, payload)
-		if err != nil {
-			// Log hook error but don't fail the publish
-			log.Printf("[warning] post-publish hook failed: %v", err)
-			s.LogWarn("Post-publish hook failed: %v", err)
-		}
-		if hookResult != nil && hookResult.Executed {
-			log.Printf("[info] post-publish hook executed: %s", hookResult.Output)
-			s.LogEvent("pub.polis.hook.post_publish", map[string]interface{}{
-				"output": hookResult.Output,
-			})
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
-}
-
-func (s *Server) handlePosts(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Read posts from public.jsonl
-	indexPath := siteKey("content", "pub.polis.core", "index.jsonl")
-	data, err := s.readKey(indexPath)
-	if err != nil {
-		// No posts yet
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"posts": []interface{}{},
-		})
-		return
-	}
-
-	// Build blessed comment count map
-	commentCountMap := make(map[string]int)
-	if bc, err := metadata.LoadBlessedComments(s.Site()); err == nil {
-		for _, pc := range bc.Comments {
-			commentCountMap[pc.Post] = len(pc.Blessed)
-		}
-	}
-
-	var posts []map[string]interface{}
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var entry map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
-		}
-		// Only posts. ⚠️ Key on `type`, never on "not a comment":
-		// index.jsonl carries every content type the site publishes — tag and
-		// attestation since Signet epic 25 — so a not-a-comment test lists
-		// tags as posts.
-		entryType, _ := entry["type"].(string)
-		entryPath, _ := entry["path"].(string)
-		if !isPostIndexEntry(entryType, entryPath) {
-			continue
-		}
-		// Generate excerpt and get modification time from source markdown
-		if path, ok := entry["path"].(string); ok {
-			srcPath := siteKey(path)
-			if raw, err := s.readKey(srcPath); err == nil {
-				body := stripFrontmatter(string(raw))
-				entry["excerpt"] = makeExcerpt(body, feed.ExcerptCharCap)
-			}
-			// ⚠️ Depends on ModTimes: the source file's mtime is used as
-			// the item's timestamp.
-			if info, err := s.statKey(srcPath); err == nil {
-				entry["modified"] = info.ModTime.Format(time.RFC3339)
-			}
-		}
-		// Attach blessed comment count
-		if path, ok := entry["path"].(string); ok {
-			count := commentCountMap[path]
-			if count == 0 {
-				for k, v := range commentCountMap {
-					if metadata.MatchesPostPath(k, path) {
-						count = v
-						break
-					}
-				}
-			}
-			entry["comment_count"] = count
-		}
-		posts = append(posts, entry)
-	}
-
-	// Reverse order (newest first)
-	for i, j := 0, len(posts)-1; i < j; i, j = i+1, j-1 {
-		posts[i], posts[j] = posts[j], posts[i]
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"posts": posts,
-	})
-}
-
-func (s *Server) handlePost(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Extract path from URL: /api/posts/posts/20260125/my-post.md
-	postPath := strings.TrimPrefix(r.URL.Path, "/api/posts/")
-	if postPath == "" {
-		http.Error(w, "Post path required", http.StatusBadRequest)
-		return
-	}
-
-	// Validate path to prevent directory traversal
-	if err := validatePostPath(postPath); err != nil {
-		if isTraversal(err) {
-			s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
-				"path": postPath, "request_id": RequestIDFromContext(r.Context()),
-			})
-		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Read the post file
-	fullPath := siteKey(postPath)
-	content, err := s.readKey(fullPath)
-	if err != nil {
-		http.Error(w, "Post not found", http.StatusNotFound)
-		return
-	}
-
-	rawMarkdown := string(content)
-
-	// Strip frontmatter to get just the body markdown
-	markdown := publish.StripFrontmatter(rawMarkdown)
-
-	// Parse frontmatter for metadata
-	frontmatter := publish.ParseFrontmatter(rawMarkdown)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"path":         postPath,
-		"markdown":     markdown,
-		"raw_markdown": rawMarkdown,
-		"title":        frontmatter["title"],
-		"published":    frontmatter["published"],
-		"updated":      frontmatter["updated"],
-	})
-}
-
-func (s *Server) handleRepublish(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.PrivateKey == nil {
-		http.Error(w, "Not configured - please complete setup first", http.StatusBadRequest)
-		return
-	}
-
-	var req struct {
-		Path     string `json:"path"`
-		Markdown string `json:"markdown"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if s.handleBodyTooLarge(w, r, err) {
-			return
-		}
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if len(req.Markdown) > MaxPostBodySize {
-		http.Error(w, "Post content too large (max 256KB)", http.StatusRequestEntityTooLarge)
-		return
-	}
-
-	if req.Path == "" {
-		http.Error(w, "Post path required", http.StatusBadRequest)
-		return
-	}
-
-	// Validate path to prevent directory traversal
-	if err := validatePostPath(req.Path); err != nil {
-		if isTraversal(err) {
-			s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
-				"path": req.Path, "request_id": RequestIDFromContext(r.Context()),
-			})
-		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	if strings.TrimSpace(req.Markdown) == "" {
-		http.Error(w, "Markdown content required", http.StatusBadRequest)
-		return
-	}
-
-	// Strip existing frontmatter if present
-	markdown := req.Markdown
-	if publish.HasFrontmatter(markdown) {
-		markdown = publish.StripFrontmatter(markdown)
-	}
-
-	s.LogDebug("Republishing post: %s", req.Path)
-	result, err := publish.RepublishPost(s.Site(), req.Path, markdown, s.PrivateKey, s.DiscoveryConfig())
-	if err != nil {
-		s.LogError("Failed to republish %s: %v", req.Path, err)
-		http.Error(w, "Failed to republish", http.StatusInternalServerError)
-		return
-	}
-	s.LogEvent("pub.polis.post.republish", map[string]interface{}{
-		"path":  result.Path,
-		"title": result.Title,
-	})
-
-	// Render site to generate HTML files. stream-shape tenants get the incremental
-	// cascade (PublishStream handles republish identically); v3 stays on full
-	// RenderSite.
-	if err := s.RenderSiteAfterPublish(result.Path); err != nil {
-		// Log but don't fail - the post was republished successfully
-		log.Printf("[warning] post-republish render failed: %v", err)
-	}
-
-	// Run post-republish hook (checks explicit config, then auto-discovers .polis/webapp/hooks/)
-	if s.EnableHooks {
-		hc := s.getHookConfig()
-		payload := &hooks.HookPayload{
-			Event:         hooks.EventPostRepublish,
-			Path:          result.Path,
-			Title:         result.Title,
-			Version:       result.Version,
-			Timestamp:     time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-			CommitMessage: hooks.GenerateCommitMessage(hooks.EventPostRepublish, result.Title),
-		}
-		hookResult, err := hooks.RunHook(s.Site(), hc, payload)
-		if err != nil {
-			// Log hook error but don't fail the republish
-			log.Printf("[warning] post-republish hook failed: %v", err)
-		}
-		if hookResult != nil && hookResult.Executed {
-			log.Printf("[info] post-republish hook executed: %s", hookResult.Output)
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
-}
-
-func (s *Server) handleUnpublish(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.PrivateKey == nil {
-		http.Error(w, "Not configured - please complete setup first", http.StatusBadRequest)
-		return
-	}
-
-	var req struct {
-		Path      string `json:"path"`
-		CommentID string `json:"comment_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	// Resolve comment path from ID if provided (blessed comments are in date dirs)
-	if req.CommentID != "" && req.Path == "" {
-		// ⭐ The lookup returns the comment's KEY, which is already the
-		// site-relative path this handler works in. ⚠️ It used to be made
-		// relative to the data directory here, and once the lookup returned a
-		// key that failed every time: unpublishing a comment by id answered 500.
-		found, key := comment.FindBlessedComment(s.Site(), req.CommentID)
-		if !found {
-			http.Error(w, "Comment not found", http.StatusNotFound)
-			return
-		}
-		req.Path = key
-	}
-
-	if req.Path == "" {
-		http.Error(w, "Content path required", http.StatusBadRequest)
-		return
-	}
-
-	// Detect content type from path
-	isPost := strings.HasPrefix(req.Path, "content/pub.polis.core/post/")
-	isComment := strings.HasPrefix(req.Path, "content/pub.polis.core/comment/")
-
-	if !isPost && !isComment {
-		http.Error(w, "Path must be under content/pub.polis.core/post/ or content/pub.polis.core/comment/", http.StatusBadRequest)
-		return
-	}
-
-	// Validate path to prevent directory traversal
-	if strings.Contains(req.Path, "..") || strings.Contains(req.Path, "\x00") {
-		s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
-			"path": req.Path, "request_id": RequestIDFromContext(r.Context()),
-		})
-		http.Error(w, "Invalid path", http.StatusBadRequest)
-		return
-	}
-
-	// Verify file exists. req.Path is site-relative and checked for traversal
-	// above; the store refuses a key that escapes the site as well.
-	contentKey := filepath.ToSlash(req.Path)
-	// Only a GENUINE absence is a 404. Any other failure goes on to the read
-	// below, which reports it as the 500 it is.
-	if present, existsErr := s.existsKey(contentKey); existsErr == nil && !present {
-		http.Error(w, "Content not found", http.StatusNotFound)
-		return
-	}
-
-	// Read content for frontmatter extraction
-	contentBytes, err := s.readKey(contentKey)
-	if err != nil {
-		s.LogError("Failed to read content file %s: %v", req.Path, err)
-		http.Error(w, "Failed to read content file", http.StatusInternalServerError)
-		return
-	}
-	contentStr := string(contentBytes)
-	fm := publish.ParseFrontmatter(contentStr)
-	title := fm["title"]
-	if title == "" {
-		title = filepath.Base(req.Path)
-	}
-
-	// Build content URL from base URL + path
-	polisBaseURL := s.BaseURL
-	if polisBaseURL == "" {
-		http.Error(w, "POLIS_BASE_URL not configured", http.StatusBadRequest)
-		return
-	}
-	contentURLPath := strings.TrimSuffix(req.Path, ".md")
-	contentURL := strings.TrimRight(polisBaseURL, "/") + "/" + contentURLPath + ".md"
-
-	// Determine DS content type
-	dsContentType := "pub.polis.post"
-	if isComment {
-		dsContentType = "pub.polis.comment"
-	}
-
-	// Sign unpublish request. R20-C-F1 (2026-05-18): canonical now
-	// includes a fresh ISO 8601 timestamp; DS rejects timestamps
-	// further than ±5min from server clock — defeats signature replay.
-	timestamp := time.Now().UTC().Format(time.RFC3339)
-	canonical := discovery.MakeContentUnpublishCanonicalJSON(dsContentType, contentURL, timestamp)
-	sig, err := signing.SignContent([]byte(canonical), s.PrivateKey)
-	if err != nil {
-		s.LogError("Failed to sign unpublish request for %s: %v", req.Path, err)
-		http.Error(w, "Failed to sign unpublish request", http.StatusInternalServerError)
-		return
-	}
-
-	// Call DS to unpublish — skip if not registered
-	if s.IsRegisteredWithDS() {
-		dsClient := s.NewDSClient(r)
-		if err := dsClient.UnpublishContent(dsContentType, contentURL, timestamp, sig); err != nil {
-			s.LogError("DS unpublish failed for %s: %v", req.Path, err)
-			// Non-fatal: still clean up locally
-		}
-	}
-
-	// Strip frontmatter, then strip any leading title heading from the
-	// body — published posts store the body markdown WITH the leading
-	// "# Title" heading still in place (see publish.PublishPost which
-	// writes canonicalBody = markdown as-is, with whatever heading the
-	// user typed). Pre-2026-05-16 this branch unconditionally prepended
-	// "# title\n\n" to the body, so a publish → unpublish → republish
-	// cycle accumulated heading copies: the first publish wrote
-	// `# Title\n\nbody`, unpublish made it `# Title\n\n# Title\n\nbody`
-	// in drafts, the next publish wrote that back to disk, and so on.
-	// Symptom: rendered post showed the title 3+ times.
-	//
-	// Strip first, then prepend, so the draft body is always
-	// exactly `# title\n\n<body-without-leading-title>`, regardless
-	// of how many cycles the user has run.
-	body := publish.StripFrontmatter(contentStr)
-
-	// Build draft content
-	var draftContent string
-	if isPost {
-		// ⛔ Unquote BEFORE the strip: the publisher escapes the title
-		// (publish.escapeYAMLString) while the body heading keeps the plain
-		// text, so comparing the raw frontmatter value never matched and each
-		// cycle stacked a heading AND re-escaped the title (close-out R3-1).
-		// Same helper as the comment builder.
-		title = publish.UnquoteYAMLString(title)
-		body = render.StripLeadingTitleHeading(body, title)
-		draftContent = "# " + title + "\n\n" + body
-	} else {
-		// A comment draft keeps its reply fields in the format LoadDraft reads,
-		// so the republish this promises is actually possible (close-out E2).
-		// The builder owns the unquote + heading strip; the body arrives here
-		// exactly as published.
-		draftContent = comment.UnpublishedDraftContent(contentStr, title, body)
-	}
-
-	// Determine draft destination
-	baseName := filepath.Base(req.Path)
-	var draftsKey string
-	if isPost {
-		draftsKey = siteKey(".polis", "bundles", "pub.polis.core", "posts", "drafts")
-	} else {
-		draftsKey = siteKey(".polis", "bundles", "pub.polis.core", "comments", "drafts")
-	}
-
-	// Write the draft. ⛔ Its directory is 0700, not 0755: it is under .polis,
-	// and drafts are private (the 0755 that used to be here was a real defect a
-	// reviewer found). The site's store creates every parent under .polis at
-	// 0700, which is what the MkdirAll here did.
-	if err := s.writeKey(siteKey(draftsKey, baseName), []byte(draftContent), 0644); err != nil {
-		s.LogError("Failed to write draft for %s: %v", req.Path, err)
-		http.Error(w, "Failed to write draft", http.StatusInternalServerError)
-		return
-	}
-
-	// Delete .versions/ history file (posts only)
-	if isPost {
-		dateDir := filepath.Base(filepath.Dir(req.Path))
-		versionsFile := siteKey("content", "pub.polis.core", "post", dateDir, ".versions", baseName)
-		_ = s.deleteKey(versionsFile, true)
-	}
-
-	// Delete the original published file
-	if err := s.deleteKey(contentKey, false); err != nil {
-		s.LogError("Failed to delete published file %s: %v", req.Path, err)
-		http.Error(w, "Failed to delete published file", http.StatusInternalServerError)
-		return
-	}
-
-	// Delete rendered HTML if exists
-	if isPost {
-		_ = s.deleteKey(strings.TrimSuffix(contentKey, ".md")+".html", true)
-		// Also check posts mount point
-		dateDir := filepath.Base(filepath.Dir(req.Path))
-		htmlName := strings.TrimSuffix(baseName, ".md") + ".html"
-		mountHtmlPath := siteKey("posts", dateDir, htmlName)
-		_ = s.deleteKey(mountHtmlPath, true)
-	} else {
-		_ = s.deleteKey(strings.TrimSuffix(contentKey, ".md")+".html", true)
-	}
-
-	// Remove from index.jsonl
-	if err := metadata.RemoveIndexEntry(s.Site(), req.Path); err != nil {
-		s.LogWarn("Could not remove index entry for %s: %v", req.Path, err)
-	}
-
-	// Update manifest
-	if err := publish.UpdateManifest(s.Site()); err != nil {
-		s.LogWarn("Failed to update manifest after unpublish: %v", err)
-	}
-
-	// Render site to regenerate HTML files
-	if err := s.RenderSite(); err != nil {
-		log.Printf("[warning] post-unpublish render failed: %v", err)
-	}
-
-	eventType := "pub.polis.post.unpublish"
-	if isComment {
-		eventType = "pub.polis.comment.unpublish"
-	}
-	s.LogEvent(eventType, map[string]interface{}{
-		"path": req.Path,
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-	})
 }
 
 func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
@@ -1311,7 +304,7 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":           true,
 		"public_key":        newPubKey,
 		"key_history_epoch": keyEpoch,
@@ -1322,575 +315,99 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 
 // Comment API handlers
 
-func (s *Server) handleCommentDrafts(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		// List comment drafts
-		drafts, err := comment.ListDrafts(s.Site())
-		if err != nil {
-			s.LogError("failed to list drafts: %v", err)
-			http.Error(w, "Failed to list drafts", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"drafts": drafts,
-		})
-
-	case http.MethodPost:
-		// Save comment draft
-		var req struct {
-			ID        string `json:"id"`
-			InReplyTo string `json:"in_reply_to"`
-			RootPost  string `json:"root_post"`
-			Content   string `json:"content"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			if isBodyTooLargeError(err) {
-				http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, "Invalid request", http.StatusBadRequest)
-			return
-		}
-
-		if len(req.Content) > MaxCommentBodySize {
-			http.Error(w, "Comment content too large (max 64KB)", http.StatusRequestEntityTooLarge)
-			return
-		}
-
-		if req.InReplyTo == "" {
-			http.Error(w, "in_reply_to is required", http.StatusBadRequest)
-			return
-		}
-
-		// ⛔ Sanitise the request-supplied ID. pkg/comment rejects a traversing id
-		// as well, which is the defence that matters, but this handler was the one
-		// that passed it through raw while its four siblings sanitised.
-		draft := &comment.CommentDraft{
-			ID:        sanitizeDraftID(req.ID),
-			InReplyTo: polisurl.NormalizeToMD(req.InReplyTo),
-			RootPost:  polisurl.NormalizeToMD(req.RootPost),
-			Content:   req.Content,
-		}
-
-		if err := comment.SaveDraft(s.Site(), draft); err != nil {
-			s.LogError("failed to save draft: %v", err)
-			http.Error(w, "Failed to save draft", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"id":      draft.ID,
-		})
-
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *Server) handleCommentDraft(w http.ResponseWriter, r *http.Request) {
-	// Extract ID from path: /api/comments/drafts/{id}
-	id := strings.TrimPrefix(r.URL.Path, "/api/comments/drafts/")
-	if id == "" {
-		http.Error(w, "Draft ID required", http.StatusBadRequest)
-		return
-	}
-
-	// Sanitize ID to prevent path traversal (matches post draft pattern)
-	id = draftIDSanitizer.ReplaceAllString(id, "-")
-
-	switch r.Method {
-	case http.MethodGet:
-		draft, err := comment.LoadDraft(s.Site(), id)
-		if err != nil {
-			http.Error(w, "Draft not found", http.StatusNotFound)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(draft)
-
-	case http.MethodDelete:
-		if err := comment.DeleteDraft(s.Site(), id); err != nil {
-			s.LogError("failed to delete draft: %v", err)
-			http.Error(w, "Failed to delete draft", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-		})
-
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *Server) handleCommentSign(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.PrivateKey == nil {
-		http.Error(w, "Not configured - please complete setup first", http.StatusBadRequest)
-		return
-	}
-
-	var req struct {
-		DraftID   string `json:"draft_id"`
-		InReplyTo string `json:"in_reply_to"`
-		RootPost  string `json:"root_post"`
-		Content   string `json:"content"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if s.handleBodyTooLarge(w, r, err) {
-			return
-		}
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if len(req.Content) > MaxCommentBodySize {
-		http.Error(w, "Comment content too large (max 64KB)", http.StatusRequestEntityTooLarge)
-		return
-	}
-
-	// Load draft if ID provided, otherwise use inline content
-	var draft *comment.CommentDraft
-	if req.DraftID != "" {
-		var err error
-		draft, err = comment.LoadDraft(s.Site(), req.DraftID)
-		if err != nil {
-			http.Error(w, "Draft not found", http.StatusNotFound)
-			return
-		}
-	} else {
-		if req.InReplyTo == "" {
-			http.Error(w, "in_reply_to is required", http.StatusBadRequest)
-			return
-		}
-		draft = &comment.CommentDraft{
-			InReplyTo: polisurl.NormalizeToMD(req.InReplyTo),
-			RootPost:  polisurl.NormalizeToMD(req.RootPost),
-			Content:   req.Content,
-		}
-	}
-
-	// Get author domain from .well-known/polis (domain is the public identity)
-	authorDomain := s.GetAuthorDomain()
-	if authorDomain == "" {
-		http.Error(w, "Author identity not configured - set domain in .well-known/polis or POLIS_BASE_URL in .env", http.StatusBadRequest)
-		return
-	}
-
-	// Get site URL from POLIS_BASE_URL env var (authoritative source, matches bash CLI)
-	siteURL := s.GetBaseURL()
-	if siteURL == "" {
-		http.Error(w, "POLIS_BASE_URL not configured - set it in .env file", http.StatusBadRequest)
-		return
-	}
-
-	signed, err := comment.SignComment(s.Site(), draft, authorDomain, siteURL, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
-	if err != nil {
-		s.LogError("failed to sign comment: %v", err)
-		http.Error(w, "Failed to sign comment", http.StatusInternalServerError)
-		return
-	}
-
-	s.LogEvent("pub.polis.comment.sign", map[string]interface{}{
-		"in_reply_to": draft.InReplyTo,
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":   true,
-		"comment":   signed.Meta,
-		"signature": signed.Signature,
-	})
-}
-
-func (s *Server) handleCommentBeseech(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		CommentID string `json:"comment_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if req.CommentID == "" {
-		http.Error(w, "comment_id is required", http.StatusBadRequest)
-		return
-	}
-
-	// Business logic is in the comment package (pass per-tenant config for hosted safety)
-	result, err := comment.BeseechComment(s.Site(), req.CommentID, s.PrivateKey, &comment.DiscoveryConfig{
-		DiscoveryURL: s.DiscoveryURL,
-		BaseURL:      s.GetBaseURL(),
-	})
-
-	// Always re-render after beseech attempt — PublishComment() runs early inside
-	// BeseechComment, so the .md may already be on disk even if DS registration
-	// fails afterward. Without this, the comment HTML and index.html are never generated.
-	if renderErr := s.RenderSite(); renderErr != nil {
-		log.Printf("[warning] post-beseech render failed: %v", renderErr)
-	}
-
-	if err != nil {
-		s.LogError("beseech failed: %v", err)
-		// Config issues → 400, runtime errors → 500
-		status := http.StatusInternalServerError
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "not configured") || strings.Contains(errMsg, "not found in pending") {
-			status = http.StatusBadRequest
-		}
-		http.Error(w, errMsg, status)
-		return
-	}
-
-	// Run hooks if the post author had already blessed it (a re-registration)
-	if result.AutoBlessed && s.EnableHooks {
-		hc := s.getHookConfig()
-		payload := &hooks.HookPayload{
-			Event:         hooks.EventPostComment,
-			Path:          fmt.Sprintf("comments/blessed/%s.md", req.CommentID),
-			Title:         result.Comment.InReplyTo,
-			Version:       result.Comment.CommentVersion,
-			Timestamp:     time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-			CommitMessage: hooks.GenerateCommitMessage(hooks.EventPostComment, result.Comment.InReplyTo),
-		}
-		hooks.RunHook(s.Site(), hc, payload)
-	}
-
-	s.LogEvent("pub.polis.comment.beseech", map[string]interface{}{
-		"comment_id": req.CommentID,
-		"status":     result.Status,
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": result.Success,
-		"status":  result.Status,
-		"message": result.Message,
-	})
-}
-
-func (s *Server) handleCommentsPending(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	comments, err := comment.ListComments(s.Site(), comment.StatusPending)
-	if err != nil {
-		s.LogError("failed to list pending comments: %v", err)
-		http.Error(w, "Failed to list pending comments", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"comments": comments,
-	})
-}
-
-func (s *Server) handleCommentsBlessed(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	comments, err := comment.ListComments(s.Site(), comment.StatusBlessed)
-	if err != nil {
-		s.LogError("failed to list blessed comments: %v", err)
-		http.Error(w, "Failed to list blessed comments", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"comments": comments,
-	})
-}
-
-func (s *Server) handleCommentsDenied(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	comments, err := comment.ListComments(s.Site(), comment.StatusDenied)
-	if err != nil {
-		s.LogError("failed to list denied comments: %v", err)
-		http.Error(w, "Failed to list denied comments", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"comments": comments,
-	})
-}
-
-// handleCommentByStatus handles GET /api/comments/{status}/{id}
-func (s *Server) handleCommentByStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Extract status and ID from URL: /api/comments/{status}/{id}
-	path := strings.TrimPrefix(r.URL.Path, "/api/comments/")
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) != 2 || parts[1] == "" {
-		http.Error(w, "Comment ID required", http.StatusBadRequest)
-		return
-	}
-
-	status := parts[0]
-	commentID := parts[1]
-
-	// Validate status
-	if status != comment.StatusPending && status != comment.StatusBlessed && status != comment.StatusDenied {
-		http.Error(w, "Invalid status", http.StatusBadRequest)
-		return
-	}
-
-	result, err := comment.GetComment(s.Site(), commentID, status)
-	if err != nil {
-		http.Error(w, "Comment not found", http.StatusNotFound)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"comment": map[string]interface{}{
-			"id":          result.Meta.ID,
-			"title":       result.Meta.Title,
-			"in_reply_to": result.Meta.InReplyTo,
-			"root_post":   result.Meta.RootPost,
-			"comment_url": result.Meta.CommentURL,
-			"timestamp":   result.Meta.Timestamp,
-			"status":      result.Meta.Status,
-			"content":     result.Content,
-		},
-	})
-}
-
-func (s *Server) handleCommentsSync(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.DiscoveryURL == "" {
-		http.Error(w, "Discovery service not configured", http.StatusBadRequest)
-		return
-	}
-
-	if s.PrivateKey == nil {
-		http.Error(w, "Private key not configured", http.StatusBadRequest)
-		return
-	}
-
-	// DS read: pending/denied queries. Auth-conditional (see
-	// NewReadDSClient docstring) — DS post-filtering is client-side,
-	// so anonymous read is sufficient for unregistered tenants.
-	myDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
-	client := s.NewReadDSClient(r)
-
-	// Sync pending comments (pass nil hookConfig when hooks disabled to prevent execution)
-	hc := s.getHookConfig()
-	result, err := comment.SyncPendingComments(s.Site(), s.GetBaseURL(), client, hc)
-	if err != nil {
-		log.Printf("handleCommentsSync: failed for %s: %v", myDomain, err)
-		s.LogError("failed to sync comments: %v", err)
-		http.Error(w, "Failed to sync comments", http.StatusInternalServerError)
-		return
-	}
-
-	// Re-render site so HTML reflects updated comment statuses (blessed/denied)
-	if err := s.RenderSite(); err != nil {
-		log.Printf("[warning] post-comment-sync render failed: %v", err)
-	}
-
-	s.LogEvent("pub.polis.comment.sync", map[string]interface{}{
-		"blessed": len(result.Blessed),
-		"denied":  len(result.Denied),
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
-}
-
 // Blessing API handlers (ON MY POSTS - incoming blessing requests)
 
-func (s *Server) handleBlessingRequests(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
+// BlessComment blesses a comment on one of the owner's posts: the blessing is
+// signed, recorded with the discovery service, the comment is verified into
+// the blessed cache, and the site is rebuilt to show it. ⭐ THE ONE
+// IMPLEMENTATION: the browser app's /api/blessing/grant and the API's
+// comment.bless both call it. A failure comes with the HTTP status to answer.
+func (s *Server) BlessComment(r *http.Request, commentURL, commentVersion, inReplyTo string) (interface{}, int, error) {
 	if s.DiscoveryURL == "" {
-		http.Error(w, "Discovery service not configured", http.StatusBadRequest)
-		return
+		return nil, http.StatusBadRequest, fmt.Errorf("Discovery service not configured")
 	}
-
-	if s.PrivateKey == nil {
-		log.Printf("handleBlessingRequests: private key not configured for %s", s.GetBaseURL())
-		http.Error(w, "Private key not configured", http.StatusBadRequest)
-		return
-	}
-
-	// DS read: status=pending blessing requests. Auth-conditional via
-	// NewReadDSClient — see docstring. The DS returns matching records
-	// regardless of auth; FetchPendingRequests filters client-side.
-	myDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
-	client := s.NewReadDSClient(r)
-
-	// Fetch pending blessing requests (actor must be full domain, not subdomain)
-	requests, err := blessing.FetchPendingRequests(client, myDomain)
-	if err != nil {
-		log.Printf("handleBlessingRequests: failed to fetch for %s: %v", myDomain, err)
-		s.LogError("failed to fetch requests: %v", err)
-		http.Error(w, fmt.Sprintf("Failed to fetch requests: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"requests": requests,
-	})
-}
-
-func (s *Server) handleBlessingGrant(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.DiscoveryURL == "" {
-		http.Error(w, "Discovery service not configured", http.StatusBadRequest)
-		return
-	}
-
 	if !s.IsRegisteredWithDS() {
-		http.Error(w, "Site not registered with discovery service", http.StatusPreconditionFailed)
-		return
+		return nil, http.StatusPreconditionFailed, fmt.Errorf("Site not registered with discovery service")
 	}
-
 	if s.PrivateKey == nil {
-		http.Error(w, "Private key not configured", http.StatusBadRequest)
-		return
+		return nil, http.StatusBadRequest, fmt.Errorf("Private key not configured")
 	}
-
-	var req struct {
-		CommentVersion string `json:"comment_version"`
-		CommentURL     string `json:"comment_url"`
-		InReplyTo      string `json:"in_reply_to"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if req.CommentURL == "" {
-		http.Error(w, "comment_url is required", http.StatusBadRequest)
-		return
+	if commentURL == "" {
+		return nil, http.StatusBadRequest, fmt.Errorf("comment_url is required")
 	}
 
 	// Create discovery client
 	client := s.NewDSClient(r)
 
 	// If comment_version is missing (old DS records without metadata), look it up
-	if req.CommentVersion == "" {
-		if check, err := client.CheckContent("pub.polis.comment", req.CommentURL); err == nil && check.Exists {
-			req.CommentVersion = check.Version
+	if commentVersion == "" {
+		if check, err := client.CheckContent("pub.polis.comment", commentURL); err == nil && check.Exists {
+			commentVersion = check.Version
 		}
 	}
 
 	// Grant the blessing (with signed request)
 	// Normalize URLs to .md format for consistent storage
-	s.LogDebug("Granting blessing for comment version: %s", req.CommentVersion)
+	s.LogDebug("Granting blessing for comment version: %s", commentVersion)
 	bhc := s.getHookConfig()
-	result, err := blessing.GrantByVersion(
-		s.Site(),
-		req.CommentVersion,
-		polisurl.NormalizeToMD(req.CommentURL),
-		polisurl.NormalizeToMD(req.InReplyTo),
-		client,
-		bhc,
-		s.PrivateKey,
-	)
+	var result *blessing.GrantResult
+	var err error
+	if live := ops.GrantFrom(r.Context()); live != nil {
+		// ⭐ An agent's decision, under the grant its token presents: marked
+		// inside the relationship request and the blessed.json entry.
+		result, err = blessing.GrantAsAgent(s.Site(), &blessing.IncomingRequest{
+			CommentVersion: commentVersion,
+			CommentURL:     polisurl.NormalizeToMD(commentURL),
+			InReplyTo:      polisurl.NormalizeToMD(inReplyTo),
+		}, client, bhc, s.PrivateKey, live)
+	} else {
+		result, err = blessing.GrantByVersion(
+			s.Site(),
+			commentVersion,
+			polisurl.NormalizeToMD(commentURL),
+			polisurl.NormalizeToMD(inReplyTo),
+			client,
+			bhc,
+			s.PrivateKey,
+		)
+	}
 	if err != nil {
 		s.LogError("Failed to grant blessing: %v", err)
-		http.Error(w, "Failed to grant blessing", http.StatusInternalServerError)
-		return
+		return nil, http.StatusInternalServerError, fmt.Errorf("Failed to grant blessing")
 	}
 	s.LogEvent("pub.polis.comment.blessing.grant", map[string]interface{}{
-		"comment_url": req.CommentURL,
+		"comment_url": commentURL,
 	})
 
 	// Verify + cache the remote comment in the ISOLATED blessed cache (NEVER
 	// under our content/ tree — Defect 3) so the renderer can display the body on
 	// the post page. Shared with the background sync handler via cacheBlessedComment
 	// so the two Defect-3 write sites can't drift.
-	s.cacheBlessedComment(req.CommentURL)
+	s.cacheBlessedComment(commentURL)
 
 	// Render site to include the newly blessed comment
 	if err := s.RenderSite(); err != nil {
 		// Log but don't fail - the blessing was granted successfully
 		log.Printf("[warning] post-blessing render failed: %v", err)
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	return result, http.StatusOK, nil
 }
 
-func (s *Server) handleBlessingDeny(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
+// DenyComment turns a waiting comment away from one of the owner's posts
+// ("not here"), by a signed request to the discovery service. ⭐ The one
+// implementation: /api/blessing/deny and the API's comment.deny call it.
+func (s *Server) DenyComment(r *http.Request, commentURL, inReplyTo string) (interface{}, int, error) {
 	if s.DiscoveryURL == "" {
-		http.Error(w, "Discovery service not configured", http.StatusBadRequest)
-		return
+		return nil, http.StatusBadRequest, fmt.Errorf("Discovery service not configured")
 	}
-
 	if !s.IsRegisteredWithDS() {
-		http.Error(w, "Site not registered with discovery service", http.StatusPreconditionFailed)
-		return
+		return nil, http.StatusPreconditionFailed, fmt.Errorf("Site not registered with discovery service")
 	}
-
 	if s.PrivateKey == nil {
-		http.Error(w, "Private key not configured", http.StatusBadRequest)
-		return
+		return nil, http.StatusBadRequest, fmt.Errorf("Private key not configured")
 	}
-
-	var req struct {
-		CommentURL string `json:"comment_url"`
-		InReplyTo  string `json:"in_reply_to"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if req.CommentURL == "" || req.InReplyTo == "" {
-		http.Error(w, "comment_url and in_reply_to are required", http.StatusBadRequest)
-		return
+	if commentURL == "" || inReplyTo == "" {
+		return nil, http.StatusBadRequest, fmt.Errorf("comment_url and in_reply_to are required")
 	}
 
 	// Create discovery client
@@ -1899,145 +416,42 @@ func (s *Server) handleBlessingDeny(w http.ResponseWriter, r *http.Request) {
 	// Deny the blessing (with signed request). Normalise to .md like grant: the
 	// DS matches the relationship on its exact URLs, and the v4 stream hands the
 	// SPA the rendered .html forms.
-	s.LogDebug("Denying blessing for comment: %s", req.CommentURL)
-	result, err := blessing.Deny(polisurl.NormalizeToMD(req.CommentURL), polisurl.NormalizeToMD(req.InReplyTo), client, s.PrivateKey)
+	s.LogDebug("Denying blessing for comment: %s", commentURL)
+	var result *blessing.DenyResult
+	var err error
+	if live := ops.GrantFrom(r.Context()); live != nil {
+		result, err = blessing.DenyAsAgent(polisurl.NormalizeToMD(commentURL), polisurl.NormalizeToMD(inReplyTo), client, s.PrivateKey, live)
+	} else {
+		result, err = blessing.Deny(polisurl.NormalizeToMD(commentURL), polisurl.NormalizeToMD(inReplyTo), client, s.PrivateKey)
+	}
 	if err != nil {
 		s.LogError("Failed to deny blessing: %v", err)
-		http.Error(w, "Failed to deny blessing", http.StatusInternalServerError)
-		return
+		return nil, http.StatusInternalServerError, fmt.Errorf("Failed to deny blessing")
 	}
 	s.LogEvent("pub.polis.comment.blessing.deny", map[string]interface{}{
-		"comment_url": req.CommentURL,
+		"comment_url": commentURL,
 	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	return result, http.StatusOK, nil
 }
 
-func (s *Server) handleBlessedComments(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Load blessed comments from local metadata
-	bc, err := metadata.LoadBlessedComments(s.Site())
-	if err != nil {
-		// Return empty list if file doesn't exist
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"version":  "",
-			"comments": []interface{}{},
-		})
-		return
-	}
-
-	// Enrich each blessed comment with an excerpt from the locally saved markdown
-	// and resolve the post title from the local post file
-	type enrichedComment struct {
-		URL       string `json:"url"`
-		Version   string `json:"version"`
-		BlessedAt string `json:"blessed_at"`
-		Excerpt   string `json:"excerpt,omitempty"`
-	}
-	type enrichedPostComments struct {
-		Post      string            `json:"post"`
-		PostTitle string            `json:"post_title,omitempty"`
-		Blessed   []enrichedComment `json:"blessed"`
-	}
-	enriched := make([]enrichedPostComments, 0, len(bc.Comments))
-	for _, pc := range bc.Comments {
-		epc := enrichedPostComments{Post: pc.Post}
-
-		// Resolve post title — try local file first, then derive from path
-		postPath := pc.Post
-		// Try local post file (works for posts on our own site)
-		localPostPath := postPath
-		if idx := strings.Index(localPostPath, "/posts/"); idx >= 0 {
-			localPostPath = "content/pub.polis.core/post/" + localPostPath[idx+len("/posts/"):]
-		}
-		localPostPath = strings.TrimSuffix(localPostPath, ".html")
-		if !strings.HasSuffix(localPostPath, ".md") {
-			localPostPath += ".md"
-		}
-		if raw, err := s.readKey(siteKey(localPostPath)); err == nil {
-			epc.PostTitle = extractFrontmatterTitle(string(raw))
-		}
-		// Derive a readable title from the URL/path if no frontmatter title found
-		if epc.PostTitle == "" {
-			slug := postPath
-			if lastSlash := strings.LastIndex(slug, "/"); lastSlash >= 0 {
-				slug = slug[lastSlash+1:]
-			}
-			slug = strings.TrimSuffix(slug, ".md")
-			slug = strings.TrimSuffix(slug, ".html")
-			slug = strings.ReplaceAll(slug, "-", " ")
-			if slug != "" {
-				// Title case the first letter
-				epc.PostTitle = strings.ToUpper(slug[:1]) + slug[1:]
-			}
-		}
-
-		for _, c := range pc.Blessed {
-			ec := enrichedComment{
-				URL:       c.URL,
-				Version:   c.Version,
-				BlessedAt: c.BlessedAt,
-			}
-			// Try to read local copy of the comment markdown.
-			// Normalize URL to .md and try multiple path forms.
-			commentURL := c.URL
-			if strings.HasSuffix(commentURL, ".html") {
-				commentURL = strings.TrimSuffix(commentURL, ".html") + ".md"
-			}
-			if relPath := extractCommentRelPath(commentURL); relPath != "" {
-				localPath := siteKey(relPath)
-				if raw, err := s.readKey(localPath); err == nil {
-					body := stripFrontmatter(string(raw))
-					ec.Excerpt = makeExcerpt(body, feed.ExcerptCharCap)
-				}
-			}
-			epc.Blessed = append(epc.Blessed, ec)
-		}
-		enriched = append(enriched, epc)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"version":  bc.Version,
-		"comments": enriched,
-	})
-}
-
-func (s *Server) handleBlessingRevoke(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		CommentURL string `json:"comment_url"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if req.CommentURL == "" {
-		http.Error(w, "comment_url is required", http.StatusBadRequest)
-		return
+// UnblessComment takes a blessed comment off one of the owner's posts: the
+// signed blessing list drops it and the site is rebuilt; it leaves at the
+// next sync. ⭐ The one implementation: /api/blessing/revoke and the API's
+// comment.unbless call it.
+func (s *Server) UnblessComment(commentURL string) (interface{}, int, error) {
+	if commentURL == "" {
+		return nil, http.StatusBadRequest, fmt.Errorf("comment_url is required")
 	}
 
 	// Normalize URL to .md format for consistent lookup
-	normalizedURL := polisurl.NormalizeToMD(req.CommentURL)
+	normalizedURL := polisurl.NormalizeToMD(commentURL)
 
 	// Remove from blessed.json, SIGNED — an unbless is as much an authored act as
 	// a bless (SIGNET epic 14). A nil key writes unsigned, which is the safe
 	// direction: unsigned is a fact, a stale signature is a false alarm.
 	if err := metadata.RemoveBlessedCommentSigned(s.Site(), normalizedURL, s.PrivateKey); err != nil {
 		s.LogError("failed to revoke blessing: %v", err)
-		http.Error(w, "Failed to revoke blessing", http.StatusInternalServerError)
-		return
+		return nil, http.StatusInternalServerError, fmt.Errorf("Failed to revoke blessing")
 	}
 	s.LogEvent("pub.polis.comment.blessing.revoke", map[string]interface{}{
 		"comment_url": normalizedURL,
@@ -2048,12 +462,10 @@ func (s *Server) handleBlessingRevoke(w http.ResponseWriter, r *http.Request) {
 		// Log but don't fail - the revoke was successful
 		log.Printf("[warning] post-revoke render failed: %v", err)
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	return map[string]interface{}{
 		"success":     true,
 		"comment_url": normalizedURL,
-	})
+	}, http.StatusOK, nil
 }
 
 // Settings and Automation API handlers
@@ -2066,470 +478,6 @@ type Automation struct {
 	Event       string `json:"event"`
 	ScriptPath  string `json:"script_path"`
 	Enabled     bool   `json:"enabled"`
-}
-
-func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Build site info from .well-known/polis and config
-	subdomain := ""
-	publicKey := ""
-	discoveryURL := s.DiscoveryURL
-	discoveryConfigured := s.DiscoveryURL != ""
-	siteTitle := s.GetSiteTitle() // From .well-known/polis with fallback to base_url
-	showFrontmatter := true       // Default to showing frontmatter
-	baseURL := ""
-
-	if s.Config != nil {
-		subdomain = s.GetSubdomain()
-		if s.Config.ShowFrontmatter != nil {
-			showFrontmatter = *s.Config.ShowFrontmatter
-		}
-	}
-	if s.PublicKey != nil {
-		publicKey = strings.TrimSpace(string(s.PublicKey))
-	}
-
-	// Get base URL from POLIS_BASE_URL env var (matches bash CLI behavior)
-	baseURL = s.GetBaseURL()
-
-	// Build automations list from hooks config
-	automations := s.getAutomations()
-
-	// Check which hook files exist
-	existingHooks := s.getExistingHooks()
-
-	setupWizardDismissed := false
-	if s.Config != nil {
-		setupWizardDismissed = s.Config.SetupWizardDismissed
-	}
-
-	// Webapp theme preference
-	webappTheme := "dark"
-	if s.Config != nil && s.Config.WebappTheme != "" {
-		webappTheme = s.Config.WebappTheme
-	}
-
-	// Editor panel mode preference
-	editorPanelMode := "wysiwyg"
-	if s.Config != nil && s.Config.EditorPanelMode != "" {
-		editorPanelMode = s.Config.EditorPanelMode
-	}
-
-	// Load theme data, filtered by tenant's active shape. Themes incompatible
-	// with the current shape (e.g. studio13-nk on v4, future v4-era studio13
-	// on v3) are excluded from the picker. Undeclared-on-disk orphans are
-	// also excluded (disk drift is covered separately by the orphan-dir
-	// Patrol check).
-	activeShape, _ := bundle.GetActiveShapeName(s.Site())
-	themes, _ := theme.ListUserSelectableThemes(s.Site(), s.CLIThemesDir, activeShape)
-	activeTheme, _ := theme.GetActiveTheme(s.Site())
-
-	// Load avatar and author_name from .well-known/polis
-	var avatarConfig *site.AvatarConfig
-	var authorName string
-	if wk, err := site.LoadWellKnown(s.Site()); err == nil {
-		avatarConfig = wk.Avatar
-		authorName = wk.AuthorName
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"site": map[string]interface{}{
-			"subdomain":            subdomain,
-			"site_title":           siteTitle,
-			"public_key":           publicKey,
-			"discovery_url":        discoveryURL,
-			"discovery_configured": discoveryConfigured,
-			"show_frontmatter":     showFrontmatter,
-			"base_url":             baseURL,
-			"avatar":               avatarConfig,
-			"author_name":          authorName,
-		},
-		"automations":            automations,
-		"existing_hooks":         existingHooks,
-		"setup_wizard_dismissed": setupWizardDismissed,
-		"hide_read":              s.Config != nil && s.Config.HideRead,
-		"webapp_theme":           webappTheme,
-		"editor_panel_mode":      editorPanelMode,
-		"active_theme":           activeTheme,
-		"themes":                 themes,
-		"license":                s.licenseSettings(),
-		"rosie":                  s.rosieSettings(),
-	})
-}
-
-func (s *Server) getAutomations() []Automation {
-	var automations []Automation
-	if !s.EnableHooks {
-		return automations
-	}
-	hc := s.getHookConfig()
-
-	type hookInfo struct {
-		event       hooks.HookEvent
-		id          string
-		name        string
-		description string
-	}
-	allHooks := []hookInfo{
-		{hooks.EventPostPublish, "post-publish", "Post-publish hook", "Runs after each publish"},
-		{hooks.EventPostRepublish, "post-republish", "Post-republish hook", "Runs after each republish"},
-		{hooks.EventPostComment, "post-comment", "Post-comment hook", "Runs when a comment becomes blessed (grant, sync, or Rosie)"},
-	}
-
-	for _, h := range allHooks {
-		path := hooks.GetHookPathWithDiscovery(hc, h.event, s.Site())
-		if path != "" {
-			automations = append(automations, Automation{
-				ID:          h.id,
-				Name:        h.name,
-				Description: h.description,
-				Event:       string(h.event),
-				ScriptPath:  path,
-				Enabled:     true,
-			})
-		}
-	}
-
-	return automations
-}
-
-func (s *Server) handleAutomations(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		automations := s.getAutomations()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"automations": automations,
-		})
-
-	case http.MethodPost:
-		if !s.EnableHooks {
-			http.Error(w, "Hooks are not available in this mode", http.StatusForbidden)
-			return
-		}
-		// Create a new automation
-		var req struct {
-			TemplateID string `json:"template_id"`
-			HookType   string `json:"hook_type"`
-			Script     string `json:"script"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			if isBodyTooLargeError(err) {
-				http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, "Invalid request", http.StatusBadRequest)
-			return
-		}
-
-		if len(req.Script) > MaxHookBodySize {
-			http.Error(w, "Hook script too large (max 32KB)", http.StatusRequestEntityTooLarge)
-			return
-		}
-
-		// Default to post-publish if not specified
-		hookType := req.HookType
-		if hookType == "" {
-			hookType = "post-publish"
-		}
-
-		// Validate hook type
-		validTypes := map[string]bool{
-			"post-publish":   true,
-			"post-republish": true,
-			"post-comment":   true,
-		}
-		if !validTypes[hookType] {
-			http.Error(w, "Invalid hook type", http.StatusBadRequest)
-			return
-		}
-
-		// Get script from template or use provided script
-		script := req.Script
-		if req.TemplateID != "" {
-			template, ok := hooks.GetTemplate(req.TemplateID)
-			if !ok {
-				http.Error(w, "Unknown template ID", http.StatusBadRequest)
-				return
-			}
-			script = template.Script
-		}
-
-		if script == "" {
-			http.Error(w, "Script is required", http.StatusBadRequest)
-			return
-		}
-
-		// Create the hook script
-		scriptPath, err := s.createHookScript(script, hookType)
-		if err != nil {
-			s.LogError("failed to create hook: %v", err)
-			http.Error(w, "Failed to create hook", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":     true,
-			"script_path": scriptPath,
-		})
-
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *Server) handleAutomationsQuick(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !s.EnableHooks {
-		http.Error(w, "Hooks are not available in this mode", http.StatusForbidden)
-		return
-	}
-
-	// Use the vercel template (default for quick create)
-	template, _ := hooks.GetTemplate("vercel")
-
-	scriptPath, err := s.createHookScript(template.Script, "post-publish")
-	if err != nil {
-		s.LogError("failed to create hook: %v", err)
-		http.Error(w, "Failed to create hook", http.StatusInternalServerError)
-		return
-	}
-	_ = scriptPath // suppress unused variable warning
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":     true,
-		"script_path": ".polis/webapp/hooks/post-publish.sh",
-		"message":     "Created post-publish hook at .polis/webapp/hooks/post-publish.sh",
-	})
-}
-
-func (s *Server) createHookScript(script string, hookType string) (string, error) {
-	// Create hooks directory (.polis/webapp/hooks — restricted)
-	hooksDir := siteKey(".polis", "webapp", "hooks")
-
-	// Write the script file
-	relativePath := ".polis/webapp/hooks/" + hookType + ".sh"
-	scriptPath := siteKey(hooksDir, hookType+".sh")
-	if err := s.writeKey(scriptPath, []byte(script), 0755); err != nil {
-		return "", fmt.Errorf("failed to write hook script: %w", err)
-	}
-
-	// Update config to use this hook
-	if s.Config == nil {
-		s.Config = &Config{}
-	}
-	if s.Config.Hooks == nil {
-		s.Config.Hooks = &hooks.HookConfig{}
-	}
-
-	switch hookType {
-	case "post-publish":
-		s.Config.Hooks.PostPublish = relativePath
-	case "post-republish":
-		s.Config.Hooks.PostRepublish = relativePath
-	case "post-comment":
-		s.Config.Hooks.PostComment = relativePath
-	}
-
-	if err := s.SaveConfig(); err != nil {
-		return "", fmt.Errorf("failed to save config: %w", err)
-	}
-
-	return relativePath, nil
-}
-
-func (s *Server) handleAutomation(w http.ResponseWriter, r *http.Request) {
-	// Extract ID from path: /api/automations/{id}
-	id := strings.TrimPrefix(r.URL.Path, "/api/automations/")
-	if id == "" {
-		http.Error(w, "Automation ID required", http.StatusBadRequest)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodDelete:
-		if !s.EnableHooks {
-			http.Error(w, "Hooks are not available in this mode", http.StatusForbidden)
-			return
-		}
-		// Remove the automation
-		if s.Config == nil || s.Config.Hooks == nil {
-			http.Error(w, "No automations configured", http.StatusNotFound)
-			return
-		}
-
-		var scriptPath string
-		switch id {
-		case "post-publish":
-			scriptPath = s.Config.Hooks.PostPublish
-			s.Config.Hooks.PostPublish = ""
-		case "post-republish":
-			scriptPath = s.Config.Hooks.PostRepublish
-			s.Config.Hooks.PostRepublish = ""
-		case "post-comment":
-			scriptPath = s.Config.Hooks.PostComment
-			s.Config.Hooks.PostComment = ""
-		default:
-			http.Error(w, "Unknown automation ID", http.StatusNotFound)
-			return
-		}
-
-		// Save the updated config
-		if err := s.SaveConfig(); err != nil {
-			s.LogError("failed to save config: %v", err)
-			http.Error(w, "Failed to save config", http.StatusInternalServerError)
-			return
-		}
-
-		// Optionally delete the script file (only if it's in our hooks directory)
-		if scriptPath != "" && strings.HasPrefix(scriptPath, ".polis/webapp/hooks/") {
-			fullPath := siteKey(scriptPath)
-			_ = s.deleteKey(fullPath, true)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-		})
-
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	templates := hooks.ListTemplates()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"templates": templates,
-	})
-}
-
-// getExistingHooks returns a list of hook types that have existing hook files
-func (s *Server) getExistingHooks() []string {
-	var existing []string
-	hooksDir := siteKey(".polis", "webapp", "hooks")
-
-	hookTypes := []string{"post-publish", "post-republish", "post-comment"}
-	for _, hookType := range hookTypes {
-		scriptPath := siteKey(hooksDir, hookType+".sh")
-		if present, _ := s.existsKey(scriptPath); present {
-			existing = append(existing, hookType)
-		}
-	}
-	return existing
-}
-
-// handleHooksGenerate handles POST /api/hooks/generate to create an empty hook script
-func (s *Server) handleHooksGenerate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !s.EnableHooks {
-		http.Error(w, "Hooks are not available in this mode", http.StatusForbidden)
-		return
-	}
-
-	var req struct {
-		HookType string `json:"hook_type"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	// Validate hook type
-	validTypes := map[string]bool{
-		"post-publish":   true,
-		"post-republish": true,
-		"post-comment":   true,
-	}
-	if !validTypes[req.HookType] {
-		http.Error(w, "Invalid hook type. Must be one of: post-publish, post-republish, post-comment", http.StatusBadRequest)
-		return
-	}
-
-	// The hooks directory (.polis/webapp/hooks) is restricted: the site's
-	// store creates it at 0700 with the script below, as the MkdirAll that used
-	// to be here did.
-	scriptKey := siteKey(".polis", "webapp", "hooks", req.HookType+".sh")
-
-	// Check if file already exists
-	if present, _ := s.existsKey(scriptKey); present {
-		http.Error(w, "Hook file already exists: .polis/webapp/hooks/"+req.HookType+".sh", http.StatusConflict)
-		return
-	}
-
-	// Create empty hook script with boilerplate
-	script := fmt.Sprintf(`#!/bin/bash
-set -e
-# %s hook
-# Available environment variables:
-# POLIS_SITE_DIR - path to your site directory
-# POLIS_PATH - relative path to the published file
-# POLIS_TITLE - title of the post
-# POLIS_COMMIT_MESSAGE - suggested commit message
-# POLIS_EVENT - event type (%s)
-# POLIS_VERSION - content hash
-# POLIS_TIMESTAMP - ISO timestamp
-
-# Add your custom logic below:
-echo "Hook triggered: %s"
-`, req.HookType, req.HookType, req.HookType)
-
-	if err := s.writeKey(scriptKey, []byte(script), 0755); err != nil {
-		s.LogError("failed to write hook script: %v", err)
-		http.Error(w, "Failed to write hook script", http.StatusInternalServerError)
-		return
-	}
-
-	// Update config to use this hook
-	if s.Config == nil {
-		s.Config = &Config{}
-	}
-	if s.Config.Hooks == nil {
-		s.Config.Hooks = &hooks.HookConfig{}
-	}
-
-	relativePath := ".polis/webapp/hooks/" + req.HookType + ".sh"
-	switch req.HookType {
-	case "post-publish":
-		s.Config.Hooks.PostPublish = relativePath
-	case "post-republish":
-		s.Config.Hooks.PostRepublish = relativePath
-	case "post-comment":
-		s.Config.Hooks.PostComment = relativePath
-	}
-
-	if err := s.SaveConfig(); err != nil {
-		s.LogError("failed to save config: %v", err)
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":     true,
-		"hook_type":   req.HookType,
-		"script_path": relativePath,
-		"message":     "Created " + req.HookType + " hook at " + relativePath,
-	})
 }
 
 // handleThemeSwitch handles POST /api/settings/theme to switch the site theme.
@@ -2577,6 +525,13 @@ func (s *Server) handleThemeSwitch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unknown theme: "+req.Theme, http.StatusBadRequest)
 		return
 	}
+	// ⛔ And one this site's shape can draw, as the picker offers: checked
+	// before anything is changed, so a refused switch leaves the site as it was.
+	shape, _ := bundle.GetActiveShapeName(s.Site())
+	if !theme.OfferedForShape(req.Theme, shape) {
+		http.Error(w, req.Theme+" is not offered for this site's shape ("+shape+")", http.StatusBadRequest)
+		return
+	}
 
 	// Update manifest and copy CSS
 	if err := theme.SetActiveTheme(s.Site(), req.Theme); err != nil {
@@ -2601,155 +556,9 @@ func (s *Server) handleThemeSwitch(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"theme":   req.Theme,
-	})
-}
-
-// handleShowFrontmatter handles POST /api/settings/show-frontmatter to toggle frontmatter visibility
-func (s *Server) handleShowFrontmatter(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		ShowFrontmatter bool `json:"show_frontmatter"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	// Ensure config exists
-	if s.Config == nil {
-		s.Config = &Config{}
-	}
-
-	// Update and save
-	s.Config.ShowFrontmatter = &req.ShowFrontmatter
-	if err := s.SaveConfig(); err != nil {
-		s.LogError("failed to save config: %v", err)
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":          true,
-		"show_frontmatter": req.ShowFrontmatter,
-	})
-}
-
-func (s *Server) handleHideRead(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		HideRead bool `json:"hide_read"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	// Ensure config exists
-	if s.Config == nil {
-		s.Config = &Config{}
-	}
-
-	// Update and save
-	s.Config.HideRead = req.HideRead
-	if err := s.SaveConfig(); err != nil {
-		s.LogError("failed to save config: %v", err)
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":   true,
-		"hide_read": req.HideRead,
-	})
-}
-
-// handleWebappTheme handles POST /api/settings/webapp-theme to switch between light and dark themes.
-func (s *Server) handleWebappTheme(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		Theme string `json:"theme"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if req.Theme != "light" && req.Theme != "dark" {
-		http.Error(w, "Invalid theme: must be 'light' or 'dark'", http.StatusBadRequest)
-		return
-	}
-
-	if s.Config == nil {
-		s.Config = &Config{}
-	}
-
-	s.Config.WebappTheme = req.Theme
-	if err := s.SaveConfig(); err != nil {
-		s.LogError("failed to save config: %v", err)
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":      true,
-		"webapp_theme": req.Theme,
-	})
-}
-
-// handleEditorPanelMode handles POST /api/settings/editor-panel-mode to persist the right panel mode.
-func (s *Server) handleEditorPanelMode(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		Mode string `json:"mode"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	validModes := map[string]bool{"wysiwyg": true, "markdown": true, "help": true, "browse": true}
-	if !validModes[req.Mode] {
-		http.Error(w, "Invalid mode", http.StatusBadRequest)
-		return
-	}
-
-	if s.Config == nil {
-		s.Config = &Config{}
-	}
-
-	s.Config.EditorPanelMode = req.Mode
-	if err := s.SaveConfig(); err != nil {
-		s.LogError("failed to save config: %v", err)
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":           true,
-		"editor_panel_mode": req.Mode,
 	})
 }
 
@@ -2794,7 +603,7 @@ func (s *Server) handleUpdateAvatar(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"avatar":  req.Avatar,
 	})
@@ -2832,7 +641,7 @@ func (s *Server) handleUpdateAuthorName(w http.ResponseWriter, r *http.Request) 
 	})
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":     true,
 		"author_name": name,
 	})
@@ -2849,7 +658,7 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "image/svg+xml")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
-	w.Write(data)
+	_, _ = w.Write(data)
 }
 
 // handleContent handles GET /api/content/{path} for browser mode navigation
@@ -2871,167 +680,11 @@ func (s *Server) handleContentRedirect(w http.ResponseWriter, r *http.Request) {
 
 	b := s.loadOrDefaultBundle()
 	if mounted := b.SourceToMountPath(clean); mounted != clean {
-		http.Redirect(w, r, "/"+mounted, http.StatusMovedPermanently)
+		http.Redirect(w, r, "/"+mounted, http.StatusMovedPermanently) //nolint:gosec // G710: the target is built from the session's own handle and the base domain, a validated return URL, or the site's own mount map
 		return
 	}
 
 	http.NotFound(w, r)
-}
-
-func (s *Server) handleContent(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Extract path from URL: /api/content/{path}
-	contentPath := strings.TrimPrefix(r.URL.Path, "/api/content/")
-	if contentPath == "" {
-		http.Error(w, "Path required", http.StatusBadRequest)
-		return
-	}
-
-	// Validate path to prevent directory traversal
-	if err := validateContentPath(contentPath); err != nil {
-		if isTraversal(err) {
-			s.LogEvent("pub.polis.security.path_traversal", map[string]interface{}{
-				"path": contentPath, "request_id": RequestIDFromContext(r.Context()),
-			})
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		// Benign prefix-mismatch (e.g. stale client): return 404 without the
-		// security event.
-		http.NotFound(w, r)
-		return
-	}
-
-	// Check if this is an HTML file request
-	if strings.HasSuffix(contentPath, ".html") {
-		s.handleHTMLContent(w, contentPath)
-		return
-	}
-
-	// Read the content file (markdown)
-	fullPath := siteKey(contentPath)
-	content, err := s.readKey(fullPath)
-	if err != nil {
-		http.Error(w, "Content not found", http.StatusNotFound)
-		return
-	}
-
-	// Determine content type and editability
-	contentType := "page"
-	editable := true // Default: own content is editable
-	rawMarkdown := string(content)
-	markdown := rawMarkdown // Start with raw, strip frontmatter for rendering
-
-	if strings.HasPrefix(contentPath, "content/pub.polis.core/post/") {
-		contentType = "post"
-		editable = true // Own posts are editable
-		// Strip frontmatter for rendering
-		markdown = publish.StripFrontmatter(rawMarkdown)
-	} else if strings.HasPrefix(contentPath, "content/pub.polis.core/comment/") {
-		contentType = "blessed_comment"
-		editable = false // Blessed comments from others are not editable
-	} else if strings.HasPrefix(contentPath, ".polis/bundles/pub.polis.core/posts/drafts/") {
-		contentType = "draft"
-		editable = true // Own drafts are editable
-	} else if strings.HasSuffix(contentPath, ".md") && !strings.Contains(contentPath, "/") {
-		// Root-level markdown files (index.md, about.md, etc.)
-		contentType = "page"
-		editable = true // Own pages are editable
-		// Strip frontmatter for rendering if present
-		if publish.HasFrontmatter(rawMarkdown) {
-			markdown = publish.StripFrontmatter(rawMarkdown)
-		}
-	}
-
-	// Render markdown to HTML (without frontmatter)
-	html, err := render.MarkdownToHTML(markdown)
-	if err != nil {
-		s.LogError("failed to render markdown: %v", err)
-		http.Error(w, "Failed to render markdown", http.StatusInternalServerError)
-		return
-	}
-
-	// Parse frontmatter for metadata
-	frontmatter := publish.ParseFrontmatter(rawMarkdown)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"path":     contentPath,
-		"markdown": rawMarkdown, // Return full content including frontmatter
-		"html":     html,
-		"editable": editable,
-		"type":     contentType,
-		"metadata": frontmatter,
-	})
-}
-
-// handleHTMLContent serves pre-rendered HTML files for browser mode
-func (s *Server) handleHTMLContent(w http.ResponseWriter, contentPath string) {
-	// First check if the HTML file exists (to validate the path)
-	fullPath := siteKey(contentPath)
-	// Only a GENUINE absence is a 404, as it was when this asked os.IsNotExist.
-	if present, existsErr := s.existsKey(fullPath); existsErr == nil && !present {
-		http.Error(w, "Content not found", http.StatusNotFound)
-		return
-	}
-
-	// Try to find the corresponding .md source file
-	mdPath := strings.TrimSuffix(contentPath, ".html") + ".md"
-	fullMdPath := siteKey(mdPath)
-	markdown := ""
-	editable := false
-	var metadata map[string]string
-	var html string
-
-	mdContent, err := s.readKey(fullMdPath)
-	if err == nil {
-		// Found the source markdown - render it fresh for consistent preview styling
-		markdown = string(mdContent)
-		editable = true // Can edit if we have the source
-		metadata = publish.ParseFrontmatter(markdown)
-		// Strip frontmatter for HTML rendering only
-		markdownForRender := markdown
-		if publish.HasFrontmatter(markdown) {
-			markdownForRender = publish.StripFrontmatter(markdown)
-		}
-		// Render markdown to HTML (same as editor preview)
-		renderedHTML, renderErr := render.MarkdownToHTML(markdownForRender)
-		if renderErr == nil {
-			html = renderedHTML
-		}
-	}
-
-	// If we couldn't render from markdown, fall back to the pre-rendered HTML
-	if html == "" {
-		htmlContent, err := s.readKey(fullPath)
-		if err != nil {
-			http.Error(w, "Content not found", http.StatusNotFound)
-			return
-		}
-		html = string(htmlContent)
-	}
-
-	// Determine content type
-	contentType := "page"
-	if strings.HasPrefix(contentPath, "content/pub.polis.core/post/") {
-		contentType = "post"
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"path":       contentPath,
-		"markdown":   markdown,
-		"html":       html,
-		"editable":   editable,
-		"type":       contentType,
-		"metadata":   metadata,
-		"source_md":  mdPath,
-		"has_source": markdown != "",
-	})
 }
 
 // handleSiteRegistrationStatus returns the site's registration status with the discovery service.
@@ -3044,7 +697,7 @@ func (s *Server) handleSiteRegistrationStatus(w http.ResponseWriter, r *http.Req
 	// Check if discovery service is configured
 	if s.DiscoveryURL == "" {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"configured": false,
 			"error":      "Discovery service not configured",
 		})
@@ -3055,7 +708,7 @@ func (s *Server) handleSiteRegistrationStatus(w http.ResponseWriter, r *http.Req
 	baseURL := s.GetBaseURL()
 	if baseURL == "" {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"configured": true,
 			"error":      "POLIS_BASE_URL not set",
 		})
@@ -3065,7 +718,7 @@ func (s *Server) handleSiteRegistrationStatus(w http.ResponseWriter, r *http.Req
 	domain := polisurl.ExtractDomain(baseURL)
 	if domain == "" {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"configured": true,
 			"error":      "Could not extract domain from POLIS_BASE_URL",
 		})
@@ -3084,7 +737,7 @@ func (s *Server) handleSiteRegistrationStatus(w http.ResponseWriter, r *http.Req
 			errMsg = "Discovery service unreachable"
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"configured": true,
 			"domain":     domain,
 			"error":      errMsg,
@@ -3093,7 +746,7 @@ func (s *Server) handleSiteRegistrationStatus(w http.ResponseWriter, r *http.Req
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"configured":    true,
 		"domain":        domain,
 		"is_registered": result.IsRegistered,
@@ -3182,7 +835,7 @@ func (s *Server) handleSiteRegister(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":            result.Success,
 		"domain":             domain,
 		"created_at":         result.CreatedAt,
@@ -3248,87 +901,10 @@ func (s *Server) handleSiteUnregister(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": result.Success,
 		"domain":  domain,
 		"message": result.Message,
-	})
-}
-
-// handleDeployCheck checks if the site is publicly accessible at its POLIS_BASE_URL.
-func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	baseURL := s.GetBaseURL()
-	if baseURL == "" {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"deployed": false,
-			"error":    "POLIS_BASE_URL not set",
-		})
-		return
-	}
-
-	domain := polisurl.ExtractDomain(baseURL)
-	if domain == "" {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"deployed": false,
-			"domain":   "",
-			"error":    "Could not extract domain from POLIS_BASE_URL",
-		})
-		return
-	}
-
-	// Try to fetch .well-known/polis from the live domain
-	checkURL := fmt.Sprintf("https://%s/.well-known/polis", domain)
-	hc := s.SharedHTTPClient
-	if hc == nil {
-		hc = &http.Client{Timeout: 5 * time.Second}
-	}
-	resp, err := hc.Get(checkURL)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"deployed": false,
-			"domain":   domain,
-		})
-		return
-	}
-	defer resp.Body.Close()
-
-	deployed := resp.StatusCode == http.StatusOK
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"deployed": deployed,
-		"domain":   domain,
-	})
-}
-
-// handleSetupWizardDismiss marks the setup wizard as dismissed in config.
-func (s *Server) handleSetupWizardDismiss(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.Config == nil {
-		s.Config = &Config{}
-	}
-	s.Config.SetupWizardDismissed = true
-	if err := s.SaveConfig(); err != nil {
-		s.LogError("Failed to save config after dismissing setup wizard: %v", err)
-		http.Error(w, "Failed to save config", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
 	})
 }
 
@@ -3347,7 +923,7 @@ func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
 			// File doesn't exist — return default content
 			defaultHTML, _ := render.MarkdownToHTML(defaultAboutContent)
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"content":      defaultAboutContent,
 				"content_html": defaultHTML,
 				"has_custom":   false,
@@ -3356,7 +932,7 @@ func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
 		}
 		contentHTML, _ := render.MarkdownToHTML(string(data))
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"content":      string(data),
 			"content_html": contentHTML,
 			"has_custom":   true,
@@ -3398,7 +974,7 @@ func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
 		s.LogEvent("pub.polis.site.about_update", nil)
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 		})
 
@@ -3408,157 +984,6 @@ func (s *Server) handleAbout(w http.ResponseWriter, r *http.Request) {
 }
 
 // Snippets API handlers
-
-// handleSnippets handles GET /api/snippets?path={subdir} and POST /api/snippets
-func (s *Server) handleSnippets(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		// List snippets at path
-		path := r.URL.Query().Get("path")
-		filter := r.URL.Query().Get("filter") // "all", "global", or "theme"
-
-		// List snippets from both local site/themes/ and CLI themes (fallback)
-		tree, err := snippet.ListSnippets(s.Site(), s.CLIThemesDir, "", path, filter)
-		if err != nil {
-			s.LogError("failed to list snippets: %v", err)
-			http.Error(w, "Failed to list snippets", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(tree)
-
-	case http.MethodPost:
-		// Create new global snippet
-		var req struct {
-			Path    string `json:"path"`
-			Content string `json:"content"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			if isBodyTooLargeError(err) {
-				http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, "Invalid request", http.StatusBadRequest)
-			return
-		}
-
-		if len(req.Content) > MaxSnippetBodySize {
-			http.Error(w, "Snippet content too large (max 64KB)", http.StatusRequestEntityTooLarge)
-			return
-		}
-
-		if req.Path == "" {
-			http.Error(w, "path is required", http.StatusBadRequest)
-			return
-		}
-
-		if err := snippet.CreateSnippet(s.Site(), req.Path, req.Content); err != nil {
-			s.LogError("failed to create snippet: %v", err)
-			http.Error(w, "Failed to create snippet", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"path":    req.Path,
-		})
-
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// handleSnippet handles GET/PUT/DELETE /api/snippets/{path}
-func (s *Server) handleSnippet(w http.ResponseWriter, r *http.Request) {
-	// Extract path from URL: /api/snippets/{path}
-	snippetPath := strings.TrimPrefix(r.URL.Path, "/api/snippets/")
-	if snippetPath == "" {
-		http.Error(w, "Snippet path required", http.StatusBadRequest)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		// Get snippet content
-		source := r.URL.Query().Get("source")
-		if source == "" {
-			source = "global" // Default to global
-		}
-
-		// Read from local site/themes/ or CLI themes (fallback)
-		content, err := snippet.ReadSnippet(s.Site(), s.CLIThemesDir, "", snippetPath, source)
-		if err != nil {
-			// Try the other source if not found
-			if source == "global" {
-				content, err = snippet.ReadSnippet(s.Site(), s.CLIThemesDir, "", snippetPath, "theme")
-			}
-			if err != nil {
-				http.Error(w, "Snippet not found", http.StatusNotFound)
-				return
-			}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(content)
-
-	case http.MethodPut:
-		// Update snippet
-		var req struct {
-			Content string `json:"content"`
-			Source  string `json:"source"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			if isBodyTooLargeError(err) {
-				http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, "Invalid request", http.StatusBadRequest)
-			return
-		}
-
-		if len(req.Content) > MaxSnippetBodySize {
-			http.Error(w, "Snippet content too large (max 64KB)", http.StatusRequestEntityTooLarge)
-			return
-		}
-
-		if req.Source == "" {
-			req.Source = "global" // Default to global
-		}
-
-		// Write to local site/themes/ or CLI themes (fallback)
-		if err := snippet.WriteSnippet(s.Site(), s.CLIThemesDir, "", snippetPath, req.Content, req.Source); err != nil {
-			s.LogError("failed to save snippet: %v", err)
-			http.Error(w, "Failed to save snippet", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"path":    snippetPath,
-			"source":  req.Source,
-		})
-
-	case http.MethodDelete:
-		// Delete snippet (global only)
-		if err := snippet.DeleteSnippet(s.Site(), snippetPath); err != nil {
-			s.LogError("failed to delete snippet: %v", err)
-			http.Error(w, "Failed to delete snippet", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"path":    snippetPath,
-		})
-
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
 
 // handleRenderPage handles POST /api/render-page to re-render pages using Go packages.
 // This is used for snippet editing workflow - after saving a snippet, re-render
@@ -3612,13 +1037,17 @@ func (s *Server) handleRenderPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.LogEvent("pub.polis.site.render_full", map[string]interface{}{
+	// ⭐ One render event, with its mode (no dashboard or monitor keyed on the
+	// old pub.polis.site.render_full name; checked before it was retired).
+	s.LogEvent("pub.polis.site.render", map[string]interface{}{
+		"mode":     ops.RenderModeFull,
+		"trigger":  "rebuild",
 		"posts":    stats.PostsRendered,
 		"comments": stats.CommentsRendered,
 	})
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":           true,
 		"path":              req.Path,
 		"posts_rendered":    stats.PostsRendered,
@@ -3644,653 +1073,78 @@ func followErrorStatus(err error) int {
 	return http.StatusInternalServerError
 }
 
-// handleFollowing manages the following list.
-// GET: returns the list of followed authors.
-// POST: follows a new author (with blessing side-effect).
-// DELETE: unfollows an author (with denial side-effect).
-func (s *Server) handleFollowing(w http.ResponseWriter, r *http.Request) {
-
-	switch r.Method {
-	case http.MethodGet:
-		f, err := following.LoadSite(s.Site())
-		if err != nil {
-			s.LogError("following load failed: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Backfill metadata for entries missing site_title/author_name (cap 3 per request)
-		missing := f.EntriesMissingMetadata()
-		if len(missing) > 3 {
-			missing = missing[:3]
-		}
-		if len(missing) > 0 {
-			rc := s.NewRemoteClient()
-			dirty := false
-			for _, m := range missing {
-				wk, err := rc.FetchWellKnown(m.URL)
-				if err != nil {
-					s.LogDebug("following backfill: failed to fetch %s: %v", m.URL, err)
-					continue
-				}
-				if f.UpdateMetadata(m.URL, wk.SiteTitle, wk.DisplayName()) {
-					dirty = true
-				}
-			}
-			if dirty {
-				// SIGNET epic 02: re-sign. This backfill is the site's own agent
-				// enriching the user's roster with their own key — not an operator
-				// actor signing on someone's behalf. Passing the key matters: a
-				// plain Save here would silently strip a good signature every time
-				// a title got filled in.
-				if err := following.SaveSigned(s.Site(), f, s.PrivateKey); err != nil {
-					s.LogError("following backfill: save failed: %v", err)
-				}
-			}
-		}
-
-		// SIGNET epic 02 — the roster's signature state travels with the roster.
-		// Reported as a fact and never enforced: the list is returned in full
-		// regardless, because a follow list is how a person reaches their
-		// network and withholding it over a signature would disconnect them
-		// (D4). Unsigned is the normal state until the epic-11 backfill.
-		followSig, followSigErr := following.VerifySite(s.Site())
-		signature := map[string]interface{}{"status": string(followSig)}
-		if followSigErr != nil {
-			signature["message"] = followSigErr.Error()
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"following": f.All(),
-			"count":     f.Count(),
-			"signature": signature,
-		})
-
-	case http.MethodPost:
-		if s.PrivateKey == nil {
-			http.Error(w, "Not configured: no private key", http.StatusBadRequest)
-			return
-		}
-
-		var req struct {
-			URL string `json:"url"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		// Normalize domain to lowercase for consistent storage and display
-		req.URL = strings.ToLower(req.URL)
-
-		if len(req.URL) < 8 || req.URL[:8] != "https://" {
-			http.Error(w, "Author URL must use HTTPS", http.StatusBadRequest)
-			return
-		}
-
-		// Prevent self-follow
-		ownDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
-		targetDomain := discovery.ExtractDomainFromURL(req.URL)
-		if ownDomain != "" && targetDomain != "" && ownDomain == targetDomain {
-			http.Error(w, "Cannot follow your own site", http.StatusBadRequest)
-			return
-		}
-
-		followDomain := ownDomain
-		discoveryClient := s.NewAuthDSClient(r, followDomain)
-		remoteClient := s.NewRemoteClient()
-
-		policies, _ := policy.LoadPolicies(s.Site())
-
-		result, err := following.FollowWithBlessing(s.Site(), req.URL, discoveryClient, remoteClient, s.PrivateKey, policies, s.FollowConfig())
-		if err != nil {
-			s.LogError("follow failed: %v", err)
-			http.Error(w, err.Error(), followErrorStatus(err))
-			return
-		}
-
-		s.LogEvent("pub.polis.follow.add", map[string]interface{}{
-			"url":              req.URL,
-			"comments_blessed": result.CommentsBlessed,
-		})
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    result,
-		})
-
-		// Backfill historical posts from the new author, then sync feed
-		// for any recent events across all followed authors.
-		go func() {
-			newDomain := discovery.ExtractDomainFromURL(req.URL)
-			if newDomain != "" {
-				s.backfillFeedForAuthor(newDomain)
-			}
-			s.syncFeed()
-		}()
-
-	case http.MethodDelete:
-		if s.PrivateKey == nil {
-			http.Error(w, "Not configured: no private key", http.StatusBadRequest)
-			return
-		}
-
-		var req struct {
-			URL string `json:"url"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
-
-		if len(req.URL) < 8 || req.URL[:8] != "https://" {
-			http.Error(w, "Author URL must use HTTPS", http.StatusBadRequest)
-			return
-		}
-
-		unfollowDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
-		discoveryClient := s.NewAuthDSClient(r, unfollowDomain)
-		remoteClient := s.NewRemoteClient()
-
-		unfollowPolicies, _ := policy.LoadPolicies(s.Site())
-
-		result, err := following.UnfollowWithDenial(s.Site(), req.URL, discoveryClient, remoteClient, s.PrivateKey, unfollowPolicies, s.FollowConfig())
-		if err != nil {
-			s.LogError("unfollow failed: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		s.LogEvent("pub.polis.follow.remove", map[string]interface{}{
-			"url":             req.URL,
-			"comments_denied": result.CommentsDenied,
-		})
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"data":    result,
-		})
-
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+// followFailure is what a failed follow or unfollow says: plain words that
+// name the site and what went wrong. ⛔ Never the underlying error's text,
+// which carries resolver and transport detail (the machine's own DNS
+// resolver's address among it) to the owner's screen and to any agent; that
+// detail is logged where the failure is.
+func followFailure(verb, site string, err error) error {
+	if site == "" {
+		site = "that site"
 	}
+	switch {
+	case remote.TargetIsNotPolis(err):
+		return fmt.Errorf("%s isn't a polis site, so it can't be %sed: it publishes no polis identity at /.well-known/polis", site, verb)
+	case remote.TargetUnavailable(err):
+		return fmt.Errorf("%s could not be reached just now (its /.well-known/polis did not answer), so it wasn't %sed; try again later", site, verb)
+	}
+	return fmt.Errorf("%s could not be %sed just now; try again later", site, verb)
 }
 
-// handleFeed returns cached feed items (instant, no network).
-// GET /api/feed?type=post|comment&status=read|unread
-func (s *Server) handleFeed(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	scope := r.URL.Query().Get("scope")
-	if scope != "" && !validFeedScopes[scope] {
-		http.Error(w, "Invalid scope", http.StatusBadRequest)
-		return
-	}
-	cm := s.feedCacheForScope(scope)
-	typeFilter := r.URL.Query().Get("type")
-	statusFilter := r.URL.Query().Get("status")
-
-	opts := s.feedFilterForScope(scope)
-	opts.Type = typeFilter
-	opts.Status = statusFilter
-
-	items, err := cm.ListFiltered(opts)
+// Follow follows a site in the owner's name: the signed follow list gains it,
+// the discovery service is told, comments it already made on the owner's
+// posts are blessed where the owner's rules say so, and its posts are
+// backfilled into the feed. ⭐ THE ONE IMPLEMENTATION: the browser app's POST
+// /api/following and the API's follow.create both call it.
+func (s *Server) Follow(r *http.Request, url string) (interface{}, int, error) {
+	// ⭐ The one implementation (ops.Follow): its checks, the site's rules,
+	// the follow and its event. What follows is this host's own: the feed.
+	result, err := ops.Follow(r.Context(), s.followSite(r), url)
 	if err != nil {
-		s.LogError("feed list failed: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	unread := 0
-	for _, item := range items {
-		if item.ReadAt == "" {
-			unread++
+		if errors.Is(err, ops.ErrFollowInvalid) {
+			return nil, http.StatusBadRequest, err
 		}
+		s.LogError("follow failed: %v", err)
+		return nil, followErrorStatus(err), followFailure("follow", discovery.ExtractDomainFromURL(url), err)
 	}
 
-	stale, _ := cm.IsStale()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"items":        items,
-		"total":        len(items),
-		"unread":       unread,
-		"stale":        stale,
-		"last_refresh": cm.LastUpdated(),
-	})
-}
-
-// handleFeedViewed advances the "viewed" cursor to the current sync position.
-// Called when the user views the feed page.
-// POST /api/feed/viewed
-func (s *Server) handleFeedViewed(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
-
-	// Catch the viewed cursor up to the feed-CONTENT high-water mark (the
-	// position of the last sync that actually added feed items), NOT the raw
-	// sync cursor — matching the has-new computation in localCounts. Using the
-	// sync cursor here would mark own-post-only syncs as "seen" inconsistently.
-	contentCursor, _ := store.GetCursor("pub.polis.feed.content")
-	if contentCursor != "" {
-		_ = store.SetCursor("pub.polis.feed.viewed", contentCursor)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
-}
-
-// handleBlessingInboxViewed advances the blessing-inbox viewed cursor to the
-// current sync position. Mirrors handleFeedViewed; called when the user
-// activates the "all comments from all polis to bless" filter view so the
-// comment nav-dot reflects "new blessing requests since I last looked."
-// POST /api/comment/blessing/viewed
-func (s *Server) handleBlessingInboxViewed(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
-
-	syncCursor, _ := store.GetCursor("pub.polis.sync")
-	if syncCursor != "" {
-		_ = store.SetCursor("pub.polis.comment.blessing.viewed", syncCursor)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
-}
-
-// handleDMSurfaceViewed advances the DM-surface viewed timestamp to now.
-// DMs are local-only (not synced from DS) so there's no monotone sync
-// position to copy; the cursor stores an RFC3339Nano timestamp that the
-// counts computation compares against each conversation's LastMessageAt.
-// POST /api/dm/viewed
-func (s *Server) handleDMSurfaceViewed(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
-	_ = store.SetCursor("pub.polis.dm.viewed", time.Now().UTC().Format(time.RFC3339Nano))
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
-}
-
-// handleFeedRefresh triggers a stream-based feed sync and returns the updated cache.
-// POST /api/feed/refresh
-func (s *Server) handleFeedRefresh(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	scope := r.URL.Query().Get("scope")
-	if scope != "" && !validFeedScopes[scope] {
-		http.Error(w, "Invalid scope", http.StatusBadRequest)
-		return
-	}
-
-	// Count items before sync to determine how many are actually new
-	cm := s.feedCacheForScope(scope)
-	opts := s.feedFilterForScope(scope)
-	beforeItems, _ := cm.ListFiltered(opts)
-	beforeCount := len(beforeItems)
-
-	// Trigger stream-based sync. Runtime-filtered scopes (followers, me)
-	// use the unified sync since their data is in the network cache.
-	if scope == "" || scope == "network" || runtimeFilteredScopes[scope] {
+	// Backfill historical posts from the new author, then sync feed
+	// for any recent events across all followed authors.
+	targetDomain := discovery.ExtractDomainFromURL(strings.ToLower(url))
+	go func() {
+		if targetDomain != "" {
+			s.backfillFeedForAuthor(targetDomain)
+		}
 		s.syncFeed()
-	} else {
-		s.syncFeedScoped(scope)
-	}
-
-	items, _ := cm.ListFiltered(opts)
-	unread := 0
-	for _, item := range items {
-		if item.ReadAt == "" {
-			unread++
-		}
-	}
-
-	newItems := len(items) - beforeCount
-	if newItems < 0 {
-		newItems = 0
-	}
-
-	s.LogEvent("pub.polis.feed.refresh", map[string]interface{}{
-		"new_items": newItems,
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"items":        items,
-		"total":        len(items),
-		"unread":       unread,
-		"new_items":    newItems,
-		"stale":        false,
-		"last_refresh": cm.LastUpdated(),
-	})
+	}()
+	return result, http.StatusOK, nil
 }
 
-// handleFeedRead marks a feed item as read (viewport-based auto-marking).
-// POST /api/feed/read
-// Body: {"id":"x"}
-func (s *Server) handleFeedRead(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+// followSite is this site as ops.Follow and ops.Unfollow need it.
+func (s *Server) followSite(r *http.Request) ops.FollowSite {
+	return ops.FollowSite{
+		Site: s.Site(), PrivateKey: s.PrivateKey, BaseURL: s.BaseURL, DiscoveryURL: s.DiscoveryURL,
+		DS:     s.NewAuthDSClient(r, discovery.ExtractDomainFromURL(s.GetBaseURL())),
+		Remote: s.NewRemoteClient(),
+		Emit:   s.LogEvent,
 	}
-
-	var req struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-	if req.ID == "" {
-		http.Error(w, "Missing id", http.StatusBadRequest)
-		return
-	}
-
-	cm := s.feedCacheForScope("network")
-
-	if err := cm.MarkRead(req.ID); err != nil {
-		// Item not found is OK — may have been pruned
-		if err.Error() == "item not found: "+req.ID {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
-			return
-		}
-		s.LogError("feed read failed: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-	})
 }
 
-// handleFeedCounts returns lightweight feed counts for sidebar badge.
-// GET /api/feed/counts
-func (s *Server) handleFeedCounts(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	cm := s.feedCacheForScope("network")
-
-	items, err := cm.List()
+// Unfollow unfollows a site in the owner's name: the signed follow list drops
+// it, the discovery service is told, and comments blessed only because the
+// owner followed it are turned away where the owner's rules say so. ⭐ The one
+// implementation: DELETE /api/following and the API's follow.delete call it.
+func (s *Server) Unfollow(r *http.Request, url string) (interface{}, int, error) {
+	// ⭐ The one implementation (ops.Unfollow).
+	result, err := ops.Unfollow(r.Context(), s.followSite(r), url)
 	if err != nil {
-		s.LogError("feed counts failed: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	unread := 0
-	newestCachedAt := ""
-	for _, item := range items {
-		if item.ReadAt == "" {
-			unread++
+		if errors.Is(err, ops.ErrFollowInvalid) {
+			return nil, http.StatusBadRequest, err
 		}
-		if item.CachedAt > newestCachedAt {
-			newestCachedAt = item.CachedAt
-		}
+		s.LogError("unfollow failed: %v", err)
+		return nil, followErrorStatus(err), followFailure("unfollow", discovery.ExtractDomainFromURL(url), err)
 	}
-
-	stale, _ := cm.IsStale()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total":            len(items),
-		"unread":           unread,
-		"stale":            stale,
-		"newest_cached_at": newestCachedAt,
-	})
-}
-
-// handleFeedGrouped returns feed items grouped by post URL.
-// Comments are grouped with their target post; posts without comments appear as solo groups.
-// GET /api/feed/grouped
-func (s *Server) handleFeedGrouped(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	scope := r.URL.Query().Get("scope")
-	if scope != "" && !validFeedScopes[scope] {
-		http.Error(w, "Invalid scope", http.StatusBadRequest)
-		return
-	}
-	cm := s.feedCacheForScope(scope)
-
-	items, err := cm.ListFiltered(s.feedFilterForScope(scope))
-	if err != nil {
-		s.LogError("feed grouped failed: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Build followed domains set
-	f, _ := following.LoadSite(s.Site())
-	followedDomains := make(map[string]bool)
-	if f != nil {
-		for _, entry := range f.Following {
-			// Extract domain from URL (e.g. "https://alice.polis.pub" -> "alice.polis.pub")
-			domain := strings.TrimPrefix(entry.URL, "https://")
-			domain = strings.TrimPrefix(domain, "http://")
-			domain = strings.TrimSuffix(domain, "/")
-			followedDomains[domain] = true
-		}
-	}
-
-	// Group items by post URL
-	//
-	// title-redundancy contract (see render.TitleStartsFirstSentence): when
-	// the title is a prefix of the body's first sentence (common with
-	// auto-derived titles that truncate the first line), the renderer is
-	// expected to suppress the title chrome so the excerpt absorbs it
-	// naturally. PostTitleRedundant + (per-comment) TitleRedundant are
-	// computed below by passing title + excerpt to the detector. The legacy
-	// renderConversationsTabbed in app.js honors these flags to skip
-	// rendering the title element when set.
-	type commentDetail struct {
-		URL            string `json:"url"`
-		AuthorDomain   string `json:"author_domain"`
-		Title          string `json:"title,omitempty"`
-		Excerpt        string `json:"excerpt,omitempty"`
-		TitleRedundant bool   `json:"title_redundant,omitempty"`
-		Published      string `json:"published"`
-		Unread         bool   `json:"unread"`
-	}
-	type feedGroup struct {
-		PostURL            string           `json:"post_url"`
-		PostTitle          string           `json:"post_title"`
-		PostDomain         string           `json:"post_domain"`
-		PostPublished      string           `json:"post_published"`
-		PostExcerpt        string           `json:"post_excerpt,omitempty"`
-		PostTitleRedundant bool             `json:"post_title_redundant,omitempty"`
-		HasPost            bool             `json:"has_post"`
-		TotalComments      int              `json:"total_comments"`
-		NetworkComments    int              `json:"network_comments"`
-		ExternalComments   int              `json:"external_comments"`
-		UnreadComments     int              `json:"unread_comments"`
-		LastActivity       string           `json:"last_activity"`
-		PostUnread         bool             `json:"post_unread"`
-		ItemIDs            []string         `json:"item_ids"`
-		Comments           []*commentDetail `json:"comments,omitempty"`
-	}
-
-	type announcementItem struct {
-		ID           string `json:"id"`
-		EventType    string `json:"event_type"`
-		AuthorDomain string `json:"author_domain"`
-		TargetDomain string `json:"target_domain,omitempty"`
-		Title        string `json:"title,omitempty"`
-		URL          string `json:"url,omitempty"`
-		Published    string `json:"published"`
-		Unread       bool   `json:"unread"`
-	}
-
-	groups := make(map[string]*feedGroup)
-	groupOrder := []string{} // track insertion order for stable iteration
-	var announcements []announcementItem
-
-	totalUnread := 0
-	for _, item := range items {
-		if item.ReadAt == "" {
-			totalUnread++
-		}
-
-		if item.Type == "announcement" {
-			announcements = append(announcements, announcementItem{
-				ID:           item.ID,
-				EventType:    item.EventType,
-				AuthorDomain: item.AuthorDomain,
-				TargetDomain: item.TargetDomain,
-				Title:        item.Title,
-				URL:          item.URL,
-				Published:    item.Published,
-				Unread:       item.ReadAt == "",
-			})
-			continue
-		} else if item.Type == "post" {
-			key := item.URL
-			g, exists := groups[key]
-			if !exists {
-				g = &feedGroup{
-					PostURL:       item.URL,
-					PostTitle:     item.Title,
-					PostDomain:    item.AuthorDomain,
-					PostPublished: item.Published,
-					LastActivity:  item.Published,
-					ItemIDs:       []string{},
-				}
-				groups[key] = g
-				groupOrder = append(groupOrder, key)
-			}
-			g.HasPost = true
-			g.PostUnread = item.ReadAt == ""
-			if item.Title != "" {
-				g.PostTitle = item.Title
-			}
-			if item.AuthorDomain != "" {
-				g.PostDomain = item.AuthorDomain
-			}
-			if item.Published != "" {
-				g.PostPublished = item.Published
-			}
-			if item.Excerpt != "" {
-				g.PostExcerpt = item.Excerpt
-			}
-			g.ItemIDs = append(g.ItemIDs, item.ID)
-			if feed.PublishedBefore(g.LastActivity, item.Published) {
-				g.LastActivity = item.Published
-			}
-		} else if item.Type == "comment" {
-			key := item.TargetURL
-			if key == "" {
-				// Orphan comment (no target URL) — use its own URL as key
-				key = item.URL
-			}
-			g, exists := groups[key]
-			if !exists {
-				g = &feedGroup{
-					PostURL:      key,
-					PostDomain:   item.TargetDomain,
-					LastActivity: item.Published,
-					ItemIDs:      []string{},
-				}
-				groups[key] = g
-				groupOrder = append(groupOrder, key)
-			}
-			g.TotalComments++
-			if followedDomains[item.AuthorDomain] {
-				g.NetworkComments++
-			} else {
-				g.ExternalComments++
-			}
-			isUnread := item.ReadAt == ""
-			if isUnread {
-				g.UnreadComments++
-			}
-			g.Comments = append(g.Comments, &commentDetail{
-				URL:            item.URL,
-				AuthorDomain:   item.AuthorDomain,
-				Title:          item.Title,
-				Excerpt:        item.Excerpt,
-				TitleRedundant: render.TitleStartsFirstSentence(item.Title, item.Excerpt),
-				Published:      item.Published,
-				Unread:         isUnread,
-			})
-			g.ItemIDs = append(g.ItemIDs, item.ID)
-			if feed.PublishedBefore(g.LastActivity, item.Published) {
-				g.LastActivity = item.Published
-			}
-		}
-	}
-
-	// Build sorted slice
-	result := make([]*feedGroup, 0, len(groups))
-	for _, key := range groupOrder {
-		result = append(result, groups[key])
-	}
-
-	// Title-redundancy pass: now that each group has its final post title +
-	// excerpt, run the detector. (Computed here rather than during the loop
-	// because both fields can be updated across iterations as items are
-	// merged into the group.)
-	for _, g := range result {
-		if g.HasPost && g.PostTitle != "" && g.PostExcerpt != "" {
-			g.PostTitleRedundant = render.TitleStartsFirstSentence(g.PostTitle, g.PostExcerpt)
-		}
-	}
-
-	// Sort by last_activity descending (parse timestamps to handle JS Date format)
-	sort.Slice(result, func(i, j int) bool {
-		return feed.PublishedBefore(result[j].LastActivity, result[i].LastActivity)
-	})
-
-	stale, _ := cm.IsStale()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"groups":        result,
-		"announcements": announcements,
-		"total_items":   len(items),
-		"unread_items":  totalUnread,
-		"stale":         stale,
-	})
-
-	// Background: fetch excerpts for items that don't have one yet.
-	// step-06/6.l: this is now the FALLBACK path. The primary trigger
-	// for excerpt fetching moved to feedSyncHandler.Process so the
-	// dashboard renders with excerpts already populated on first load.
-	// This call stays as a safety net — idempotent (only fetches what's
-	// still missing), so a sync that didn't reach the network still
-	// gets a second chance when the user opens the dashboard.
-	s.kickOffExcerptFetch(cm, items)
+	return result, http.StatusOK, nil
 }
 
 // excerptFetchIndices returns the indices of items that need an
@@ -4414,125 +1268,6 @@ func (s *Server) fetchFeedExcerpts(cm *feed.CacheManager, items []feed.CachedFee
 	}
 }
 
-// handleRemoteAvatar fetches avatar and author_name from a remote site's .well-known/polis.
-// GET /api/remote/avatar?domain=discover.polis.pub
-func (s *Server) handleRemoteAvatar(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	domain := r.URL.Query().Get("domain")
-	if domain == "" {
-		http.Error(w, "Missing 'domain' parameter", http.StatusBadRequest)
-		return
-	}
-
-	// Validate domain: no slashes, no colons, basic sanity
-	if strings.ContainsAny(domain, "/\\:@?#") || len(domain) > 253 {
-		http.Error(w, "Invalid domain", http.StatusBadRequest)
-		return
-	}
-
-	client := s.NewRemoteClient()
-	client.HTTPClient.Timeout = 5 * time.Second
-
-	wk, err := client.FetchWellKnown("https://" + domain)
-	if err != nil {
-		// Return empty result rather than error — no avatar is normal
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"domain": domain,
-		})
-		return
-	}
-
-	resp := map[string]interface{}{
-		"domain": domain,
-	}
-	if wk.Avatar != nil {
-		resp["avatar"] = wk.Avatar
-	}
-	if wk.AuthorName != "" {
-		resp["author_name"] = wk.AuthorName
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
-// handleRemotePost fetches a remote post and returns it as rendered HTML.
-// GET /api/remote/post?url=https://example.com/posts/hello.md
-func (s *Server) handleRemotePost(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	postURL := r.URL.Query().Get("url")
-	if postURL == "" {
-		http.Error(w, "Missing 'url' parameter", http.StatusBadRequest)
-		return
-	}
-
-	if len(postURL) < 8 || postURL[:8] != "https://" {
-		http.Error(w, "URL must use HTTPS", http.StatusBadRequest)
-		return
-	}
-
-	client := s.NewRemoteClient()
-
-	// Try fetching the URL as-is first
-	content, err := client.FetchContent(postURL)
-	fetchedURL := postURL
-
-	if err != nil {
-		s.LogError("remote post fetch failed: %v", err)
-		http.Error(w, "Failed to fetch remote post: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-
-	// If the response looks like HTML (not markdown), the host likely served
-	// the rendered page instead of the raw source. Try the alternate extension.
-	if looksLikeHTML(content) {
-		altContent, altURL, altErr := client.TryAlternateExtension(postURL)
-		if altErr == nil && !looksLikeHTML(altContent) {
-			content = altContent
-			fetchedURL = altURL
-		}
-		// If both extensions return HTML, use the original content as-is
-	}
-
-	var body, htmlContent string
-	if looksLikeHTML(content) {
-		// No markdown source, only a rendered page. Never hand remote markup to
-		// the caller: the SPA inserts `content` with innerHTML, so a hostile
-		// page would run script in the owner's logged-in web app (R20-D-H1).
-		// A polis post always publishes its .md; a host that answers both
-		// extensions with a page is not serving a post source, so the viewer
-		// gets a link to the original instead of the page's body.
-		htmlContent = `<p class="remote-post-unavailable">No markdown source for this post. <a href="` +
-			html.EscapeString(fetchedURL) + `" target="_blank" rel="noopener noreferrer">Open the original</a>.</p>`
-	} else {
-		// Content is markdown — strip frontmatter and render
-		body = stripFrontmatter(content)
-		rendered, renderErr := render.MarkdownToHTML(body)
-		if renderErr != nil {
-			s.LogError("remote post render failed: %v", renderErr)
-			http.Error(w, "Failed to render post", http.StatusInternalServerError)
-			return
-		}
-		htmlContent = rendered
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"url":     fetchedURL,
-		"content": htmlContent,
-		"raw":     body,
-	})
-}
-
 // makeExcerpt strips markdown syntax and truncates to maxLen at a word boundary.
 func makeExcerpt(markdown string, maxLen int) string {
 	// Remove headings
@@ -4592,30 +1327,6 @@ func makeExcerpt(markdown string, maxLen int) string {
 	return text[:cut] + "…"
 }
 
-// extractFrontmatterTitle extracts the title field from YAML frontmatter.
-func extractFrontmatterTitle(content string) string {
-	if !strings.HasPrefix(strings.TrimSpace(content), "---") {
-		return ""
-	}
-	idx := strings.Index(content, "---")
-	if idx < 0 {
-		return ""
-	}
-	end := strings.Index(content[idx+3:], "---")
-	if end < 0 {
-		return ""
-	}
-	fm := content[idx+3 : idx+3+end]
-	for _, line := range strings.Split(fm, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "title:") {
-			t := strings.TrimSpace(strings.TrimPrefix(line, "title:"))
-			return strings.Trim(t, "\"'")
-		}
-	}
-	return ""
-}
-
 // stripFrontmatter removes YAML frontmatter (---...---) from content.
 //
 // It is deliberately NOT replaced by publish.StripFrontmatter, which reads
@@ -4646,15 +1357,6 @@ func looksLikeHTML(content string) bool {
 		strings.HasPrefix(trimmed, "<!doctype") ||
 		strings.HasPrefix(trimmed, "<html") ||
 		strings.HasPrefix(trimmed, "<HTML")
-}
-
-// extractCommentRelPath extracts the relative content path (e.g.
-// "content/pub.polis.core/comment/20260222/id.md") from a full comment URL.
-// Tolerant of BOTH the legacy mount form (/comments/<…>) and the canonical
-// source form (/content/pub.polis.core/comment/<…>) so it keeps working as the
-// DS-registered URL is canonicalized (Defect 1). Returns "" for neither shape.
-func extractCommentRelPath(commentURL string) string {
-	return polisurl.CommentURLToContentRel(commentURL)
 }
 
 // commentSourceURL converts a comment URL to the content source-path URL.
@@ -4704,131 +1406,6 @@ type ConversationsResponse struct {
 	} `json:"on_your_posts"`
 }
 
-// handleConversations returns comment threads and blessing activity from local cache.
-// GET /api/conversations
-func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var resp ConversationsResponse
-
-	// 1. Comment threads from feed cache (type=comment, last 30 days)
-	cm := s.feedCacheForScope("network")
-	items, err := cm.List()
-	if err != nil {
-		items = nil
-	}
-
-	cutoff30d := time.Now().AddDate(0, 0, -30)
-	threadMap := make(map[string][]ConversationComment)
-	for _, item := range items {
-		if item.Type != "comment" {
-			continue
-		}
-		pub, err := time.Parse(time.RFC3339, item.Published)
-		if err != nil || pub.Before(cutoff30d) {
-			continue
-		}
-		domain := item.AuthorDomain
-		if domain == "" {
-			continue
-		}
-		threadMap[domain] = append(threadMap[domain], ConversationComment{
-			Title:     item.Title,
-			URL:       item.URL,
-			Published: item.Published,
-			Unread:    item.ReadAt == "",
-		})
-	}
-
-	// Sort threads by most recent comment, cap at 10 threads / 5 comments each
-	type threadEntry struct {
-		domain     string
-		comments   []ConversationComment
-		mostRecent time.Time
-	}
-	var threads []threadEntry
-	for domain, comments := range threadMap {
-		var mostRecent time.Time
-		for _, c := range comments {
-			if t, err := time.Parse(time.RFC3339, c.Published); err == nil && t.After(mostRecent) {
-				mostRecent = t
-			}
-		}
-		// Sort comments newest first
-		sort.Slice(comments, func(i, j int) bool {
-			return comments[i].Published > comments[j].Published
-		})
-		if len(comments) > 5 {
-			comments = comments[:5]
-		}
-		threads = append(threads, threadEntry{domain, comments, mostRecent})
-	}
-	sort.Slice(threads, func(i, j int) bool {
-		return threads[i].mostRecent.After(threads[j].mostRecent)
-	})
-	if len(threads) > 10 {
-		threads = threads[:10]
-	}
-
-	resp.CommentThreads = make([]CommentThread, len(threads))
-	for i, t := range threads {
-		resp.CommentThreads[i] = CommentThread{
-			AuthorDomain: t.domain,
-			Comments:     t.comments,
-		}
-	}
-
-	// 2. Blessing activity from cached state
-	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
-	var blessingState stream.BlessingState
-	_ = store.LoadState("pub.polis.comment.blessing", &blessingState)
-
-	pendingCount := 0
-	blessedCount := 0
-	for _, b := range blessingState.Blessings {
-		switch b.Status {
-		case "pending":
-			pendingCount++
-		case "granted":
-			blessedCount++
-		}
-	}
-	resp.OnYourPosts.PendingCount = pendingCount
-	resp.OnYourPosts.BlessedCount = blessedCount
-
-	// Recent blessing entries (up to 10, sorted by updated_at desc)
-	blessings := make([]stream.BlessingEntry, len(blessingState.Blessings))
-	copy(blessings, blessingState.Blessings)
-	sort.Slice(blessings, func(i, j int) bool {
-		return blessings[i].UpdatedAt > blessings[j].UpdatedAt
-	})
-	if len(blessings) > 10 {
-		blessings = blessings[:10]
-	}
-
-	recentBlessings := make([]BlessingActivityEntry, len(blessings))
-	for i, b := range blessings {
-		recentBlessings[i] = BlessingActivityEntry{
-			Domain:    b.Actor,
-			Status:    b.Status,
-			TargetURL: b.TargetURL,
-			SourceURL: b.SourceURL,
-			UpdatedAt: b.UpdatedAt,
-		}
-	}
-	resp.OnYourPosts.Recent = recentBlessings
-	if resp.OnYourPosts.Recent == nil {
-		resp.OnYourPosts.Recent = []BlessingActivityEntry{}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
 // PulseHighlight is a recent feed item for the pulse dashboard.
 type PulseHighlight struct {
 	Type         string `json:"type"`
@@ -4862,300 +1439,9 @@ type PulseResponse struct {
 	} `json:"site"`
 }
 
-// handlePulse returns an aggregated community pulse dashboard.
-// All data comes from local cached state — no DS queries.
-// GET /api/pulse
-func (s *Server) handlePulse(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	counts := s.computeAllCounts()
-
-	var resp PulseResponse
-	resp.Network.Following = counts.Following
-	resp.Network.Followers = counts.Followers
-	resp.Network.FeedUnread = counts.FeedUnread
-	resp.Network.IncomingPending = counts.IncomingPending
-	resp.Site.Posts = counts.Posts
-	resp.Site.IncomingBlessed = counts.IncomingBlessed
-	resp.Site.IncomingPending = counts.IncomingPending
-
-	// Recent highlights: top 5 feed items from last 7 days
-	cm := s.feedCacheForScope("network")
-	items, err := cm.List()
-	if err != nil {
-		items = nil
-	}
-
-	cutoff7d := time.Now().AddDate(0, 0, -7)
-	var recent []PulseHighlight
-	for _, item := range items {
-		if len(recent) >= 5 {
-			break
-		}
-		pub, err := time.Parse(time.RFC3339, item.Published)
-		if err != nil {
-			continue
-		}
-		if pub.Before(cutoff7d) {
-			continue
-		}
-		recent = append(recent, PulseHighlight{
-			Type:         item.Type,
-			Title:        item.Title,
-			AuthorDomain: item.AuthorDomain,
-			Published:    item.Published,
-			Unread:       item.ReadAt == "",
-		})
-	}
-	resp.Recent = recent
-	if resp.Recent == nil {
-		resp.Recent = []PulseHighlight{}
-	}
-
-	// Most active authors: top 5 by activity in last 30 days
-	cutoff30d := time.Now().AddDate(0, 0, -30)
-	type authorStats struct {
-		posts    int
-		comments int
-	}
-	authorMap := make(map[string]*authorStats)
-	for _, item := range items {
-		pub, err := time.Parse(time.RFC3339, item.Published)
-		if err != nil || pub.Before(cutoff30d) {
-			continue
-		}
-		domain := item.AuthorDomain
-		if domain == "" {
-			continue
-		}
-		stats, ok := authorMap[domain]
-		if !ok {
-			stats = &authorStats{}
-			authorMap[domain] = stats
-		}
-		if item.Type == "post" {
-			stats.posts++
-		} else if item.Type == "comment" {
-			stats.comments++
-		}
-	}
-
-	// Sort by total activity descending, take top 5
-	type authorEntry struct {
-		domain string
-		total  int
-		stats  *authorStats
-	}
-	var authorList []authorEntry
-	for domain, stats := range authorMap {
-		authorList = append(authorList, authorEntry{domain, stats.posts + stats.comments, stats})
-	}
-	sort.Slice(authorList, func(i, j int) bool {
-		return authorList[i].total > authorList[j].total
-	})
-	var topAuthors []PulseAuthor
-	for i, a := range authorList {
-		if i >= 5 {
-			break
-		}
-		topAuthors = append(topAuthors, PulseAuthor{
-			Domain:       a.domain,
-			PostCount:    a.stats.posts,
-			CommentCount: a.stats.comments,
-		})
-	}
-	resp.TopAuthors = topAuthors
-	if resp.TopAuthors == nil {
-		resp.TopAuthors = []PulseAuthor{}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
-// handleFollowerCount returns the current follower count from cached state.
-// The unified sync loop keeps polis.follow.json up to date, so this handler
-// only reads from disk (no DS queries).
-// GET /api/followers/count?refresh=false
-func (s *Server) handleFollowerCount(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// If refresh requested, trigger an immediate sync
-	if r.URL.Query().Get("refresh") == "true" {
-		s.TriggerSync()
-	}
-
-	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
-
-	var state stream.FollowerState
-	_ = store.LoadState("pub.polis.follow", &state)
-
-	followers := state.Followers
-	if followers == nil {
-		followers = []string{}
-	}
-	// Normalize follower domains to lowercase for consistent display
-	for i, f := range followers {
-		followers[i] = strings.ToLower(f)
-	}
-	// FollowedAt may be nil on legacy state files written before
-	// 2026-05-02 (when timestamps were added). Default to empty so the
-	// JSON encodes as {} rather than null — easier for the SPA to use.
-	followedAt := state.FollowedAt
-	if followedAt == nil {
-		followedAt = map[string]string{}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"count":       state.Count,
-		"followers":   followers,
-		"followed_at": followedAt,
-	})
-}
-
-// handleNotifications returns a paginated list of notifications.
-// GET /api/notifications?offset=0&limit=20&include_read=false
-func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	mgr := notification.NewManager(s.Site(), s.GetDiscoveryDomain())
-
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 {
-		limit = 20
-	}
-	includeRead := r.URL.Query().Get("include_read") == "true"
-
-	items, total, err := mgr.ListPaginated(offset, limit, includeRead)
-	if err != nil {
-		s.LogError("Failed to list notifications: %v", err)
-		http.Error(w, "Failed to list notifications", http.StatusInternalServerError)
-		return
-	}
-
-	if items == nil {
-		items = []notification.StateEntry{}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"notifications": items,
-		"total":         total,
-		"offset":        offset,
-		"limit":         limit,
-	})
-}
-
-// handleNotificationCount returns the unread notification count from cached state.
-// The unified sync loop keeps polis.notification.jsonl up to date.
-// GET /api/notifications/count
-func (s *Server) handleNotificationCount(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	mgr := notification.NewManager(s.Site(), s.GetDiscoveryDomain())
-	unread, err := mgr.CountUnread()
-	if err != nil {
-		s.LogError("Failed to count notifications: %v", err)
-		http.Error(w, "Failed to count notifications", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"unread": unread,
-	})
-}
-
-// handleNotificationRead marks notifications as read.
-// POST /api/notifications/read  body: {"ids": [...]} or {"all": true}
-func (s *Server) handleNotificationRead(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req struct {
-		IDs []string `json:"ids"`
-		All bool     `json:"all"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	mgr := notification.NewManager(s.Site(), s.GetDiscoveryDomain())
-	marked, err := mgr.MarkRead(req.IDs, req.All)
-	if err != nil {
-		s.LogError("Failed to mark notifications as read: %v", err)
-		http.Error(w, "Failed to mark as read", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"marked":  marked,
-	})
-}
-
 // ============================================================================
 // WIDGET API HANDLERS
 // ============================================================================
-
-// POST /api/widget/publish — Sign and publish content via widget token.
-// Generic endpoint dispatched by "type" field. Currently supports "comment".
-func (s *Server) handleWidgetPublish(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.PrivateKey == nil {
-		http.Error(w, "Not configured", http.StatusBadRequest)
-		return
-	}
-
-	var req struct {
-		Type     string                 `json:"type"`
-		Target   string                 `json:"target"`
-		Text     string                 `json:"text"`
-		Metadata map[string]interface{} `json:"metadata"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if s.handleBodyTooLarge(w, r, err) {
-			return
-		}
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	if len(req.Text) > MaxCommentBodySize {
-		http.Error(w, "Comment text too large (max 64KB)", http.StatusRequestEntityTooLarge)
-		return
-	}
-
-	switch req.Type {
-	case "comment":
-		s.handleWidgetPublishComment(w, r, req.Target, req.Text)
-	default:
-		http.Error(w, "Unsupported content type", http.StatusBadRequest)
-	}
-}
 
 // POST /api/widget/comment — Direct comment endpoint for the widget.
 // Accepts {target, text} without requiring a type field.
@@ -5190,8 +1476,19 @@ func (s *Server) handleWidgetComment(w http.ResponseWriter, r *http.Request) {
 	s.handleWidgetPublishComment(w, r, req.Target, req.Text)
 }
 
+// widgetRequest is r marked as the widget's, so the shared function's event
+// says who made the write.
+func widgetRequest(r *http.Request) *http.Request {
+	return r.WithContext(ops.WithRequestMeta(r.Context(), &ops.RequestMeta{Surface: ops.SurfaceWidget}))
+}
+
 // handleWidgetPublishComment handles the comment type for widget publish.
 func (s *Server) handleWidgetPublishComment(w http.ResponseWriter, r *http.Request, target, text string) {
+	// Both widget comment routes (comment, and publish with type comment) land here.
+	if s.switchedOff(api.SwitchWidgetComments) {
+		api.WriteSwitchedOff(w)
+		return
+	}
 	if target == "" || text == "" {
 		http.Error(w, "target and text are required", http.StatusBadRequest)
 		return
@@ -5209,28 +1506,22 @@ func (s *Server) handleWidgetPublishComment(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	draft := &comment.CommentDraft{
-		InReplyTo: polisurl.NormalizeToMD(target),
-		Content:   text,
-	}
-
-	signed, err := comment.SignComment(s.Site(), draft, authorDomain, siteURL, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
+	// ⭐ The one implementation of writing a comment (ops.WriteComment): the
+	// same author, generator and send as the API's comment.create.
+	signed, sent, err := ops.WriteComment(ops.CommentSite{
+		Site: s.Site(), PrivateKey: s.PrivateKey, BaseURL: siteURL, DiscoveryURL: s.DiscoveryURL,
+	}, &comment.CommentDraft{InReplyTo: target, Content: text})
 	if err != nil {
 		s.LogError("widget publish comment: sign failed: %v", err)
 		http.Error(w, "Failed to sign comment", http.StatusInternalServerError)
 		return
 	}
 
-	// Attempt to send blessing request (beseech) — pass per-tenant config for hosted safety
 	blessingStatus := "pending"
-	result, err := comment.BeseechComment(s.Site(), signed.Meta.ID, s.PrivateKey, &comment.DiscoveryConfig{
-		DiscoveryURL: s.DiscoveryURL,
-		BaseURL:      s.GetBaseURL(),
-	})
-	if err != nil {
-		s.LogError("widget publish comment: beseech failed: %v", err)
+	if sent.Err != nil {
+		s.LogError("widget publish comment: beseech failed: %v", sent.Err)
 		blessingStatus = "error"
-	} else if result.AutoBlessed {
+	} else if sent.AutoBlessed {
 		// Only a comment the post author had ALREADY blessed (a re-registration).
 		// A new comment is always "pending": the post author's own site decides
 		// it later, and the widget must not promise otherwise (Signet epic 45 D8).
@@ -5246,7 +1537,7 @@ func (s *Server) handleWidgetPublishComment(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":         true,
 		"content_url":     signed.Meta.CommentURL,
 		"comment_id":      signed.Meta.ID,
@@ -5286,52 +1577,36 @@ func (s *Server) handleWidgetFollow(w http.ResponseWriter, r *http.Request) {
 		authorURL = "https://" + authorURL
 	}
 
-	followDomain := discovery.ExtractDomainFromURL(s.GetBaseURL())
-	discoveryClient := s.NewAuthDSClient(r, followDomain)
-	remoteClient := s.NewRemoteClient()
-
 	switch r.Method {
 	case http.MethodPost:
-		widgetPolicies, _ := policy.LoadPolicies(s.Site())
-
-		result, err := following.FollowWithBlessing(s.Site(), authorURL, discoveryClient, remoteClient, s.PrivateKey, widgetPolicies, s.FollowConfig())
+		// ⭐ The shared follow (/api/following and /v1 use it): its checks
+		// (https only, no self-follow), its feed backfill and its event, which
+		// says the widget made it. The widget used to call the package itself
+		// and skipped all three.
+		result, status, err := s.Follow(widgetRequest(r), authorURL)
 		if err != nil {
 			s.LogError("widget follow failed: %v", err)
-			http.Error(w, err.Error(), followErrorStatus(err))
+			http.Error(w, err.Error(), status)
 			return
 		}
-
-		s.LogEvent("pub.polis.follow.widget_add", map[string]interface{}{
-			"url": authorURL,
-		})
-
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    result,
 		})
 
 	case http.MethodDelete:
-		widgetUnfollowPolicies, _ := policy.LoadPolicies(s.Site())
-
-		result, err := following.UnfollowWithDenial(s.Site(), authorURL, discoveryClient, remoteClient, s.PrivateKey, widgetUnfollowPolicies, s.FollowConfig())
+		result, status, err := s.Unfollow(widgetRequest(r), authorURL)
 		if err != nil {
 			s.LogError("widget unfollow failed: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), status)
 			return
 		}
-
-		s.LogEvent("pub.polis.follow.widget_remove", map[string]interface{}{
-			"url":             authorURL,
-			"comments_denied": result.CommentsDenied,
-		})
-
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"data":    result,
 		})
-
 	}
 }
 
@@ -5433,7 +1708,7 @@ func WriteZipArchive(w io.Writer, dataDir string, excludeDirs []string) error {
 			return nil
 		}
 
-		f, err := os.Open(path)
+		f, err := os.Open(path) //nolint:gosec // G304: a file this walk found under the site
 		if err != nil {
 			return nil
 		}
@@ -5471,285 +1746,16 @@ func (s *Server) handleDownloadSite(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="polis-site.zip"`)
 
-	WriteZipArchive(w, s.DataDir, []string{filepath.Join(".polis", "logs")})
+	if err := WriteZipArchive(w, s.DataDir, []string{filepath.Join(".polis", "logs")}); err != nil {
+		// The headers are sent, so the download cannot be turned into an error
+		// now; it ends truncated, which the zip reader will refuse.
+		s.LogWarn("site download incomplete: %v", err)
+	}
 }
 
 // ============================================================================
-// SSE AND COUNTS HANDLERS
+// MESSAGES KEY HANDLERS
 // ============================================================================
-
-// handleSSE provides a Server-Sent Events endpoint for real-time count updates.
-// GET /_/api/sse
-func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		// ⭐ 204, NEVER 500: the SSE spec makes 204 mean "stop reconnecting".
-		// A platform that buffers a function's whole response (Vercel) cannot
-		// stream, and a 500 here made the app reopen the stream every 5 s,
-		// forever: a red log row and a function invocation each time. The
-		// app's counts poll instead (initSSE).
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	// Register this client
-	ch := make(chan SSEEvent, 10)
-	s.addSSEClient(ch)
-	defer s.removeSSEClient(ch)
-
-	// Send initial counts immediately
-	counts := s.computeAllCounts()
-	if data, err := json.Marshal(counts); err == nil {
-		fmt.Fprintf(w, "event: counts\ndata: %s\n\n", data)
-		flusher.Flush()
-	}
-
-	// Stream events until client disconnects
-	ctx := r.Context()
-	keepalive := time.NewTicker(15 * time.Second)
-	defer keepalive.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case evt, ok := <-ch:
-			if !ok {
-				return
-			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evt.Event, evt.Data)
-			flusher.Flush()
-		case <-keepalive.C:
-			fmt.Fprintf(w, ": keepalive\n\n")
-			flusher.Flush()
-		}
-	}
-}
-
-// handleNavState returns nav state for the avatar menu and nav widget.
-// GET /api/nav/state
-func (s *Server) handleNavState(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	counts := s.computeAllCounts()
-
-	// Read author name + avatar from .well-known/polis
-	authorName := ""
-	var avatarConfig map[string]interface{}
-	wkPath := siteKey(".well-known", "polis")
-	if data, err := s.readKey(wkPath); err == nil {
-		var wk map[string]interface{}
-		if json.Unmarshal(data, &wk) == nil {
-			if name, ok := wk["author_name"].(string); ok {
-				authorName = name
-			}
-			if av, ok := wk["avatar"].(map[string]interface{}); ok {
-				avatarConfig = av
-			}
-		}
-	}
-
-	// Build handle from base URL
-	handle := ""
-	baseURL := s.GetBaseURL()
-	if baseURL != "" {
-		if u, err := url.Parse(baseURL); err == nil {
-			parts := strings.SplitN(u.Hostname(), ".", 2)
-			if len(parts) > 0 {
-				handle = parts[0]
-			}
-		}
-	}
-
-	resp := map[string]interface{}{
-		"handle":      handle,
-		"author_name": authorName,
-		"home_url":    baseURL,
-		"counts": map[string]int{
-			"posts":             counts.Posts,
-			"following":         counts.Following,
-			"followers":         counts.Followers,
-			"feed_unread":       counts.FeedUnread,
-			"dm_unread":         counts.DMUnread,
-			"blessing_requests": counts.BlessingRequests,
-		},
-	}
-	if avatarConfig != nil {
-		resp["avatar"] = avatarConfig
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
-// handleCounts returns all badge counts in a single response.
-// Replaces the need for 13 parallel API calls from loadAllCounts().
-// GET /_/api/counts
-func (s *Server) handleCounts(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	counts := s.computeAllCounts()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(counts)
-}
-
-// handleDMConversations returns the list of DM conversations.
-func (s *Server) handleDMConversations(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	mb, self, _, err := s.dmMailbox()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	entries, err := mb.RebuildInbox()
-	if err != nil {
-		s.LogError("dm conversations: %v", err)
-		http.Error(w, "Failed to load conversations", http.StatusInternalServerError)
-		return
-	}
-
-	// No server-readable preview under end-to-end encryption (last_preview is empty).
-	convs := make([]map[string]interface{}, 0, len(entries))
-	for _, e := range entries {
-		convs = append(convs, map[string]interface{}{
-			"id":              dm.ComputeConversationID(self, e.Peer),
-			"peer_domain":     e.Peer,
-			"peer_url":        "https://" + e.Peer,
-			"last_message_at": e.LastMessageAt,
-			"unread_count":    e.Unread,
-			"last_preview":    "",
-		})
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"conversations": convs,
-		"count":         len(convs),
-	})
-}
-
-// handleDMConversation returns a single conversation with decrypted messages.
-// Also auto-marks the conversation as read.
-func (s *Server) handleDMConversation(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodDelete {
-		s.handleDMDeleteConversation(w, r)
-		return
-	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	convID := strings.TrimPrefix(r.URL.Path, "/api/dm/conversations/")
-	if convID == "" {
-		http.Error(w, "Missing conversation ID", http.StatusBadRequest)
-		return
-	}
-
-	mb, self, deks, err := s.dmMailbox()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	peer, ok, err := mb.PeerForConversationID(self, convID)
-	if err != nil {
-		s.LogError("dm conversation resolve: %v", err)
-		http.Error(w, "Failed to load conversation", http.StatusInternalServerError)
-		return
-	}
-	if !ok {
-		http.Error(w, "Conversation not found", http.StatusNotFound)
-		return
-	}
-
-	stored, err := mb.ReadConversation(peer, deks)
-	if err != nil {
-		s.LogError("dm conversation load: %v", err)
-		http.Error(w, "Failed to load conversation", http.StatusInternalServerError)
-		return
-	}
-
-	// content is empty for messages whose epoch DEK is locked (password epoch not
-	// unlocked); the "locked" flag + key_epoch tell the SPA to prompt for unlock.
-	type readMsg struct {
-		ID        string `json:"id"`
-		From      string `json:"from"`
-		To        string `json:"to"`
-		Content   string `json:"content"`
-		ReplyToID string `json:"reply_to_id,omitempty"`
-		Timestamp string `json:"timestamp"`
-		Status    string `json:"status"`
-		KeyEpoch  int    `json:"key_epoch"`
-		Locked    bool   `json:"locked"`
-		// Undecryptable: the epoch DEK was available but the stored box failed to open
-		// (corruption, or a pre-DM-1 injected box). Flagged per-message so one bad box
-		// doesn't fail the whole conversation read (DM-6).
-		Undecryptable bool `json:"undecryptable,omitempty"`
-		// Raw wire box, so the SPA can open a locked (password-epoch) message client-side
-		// after unlocking that epoch's DEK in the browser. Not secret — it's the encrypted
-		// box. Present only when Locked (an unlocked message already carries plaintext in
-		// Content; a bootstrap-epoch message is decrypted server-side).
-		Ciphertext string `json:"ciphertext,omitempty"`
-		Nonce      string `json:"nonce,omitempty"`
-		BoxPub     string `json:"box_pub,omitempty"`
-	}
-	msgs := make([]readMsg, 0, len(stored))
-	for _, msg := range stored {
-		m := readMsg{
-			ID:            msg.ID,
-			From:          msg.From,
-			To:            msg.To,
-			Content:       msg.Plaintext,
-			ReplyToID:     msg.ReplyTo,
-			Timestamp:     msg.At,
-			Status:        msg.Status,
-			KeyEpoch:      msg.KeyEpoch,
-			Locked:        msg.Locked,
-			Undecryptable: msg.Undecryptable,
-		}
-		if msg.Locked {
-			m.Ciphertext = msg.Ciphertext
-			m.Nonce = msg.Nonce
-			m.BoxPub = msg.BoxPub
-		}
-		msgs = append(msgs, m)
-	}
-
-	// Auto-mark as read
-	if err := mb.MarkRead(peer); err != nil {
-		s.LogError("dm mark read: %v", err)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"peer_domain": peer,
-		"peer_url":    "https://" + peer,
-		"messages":    msgs,
-	})
-}
 
 // handleDMKeyring returns the DM keyring's browser-safe view: epoch pubkeys + the wrapped
 // DEK blobs + KDF params the SPA needs to derive a KEK from the user's password and unwrap
@@ -5771,7 +1777,7 @@ func (s *Server) handleDMKeyring(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(kr.BrowserView())
+	_ = json.NewEncoder(w).Encode(kr.BrowserView())
 }
 
 // handleDMSetPassword performs the bootstrap→epoch-1 upgrade. The browser mints the epoch
@@ -5880,8 +1886,9 @@ func (s *Server) handleDMSetPassword(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	s.LogEvent("pub.polis.dm.password_set", ops.RequestFields(r.Context(), map[string]any{"epoch_id": id}))
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"epoch_id": id, "current_epoch": id})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"epoch_id": id, "current_epoch": id})
 }
 
 // handleDMRewrapPassword performs the O(1) re-wrap (phase 4.8): the browser
@@ -5941,122 +1948,9 @@ func (s *Server) handleDMRewrapPassword(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	s.LogEvent("pub.polis.dm.password_change", ops.RequestFields(r.Context(), map[string]any{"revision": kr.Revision}))
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "revision": kr.Revision})
-}
-
-// handleDMDeleteConversation deletes a DM conversation.
-func (s *Server) handleDMDeleteConversation(w http.ResponseWriter, r *http.Request) {
-	convID := strings.TrimPrefix(r.URL.Path, "/api/dm/conversations/")
-	if convID == "" {
-		http.Error(w, "Missing conversation ID", http.StatusBadRequest)
-		return
-	}
-
-	mb, self, _, err := s.dmMailbox()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	peer, ok, err := mb.PeerForConversationID(self, convID)
-	if err != nil {
-		s.LogError("dm delete resolve: %v", err)
-		http.Error(w, "Failed to delete conversation", http.StatusInternalServerError)
-		return
-	}
-	if ok {
-		if err := mb.DeleteConversation(peer); err != nil {
-			s.LogError("dm delete: %v", err)
-			http.Error(w, "Failed to delete conversation", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-	})
-}
-
-// handleDMSend sends a new DM to a remote recipient.
-func (s *Server) handleDMSend(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.PrivateKey == nil {
-		http.Error(w, "no private key configured", http.StatusBadRequest)
-		return
-	}
-
-	var req struct {
-		RecipientURL string `json:"recipient_url"`
-		Content      string `json:"content"`
-		ReplyToID    string `json:"reply_to_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if s.handleBodyTooLarge(w, r, err) {
-			return
-		}
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if req.RecipientURL == "" {
-		http.Error(w, "recipient_url is required", http.StatusBadRequest)
-		return
-	}
-	if req.Content == "" {
-		http.Error(w, "content is required", http.StatusBadRequest)
-		return
-	}
-
-	// Validate recipient URL
-	if _, err := url.Parse(req.RecipientURL); err != nil {
-		http.Error(w, "Invalid recipient URL", http.StatusBadRequest)
-		return
-	}
-	if s.RestrictDMEgress {
-		if err := dm.ValidateRecipientURL(req.RecipientURL); err != nil {
-			http.Error(w, "Invalid recipient URL: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-	}
-
-	domain := s.GetBaseURL()
-	if domain == "" {
-		http.Error(w, "Site base URL not configured", http.StatusBadRequest)
-		return
-	}
-
-	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.Site(), s.SharedHTTPClient)
-	sender.Logger = dm.EventFunc(s.LogEvent)
-
-	msg, err := sender.SendMessage(req.RecipientURL, req.Content, req.ReplyToID)
-	if err != nil {
-		// Even on delivery failure, the message may have been saved as "unsent"
-		if msg != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"message_id": msg.ID,
-				"status":     msg.Status,
-				"warning":    err.Error(),
-			})
-			return
-		}
-		s.LogError("dm send: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message_id": msg.ID,
-		"status":     msg.Status,
-	})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "revision": kr.Revision})
 }
 
 // handleDMRecipientKey resolves a recipient's verified X25519 messages key so the
@@ -6081,7 +1975,7 @@ func (s *Server) handleDMRecipientKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid recipient URL", http.StatusBadRequest)
 		return
 	}
-	if s.RestrictDMEgress {
+	if !s.allowPrivateDMRecipients() {
 		if err := dm.ValidateRecipientURL(recipientURL); err != nil {
 			http.Error(w, "Invalid recipient URL: "+err.Error(), http.StatusBadRequest)
 			return
@@ -6092,7 +1986,7 @@ func (s *Server) handleDMRecipientKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Site base URL not configured", http.StatusBadRequest)
 		return
 	}
-	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.Site(), s.SharedHTTPClient)
+	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.Site(), s.dmHTTPClient())
 	sender.Logger = dm.EventFunc(s.LogEvent)
 	pubB64, epoch, err := sender.ResolveRecipientKey(recipientURL)
 	if err != nil {
@@ -6103,7 +1997,7 @@ func (s *Server) handleDMRecipientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"public_key_messages": pubB64,
 		"recipient_epoch":     epoch,
 	})
@@ -6155,7 +2049,7 @@ func (s *Server) handleDMSendSealed(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid recipient URL", http.StatusBadRequest)
 		return
 	}
-	if s.RestrictDMEgress {
+	if !s.allowPrivateDMRecipients() {
 		if err := dm.ValidateRecipientURL(req.RecipientURL); err != nil {
 			http.Error(w, "Invalid recipient URL: "+err.Error(), http.StatusBadRequest)
 			return
@@ -6166,7 +2060,7 @@ func (s *Server) handleDMSendSealed(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Site base URL not configured", http.StatusBadRequest)
 		return
 	}
-	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.Site(), s.SharedHTTPClient)
+	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.Site(), s.dmHTTPClient())
 	sender.Logger = dm.EventFunc(s.LogEvent)
 	msg, err := sender.SendSealed(req.RecipientURL, req.SenderEpoch, req.RecipientEpoch, req.BoxPub,
 		dm.SealedBox{Ciphertext: req.Delivery.Ciphertext, Nonce: req.Delivery.Nonce},
@@ -6176,7 +2070,7 @@ func (s *Server) handleDMSendSealed(w http.ResponseWriter, r *http.Request) {
 			// Saved as "unsent" — delivery failed but the box is stored.
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"message_id": msg.ID,
 				"status":     msg.Status,
 				"warning":    err.Error(),
@@ -6188,7 +2082,7 @@ func (s *Server) handleDMSendSealed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"message_id": msg.ID,
 		"status":     msg.Status,
 	})
@@ -6218,7 +2112,7 @@ func (s *Server) handleDMProtectionStatus(w http.ResponseWriter, r *http.Request
 		http.Error(w, "Invalid recipient URL", http.StatusBadRequest)
 		return
 	}
-	if s.RestrictDMEgress {
+	if !s.allowPrivateDMRecipients() {
 		if err := dm.ValidateRecipientURL(recipientURL); err != nil {
 			http.Error(w, "Invalid recipient URL: "+err.Error(), http.StatusBadRequest)
 			return
@@ -6229,108 +2123,20 @@ func (s *Server) handleDMProtectionStatus(w http.ResponseWriter, r *http.Request
 		http.Error(w, "Site base URL not configured", http.StatusBadRequest)
 		return
 	}
-	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.Site(), s.SharedHTTPClient)
+	sender := dm.NewSenderWithHTTP(s.PrivateKey, s.PublicKey, dm.ExtractDomainFromURL(domain), s.Site(), s.dmHTTPClient())
 	sender.Logger = dm.EventFunc(s.LogEvent)
 	ps, err := sender.FetchProtectionStatus(recipientURL)
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		// Not an HTTP error: "unknown" is a legitimate UX state (the SPA warns softly).
 		s.LogDebug("dm protection-status unknown for %s: %v", recipientURL, err)
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "unknown"})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "unknown"})
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":    "ok",
 		"protected": ps.Protected,
 		"domain":    ps.Domain,
-	})
-}
-
-// handleDMMarkRead marks a conversation as read.
-func (s *Server) handleDMMarkRead(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	mb, self, _, err := s.dmMailbox()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	var req struct {
-		ConversationID string `json:"conversation_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		if s.handleBodyTooLarge(w, r, err) {
-			return
-		}
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if req.ConversationID == "" {
-		http.Error(w, "conversation_id is required", http.StatusBadRequest)
-		return
-	}
-
-	peer, ok, err := mb.PeerForConversationID(self, req.ConversationID)
-	if err == nil && ok {
-		err = mb.MarkRead(peer)
-	}
-	if err != nil {
-		s.LogError("dm mark read: %v", err)
-		http.Error(w, "Failed to mark read", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-	})
-}
-
-// handleDMRetry returns unsent messages (retry is handled client-side by re-sending).
-func (s *Server) handleDMRetry(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	mb, self, _, err := s.dmMailbox()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	unsent, err := mb.UnsentMessages()
-	if err != nil {
-		s.LogError("dm retry: %v", err)
-		http.Error(w, "Failed to get unsent messages", http.StatusInternalServerError)
-		return
-	}
-
-	type unsentItem struct {
-		ConvID    string `json:"conv_id"`
-		MessageID string `json:"message_id"`
-		To        string `json:"to"`
-		Timestamp string `json:"timestamp"`
-	}
-	items := make([]unsentItem, 0, len(unsent))
-	for _, u := range unsent {
-		items = append(items, unsentItem{
-			ConvID:    dm.ComputeConversationID(self, u.Peer),
-			MessageID: u.Message.ID,
-			To:        u.Message.To,
-			Timestamp: u.Message.At,
-		})
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"unsent_count": len(items),
-		"unsent":       items,
 	})
 }
 
@@ -6354,7 +2160,7 @@ func (s *Server) handleDMRecipients(w http.ResponseWriter, r *http.Request) {
 	f, err := following.LoadSite(s.Site())
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"recipients": []interface{}{},
 		})
 		return
@@ -6414,7 +2220,6 @@ func (s *Server) handleDMRecipients(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Collect results
-	followingChanged := false
 	for range pendingCount {
 		cr := <-resultCh
 		results[cr.idx].Status = cr.result.Status
@@ -6433,10 +2238,6 @@ func (s *Server) handleDMRecipients(w http.ResponseWriter, r *http.Request) {
 		// Opportunistic metadata sync: update author_name/site_title in following.json
 		// if the remote following.json was fetched and we can get .well-known metadata
 		// (skipped — would require extra fetch; metadata comes from other sync paths)
-	}
-
-	if followingChanged {
-		following.SaveSigned(s.Site(), f, s.PrivateKey)
 	}
 
 	// Resolve each recipient's avatar for the composer list. Uses the shared
@@ -6486,7 +2287,7 @@ func (s *Server) handleDMRecipients(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"recipients": results,
 	})
 }
@@ -6585,7 +2386,9 @@ func (s *Server) syncFollowerState(remoteDomain string, theyFollowUs bool) {
 	if theyFollowUs && !isLocal {
 		fs.Followers = append(fs.Followers, remoteLower)
 		fs.Count = len(fs.Followers)
-		store.SaveState("pub.polis.follow", &fs)
+		if err := store.SaveState("pub.polis.follow", &fs); err != nil {
+			s.LogWarn("follower state for %s not saved: %v", remoteLower, err)
+		}
 	} else if !theyFollowUs && isLocal {
 		filtered := fs.Followers[:0]
 		for _, f := range fs.Followers {
@@ -6595,148 +2398,9 @@ func (s *Server) syncFollowerState(remoteDomain string, theyFollowUs bool) {
 		}
 		fs.Followers = filtered
 		fs.Count = len(fs.Followers)
-		store.SaveState("pub.polis.follow", &fs)
-	}
-}
-
-// handleTags handles GET (list all tags), POST (apply tag), and DELETE (remove target) for /api/tags.
-func (s *Server) handleTags(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.handleTagsList(w, r)
-	case http.MethodPost:
-		s.handleTagApply(w, r)
-	case http.MethodDelete:
-		s.handleTagRemove(w, r)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// handleTagsList returns all tag files as JSON.
-func (s *Server) handleTagsList(w http.ResponseWriter, r *http.Request) {
-	tags, err := tag.ListTags(s.Site())
-	if err != nil {
-		s.LogError("list tags: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if tags == nil {
-		tags = []tag.TagFile{}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"tags": tags,
-	})
-}
-
-// handleTagApply applies a tag to a target URI.
-func (s *Server) handleTagApply(w http.ResponseWriter, r *http.Request) {
-	if s.PrivateKey == nil {
-		http.Error(w, "Not configured: no signing key", http.StatusBadRequest)
-		return
-	}
-
-	var req struct {
-		Tag       string `json:"tag"`
-		TargetURI string `json:"target_uri"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-	if req.Tag == "" || req.TargetURI == "" {
-		http.Error(w, "tag and target_uri are required", http.StatusBadRequest)
-		return
-	}
-
-	tf, err := tag.ApplyTag(s.Site(), req.Tag, req.TargetURI, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
-	if err != nil {
-		s.LogError("apply tag: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Sync with discovery service
-	dsCfg := s.tagDiscoveryConfig()
-	if dsCfg != nil {
-		if err := tag.SyncTag(s.Site(), tf, s.PrivateKey, dsCfg); err != nil {
-			s.LogWarn("tag DS sync failed: %v", err)
+		if err := store.SaveState("pub.polis.follow", &fs); err != nil {
+			s.LogWarn("follower state for %s not saved: %v", remoteLower, err)
 		}
-	}
-
-	s.LogEvent("pub.polis.tag.applied", map[string]interface{}{
-		"tag":        req.Tag,
-		"target_uri": req.TargetURI,
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"tag":     tf,
-	})
-}
-
-// handleTagRemove removes a target URI from a tag.
-func (s *Server) handleTagRemove(w http.ResponseWriter, r *http.Request) {
-	if s.PrivateKey == nil {
-		http.Error(w, "Not configured: no signing key", http.StatusBadRequest)
-		return
-	}
-
-	var req struct {
-		Tag       string `json:"tag"`
-		TargetURI string `json:"target_uri"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-	if req.Tag == "" || req.TargetURI == "" {
-		http.Error(w, "tag and target_uri are required", http.StatusBadRequest)
-		return
-	}
-
-	tf, err := tag.RemoveTarget(s.Site(), req.Tag, req.TargetURI, s.PrivateKey, "polis-cli-go/"+s.CLIVersion)
-	if err != nil {
-		s.LogError("remove tag target: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Unregister from discovery service
-	dsCfg := s.tagDiscoveryConfig()
-	if dsCfg != nil {
-		if err := tag.UnregisterTarget(req.Tag, req.TargetURI, s.PrivateKey, dsCfg); err != nil {
-			s.LogWarn("tag DS unregister failed: %v", err)
-		}
-	}
-
-	s.LogEvent("pub.polis.tag.removed", map[string]interface{}{
-		"tag":        req.Tag,
-		"target_uri": req.TargetURI,
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"tag":     tf,
-	})
-}
-
-// tagDiscoveryConfig returns a tag.DiscoveryConfig for the current server,
-// or nil if discovery is not configured.
-func (s *Server) tagDiscoveryConfig() *tag.DiscoveryConfig {
-	if s.DiscoveryURL == "" || s.BaseURL == "" {
-		return nil
-	}
-	return &tag.DiscoveryConfig{
-		DiscoveryURL: s.DiscoveryURL,
-		BaseURL:      s.BaseURL,
-		Site:         s.Site(),
-		HTTPClient:   s.SharedHTTPClient,
-		Generator:    "polis-cli-go/" + s.CLIVersion,
 	}
 }
 
@@ -6753,26 +2417,8 @@ func (s *Server) readKey(key string) ([]byte, error) {
 	return s.Site().Store().Get(context.Background(), key)
 }
 
-func (s *Server) statKey(key string) (storage.Info, error) {
-	return s.Site().Store().Stat(context.Background(), key)
-}
-
-func (s *Server) existsKey(key string) (bool, error) {
-	return s.Site().Store().Exists(context.Background(), key)
-}
-
 func (s *Server) writeKey(key string, data []byte, perm fs.FileMode) error {
 	return s.Site().Store().Put(context.Background(), key, data, storage.WithMode(perm))
-}
-
-// deleteKey removes key. ignoreMissing matches the callers that treated an
-// absent file as success.
-func (s *Server) deleteKey(key string, ignoreMissing bool) error {
-	var opts []storage.DeleteOption
-	if ignoreMissing {
-		opts = append(opts, storage.IgnoreMissing())
-	}
-	return s.Site().Store().Delete(context.Background(), key, opts...)
 }
 
 // listKey lists the direct children of key. A missing prefix yields no
@@ -6783,22 +2429,4 @@ func (s *Server) listKey(key string) []storage.Entry {
 		return nil
 	}
 	return entries
-}
-
-// sanitizeDraftID keeps only the base name of a client-supplied draft id, so it
-// can address nothing but a file in the directory the caller chose.
-//
-// ⚠️ Defence in depth: pkg/comment refuses a traversing id outright. Both exist
-// because a traversing id used to write into ANOTHER TENANT'S site directory on
-// the shared volume, and the detach made it worse by creating missing parents.
-func sanitizeDraftID(id string) string {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return ""
-	}
-	id = pathpkg.Base(filepath.ToSlash(id))
-	if id == "." || id == ".." || id == "/" {
-		return ""
-	}
-	return id
 }

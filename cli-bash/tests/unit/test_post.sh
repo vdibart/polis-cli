@@ -105,6 +105,71 @@ test_post_without_init() {
 }
 
 # Run tests
+# Test: post refuses a source that states its own licence terms
+#
+# This CLI cannot carry a `license:` block into a new post, so publishing would
+# silently drop the author's per-work terms. It must FAIL instead, from a file
+# and from stdin (where the already-published check is skipped), and leave the
+# source where it was.
+test_post_refuses_licensed_source() {
+    setup_test_env "post_licensed"
+    trap teardown_test_env EXIT
+
+    "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
+
+    printf '%s\n' '---' 'title: Terms of my own' 'license:' '  train-ai: y' '---' '' 'Body text.' > licensed.md
+    local before
+    before=$(cat licensed.md)
+
+    local result exit_code error_code
+    result=$("$POLIS_BIN" --json post licensed.md 2>&1)
+    exit_code=$?
+    assert_exit_code 1 "$exit_code" || return 1
+    assert_valid_json "$result" || return 1
+    error_code=$(echo "$result" | jq -r '.error.code')
+    if [[ "$error_code" != "UNSUPPORTED_CONTENT" ]]; then
+        log_error "file: expected UNSUPPORTED_CONTENT, got: $error_code"
+        return 1
+    fi
+    if [[ "$(cat licensed.md)" != "$before" ]]; then
+        log_error "Refused post still moved or changed the source"
+        return 1
+    fi
+
+    result=$("$POLIS_BIN" --json post - < licensed.md 2>&1)
+    exit_code=$?
+    assert_exit_code 1 "$exit_code" || return 1
+    error_code=$(echo "$result" | jq -r '.error.code')
+    if [[ "$error_code" != "UNSUPPORTED_CONTENT" ]]; then
+        log_error "stdin: expected UNSUPPORTED_CONTENT, got: $error_code"
+        return 1
+    fi
+    if [[ -n "$(find content -path '*/post/*' -name '*.md' 2>/dev/null)" ]]; then
+        log_error "A refused post still wrote a post file"
+        return 1
+    fi
+
+    log "  [OK] post refused a source with licence terms, from a file and from stdin"
+    return 0
+}
+
+# Test: a body that mentions "license:" is not a licence block
+test_post_body_mentioning_license_still_publishes() {
+    setup_test_env "post_mentions_license"
+    trap teardown_test_env EXIT
+
+    "$POLIS_BIN" --json init > /dev/null 2>&1 || return 1
+
+    printf '%s\n' '# Mentions' '' 'license: is a word some frontmatter uses.' > mentions.md
+    local result
+    result=$("$POLIS_BIN" --json post mentions.md 2>&1)
+    assert_exit_code 0 "$?" || return 1
+    assert_json_success "$result" "post" || return 1
+    return 0
+}
+
 run_test "Post Basic" test_post_basic
+run_test "Post Refuses Licensed Source" test_post_refuses_licensed_source
+run_test "Post Body Mentioning License Still Publishes" test_post_body_mentioning_license_still_publishes
 run_test "Post Missing File" test_post_missing_file
 run_test "Post Without Init" test_post_without_init

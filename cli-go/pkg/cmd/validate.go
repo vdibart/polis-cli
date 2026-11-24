@@ -106,6 +106,7 @@ var familyOrder = []string{
 	sitecheck.FamilyPolicy,
 	sitecheck.FamilyIdentity,
 	sitecheck.FamilyBundle,
+	sitecheck.FamilyAgents,
 }
 
 func printReport(r *sitecheck.Report) {

@@ -79,6 +79,12 @@
       "reason": ""
     },
     {
+      "name": "layout-private-drafts",
+      "status": "pass",
+      "message": "no private drafts at pre-0.58 paths",
+      "reason": ""
+    },
+    {
       "name": "registry-migration",
       "status": "pass",
       "message": "active_theme already migrated out of .well-known/polis",
@@ -105,7 +111,7 @@
     {
       "name": "active-shape-upgrade",
       "status": "pass",
-      "message": "active_shape is \"pub.polis.shapes.v4\"; not on v3 (nothing to upgrade)",
+      "message": "active_shape is \"pub.polis.shapes.v5\"",
       "reason": ""
     },
     {
@@ -189,7 +195,7 @@
     {
       "name": "reference-payload-integrity",
       "status": "fail",
-      "message": "reference payload drift: 1 file(s) differ",
+      "message": "reference payload drift: 1 file(s) differ from the copy built into polis (edited by hand?): shapes/v4/stream.css; apply reinstalls them and keeps your copies in the backup",
       "reason": "F1 content-aware integrity — even when version stamps match, on-disk fixtures can drift from the embedded reference payload via hand-edits or partial writes; reinstall is content-idempotent so safe to run unconditionally",
       "actions": [
         {
@@ -321,16 +327,9 @@
     },
     {
       "name": "cli-update",
-      "status": "fail",
-      "message": "Would download polis-full vdev for $GOOS/$GOARCH",
-      "reason": "Your site is now at vdev format — the latest CLI ensures full compatibility",
-      "actions": [
-        {
-          "op": "create",
-          "path": ".polis/bin/polis-full-$GOOS-$GOARCH",
-          "detail": "download polis-full vdev for $GOOS/$GOARCH"
-        }
-      ]
+      "status": "pass",
+      "message": "not compared (development build, or release lookup disabled)",
+      "reason": ""
     }
   ],
   "dry_run": [
@@ -361,7 +360,7 @@
     {
       "name": "reference-payload-integrity",
       "status": "fail",
-      "message": "reference payload drift: 1 file(s) differ",
+      "message": "reference payload drift: 1 file(s) differ from the copy built into polis (edited by hand?): shapes/v4/stream.css; apply reinstalls them and keeps your copies in the backup",
       "reason": "F1 content-aware integrity — even when version stamps match, on-disk fixtures can drift from the embedded reference payload via hand-edits or partial writes; reinstall is content-idempotent so safe to run unconditionally",
       "actions": [
         {
@@ -460,7 +459,7 @@
     {
       "name": "reference-payload-integrity",
       "status": "fail",
-      "message": "re-installed 1 drifted reference-payload file(s)",
+      "message": "re-installed 1 drifted reference-payload file(s); your edited copies are in ../../102/backup/.polis/bundles/pub.polis.core — to keep a change, make it in a theme of your own",
       "reason": "F1 content-aware integrity — even when version stamps match, on-disk fixtures can drift from the embedded reference payload via hand-edits or partial writes; reinstall is content-idempotent so safe to run unconditionally",
       "actions": [
         {

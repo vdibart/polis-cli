@@ -40,8 +40,7 @@ var serverDirStringSurvivors = map[string]struct {
 	"webapp/internal/server/ownergate.go": {1, "kind 3: a NAME, not an access — the owner instance's SiteID, " +
 		"which keys sessions so two sites sharing a base URL cannot open each other's; nothing reads a disk " +
 		"through it"},
-	"webapp/internal/server/handlers.go": {2, "kind 3: a log line naming the directory. " +
-		"kind 1: the site export (WriteZipArchive) walks and streams the directory, and waits on a " +
+	"webapp/internal/server/handlers.go": {1, "kind 1: the site export (WriteZipArchive) walks and streams the directory, and waits on a " +
 		"streaming read in the storage interface, which is whole-file; hosted shares the function"},
 }
 

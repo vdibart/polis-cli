@@ -141,13 +141,31 @@ func licenseOverrides(site storage.Site, siteTerms *license.Terms) (map[string]*
 			continue // unreadable post: nothing to say about it
 		}
 		workTerms := license.ParseBlock(string(content))
-		if license.ContentUsage(workTerms) == siteSignal {
+		if !overridesSite(workTerms, siteSignal) {
 			continue
 		}
 		mount := corePostsMount + "/" + rel
 		overrides["/"+strings.TrimSuffix(mount, ".md")+".html"] = workTerms
 	}
 	return overrides, nil
+}
+
+// overridesSite is the one rule for whether a work's terms are its own: their
+// content-usage signal differs from the site's.
+func overridesSite(workTerms *license.Terms, siteSignal string) bool {
+	return license.ContentUsage(workTerms) != siteSignal
+}
+
+// IsLicenseOverride reports whether a post's own terms (its frontmatter's
+// licence block) differ from the site's, so robots.txt names it: the same
+// rule licenseOverrides applies to every post. A site with no terms has no
+// overrides.
+func IsLicenseOverride(site storage.Site, postContent []byte) bool {
+	terms, err := SiteTerms(site)
+	if err != nil || terms == nil {
+		return false
+	}
+	return overridesSite(license.ParseBlock(string(postContent)), license.ContentUsage(terms))
 }
 
 // inVersionsDir reports whether a site-relative key sits under a .versions

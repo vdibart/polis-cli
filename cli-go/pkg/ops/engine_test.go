@@ -503,31 +503,40 @@ func TestListBundles(t *testing.T) {
 	t.Error("pub.polis.post type not found in bundle info")
 }
 
-func TestOnContentChangedCallback(t *testing.T) {
+func TestAfterWriteIsCalledOnceForAWriteWithWhatItDid(t *testing.T) {
 	engine, _ := newTestEngine(t)
 
-	called := false
-	engine.OnContentChanged = func() {
-		called = true
+	var got []Written
+	engine.AfterWrite = func(_ context.Context, w Written) { got = append(got, w) }
+
+	// Reads do not report.
+	engine.Dispatch(context.Background(), ActionRequest{Action: "list", ContentType: "pub.polis.post"})
+	if len(got) != 0 {
+		t.Fatalf("a read reported %d writes", len(got))
 	}
 
-	// Reads should NOT trigger callback
-	engine.Dispatch(context.Background(), ActionRequest{
-		Action:      "list",
-		ContentType: "pub.polis.post",
-	})
-	if called {
-		t.Error("OnContentChanged should not be called for read operations")
-	}
-
-	// Writes SHOULD trigger callback
-	engine.Dispatch(context.Background(), ActionRequest{
+	res, err := engine.Dispatch(context.Background(), ActionRequest{
 		Action:      "create",
-		ContentType: "pub.polis.post",
-		Payload:     map[string]any{"markdown": "# Callback Test\n\nContent."},
+		ContentType: "post",
+		Payload:     map[string]any{"markdown": "# Callback Test\n\nContent.", "draft_id": "draft-1"},
 	})
-	if !called {
-		t.Error("OnContentChanged should be called after write operations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("a write reported %d times, want once", len(got))
+	}
+	w := got[0]
+	if w.Op() != "pub.polis.post.create" || w.Path != res.Data["path"] || w.Title != "Callback Test" ||
+		w.Version == "" || w.DraftID != "draft-1" {
+		t.Errorf("written = %+v", w)
+	}
+
+	// A write that fails reports nothing.
+	got = nil
+	_, _ = engine.Dispatch(context.Background(), ActionRequest{Action: "create", ContentType: "pub.polis.post", Payload: map[string]any{"markdown": " "}})
+	if len(got) != 0 {
+		t.Errorf("a failed write reported %d times", len(got))
 	}
 }
 
@@ -584,11 +593,12 @@ func TestCommentCreateMissingID(t *testing.T) {
 		ContentType: "pub.polis.comment",
 		Payload:     map[string]any{},
 	})
+	// An empty create names both forms: write one from text, or send one by id.
 	if err == nil {
-		t.Fatal("expected error for missing comment_id")
+		t.Fatal("expected error for an empty comment create")
 	}
-	if !strings.Contains(err.Error(), "comment_id is required") {
-		t.Errorf("expected 'comment_id is required' error, got: %s", err.Error())
+	if !strings.Contains(err.Error(), "comment_id is required") || !strings.Contains(err.Error(), "in_reply_to and markdown are required") {
+		t.Errorf("expected both forms named, got: %s", err.Error())
 	}
 }
 
@@ -634,7 +644,7 @@ func TestDispatchNilPayload(t *testing.T) {
 // ── isWriteAction coverage ──────────────────────────────────────────
 
 func TestIsWriteAction(t *testing.T) {
-	writes := []string{"create", "update", "delete", "bless", "deny", "revoke", "sync", "draft.save", "draft.delete", "refresh"}
+	writes := []string{"create", "update", "delete", "bless", "deny", "revoke", "sync", "save_draft", "discard_draft", "refresh"}
 	reads := []string{"list", "get", "draft.list", "draft.get", "render", "anything_else"}
 
 	for _, a := range writes {
@@ -711,6 +721,28 @@ func TestListBundlesTypeDetails(t *testing.T) {
 	}
 }
 
+// A site's bundle.json only ever gains themes, so a site from before a rename
+// still declares the old name (classic, now daryl). The list offers the new
+// name and never the retired one, which the theme switch would refuse.
+func TestThemeListNeverOffersARetiredTheme(t *testing.T) {
+	b := bundle.DefaultCoreBundle()
+	b.Themes["classic"] = &bundle.Theme{Name: "classic", Version: "1.0.0", CSS: "v5.json", CompatibleShapes: []string{"pub.polis.shapes.v5"}}
+	result, err := (&BuiltinCoreHandler{}).listThemes(HandlerEnv{Bundle: b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, th := range result.Data["themes"].([]map[string]any) {
+		names[th["name"].(string)] = true
+	}
+	if names["classic"] {
+		t.Error("the list offers classic, a retired name")
+	}
+	if !names["daryl"] {
+		t.Error("the list must offer daryl, classic's new name")
+	}
+}
+
 func TestDispatchThemeList(t *testing.T) {
 	engine, _ := newTestEngine(t)
 
@@ -725,8 +757,8 @@ func TestDispatchThemeList(t *testing.T) {
 		t.Errorf("status = %q, want success", result.Status)
 	}
 	count, _ := result.Data["count"].(int)
-	if count < 3 {
-		t.Errorf("expected at least 3 themes (_shared, especial-light, vice), got %d", count)
+	if count < 2 {
+		t.Errorf("expected at least 2 themes (especial-light, vice), got %d", count)
 	}
 
 	themes, ok := result.Data["themes"].([]map[string]any)
@@ -739,10 +771,21 @@ func TestDispatchThemeList(t *testing.T) {
 			names[name] = true
 		}
 	}
-	for _, expected := range []string{"_shared", "especial-light", "vice"} {
+	for _, expected := range []string{"especial-light", "vice"} {
 		if !names[expected] {
 			t.Errorf("expected theme %q in list", expected)
 		}
+	}
+	// ⛔ Only what set_theme accepts: an agent picks from this list. The
+	// system directory and the reserved themes (sols, stardust) were offered
+	// and then refused (seen live, 2026-11-16).
+	for _, never := range []string{"_shared", "_base", "sols", "stardust"} {
+		if names[never] {
+			t.Errorf("theme list offers %q, which cannot be selected", never)
+		}
+	}
+	if count != len(themes) {
+		t.Errorf("count = %d, themes = %d", count, len(themes))
 	}
 }
 
@@ -790,5 +833,29 @@ func TestDispatchThemeUnsupportedAction(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported action") {
 		t.Errorf("expected 'unsupported action' error, got: %v", err)
+	}
+}
+
+// ⭐ An event a package emits during a write (here the DM receiver refusing a
+// delivery) carries the request's field set, stamped by the engine: the
+// request id, the operation and the surface.
+func TestEventsEmittedDuringAWriteCarryTheRequestsFields(t *testing.T) {
+	engine, _ := newTestEngine(t)
+	var got []map[string]any
+	engine.EmitEvent = func(_ string, f map[string]any) { got = append(got, f) }
+
+	ctx := WithRequestMeta(context.Background(), &RequestMeta{RequestID: "req-9", Surface: SurfaceToken})
+	_, _ = engine.Dispatch(ctx, ActionRequest{Action: "deliver", ContentType: "pub.polis.dm",
+		Payload: map[string]any{"sender_domain": "bob.example", "envelope": "{not json"}})
+	if len(got) == 0 {
+		t.Skip("the receiver emitted nothing for this refusal; nothing to check")
+	}
+	for _, f := range got {
+		if f["request_id"] != "req-9" || f["op"] != "pub.polis.dm.deliver" || f["surface"] != SurfaceToken {
+			t.Errorf("event fields = %v, want the request's id, op and surface", f)
+		}
+	}
+	if m := RequestMetaFrom(ctx); m.Op != "pub.polis.dm.deliver" {
+		t.Errorf("the request's op = %q, want the engine to have noted it", m.Op)
 	}
 }

@@ -166,7 +166,7 @@ func RunHook(site storage.Site, config *HookConfig, payload *HookPayload) (*Hook
 	ctx, cancel := context.WithTimeout(context.Background(), HookTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, hookPath)
+	cmd := exec.CommandContext(ctx, hookPath) //nolint:gosec // G204: hooks are the owner's own scripts by design (security model 8.9)
 	cmd.Env = env
 	cmd.Dir = site.Dir()            // Run in site directory
 	cmd.WaitDelay = 3 * time.Second // Force-close pipes if child processes linger after timeout

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/mode"
@@ -54,9 +55,9 @@ func TestGateRefusalNamesNoProviderOnAFreshInstance(t *testing.T) {
 		t.Error("the no-provider refusal lost its remedy")
 	}
 	// ⭐ The setup screen enrols from this list, so passkey must be on it with
-	// its ceremony kind, and nothing may be marked enrolled.
+	// its ceremony kind.
 	pk, ok := findWay(body.WaysIn, passkeyName)
-	if !ok || pk.Kind != PasskeyCeremony || !pk.Enrollable || pk.Enrolled {
+	if !ok || pk.Kind != PasskeyCeremony || !pk.Enrollable {
 		t.Errorf("passkey should be offered as an enrollable webauthn way in, got %+v (found=%v)", pk, ok)
 	}
 }
@@ -69,8 +70,42 @@ func TestGateRefusalNamesNotSignedInOnceSomethingIsEnrolled(t *testing.T) {
 		t.Fatalf("enrolled remote instance: got %d reason %q, want 401 %q", code, body.Reason, RefusalNotSignedIn)
 	}
 	pk, ok := findWay(body.WaysIn, passkeyName)
-	if !ok || !pk.Enrolled || pk.Kind != PasskeyCeremony {
-		t.Errorf("the sign-in screen needs the enrolled passkey and its kind, got %+v (found=%v)", pk, ok)
+	if !ok || pk.Kind != PasskeyCeremony {
+		t.Errorf("the sign-in screen needs passkey offered with its kind, got %+v (found=%v)", pk, ok)
+	}
+}
+
+// ⛔ A GENERIC SIGN-IN: the refusal says which ways in the instance supports,
+// never which the owner set up. Two instances configured alike, one with a
+// passkey enrolled and one with nothing, must offer byte-identical ways in,
+// and no entry may carry an enrolment flag.
+func TestGateRefusalNeverSaysWhichWaysInTheOwnerSetUp(t *testing.T) {
+	rawWays := func(s *Server) string {
+		t.Helper()
+		w := httptest.NewRecorder()
+		s.ownerGateMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/publish", nil))
+		var body map[string]json.RawMessage
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("refusal is not JSON: %v (%q)", err, w.Body.String())
+		}
+		return string(body["ways_in"])
+	}
+
+	fresh := enrolServer(t)
+	fresh.Mode, fresh.BoundToLoopback = mode.RemoteServerSigned, false
+	enrolled, _ := passkeyServer(t)
+
+	a, b := rawWays(fresh), rawWays(enrolled)
+	if a != b {
+		t.Errorf("the ways in differ with what the owner enrolled:\n nothing enrolled: %s\n passkey enrolled: %s", a, b)
+	}
+	if strings.Contains(b, "enrolled") {
+		t.Errorf("the refusal says what is enrolled: %s", b)
+	}
+	if !strings.Contains(b, passkeyName) {
+		t.Fatalf("non-vacuity: passkey should be offered, got %s", b)
 	}
 }
 

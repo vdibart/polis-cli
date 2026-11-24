@@ -1,6 +1,6 @@
 # Signet
 
-**Signet is the identity layer of polis** — the set of specifications covering how a person proves
+**Signet is the trust layer of polis** — the set of specifications covering how a person proves
 what they made, states the terms it may be used under, vouches for someone else, and lets something
 act on their behalf.
 

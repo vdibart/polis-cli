@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
 )
@@ -25,6 +27,8 @@ func handleComment(args []string) {
 		handleCommentDraft(subArgs)
 	case "sign":
 		handleCommentSign(subArgs)
+	case "send":
+		handleCommentSend(subArgs)
 	case "list":
 		handleCommentList(subArgs)
 	case "sync":
@@ -43,13 +47,18 @@ func printCommentUsage() {
 
 Subcommands:
   draft <url>        Create a comment draft replying to <url>
-  sign <id>          Sign a draft comment (moves to pending)
+  sign <id>          Sign a draft comment, publish it and send it to the
+                     post's author for blessing
+  send <id>          Send a pending comment again (after a failed send, or
+                     once the site is registered)
   list [status]      List comments (drafts, pending, blessed, denied)
-  sync               Sync pending comments with discovery service
+  sync               Check pending comments' blessing status and file them
+                     as blessed or denied
 
 Examples:
   polis comment draft https://alice.polis.pub/posts/20260201/hello.md
   polis comment sign abc123
+  polis comment send abc123
   polis comment list drafts
   polis comment sync
 `)
@@ -127,32 +136,104 @@ func handleCommentSign(args []string) {
 		exitError("POLIS_BASE_URL not set")
 	}
 
-	// Resolve author identity from POLIS_BASE_URL, fall back to email for backward compat
-	authorIdentity := extractDomain(siteURL)
-	if authorIdentity == "" && wk.Email != "" {
-		authorIdentity = wk.Email
-	}
-	if authorIdentity == "" {
-		exitError("Author identity not configured — set POLIS_BASE_URL")
-	}
+	_ = wk // the site must have one; the author is the site's domain
 
-	// Sign the comment
-	signed, err := comment.SignComment(storage.At(dir), draft, authorIdentity, siteURL, privKey, generator)
+	// ⭐ The one implementation of signing a comment (ops.SignComment): the
+	// author is the site's domain and the generator this build's, as the API
+	// and the widget sign.
+	signed, err := ops.SignComment(ops.CommentSite{Site: storage.At(dir), PrivateKey: privKey, BaseURL: siteURL}, draft)
 	if err != nil {
 		exitError("Failed to sign comment: %v", err)
 	}
-
-	if jsonOutput {
-		outputJSON(map[string]interface{}{
-			"success":   true,
-			"id":        signed.Meta.ID,
-			"version":   signed.Meta.CommentVersion,
-			"signature": signed.Signature,
-		})
-	} else {
+	if !jsonOutput {
 		fmt.Printf("Signed comment: %s\n", signed.Meta.ID)
 		fmt.Printf("Version: %s\n", signed.Meta.CommentVersion)
-		fmt.Println("Comment moved to pending. Use 'polis comment sync' to request blessing.")
+	}
+	// Then send it, as the API's comment.create does after signing.
+	reportCommentSent(signed.Meta.ID, map[string]interface{}{
+		"id":        signed.Meta.ID,
+		"version":   signed.Meta.CommentVersion,
+		"signature": signed.Signature,
+	}, sendComment(dir, privKey, signed.Meta.ID))
+}
+
+func handleCommentSend(args []string) {
+	if len(args) < 1 {
+		exitError("Usage: polis comment send <comment-id>")
+	}
+	dir := getDataDir()
+	if !isPolisSite(dir) {
+		exitError("Not a polis site directory")
+	}
+	privKey, err := loadPrivateKey(dir)
+	if err != nil {
+		exitError("Failed to load private key: %v", err)
+	}
+	reportCommentSent(args[0], map[string]interface{}{"id": args[0]}, sendComment(dir, privKey, args[0]))
+}
+
+// commentSendResult is what sending a pending comment came to.
+type commentSendResult struct {
+	Status, Message string
+	AutoBlessed     bool
+	Err             error
+}
+
+// sendComment publishes a pending comment signed here and sends it to the
+// discovery service with its blessing request. ⭐ It runs the API's own
+// operation in-process (comment.create with a comment_id, which is
+// ops.SendComment), so what the send causes (the render, the event) is the
+// shared after-write module's, with the CLI's parts (no hook).
+func sendComment(dir string, privKey []byte, commentID string) commentSendResult {
+	pubKey, _ := storage.NewPOSIX(dir).Get(context.Background(), ".polis/keys/id_ed25519.pub")
+	engine, err := cliEngine(dir, privKey, pubKey)
+	if err != nil {
+		return commentSendResult{Err: err}
+	}
+	res, err := engine.Dispatch(cliContext(), ops.ActionRequest{Action: "create", ContentType: "pub.polis.comment",
+		Payload: map[string]any{"comment_id": commentID}})
+	if err != nil {
+		return commentSendResult{Err: err}
+	}
+	str := func(k string) string { v, _ := res.Data[k].(string); return v }
+	auto, _ := res.Data["auto_blessed"].(bool)
+	return commentSendResult{Status: str("status"), Message: str("message"), AutoBlessed: auto}
+}
+
+// reportCommentSent prints what a send came to, and exits non-zero when the
+// comment did not reach the discovery service: the reply is signed and kept
+// here, but its post's author has not been sent it.
+func reportCommentSent(commentID string, out map[string]interface{}, sent commentSendResult) {
+	retry := fmt.Sprintf("polis comment send %s", commentID)
+	deferred := sent.Err == nil && sent.Status == "deferred"
+	reached := sent.Err == nil && !deferred
+	out["success"] = reached
+	out["sent"] = reached
+	if sent.Err != nil {
+		out["send_error"] = sent.Err.Error()
+	} else {
+		out["status"] = sent.Status
+		out["message"] = sent.Message
+		out["auto_blessed"] = sent.AutoBlessed
+	}
+	if jsonOutput {
+		outputJSON(out)
+	} else {
+		switch {
+		case sent.Err != nil:
+			fmt.Fprintf(os.Stderr, "[x] Not sent: %v\n", sent.Err)
+			fmt.Fprintf(os.Stderr, "The comment is signed and kept in pending. Send it again with: %s\n", retry)
+		case deferred:
+			fmt.Println("Published on this site, but not sent: the site is not registered with the discovery service.")
+			fmt.Printf("Run 'polis register', then: %s\n", retry)
+		case sent.AutoBlessed:
+			fmt.Println("Published and sent. The post's author had already blessed it, so it moved to blessed.")
+		default:
+			fmt.Println("Published and sent to the post's author for blessing. 'polis comment sync' checks for their answer.")
+		}
+	}
+	if !reached {
+		os.Exit(1)
 	}
 }
 

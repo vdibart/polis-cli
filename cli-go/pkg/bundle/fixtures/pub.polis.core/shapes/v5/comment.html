@@ -1,0 +1,15 @@
+<!--
+    v5 shape · comment.html — one of the site's own comments, made on
+    someone's post (spec 1.5, 4.1): the first row (the date, which is the
+    comment's own page), what it answered, then its words in the comment
+    panel, then where it is shown (once the post's author blessed it) and
+    its terms, and a button that copies its address. Not the thread: that belongs to the post, on the
+    post author's site, linked from the line above the words.
+-->
+<article class="item cmt{{open}}" data-path="{{path}}"{{role}}{{blessed}}{{agent}}>
+  <div class="stick" aria-hidden="true"><div class="srow"><div class="sin">{{mark}}<span class="sdate">{{date}}</span><span class="sttl"><small>replied to</small><span>“{{reply_title}}”</span> <small>on {{reply_site}}</small></span></div></div></div>
+  <div class="hd">{{mark}}<a class="hdt perma" href="{{path}}"><time datetime="{{iso}}">{{date}}</time></a></div>
+  <{{on_tag}} class="on">replied to <a class="pq" href="{{reply_url}}" rel="noopener">“{{reply_title}}”</a> <span class="site">on <a href="https://{{reply_site}}" rel="noopener">{{reply_site}}</a></span></{{on_tag}}>
+  <div class="ex">{{body}}</div>
+  <div class="ifoot cfoot">{{shown}}{{terms}}<button class="copy" type="button" data-path="{{path}}" aria-label="Copy the link" title="Copy the link"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg></button></div>
+</article>

@@ -2,9 +2,11 @@
 //
 // Usage:
 //
-//	tailor [--apply] [--json] [--quiet] [site-dir]
+//	tailor [--apply] [--json] [--quiet] [--only id,...|--skip id,...] [site-dir]
+//	tailor --list [--json]
 //
 // By default runs in dry-run mode (diagnosis only). Use --apply to actually fix issues.
+// --only / --skip take a chosen subset of checks; --list names them.
 // Prints a detailed human-readable report to stdout by default.
 // Use --json for machine-readable output. Use --quiet for summary only.
 package main
@@ -24,13 +26,29 @@ import (
 var Version = "dev"
 
 func main() {
+	args := os.Args[1:]
 	siteDir := "."
 	apply := false
 	jsonOutput := false
 	quiet := false
+	list := false
+	var opts tailor.Options
+	usage := "Usage: tailor [--apply] [--json] [--quiet] [--only id,...|--skip id,...] [site-dir]\n       tailor --list [--json]\n"
+	ids := func(i int, flag string) []string {
+		if i+1 >= len(args) || args[i+1] == "" || args[i+1][0] == '-' {
+			fmt.Fprintf(os.Stderr, "error: %s needs a comma-separated list of check ids (tailor --list shows them)\n%s", flag, usage)
+			os.Exit(2)
+		}
+		var out []string
+		for _, id := range strings.Split(args[i+1], ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
 
 	// Parse args
-	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--apply":
@@ -39,13 +57,33 @@ func main() {
 			jsonOutput = true
 		case "--quiet":
 			quiet = true
+		case "--list":
+			list = true
+		case "--only":
+			opts.Only = append(opts.Only, ids(i, "--only")...)
+			i++
+		case "--skip":
+			opts.Skip = append(opts.Skip, ids(i, "--skip")...)
+			i++
 		case "--help", "-h":
-			fmt.Fprintf(os.Stderr, "Usage: tailor [--apply] [--json] [--quiet] [site-dir]\n")
+			fmt.Fprint(os.Stderr, usage)
 			fmt.Fprintf(os.Stderr, "\nDiagnose and auto-fix polis sites to bring them up to current spec.\n")
 			fmt.Fprintf(os.Stderr, "\nOptions:\n")
 			fmt.Fprintf(os.Stderr, "  --apply   Apply fixes (default: dry-run diagnosis only)\n")
 			fmt.Fprintf(os.Stderr, "  --json    Machine-readable JSON output\n")
 			fmt.Fprintf(os.Stderr, "  --quiet   Summary only (suppress per-check detail)\n")
+			fmt.Fprintf(os.Stderr, "  --list    List every check: id, phase, kind, what it does, what it needs first\n")
+			fmt.Fprintf(os.Stderr, "  --only    Run only these checks (comma-separated ids)\n")
+			fmt.Fprintf(os.Stderr, "  --skip    Run every check except these\n")
+			fmt.Fprintf(os.Stderr, "\n--apply with --only/--skip refuses, changing nothing, if a chosen check needs\n")
+			fmt.Fprintf(os.Stderr, "one you left out that has not been applied yet.\n")
+			fmt.Fprintf(os.Stderr, "\nTo choose changes yourself, one at a time or in phases:\n")
+			fmt.Fprintf(os.Stderr, "  %s\n", tailor.GuideURL(Version))
+			fmt.Fprintf(os.Stderr, "is the upgrade guide: every check (tailor --list) as a recipe you can run by hand (what it\n")
+			fmt.Fprintf(os.Stderr, "changes, how to detect it, the shell commands to apply it), in run order. It is\n")
+			fmt.Fprintf(os.Stderr, "written so an AI assistant can work through it with you: give it the guide and\n")
+			fmt.Fprintf(os.Stderr, "this site's dry-run report (tailor --json), decide together which changes to make,\n")
+			fmt.Fprintf(os.Stderr, "then apply them with --only, or by hand, and re-run the dry run to check.\n")
 			fmt.Fprintf(os.Stderr, "\nExit codes:\n")
 			fmt.Fprintf(os.Stderr, "  0  Site is healthy (all checks pass)\n")
 			fmt.Fprintf(os.Stderr, "  1  Issues found or fix failed\n")
@@ -56,7 +94,7 @@ func main() {
 			os.Exit(0)
 		case "":
 			// An unset shell variable expands to ""; it names no directory.
-			fmt.Fprintf(os.Stderr, "error: empty argument at position %d\nUsage: tailor [--apply] [--json] [--quiet] [site-dir]\n", i+1)
+			fmt.Fprintf(os.Stderr, "error: empty argument at position %d\n%s", i+1, usage)
 			os.Exit(2)
 		default:
 			if args[i][0] == '-' {
@@ -67,8 +105,13 @@ func main() {
 		}
 	}
 
+	if list {
+		printList(jsonOutput)
+		return
+	}
+
 	// Verify directory exists
-	if _, err := os.Stat(siteDir); errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Stat(siteDir); errors.Is(err, fs.ErrNotExist) { //nolint:gosec // G703: an operator's own command-line flag, on the operator's machine
 		fmt.Fprintf(os.Stderr, "error: directory does not exist: %s\n", siteDir)
 		os.Exit(2)
 	}
@@ -78,17 +121,22 @@ func main() {
 
 	// Run
 	var result *tailor.Result
+	var err error
 	if apply {
-		result = tailor.Apply(siteDir)
+		result, err = tailor.ApplyWith(siteDir, opts)
 	} else {
-		result = tailor.Diagnose(siteDir)
+		result, err = tailor.DiagnoseWith(siteDir, opts)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(2)
 	}
 
 	// Output
 	if jsonOutput {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		enc.Encode(result)
+		_ = enc.Encode(result) // stdout gone: nobody left to tell
 	} else {
 		printHuman(result, quiet)
 	}
@@ -133,12 +181,25 @@ func printHuman(result *tailor.Result, quiet bool) {
 			}
 			fmt.Println()
 			fmt.Println("Run with --apply to fix all issues (backup will be created first).")
+			fmt.Printf("To choose which to fix, with --only/--skip or by hand (an AI assistant can help):\n  %s\n", tailor.GuideURL(Version))
 		} else {
-			fmt.Printf("All %d issue(s) fixed.", result.Summary.Failed)
-			if result.Summary.Passed > 0 {
-				fmt.Printf(" %d already OK.", result.Summary.Passed)
+			sum := result.Summary
+			fmt.Printf("%d fixed", sum.Fixed)
+			if sum.NotApplied > 0 {
+				fmt.Printf(", %d NOT APPLIED", sum.NotApplied)
 			}
-			fmt.Printf(" Site is ready for polis v%s.\n", Version)
+			if sum.Reported > 0 {
+				fmt.Printf(", %d reported for you to decide", sum.Reported)
+			}
+			if sum.Passed > 0 {
+				fmt.Printf(", %d already OK", sum.Passed)
+			}
+			fmt.Println(".")
+			if sum.NotApplied > 0 {
+				fmt.Println("Some changes did not apply; see [✗] above. The backup directory holds whatever was changed.")
+			} else if sum.Reported == 0 {
+				fmt.Printf("Site is ready for polis v%s.\n", Version)
+			}
 		}
 	}
 }
@@ -149,7 +210,17 @@ func printCheck(cr tailor.CheckResult, mode string) {
 		fmt.Printf("[✓] %s\n", cr.Name)
 		fmt.Printf("    %s\n", cr.Message)
 	case tailor.StatusFail:
-		fmt.Printf("[!] %s\n", cr.Name)
+		switch cr.Outcome {
+		case tailor.OutcomeFailed:
+			// ⛔ The apply did not take: say so, and describe its actions as
+			// planned, never as done.
+			fmt.Printf("[✗] %s — NOT APPLIED\n", cr.Name)
+			mode = "diagnose"
+		case tailor.OutcomeReported:
+			fmt.Printf("[i] %s — reported, nothing to apply\n", cr.Name)
+		default:
+			fmt.Printf("[!] %s\n", cr.Name)
+		}
 		fmt.Printf("    %s\n", cr.Message)
 		if cr.Reason != "" {
 			fmt.Printf("    Why: %s\n", cr.Reason)
@@ -195,4 +266,22 @@ func printCheck(cr tailor.CheckResult, mode string) {
 		fmt.Printf("    %s\n", cr.Message)
 	}
 	fmt.Println()
+}
+
+// printList prints every declared check in run order.
+func printList(asJSON bool) {
+	checks := tailor.Checks()
+	if asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(checks) // stdout gone: nobody left to tell
+		return
+	}
+	for _, c := range checks {
+		fmt.Printf("%-31s %-4s %-10s %s\n", c.ID, c.Phase, c.Kind, c.Summary)
+		if len(c.DependsOn) > 0 {
+			fmt.Printf("%-47s needs: %s\n", "", strings.Join(c.DependsOn, ", "))
+		}
+	}
+	fmt.Printf("\nEach check's recipe, to apply by hand or with an AI assistant: %s\n", tailor.GuideURL(Version))
 }

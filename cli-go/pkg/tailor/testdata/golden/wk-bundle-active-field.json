@@ -79,6 +79,12 @@
       "reason": ""
     },
     {
+      "name": "layout-private-drafts",
+      "status": "pass",
+      "message": "no private drafts at pre-0.58 paths",
+      "reason": ""
+    },
+    {
       "name": "registry-migration",
       "status": "pass",
       "message": "active_theme already migrated out of .well-known/polis",
@@ -112,7 +118,7 @@
     {
       "name": "active-shape-upgrade",
       "status": "pass",
-      "message": "active_shape is \"pub.polis.shapes.v4\"; not on v3 (nothing to upgrade)",
+      "message": "active_shape is \"pub.polis.shapes.v5\"",
       "reason": ""
     },
     {
@@ -321,16 +327,9 @@
     },
     {
       "name": "cli-update",
-      "status": "fail",
-      "message": "Would download polis-full vdev for $GOOS/$GOARCH",
-      "reason": "Your site is now at vdev format — the latest CLI ensures full compatibility",
-      "actions": [
-        {
-          "op": "create",
-          "path": ".polis/bin/polis-full-$GOOS-$GOARCH",
-          "detail": "download polis-full vdev for $GOOS/$GOARCH"
-        }
-      ]
+      "status": "pass",
+      "message": "not compared (development build, or release lookup disabled)",
+      "reason": ""
     }
   ],
   "dry_run": [

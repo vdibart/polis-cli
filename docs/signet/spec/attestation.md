@@ -498,6 +498,8 @@ follows* — a first-class claim, not a checksum over generated output.
 | `following[].added_at` | yes | RFC 3339, `Z`, second precision. |
 | `following[].site_title` | no | Cached display metadata. **Omitted entirely when empty** — not `""`. |
 | `following[].author_name` | no | As above. |
+| `following[].agent` | no | The **agent marker**: the owner's name for the connection that followed this site under the owner's grant. **Omitted entirely on an entry the owner added** — never `""`. See [`delegation.md` §5.5](delegation.md#55-a-follow-list-entry--followingjson). |
+| `following[].grant` | no | The source URL of the grant record that follow was made under. Present exactly when `agent` is. |
 | `signature` | no | Absent means **unsigned**, which is a legitimate state (§5). |
 
 There is deliberately **no `current_version` hash field**, though sibling types such as
@@ -519,7 +521,7 @@ and `following`, **in that order**:
 ```
 
 Each entry serialises its present fields in this order: `url`, `added_at`, `site_title`,
-`author_name`.
+`author_name`, `agent`, `grant`.
 
 Rules, all of which matter:
 

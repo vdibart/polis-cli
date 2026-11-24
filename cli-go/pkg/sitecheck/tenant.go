@@ -655,7 +655,10 @@ func PolicyContentDrift(siteDir string) []string {
 	var drifted []string
 	for _, f := range []policy.File{policy.PrivateFile, policy.PublicFile} {
 		if data, err := readTenantFile(siteDir, filepath.Join(siteDir, f.RelPath())); err == nil {
-			if policy.ContentKey(string(data)) != policy.ContentKey(f.DefaultContent()) {
+			// Rules added through the API (policy.SplitAdded) are not drift:
+			// a default with only those on top is still the default.
+			base, _ := policy.SplitAdded(string(data))
+			if policy.ContentKey(base) != policy.ContentKey(f.DefaultContent()) {
 				drifted = append(drifted, string(f))
 			}
 		}

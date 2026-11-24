@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/attestation"
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/did"
 	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
@@ -104,6 +105,23 @@ func BundleJSONBytes(data []byte, readErr error) CheckStatus {
 	}
 	if s, _ := raw["version"].(string); s == "" {
 		return CheckStatus{OK: false, Message: "missing required field: version"}
+	}
+	// ⛔ A type mounted at /_ or under it publishes where the owner's interface
+	// lives: every address there asks for a sign-in, so readers cannot reach
+	// it, and it can collide with an owner route. Writers refuse one; this
+	// reports one already on disk.
+	if types, ok := raw["types"].(map[string]interface{}); ok {
+		names := make([]string, 0, len(types))
+		for name := range types {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			t, _ := types[name].(map[string]interface{})
+			if m, _ := t["mount"].(string); m != "" && bundle.ReservedMount(m) {
+				return CheckStatus{OK: false, Message: fmt.Sprintf("type %s is mounted at %q, which is reserved for the site's own pages (the owner's interface lives under /_)", name, m)}
+			}
+		}
 	}
 	return CheckStatus{OK: true}
 }

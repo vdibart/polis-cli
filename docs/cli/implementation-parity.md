@@ -31,12 +31,13 @@ and writable by the other. They no longer share a **feature set**.
 | `did` | — | ✅ | `did:web` identity document |
 | `dm` | — | ✅ | encrypted direct messages |
 | `license` | — | ✅ | outbound licence |
+| `mcp` | — | ✅ | an MCP server over stdio for an agent on this machine, with tools generated from a site's own API description and calls to its `/v1`. ⭐ **Not a parity gap worth closing** — it is a client of the site API, not a site operation, and needs the Go MCP SDK |
 | `recover` | — | ✅ | `recover sign` signs a sign-in recovery challenge with the key you hold, under the `polis-recovery` namespace. ⭐ **Not a parity gap worth closing** — it is a convenience over `ssh-keygen -Y sign -n polis-recovery`, which the setup screen shows and which works with the same key, so a bash user signs by hand |
 | `site` | — | ✅ | `site set author-name` / `site set avatar` edit `.well-known/polis` through the lossless writer; `site rewrite-unsigned` is the escape hatch for a signed file a newer polis wrote. ⭐ **Not a parity gap worth closing for the edits** — bash edits the document with `jq`, which already keeps every member. ⚠️ **The escape hatch has no bash counterpart** — bash's one refusing writer (tags) points at the Go CLI's: see *Signed files a newer polis wrote — refused, never re-signed* below |
 | `serve` | — | ✅ | webapp-only; **not a divergence** — bash has no HTTP server by design |
 | `validate` | — | ✅ | site verification — per-URL JSON records, index consistency across all four entry types. Bash has no counterpart, so a bash user checks a record by hand against [`spec/attestation.md`](../signet/spec/attestation.md) §9. ⚠️ **Judge and Patrol are Go-only hosted actors**; their checks of registration attestations and retired-key resolution have no bash surface to diverge from |
 
-**Ten Go-only commands** (nine, not counting `serve`). **Zero bash-only commands.** bash is a strict subset.
+**Eleven Go-only commands** (ten, not counting `serve`). **Zero bash-only commands.** bash is a strict subset.
 
 ## Behavioural divergence within shared commands
 
@@ -45,9 +46,10 @@ and writable by the other. They no longer share a **feature set**.
 | Command | bash | Go |
 |---|---|---|
 | **Flag position** | flags anywhere | ⚠️ **flags must come before positional arguments** — Go uses the standard `flag` package, which stops at the first positional, so `polis post file.md --filename x` silently ignores `--filename`. `unpublish` is the exception: its flags work on either side of the path |
-| `comment` | `comment <file> [<reply-to-url>]` and `comment - <url>` (stdin); signs, publishes and sends the blessing request in one step (`cmd_comment`) | `comment draft <url>` · `sign <id>` · `list` · `sync` (`pkg/cmd/comment.go`). ⚠️ **No Go CLI command sends the blessing request** — `sync` only checks status; the web app does it |
+| `comment` | `comment <file> [<reply-to-url>]` and `comment - <url>` (stdin); signs, publishes and sends the blessing request in one step (`cmd_comment`) | `comment draft <url>` · `sign <id>` · `send <id>` · `list` · `sync` (`pkg/cmd/comment.go`). `sign` signs, publishes and sends the blessing request, through the same send as the API's comment create; `send` sends a pending comment again (after a failed send, or once the site is registered); `sync` only checks status. Drafting is a separate step, and there is no stdin form |
 | `post` from stdin | `polis post - [--filename] [--title]` | ❌ a file argument only |
 | `post` and git | ❌ stages nothing (automatic `git add` was removed from every command in 0.11.0) | ❌ stages nothing either. ⭐ **Not a divergence** — git automation is a post-publish hook (`.polis/webapp/hooks/`), which only the web app runs on publish; neither CLI's `post` runs one |
+| `post`: the title | the first level-one heading (`# `) **anywhere** in the file; with none, the file name, title-cased (`extract_title`) | the **first non-empty line**: a heading of any level gives its text (no `#`s, no closing `#`s); any other line is the title, cut at 60 characters |
 | `post` and the site's terms | ❌ a new post carries no `license:` block, even on a site that states terms; there is no `--license` | ✅ stamps the site's terms (or `--license`) into the post's signed frontmatter |
 | `init` flags | `--site-title` plus path flags (`--posts-dir`, `--comments-dir`, `--keys-dir`, `--versions-dir`, …) | `--site-title` `--author` `--email` `--theme` `--license`; no path flags — paths are fixed by the bundle |
 | `index --json` | `{version, posts, comments}`; entries of any other type dropped | envelope with `data.entries` and `data.count`, every type |
@@ -55,12 +57,14 @@ and writable by the other. They no longer share a **feature set**.
 | `blessing sync` | ⛔ **deprecated**: refuses with `DEPRECATED`. It asked the discovery service for blessings whose *actor* is this site, and a blessing's actor is the commenter, so it rebuilt `blessed.json` from the wrong set. The fix needs stream pagination; bash is feature-frozen, so the command was retired instead | ✅ reads the site's own `blessing.granted` stream events |
 | `rebuild --comments` and `blessed.json` | leaves `blessed.json` unchanged (it used to replace it using the same wrong read as `blessing sync`) | ✅ reconciles `blessed.json` |
 | `blessing requests` | no longer runs a blessing sync first (it wrote the same wrong set on every call) | lists requests only |
-| `blessing beseech` | ✅ re-requests a **pending** blessing. ⚠️ For a **denied** one it says it is re-submitting, but it only re-registers the comment, and the discovery service returns the denial unchanged: a denied comment cannot be re-requested | ❌ refuses with `NOT_SUPPORTED` (it used to report success for doing nothing). For a **pending** comment, `republish` (as a new version) or the web app re-requests; ⚠️ a **denied** comment cannot be re-requested by either, because the discovery service returns the earlier denial unchanged |
+| `blessing beseech` | ✅ re-requests a **pending** blessing. ⚠️ For a **denied** one it says it is re-submitting, but it only re-registers the comment, and the discovery service returns the denial unchanged: a denied comment cannot be re-requested | ✅ sends a **pending** comment signed on this site again, found by its full version (no short hashes), as `comment send` does; any other version is refused with `NOT_FOUND`, contacting nothing. ⚠️ A **denied** comment cannot be re-requested by either, because the discovery service returns the earlier denial unchanged; `republish` signs a new version |
 | `unpublish` | asks nothing, has no `-y`, and goes ahead under `--json`; posts only | asks for confirmation; `-y` / `--yes` skips it, before or after the path; ⛔ under `--json` refuses without `-y`; posts and comments |
 | `discover --since <date>` | ✅ | ❌ (only `--author`) |
 | `notifications clear` | ❌ (`list` only) | ✅ |
 | `render` and `site/custom.css` | ❌ writes `styles.css` from the theme alone, so a site's own CSS is dropped on a bash render. Not fixed: bash is feature-frozen, and the site's own CSS is set only through the web app | ✅ every writer of `styles.css` appends `site/custom.css` after the theme ([content system](../general/concepts/content-system.md#the-sites-own-css--sitecustomcss)) |
 | `follow` blessing | ⛔ blesses **every** pending and denied comment from the author, consulting no policy — so a follow overturns denies no rule asked it to. Not fixed: bash has no policy evaluator, and building one is a feature | ✅ blesses only what the site's policies bless, through `following.FollowWithBlessing`, the web app's own path |
+| `unfollow` denial | denies **every** blessed comment from the author, consulting no policy. Not fixed, for the same reason | ✅ denies only what the site's policies no longer bless once the author is unfollowed, through `following.UnfollowWithDenial`, the web app's own path; a site whose rules still accept the author's comments (a `review … from all` rule, say) denies none |
+| `publish`, `republish`, `tag`, `follow`, `unfollow` | each writes on its own | ✅ `publish`, `republish` and `tag` run the same operation the site's API serves, in process, with no server: the same signed files and the same render (incremental on the v4 shape, the whole site on v5, none on v3), so a `tag` change now re-renders the site's tag pages. `follow` and `unfollow` run the same function the API's follow does. ⭐ Neither CLI runs a post-publish hook |
 
 ### `init` — the Rosie question
 
@@ -68,7 +72,8 @@ Interactive Go `polis init` asks whether to switch Rosie on (nothing pre-selecte
 `pub.polis.attestation.grant` on the new site. **bash `init` does not ask**, and writes no grant.
 ⭐ **Not a gap worth closing:** Rosie runs only inside the web app's server sync, which bash has no
 counterpart to, so a grant written by bash would switch on a helper that never runs. A bash user who later
-runs the web app switches her on in **Settings → Rosie**. Bash has no `attest` command and never rewrites
+runs the web app switches her on with `agent.set_rosie` (`POST /v1/agents/rosie`, owner only); the owner app's
+**enhance › Agents** shows whether she is on. Bash has no `attest` command and never rewrites
 attestation records, so it cannot drop a grant's `withdrawn_by` pointer. ⚠️ **Bash never writes the
 marker either**: bash blessing writes append with `jq`, which keeps unknown entry keys, but bash clears the
 list's signature on write — a marked list touched by bash is unsigned afterwards, with its markers intact.
@@ -198,13 +203,24 @@ failing — the same limit as every other bash write of these files.
 bash rotation on a site with tags or attestations: their index lines are carried through untouched,
 not refreshed.
 
-### `republish` — a post carrying licence terms is refused
+### `republish` and `post` — licence terms are refused
 
 bash rebuilds a post's frontmatter from a fixed field list on republish, so it cannot carry a
 `license:` block through. Rather than drop the author's signed terms and re-sign a post that would
 still verify, **bash `republish` refuses a post with a top-level `license:` key** (`UNSUPPORTED_CONTENT`)
 and points at the Go CLI, which preserves the block. bash has no `license` command, so this only
 arises on a site whose terms were set with the Go CLI or the web app.
+
+The same check covers a **comment**: the refusal runs before `republish` tells a post from a comment,
+so an edited comment that carries a `license:` block is refused too (the message says "post").
+The Go CLI, the web app and `/v1` re-sign an edited comment with the block it was published under,
+byte for byte; they do not re-resolve it to the site's current terms, and a comment published with
+none gets none. bash comments without terms republish as before.
+
+**bash `post` refuses a source that states its own terms the same way**: a top-level `license:` key
+in the source's frontmatter, from a file or from stdin, is answered with `UNSUPPORTED_CONTENT`
+pointing at the Go CLI, and the source is left where it was. Publishing it would drop the author's
+per-work terms without a word. bash is not taught to carry the block.
 
 ### Signed files a newer polis wrote — refused, never re-signed
 

@@ -17,7 +17,7 @@ import (
 
 func handleRotateKey(args []string) {
 	fs := flag.NewFlagSet("rotate-key", flag.ExitOnError)
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 	dir := getDataDir()
 

@@ -181,6 +181,9 @@ func describeBehaviours(set string) string {
 	if s, v, ok := attestation.ParseBehaviours(set); ok && s == RosieSet && v >= 1 {
 		return "approve or turn away comments, using the owner's own rules (" + set + ")"
 	}
+	if s, v, ok := attestation.ParseBehaviours(set); ok && s == "agent" && v >= 1 {
+		return "act through the site's API, within the scopes the owner granted (" + set + ")"
+	}
 	return set
 }
 

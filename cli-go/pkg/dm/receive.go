@@ -376,6 +376,11 @@ func (rcv *Receiver) checkPolicy(senderDomain string, followingDomains map[strin
 	return nil
 }
 
+// peerClient is how the receiving side fetches a sender's keys. The sender
+// domain arrives in the request, so anyone chooses it: the name is checked
+// (ValidateDomain) and so is every address it leads to, on connect.
+var peerClient = PublicOnly(&http.Client{Timeout: 10 * time.Second})
+
 // fetchSenderKeysDefault fetches a sender domain's identity public key (OpenSSH) and its
 // signed public_key_messages block from .well-known/polis — the default for
 // Receiver.FetchSenderKeys (DM-1 box_pub authentication). Domain is SSRF-validated.
@@ -383,7 +388,7 @@ func fetchSenderKeysDefault(domain string) ([]byte, *MessagesKeyBlock, error) {
 	if err := ValidateDomain(domain); err != nil {
 		return nil, nil, fmt.Errorf("invalid domain: %w", err)
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := peerClient
 	wellKnownURL := "https://" + domain + "/.well-known/polis"
 	resp, err := client.Get(wellKnownURL)
 	if err != nil {
@@ -422,9 +427,9 @@ func FetchPublicKey(domain string) ([]byte, error) {
 	if err := ValidateDomain(domain); err != nil {
 		return nil, fmt.Errorf("invalid domain: %w", err)
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := peerClient
 	wellKnownURL := "https://" + domain + "/.well-known/polis"
-	resp, err := client.Get(wellKnownURL)
+	resp, err := client.Get(wellKnownURL) //nolint:gosec // G704: egress to a peer's .well-known is the protocol; hosted restricts DM egress (RestrictDMEgress)
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s: %w", wellKnownURL, err)
 	}

@@ -3,8 +3,6 @@ package server
 import (
 	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -33,12 +31,11 @@ func publishStoreCalls(t *testing.T, before int) int64 {
 	s.deployAPIBase = srv.URL
 	s.deployLiveBase = newLiveSite(t, api).URL
 	netServe(h, "GET", "/.well-known/polis", nil)
+	owner := mint(t, s)
 	publish := func(title string) {
-		w := httptest.NewRecorder()
 		body := fmt.Sprintf(`{"markdown":%q}`, "# "+title+"\n\nA post.\n")
-		s.handlePublish(w, httptest.NewRequest(http.MethodPost, "/api/publish", strings.NewReader(body)))
-		if w.Code != http.StatusOK {
-			t.Fatalf("publish %q: %d %s", title, w.Code, w.Body.String())
+		if code, out := apiCall(t, h, "POST", "/v1/content/post", owner, body); code != http.StatusCreated {
+			t.Fatalf("publish %q: %d %v", title, code, out)
 		}
 	}
 	for i := 0; i < before; i++ {
@@ -59,8 +56,11 @@ func TestAPublishMakesFewStoreCalls(t *testing.T) {
 	at3 := publishStoreCalls(t, 2)
 	at8 := publishStoreCalls(t, 7)
 	t.Logf("store calls per publish: %d at 3 posts, %d at 8 posts", at3, at8)
-	if at3 > 70 {
-		t.Errorf("a publish on a three-post site made %d store calls; want at most 70 (it was 216 before the render read cache)", at3)
+	// Measured through /v1 (the only publish since the old app's /api/publish
+	// was deleted, 2026-11-22): 79 at three posts, the act log and the shared
+	// after-write step included. The old route's ceiling was 70.
+	if at3 > 85 {
+		t.Errorf("a publish on a three-post site made %d store calls; want at most 85 (it was 216 before the render read cache)", at3)
 	}
 	// Each further post costs its page write and its own source read, never
 	// the templates again.

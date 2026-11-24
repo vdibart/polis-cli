@@ -4,8 +4,9 @@
 
 **Delegation is a user letting software decide some things for them, under a record they can see and
 withdraw.** The software is a **user agent**. It works for the user, signs with the user's key, and marks
-every act it makes with its name and the record it acted under. polis has one today: Rosie, who decides
-blessing requests on a user's posts by the user's own rules, public and private.
+every act it makes with its name and the record it acted under. polis has two kinds today: Rosie, who decides
+blessing requests on a user's posts by the user's own rules, public and private; and any agent the user
+connects to their site's API (Claude, a script, any MCP client), each under a grant of its own.
 
 This page explains why delegation is shaped this way and what it can and cannot tell a reader. The formats
 are in [the delegation spec](../spec/delegation.md); reading a real marked blessing from outside is
@@ -91,7 +92,9 @@ whether it has since been withdrawn.
 **It does not prove:**
 
 - ⛔ **That every agent act is marked.** The marker is self-declared. Whoever holds the key could sign without
-  it. Marked acts are fully traceable; unmarked acts are no more visible than they were before.
+  it. Marked acts are fully traceable; unmarked acts are no more visible than they were before. And an act
+  through the user's own CLI is the user's, unmarked, even when an agent drove it: attribution follows the
+  route, not who is typing ([spec §2.2](../spec/delegation.md#22-attribution-follows-the-route)).
 - ⛔ **That the user consented.** A grant with `basis: hosting-terms` was issued by the hosting operator under
   its terms, and it says so. It is revocable and prospective, and it applies rules the user already
   published. It is neither consent nor terms, and nothing should cite it as either.

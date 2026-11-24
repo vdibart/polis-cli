@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io/fs"
@@ -86,52 +85,6 @@ func TestSettingsWithdrawalRemovesEveryProjection(t *testing.T) {
 		if errors.Is(withdrawnErr, fs.ErrNotExist) != errors.Is(neverErr, fs.ErrNotExist) {
 			t.Errorf("%s: withdrawn site and never-stated site disagree (%v vs %v)", rel, withdrawnErr, neverErr)
 		}
-	}
-}
-
-// Settings must read sensibly for a tenant that has never stated terms.
-//
-// Removing the hosted-signup default makes this EVERY new tenant's state
-// rather than an edge case, so the never-stated branch is now the common one.
-// It is also the whole discoverable path — polis.pub asks nothing at
-// registration, deliberately — so it has to stand on its own on day one.
-//
-// ⛔ The shape matters as much as the flag: `stated` false with no profile,
-// summary or content_usage alongside it. A leaked field from a prior state is
-// how the UI would end up rendering terms nobody stated.
-func TestSettingsLicenceSectionForATenantThatNeverStatedTerms(t *testing.T) {
-	s := newConfiguredServer(t)
-
-	info := s.licenseSettings()
-
-	if stated, ok := info["stated"].(bool); !ok || stated {
-		t.Fatalf("licenseSettings()[\"stated\"] = %v; want false", info["stated"])
-	}
-	for _, key := range []string{"profile", "summary", "content_usage", "terms_url", "asserted"} {
-		if v, present := info[key]; present {
-			t.Errorf("never-stated tenant carries %s = %v; the UI must have nothing to render as terms", key, v)
-		}
-	}
-
-	// And it arrives on the payload Settings actually reads, under the key the
-	// client destructures — `settings.license || { stated: false }`.
-	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
-	w := httptest.NewRecorder()
-	s.handleSettings(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("GET /api/settings = %d: %s", w.Code, w.Body.String())
-	}
-	var payload struct {
-		License map[string]interface{} `json:"license"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode settings: %v", err)
-	}
-	if payload.License == nil {
-		t.Fatal("/api/settings omits `license` entirely")
-	}
-	if stated, _ := payload.License["stated"].(bool); stated {
-		t.Errorf("/api/settings reports stated=true for a site with no licence")
 	}
 }
 

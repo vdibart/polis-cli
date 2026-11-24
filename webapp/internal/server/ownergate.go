@@ -49,9 +49,6 @@ var publicAPIRoutes = map[string]string{
 		"behind the gate it returns 401, which reads as 'no API at all' and is the " +
 		"opposite of what the descriptor says",
 
-	// ⭐ These two already serve public content to anonymous visitors on hosted
-	// tenants — the operator releases them before its own session check, so
-	// gating them here would break reading a post's comments while logged out.
 	RecoveryChallengePath: "the recovery door. ⛔ PUBLIC BY NECESSITY — you cannot authenticate " +
 		"to reach the thing that lets you authenticate, and a locked-out owner is refused by " +
 		"everything else. It mints a nonce and nothing more; rate-limited in the handler",
@@ -64,12 +61,12 @@ var publicAPIRoutes = map[string]string{
 	SignInCompletePath: "the sign-in ceremony, same reason. It accepts only an assertion over a " +
 		"challenge this instance just issued",
 
-	"/api/status": "the SPA's bootstrap call, needed before login to choose a screen. " +
-		"⛔ TRIMMED, not opened: handleStatus withholds the validation detail and site_info " +
-		"from a non-owner, because a stranger learning which file is missing is reconnaissance",
-
+	// ⭐ These two already serve public content to anonymous visitors on hosted
+	// tenants — the operator releases them before its own session check, so
+	// gating them here would break the v4 shape's public pages (the only
+	// caller left: v4 is unsupported but still renders).
 	"/api/v1/stream/focus-comment": "public comment content, already served to anonymous visitors",
-	"/api/v1/stream/body":          "public post body, the same content the canonical page renders",
+	"/api/v1/stream/body":          "a post's body for the stream to show in place: the owner may ask for any post; anyone else only this site's or a followed site's, so it is no one's fetching proxy",
 }
 
 // publicAPIPrefixes are path prefixes a stranger may reach.
@@ -193,31 +190,35 @@ const (
 	RefusalNotSignedIn = "not-signed-in"
 )
 
-// wayIn is the public projection of one provider on a refusal: what a caller
-// on the far side of the gate could use to get in.
+// wayIn is the public projection of one provider on a refusal: a way in this
+// INSTANCE supports, never whether the owner has set it up.
 type wayIn struct {
 	Name       string `json:"name"`
 	Kind       string `json:"kind,omitempty"`
-	Enrolled   bool   `json:"enrolled"`
 	Enrollable bool   `json:"enrollable"`
 }
 
 // writeOwnerRefusal answers a refused request with the reason and the ways in.
 //
-// ⭐ The ways in are what the setup and sign-in screens render from: the
-// signed-out SPA cannot read /api/providers, and must not hardcode a provider.
-// ⛔ TRIMMED, NOT OPENED (the rule above publicAPIRoutes): only providers
-// AVAILABLE here, only name, kind and whether one is set up. ⚠️ That last fact
-// is not new to a stranger — the 403/401 split already says whether anything
-// is enrolled, and /api/signin/begin says whether a passkey is — and it is what
-// any sign-in page shows: which way in to offer.
+// ⭐ The ways in are what signed-out setup and sign-in screens render from: the
+// signed-out app cannot read /api/providers, and must not hardcode a provider.
+// ⛔ A GENERIC SIGN-IN, NOT A LIST OF WHAT THE OWNER SET UP. Each entry is a
+// way in the instance SUPPORTS (available here: decided by the instance's mode
+// and configuration, the same for every site configured alike) with its
+// ceremony kind and whether it has an enrolment step — all facts about the
+// software, none about the owner. ⛔ Never add which ways are enrolled: that
+// told any visitor which kinds of sign-in this site's owner chose, a
+// fingerprint and a hint for targeting. A screen offers every way listed, and
+// the ceremony itself (the browser's own passkey prompt) is where the owner's
+// choice shows. ⚠️ Whether ANYTHING is enrolled still shows, as the 403/401
+// split: it picks setup or sign-in, and setup needs the recovery key anyway.
 func writeOwnerRefusal(w http.ResponseWriter, inst owner.Instance, status int, reason, message, remedy string) {
 	ways := []wayIn{}
 	for _, st := range owner.Statuses(inst) {
 		if !st.Available {
 			continue
 		}
-		ways = append(ways, wayIn{Name: st.Name, Kind: st.Kind, Enrolled: st.Enrolled, Enrollable: st.Enrollable})
+		ways = append(ways, wayIn{Name: st.Name, Kind: st.Kind, Enrollable: st.Enrollable})
 	}
 	body := map[string]interface{}{"error": message, "reason": reason, "ways_in": ways}
 	if remedy != "" {

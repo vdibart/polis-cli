@@ -34,7 +34,7 @@ If you only read one section, read this one.
   "private from the moment you set a password," not "private always." You can close the window
   to zero by setting a password proactively, before any message arrives.
 - **We see *that* you message, not *what*.** "We can't read your DMs" is about **content**.
-  The operators of your space and your correspondent's space still see who messages whom,
+  The operators of your site and your correspondent's site still see who messages whom,
   when, and how often. That is metadata, and a federated network exposes peer domains anyway.
 - **Keep your own copies.** Export your site (it includes your messages as ciphertext) and you
   can read them offline forever with your password — see [Reading your messages
@@ -81,7 +81,7 @@ password plus Argon2id makes that infeasible.
   decryption — code you control, not the operator's served JS) as the high-assurance escape.
   We document this; we do not hide it.
 - **Metadata.** The two endpoint operators — the hosts of the sender's and the recipient's
-  spaces — still see who messages whom, when, frequency, and message sizes. "We can't read
+  sites — still see who messages whom, when, frequency, and message sizes. "We can't read
   your DMs" means **content**. Because delivery is [point-to-point](#delivery), no discovery
   service or other central polis entity is in the path to learn even the metadata; the
   exposure is to the endpoint operators only.
@@ -102,7 +102,7 @@ password plus Argon2id makes that infeasible.
 
 ### A separate key for messages
 
-DMs do **not** reuse your Ed25519 identity (signing) key. Each space has an independent
+DMs do **not** reuse your Ed25519 identity (signing) key. Each site has an independent
 X25519 **messages key** per [epoch](#glossary), published in `.well-known/polis` as a
 `public_key_messages` block and **signed by the identity key** so a sender can verify they are
 sealing to the real recipient and not an operator-substituted key. The identity key signs the
@@ -151,7 +151,7 @@ This is a deliberate trade for zero-friction onboarding, and it is disclosed, no
   password epoch the server cannot read. The bootstrap `server_dek` is retained only through a
   short forwarding grace period (so in-flight messages still deliver), then cleared.
 - **You can have a zero-exposure window** by setting a password *proactively*, before any
-  message arrives (Settings → Messages).
+  message arrives (in the owner app, enhance › People › Message password).
 - **Senders are warned** before messaging a recipient who has not set a password, so the
   exposure is informed on both sides rather than silent.
 
@@ -196,7 +196,7 @@ a second time. So:
 - **Lose both and the messages are permanently lost** — to you and to us alike. Store the
   phrase offline, outside polis. Anyone who has it can read all your messages.
 
-You can **regenerate** the recovery phrase (retiring the old one) from Settings → Messages;
+You can **regenerate** the recovery phrase (retiring the old one) from enhance › People › Message password (*New recovery phrase*);
 this re-wraps the current DEK under a fresh phrase and leaves the password untouched.
 
 ---
@@ -207,8 +207,8 @@ this re-wraps the current DEK under a fresh phrase and leaves the password untou
 
 1. **You write it.** In your browser, the plaintext is sealed with NaCl `box` to the
    recipient's verified messages key, from your current epoch's DEK.
-2. **It is delivered point-to-point.** Your space POSTs the sealed envelope straight to the
-   recipient's space, authenticated instance-to-instance. No central entity relays it.
+2. **It is delivered point-to-point.** Your site POSTs the sealed envelope straight to the
+   recipient's site, authenticated instance-to-instance. No central entity relays it.
 3. **It is stored as ciphertext** on the recipient's side — the wire `box`, exactly as
    received. The recipient's server has no key to open a password-epoch message.
 4. **It sits locked** until the recipient opens it: their browser derives their KEK from their
@@ -237,7 +237,12 @@ this re-wraps the current DEK under a fresh phrase and leaves the password untou
 
 A DM travels **directly** from the sender's polis instance to the recipient's instance —
 `POST /v1/content/dm/actions/deliver`, authenticated with a signed instance-to-instance
-header. The discovery service is **not** in the message path. This is why the metadata
+header. Because the recipient's address is chosen by someone else, every connection the
+sender's instance makes for a message (the delivery, the recipient's messages key, checking who
+sent one) is refused unless the address the name resolves to is public: never loopback, private,
+link-local (cloud metadata included), carrier-grade NAT, unspecified or multicast, checked at the
+moment of connecting, redirects included. An instance in local mode may still message another on
+the same machine. The discovery service is **not** in the message path. This is why the metadata
 exposure is to the two endpoint operators only: no central polis entity ever sees that a DM
 was sent, let alone its contents. Acceptance is gated by the recipient's Layer-1 policy
 (`pub.polis.dm`), which by default accepts DMs only from domains the recipient follows; the
@@ -396,7 +401,7 @@ Honesty about detection matters as much as honesty about the crypto:
 - **`server_dek`** — the bootstrap epoch's DEK, stored in plaintext in `keyring.json` so the
   server can read bootstrap-era messages. Cleared once you set a password (past the forwarding
   window).
-- **`public_key_messages`** — your space's per-epoch X25519 messages public key, published in
+- **`public_key_messages`** — your site's per-epoch X25519 messages public key, published in
   `.well-known/polis` and signed by your identity key.
 
 See also the repository glossary at `docs/general/reference/glossary.md`.

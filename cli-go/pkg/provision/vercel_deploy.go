@@ -3,7 +3,7 @@ package provision
 import (
 	"bytes"
 	"context"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // G505: SHA-1 is what Vercel's file-upload API names files by; not used for integrity or signing
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -414,6 +414,6 @@ func (v *Vercel) createDeployment(ctx context.Context, project string, files []D
 }
 
 func sha1Hex(b []byte) string {
-	s := sha1.Sum(b)
+	s := sha1.Sum(b) //nolint:gosec // G401: SHA-1 is what Vercel's file-upload API names files by; not used for integrity or signing
 	return hex.EncodeToString(s[:])
 }

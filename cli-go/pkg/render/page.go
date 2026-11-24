@@ -208,13 +208,14 @@ var BlessedCacheFiller func(site storage.Site, commentURL string) bool
 //
 // ── HANDBOOK TRAIL MARKER ─ foreign-site widget thread ─────────────────
 // This constant is what every rendered tenant page references in its
-// <script src="https://{{base_domain}}/widget-{{widget_version}}.js"> tag.
-// Bump this when widget/widget.js changes; the hosted server's serveWidgetJS
-// 301-redirects old version URLs to the current one for old HTML.
-// Tour: github.com/vdibart/polis-cli/blob/main/docs/handbook/foreign-site-widget.md
-// Map:  github.com/vdibart/polis-cli/blob/main/AGENTS.md
+// <script src="…/widget-{{widget_version}}.js"> tag (the v5 shape's
+// frame.html, and the v3 and v4 shapes' templates).
+// Bump this when the widget (polis.pub's widget.js) changes; polis.pub
+// 302-redirects old version URLs to the current one for old HTML.
+// Tour: https://github.com/vdibart/polis-cli/blob/main/docs/handbook/foreign-site-widget.md
+// Map:  https://github.com/vdibart/polis-cli/blob/main/AGENTS.md
 // ───────────────────────────────────────────────────────────────────────
-const WidgetVersion = "1.5.0"
+const WidgetVersion = "1.6.2"
 
 // PageConfig holds configuration for page rendering.
 type PageConfig struct {
@@ -251,6 +252,7 @@ type PageRenderer struct {
 	themeName  string
 	shapeName  string            // "v3" (page) or "v4" (stream); drives RenderAll dispatch
 	replyCache replyContextCache // lazily loaded cache for reply context
+	v5theme    *theme.V5Theme    // the active theme's v5 definition (v5 shape only; nil: the polis default)
 }
 
 // RenderStats holds statistics from a render operation.
@@ -278,15 +280,15 @@ func NewPageRenderer(cfg PageConfig) (*PageRenderer, error) {
 		}
 	}
 
-	// Load active shape from registry. Defaults to v4 post-cutover —
-	// bundle.GetActiveShapeName returns "v4" on missing/empty registry
-	// field, and Medic's upgradeActiveShape remediation flips any
-	// remaining v3 stamps. This fallback covers the edge case of a
+	// Load active shape from registry. Defaults to v5, the shape every
+	// tenant runs since the cutover: bundle.GetActiveShapeName returns "v5"
+	// on a missing/empty registry field, and Medic's upgradeActiveShape
+	// remediation flips any remaining v3 stamps to v5. This fallback covers the edge case of a
 	// renderer constructed before Medic has touched a tenant (cold-
 	// boot races, test fixtures without a registry).
 	shapeName, err := bundle.GetActiveShapeName(cfg.Site)
 	if err != nil || shapeName == "" {
-		shapeName = "v4"
+		shapeName = "v5"
 	}
 
 	// Load templates
@@ -808,6 +810,11 @@ func (r *PageRenderer) RenderAll(force bool) (*RenderStats, error) {
 	// the most-recent post. v3 keeps the legacy per-post/archive/tag pipeline.
 	if r.shapeName == "v4" {
 		return r.renderStreamAll(force)
+	}
+	// ⚠️ v5 is named explicitly: any shape this does not name falls through
+	// to the v3 pipeline below.
+	if r.shapeName == "v5" {
+		return r.renderV5All(force)
 	}
 
 	stats := &RenderStats{}
@@ -1650,18 +1657,18 @@ func FetchReplyContextFull(htmlURL string) (entry ReplyContextEntry, ok bool) {
 	if client == nil {
 		client = &http.Client{Timeout: 3 * time.Second}
 	}
-	resp, err := client.Get(mdURL)
+	resp, err := client.Get(mdURL) //nolint:gosec // G704: replyURLAllowed above admits only http(s) to a public domain (dm.ValidateDomain), and the .md swap changes only the path
 	if err != nil || resp.StatusCode != 200 {
 		if resp != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close() // read side, unread
 		}
 		// Fallback: try content source path (hosted sites serve .md at /content/...)
 		sourceURL := mountToSourceURL(mdURL)
-		if sourceURL != mdURL {
-			resp, err = client.Get(sourceURL)
+		if sourceURL != mdURL && replyURLAllowed(sourceURL) {
+			resp, err = client.Get(sourceURL) //nolint:gosec // G704: checked by replyURLAllowed on the line above
 			if err != nil || resp.StatusCode != 200 {
 				if resp != nil {
-					resp.Body.Close()
+					_ = resp.Body.Close() // read side, unread
 				}
 				return ReplyContextEntry{}, false
 			}

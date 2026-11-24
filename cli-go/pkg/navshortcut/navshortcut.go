@@ -6,7 +6,7 @@
 // their site through the instance's API. This package's API may change or be
 // removed without notice; do not depend on it.
 //
-// ⭐ BEHAVIOUR AS DATA, like streammark. A shortcut is a label, an icon from
+// ⭐ BEHAVIOUR AS DATA. A shortcut is a label, an icon from
 // a closed set and a PQL sentence; the instance validates it and the app draws
 // the button. A shortcut carries no URL, no markup and no code: the sentence
 // must parse as PQL, and is stored in its canonical form.

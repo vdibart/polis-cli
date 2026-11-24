@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -19,8 +20,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/apidesc"
 	"github.com/vdibart/polis-cli/cli-go/pkg/attestation"
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/capability"
@@ -37,6 +40,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 	"github.com/vdibart/polis-cli/cli-go/pkg/owner"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
+	"github.com/vdibart/polis-cli/cli-go/pkg/pql"
 	"github.com/vdibart/polis-cli/cli-go/pkg/provision"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
@@ -134,26 +138,41 @@ type Config struct {
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
-// SSEEvent is a server-sent event pushed to connected clients.
-type SSEEvent struct {
-	Event string // event type (e.g., "counts")
-	Data  string // JSON payload
-}
-
 // DefaultLogRetentionDays is the default number of days to keep log files.
 const DefaultLogRetentionDays = 7
 
 // Server holds the application state
 type Server struct {
+	// AgentTokens checks a sign-in token an agent presents to this site's API
+	// (polis.pub's sign-in server sets it per tenant); nil accepts only the
+	// site's own API keys.
+	AgentTokens func(r *http.Request, token string) (api.TokenGrant, bool)
+	// ConnectionOff is told when the owner switches a connection off, after
+	// its grant is withdrawn, so the host can revoke the connection's sign-in
+	// tokens at once. nil where the host issues none.
+	ConnectionOff func(ctx context.Context, grantID string)
+	// SwitchedOff reports whether the host's operator has switched a feature
+	// off, right now (api/switches.go). Asked on every gated request, never
+	// copied: a tenant server is cached, so a value set at load would freeze.
+	// nil means nothing is ever off.
+	SwitchedOff func(name string) bool
+	// Notices tells the owner, by the host's mail, that an agent was
+	// connected or a passkey added or removed (notices.go). nil on a
+	// self-hosted instance: nothing is sent there.
+	Notices Notices
+
 	keyReload keyReloadState // key file as last loaded; see keyreload.go
 
-	DataDir          string
-	CLIThemesDir     string // Path to CLI themes directory (fallback for theme snippets)
-	CLIVersion       string // CLI version for metadata files (set by bundled binary or from version.txt)
-	Config           *Config
-	PrivateKey       []byte
-	PublicKey        []byte
-	Logger           *Logger
+	DataDir      string
+	CLIThemesDir string // Path to CLI themes directory (fallback for theme snippets)
+	CLIVersion   string // CLI version for metadata files (set by bundled binary or from version.txt)
+	Config       *Config
+	PrivateKey   []byte
+	PublicKey    []byte
+	Logger       *Logger
+	// LogOutput, when set, is where the logger's JSON lines go instead of
+	// os.Stdout; Initialize hands it to the logger it makes or keeps.
+	LogOutput        io.Writer
 	LogLevel         int    // From .env LOG_LEVEL (default 1)
 	logLevelSet      bool   // LOG_LEVEL was present and valid, so 0 means off, not unset
 	LogRetentionDays int    // From .env LOG_RETENTION_DAYS (default 7)
@@ -184,10 +203,6 @@ type Server struct {
 
 	// deployQueue publishes the site by deploying it, on Vercel; nil elsewhere.
 	deployQueue *deploy.Queue
-
-	// kayV0Base is v0's Platform API; "" means v0.DefaultBase. Tests point it
-	// at a fake.
-	kayV0Base string
 
 	// syncOnRequestFn replaces syncFeed in sync on request, and
 	// syncOnRequestBudget its time budget; tests set them.
@@ -256,6 +271,13 @@ type Server struct {
 	mcpKeys     mcpKeyCache
 	mcpFailOnce sync.Once
 	mcpFail     *attemptLimiter
+	// mcpToolsets caches each key's generated tools (mcp.go).
+	mcpToolsets mcpToolsetCache
+
+	// v1 is the handler mounted at /v1/, recorded where it is mounted so /mcp
+	// can call the site's API in-process (mcp.go). nil until mounted.
+	v1Mu sync.Mutex
+	v1   http.Handler
 
 	// SharedHTTPClient is a process-level HTTP client using a shared transport
 	// for connection pooling. Set by the hosted entry point; nil in localhost mode
@@ -274,6 +296,7 @@ type Server struct {
 	// Unified sync infrastructure
 	syncHandlers   []stream.SyncHandler
 	syncTrigger    chan struct{}             // non-blocking channel to trigger on-demand sync
+	lastSyncAsked  atomic.Int64              // unix nanos of the last sync run or requested; see syncIfStale
 	AuthorKeyCache *discovery.AuthorKeyCache // cached author public keys for signature verification
 
 	// Policy check cache: key is "recipient:myDomain", value is cached result with expiry
@@ -289,10 +312,11 @@ type Server struct {
 
 	// RestrictDMEgress enables the outbound DM SSRF guard (DM-4): when true, DM send /
 	// recipient-key / protection-status reject recipient URLs that aren't https to a safe
-	// public host (no IPs, loopback, .internal, ports). Set true by the hosted multi-tenant
-	// entry point (a hostile tenant must not drive the shared server to internal hosts);
-	// left false in localhost mode, where the owner runs on their own machine and may DM a
-	// local instance.
+	// public host (no IPs, loopback, .internal, ports), and connect only to public
+	// addresses once resolved (dm.PublicOnly). Set true by the hosted multi-tenant entry
+	// point (a hostile tenant must not drive the shared server to internal hosts). When
+	// false the rule still applies in every mode but local, where the owner runs on their
+	// own machine and may DM a local instance (allowPrivateDMRecipients).
 	RestrictDMEgress bool
 
 	// Proxy names the platform proxy standing in front of this server, which
@@ -313,6 +337,11 @@ type Server struct {
 	// Always false outside hosting: self-hosted and localhost have no switch.
 	RosiePaused bool
 
+	// APIPointerEnabled is the switch APIPointerEnv, read at boot (self-hosted)
+	// or set by the hosting service: whether this site publishes the `api`
+	// pointer in .well-known/polis (EnsureAPIPointer).
+	APIPointerEnabled bool
+
 	// Cross-tenant comment-count cache: post URL → count + expiry.
 	// Populated by populateCrossTenantCommentCounts in handlers_stream.go.
 	// commentCountFlight collapses concurrent stream requests that share
@@ -327,10 +356,6 @@ type Server struct {
 	focusCommentCache   map[string]*focusCommentCacheEntry
 	focusCommentCacheMu sync.Mutex
 	latestCommentFlight focusCommentSingleflight
-
-	// SSE client registry
-	sseClients map[chan SSEEvent]struct{}
-	sseMu      sync.Mutex
 
 	// Shared feed caches — one CacheManager per scope, lazily created.
 	// All code paths (background sync, manual refresh, counts) use these
@@ -520,6 +545,7 @@ func (s *Server) startOnFirstRequest(ctx context.Context) error {
 		return fmt.Errorf("identity key: %w", err)
 	}
 	s.EnsureSite(ctx)
+	s.EnsureAPIPointer()
 	s.deployIfNeverDeployed(ctx)
 	// ⭐ The session key into memory now, so the sign-in that may have woken
 	// this process costs no store operation of its own.
@@ -621,6 +647,29 @@ type Logger struct {
 	// stdoutOnly: no log file at all, every line goes to stdout as JSON. For a
 	// site whose storage is not this machine's disk (see NewStdoutLogger).
 	stdoutOnly bool
+	// out is where the JSON lines go; nil means os.Stdout. A host that
+	// collects its tenants' lines (and a test that reads them) sets it with
+	// SetOutput, never by replacing os.Stdout, which every goroutine shares.
+	out io.Writer
+}
+
+// SetOutput sends the logger's JSON lines to w instead of os.Stdout (nil
+// restores os.Stdout).
+func (l *Logger) SetOutput(w io.Writer) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.out = w
+}
+
+// stdout is where a JSON line goes. The caller holds l.mu.
+func (l *Logger) stdout() io.Writer {
+	if l.out != nil {
+		return l.out
+	}
+	return os.Stdout
 }
 
 // NewLogger creates a new logger with the given level and logs directory
@@ -673,7 +722,7 @@ func (l *Logger) getLogFile() (*os.File, error) {
 			return l.file, nil
 		}
 		// Close old file
-		l.file.Close()
+		_ = l.file.Close() // yesterday's log file, being replaced
 	}
 
 	// Open new log file.
@@ -685,7 +734,7 @@ func (l *Logger) getLogFile() (*os.File, error) {
 	// take this logs to STDOUT, which the platform captures; hosted already
 	// ships stdout to its pipeline. A different answer, not a missing
 	// conversion.
-	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) //nolint:gosec // G304: the server's own log file under the site
 	if err != nil {
 		return nil, err
 	}
@@ -723,7 +772,7 @@ func (l *Logger) log(level int, prefix string, format string, args ...interface{
 		}
 		data, err := json.Marshal(obj)
 		if err == nil {
-			fmt.Fprintln(os.Stdout, string(data))
+			fmt.Fprintln(l.stdout(), string(data))
 		}
 	}
 }
@@ -818,7 +867,7 @@ func (l *Logger) EventWithSource(source, event string, fields map[string]interfa
 		}
 		data, err := json.Marshal(obj)
 		if err == nil {
-			fmt.Fprintln(os.Stdout, string(data))
+			fmt.Fprintln(l.stdout(), string(data))
 		}
 	}
 }
@@ -906,7 +955,7 @@ func (l *Logger) Request(method, path string, status int, duration time.Duration
 		}
 		data, err := json.Marshal(obj)
 		if err == nil {
-			fmt.Fprintln(os.Stdout, string(data))
+			fmt.Fprintln(l.stdout(), string(data))
 		}
 	}
 }
@@ -914,7 +963,7 @@ func (l *Logger) Request(method, path string, status int, duration time.Duration
 // Close closes the log file
 func (l *Logger) Close() {
 	if l != nil && l.file != nil {
-		l.file.Close()
+		_ = l.file.Close() // at shutdown; nothing left to log to
 	}
 }
 
@@ -983,8 +1032,29 @@ func (s *Server) LogDebug(format string, args ...interface{}) {
 // LogEvent logs a structured event. Nil-safe delegate to Logger.Event().
 func (s *Server) LogEvent(event string, fields map[string]interface{}) {
 	if s.Logger != nil {
-		s.Logger.Event(event, fields)
+		s.Logger.Event(event, withSiteField(fields, s.GetBaseURL()))
 	}
+}
+
+// withSiteField adds "site", the site's domain, to an event's fields unless
+// the event names one itself. ⭐ On polis.pub every tenant's server logs to
+// the same stream, and without it a tenant's pub.polis.post.publish could be
+// told apart from another's only by joining on the request log. The caller's
+// map is not changed.
+func withSiteField(fields map[string]interface{}, baseURL string) map[string]interface{} {
+	domain := extractDomainFromURL(baseURL)
+	if domain == "" {
+		return fields
+	}
+	if _, ok := fields["site"]; ok {
+		return fields
+	}
+	out := make(map[string]interface{}, len(fields)+1)
+	for k, v := range fields {
+		out[k] = v
+	}
+	out["site"] = domain
+	return out
 }
 
 // NewDSClient creates a discovery client with request ID propagation and timing.
@@ -1139,14 +1209,73 @@ func (s *Server) newContentEngine() (*ops.Engine, error) {
 		Keys:         func() ([]byte, []byte) { return s.PrivateKey, s.PublicKey },
 		PublicKey:    s.PublicKey,
 		BaseURL:      s.GetBaseURL(),
+		Capabilities: capability.For(s.effectiveMode()),
 		DiscoveryURL: s.DiscoveryURL,
 		CLIThemesDir: s.CLIThemesDir,
 		EmitEvent:    s.LogEvent,
-		OnContentChanged: func() {
-			if err := s.RenderSite(); err != nil {
-				s.LogWarn("post-write render failed: %v", err)
-			}
-		},
+		// ⭐ What a write causes (render, the owner's hook, the draft it came
+		// from) is the shared after-write module's, the same for every host.
+		// The outbound address rule for messages (ops/dm_send.go): a private
+		// recipient only on the owner's own machine.
+		DMHTTPClient:             s.SharedHTTPClient,
+		AllowPrivateDMRecipients: s.allowPrivateDMRecipients(),
+		// Built per write, so a hook configured in settings since start applies.
+		AfterWrite: func(ctx context.Context, w ops.Written) { s.afterWrite().Apply(ctx, w) },
+	})
+}
+
+// PublishAsOwner publishes a post in the owner's own name through the action
+// layer: the same operation /v1 serves (post.create), with its render and side
+// effects, unmarked because no agent is acting. ⭐ For a caller inside the
+// deployment that has no HTTP request to make, such as polis.pub's signup,
+// which publishes the post a new owner wrote before confirming their email.
+// It answers the post's content path.
+func (s *Server) PublishAsOwner(ctx context.Context, markdown string) (string, error) {
+	engine, err := s.newContentEngine()
+	if err != nil {
+		return "", err
+	}
+	res, err := engine.Dispatch(ctx, ops.ActionRequest{
+		Action:      "create",
+		ContentType: "pub.polis.post",
+		Payload:     map[string]any{"markdown": markdown},
+	})
+	if err != nil {
+		return "", err
+	}
+	path, _ := res.Data["path"].(string)
+	return path, nil
+}
+
+// afterWrite is this server's after-write module. Hooks run only where the
+// webapp has them on (EnableHooks; never on hosted).
+func (s *Server) afterWrite() *ops.AfterWrite {
+	return ops.NewAfterWrite(ops.AfterWriteConfig{
+		Site:        s.Site(),
+		NewRenderer: func() (ops.SiteRenderer, error) { return s.newPageRenderer() },
+		Hooks:       s.getHookConfig(),
+		HooksOn:     s.EnableHooks,
+		Emit:        s.LogEvent,
+		Warn:        func(format string, args ...any) { s.LogWarn(format, args...) },
+	})
+}
+
+// newPageRenderer is a renderer for this site, reading through the render's
+// read cache.
+func (s *Server) newPageRenderer() (*render.PageRenderer, error) {
+	coreBundle := s.loadOrDefaultBundle()
+	postsSource, _ := coreBundle.ContentDir("pub.polis.post")
+	postsMountDir, _ := coreBundle.MountDir("pub.polis.post")
+	commentsSource, _ := coreBundle.ContentDir("pub.polis.comment")
+	commentsMountDir, _ := coreBundle.MountDir("pub.polis.comment")
+	return render.NewPageRenderer(render.PageConfig{
+		Site:              s.renderSite(),
+		CLIThemesDir:      s.CLIThemesDir,
+		BaseURL:           s.GetBaseURL(),
+		PostsSourceDir:    postsSource,
+		PostsMountDir:     postsMountDir,
+		CommentsSourceDir: commentsSource,
+		CommentsMountDir:  commentsMountDir,
 	})
 }
 
@@ -1197,6 +1326,7 @@ func (s *Server) RenderSite() error {
 	}
 
 	s.LogEvent("pub.polis.site.render", map[string]interface{}{
+		"mode":     ops.RenderModeFull,
 		"posts":    stats.PostsRendered,
 		"comments": stats.CommentsRendered,
 	})
@@ -1212,41 +1342,25 @@ func (s *Server) RenderSite() error {
 // publish.PublishPost / RepublishPost (e.g.
 // "content/pub.polis.core/post/YYYYMMDD/slug.md").
 func (s *Server) RenderSiteAfterPublish(postSourceRelPath string) error {
-	shape, err := bundle.GetActiveShapeName(s.Site())
-	if err != nil || shape != "v4" {
-		// v3 or unknown → existing full-corpus path. Preserves byte-identical
-		// output for blog-shape tenants.
-		return s.RenderSite()
-	}
-
-	baseURL := s.GetBaseURL()
-	coreBundle := s.loadOrDefaultBundle()
-	postsSource, _ := coreBundle.ContentDir("pub.polis.post")
-	postsMountDir, _ := coreBundle.MountDir("pub.polis.post")
-	commentsSource, _ := coreBundle.ContentDir("pub.polis.comment")
-	commentsMountDir, _ := coreBundle.MountDir("pub.polis.comment")
-
-	renderer, err := render.NewPageRenderer(render.PageConfig{
-		Site:              s.renderSite(),
-		CLIThemesDir:      s.CLIThemesDir,
-		BaseURL:           baseURL,
-		PostsSourceDir:    postsSource,
-		PostsMountDir:     postsMountDir,
-		CommentsSourceDir: commentsSource,
-		CommentsMountDir:  commentsMountDir,
-	})
+	// ⭐ The choice (incremental where the shape supports it, full otherwise,
+	// full again if the shortcut fails) is the action layer's, shared with
+	// every /v1 write: ops.RenderAfterChange.
+	renderer, err := s.newPageRenderer()
 	if err != nil {
-		s.LogError("v4 incremental renderer init failed: %v", err)
+		s.LogError("renderer init failed: %v", err)
 		return fmt.Errorf("create renderer: %w", err)
 	}
-	if err := renderer.PublishStream(postSourceRelPath); err != nil {
-		s.LogError("v4 PublishStream cascade failed: %v", err)
-		return fmt.Errorf("v4 cascade: %w", err)
+	mode, stats, err := ops.RenderAfterChange(s.Site(), renderer, postSourceRelPath)
+	if err != nil {
+		s.LogError("render after publish failed: %v", err)
+		return fmt.Errorf("render: %w", err)
 	}
-	s.LogEvent("pub.polis.site.render", map[string]interface{}{
-		"mode": "v4-incremental",
-		"path": postSourceRelPath,
-	})
+	fields := map[string]interface{}{"mode": mode, "path": postSourceRelPath}
+	if stats != nil {
+		fields["posts"] = stats.PostsRendered
+		fields["comments"] = stats.CommentsRendered
+	}
+	s.LogEvent("pub.polis.site.render", fields)
 	return nil
 }
 
@@ -1457,7 +1571,7 @@ func (s *Server) LoadEnv() {
 			// NOT the storage interface: the working directory is not the
 			// site.
 			envPath = filepath.Join(cwd, ".env")
-			data, err = os.ReadFile(envPath)
+			data, err = os.ReadFile(envPath) //nolint:gosec // G304: .env in the working directory
 			if err == nil {
 				log.Printf("[i] Loaded .env from current directory: %s", envPath)
 			}
@@ -1470,7 +1584,7 @@ func (s *Server) LoadEnv() {
 		if homeErr == nil {
 			// NOT the storage interface: the home directory is not the site.
 			envPath = filepath.Join(homeDir, ".polis", ".env")
-			data, err = os.ReadFile(envPath)
+			data, err = os.ReadFile(envPath) //nolint:gosec // G304: .env in the user's home
 			if err == nil {
 				log.Printf("[i] Loaded .env from fallback: %s", envPath)
 			}
@@ -1645,7 +1759,7 @@ func FindAvailablePort() (int, error) {
 		return 0, err
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
+	_ = listener.Close() // a probe listener, closed to free the port
 	return port, nil
 }
 
@@ -1654,11 +1768,11 @@ func OpenBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.Command("open", url) //nolint:gosec // G204: opens the local server's own URL in the owner's browser, on their machine
 	case "linux":
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.Command("xdg-open", url) //nolint:gosec // G204: opens the local server's own URL in the owner's browser, on their machine
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
+		cmd = exec.Command("cmd", "/c", "start", url) //nolint:gosec // G204: opens the local server's own URL in the owner's browser, on their machine
 	default:
 		fmt.Printf("[i] Please open %s in your browser\n", url)
 		return
@@ -1780,8 +1894,14 @@ func (s *Server) Initialize() {
 	// public path. No-op when there is no DS configured.
 	InstallBlessedCacheFiller(extractDomainFromURL(s.DiscoveryURL))
 
+	// Author-avatar fetch failures are logged through this site's events, unless
+	// the process (polis-hosted) already set its own sink.
+	render.SetAvatarFetchLoggerIfUnset(func(event string, fields map[string]any) {
+		s.LogEvent(event, fields)
+	})
+
 	// One-time migration: consolidate author → author_name in .well-known/polis
-	site.MigrateAuthorField(s.Site())
+	_ = site.MigrateAuthorField(s.Site()) // best effort, and retried at every start
 
 	// Apply log defaults and write back to .env so settings are visible
 	// Only an ABSENT level takes the default. LOG_LEVEL=0 is LogLevelOff, a
@@ -1811,6 +1931,9 @@ func (s *Server) Initialize() {
 		s.Logger.level, s.Logger.logsDir = s.LogLevel, logsDir
 	}
 	s.Logger.retentionDays = s.LogRetentionDays
+	if s.LogOutput != nil {
+		s.Logger.SetOutput(s.LogOutput)
+	}
 
 	// Enable JSON stdout output when LOG_FORMAT=json (for Axiom/Vector ingestion)
 	if os.Getenv("LOG_FORMAT") == "json" {
@@ -1889,8 +2012,8 @@ func (s *Server) RegisterSyncHandler(h stream.SyncHandler) {
 }
 
 // TriggerSync requests an immediate sync cycle (non-blocking).
-// Used after user-initiated mutations (publish, bless, follow) to push
-// updated counts to SSE clients within milliseconds.
+// Used after user-initiated mutations (publish, bless, follow) and by the
+// discovery service's wake, so the site's caches catch up at once.
 func (s *Server) TriggerSync() {
 	select {
 	case s.syncTrigger <- struct{}{}:
@@ -1905,7 +2028,6 @@ func (s *Server) StartBackgroundSync() {
 	// Initialize infrastructure
 	s.syncTrigger = make(chan struct{}, 1)
 	s.syncDone = make(chan struct{})
-	s.sseClients = make(map[chan SSEEvent]struct{})
 
 	// Register handlers
 	s.syncHandlers = nil
@@ -1929,13 +2051,9 @@ func (s *Server) StartBackgroundSync() {
 			case <-s.syncDone:
 				return
 			case <-ticker.C:
-				// Only sync when browser tabs are connected — idle cached
-				// tenants skip the DS query entirely. On-demand sync via
-				// syncTrigger (SSE connect, wake endpoint) still fires
-				// immediately when a client arrives.
-				if s.hasSSEClients() {
-					s.runUnifiedSync()
-				}
+				// The ticker only prunes logs. A sync runs at start, when
+				// asked (TriggerSync: a write, the DS's wake) and when the
+				// owner reads a stale first-person view (syncIfStale).
 				if s.Logger != nil {
 					s.Logger.PruneLogs()
 				}
@@ -1946,296 +2064,21 @@ func (s *Server) StartBackgroundSync() {
 	}()
 }
 
-// hasSSEClients returns true if any browser tabs are connected via SSE.
-func (s *Server) hasSSEClients() bool {
-	s.sseMu.Lock()
-	defer s.sseMu.Unlock()
-	return len(s.sseClients) > 0
+// allowPrivateDMRecipients is the outbound address rule for messages
+// (ops/dm_send.go), for every send path on this server: a private recipient
+// only in local mode, on the owner's own machine, and never where hosted
+// restricts egress.
+func (s *Server) allowPrivateDMRecipients() bool {
+	return s.effectiveMode() == mode.Local && !s.RestrictDMEgress
 }
 
-// addSSEClient registers a client channel for SSE events.
-func (s *Server) addSSEClient(ch chan SSEEvent) {
-	s.sseMu.Lock()
-	wasEmpty := len(s.sseClients) == 0
-	s.sseClients[ch] = struct{}{}
-	count := len(s.sseClients)
-	s.sseMu.Unlock()
-	s.LogEvent("sse.client.connected", map[string]interface{}{
-		"active_clients": count,
-	})
-	if wasEmpty {
-		s.TriggerSync()
+// dmHTTPClient is the client a message route sends with: the shared one, its
+// connections limited to public addresses unless the rule allows private ones.
+func (s *Server) dmHTTPClient() *http.Client {
+	if s.allowPrivateDMRecipients() {
+		return s.SharedHTTPClient
 	}
-}
-
-// removeSSEClient unregisters a client channel.
-func (s *Server) removeSSEClient(ch chan SSEEvent) {
-	s.sseMu.Lock()
-	delete(s.sseClients, ch)
-	count := len(s.sseClients)
-	s.sseMu.Unlock()
-	close(ch)
-	s.LogEvent("sse.client.disconnected", map[string]interface{}{
-		"active_clients": count,
-	})
-}
-
-// broadcastSSE sends an event to all connected SSE clients.
-func (s *Server) broadcastSSE(evt SSEEvent) {
-	s.sseMu.Lock()
-	defer s.sseMu.Unlock()
-	for ch := range s.sseClients {
-		select {
-		case ch <- evt:
-		default:
-			// Client channel full, skip (they'll get the next one)
-		}
-	}
-}
-
-// broadcastCounts computes all badge counts and pushes them to SSE clients.
-func (s *Server) broadcastCounts(syncResult SyncResult) {
-	if s.sseClients == nil {
-		return
-	}
-	s.sseMu.Lock()
-	clientCount := len(s.sseClients)
-	s.sseMu.Unlock()
-	if clientCount == 0 {
-		return
-	}
-
-	counts := s.computeAllCounts()
-	data, err := json.Marshal(counts)
-	if err != nil {
-		return
-	}
-	s.broadcastSSE(SSEEvent{Event: "counts", Data: string(data)})
-}
-
-// CountsPayload contains all badge counts for the frontend.
-type CountsPayload struct {
-	Posts           int  `json:"posts"`
-	Drafts          int  `json:"drafts"`
-	MyPending       int  `json:"my_pending"`
-	MyBlessed       int  `json:"my_blessed"`
-	MyDenied        int  `json:"my_denied"`
-	MyCommentDrafts int  `json:"my_comment_drafts"`
-	IncomingPending int  `json:"incoming_pending"`
-	IncomingBlessed int  `json:"incoming_blessed"`
-	FeedUnread      int  `json:"feed_unread"`
-	HasNewFeed      bool `json:"has_new_feed"`
-	// HasNewBlessingInbox / HasNewDM follow the same "new since last view"
-	// pattern as HasNewFeed — each clears when the user activates the
-	// corresponding filter surface (see /api/comment/blessing/viewed and
-	// /api/dm/viewed).
-	HasNewBlessingInbox bool `json:"has_new_blessing_inbox"`
-	HasNewDM            bool `json:"has_new_dm"`
-	Following           int  `json:"following"`
-	Followers           int  `json:"followers"`
-	NotificationsUnread int  `json:"notifications_unread"`
-	BlessingRequests    int  `json:"blessing_requests"`
-	DMUnread            int  `json:"dm_unread"`
-}
-
-// computeAllCounts reads all badge counts from local state/filesystem.
-// No DS queries — everything comes from cached state.
-func (s *Server) computeAllCounts() CountsPayload {
-	counts := CountsPayload{}
-
-	// Posts — read from index.jsonl (handles date-based subdirectories).
-	//
-	// ⚠️ Count on `type`, never on "not a comment". index.jsonl carries every
-	// content type the site publishes — comments for as long as it has
-	// existed, and tag + attestation since Signet epic 25 — so a
-	// not-a-comment test counts tags as posts.
-	if entries, err := metadata.LoadPublicIndex(s.Site()); err == nil {
-		for _, e := range entries {
-			if isPostIndexEntry(e.Type, e.Path) {
-				counts.Posts++
-			}
-		}
-	}
-
-	// Drafts
-	draftsDir := siteKey(".polis", "bundles", "pub.polis.core", "posts", "drafts")
-	{
-		for _, e := range s.listKey(draftsDir) {
-			if !e.IsDir && strings.HasSuffix(e.Key, ".md") {
-				counts.Drafts++
-			}
-		}
-	}
-
-	// My comments by status (pending/denied are flat in .polis/bundles/pub.polis.core/comments/<status>/)
-	for _, status := range []struct {
-		dir  string
-		dest *int
-	}{
-		{"pending", &counts.MyPending},
-		{"denied", &counts.MyDenied},
-	} {
-		dir := siteKey(".polis", "bundles", "pub.polis.core", "comments", status.dir)
-		{
-			for _, e := range s.listKey(dir) {
-				if !e.IsDir && strings.HasSuffix(e.Key, ".md") {
-					*status.dest++
-				}
-			}
-		}
-	}
-
-	// My blessed comments live in content/pub.polis.core/comment/YYYYMMDD/ (date-based subdirs)
-	blessedDir := siteKey("content", "pub.polis.core", "comment")
-	{
-		for _, dd := range s.listKey(blessedDir) {
-			if !dd.IsDir {
-				continue
-			}
-			subDir := siteKey(dd.Key)
-			{
-				for _, f := range s.listKey(subDir) {
-					if !f.IsDir && strings.HasSuffix(f.Key, ".md") {
-						counts.MyBlessed++
-					}
-				}
-			}
-		}
-	}
-
-	// Comment drafts
-	commentDraftsDir := siteKey(".polis", "bundles", "pub.polis.core", "comments", "drafts")
-	{
-		for _, e := range s.listKey(commentDraftsDir) {
-			if !e.IsDir && strings.HasSuffix(e.Key, ".json") {
-				counts.MyCommentDrafts++
-			}
-		}
-	}
-
-	// Incoming blessed comments (on our posts)
-	blessedIndex := siteKey("content", "pub.polis.core", "comment", "blessed.json")
-	if data, err := s.readKey(blessedIndex); err == nil {
-		var idx map[string]interface{}
-		if json.Unmarshal(data, &idx) == nil {
-			if posts, ok := idx["posts"].(map[string]interface{}); ok {
-				for _, v := range posts {
-					if comments, ok := v.([]interface{}); ok {
-						counts.IncomingBlessed += len(comments)
-					}
-				}
-			}
-		}
-	}
-
-	// Following
-	if f, err := following.LoadSite(s.Site()); err == nil {
-		counts.Following = f.Count()
-	}
-
-	// Feed unread count
-	cm := s.feedCacheForScope("network")
-	if items, err := cm.List(); err == nil {
-		for _, item := range items {
-			if item.ReadAt == "" {
-				counts.FeedUnread++
-			}
-		}
-	}
-
-	// Followers (from cached state)
-	discoveryDomain := s.GetDiscoveryDomain()
-	store := stream.NewStore(s.Site(), discoveryDomain, "pub.polis.core")
-	var followerState stream.FollowerState
-	if store.LoadState("pub.polis.follow", &followerState) == nil {
-		counts.Followers = followerState.Count
-	}
-
-	// Incoming pending blessing requests — read from DS-cached blessing state
-	var blessingState stream.BlessingState
-	if store.LoadState("pub.polis.comment.blessing", &blessingState) == nil {
-		for _, b := range blessingState.Blessings {
-			if b.Status == "pending" {
-				counts.BlessingRequests++
-				counts.IncomingPending++
-			}
-		}
-	}
-
-	// DM unread count
-	if s.PrivateKey != nil {
-		if mb, _, _, err := s.dmMailbox(); err == nil {
-			if entries, err := mb.RebuildInbox(); err == nil {
-				for _, e := range entries {
-					counts.DMUnread += e.Unread
-				}
-			}
-		}
-	}
-
-	// has-new flags: each surface uses a "viewed" cursor that the SPA
-	// advances when the corresponding filter view becomes active. The dot
-	// fires when sync has written something past that cursor.
-	//
-	// Cold-start: when a viewed cursor is empty (fresh tenant, or a tenant
-	// that predates this code), seed it to the current high-water mark and
-	// keep the flag false. Avoids lighting all three dots on first load
-	// when the user has had no opportunity to acknowledge anything.
-	syncPos, _ := store.GetCursor("pub.polis.sync")
-
-	// Feed has-new keys off the feed-CONTENT cursor (advanced only when a sync
-	// actually added feed items), NOT the raw sync cursor — otherwise your own
-	// posts (synced but filtered out of the feed) would light the dot with
-	// nothing new to show.
-	feedContentPos, _ := store.GetCursor("pub.polis.feed.content")
-	feedViewedPos, _ := store.GetCursor("pub.polis.feed.viewed")
-	if feedViewedPos == "" || feedViewedPos == "0" {
-		if feedContentPos != "" {
-			_ = store.SetCursor("pub.polis.feed.viewed", feedContentPos)
-		}
-		counts.HasNewFeed = false
-	} else {
-		counts.HasNewFeed = feedContentPos != "" && feedContentPos != feedViewedPos
-	}
-
-	// Blessing inbox: dot fires when sync has advanced past the inbox-viewed
-	// cursor AND there's at least one currently-pending blessing request
-	// (no point flagging "new since last view" when nothing's actionable).
-	blessingViewedPos, _ := store.GetCursor("pub.polis.comment.blessing.viewed")
-	if blessingViewedPos == "" || blessingViewedPos == "0" {
-		if syncPos != "" {
-			_ = store.SetCursor("pub.polis.comment.blessing.viewed", syncPos)
-		}
-		counts.HasNewBlessingInbox = false
-	} else {
-		counts.HasNewBlessingInbox = syncPos != "" &&
-			syncPos != blessingViewedPos &&
-			counts.IncomingPending > 0
-	}
-
-	// DM surface: cursor is an RFC3339 timestamp (DMs are local-only).
-	// Fast-path on the conversation summary — per-conversation UnreadCount
-	// already excludes outgoing messages (see dm/store.go updateIndex),
-	// so any conversation with UnreadCount > 0 AND LastMessageAt > viewed
-	// is a "new since last view" hit. No per-message scan needed.
-	dmViewedPos, _ := store.GetCursor("pub.polis.dm.viewed")
-	if dmViewedPos == "" || dmViewedPos == "0" {
-		_ = store.SetCursor("pub.polis.dm.viewed", time.Now().UTC().Format(time.RFC3339Nano))
-		counts.HasNewDM = false
-	} else if s.PrivateKey != nil {
-		if mb, _, _, err := s.dmMailbox(); err == nil {
-			if entries, err := mb.RebuildInbox(); err == nil {
-				for _, e := range entries {
-					if e.Unread > 0 && e.LastMessageAt > dmViewedPos {
-						counts.HasNewDM = true
-						break
-					}
-				}
-			}
-		}
-	}
-
-	return counts
+	return dm.PublicOnly(s.SharedHTTPClient)
 }
 
 // dmMailbox returns the tenant DM mailbox, the site's own domain (for convID↔peer
@@ -2435,93 +2278,6 @@ func (s *Server) syncFeed() {
 	}
 }
 
-// syncFeedScoped syncs a non-network feed scope that needs its own DS query.
-// Currently only "global" qualifies — it queries DS with no actor filter + created_after=24h.
-// "followers" and "me" are runtime-filtered over the network cache and don't need separate sync.
-func (s *Server) syncFeedScoped(scope string) {
-	// scope=="" / "network" / runtime-filtered are not handled here (see
-	// syncFeed). Other invalid invocations short-circuit without touching
-	// the cache.
-	if scope == "" || scope == "network" || runtimeFilteredScopes[scope] {
-		return
-	}
-
-	cm := s.feedCacheForScope(scope)
-
-	// Structural early-returns mark the cache as checked — see syncFeed
-	// for the rationale.
-	if s.DiscoveryURL == "" {
-		_ = cm.MarkChecked()
-		return
-	}
-	baseURL := s.GetBaseURL()
-	if baseURL == "" {
-		_ = cm.MarkChecked()
-		return
-	}
-	myDomain := extractDomainFromURL(baseURL)
-	if myDomain == "" {
-		_ = cm.MarkChecked()
-		return
-	}
-
-	cursor, _ := cm.GetCursor()
-
-	client := s.NewDSClient(nil)
-	client.RequestID = generateBackgroundRequestID("feed-sync-" + scope)
-	typeFilter := "pub.polis.post.published,pub.polis.post.republished,pub.polis.comment.published,pub.polis.comment.republished,pub.polis.comment.blessing.granted,pub.polis.comment.blessing.requested,pub.polis.follow.announced,pub.polis.site.registered"
-
-	var actorFilter string
-	followedDomains := make(map[string]bool)
-
-	switch scope {
-	case "global":
-		client.CreatedAfter = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
-		// No actor filter — query all of polis
-	}
-
-	log.Printf("[feed-sync-%s] querying stream: cursor=%q actors=%q", scope, cursor, actorFilter)
-
-	result, err := client.StreamQuery(cursor, 1000, typeFilter, actorFilter, "")
-	if err != nil {
-		log.Printf("[feed-sync-%s] stream query failed: %v", scope, err)
-		return
-	}
-
-	log.Printf("[feed-sync-%s] stream returned %d events", scope, len(result.Events))
-
-	handler := &feed.FeedHandler{
-		MyDomain:        myDomain,
-		FollowedDomains: followedDomains,
-		IncludeSelf:     scope == "me",
-	}
-
-	items := handler.Process(result.Events)
-	// R21: same fix as syncFeed (network) — pruning losses no longer
-	// freeze the cursor. See the syncFeed comment for rationale.
-	mergeFailed := false
-	if len(items) > 0 {
-		mr, err := cm.MergeItemsResult(items)
-		if err != nil {
-			log.Printf("[feed-sync-%s] merge failed: %v", scope, err)
-			mergeFailed = true
-		} else {
-			log.Printf("[feed-sync-%s] merged %d new items, %d retained", scope, mr.Added, mr.Retained)
-			if mr.Added > 0 && mr.Retained < mr.Added {
-				log.Printf("[feed-sync-%s] %d items pruned on insert (advancing cursor anyway)", scope, mr.Added-mr.Retained)
-			}
-		}
-	}
-
-	if result.Cursor != "" {
-		if mergeFailed {
-			_ = cm.SetCursor(cursor)
-		} else {
-			_ = cm.SetCursor(result.Cursor)
-		}
-	}
-}
-
 // backfillFeedForAuthor queries the DS stream from the beginning (since="0")
 // for a single author's events and merges them into the feed cache.
 // This ensures historical posts appear when following a new author.
@@ -2579,6 +2335,29 @@ func (s *Server) backfillFeedForAuthor(domain string) {
 	}
 }
 
+// newV1Handler is the site's API, /v1, on its own mux, recorded so /mcp can
+// call it in-process.
+func (s *Server) newV1Handler(engine *ops.Engine) http.Handler {
+	m := http.NewServeMux()
+	api.SetupRoutesWithHost(m, engine, s.Site(), s.apiHost(), func(event string, fields map[string]interface{}) {
+		s.LogEvent(event, fields)
+	})
+	s.setV1Handler(m)
+	return m
+}
+
+func (s *Server) setV1Handler(h http.Handler) {
+	s.v1Mu.Lock()
+	s.v1 = h
+	s.v1Mu.Unlock()
+}
+
+func (s *Server) v1Handler() http.Handler {
+	s.v1Mu.Lock()
+	defer s.v1Mu.Unlock()
+	return s.v1
+}
+
 // Handler returns an http.Handler for this Server's API routes.
 // Used by the hosted service to serve tenant requests without starting a
 // standalone HTTP listener.
@@ -2588,9 +2367,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Setup v1 content API routes (needed for DM delivery, content queries, etc.)
 	if apiEngine, err := s.newContentEngine(); err == nil {
-		api.SetupRoutes(mux, apiEngine, s.Site(), func(event string, fields map[string]interface{}) {
-			s.LogEvent(event, fields)
-		})
+		mux.Handle("/v1/", s.newV1Handler(apiEngine))
 	}
 
 	// ⚠️ NOT loopback: this handler is mounted by the hosted service and
@@ -2696,7 +2473,7 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 	// concern, not a key operation.
 	if _, err := os.Stat(dataDir); errors.Is(err, fs.ErrNotExist) {
 		// Create just the data directory (not the full structure)
-		if err := os.MkdirAll(dataDir, 0755); err != nil {
+		if err := os.MkdirAll(dataDir, 0755); err != nil { //nolint:gosec // G301: the site root; .polis inside it is created 0700
 			log.Printf("[warning] Failed to create data directory: %v", err)
 		}
 	}
@@ -2805,64 +2582,27 @@ func Run(webFS fs.FS, dataDir string, opts ...RunOptions) {
 	// ⭐ The shared middleware order (instanceHandler), inside the localhost
 	// guard and the rest of localhostModeHandler.
 	mux := server.instanceHandler(routes)
-	if err := http.ListenAndServe(addr, localhostModeHandler(server.Logger, mux)); err != nil {
+	if err := NewHTTPServer(addr, localhostModeHandler(server.Logger, mux)).ListenAndServe(); err != nil {
 		log.Fatal("Server error:", err)
 	}
 }
 
-// spaHandler serves static files from the embedded filesystem, falling back
-// to index.html for the app's deep links (/_/…) and 404 for anything else. For index.html
-// itself (and the SPA fallback path), substitutes a {{theme_attr}}
-// placeholder with the tenant's active theme attribute so first paint
-// lands in the user's selected theme rather than the sols-flavored default
-// (R23 #4 follow-up — the inline-script localStorage path covered repeat
-// visits but not first-load).
+// spaHandler serves the owner's app (the v5 app at /_/ and below, the
+// instance's root redirecting there), the embedded files it loads, and the
+// site's own generated files; 404 for anything else.
 func spaHandler(fsys fs.FS, site storage.Site) http.Handler {
 	fileServer := http.FileServer(http.FS(fsys))
-	serveTemplatedIndex := func(w http.ResponseWriter, r *http.Request) {
-		// Sub-rooted at www/ in cmd/server/main.go via fs.Sub, so paths
-		// here are relative to that root (just "index.html", not the
-		// full embed-relative path).
-		raw, err := fs.ReadFile(fsys, "index.html")
-		if err != nil {
-			fileServer.ServeHTTP(w, r)
-			return
-		}
-		var attr string
-		if name, _ := bundle.GetActiveThemeName(site); name != "" {
-			// Bare attribute injection — the value is constrained by
-			// SetActiveThemeName to ParseFQN-validated tokens (alnum +
-			// `-`/`_`), so direct interpolation is safe.
-			attr = ` data-site-theme="` + name + `"`
-		}
-		out := strings.Replace(string(raw), "{{theme_attr}}", attr, 1)
-		// R18-21: per-response CSP nonce. Substituted into the importmap
-		// script tag's nonce= attribute; matches the admin-SPA CSP set
-		// below. ReplaceAll because the placeholder appears in both an
-		// HTML comment (descriptive text) AND the actual nonce attribute
-		// — only substituting the first occurrence leaves the real
-		// attribute as the literal placeholder string, which doesn't
-		// match the CSP header and gets the importmap blocked.
-		nonce := GenerateCSPNonce()
-		out = strings.ReplaceAll(out, "{{csp_nonce}}", nonce)
-		// ⛔ __POLIS_DEV IS GONE. It injected a flag the SPA checked alongside
-		// the hosted flag to decide ONE capability — two globals answering "is
-		// this instance reachable?" differently, which is the scattering the
-		// capability model removes. `polis serve --dev` now selects a mode, and
-		// the SPA fetches the descriptor derived from it. ⚠️ Nothing replaces
-		// this block; a dev-only global would be the same bug wearing a hat.
-		// R18-21: override the default tenant-content CSP from
-		// securityHeadersMiddleware with the admin-SPA variant that
-		// permits this nonce + the Milkdown esm.sh CDN.
-		w.Header().Set("Content-Security-Policy", CSPAdminSPA(nonce))
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache")
-		_, _ = w.Write([]byte(out))
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
+		// ⭐ Every site's owner app is the v5 app, whatever its shape: /_/
+		// and below. The v4 app is retired.
+		if isAppPath(path) {
+			ServeV5Owner(w, r, fsys)
+			return
+		}
+		// The instance's root is the owner's app, as it always was here.
 		if path == "" || path == "index.html" {
-			serveTemplatedIndex(w, r)
+			http.Redirect(w, r, "/_/", http.StatusFound)
 			return
 		}
 		// If the file exists in the embedded FS, serve it directly
@@ -2877,18 +2617,11 @@ func spaHandler(fsys fs.FS, site storage.Site) http.Handler {
 			serveSiteFile(w, r, site)
 			return
 		}
-		// SPA fallback: the templated index.html, for the app's own deep links
-		// only (/_ and below, where every app route lives).
-		//
 		// ⛔ ANY OTHER PATH IS A 404, as on hosted. Serving the shell with a 200
 		// for everything made a mistyped page, a retired URL and a private name
 		// (/.env, /.polis/keys/…) all look served, to a crawler and to any check
 		// that reads the status; on a remote instance every such path reaches
 		// this handler, since the deployment's static files answer the rest.
-		if isAppPath(path) {
-			serveTemplatedIndex(w, r)
-			return
-		}
 		http.NotFound(w, r)
 	})
 }
@@ -2907,29 +2640,6 @@ func (s *Server) GetDiscoveryDomain() string {
 		return "default"
 	}
 	return domain
-}
-
-// validFeedScopes lists the accepted scope values for feed queries.
-//
-// step-06/6.f.2 review item #6 — known parallel of the scope=my bug
-// fixed in /api/v1/stream/items at a3de221. The "me" scope here also
-// routes through feedCacheForScope("me") → returns the network cache
-// (per runtimeFilteredScopes) which self-skips own events — so /api/
-// feed?scope=me returns 0 items in production despite local data
-// existing on disk. The fix mirror would be to route through
-// loadOwnContentAsFeedItems for scope=me, but /api/feed has a
-// different response shape than /api/v1/stream/items and the legacy
-// SPA views still using it would need verification.
-//
-// Deferred for now (low priority) since the v4 stream endpoint is the
-// new canonical surface; legacy /api/feed is on the deprecation path
-// (6.l excerpt-fetch + 6.m route cleanup). Revisit if a non-migrated
-// view surfaces a regression.
-var validFeedScopes = map[string]bool{
-	"network":   true,
-	"followers": true,
-	"global":    true,
-	"me":        true,
 }
 
 // runtimeFilteredScopes are feed scopes that are served as runtime filters
@@ -3019,4 +2729,97 @@ func isPostIndexEntry(entryType, path string) bool {
 		return entryType == "post"
 	}
 	return strings.HasPrefix(path, "content/pub.polis.core/post/") || strings.HasPrefix(path, "posts/")
+}
+
+// APIPointerEnv switches on the `api` pointer in .well-known/polis: "1" on,
+// anything else off.
+//
+// ⭐ DARK UNTIL SWITCHED ON. The description itself is always served at
+// /v1/openapi.json, but the pointer is what tells every crawler and agent
+// that the API exists, and once published it is a promise (the developer
+// reference states it), so it is published only where this is on. On
+// polis.pub it is the operator's switch, a Fly secret.
+const APIPointerEnv = "POLIS_API_POINTER"
+
+// EnsureAPIPointer makes .well-known/polis's `api` member match what this
+// site offers: present when the switch is on and the site has an API an
+// outsider can reach, absent otherwise. It writes only when that changes
+// (Patrol and Judge track the file).
+//
+// ⭐ A site that should carry the pointer and cannot (the switch is on, the
+// site has a public API, and there is no base URL to name or the write
+// failed) logs the same event with published false and failed true, so the
+// operator's monitor for a missing pointer sees it as it sees a withdrawal.
+func (s *Server) EnsureAPIPointer() {
+	var p *site.APIPointer
+	caps := capability.For(s.effectiveMode())
+	if s.APIPointerEnabled {
+		if desc, ver, mcp, ok := apidesc.Pointer(caps, s.GetBaseURL()); ok {
+			p = &site.APIPointer{Description: desc, Version: ver, MCP: mcp}
+		} else if caps.HasPublicApi {
+			s.LogEvent("pub.polis.site.api_pointer", map[string]interface{}{"published": false, "failed": true, "reason": "no base URL"})
+		}
+	}
+	changed, err := site.SetAPIPointer(s.Site(), p)
+	if err != nil {
+		if p != nil {
+			s.LogWarn("api pointer: %v", err)
+			s.LogEvent("pub.polis.site.api_pointer", map[string]interface{}{"published": false, "failed": true, "reason": "write failed"})
+		}
+		return
+	}
+	if changed {
+		s.LogEvent("pub.polis.site.api_pointer", map[string]interface{}{"published": p != nil})
+	}
+}
+
+// apiQuery is how /v1/query reaches PQL: the very handler /pql/ is served by
+// (rate limit included), and the owner gate's own rule for which sentences are
+// the owner's alone. The API checks the owner's token for those itself;
+// /pql/ keeps its session-based gate.
+func (s *Server) apiQuery() *api.Query {
+	return &api.Query{
+		Handler: http.HandlerFunc(publicContentMiddleware(sharedPublicContentLimiter, s.Proxy, s.handleStreamPQL)),
+		Scope:   PQLScope,
+	}
+}
+
+// apiHost is what this server serves to the API beyond the engine: PQL and
+// the blessing decisions, each through the code its own routes use.
+func (s *Server) apiHost() *api.Host {
+	return &api.Host{
+		Query:      s.apiQuery(),
+		Blessing:   &api.Blessing{Bless: s.BlessComment, Deny: s.DenyComment, Unbless: s.UnblessComment},
+		Following:  &api.Following{Follow: s.Follow, Unfollow: s.Unfollow},
+		Routes:     withAnswers(append(append(append(s.siteRoutes(), s.messageRoutes()...), s.ownerRoutes()...), s.sourceRoutes()...)),
+		Tokens:     s.AgentTokens,
+		ClientAddr: func(r *http.Request) string { return remoteIP(r, s.Proxy) },
+		// The owner's interface reaches /v1 on the owner's own sign-in.
+		OwnerSession: s.apiOwnerSession,
+		SwitchedOff:  s.SwitchedOff,
+	}
+}
+
+// switchedOff asks the host whether a switch is off.
+func (s *Server) switchedOff(name string) bool {
+	return s.SwitchedOff != nil && s.SwitchedOff(name)
+}
+
+// PQLScope is the scope a /pql/<sentence> request needs through the API: none
+// for public content, read for the owner's own private content, and the
+// owner's full token for messages, which no agent scope reaches.
+func PQLScope(r *http.Request) string {
+	if !PQLRequiresOwner(r) {
+		return ""
+	}
+	if f, err := pql.ParseURL(r.URL.Path, "@__tenant__"); err == nil && f != nil {
+		if f.Type == "dms" {
+			return apidesc.ScopeFull
+		}
+		// The owner's own activity: that things happened, the notify scope.
+		if aboutMe(f) {
+			return apidesc.ScopeNotify
+		}
+	}
+	return apidesc.ScopeRead
 }

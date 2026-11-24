@@ -4,10 +4,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 )
 
 // pqlRequest performs a GET against /pql/<path-tail> with the given Accept
@@ -112,7 +117,7 @@ func TestStreamPQL_HTMLShell_SeedsNonDefault(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", code)
 	}
-	if !strings.Contains(body, "window.__POLIS_INITIAL_PQL") {
+	if !strings.Contains(body, seedOpen) {
 		t.Errorf("expected seed injection for comments view, body: %s", body)
 	}
 	if !strings.Contains(body, "\"type\":\"comments\"") {
@@ -124,8 +129,46 @@ func TestStreamPQL_HTMLShell_SeedsNonDefault(t *testing.T) {
 	if code2 != http.StatusOK {
 		t.Fatalf("expected 200, got %d", code2)
 	}
-	if strings.Contains(body2, "__POLIS_INITIAL_PQL") {
+	if strings.Contains(body2, "polis-initial-pql") {
 		t.Errorf("default posts view must not inject a seed, body: %s", body2)
+	}
+}
+
+// A sentence with a relation keeps it in the seed: without it "all comments
+// on <post>" hydrates as "all comments from <post>", which the server refuses.
+func TestStreamPQL_HTMLShell_SeedKeepsTheRelation(t *testing.T) {
+	s := newConfiguredServer(t)
+	if err := os.WriteFile(filepath.Join(s.DataDir, "index.html"),
+		[]byte("<html><head><title>x</title></head><body>stream</body></html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	post := "https://alice.polis.pub/posts/20261113/Hello.html"
+	for _, tc := range []struct{ tail, relation, scope string }{
+		{"all+comments+on+https:%2F%2Falice.polis.pub%2Fposts%2F20261113%2FHello.html", "on", post},
+		{"all+blessed+comments+on+https:%2F%2Falice.polis.pub%2Fposts%2F20261113%2FHello.html", "on", post},
+		{"all+activity+about+me", "about", "me"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/pql/"+tc.tail, nil)
+		req.Header.Set("Accept", "text/html")
+		w := httptest.NewRecorder()
+		s.handleStreamPQL(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d: %s", tc.tail, w.Code, w.Body.String())
+		}
+		body := w.Body.String()
+		i := strings.Index(body, seedOpen)
+		if i < 0 {
+			t.Fatalf("%s: no seed in %s", tc.tail, body)
+		}
+		raw := body[i+len(seedOpen):]
+		raw = raw[:strings.Index(raw, "</script>")]
+		var seed map[string]string
+		if err := json.Unmarshal([]byte(raw), &seed); err != nil {
+			t.Fatalf("%s: seed is not JSON: %v (%s)", tc.tail, err, raw)
+		}
+		if seed["relation"] != tc.relation || seed["scope"] != tc.scope {
+			t.Errorf("%s: seed relation %q scope %q, want %q %q", tc.tail, seed["relation"], seed["scope"], tc.relation, tc.scope)
+		}
 	}
 }
 
@@ -162,53 +205,6 @@ func TestStreamPQL_HTMLShell_404WhenNoShell(t *testing.T) {
 	}
 }
 
-// TestTenantRoot_HTMLRedirectsToPQL covers the public-surface landing redirect
-// (reader mode / hosted serve.ServeTenantPublic): a browser hitting the bare
-// tenant root is sent to the canonical PQL URL; non-HTML clients are not.
-func TestTenantRoot_HTMLRedirectsToPQL(t *testing.T) {
-	s := newConfiguredServer(t)
-	h := tenantStaticHandler(s)
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("Accept", "text/html")
-	w := httptest.NewRecorder()
-	h(w, req)
-	if w.Code != http.StatusFound {
-		t.Fatalf("expected 302 for HTML root, got %d", w.Code)
-	}
-	if loc := w.Header().Get("Location"); loc != "/pql/all+posts+by+date" {
-		t.Errorf("Location = %q, want /pql/all+posts+by+date", loc)
-	}
-
-	// Non-HTML client → no redirect (serves index.html, or 404 if absent here).
-	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
-	w2 := httptest.NewRecorder()
-	h(w2, req2)
-	if w2.Code == http.StatusFound {
-		t.Errorf("non-HTML root must not redirect")
-	}
-
-	// Explicit /index.html (HTML GET) → same canonical PQL redirect.
-	req3 := httptest.NewRequest(http.MethodGet, "/index.html", nil)
-	req3.Header.Set("Accept", "text/html")
-	w3 := httptest.NewRecorder()
-	h(w3, req3)
-	if w3.Code != http.StatusFound {
-		t.Fatalf("expected 302 for HTML /index.html, got %d", w3.Code)
-	}
-	if loc := w3.Header().Get("Location"); loc != "/pql/all+posts+by+date" {
-		t.Errorf("/index.html Location = %q, want /pql/all+posts+by+date", loc)
-	}
-
-	// Non-HTML /index.html → no redirect (serves the file).
-	req4 := httptest.NewRequest(http.MethodGet, "/index.html", nil)
-	w4 := httptest.NewRecorder()
-	h(w4, req4)
-	if w4.Code == http.StatusFound {
-		t.Errorf("non-HTML /index.html must not redirect")
-	}
-}
-
 func TestStreamPQL_Malformed(t *testing.T) {
 	s := newConfiguredServer(t)
 	code, body := pqlRequest(t, s, "all+from+my+network", "application/json") // missing type
@@ -220,11 +216,17 @@ func TestStreamPQL_Malformed(t *testing.T) {
 	}
 }
 
-func TestStreamPQL_AboutRelationRejectedOnTenant(t *testing.T) {
+// The tenant serves "about" only for the owner's own activity; any other
+// "about" belongs to the discovery service's /pql/.
+func TestStreamPQL_AboutRelationOnlyForTheOwnersActivity(t *testing.T) {
 	s := newConfiguredServer(t)
-	code, body := pqlRequest(t, s, "all+activity+about+me", "application/json")
-	if code != http.StatusBadRequest {
-		t.Errorf("expected 400 for about relation, got %d (%v)", code, body)
+	if code, body := pqlRequest(t, s, "all+activity+about+me", "application/json"); code != http.StatusOK {
+		t.Errorf("all activity about me: got %d (%v), want 200", code, body)
+	}
+	for _, tail := range []string{"all+activity+about+alice.example", "all+comments+about+me"} {
+		if code, body := pqlRequest(t, s, tail, "application/json"); code != http.StatusBadRequest {
+			t.Errorf("%s: got %d (%v), want 400", tail, code, body)
+		}
 	}
 }
 
@@ -254,5 +256,210 @@ func TestStreamPQL_UnderlyingErrorPassThrough(t *testing.T) {
 	code, body := pqlRequest(t, s, "all+drafts+from+my+network", "application/json")
 	if code != http.StatusBadRequest {
 		t.Errorf("expected 400 passthrough, got %d (%v)", code, body)
+	}
+}
+
+// A shell that marks the place (v5's index.html) says, on a view other than
+// its own, that the view needs script; the default view, and a shell without
+// the mark (v4's), are served as they were.
+func TestStreamPQL_HTMLShell_SaysAViewNeedsScript(t *testing.T) {
+	s := newConfiguredServer(t)
+	marked := "<html><head><title>x</title></head><body><main>" + viewNeedsScriptMark + "posts</main></body></html>"
+	if err := os.WriteFile(filepath.Join(s.DataDir, "index.html"), []byte(marked), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, body := htmlShellRequest(t, s, "all+comments+by+date"); !strings.Contains(body, "<noscript><p class=\"needs-script\">") || strings.Contains(body, viewNeedsScriptMark) {
+		t.Errorf("a view's page should carry the note in place of the mark, body: %s", body)
+	}
+	if _, body := htmlShellRequest(t, s, "all+posts+by+date"); strings.Contains(body, "<noscript>") {
+		t.Errorf("the default view is the page itself and needs no note, body: %s", body)
+	}
+
+	unmarked := "<html><head><title>x</title></head><body>stream</body></html>"
+	if err := os.WriteFile(filepath.Join(s.DataDir, "index.html"), []byte(unmarked), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, body := htmlShellRequest(t, s, "all+comments+by+date"); strings.Contains(body, "<noscript>") {
+		t.Errorf("a shell without the mark is served as it was, body: %s", body)
+	}
+}
+
+// seedOpen opens the view's filter in a shell: a JSON data block.
+const seedOpen = `<script type="application/json" id="polis-initial-pql">`
+
+// The view's filter reaches the page as data, never as an inline script:
+// tenant pages are served with script-src 'self', under which an inline
+// script never runs (and a view's address then showed the default posts).
+// Every <script> the handler adds is a data block or has a src.
+func TestStreamPQL_HTMLShell_AddsNoInlineScript(t *testing.T) {
+	s := newConfiguredServer(t)
+	shell := "<html><head><title>x</title></head><body>stream</body></html>"
+	if err := os.WriteFile(filepath.Join(s.DataDir, "index.html"), []byte(shell), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tail := range []string{"all+comments+by+date", "all+posts+with+comments", "all+profiles+from+my+network"} {
+		_, body := htmlShellRequest(t, s, tail)
+		for _, tag := range scriptTags.FindAllString(body, -1) {
+			if !strings.Contains(tag, `type="application/json"`) && !strings.Contains(tag, " src=") {
+				t.Errorf("%s: an inline script reached the page, which the CSP will not run: %s", tail, tag)
+			}
+		}
+		if !strings.Contains(body, seedOpen) {
+			t.Errorf("%s: the view's filter is not in the page", tail)
+		}
+	}
+}
+
+var scriptTags = regexp.MustCompile(`<script\b[^>]*>`)
+
+// The root serves the home page, with 200 and no redirect, to a browser and a
+// crawler alike (v5 spec 4.2, SEO rule 5; every shape). It used to answer
+// HTML clients with a 302 to /pql/all+posts+by+date, whose canonical was /:
+// a loop for search engines.
+func TestTenantRoot_ServesTheHomePage(t *testing.T) {
+	s := newConfiguredServer(t)
+	if err := os.WriteFile(filepath.Join(s.DataDir, "index.html"), []byte("<html><head></head><body>home</body></html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := tenantStaticHandler(s)
+	for _, accept := range []string{"text/html,application/xhtml+xml", ""} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Accept", accept)
+		req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)")
+		w := httptest.NewRecorder()
+		h(w, req)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "home") {
+			t.Errorf("Accept %q: / answered %d, want 200 with the home page", accept, w.Code)
+		}
+	}
+}
+
+// /index.html is the home page under a second address: it redirects to /, so a
+// page has one address, keeping the query, and nothing in the query can send
+// the reader anywhere else.
+func TestTenantRoot_IndexRedirectNeverLeavesTheSite(t *testing.T) {
+	s := newConfiguredServer(t)
+	h := tenantStaticHandler(s)
+	for q, want := range map[string]string{
+		"":                   "/",
+		"search=agent":       "/?search=agent",
+		"//evil.example":     "/?//evil.example",
+		"x=@evil.example":    "/?x=@evil.example",
+		"%2F%2Fevil.example": "/?%2F%2Fevil.example",
+	} {
+		target := "/index.html"
+		if q != "" {
+			target += "?" + q
+		}
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Header.Set("Accept", "text/html")
+		w := httptest.NewRecorder()
+		h(w, req)
+		loc := w.Header().Get("Location")
+		if w.Code != http.StatusMovedPermanently || loc != want {
+			t.Errorf("%s: %d %q, want 301 %q", target, w.Code, loc, want)
+		}
+		if u, err := url.Parse(loc); err != nil || u.Host != "" || u.Scheme != "" || u.Path != "/" {
+			t.Errorf("%s redirected off the home page: %q", target, loc)
+		}
+	}
+}
+
+// A view's address is navigation, not content: "noindex, follow" (v5 spec
+// 4.2, SEO rule 6), on the default view and every other.
+func TestStreamPQL_HTMLShell_IsNoindexFollow(t *testing.T) {
+	s := newConfiguredServer(t)
+	if err := os.WriteFile(filepath.Join(s.DataDir, "index.html"), []byte("<html><head><title>x</title></head><body>stream</body></html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tail := range []string{"all+posts+by+date", "all+comments+by+date"} {
+		_, body := htmlShellRequest(t, s, tail)
+		if !strings.Contains(body, `<meta name="robots" content="noindex, follow">`) {
+			t.Errorf("%s: the view's page is not noindex, follow", tail)
+		}
+	}
+}
+
+// A PQL read that names no window gets the widest one the server allows, not
+// the stream endpoint's 24h; a named window is still honoured, and the count
+// reads the same window as the list.
+func TestStreamPQL_NoWindowReadsTheWidestAndCountsFollowTheWindow(t *testing.T) {
+	s := newConfiguredServer(t)
+	now := time.Now().UTC()
+	seedNetworkFeed(t, s, []feed.FeedItem{
+		{Type: "post", Title: "Recent", URL: "posts/r.md", Published: now.Add(-30 * time.Minute).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "LastWeek", URL: "posts/w.md", Published: now.Add(-6 * 24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "TooOld", URL: "posts/o.md", Published: now.Add(-40 * 24 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+	})
+	titles := func(body map[string]interface{}) []string {
+		var out []string
+		items, _ := body["items"].([]interface{})
+		for _, it := range items {
+			out = append(out, it.(map[string]interface{})["title"].(string))
+		}
+		return out
+	}
+	count := func(body map[string]interface{}) interface{} {
+		c, _ := body["counts"].(map[string]interface{})
+		return c["posts"]
+	}
+
+	code, body := pqlRequest(t, s, "all+posts+from+my+network+by+date?counts=posts", "application/json")
+	if code != http.StatusOK {
+		t.Fatalf("no window: %d %v", code, body)
+	}
+	if got := titles(body); len(got) != 2 || got[0] != "Recent" || got[1] != "LastWeek" {
+		t.Errorf("no window: got %v, want [Recent LastWeek] (30 days, not 24h)", got)
+	}
+	if n := count(body); n != float64(2) {
+		t.Errorf("no window: counts.posts = %v, want 2", n)
+	}
+
+	_, body = pqlRequest(t, s, "all+posts+from+my+network+by+date?time=24h&counts=posts", "application/json")
+	if got := titles(body); len(got) != 1 || got[0] != "Recent" {
+		t.Errorf("time=24h: got %v, want [Recent]", got)
+	}
+	if n := count(body); n != float64(1) {
+		t.Errorf("time=24h: counts.posts = %v, want 1 (the count reads the list's window)", n)
+	}
+}
+
+// ⭐ A COUNT THAT IS THE CACHE'S LIMIT IS A LOWER BOUND, AND SAYS SO. The
+// owner's feed cache keeps the newest posts up to a bound; a network that
+// outposts it (discover.polis.pub alone does, and every polis.pub site follows
+// it from signup) fills it, and the count then reads the bound forever. It is
+// listed in counts_capped, so the filter can read "300+ posts".
+func TestStreamPQL_ACountThatFillsTheCacheIsALowerBound(t *testing.T) {
+	s := newConfiguredServer(t)
+	if err := s.feedCacheForScope("network").SaveConfig(&feed.FeedConfig{MaxPosts: 2}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	seedNetworkFeed(t, s, []feed.FeedItem{
+		{Type: "post", Title: "A", URL: "posts/a.md", Published: now.Add(-1 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "B", URL: "posts/b.md", Published: now.Add(-50 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+		{Type: "post", Title: "C", URL: "posts/c.md", Published: now.Add(-60 * time.Hour).Format(time.RFC3339), AuthorURL: "https://a.pub", AuthorDomain: "a.pub"},
+	})
+	capped := func(body map[string]interface{}) bool {
+		list, _ := body["counts_capped"].([]interface{})
+		for _, w := range list {
+			if w == "posts" {
+				return true
+			}
+		}
+		return false
+	}
+
+	_, body := pqlRequest(t, s, "all+posts+from+my+network+by+date?counts=posts", "application/json")
+	if c, _ := body["counts"].(map[string]interface{}); c["posts"] != float64(2) {
+		t.Fatalf("counts.posts = %v, want 2 (the cache kept two)", c["posts"])
+	}
+	if !capped(body) {
+		t.Errorf("a count at the cache's limit is not in counts_capped: %v", body["counts_capped"])
+	}
+
+	_, body = pqlRequest(t, s, "all+posts+from+my+network+by+date?time=24h&counts=posts", "application/json")
+	if capped(body) {
+		t.Errorf("a count under the cache's limit (one post in 24h) is in counts_capped")
 	}
 }

@@ -132,7 +132,19 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		// set an env var and redeploy. ⚠️ But correct-and-surprising is still
 		// bad, so it requires an explicit acknowledgement that names the
 		// recovery path.
-		if lastEnrolled(owner.Statuses(inst), name) && r.URL.Query().Get("acknowledge") != "recovery" {
+		//
+		// ⭐ Removing ONE passkey of several is not removing the last way in:
+		// with ?credential= the guard counts what would remain.
+		cred := strings.TrimSpace(r.URL.Query().Get("credential"))
+		last := lastEnrolled(owner.Statuses(inst), name)
+		if last && cred != "" && name == passkeyName {
+			if pk := passkeyProvider(); pk != nil {
+				if n, err := pk.CredentialCount(inst); err == nil && n > 1 {
+					last = false
+				}
+			}
+		}
+		if last && r.URL.Query().Get("acknowledge") != "recovery" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(w).Encode(map[string]string{
@@ -146,7 +158,7 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// ⭐ One credential, not the whole provider, when ?credential= names it.
-		if cred := strings.TrimSpace(r.URL.Query().Get("credential")); cred != "" && name == passkeyName {
+		if cred != "" && name == passkeyName {
 			pk := passkeyProvider()
 			if pk == nil {
 				writeRecoveryError(w, http.StatusNotFound, "no passkey provider", "")
@@ -156,12 +168,17 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 				writeRecoveryError(w, http.StatusBadRequest, err.Error(), "")
 				return
 			}
+			left, _ := pk.CredentialCount(inst)
+			s.notifyPasskey(false, left)
 			writeJSON(w, map[string]interface{}{"removed": name, "credential": cred})
 			return
 		}
 		if err := owner.DeleteEnrolment(inst, name); err != nil {
 			writeRecoveryError(w, http.StatusBadRequest, err.Error(), "")
 			return
+		}
+		if name == passkeyName {
+			s.notifyPasskey(false, 0)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"removed": name})
@@ -288,6 +305,12 @@ func (s *Server) handleEnrol(w http.ResponseWriter, r *http.Request) {
 		if err := owner.SaveEnrolment(inst, name, record); err != nil {
 			writeRecoveryError(w, http.StatusInternalServerError, "the enrolment could not be saved", "begin again")
 			return
+		}
+		if name == passkeyName {
+			if pk := passkeyProvider(); pk != nil {
+				n, _ := pk.CredentialCount(inst)
+				s.notifyPasskey(true, n)
+			}
 		}
 		clearOwnerCookie(w, ceremonyCookie, ceremonyCookiePlain)
 		if viaSession {

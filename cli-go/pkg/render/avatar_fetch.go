@@ -1,11 +1,16 @@
 package render
 
 import (
+	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -73,29 +78,141 @@ func LoadOrFetchAuthorAvatar(domain string) (AvatarConfig, bool) {
 // fetchAuthorAvatar is a package var so tests can stub the network. Default
 // implementation reads https://<domain>/.well-known/polis and parses the
 // "avatar" block.
+//
+// ⭐ Every failure is reported (avatarFetchFailed) and closes the client's idle
+// connections: a pooled connection that has gone bad must not make every later
+// refetch fail too. Once, a running polis-hosted answered "failed" for one
+// domain for hours, with nothing logged, until a restart.
 var fetchAuthorAvatar = func(domain string) (AvatarConfig, bool) {
+	start := time.Now()
 	resp, err := authorAvatarClient.Get("https://" + domain + "/.well-known/polis")
 	if err != nil {
+		avatarFetchFailed(domain, transportErrorClass(err), start, 0, err)
 		return AvatarConfig{}, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		avatarFetchFailed(domain, "status", start, resp.StatusCode, nil)
 		return AvatarConfig{}, false
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, authorAvatarMaxBody))
 	if err != nil {
+		avatarFetchFailed(domain, "read", start, resp.StatusCode, err)
 		return AvatarConfig{}, false
 	}
 	var wk struct {
 		Avatar *AvatarConfig `json:"avatar"`
 	}
 	if err := json.Unmarshal(body, &wk); err != nil {
+		avatarFetchFailed(domain, "parse", start, resp.StatusCode, nil)
 		return AvatarConfig{}, false
 	}
 	if wk.Avatar == nil {
 		return AvatarConfig{}, true // reachable, no custom avatar
 	}
 	return *wk.Avatar, true
+}
+
+// avatarFetchLogInterval is how often one domain's fetch failures are logged:
+// the first failure is logged at once, later ones within the interval are
+// counted and reported as `suppressed` on the next line, so a dead host cannot
+// flood the log.
+const avatarFetchLogInterval = 15 * time.Minute
+
+// avatarFetchLogger receives pub.polis.render.avatar_fetch_failed. It is unset
+// in the CLI (nothing is logged) and set by the host that serves renders.
+var avatarFetchLogger atomic.Pointer[func(event string, fields map[string]any)]
+
+// SetAvatarFetchLogger sets where author-avatar fetch failures are logged. The
+// avatar cache is per process, so this is a process-wide sink: polis-hosted
+// sets its own (landlord) logger at boot, before any site starts.
+func SetAvatarFetchLogger(logEvent func(event string, fields map[string]any)) {
+	avatarFetchLogger.Store(&logEvent)
+}
+
+// SetAvatarFetchLoggerIfUnset sets the sink only when none is set, so a site's
+// server can supply one without replacing the process's own.
+func SetAvatarFetchLoggerIfUnset(logEvent func(event string, fields map[string]any)) {
+	avatarFetchLogger.CompareAndSwap(nil, &logEvent)
+}
+
+type avatarFetchLogState struct {
+	loggedAt   time.Time
+	suppressed int
+}
+
+var (
+	avatarFetchLogMu sync.Mutex
+	avatarFetchLogs  = map[string]*avatarFetchLogState{}
+)
+
+// avatarFetchFailed closes the client's idle connections, so a later fetch
+// dials afresh, and logs the failure, rate-limited per domain. It logs the
+// domain, the error class, the duration and (for a transport or read error)
+// the error's text; never the response body.
+func avatarFetchFailed(domain, class string, start time.Time, status int, err error) {
+	authorAvatarClient.CloseIdleConnections()
+
+	avatarFetchLogMu.Lock()
+	st := avatarFetchLogs[domain]
+	if st == nil {
+		st = &avatarFetchLogState{}
+		avatarFetchLogs[domain] = st
+	}
+	if !st.loggedAt.IsZero() && time.Since(st.loggedAt) < avatarFetchLogInterval {
+		st.suppressed++
+		avatarFetchLogMu.Unlock()
+		return
+	}
+	suppressed := st.suppressed
+	st.loggedAt, st.suppressed = time.Now(), 0
+	avatarFetchLogMu.Unlock()
+
+	msg := ""
+	if err != nil {
+		if msg = err.Error(); len(msg) > 200 {
+			msg = msg[:200]
+		}
+	}
+	// status is 0 and error "" where the class has none.
+	logAvatarFetch("pub.polis.render.avatar_fetch_failed", map[string]any{
+		"domain":      domain,
+		"error_class": class,
+		"duration_ms": time.Since(start).Milliseconds(),
+		"suppressed":  suppressed,
+		"status":      status,
+		"error":       msg,
+	})
+}
+
+// logAvatarFetch hands an event to the sink, if one is set.
+func logAvatarFetch(event string, fields map[string]any) {
+	if logger := avatarFetchLogger.Load(); logger != nil && *logger != nil {
+		(*logger)(event, fields)
+	}
+}
+
+// transportErrorClass names a failed request's cause: timeout, dial (DNS or
+// connect), tls, or transport for anything else (a dropped connection).
+func transportErrorClass(err error) string {
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return "timeout"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "dial"
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return "dial"
+	}
+	var certErr *tls.CertificateVerificationError
+	var recErr tls.RecordHeaderError
+	if errors.As(err, &certErr) || errors.As(err, &recErr) {
+		return "tls"
+	}
+	return "transport"
 }
 
 // FallbackAvatarConfig returns a deterministic hue-based config for an author

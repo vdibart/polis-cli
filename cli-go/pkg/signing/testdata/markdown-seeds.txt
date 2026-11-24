@@ -1,0 +1,63 @@
+# Seeds for the markdown signing-base fuzz tests (verify, patrol, judge, signing). One seed per block;
+# blocks are separated by a line holding exactly "=====". Lines beginning "# " before the first block are
+# this header. Each seed is a document body a writer might publish: the shapes that broke verification once.
+=====
+# Hello
+
+Body text.
+=====
+# A post about signing
+
+Frontmatter looks like this:
+
+signature: AAAA
+author: someone
+current-version: sha256:abc
+=====
+# Code fence
+
+```yaml
+---
+signature: not-the-real-one
+---
+```
+=====
+---
+title: a body that starts like frontmatter
+signature: forged
+---
+Text after it.
+=====
+# Title with "quotes" and: a colon
+
+Body.
+=====
+# Unicode ✓ é 中文
+
+Line with trailing spaces
+	tab-indented line
+
+=====
+# CRLF
+
+line one
+line two
+=====
+#
+
+Only an empty heading above.
+=====
+No heading at all, just a sentence with signature: inside it.
+=====
+# Many blank lines
+
+
+
+end
+=====
+  signature: indented, so a child, not a field
+title: column zero in the body
+=====
+# Long
+
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

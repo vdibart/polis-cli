@@ -2,14 +2,16 @@
 
 *For* [Writers](../../README.md#writing-on-polis) — *Kind* [Guide](../../README.md#kinds-of-page) — *Component* [Webapp](../README.md) — *See also* [concept](../../general/concepts/infinity-stream.md) · [guide](../../signet/guides/set-your-terms.md)
 
+⚠️ **This page describes the v4 owner app and the stream shape, both replaced.** Since 2026-11-22 every site's owner app is the **v5 app** (at `/_/`, on `/v1` only), and every site on polis.pub is on the **v5 shape**; the v4 app (its screens and settings panel) is deleted, and the stream shape is no longer supported though a site that records it still renders as before. What follows is kept as the record of how v4 worked. For the current model see [shapes](../../general/concepts/shapes.md) and [architecture](../../general/concepts/architecture.md). To connect an AI assistant to your site, see [Connect your AI to your site](connect-your-ai.md).
+
 This guide covers the Polis webapp — a local web interface for managing your Polis site. If you use the command-line tool instead, see [CLI Command Reference](../../cli/user/command-reference.md).
 
 There are two ways to run Polis:
 
 - **Self-hosted (this guide's main focus).** The webapp runs on *your* computer, modifies files on your disk, and opens in your browser. There are no accounts, no passwords, and no database — your files are the source of truth.
-- **Hosted (e.g. `you.polis.pub`).** A managed Polis space you sign into from any browser. Here there *is* an account, tied to your email and accessed with magic links (no passwords). If you arrived from a "Sign in to polis" or "Welcome to polis" email, see [Hosted Accounts & Signing In](#hosted-accounts--signing-in).
+- **Hosted (e.g. `you.polis.pub`).** A managed Polis site you sign into from any browser. Here there *is* an account, tied to your email and accessed with magic links (no passwords). If you arrived from a "Sign in to polis" or "Welcome to polis" email, see [Hosted Accounts & Signing In](#hosted-accounts--signing-in).
 
-**Core Features** and **Social Features** work the same in both modes. **Settings** differs a little: a hosted space has an **Account** section and no hooks or discovery-service configuration, because the host runs those for you.
+**Core Features** and **Social Features** work the same in both modes. **Settings** differs a little: a hosted site has an **Account** section and no hooks or discovery-service configuration, because the host runs those for you.
 
 ---
 
@@ -113,27 +115,27 @@ made with `polis branch` and `polis branch deploy`. A laptop needs no sign-in, a
 
 ## Hosted Accounts & Signing In
 
-This section applies to the **hosted** Polis service (a space at an address like `you.polis.pub`). If you run the webapp on your own computer, skip it — self-hosting has no accounts or sign-in.
+This section applies to the **hosted** Polis service (a site at an address like `you.polis.pub`). If you run the webapp on your own computer, skip it — self-hosting has no accounts or sign-in.
 
 Polis uses **magic links**, not passwords. You prove who you are by clicking a one-time link sent to your email. Every link **expires 15 minutes** after it's sent and works **once**.
 
 ### Creating an account
 
 1. Go to the hosted service and enter your email address.
-2. You'll receive a **"Welcome to polis"** email. Click **Create my space**.
-3. That verifies your email and provisions your space. Your new space automatically follows `discover.polis.pub` so your stream has something in it from day one.
+2. You'll receive a **"Welcome to polis"** email. Click **Create my site**.
+3. That verifies your email and provisions your site. Your new site automatically follows `discover.polis.pub` so your stream has something in it from day one.
 
-Until you click the link your space is *unverified*. After **7 days** unverified you get a reminder email; after **14 days** the space is archived — your data is kept safe and can be recovered later (see Troubleshooting below).
+Until you click the link your site is *unverified*. After **7 days** unverified you get a reminder email; after **14 days** the site is archived — your data is kept safe and can be recovered later (see Troubleshooting below).
 
 ### Signing in
 
-1. On the sign-in page, enter the email tied to your space.
+1. On the sign-in page, enter the email tied to your site.
 2. You'll receive a **"Sign in to polis"** email. Click **Sign in**.
-3. You're taken straight into your space — no password to remember.
+3. You're taken straight into your site — no password to remember.
 
-If you didn't request a sign-in link, you can safely ignore the email; your space stays locked.
+If you didn't request a sign-in link, you can safely ignore the email; your site stays locked.
 
-> **Sign-in is separate from your DM password.** Signing in gets you *into* your space. Reading and sending direct messages may additionally ask for a **message password**, which encrypts your DMs at rest — it's a different secret from your email sign-in. See [DM encryption](../../general/security/dm-encryption.md) if you're prompted for it.
+> **Sign-in is separate from your DM password.** Signing in gets you *into* your site. Reading and sending direct messages may additionally ask for a **message password**, which encrypts your DMs at rest — it's a different secret from your email sign-in. See [DM encryption](../../general/security/dm-encryption.md) if you're prompted for it.
 
 ### Troubleshooting access
 
@@ -149,8 +151,8 @@ If you didn't request a sign-in link, you can safely ignore the email; your spac
 **I need to change my email address.**
 - Sign in, then go to **Settings → Account → Change**. A confirmation link is sent to the *new* address; click it to complete the switch. Your old address stops working once confirmed.
 
-**My space was archived (I didn't verify in time).**
-- Your data isn't lost. On the recover page (`/recover` on the hosted service), enter the same email. The **Recover your polis space** email lets you download an archive of everything or reinstate the live site.
+**My site was archived (I didn't verify in time).**
+- Your data isn't lost. On the recover page (`/recover` on the hosted service), enter the same email. The **Recover your polis site** email lets you download an archive of everything or reinstate the live site.
 
 **Still stuck.**
 - Use the **Help** link in any Polis email (it points here).
@@ -165,7 +167,7 @@ The webapp uses a centered-column layout with a thin top navigation bar. The log
 
 The top bar contains (left to right):
 
-- **Avatar button** — your avatar. Clicking it returns you to the default stream; hovering opens a menu with your name and handle (click the handle to open your public site), follower/following/post counts, **Follow a site**, **Copy follow link**, **Kay** (not on polis.pub; see [Kay](#kay-have-your-ai-change-your-site-experimental)), and **Settings**.
+- **Avatar button** — your avatar. Clicking it returns you to the default stream; hovering opens a menu with your name and handle (click the handle to open your public site), follower/following/post counts, **Follow a site**, **Copy follow link**, **Kay** (not on polis.pub; see [Kay](#kay-have-your-ai-change-your-site-retired)), and **Settings**.
 - **Icon row** (each loads a PQL preset; three carry a notification dot):
   - **Gateway** (arc + dots) — "Activity from my network" (`all activity from my network`). Dot = new items in your network since you last looked.
   - **Paragraph** (three lines) — "My posts" (`all posts from me by date`).
@@ -197,7 +199,7 @@ The webapp is a single stream-screen, and the URL **is** the filter. There are o
 | `/_/` | The default stream (activity from your network, by date) |
 | `/_/pql/<sentence>` | The stream filtered by a PQL sentence — every icon button and the sentence-filter widget just load one of these |
 | `/_/settings` | Settings |
-| `/_/kay` | Kay: have your AI change your site, in plain words (from the avatar menu, beside Settings; not on polis.pub) |
+| `/_/kay` | Kay: have your AI change your site, in plain words (experimental and off unless your instance switches it on; not on polis.pub) |
 
 Every view you used to reach by a dedicated page — posts, comments, blessings, following, messages — is now a PQL filter. For example:
 
@@ -301,24 +303,12 @@ Snippet resolution order: `.md` first, then `.html`, then exact name match. Glob
 
 ---
 
-### Kay: have your AI change your site (experimental)
+### Kay: have your AI change your site (retired)
 
-⚠️ **Experimental.** Kay (avatar menu → **Kay**, `/_/kay`) lets you ask an AI, in plain words, for changes to
-how your site looks: its theme, its styles, the shortcuts in your nav bar, marks in your stream. Today the AI is
-**v0**: you paste a v0 API key once, and the page shows each step v0 took and what it changed.
-
-**Where it works:** only on your own instance, at a public address v0 can reach (`localhost` is refused,
-because v0 calls your site from outside). **It is not offered on polis.pub**: the menu has no Kay entry there,
-and the Kay API answers `404`.
-
-- **v0 acts on your site only through your site's own tools.** Your site registers its `/mcp` endpoint with v0
-  under keys it mints for this purpose (one for each address it registers, and each works only there), and those
-  keys can only change what readers see rendered: styles, theme, nav shortcuts, stream marks. It cannot publish or delete posts, sign anything new as you, read your messages, or
-  reach your keys.
-- **Changes are data, never code.** A stream mark or a nav shortcut is a rule from a fixed set; nothing the AI
-  writes is ever run as a script.
-- **Your v0 key stays on your server** and is never sent to your browser after you paste it. **Disconnect**
-  removes it and your site's registration with v0.
+The Kay page (`/_/kay`), where you asked v0 for changes to how your site looks, is gone: it was part of the
+previous owner app, which has been retired. To have an AI change your site, connect your own agent to your
+site's API (*Enhance* → agents), which acts under a grant you sign and can revoke: see
+[Connect your AI to your site](connect-your-ai.md).
 
 ## Social Features
 
@@ -331,7 +321,7 @@ menu and enter its address (`alice.example`, `https://alice.example`, or a polis
 `polis.pub/f/alice`). Only polis.pub's own follow links are rewritten, and a bare handle with no dot
 (`alice`) is completed to `alice.polis.pub`; any other address is followed as you entered it. An address that isn't a polis site is refused with the reason.
 
-Anyone can follow you with your follow link: choose **Copy follow link** from the avatar menu to share it. New hosted spaces follow `discover.polis.pub` from the start, so the stream has content from day one.
+Anyone can follow you with your follow link: choose **Copy follow link** from the avatar menu to share it. New hosted sites follow `discover.polis.pub` from the start, so the stream has content from day one.
 
 **Important side effects:**
 - Following an author blesses any of their pending blessing requests on your posts — **your own site does it**, as part of the follow, signing with your key. The discovery service is told the result; it never decides one.
@@ -590,7 +580,7 @@ Pick a theme and click **Change Theme**. This updates `active_theme` in `.polis/
 
 ### Discovery Service Section
 
-*Self-hosted only — on a hosted space the host manages this, and **Your Site** shows the registration status.*
+*Self-hosted only — on a hosted site the host manages this, and **Your Site** shows the registration status.*
 
 | Field | Source | Description |
 |-------|--------|-------------|
@@ -632,7 +622,7 @@ The `.env` file is searched in order: your data directory first, then the curren
 
 ## Hooks & Automations
 
-Hooks are shell scripts that run automatically after you publish, republish, or a comment is blessed. They run only when you run the webapp yourself; a hosted space does not run hooks. The most common use is **automated deployment** — pushing your site to a hosting provider after every publish.
+Hooks are shell scripts that run automatically after you publish, republish, or a comment is blessed. They run only when you run the webapp yourself; a hosted site does not run hooks. The most common use is **automated deployment** — pushing your site to a hosting provider after every publish.
 
 ### The Three Hook Events
 
@@ -982,7 +972,7 @@ Sync runs every 30 seconds, but only while a browser tab is connected. If nothin
 
 Common causes:
 
-- **Hosted space**: hooks only run when you run the webapp yourself
+- **Hosted site**: hooks only run when you run the webapp yourself
 - **Not executable**: Run `chmod +x .polis/webapp/hooks/post-publish.sh`
 - **Script not found**: Ensure scripts are in `.polis/webapp/hooks/` (not `.polis/hooks/`)
 - **Script errors**: Check the terminal output — hook failures are logged but don't prevent publishing
@@ -1075,7 +1065,7 @@ This rebuilds the comment entries in the content index from the files on disk an
 
 ### Downloading Your Site
 
-In **Settings → Your Data**, click **Download** (or **Export** on a hosted space) to get a zip archive of your entire site, including keys. Use this for:
+In **Settings → Your Data**, click **Download** (or **Export** on a hosted site) to get a zip archive of your entire site, including keys. Use this for:
 - Full backups
 - Migrating to a new machine
 - Archiving a snapshot of your site

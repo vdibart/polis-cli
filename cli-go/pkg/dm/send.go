@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io"
@@ -143,7 +144,7 @@ func (s *Sender) SendMessage(recipientURL, content, replyToID string) (*MailboxM
 
 	// Store our own copy, sealed to our own current-epoch key (mailbox).
 	mb := NewMailbox(site)
-	msg, err := mb.AppendSent(recipientDomain, s.Domain, content, seal.epoch, seal.pub, seal.dek, replyToID, status)
+	msg, err := mb.appendSent(recipientDomain, content, seal.epoch, seal.pub, seal.dek, replyToID, status, envelope.Nonce)
 	if err != nil {
 		return nil, fmt.Errorf("store sent message: %w", err)
 	}
@@ -231,7 +232,7 @@ func (s *Sender) SendSealed(recipientURL string, senderEpoch, recipientEpoch int
 	// Store the browser's pre-sealed box-to-self copy (no re-seal — the server
 	// has no password-epoch DEK).
 	mb := NewMailbox(s.Site)
-	msg, err := mb.AppendSentRaw(recipientDomain, senderEpoch, sent.Ciphertext, sent.Nonce, boxPubB64, replyToID, status)
+	msg, err := mb.appendSentRaw(recipientDomain, senderEpoch, sent.Ciphertext, sent.Nonce, boxPubB64, replyToID, status, delivery.Nonce)
 	if err != nil {
 		return nil, fmt.Errorf("store sent message: %w", err)
 	}
@@ -391,6 +392,15 @@ func bodyDigest(body []byte) string {
 }
 
 // fetchRecipientKey fetches and caches a recipient's public key from .well-known/polis.
+// ErrRecipientUnreachable and ErrRecipientNoMessagesKey say why a
+// recipient's messages key could not be had: its site did not answer, or it
+// answered without a messages key this site can seal to (not a polis site,
+// a site from before encrypted messages, or a key that does not verify).
+var (
+	ErrRecipientUnreachable   = errors.New("the recipient's site could not be reached")
+	ErrRecipientNoMessagesKey = errors.New("the recipient publishes no messages key this site can use")
+)
+
 func (s *Sender) fetchRecipientKey(recipientURL string) ([]byte, [32]byte, int, error) {
 	domain := extractDomain(recipientURL) // already lowercased by extractDomain
 
@@ -409,17 +419,21 @@ func (s *Sender) fetchRecipientKey(recipientURL string) ([]byte, [32]byte, int, 
 	wellKnownURL := strings.TrimRight(recipientURL, "/") + "/.well-known/polis"
 	resp, err := s.httpClient.Get(wellKnownURL)
 	if err != nil {
-		return nil, [32]byte{}, 0, fmt.Errorf("fetch %s: %w", wellKnownURL, err)
+		return nil, [32]byte{}, 0, fmt.Errorf("fetch %s: %w (%w)", wellKnownURL, err, ErrRecipientUnreachable)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, [32]byte{}, 0, fmt.Errorf("fetch %s: HTTP %d", wellKnownURL, resp.StatusCode)
+		kind := ErrRecipientNoMessagesKey
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+			kind = ErrRecipientUnreachable
+		}
+		return nil, [32]byte{}, 0, fmt.Errorf("fetch %s: HTTP %d (%w)", wellKnownURL, resp.StatusCode, kind)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxWellKnownSize))
 	if err != nil {
-		return nil, [32]byte{}, 0, fmt.Errorf("read response: %w", err)
+		return nil, [32]byte{}, 0, fmt.Errorf("read response: %w (%w)", err, ErrRecipientUnreachable)
 	}
 
 	var wk struct {
@@ -427,14 +441,14 @@ func (s *Sender) fetchRecipientKey(recipientURL string) ([]byte, [32]byte, int, 
 		PublicKeyMessages *MessagesKeyBlock `json:"public_key_messages"`
 	}
 	if err := json.Unmarshal(body, &wk); err != nil {
-		return nil, [32]byte{}, 0, fmt.Errorf("parse .well-known/polis: %w", err)
+		return nil, [32]byte{}, 0, fmt.Errorf("parse .well-known/polis: %w (%w)", err, ErrRecipientNoMessagesKey)
 	}
 	if wk.PublicKey == "" {
-		return nil, [32]byte{}, 0, fmt.Errorf("no public_key in .well-known/polis")
+		return nil, [32]byte{}, 0, fmt.Errorf("no public_key in .well-known/polis (%w)", ErrRecipientNoMessagesKey)
 	}
 	publicKeySSH := []byte(wk.PublicKey)
 	if err := signing.ValidatePublicKey(publicKeySSH); err != nil {
-		return nil, [32]byte{}, 0, fmt.Errorf("invalid public key from %s: %w", wellKnownURL, err)
+		return nil, [32]byte{}, 0, fmt.Errorf("invalid public key from %s: %w (%w)", wellKnownURL, err, ErrRecipientNoMessagesKey)
 	}
 
 	// Phase 2 (decision (a)): require the identity-signed public_key_messages block and
@@ -443,18 +457,18 @@ func (s *Sender) fetchRecipientKey(recipientURL string) ([]byte, [32]byte, int, 
 	// present-but-invalid signature is a key-swap attack: also refuse — never silently
 	// fall back, or stripping/forging the block would downgrade the recipient.
 	if wk.PublicKeyMessages == nil {
-		return nil, [32]byte{}, 0, fmt.Errorf("recipient %s has not published public_key_messages (pre-DM-encryption site)", domain)
+		return nil, [32]byte{}, 0, fmt.Errorf("recipient %s has not published public_key_messages (pre-DM-encryption site) (%w)", domain, ErrRecipientNoMessagesKey)
 	}
 	ok, err := VerifyMessagesKeyEntry(wk.PublicKeyMessages.Current, publicKeySSH)
 	if err != nil {
-		return nil, [32]byte{}, 0, fmt.Errorf("verify public_key_messages for %s: %w", domain, err)
+		return nil, [32]byte{}, 0, fmt.Errorf("verify public_key_messages for %s: %w (%w)", domain, err, ErrRecipientNoMessagesKey)
 	}
 	if !ok {
-		return nil, [32]byte{}, 0, fmt.Errorf("public_key_messages signature invalid for %s (key-swap?)", domain)
+		return nil, [32]byte{}, 0, fmt.Errorf("public_key_messages signature invalid for %s (key-swap?) (%w)", domain, ErrRecipientNoMessagesKey)
 	}
 	x25519PK, err := wk.PublicKeyMessages.Current.X25519()
 	if err != nil {
-		return nil, [32]byte{}, 0, fmt.Errorf("decode messages key for %s: %w", domain, err)
+		return nil, [32]byte{}, 0, fmt.Errorf("decode messages key for %s: %w (%w)", domain, err, ErrRecipientNoMessagesKey)
 	}
 
 	epoch := wk.PublicKeyMessages.Current.Epoch

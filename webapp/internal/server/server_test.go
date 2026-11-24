@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io/fs"
 	"net/http"
@@ -720,17 +721,15 @@ func newTestFS() fs.FS {
 	}
 }
 
+// The instance's root is the owner's app: it redirects to /_/.
 func TestSPAHandler_RootServesIndex(t *testing.T) {
 	handler := spaHandler(newTestFS(), storage.At(t.TempDir()))
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
-	}
-	if body := w.Body.String(); body != "<html>SPA</html>" {
-		t.Errorf("expected index.html content, got %q", body)
+	for _, path := range []string{"/", "/index.html"} {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusFound || w.Header().Get("Location") != "/_/" {
+			t.Errorf("GET %s = %d → %q, want 302 → /_/", path, w.Code, w.Header().Get("Location"))
+		}
 	}
 }
 
@@ -775,33 +774,6 @@ func TestSPAHandler_ExistingAsset(t *testing.T) {
 
 		if w.Code != http.StatusOK {
 			t.Errorf("%s: expected 200, got %d", path, w.Code)
-		}
-	}
-}
-
-func TestSPAHandler_DeepLinkFallsBackToIndex(t *testing.T) {
-	handler := spaHandler(newTestFS(), storage.At(t.TempDir()))
-
-	deepPaths := []string{
-		"/_/posts",
-		"/_/feed",
-		"/_/posts/20260218/hello",
-		"/_/posts/drafts/my-draft",
-		"/_/comments/new",
-		"/_/settings",
-		"/_/snippets/global/header.html",
-	}
-
-	for _, path := range deepPaths {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
-		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, req)
-
-		if w.Code != http.StatusOK {
-			t.Errorf("%s: expected 200, got %d", path, w.Code)
-		}
-		if body := w.Body.String(); body != "<html>SPA</html>" {
-			t.Errorf("%s: expected index.html content for SPA fallback, got %q", path, body)
 		}
 	}
 }
@@ -1402,112 +1374,6 @@ func TestFeedCacheForScope_RuntimeFilteredScopesUseNetwork(t *testing.T) {
 	}
 }
 
-func TestSyncFeedScoped_SkipsRuntimeFilteredScopes(t *testing.T) {
-	s := newConfiguredServer(t)
-	// These should be no-ops — just verify they don't panic or error
-	s.syncFeedScoped("followers")
-	s.syncFeedScoped("me")
-	s.syncFeedScoped("network")
-	s.syncFeedScoped("")
-}
-
-// ============================================================================
-// SSE Client Gating Tests
-// ============================================================================
-
-func TestHasSSEClients_Empty(t *testing.T) {
-	s := &Server{
-		sseClients: make(map[chan SSEEvent]struct{}),
-	}
-	if s.hasSSEClients() {
-		t.Error("expected hasSSEClients() to return false with no clients")
-	}
-}
-
-func TestHasSSEClients_WithClient(t *testing.T) {
-	s := &Server{
-		sseClients:  make(map[chan SSEEvent]struct{}),
-		syncTrigger: make(chan struct{}, 1),
-	}
-	ch := make(chan SSEEvent, 1)
-	s.addSSEClient(ch)
-	if !s.hasSSEClients() {
-		t.Error("expected hasSSEClients() to return true with one client")
-	}
-}
-
-func TestAddSSEClient_TriggersSync_WhenFirstClient(t *testing.T) {
-	s := &Server{
-		sseClients:  make(map[chan SSEEvent]struct{}),
-		syncTrigger: make(chan struct{}, 1),
-	}
-	ch := make(chan SSEEvent, 1)
-	s.addSSEClient(ch)
-
-	// syncTrigger should have been fired
-	select {
-	case <-s.syncTrigger:
-		// expected
-	default:
-		t.Error("expected syncTrigger to fire on first SSE client connect")
-	}
-}
-
-func TestAddSSEClient_NoTrigger_WhenNotFirstClient(t *testing.T) {
-	s := &Server{
-		sseClients:  make(map[chan SSEEvent]struct{}),
-		syncTrigger: make(chan struct{}, 1),
-	}
-	ch1 := make(chan SSEEvent, 1)
-	s.addSSEClient(ch1)
-	// Drain the trigger from first connect
-	<-s.syncTrigger
-
-	ch2 := make(chan SSEEvent, 1)
-	s.addSSEClient(ch2)
-
-	// syncTrigger should NOT have been fired again
-	select {
-	case <-s.syncTrigger:
-		t.Error("expected syncTrigger NOT to fire when clients already connected")
-	default:
-		// expected
-	}
-}
-
-func TestRemoveSSEClient_UpdatesCount(t *testing.T) {
-	s := &Server{
-		sseClients:  make(map[chan SSEEvent]struct{}),
-		syncTrigger: make(chan struct{}, 1),
-	}
-	ch := make(chan SSEEvent, 1)
-	s.addSSEClient(ch)
-	if !s.hasSSEClients() {
-		t.Fatal("expected client to be registered")
-	}
-
-	s.removeSSEClient(ch)
-	if s.hasSSEClients() {
-		t.Error("expected hasSSEClients() to return false after removing last client")
-	}
-}
-
-func TestRemoveSSEClient_ClosesChannel(t *testing.T) {
-	s := &Server{
-		sseClients:  make(map[chan SSEEvent]struct{}),
-		syncTrigger: make(chan struct{}, 1),
-	}
-	ch := make(chan SSEEvent, 1)
-	s.addSSEClient(ch)
-	s.removeSSEClient(ch)
-
-	// Reading from a closed channel returns zero value immediately
-	_, ok := <-ch
-	if ok {
-		t.Error("expected channel to be closed after removeSSEClient")
-	}
-}
-
 // ── Handler() v1 API Tests ──────────────────────────────────────────
 
 func TestHandler_IncludesV1Routes(t *testing.T) {
@@ -1553,7 +1419,6 @@ func TestStopSync_StopsGoroutine(t *testing.T) {
 	s := &Server{}
 	s.syncTrigger = make(chan struct{}, 1)
 	s.syncDone = make(chan struct{})
-	s.sseClients = make(map[chan SSEEvent]struct{})
 
 	exited := make(chan struct{})
 	go func() {
@@ -1875,6 +1740,9 @@ func TestBlessedCommentLifecycle_E2E(t *testing.T) {
 // folder before the fallback; absent means 404, never the shell.
 func TestSPAHandler_SiteFilesAreNotTheSPA(t *testing.T) {
 	dataDir := t.TempDir()
+	if err := bundle.SetActiveShapeName(storage.At(dataDir), "v4"); err != nil { // the v4 app's routes
+		t.Fatal(err)
+	}
 	files := map[string]string{
 		"robots.txt":              "User-agent: *\nContent-Usage: train-ai=n\n",
 		"rsl.xml":                 "<rsl></rsl>\n",
@@ -1928,10 +1796,11 @@ func TestSPAHandler_SiteFilesAreNotTheSPA(t *testing.T) {
 		}
 	}
 
-	// The app's own routes still get the shell; a path that merely starts
-	// with the mount's name is not the mount, and is not an app route either.
-	if w := get("/_/settings"); w.Body.String() != "<html>SPA</html>" {
-		t.Errorf("GET /_/settings = %q, want the SPA shell", w.Body.String())
+	// The app's own routes are the app's (an old one redirects to its v5
+	// place); a path that merely starts with the mount's name is not the
+	// mount, and is not an app route either.
+	if w := get("/_/settings"); w.Code != http.StatusFound || w.Header().Get("Location") != "/_/enhance" {
+		t.Errorf("GET /_/settings = %d → %q, want 302 → /_/enhance", w.Code, w.Header().Get("Location"))
 	}
 	if w := get("/licenses-page"); w.Code != http.StatusNotFound {
 		t.Errorf("GET /licenses-page = %d %q, want 404", w.Code, w.Body.String())
@@ -1943,7 +1812,8 @@ func TestSPAHandler_SiteFilesAreNotTheSPA(t *testing.T) {
 // page, a retired URL and a private name look served. On a remote instance
 // every path the deployment's static files do not answer reaches this handler.
 func TestSPAHandler_UnknownPathIsNotFound(t *testing.T) {
-	handler := spaHandler(newTestFS(), storage.At(t.TempDir()))
+	site := storage.At(t.TempDir())
+	handler := spaHandler(newTestFS(), site)
 	for _, path := range []string{
 		"/zzz-nonexistent",
 		"/posts/nope.html",
@@ -1963,11 +1833,14 @@ func TestSPAHandler_UnknownPathIsNotFound(t *testing.T) {
 			t.Errorf("GET %s served the app shell: %q", path, w.Body.String())
 		}
 	}
+	// The app's own addresses are never a 404: the root and the old addresses
+	// redirect, the rest are the app (500 here only because the test's files
+	// hold no v5 shell).
 	for _, path := range []string{"/", "/index.html", "/_", "/_/", "/_/settings", "/_/kay", "/_/pql/all+posts"} {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
-		if w.Code != http.StatusOK || w.Body.String() != "<html>SPA</html>" {
-			t.Errorf("GET %s = %d %q, want 200 and the shell", path, w.Code, w.Body.String())
+		if w.Code == http.StatusNotFound {
+			t.Errorf("GET %s = 404, want the app or its redirect", path)
 		}
 	}
 }

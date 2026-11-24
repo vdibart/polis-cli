@@ -169,7 +169,7 @@ func rebuildCommentsIndex(site storage.Site, opts RebuildOptions) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		if err := os.MkdirAll(commentDir, 0755); err != nil {
+		if err := os.MkdirAll(commentDir, 0755); err != nil { //nolint:gosec // G301: content/, the public tree a web server reads
 			return 0, err
 		}
 	}

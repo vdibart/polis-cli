@@ -544,81 +544,6 @@ func releaseStub(s *Server, api *fakeDeployAPI, version string, fetched *[]strin
 	}
 }
 
-func deployedFunctionSHA(api *fakeDeployAPI, i int) string {
-	api.mu.Lock()
-	defer api.mu.Unlock()
-	for _, f := range api.deployed[i] {
-		if strings.HasSuffix(f.File, "/bootstrap") {
-			return f.SHA
-		}
-	}
-	return ""
-}
-
-func applyRelease(t *testing.T, s *Server, version string) (int, map[string]any) {
-	t.Helper()
-	w := httptest.NewRecorder()
-	s.handleDeployApply(w, httptest.NewRequest(http.MethodPost, "/api/deploy/apply", strings.NewReader(`{"version":"`+version+`"}`)))
-	var out map[string]any
-	_ = json.Unmarshal(w.Body.Bytes(), &out)
-	return w.Code, out
-}
-
-// ⭐⭐ The owner applies a release: it is deployed with the current pages, and
-// every later publish keeps deploying it.
-func TestAnAppliedReleaseIsDeployedAndKept(t *testing.T) {
-	s, h, store, api := vercelRig(t)
-	releaseStub(s, api, "9.9.9", nil)
-	publishPage(t, s)
-	netServe(h, "GET", "/", nil) // the dev build's function
-	devSHA := deployedFunctionSHA(api, 0)
-
-	code, out := applyRelease(t, s, "9.9.9")
-	if code != http.StatusOK || out["applied"] != "9.9.9" || out["deployed"] != true {
-		t.Fatalf("apply: %d %v", code, out)
-	}
-	if len(api.deployed) != 2 || deployedFunctionSHA(api, 1) == devSHA {
-		t.Fatalf("the apply did not deploy the release's function (%d deployments)", len(api.deployed))
-	}
-	names := map[string]bool{}
-	for _, f := range api.deployed[1] {
-		names[f.File] = true
-	}
-	if !names[".vercel/output/static/posts/hello.html"] {
-		t.Error("the apply deployed the function without the site's pages")
-	}
-	publishPage(t, s)
-	netServe(h, "GET", "/", nil)
-	if len(api.deployed) != 3 || deployedFunctionSHA(api, 2) != deployedFunctionSHA(api, 1) {
-		t.Error("⛔ a publish after the apply deployed another function than the one applied")
-	}
-	if st := deployStatusOf(t, s); st["function_version"] != "9.9.9" || st["function_applied"] != true {
-		t.Errorf("status after the apply: %v", st)
-	}
-	if ok, _ := store.Exists(context.Background(), deployFunctionKey); !ok {
-		t.Error("the applied release was not recorded")
-	}
-}
-
-// ⛔ Nothing is recorded for a version that is not a release, or a release
-// whose function cannot be fetched: either would leave every later publish
-// refusing.
-func TestAnApplyThatCannotBeDeployedRecordsNothing(t *testing.T) {
-	s, _, store, api := vercelRig(t)
-	releaseStub(s, api, "9.9.9", nil)
-	for v, want := range map[string]int{"dev-build": http.StatusBadRequest, "": http.StatusBadRequest, "8.8.8": http.StatusBadGateway} {
-		if code, _ := applyRelease(t, s, v); code != want {
-			t.Errorf("apply %q: %d, want %d", v, code, want)
-		}
-	}
-	if ok, _ := store.Exists(context.Background(), deployFunctionKey); ok {
-		t.Error("⛔ a release that cannot be deployed was recorded")
-	}
-	if len(api.deployed) != 0 {
-		t.Error("a refused apply deployed")
-	}
-}
-
 // ⛔ A record that does not name a release refuses the deploy rather than
 // falling back to the instance's own, possibly older, function.
 func TestAnUnreadableAppliedReleaseRefusesTheDeploy(t *testing.T) {
@@ -631,18 +556,6 @@ func TestAnUnreadableAppliedReleaseRefusesTheDeploy(t *testing.T) {
 	}
 	if dirtyMarks(t, store) == 0 {
 		t.Error("the refused deploy dropped its write")
-	}
-}
-
-// ⛔ Applying is the owner's alone, and means nothing off Vercel.
-func TestApplyIsOwnerOnlyAndOnlyOnVercel(t *testing.T) {
-	_, h, _, _ := vercelRig(t)
-	if w := netServe(h, "POST", "/api/deploy/apply", map[string]string{"Content-Type": "application/json"}); w.Code != http.StatusUnauthorized && w.Code != http.StatusForbidden {
-		t.Errorf("apply with no session: %d", w.Code)
-	}
-	off, _ := newTestNetworkHandler(t, storage.Backend{Store: storage.NewObjectStore("")}, networkEnv(nil))
-	if code, _ := applyRelease(t, off, "9.9.9"); code != http.StatusConflict {
-		t.Errorf("apply off Vercel: %d", code)
 	}
 }
 
@@ -676,46 +589,6 @@ func TestAPublishLogsWhereItsTimeWent(t *testing.T) {
 	}
 	if strings.Contains(out, "prj-token") {
 		t.Error("the log carries the deploy token")
-	}
-}
-
-// ⛔ A release's function is pinned on first use: once the instance accepted a
-// manifest for a version, a different one for that version (replaced release
-// assets) is refused, at apply and at every later publish.
-func TestAReplacedReleaseFunctionIsRefused(t *testing.T) {
-	s, h, store, api := vercelRig(t)
-	releaseStub(s, api, "9.9.9", nil)
-	if code, out := applyRelease(t, s, "9.9.9"); code != http.StatusOK {
-		t.Fatalf("apply: %d %v", code, out)
-	}
-	if ok, _ := store.Exists(context.Background(), functionPinPrefix+"9.9.9"); !ok {
-		t.Fatal("applying did not pin the release's function")
-	}
-	deploys := len(api.deployed)
-
-	// The same version's assets are swapped for a matching pair.
-	good := s.releaseFunctionFor
-	s.releaseFunctionFor = func(ctx context.Context, v string) (provision.FunctionManifest, func(context.Context, provision.DeployFile) ([]byte, error), error) {
-		m, src, err := good(ctx, v)
-		m.Files = append([]provision.DeployFile(nil), m.Files...)
-		m.Files[2].SHA = strings.Repeat("e", 40)
-		return m, src, err
-	}
-	publishPage(t, s)
-	netServe(h, "GET", "/", nil)
-	if len(api.deployed) != deploys {
-		t.Fatal("⛔ a publish deployed a replaced release's function")
-	}
-	if code, out := applyRelease(t, s, "9.9.9"); code == http.StatusOK {
-		t.Fatalf("⛔ re-applying a replaced release was accepted: %v", out)
-	}
-
-	// The genuine assets still deploy.
-	s.releaseFunctionFor = good
-	publishPage(t, s)
-	netServe(h, "GET", "/", nil)
-	if len(api.deployed) != deploys+1 {
-		t.Errorf("the genuine release no longer deploys (%d deployments, want %d)", len(api.deployed), deploys+1)
 	}
 }
 

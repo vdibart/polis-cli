@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -244,6 +245,10 @@ type ContentRegisterRequest struct {
 	Author    string                 `json:"author"`
 	Metadata  map[string]interface{} `json:"metadata"`
 	Signature string                 `json:"signature"`
+	// A user agent's marker; set both or neither, and sign with
+	// MakeContentCanonicalJSONMarked over the same marker.
+	Agent string `json:"agent,omitempty"`
+	Grant string `json:"grant,omitempty"`
 }
 
 // ContentRegisterResponse is the response from content-register.
@@ -271,6 +276,9 @@ type ContentUnregisterRequest struct {
 	URL       string `json:"url"`
 	Timestamp string `json:"timestamp"`
 	Signature string `json:"signature"`
+	// A user agent's marker, signed with MakeContentUnregisterCanonicalJSONMarked.
+	Agent string `json:"agent,omitempty"`
+	Grant string `json:"grant,omitempty"`
 }
 
 // ContentCheckResponse is the response from content-check.
@@ -351,6 +359,39 @@ type AgentMarker struct {
 }
 
 func (m AgentMarker) empty() bool { return m.Agent == "" && m.Grant == "" }
+
+var (
+	markerAgentRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$`)
+	// markerAgentWord: a letter somewhere, so YAML reads a string, not a number.
+	markerAgentWord = regexp.MustCompile(`[A-Za-z]`)
+	markerYAMLWords = map[string]bool{"null": true, "true": true, "false": true, "yes": true, "no": true, "on": true, "off": true, "y": true, "n": true}
+	markerGrantRe   = regexp.MustCompile(`^https?://[A-Za-z0-9._~:/?\[\]@!$&()*+;=%-]+$`)
+)
+
+// FrontmatterYAML is the marker as top-level frontmatter lines for a signed
+// post or comment ("\nagent: …\ngrant: …"), or "" for the zero marker.
+//
+// ⛔ It is spliced into the frontmatter BEFORE signing, so both lines are inside
+// the signature (a markdown signing base drops only a type's unsigned fields).
+// ⛔ The values are written raw: an agent name or grant URL that would need
+// YAML quoting is refused rather than escaped, so what is signed is exactly
+// what a reader parses.
+func (m AgentMarker) FrontmatterYAML() (string, error) {
+	if m.empty() {
+		return "", nil
+	}
+	if err := m.check(); err != nil {
+		return "", err
+	}
+	if !markerAgentRe.MatchString(m.Agent) || strings.TrimSpace(m.Agent) != m.Agent || !markerAgentWord.MatchString(m.Agent) ||
+		markerYAMLWords[strings.ToLower(m.Agent)] {
+		return "", fmt.Errorf("agent name %q is not safe in frontmatter; refused", m.Agent)
+	}
+	if !markerGrantRe.MatchString(m.Grant) {
+		return "", fmt.Errorf("marker grant %q is not a plain https URL; refused", m.Grant)
+	}
+	return "\nagent: " + m.Agent + "\ngrant: " + m.Grant, nil
+}
 
 func (m AgentMarker) check() error {
 	if (m.Agent == "") != (m.Grant == "") {
@@ -458,6 +499,16 @@ func (c *Client) RegisterContent(req *ContentRegisterRequest) (*ContentRegisterR
 // used when building the canonical for `signature`. DS rejects
 // timestamps further than ±5min from server clock.
 func (c *Client) UnregisterContent(contentType, contentURL, timestamp, signature string) error {
+	return c.UnregisterContentMarked(contentType, contentURL, timestamp, signature, AgentMarker{})
+}
+
+// UnregisterContentMarked is UnregisterContent for an act a user agent caused: the marker
+// rides in the request, and signature must be over
+// MakeContentUnregisterCanonicalJSONMarked with the same marker.
+func (c *Client) UnregisterContentMarked(contentType, contentURL, timestamp, signature string, marker AgentMarker) error {
+	if err := marker.check(); err != nil {
+		return err
+	}
 	endpoint := c.BaseURL + "/v1/content/unregister"
 
 	req := ContentUnregisterRequest{
@@ -465,6 +516,8 @@ func (c *Client) UnregisterContent(contentType, contentURL, timestamp, signature
 		URL:       contentURL,
 		Timestamp: timestamp,
 		Signature: signature,
+		Agent:     marker.Agent,
+		Grant:     marker.Grant,
 	}
 
 	body, err := json.Marshal(req)
@@ -500,6 +553,16 @@ func (c *Client) UnregisterContent(contentType, contentURL, timestamp, signature
 // R20-C-F1 (2026-05-18): callers must pass the same `timestamp` they
 // used when building the canonical for `signature`.
 func (c *Client) UnpublishContent(contentType, contentURL, timestamp, signature string) error {
+	return c.UnpublishContentMarked(contentType, contentURL, timestamp, signature, AgentMarker{})
+}
+
+// UnpublishContentMarked is UnpublishContent for an act a user agent caused: the marker
+// rides in the request, and signature must be over
+// MakeContentUnregisterCanonicalJSONMarked with the same marker.
+func (c *Client) UnpublishContentMarked(contentType, contentURL, timestamp, signature string, marker AgentMarker) error {
+	if err := marker.check(); err != nil {
+		return err
+	}
 	endpoint := c.BaseURL + "/v1/content/unpublish"
 
 	req := ContentUnregisterRequest{
@@ -507,6 +570,8 @@ func (c *Client) UnpublishContent(contentType, contentURL, timestamp, signature 
 		URL:       contentURL,
 		Timestamp: timestamp,
 		Signature: signature,
+		Agent:     marker.Agent,
+		Grant:     marker.Grant,
 	}
 
 	body, err := json.Marshal(req)
@@ -1018,6 +1083,10 @@ type contentCanonicalPayload struct {
 	Version  string                 `json:"version"`
 	Author   string                 `json:"author"`
 	Metadata map[string]interface{} `json:"metadata"`
+	// A user agent's marker, after the five fields and only when present
+	// (delegation.md §7): an unmarked payload's bytes never moved.
+	Agent string `json:"agent,omitempty"`
+	Grant string `json:"grant,omitempty"`
 }
 
 // relationshipCanonicalPayload is the canonical payload for relationship update signing.
@@ -1042,12 +1111,26 @@ type relationshipCanonicalPayload struct {
 
 // MakeContentCanonicalJSON creates canonical JSON for content registration signing.
 func MakeContentCanonicalJSON(contentType, contentURL, version, author string, metadata map[string]interface{}) ([]byte, error) {
+	return MakeContentCanonicalJSONMarked(contentType, contentURL, version, author, metadata, AgentMarker{})
+}
+
+// MakeContentCanonicalJSONMarked is MakeContentCanonicalJSON for a registration
+// a user agent caused: the marker is appended after the five fields (DS
+// contentRegisterCanonical). ⚠️ A discovery service that predates the marker
+// rebuilds the five fields and refuses a marked request (401): the DS ships
+// first.
+func MakeContentCanonicalJSONMarked(contentType, contentURL, version, author string, metadata map[string]interface{}, marker AgentMarker) ([]byte, error) {
+	if err := marker.check(); err != nil {
+		return nil, err
+	}
 	return marshalCanonical(contentCanonicalPayload{
 		Type:     contentType,
 		URL:      contentURL,
 		Version:  version,
 		Author:   author,
 		Metadata: metadata,
+		Agent:    marker.Agent,
+		Grant:    marker.Grant,
 	})
 }
 
@@ -1057,14 +1140,29 @@ func MakeContentCanonicalJSON(contentType, contentURL, version, author string, m
 //
 // R20-C-F1 (2026-05-18): timestamp added for replay defense.
 func MakeContentUnregisterCanonicalJSON(contentType, contentURL, timestamp string) string {
+	return MakeContentUnregisterCanonicalJSONMarked(contentType, contentURL, timestamp, AgentMarker{})
+}
+
+// MakeContentUnregisterCanonicalJSONMarked is the unregister/unpublish
+// canonical with a user agent's marker appended, agent then grant, only when
+// present (DS buildContentUnregisterCanonicalJSON). A half marker yields ""
+// (callers check the marker first; the DS refuses one).
+func MakeContentUnregisterCanonicalJSONMarked(contentType, contentURL, timestamp string, marker AgentMarker) string {
+	if marker.check() != nil {
+		return ""
+	}
 	b, _ := marshalCanonical(struct {
 		Type      string `json:"type"`
 		URL       string `json:"url"`
 		Timestamp string `json:"timestamp"`
+		Agent     string `json:"agent,omitempty"`
+		Grant     string `json:"grant,omitempty"`
 	}{
 		Type:      contentType,
 		URL:       contentURL,
 		Timestamp: timestamp,
+		Agent:     marker.Agent,
+		Grant:     marker.Grant,
 	})
 	return string(b)
 }
@@ -1073,6 +1171,12 @@ func MakeContentUnregisterCanonicalJSON(contentType, contentURL, timestamp strin
 // content unpublish signing. Same shape as unregister: {type, url, timestamp}.
 func MakeContentUnpublishCanonicalJSON(contentType, contentURL, timestamp string) string {
 	return MakeContentUnregisterCanonicalJSON(contentType, contentURL, timestamp)
+}
+
+// MakeContentUnpublishCanonicalJSONMarked is MakeContentUnpublishCanonicalJSON
+// with a user agent's marker.
+func MakeContentUnpublishCanonicalJSONMarked(contentType, contentURL, timestamp string, marker AgentMarker) string {
+	return MakeContentUnregisterCanonicalJSONMarked(contentType, contentURL, timestamp, marker)
 }
 
 // ============================================================================
@@ -1467,10 +1571,10 @@ func unmarshalJSONBField(raw json.RawMessage) map[string]interface{} {
 		// Double-encoded string — unquote then parse
 		var s string
 		if err := json.Unmarshal(raw, &s); err == nil {
-			json.Unmarshal([]byte(s), &result)
+			_ = json.Unmarshal([]byte(s), &result) // tolerant: an unparseable body leaves result nil, handled below
 		}
 	} else {
-		json.Unmarshal(raw, &result)
+		_ = json.Unmarshal(raw, &result) // tolerant: an unparseable body leaves result nil, handled below
 	}
 	if result == nil {
 		return map[string]interface{}{}

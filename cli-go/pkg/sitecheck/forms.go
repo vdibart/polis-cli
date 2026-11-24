@@ -51,6 +51,8 @@ var formParity = map[string]formReach{
 	"bundle.json":     {local: true, remote: true},
 	"bundle.registry": {local: true, why: "the bundle registry is private state, never served over HTTP"},
 
+	"agents.acts": {local: true, why: "an agent's writes are checked against the site's act log, which is private and never served"},
+
 	// Both forms check every indexed entry; only a directory can also see a
 	// phantom (HTTP does not list directories), and the remote detail says so.
 	"index.consistency": {local: true, remote: true},

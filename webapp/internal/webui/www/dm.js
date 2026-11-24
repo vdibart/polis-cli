@@ -20,7 +20,8 @@
   // the password + recovery KEKs over fresh salts, and wraps the DEK under both. Returns
   // the server payload (wrapped blobs + KDF params + epoch pubkey — no secrets), the
   // recovery phrase to display ONCE, and the in-memory DEK for immediate unlock. Pure
-  // crypto; no network — so it's unit-testable and the fetch stays in setPassword().
+  // crypto; no network — so it's unit-testable. The owner app sends the payload to the
+  // site's API (www/v5/msgkey.js: /v1/messages/password and /v1/messages/password/change).
   async function buildSetPasswordPayload(password) {
     const kp = globalThis.nacl.box.keyPair(); // publicKey (X25519 pub), secretKey (= DEK)
     const dek = kp.secretKey;
@@ -42,25 +43,6 @@
       recovery_kdf: recoveryKdf,
     };
     return { payload, recoveryPhrase, dek };
-  }
-
-  // setPassword runs the bootstrap→epoch-1 upgrade end to end: build the payload, POST it,
-  // and unlock the new epoch in this session. Returns { epochId, recoveryPhrase } — the
-  // caller must display the phrase once and then drop it.
-  async function setPassword(password) {
-    const { payload, recoveryPhrase, dek } = await buildSetPasswordPayload(password);
-    const resp = await fetch('/api/dm/password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify(payload),
-    });
-    if (!resp.ok) {
-      throw new Error('set password failed (HTTP ' + resp.status + '): ' + (await resp.text()).trim());
-    }
-    const { epoch_id } = await resp.json();
-    S().unlock(epoch_id, dek); // immediately usable this session
-    return { epochId: epoch_id, recoveryPhrase };
   }
 
   // buildRewrapPasswordPayload re-wraps the CURRENT epoch DEK under a NEW password
@@ -86,37 +68,8 @@
     };
   }
 
-  async function postRewrap(payload) {
-    const resp = await fetch('/api/dm/password/rewrap', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify(payload),
-    });
-    if (!resp.ok) {
-      throw new Error('rewrap failed (HTTP ' + resp.status + '): ' + (await resp.text()).trim());
-    }
-    return resp.json();
-  }
-
-  // changePassword re-wraps the unlocked current-epoch DEK under a new password and
-  // uploads it (recovery wrap untouched). dek is the in-session Uint8Array.
-  async function changePassword(newPassword, dek) {
-    await postRewrap(await buildRewrapPasswordPayload(newPassword, dek));
-  }
-
-  // regenerateRecovery mints a new recovery phrase, re-wraps the DEK under it, uploads
-  // it (password wrap untouched), and returns { recoveryPhrase } to display once. The
-  // OLD phrase stops working the moment this lands.
-  async function regenerateRecovery(dek) {
-    const { payload, recoveryPhrase } = await buildRegenRecoveryPayload(dek);
-    await postRewrap(payload);
-    return { recoveryPhrase };
-  }
-
   globalThis.PolisDM = {
-    buildSetPasswordPayload, setPassword,
-    buildRewrapPasswordPayload, buildRegenRecoveryPayload, changePassword, regenerateRecovery,
+    buildSetPasswordPayload, buildRewrapPasswordPayload, buildRegenRecoveryPayload,
     ARGON,
   };
 })();

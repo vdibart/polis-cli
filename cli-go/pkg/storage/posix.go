@@ -217,15 +217,15 @@ func putIfAbsent(full string, data []byte, mode fs.FileMode) error {
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // the link, if made, keeps the inode alive
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // the write already failed; that error is the one returned
 		return err
 	}
 	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // the chmod already failed; that error is the one returned
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close() // the sync already failed; that error is the one returned
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -450,7 +450,7 @@ func (p *POSIX) EnsureParent(key string) error {
 	if p.opts.isDeclaredPrivate(parent) {
 		return p.mkdirAllForKey(filepath.Join(p.root, filepath.FromSlash(parent)), parent)
 	}
-	return os.MkdirAll(filepath.Join(p.root, filepath.FromSlash(parent)), 0o755)
+	return os.MkdirAll(filepath.Join(p.root, filepath.FromSlash(parent)), 0o755) //nolint:gosec // G301: the public default; declared-private prefixes take the branch above
 }
 
 // mkdirAllForKey creates dir and its missing ancestors, giving each the mode its

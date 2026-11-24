@@ -1,6 +1,8 @@
 package ops
 
 import (
+	"github.com/vdibart/polis-cli/cli-go/pkg/apidesc"
+
 	"context"
 	"sort"
 	"strings"
@@ -14,7 +16,7 @@ import (
 // Handle, or neither.
 var candidateActions = []string{
 	"list", "get", "create", "update", "delete", "render",
-	"draft.list", "draft.get", "draft.save", "draft.delete",
+	"draft.list", "draft.get", "draft.save", "draft.delete", "save_draft", "discard_draft",
 	"bless", "deny", "revoke", "sync",
 	"apply", "remove",
 	"send", "deliver", "protection_status", "mark_read", "retry",
@@ -85,5 +87,41 @@ func TestDispatchThemeGetByID(t *testing.T) {
 	}
 	if result.Data["name"] != "vice" {
 		t.Errorf("name = %v, want vice", result.Data["name"])
+	}
+}
+
+// ⭐ Every core operation is described in words an agent can choose from, and
+// is marked: who may call it, whether it writes, whether it signs. Owner-only
+// operations are reachable only with the owner's full-access token.
+func TestCoreOperationsAreDescribed(t *testing.T) {
+	seen := map[string]bool{}
+	for _, op := range NewBuiltinCoreHandler().Operations() {
+		id := op.ID()
+		if seen[id] {
+			t.Errorf("%s is declared twice", id)
+		}
+		seen[id] = true
+		if len(op.Summary) < 10 || len(op.Description) < 40 {
+			t.Errorf("%s: summary and description must say what it does", id)
+		}
+		if op.Method == "" || !strings.HasPrefix(op.Path, "/v1/") || op.Auth == "" {
+			t.Errorf("%s: needs a method, a /v1 path and an auth mark", id)
+		}
+		if op.Auth == apidesc.AuthOwner && !apidesc.KnownScope(op.Scope) {
+			t.Errorf("%s: an owner operation names a scope from the vocabulary, not %q", id, op.Scope)
+		}
+		if op.Type == "pub.polis.dm" && op.Auth == apidesc.AuthOwner && op.Scope != apidesc.ScopeFull {
+			t.Errorf("%s: messages are the owner's alone in this version; no agent scope reaches them", id)
+		}
+		if op.OwnerOnly && (op.Auth != apidesc.AuthOwner || op.Scope != apidesc.ScopeFull) {
+			t.Errorf("%s: owner-only but reachable without the owner's full token", id)
+		}
+		if op.Auth == apidesc.AuthPublic && op.Write {
+			t.Errorf("%s: a public operation must not write", id)
+		}
+		// dm.retry is a POST that only reads: it lists undelivered messages.
+		if op.Method != "GET" && !op.Write && op.Auth != apidesc.AuthSiteSigned && id != "dm.retry" {
+			t.Errorf("%s: %s but not marked as a write", id, op.Method)
+		}
 	}
 }

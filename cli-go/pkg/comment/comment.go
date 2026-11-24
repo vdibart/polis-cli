@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"io/fs"
 	pathpkg "path"
 	"regexp"
@@ -69,6 +70,11 @@ type CommentDraft struct {
 	Content   string `json:"content"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at,omitempty"`
+	// Agent and Grant are the marker of a user agent writing this comment under
+	// the owner's grant. ⛔ Both or neither; SignComment puts them inside the
+	// signature. Empty for the owner's own comment.
+	Agent string `json:"agent,omitempty"`
+	Grant string `json:"grant,omitempty"`
 }
 
 // CommentMeta represents metadata for a signed comment.
@@ -267,7 +273,7 @@ func SignComment(site storage.Site, draft *CommentDraft, authorIdentity, siteURL
 		// Refused BEFORE the uniqueness probe below, which stats the id as a path.
 		return nil, err
 	}
-	commentID = ensureUniqueCommentID(site, commentID)
+	commentID = ensureUniqueCommentID(site, commentID, draft.ID)
 	dateDir := timestamp.Format("20060102")
 	// Canonical source-path URL (content/pub.polis.core/comment/...), matching
 	// where PublishComment writes the signed .md — so the comment self-declares
@@ -307,6 +313,13 @@ func SignComment(site storage.Site, draft *CommentDraft, authorIdentity, siteURL
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve licence terms: %w", err)
 	}
+	// ⛔ The marker rides in the licence's spliced block, so it is in both the
+	// signing base and the final file, inside the signature.
+	markerYAML, err := discovery.AgentMarker{Agent: draft.Agent, Grant: draft.Grant}.FrontmatterYAML()
+	if err != nil {
+		return nil, err
+	}
+	licenseYAML += markerYAML
 
 	// Build CLI-compatible frontmatter (without signature first)
 	// CLI format uses nested in-reply-to with url and root-post
@@ -1200,14 +1213,23 @@ func unquoteYAMLTitle(s string) string {
 }
 
 // ensureUniqueCommentID checks for comment ID collisions across all status directories.
-// Appends -2, -3, etc. if a collision is found.
-func ensureUniqueCommentID(site storage.Site, commentID string) string {
+// Appends -2, -3, etc. if a collision is found. ownDraft names the draft being
+// signed or saved, whose own file is not a collision: without it, signing a
+// draft always produced "<id>-2", because the draft it was signing was there.
+func ensureUniqueCommentID(site storage.Site, commentID string, ownDraft ...string) string {
+	own := ""
+	if len(ownDraft) > 0 {
+		own = ownDraft[0]
+	}
 	candidate := commentID
 	suffix := 2
 	for {
 		collision := false
 		// Check all private status dirs
 		for _, status := range []string{StatusDrafts, StatusPending, StatusDenied} {
+			if status == StatusDrafts && own != "" && candidate == own {
+				continue
+			}
 			key := commentDirKey(status) + "/" + candidate + ".md"
 			if _, err := site.Store().Stat(context.Background(), key); err == nil {
 				collision = true

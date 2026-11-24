@@ -6,7 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // G505: SHA-1 is what Vercel's file-upload API names files by; not used for integrity or signing
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -146,7 +146,7 @@ func buildOutputFiles(code Code) ([]uploadFile, error) {
 		if !ok {
 			return nil, fmt.Errorf("provision: the build has no %s", name)
 		}
-		sum := sha1.Sum(data)
+		sum := sha1.Sum(data) //nolint:gosec // G401: SHA-1 is what Vercel's file-upload API names files by; not used for integrity or signing
 		files = append(files, uploadFile{
 			name: ".vercel/output/" + name, data: data, mode: allowed[name], sha: hex.EncodeToString(sum[:]),
 		})
@@ -234,7 +234,7 @@ func readArchive(code Code) (map[string][]byte, error) {
 				return nil, fmt.Errorf("provision: read %s from the build archive: %w", f.Name, err)
 			}
 			err = add(f.Name, rc)
-			rc.Close()
+			_ = rc.Close() // read side
 			if err != nil {
 				return nil, err
 			}
@@ -314,7 +314,7 @@ func ArchiveBuildOutput(dir string) (Code, error) {
 		if err != nil {
 			return err
 		}
-		data, err := os.ReadFile(p)
+		data, err := os.ReadFile(p) //nolint:gosec // G304: a file this walk found in the build directory
 		if err != nil {
 			return err
 		}
@@ -370,7 +370,7 @@ func ArchiveFunctionBuild(dir string) (Code, error) {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("provision: %s is not a regular file", p)
 		}
-		data, err := os.ReadFile(p)
+		data, err := os.ReadFile(p) //nolint:gosec // G304: a regular file in the build directory, checked above
 		if err != nil {
 			return err
 		}

@@ -41,6 +41,10 @@ const (
 	// GrantKeyBehaviours is REQUIRED: a versioned behaviour set, "<name>/<n>".
 	// The provider documents what each set means.
 	GrantKeyBehaviours = "behaviours"
+	// GrantKeyScopes is OPTIONAL: what an agent connected to the API may do,
+	// as space-separated scope names from the API's vocabulary. A grant for a
+	// behaviour set that names no scopes (rosie/1) has none.
+	GrantKeyScopes = "scopes"
 )
 
 var behavioursRe = regexp.MustCompile(`^([a-z0-9][a-z0-9-]*)/([1-9][0-9]*)$`)
@@ -183,6 +187,15 @@ type LiveGrant struct {
 	set     string
 	version int
 	basis   string
+	scopes  []string
+}
+
+// Scopes is what the grant lets the agent do over the API, from its payload.
+func (g *LiveGrant) Scopes() []string {
+	if g == nil {
+		return nil
+	}
+	return append([]string(nil), g.scopes...)
 }
 
 // Valid reports whether g was produced by the resolver. Nil-safe.
@@ -245,5 +258,38 @@ func ResolveLiveGrant(site storage.Site, agent, set string, minVersion int) (*Li
 	if best == nil {
 		return nil, nil
 	}
-	return &LiveGrant{url: best.URL, agent: best.Agent, set: best.Set, version: best.Version, basis: best.Basis}, nil
+	return liveFrom(best), nil
+}
+
+func liveFrom(g *GrantEntry) *LiveGrant {
+	return &LiveGrant{url: g.URL, agent: g.Agent, set: g.Set, version: g.Version, basis: g.Basis,
+		scopes: strings.Fields(g.Record.Payload[GrantKeyScopes])}
+}
+
+// ResolveGrant returns the grant at grantURL when it is live for behaviour set
+// `set` at version ≥ minVersion, or nil.
+//
+// ⭐ For an agent that holds a token pointing at one grant (a connection), so
+// it is that grant, not the newest for its name, that must be standing.
+// ⛔ FAIL CLOSED, as ResolveLiveGrant: a record that does not verify, is not
+// self-issued, or is named by any withdrawal reads as no grant.
+func ResolveGrant(site storage.Site, grantURL, set string, minVersion int) (*LiveGrant, error) {
+	if strings.TrimSpace(grantURL) == "" {
+		return nil, nil
+	}
+	grants, err := Grants(site, "")
+	if err != nil {
+		return nil, err
+	}
+	for i := range grants {
+		g := &grants[i]
+		if g.URL != grantURL {
+			continue
+		}
+		if g.Withdrawn || g.Signature != StatusValid || g.Set != set || g.Version < minVersion {
+			return nil, nil
+		}
+		return liveFrom(g), nil
+	}
+	return nil, nil
 }

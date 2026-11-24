@@ -322,7 +322,8 @@ Semantics: [`license.md`](license.md).
 
 Signable fields, in order: **`version`, `following`.**
 Each entry, in order: **`url`, `added_at`, `site_title`, `author_name`** — the last two omitted when
-empty.
+empty — then **`agent`, `grant`**, the agent marker, ⛔ **omitted entirely when absent** (never written
+as `""`).
 
 ⚠️ **`version` is not a version.** It holds the *generator* string. The name is wrong, it is
 published, and it is deliberately left alone.
@@ -338,6 +339,20 @@ An empty roster — note `[]`, not `null`:
 ```
 {"version":"polis-cli-go/0.67.0","following":[]}
 ```
+
+**An entry a user agent added** (a site an agent followed through the API under the owner's grant)
+carries the marker: `agent` is the owner's name for the connection, `grant` the source URL of the grant
+record it acted under ([`delegation.md`](delegation.md)). Only that entry changes; an unmarked entry
+beside it is byte-identical to the vector above, so no signature made before the marker existed stops
+verifying.
+
+```
+{"version":"polis-cli-go/0.67.0","following":[{"url":"https://bob.example","added_at":"2026-08-28T09:15:00Z","site_title":"Bob's Notes","author_name":"Bob"},{"url":"https://carol.example","added_at":"2026-11-23T12:00:00Z","agent":"Claude Desktop","grant":"https://alice.example/content/pub.polis.core/attestation/20261123T120000Z-0123456789abcdef.json"}]}
+```
+
+⚠️ **A verifier that predates these two fields rebuilds the entry without them, so its rebuild fails.**
+Under §6.1 it answers `unknown`, naming `agent` and `grant`, never `invalid`. An unfollow removes an
+entry and so leaves nothing to carry a marker.
 
 Semantics: [`attestation.md#the-signed-follow-file`](attestation.md).
 

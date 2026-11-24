@@ -2131,118 +2131,6 @@ func TestStreamItems_WithPendingBlessingValidation(t *testing.T) {
 	}
 }
 
-// TestClientEvent_FieldSchemaEnforced — step-06/6.f.2 review concern
-// #2. /api/v1/event must filter caller fields through the per-event
-// schema: drop unknown keys, drop non-string values, length-cap
-// strings, and stamp client_origin server-side (not caller-spoofable).
-func TestClientEvent_FieldSchemaEnforced(t *testing.T) {
-	s := newConfiguredServer(t)
-
-	// Mixed payload: 2 valid known string fields, 1 unknown key, 1
-	// non-string value, 1 over-length string, attempted client_origin
-	// spoof.
-	overlong := strings.Repeat("x", clientEventFieldMaxLen+50)
-	body := jsonBody(t, map[string]interface{}{
-		"event": "pub.polis.stream.preset_loaded",
-		"fields": map[string]interface{}{
-			"preset_name":   "gateway",
-			"qualifier":     "new",
-			"unknown_key":   "should be dropped",
-			"type":          map[string]string{"nested": "object should drop"},
-			"scope":         overlong,
-			"client_origin": "evil-attacker", // attempted spoof
-		},
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/event", body)
-	w := httptest.NewRecorder()
-	s.handleClientEvent(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 (validation drops bad fields, doesn't reject the request); got %d (body=%s)", w.Code, w.Body.String())
-	}
-
-	// Direct unit test of the validator for fine-grained assertions.
-	got := validateClientEventFields("pub.polis.stream.preset_loaded", map[string]interface{}{
-		"preset_name":   "gateway",
-		"qualifier":     "new",
-		"unknown_key":   "drop",
-		"type":          map[string]string{"nested": "drop"},
-		"scope":         overlong,
-		"client_origin": "evil",
-	})
-	if got["preset_name"] != "gateway" {
-		t.Errorf("expected preset_name passed through, got %v", got["preset_name"])
-	}
-	if _, ok := got["unknown_key"]; ok {
-		t.Errorf("unknown_key should be dropped, got %v", got["unknown_key"])
-	}
-	if _, ok := got["type"]; ok {
-		t.Errorf("non-string type should be dropped, got %v", got["type"])
-	}
-	scope, _ := got["scope"].(string)
-	if len(scope) != clientEventFieldMaxLen {
-		t.Errorf("scope should be length-capped to %d, got %d", clientEventFieldMaxLen, len(scope))
-	}
-	if _, ok := got["client_origin"]; ok {
-		// Validator drops it; handler then stamps the canonical value.
-		t.Errorf("client_origin from caller should be filtered out (server stamps it), got %v", got["client_origin"])
-	}
-
-	// Event with no schema entry: all fields drop.
-	got2 := validateClientEventFields("pub.polis.stream.unknown", map[string]interface{}{
-		"anything": "everything",
-	})
-	if len(got2) != 0 {
-		t.Errorf("event with no schema should drop all fields, got %v", got2)
-	}
-}
-
-// TestNotificationRulesEndpoint_ReturnsRegistryRules covers the
-// step-06/6.f.2 endpoint that surfaces registry.json's notification
-// rules to the SPA's activity-mode renderer. Asserts the endpoint
-// returns the canonical 8 rule IDs from DefaultRegistry, plus that
-// non-GET methods 405.
-func TestNotificationRulesEndpoint_ReturnsRegistryRules(t *testing.T) {
-	s := newConfiguredServer(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/bundle/notification-rules", nil)
-	w := httptest.NewRecorder()
-	s.handleNotificationRules(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d (body=%s)", w.Code, w.Body.String())
-	}
-	var resp struct {
-		Rules []map[string]interface{} `json:"rules"`
-	}
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	wantIDs := map[string]bool{
-		"new-post": false, "updated-post": false,
-		"new-comment": false, "blessing-requested": false,
-		"blessing-granted": false, "blessing-denied": false,
-		"new-follower": false, "lost-follower": false,
-	}
-	for _, rule := range resp.Rules {
-		id, _ := rule["id"].(string)
-		if _, ok := wantIDs[id]; ok {
-			wantIDs[id] = true
-		}
-	}
-	for id, found := range wantIDs {
-		if !found {
-			t.Errorf("expected rule %q in response", id)
-		}
-	}
-
-	// Wrong method → 405.
-	req = httptest.NewRequest(http.MethodPost, "/api/v1/bundle/notification-rules", nil)
-	w = httptest.NewRecorder()
-	s.handleNotificationRules(w, req)
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("POST should 405, got %d", w.Code)
-	}
-}
-
 // TestStreamItems_ProfilesScopeAliases is the regression test for the
 // step-06/6.e bug (carried forward into 06-profiles): scope aliases must
 // all route to the own-tenant data path. The previous grammar
@@ -2341,8 +2229,8 @@ func TestStreamItems_ProfilesSortByName(t *testing.T) {
 }
 
 // TestStreamItems_ProfilesMyNetworkSearch verifies the &search= filter
-// on the my-network profiles surface. Matching is case-insensitive
-// substring against author_domain (and display_name when set). The
+// on the my-network profiles surface. Matching is case-insensitive, at the
+// start of a word of the handle (and display_name when set): profileMatches. The
 // follow list is small, so server-side filtering happens in memory
 // after buildProfilesList without changing its shared signature.
 func TestStreamItems_ProfilesMyNetworkSearch(t *testing.T) {
@@ -2358,7 +2246,7 @@ func TestStreamItems_ProfilesMyNetworkSearch(t *testing.T) {
 		t.Fatalf("save following: %v", err)
 	}
 
-	// Substring match — "ali" hits alice; case-insensitive.
+	// A word start — "ali" hits alice; case-insensitive.
 	code, resp := streamRequest(t, s, "type=profiles&scope=my-network&search=ALI")
 	if code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (resp=%v)", code, resp)
@@ -2499,54 +2387,6 @@ func TestStreamItems_SortValidation(t *testing.T) {
 	}
 }
 
-// TestClientEvent_AllowlistEnforced — POST /api/v1/event accepts only
-// events listed in allowedClientEvents. step-06/6.e ships
-// pub.polis.stream.preset_loaded; everything else 400s. Prevents the
-// endpoint from becoming a generic log-anything sink.
-func TestClientEvent_AllowlistEnforced(t *testing.T) {
-	s := newConfiguredServer(t)
-
-	// Allowed event → 200.
-	body := jsonBody(t, map[string]interface{}{
-		"event":  "pub.polis.stream.preset_loaded",
-		"fields": map[string]string{"preset_name": "gateway"},
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/event", body)
-	w := httptest.NewRecorder()
-	s.handleClientEvent(w, req)
-	if w.Code != http.StatusOK {
-		t.Errorf("allowed event should 200, got %d (body=%s)", w.Code, w.Body.String())
-	}
-
-	// Disallowed event → 400.
-	body = jsonBody(t, map[string]interface{}{
-		"event":  "pub.polis.evil.exfil",
-		"fields": map[string]string{},
-	})
-	req = httptest.NewRequest(http.MethodPost, "/api/v1/event", body)
-	w = httptest.NewRecorder()
-	s.handleClientEvent(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("disallowed event should 400, got %d", w.Code)
-	}
-
-	// Wrong method → 405.
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/event", nil)
-	w = httptest.NewRecorder()
-	s.handleClientEvent(w, req)
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("GET should 405, got %d", w.Code)
-	}
-
-	// Malformed JSON → 400.
-	req = httptest.NewRequest(http.MethodPost, "/api/v1/event", strings.NewReader("not json"))
-	w = httptest.NewRecorder()
-	s.handleClientEvent(w, req)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("malformed JSON should 400, got %d", w.Code)
-	}
-}
-
 // TestHandleStreamItemsDMThread_LockedShipsBox verifies phase-4.5 server wiring:
 // a password-epoch message the server can't read (it holds no epoch-1 DEK) is
 // returned as locked, WITHOUT leaking plaintext, but WITH the raw wire box
@@ -2654,5 +2494,27 @@ func TestDedupeActivityCommentsAgainstPosts(t *testing.T) {
 	}
 	if !hasPost || !hasOrphan {
 		t.Errorf("post and orphan comment should survive; hasPost=%v hasOrphan=%v", hasPost, hasOrphan)
+	}
+}
+
+// ⭐ The owner's own post or comment says when it was edited (edited, RFC
+// 3339) only when it was republished: from its frontmatter's top-level
+// updated, never a body line or a nested field.
+func TestEditedIsTheRepublishedTimeOnly(t *testing.T) {
+	const pub = "2026-11-18T01:30:38Z"
+	fm := func(lines string) string { return "---\ntitle: x\npublished: " + pub + "\n" + lines + "---\nbody\n" }
+	for name, c := range map[string]struct{ raw, want string }{
+		"republished":       {fm("updated: 2026-11-18T03:31:10Z\n"), "2026-11-18T03:31:10Z"},
+		"never republished": {fm(""), ""},
+		"same moment":       {fm("updated: " + pub + "\n"), ""},
+		"nested, not top":   {fm("license:\n  updated: 2026-11-19T00:00:00Z\n"), ""},
+		"in the body":       {"---\ntitle: x\npublished: " + pub + "\n---\nupdated: 2026-11-19T00:00:00Z\n", ""},
+		"not a time":        {fm("updated: yesterday\n"), ""},
+		"no frontmatter":    {"updated: 2026-11-19T00:00:00Z\n", ""},
+		"a zone, made UTC":  {fm("updated: 2026-11-18T05:31:10+02:00\n"), "2026-11-18T03:31:10Z"},
+	} {
+		if got := editedAt(c.raw, pub); got != c.want {
+			t.Errorf("%s: edited = %q, want %q", name, got, c.want)
+		}
 	}
 }

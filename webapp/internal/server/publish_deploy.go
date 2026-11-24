@@ -2,7 +2,7 @@ package server
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // G505: SHA-1 is what Vercel's file-upload API names files by; not used for integrity or signing
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -36,7 +36,7 @@ const (
 	// the provisioner hands it over through a write-only setting, which the
 	// instance adopts and deletes (adoptDeployToken). ⛔ Under .polis, so it
 	// is never a static file.
-	deployTokenKey = ".polis/deploy/token"
+	deployTokenKey = ".polis/deploy/token" //nolint:gosec // G101: a setting's or path's name, not a credential
 
 	// deployTokenAdoptedKey lists the SHA-256 of every token adopted from the
 	// setting, so a deployment older than a setting's deletion (a rollback)
@@ -376,7 +376,7 @@ func (s *Server) deployMiddleware(next http.Handler) http.Handler {
 			c2, t2 = s.deployStore.snapshot()
 		}
 		ms := func(d time.Duration) time.Duration { return d.Round(time.Millisecond) }
-		log.Printf("[i] timing: %s %s request_id=%s took %s: handler %s (store: %d calls, %s), then deploy %s (store: %d calls, %s)",
+		log.Printf("[i] timing: %s %s request_id=%s took %s: handler %s (store: %d calls, %s), then deploy %s (store: %d calls, %s)", //nolint:gosec // G706: newlines are escaped by server.OneLinePerLogEntry, so a value cannot start a second entry
 			r.Method, r.URL.Path, RequestIDFromContext(r.Context()), ms(end.Sub(start)),
 			ms(sp.handlerDone.Sub(start)), sp.calls-c0, ms(sp.storeTime-t0),
 			ms(after), c2-sp.calls, ms(t2-sp.storeTime))
@@ -643,11 +643,11 @@ func (s *Server) bootstrapSHA(getenv func(string) string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	b, err := os.ReadFile(exe) // NOT the storage interface: the running function's own executable, not a site key
+	b, err := os.ReadFile(exe) //nolint:gosec // G304: NOT the storage interface: the running function's own executable, not a site key
 	if err != nil {
 		return "", err
 	}
-	sum := sha1.Sum(b)
+	sum := sha1.Sum(b) //nolint:gosec // G401: SHA-1 is what Vercel's file-upload API names files by; not used for integrity or signing
 	return hex.EncodeToString(sum[:]), nil
 }
 
@@ -680,66 +680,6 @@ func (s *Server) appliedFunction(ctx context.Context, store storage.Store) (stri
 		return "", fmt.Errorf("deploy: %s does not name a released version; not deploying a function nobody chose", deployFunctionKey)
 	}
 	return a.Version, nil
-}
-
-// handleDeployApply applies a function release: the owner's choice, never
-// automatic. ⭐ POST {"version": "x.y.z"}, owner only (every /api/ route not
-// listed public is). It checks the release publishes a function manifest,
-// records the choice, and deploys it with the current pages through the same
-// queue as a publish.
-func (s *Server) handleDeployApply(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	q := s.deployQueue
-	if q == nil {
-		writeJSONError(w, http.StatusConflict, "this instance does not publish by deploying, so it has no function release to apply")
-		return
-	}
-	var req struct {
-		Version string `json:"version"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid request")
-		return
-	}
-	version := strings.TrimPrefix(strings.TrimSpace(req.Version), "v")
-	if !provision.IsReleasedVersion(version) {
-		writeJSONError(w, http.StatusBadRequest, "version must be a released version, x.y.z")
-		return
-	}
-	ctx := r.Context()
-	// ⭐ Checked before it is recorded: a release with no function manifest
-	// would leave every later publish refusing.
-	store := s.Site().Store()
-	// ⭐ Applying pins the release's function: the owner's choice is the
-	// moment of trust, and every later deploy of it must match.
-	if _, _, err := s.trustedReleaseFunction(ctx, store, version, s.deployGetenv); err != nil {
-		writeJSONError(w, http.StatusBadGateway, "the release's function cannot be fetched: "+err.Error())
-		return
-	}
-	b, _ := json.Marshal(appliedFunction{Version: version, AppliedAt: time.Now().UTC()})
-	if err := store.Put(ctx, deployFunctionKey, b); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "cannot record the applied release")
-		return
-	}
-	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
-	defer cancel()
-	if err := q.MarkDirty(dctx); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "the release is recorded but the deploy could not be queued; it goes with the next publish")
-		return
-	}
-	o := q.Run(dctx)
-	w.Header().Set("Content-Type", "application/json")
-	out := map[string]any{"applied": version, "deployed": o.Deploys > 0 && !o.Behind}
-	if o.Held {
-		out["deployed"] = false
-		out["reason"] = "a deploy is in progress and will carry it"
-	} else if o.Err != nil {
-		out["reason"] = o.Err.Error()
-	}
-	_ = json.NewEncoder(w).Encode(out)
 }
 
 // adoptDeployToken moves a handed-over deploy token from its write-only

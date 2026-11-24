@@ -15,10 +15,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/apidesc"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
-const apiKeysFilename = "api-keys.json"
+const apiKeysFilename = "api-keys.json" //nolint:gosec // G101: a setting's or path's name, not a credential
 
 // ScopeRender is the scope for a site's RENDERED output: its appearance and
 // anything else a render projects, never an authored or signed source. ⭐ It is
@@ -26,8 +27,9 @@ const apiKeysFilename = "api-keys.json"
 // scope there is so far.
 const ScopeRender = "render"
 
-// knownScopes are the scopes a key may be minted with.
-var knownScopes = map[string]bool{ScopeRender: true}
+// knownScope reports whether a key may be minted with a scope: the API's
+// vocabulary (apidesc), whose `render` is appearance's earlier name.
+func knownScope(name string) bool { return name != apidesc.ScopeFull && apidesc.KnownScope(name) }
 
 // APIKey represents a stored API key.
 type APIKey struct {
@@ -40,12 +42,23 @@ type APIKey struct {
 	// ⚠️ So a build older than scopes reads a scoped key as a full one; scoped
 	// keys are only safe on an instance running a build that knows them.
 	Scopes []string `json:"scopes,omitempty"`
-	// Bound is the one path the key works at ("/mcp", "/mcp/c/card"), or ""
+	// Bound is the one path the key works at ("/mcp"), or ""
 	// for anywhere its scopes allow. ⭐ One key per MCP endpoint means a
 	// connection limited to one part of the site cannot be replayed at
 	// another. ⚠️ Like Scopes, a build older than this field ignores it.
 	Bound string `json:"bound,omitempty"`
+	// Grant is the URL of the signed grant this key presents (a personal
+	// token), and GrantID its record id. ⭐ A scoped key with a grant is an
+	// agent's: every write it makes checks the grant is live and is marked with
+	// it. ⛔ A scoped key WITHOUT one (made before grants) may only read until
+	// the owner renews it. ⚠️ A build older than this field ignores it and
+	// treats the key as plainly scoped, unmarked.
+	Grant   string `json:"grant,omitempty"`
+	GrantID string `json:"grant_id,omitempty"`
 }
+
+// PersonalToken reports whether the key presents an agent's grant.
+func (k APIKey) PersonalToken() bool { return k.Grant != "" }
 
 // UsableAt reports whether the key may be used at path.
 func (k APIKey) UsableAt(path string) bool { return k.Bound == "" || k.Bound == path }
@@ -59,8 +72,11 @@ func (k APIKey) Allows(scope string) bool {
 	if k.Unscoped() {
 		return true
 	}
+	if scope == apidesc.ScopeFull {
+		return false
+	}
 	for _, s := range k.Scopes {
-		if s == scope {
+		if apidesc.SameScope(s, scope) {
 			return true
 		}
 	}
@@ -165,7 +181,7 @@ func MintBoundAPIKey(site storage.Site, name string, scopes []string, bound stri
 		return "", APIKey{}, fmt.Errorf("a key needs a name of 1 to 100 characters")
 	}
 	for _, s := range scopes {
-		if !knownScopes[s] {
+		if !knownScope(s) {
 			return "", APIKey{}, fmt.Errorf("unknown scope %q", s)
 		}
 	}
@@ -197,6 +213,68 @@ func MintBoundAPIKey(site storage.Site, name string, scopes []string, bound stri
 		return "", APIKey{}, err
 	}
 	return plaintext, key, nil
+}
+
+// MintPersonalToken mints a scoped key that presents the grant at grantURL
+// (record id grantID). The grant must already be written; the key only
+// points at it.
+func MintPersonalToken(site storage.Site, name string, scopes []string, grantURL, grantID string) (string, APIKey, error) {
+	return MintBoundPersonalToken(site, name, scopes, grantURL, grantID, "")
+}
+
+// MintBoundPersonalToken is MintPersonalToken for a token that works only at
+// one path (an instance's /mcp, which calls /v1 for it in-process).
+func MintBoundPersonalToken(site storage.Site, name string, scopes []string, grantURL, grantID, bound string) (string, APIKey, error) {
+	if grantURL == "" || grantID == "" || len(scopes) == 0 {
+		return "", APIKey{}, fmt.Errorf("a personal token needs its grant and its scopes")
+	}
+	plaintext, key, err := MintBoundAPIKey(site, name, scopes, bound)
+	if err != nil {
+		return "", APIKey{}, err
+	}
+	if err := SetAPIKeyGrant(site, key.ID, scopes, grantURL, grantID); err != nil {
+		_ = RevokeAPIKey(site, key.ID)
+		return "", APIKey{}, err
+	}
+	key.Scopes, key.Grant, key.GrantID = append([]string(nil), scopes...), grantURL, grantID
+	return plaintext, key, nil
+}
+
+// SetAPIKeyGrant records, on the key with id, the grant it presents and the
+// scopes that grant allows (renewing a key made before grants). ⭐ Every other
+// member of the entry is kept as it was.
+func SetAPIKeyGrant(site storage.Site, id string, scopes []string, grantURL, grantID string) error {
+	found := false
+	err := rewriteAPIKeys(site, func(entries []json.RawMessage) ([]json.RawMessage, error) {
+		for i, e := range entries {
+			var m map[string]json.RawMessage
+			if json.Unmarshal(e, &m) != nil {
+				continue
+			}
+			var gotID string
+			if json.Unmarshal(m["id"], &gotID) != nil || gotID != id {
+				continue
+			}
+			for k, v := range map[string]any{"scopes": scopes, "grant": grantURL, "grant_id": grantID} {
+				b, err := json.Marshal(v)
+				if err != nil {
+					return nil, err
+				}
+				m[k] = b
+			}
+			b, err := json.Marshal(m)
+			if err != nil {
+				return nil, err
+			}
+			entries[i] = b
+			found = true
+		}
+		return entries, nil
+	})
+	if err == nil && !found {
+		return fmt.Errorf("no key %q", id)
+	}
+	return err
 }
 
 // RevokeAPIKey deletes the key with the given id.

@@ -261,7 +261,7 @@ func TestRunLocal_AllFiveFamiliesAreAlwaysReported(t *testing.T) {
 	for _, c := range r.Checks {
 		seen[c.Family] = true
 	}
-	for _, family := range []string{FamilyContent, FamilyIndex, FamilyPolicy, FamilyIdentity, FamilyBundle} {
+	for _, family := range []string{FamilyContent, FamilyIndex, FamilyPolicy, FamilyIdentity, FamilyBundle, FamilyAgents} {
 		if !seen[family] {
 			t.Errorf("family %q is absent from the report entirely", family)
 		}

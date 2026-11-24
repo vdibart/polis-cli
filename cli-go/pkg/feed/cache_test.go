@@ -1481,3 +1481,79 @@ func TestCacheManager_SaveConfigCreatesAPrivateParent(t *testing.T) {
 		t.Errorf("config directory mode = %v, want 0700", info.Mode().Perm())
 	}
 }
+
+// One site that posts constantly must not evict every other site the owner
+// follows: each site's newest posts survive the posts cap, and the rest of
+// the cap goes to the newest posts overall.
+func TestPruneByType_ProlificSiteDoesNotEvictAQuietOne(t *testing.T) {
+	now := time.Now()
+	cfg := &FeedConfig{MaxAgeDays: 90, MaxPosts: 300, MaxComments: 150, MaxAnnouncements: 10, MaxAnnouncementDays: 14}
+
+	var items []CachedFeedItem
+	// The quiet site's three posts are the OLDEST items in the cache.
+	for i := 0; i < 400; i++ {
+		items = append(items, CachedFeedItem{
+			ID: fmt.Sprintf("busy-%d", i), Type: "post", AuthorDomain: "busy.polis.pub",
+			Published: now.Add(-time.Duration(i) * time.Hour).UTC().Format(time.RFC3339),
+		})
+	}
+	for i := 0; i < 3; i++ {
+		items = append(items, CachedFeedItem{
+			ID: fmt.Sprintf("quiet-%d", i), Type: "post", AuthorDomain: "quiet.polis.pub",
+			Published: now.Add(-time.Duration(500+i) * time.Hour).UTC().Format(time.RFC3339),
+		})
+	}
+
+	result := pruneByType(items, cfg)
+
+	quiet, busy := 0, 0
+	for _, it := range result {
+		switch it.AuthorDomain {
+		case "quiet.polis.pub":
+			quiet++
+		case "busy.polis.pub":
+			busy++
+		}
+	}
+	if quiet != 3 {
+		t.Errorf("quiet site kept %d of its 3 posts, want all 3", quiet)
+	}
+	if busy+quiet != 300 {
+		t.Errorf("kept %d posts, want the cap (300)", busy+quiet)
+	}
+	// The busy site keeps its newest: the posts it lost are its oldest.
+	for _, it := range result {
+		if it.ID == "busy-297" {
+			t.Errorf("busy-297 kept: the busy site's 297 newest should fill what the floor leaves")
+		}
+	}
+	for i := 1; i < len(result); i++ {
+		if PublishedBefore(result[i-1].Published, result[i].Published) {
+			t.Fatalf("result not newest first at %d", i)
+		}
+	}
+}
+
+// The floors never push the cache past its cap: with more sites than the cap
+// holds at the full floor, each site's floor shrinks to its share.
+func TestCapKeepingEachSitesNewest_FloorsNeverExceedTheCap(t *testing.T) {
+	var items []CachedFeedItem
+	for s := 0; s < 5; s++ {
+		for i := 0; i < 20; i++ {
+			items = append(items, CachedFeedItem{ID: fmt.Sprintf("%d-%d", s, i), AuthorDomain: fmt.Sprintf("s%d.pub", s)})
+		}
+	}
+	got := capKeepingEachSitesNewest(items, 10, 4)
+	if len(got) != 10 {
+		t.Fatalf("kept %d, want the cap (10)", len(got))
+	}
+	per := map[string]int{}
+	for _, it := range got {
+		per[it.AuthorDomain]++
+	}
+	for s := 0; s < 5; s++ {
+		if n := per[fmt.Sprintf("s%d.pub", s)]; n != 2 {
+			t.Errorf("s%d kept %d, want its share of 2", s, n)
+		}
+	}
+}

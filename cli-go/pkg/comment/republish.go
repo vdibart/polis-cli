@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"github.com/vdibart/polis-cli/cli-go/pkg/license"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
@@ -51,6 +52,13 @@ type RepublishResult struct {
 // frontmatter already stripped. DS registration failures are non-fatal — the local
 // republish still succeeds — matching RepublishPost.
 func RepublishComment(site storage.Site, commentPath, markdown string, privateKey []byte, dsCfg ...*DiscoveryConfig) (*RepublishResult, error) {
+	return RepublishCommentAs(site, commentPath, markdown, privateKey, discovery.AgentMarker{}, dsCfg...)
+}
+
+// RepublishCommentAs is RepublishComment for an act made by a user agent: the
+// marker goes inside the new version's signature. The zero marker is the
+// owner's own edit.
+func RepublishCommentAs(site storage.Site, commentPath, markdown string, privateKey []byte, marker discovery.AgentMarker, dsCfg ...*DiscoveryConfig) (*RepublishResult, error) {
 	var cfg *DiscoveryConfig
 	if len(dsCfg) > 0 {
 		cfg = dsCfg[0]
@@ -115,6 +123,22 @@ func RepublishComment(site storage.Site, commentPath, markdown string, privateKe
 	for _, v := range versionHistory {
 		vhYAML += fmt.Sprintf("\n  - %s", v)
 	}
+	// The new version keeps the terms the comment was published under, copied
+	// byte for byte from the version being replaced: terms are not retroactive,
+	// so an edit neither drops them nor re-resolves them to the site's current
+	// terms. A comment published with none gets none. It sits where SignComment
+	// puts it, after the version history.
+	licenseYAML := ""
+	if block := license.ExtractBlock(existingStr); block != "" {
+		licenseYAML = "\n" + block
+	}
+	// ⛔ The licence block and the marker follow the version history in BOTH
+	// frontmatters below, so they are inside the signature. Built once.
+	markerYAML, err := marker.FrontmatterYAML()
+	if err != nil {
+		return nil, err
+	}
+	vhYAML += licenseYAML + markerYAML
 
 	commentID := strings.TrimSuffix(filepath.Base(commentPath), ".md")
 
@@ -219,7 +243,7 @@ signature: %s
 	}
 	// Republish always re-registers + re-evaluates blessing (beseech=true),
 	// preserving the historical behavior.
-	resp, err := registerCommentContent(site, meta, commentID, privateKey, dsURL, base, true)
+	resp, err := registerCommentContent(site, meta, commentID, privateKey, dsURL, base, true, marker)
 	if err != nil {
 		result.RegisterError = err.Error()
 		return result, nil // non-fatal, mirroring RepublishPost

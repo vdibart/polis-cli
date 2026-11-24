@@ -185,6 +185,13 @@ type RenderContext struct {
 	Following       []FollowingData
 	Targets         []TagTargetData
 	Tags            []TagData
+
+	// Vars holds a shape's own variables, by name. v5 draws everything from
+	// here, so its templates add no field to this struct; v3 and v4 never set
+	// it. A name in Vars wins over the fixed list above (v5's "title" is its
+	// own, not ctx.Title). Values are substituted raw, as every value is: the
+	// producer escapes.
+	Vars map[string]string
 }
 
 // FollowingData represents a followed author in a loop.
@@ -403,6 +410,9 @@ func (e *Engine) substituteVariables(template string, ctx *RenderContext) string
 	return variableRe.ReplaceAllStringFunc(template, func(match string) string {
 		// Extract variable name from {{name}}
 		name := match[2 : len(match)-2]
+		if val, ok := ctx.Vars[name]; ok {
+			return strings.ReplaceAll(val, "{{", escapedOpenBrace)
+		}
 		if val, ok := vars[name]; ok {
 			return strings.ReplaceAll(val, "{{", escapedOpenBrace)
 		}

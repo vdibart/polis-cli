@@ -203,8 +203,14 @@ var PastDefaults = []PastDefaultContent{
 // default, the site's own rules, or something that does not parse. The
 // current default and the past defaults are checked before parsing, because
 // some past defaults hold rules today's parser rejects in a tenant file.
+//
+// ⭐ Deny rules added through TightenPrivate (marked added_by) are set aside
+// first: a default with only such tightenings on top is still that default,
+// so it keeps receiving upgrades (Upgraded puts the additions back) and is
+// never reported as the site's own rules for them alone.
 func Classify(content []byte, f File) Class {
-	key := ContentKey(string(content))
+	base, _ := SplitAdded(string(content))
+	key := ContentKey(base)
 	if key == ContentKey(f.DefaultContent()) {
 		return Current
 	}
@@ -213,10 +219,57 @@ func Classify(content []byte, f File) Class {
 			return PastDefault
 		}
 	}
-	if !Parses(content) {
+	if !Parses([]byte(base)) {
 		return Unparseable
 	}
 	return Authored
+}
+
+// SplitAdded separates the rules TightenPrivate added (a deny rule marked
+// added_by) from the rest of a rules file. base is the file without them, in
+// its order; added are those lines exactly as written, in their order. A line
+// marked added_by that is not a deny rule that parses stays in base: only a
+// tightening is set aside, so a hand edit that loosened one is the site's own.
+func SplitAdded(content string) (base string, added []string) {
+	var kept []string
+	for _, l := range strings.Split(content, "\n") {
+		if isAddedTightening(l) {
+			added = append(added, strings.TrimSpace(l))
+			continue
+		}
+		kept = append(kept, l)
+	}
+	return strings.Join(kept, "\n"), added
+}
+
+func isAddedTightening(line string) bool {
+	var entry struct {
+		Policy  string `json:"policy"`
+		AddedBy string `json:"added_by"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(line)), &entry) != nil || strings.TrimSpace(entry.AddedBy) == "" {
+		return false
+	}
+	p, err := Parse(entry.Policy)
+	return err == nil && p.Action == "deny"
+}
+
+// Upgraded is what a file Classify calls PastDefault becomes: the current
+// default, with the rules TightenPrivate added kept, where TightenPrivate puts
+// them (after the header, before the defaults, in their order).
+func Upgraded(content []byte, f File) []byte {
+	_, added := SplitAdded(string(content))
+	def := f.DefaultContent()
+	if len(added) == 0 {
+		return []byte(def)
+	}
+	lines := strings.Split(strings.TrimRight(def, "\n"), "\n")
+	at := 0
+	if len(lines) > 0 && isHeader(lines[0]) {
+		at = 1
+	}
+	out := append(append(append([]string(nil), lines[:at]...), added...), lines[at:]...)
+	return []byte(strings.Join(out, "\n") + "\n")
 }
 
 // Parses reports whether every line of a rules.jsonl body is a JSON object and

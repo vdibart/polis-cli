@@ -18,7 +18,14 @@ We take security seriously. If you discover a security vulnerability in Polis CL
 
 **Please do NOT report security vulnerabilities through public GitHub issues.**
 
-Instead, please email security concerns to: **security@polis.pub**
+Instead, please email security concerns to: **security@polis.pub**, or use **Report a vulnerability** on the
+[Security tab of polis-cli](https://github.com/vdibart/polis-cli/security), which opens a private advisory only you and the
+maintainers can see.
+
+The same contact is published in machine-readable form at
+[`https://polis.pub/.well-known/security.txt`](https://polis.pub/.well-known/security.txt) (RFC 9116), which points back
+to this page as its policy. It is served on polis.pub's root domain only: a site at `<name>.polis.pub` is its owner's, and
+polis.pub does not publish a contact on their behalf.
 
 Include the following in your report:
 - Description of the vulnerability
@@ -49,18 +56,40 @@ It also applies to two services operated alongside the project:
 For these two services you cannot point at code, so describe the behaviour you observed: the request, the response, and
 why it is a vulnerability.
 
+**Vulnerabilities in dependencies.** polis checks its dependencies for known vulnerabilities before every release and
+every deploy. A vulnerability in a dependency is in scope when polis's own code reaches it: for example, a flaw in the
+MCP SDK or in the OAuth library behind polis.pub's sign-in server that a request to polis can trigger. Report it here; we
+fix or work around it in polis and coordinate with the dependency's maintainers. A flaw in a dependency that polis's code
+does not reach belongs with that project.
+
 ### Out of Scope
 
-- Issues in third-party dependencies (please report to the respective projects)
+- Vulnerabilities in third-party dependencies that polis's code does not reach (please report them to the respective
+  projects)
 - Social engineering attacks
 - Denial of service attacks
 
 ## Security Best Practices for Users
 
-1. **Verify downloads**: Each release publishes a `checksums.txt` of SHA-256 sums for its archives. Download it beside the archive and check:
+1. **Verify downloads**: Each release publishes a `checksums.txt` of SHA-256 sums for its files and, from the first
+   signed release on, `checksums.txt.sig`: a signature over it by the polis release key. The key's public half is
+   [`release/release-signing-key.pub`](https://github.com/vdibart/polis-cli/blob/main/release/release-signing-key.pub)
+   in this repository. Download `checksums.txt`, `checksums.txt.sig` and the archive into one directory, then check the
+   signature first and the archive second:
    ```bash
+   echo "polis-release namespaces=\"polis-release\" $(cut -d' ' -f1-2 release-signing-key.pub)" > allowed_signers
+   ssh-keygen -Y verify -f allowed_signers -I polis-release -n polis-release -s checksums.txt.sig < checksums.txt
    sha256sum -c --ignore-missing checksums.txt
    ```
+   The first command must print `Good "polis-release" signature`. A checksum alone shows that a download arrived
+   intact; the signature shows it is the file the release key signed. Releases made before signing began carry no
+   `checksums.txt.sig`, and their checksums show only the first. Each archive also has a software bill of materials
+   beside it (`<archive>.sbom.json`, SPDX), listed in the same `checksums.txt`, so the signature covers it too.
+
+   The installer (`scripts/install.sh`, the one-line install in the README) does both checks itself, with the
+   release key pinned in the script, and installs nothing if either fails. It refuses a release that carries no
+   signature unless you set `POLIS_ALLOW_UNSIGNED=1`, and without `ssh-keygen` (OpenSSH 8.0+) it stops and points
+   here, so you can run the steps above by hand. `polis-upgrade` checks the same signature.
 
 2. **Protect your keys**: Your Ed25519 private key in `.polis/keys/` should never be shared
 

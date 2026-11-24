@@ -177,101 +177,13 @@ Monospace fonts: JetBrains Mono, Fira Code for editor areas.
 
 ---
 
-## API Endpoints
+## API
 
-### Core
-
-| Method | Endpoint | Handler | Purpose |
-|--------|----------|---------|---------|
-| GET | `/api/status` | `handleStatus` | Site status and identity |
-| POST | `/api/init` | `handleInit` | Initialize new site |
-| GET | `/api/validate` | `handleValidate` | Validate site structure |
-| GET/PUT | `/api/settings` | `handleSettings` | Read/write webapp config |
-
-### Posts
-
-| Method | Endpoint | Handler | Purpose |
-|--------|----------|---------|---------|
-| POST | `/api/publish` | `handlePublish` | Sign and publish a post |
-| POST | `/api/republish` | `handleRepublish` | Update existing post |
-| GET | `/api/posts` | `handlePosts` | List published posts |
-| GET/DELETE | `/api/posts/{path}` | `handlePost` | Read/delete single post |
-| GET | `/api/drafts` | `handleDrafts` | List drafts |
-| GET/PUT/DELETE | `/api/drafts/{id}` | `handleDraft` | CRUD single draft |
-| POST | `/api/render` | `handleRender` | Re-render all HTML |
-
-### Comments (outgoing)
-
-| Method | Endpoint | Handler | Purpose |
-|--------|----------|---------|---------|
-| GET | `/api/comments/drafts` | `handleCommentDrafts` | List comment drafts |
-| GET/PUT/DELETE | `/api/comments/drafts/{id}` | `handleCommentDraft` | CRUD comment draft |
-| POST | `/api/comments/sign` | `handleCommentSign` | Sign a comment |
-| POST | `/api/comments/beseech` | `handleCommentBeseech` | Request blessing |
-| GET | `/api/comments/pending` | `handleCommentsPending` | List pending |
-| GET | `/api/comments/blessed` | `handleCommentsBlessed` | List blessed |
-| GET | `/api/comments/denied` | `handleCommentsDenied` | List denied |
-| POST | `/api/comments/sync` | `handleCommentsSync` | Sync comment statuses |
-
-### Blessings (incoming)
-
-| Method | Endpoint | Handler | Purpose |
-|--------|----------|---------|---------|
-| GET | `/api/blessing/requests` | `handleBlessingRequests` | List pending requests |
-| POST | `/api/blessing/grant` | `handleBlessingGrant` | Bless a comment |
-| POST | `/api/blessing/deny` | `handleBlessingDeny` | Deny a comment |
-| POST | `/api/blessing/revoke` | `handleBlessingRevoke` | Revoke a blessing |
-| GET | `/api/blessed-comments` | `handleBlessedComments` | List blessed on my posts |
-
-### Social
-
-| Method | Endpoint | Handler | Purpose |
-|--------|----------|---------|---------|
-| GET/POST/DELETE | `/api/following` | `handleFollowing` | Manage followed sites |
-| GET | `/api/feed` | `handleFeed` | Aggregated feed from followed sites |
-| POST | `/api/feed/refresh` | `handleFeedRefresh` | Force feed refresh |
-| POST | `/api/feed/read` | `handleFeedRead` | Mark feed item as read |
-| GET | `/api/feed/counts` | `handleFeedCounts` | Unread/total counts |
-| GET | `/api/remote/post` | `handleRemotePost` | Fetch remote post content |
-
-### Automation & Templates
-
-| Method | Endpoint | Handler | Purpose |
-|--------|----------|---------|---------|
-| GET | `/api/automations` | `handleAutomations` | List hook configurations |
-| POST | `/api/automations/quick` | `handleAutomationsQuick` | Auto-discover hooks |
-| PUT/DELETE | `/api/automations/{type}` | `handleAutomation` | Configure/remove hook |
-| GET | `/api/templates` | `handleTemplates` | List available templates |
-| POST | `/api/hooks/generate` | `handleHooksGenerate` | Generate hook script |
-
-### Site Registration
-
-| Method | Endpoint | Handler | Purpose |
-|--------|----------|---------|---------|
-| GET | `/api/site/registration-status` | `handleSiteRegistrationStatus` | Check registration |
-| POST | `/api/site/register` | `handleSiteRegister` | Register with discovery |
-| POST | `/api/site/unregister` | `handleSiteUnregister` | Unregister |
-
-### Snippets & Content
-
-| Method | Endpoint | Handler | Purpose |
-|--------|----------|---------|---------|
-| GET | `/api/snippets` | `handleSnippets` | List snippets |
-| GET/PUT/DELETE | `/api/snippets/{name}` | `handleSnippet` | CRUD snippet |
-| GET | `/api/content/{path}` | `handleContent` | Read site content files |
-| POST | `/api/render-page` | `handleRenderPage` | Preview snippet changes |
-
-### Response Convention
-
-Success responses use domain-specific shapes:
-
-```json
-{"success": true, "data": {...}}
-{"posts": [...], "count": 5}
-{"configured": true, "validation": {...}}
-```
-
-Errors return appropriate HTTP status codes with plain text or JSON error messages.
+The site's API is `/v1`, described by the site itself at `/v1/openapi.json` and written up in the
+[API reference](../docs/api/developer/reference.md). The owner app, agents, scripts and the CLI all use it.
+What is left under `/api/` (signing in, the capability descriptor, the hosted account, the embeddable
+widget, and two routes the v4 shape's public pages call) is listed, each with its reason, in
+[the site API page](../docs/api/developer/site-api.md). `webapp/internal/server/routes.go` registers them.
 
 ---
 

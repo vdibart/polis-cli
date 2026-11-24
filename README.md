@@ -127,6 +127,8 @@ Curated conversation without censorship.
 curl -fsSL https://raw.githubusercontent.com/vdibart/polis-cli/main/scripts/install.sh | bash
 ```
 
+The installer checks the release's signature with the polis release key, then the archive against the signed checksums, and installs nothing if either fails. It needs `ssh-keygen` (OpenSSH 8.0+); [SECURITY.md](SECURITY.md#security-best-practices-for-users) shows how to verify a download by hand.
+
 Four binaries are available on [GitHub Releases](https://github.com/vdibart/polis-cli/releases):
 
 | Binary | What you get | Size |
@@ -148,7 +150,7 @@ cd polis-cli && make all
 
 ## Going deeper
 
-- **Themes** — Seven built-in themes with Mustache-style templating. See [Templating](docs/cli/user/templating.md).
+- **Themes** — Eight built-in themes to choose from, with Mustache-style templating. See [Templating](docs/cli/user/templating.md).
 - **JSON mode** — Every command supports `--json` for scripting and automation. See [JSON Mode](docs/cli/user/json-mode.md).
 - **AI integration** — Polis includes a [Claude Code](https://claude.ai/code) skill for natural language workflows: "publish my draft", "check my blessing requests", "comment on Alice's post".
 

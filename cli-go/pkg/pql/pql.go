@@ -1,7 +1,8 @@
 // Package pql parses PQL (Polis Query Language) sentences into a filter
-// state struct, and composes them back. It is the Go sibling of the JS
-// parser (webapp/internal/webui/www/pql.js) and the TS parser
-// (discovery-service/core/pql.ts).
+// state struct, and composes them back. It is the Go sibling of the discovery
+// service's TS parser, which answers the DS's own /pql/ (docs/ds/developer/pql-json-api.md).
+// (The v4 owner app's JS parser, www/pql.js, was deleted with that app on
+// 2026-11-22.)
 //
 // =============================================================================
 // HANDBOOK TRAIL MARKER — PQL grammar (Go side)
@@ -11,8 +12,8 @@
 // values are exactly what webapp parseStreamScope accepts).
 //
 // The canonical vocabulary lives in docs/general/reference/pql-vocabulary.json; the
-// cross-language contract is docs/general/reference/pql-golden.jsonl. All three parsers
-// (JS/Go/TS) assert against that golden corpus so the grammar can never drift.
+// cross-language contract is docs/general/reference/pql-golden.jsonl. Both parsers
+// (Go/TS) assert against that golden corpus so the grammar can never drift.
 // The tables below are a hand-mirror of the JSON — pql_test.go asserts they
 // match it, so editing the JSON without updating here fails the build.
 //
@@ -20,26 +21,29 @@
 //
 //	spec      — docs/general/reference/pql.md
 //	vocab     — docs/general/reference/pql-vocabulary.json (canonical) + pql-golden.jsonl
-//	JS parser — webapp/internal/webui/www/pql.js
 //	Go parser — this file
-//	TS parser — discovery-service/core/pql.ts
+//	TS parser — the discovery service's (its source is not published; its
+//	            /pql/ is docs/ds/developer/pql-json-api.md)
 //
 // =============================================================================
 //
 // Grammar:
 //
-//	sentence  := qualifier type relation scope [modifier]
+//	sentence  := qualifier [adjective] type relation scope [modifier]
 //	qualifier := "all" | "new"            ; "new" reserved (UI-locked)
+//	adjective := "blessed"                ; only the comments the post's author blessed
 //	type      := "posts"|"comments"|"profiles"|"messages"|"drafts"|"activity"
 //	           | <fully-qualified event type>   ; e.g. pub.polis.follow.announced
 //	relation  := "from"                   ; authored-by (actor axis)
 //	           | "about"                  ; concerns/targets (involved axis)
+//	           | "on"                     ; replies to one post (scope is its address)
 //	scope     := "me" | "my" "network" | "my" "mutuals" | "all" "polis"
 //	           | <handle> | <handle> "'s" "network"
+//	           | <post address>           ; after "on" only: an https URL, kept as written
 //	modifier  := "by" <key> | "with" <key> | "to" <key>
 //
 // Type-conditional rules are NOT enforced here — the parser is liberal; the
-// dispatcher (webapp/DS) narrows valid combinations per surface (e.g. the DS
+// dispatcher (the site's, and the DS's) narrows valid combinations per surface (e.g. the DS
 // rejects first-person scopes; see docs/general/reference/pql.md).
 package pql
 
@@ -54,16 +58,28 @@ import (
 type Filter struct {
 	Qualifier string // "all" | "new"
 	Type      string // alias internal (posts|comments|profiles|dms|drafts|activity) OR a fully-qualified event type
-	Relation  string // "from" (actor) | "about" (involved/target)
+	Relation  string // "from" (actor) | "about" (involved/target) | "on" (replies to a post)
 	Scope     string // me|my-network|my-mutuals|all-polis|@handle|@handle:network
-	Modifier  string // by-date|by-name|by-activity|with-comments|to-bless|"" (none)
+	Modifier  string // by-date|by-name|by-activity|with-comments|to-bless|blessed|"" (none)
 }
 
 // ── Vocabulary (hand-mirror of docs/general/reference/pql-vocabulary.json) ──────────────
 
 var qualifiers = map[string]bool{"all": true, "new": true}
 
-var relations = map[string]bool{"from": true, "about": true}
+var relations = map[string]bool{"from": true, "about": true, "on": true}
+
+// adjectives go between the qualifier and the type ("all blessed comments")
+// and set the Modifier, so a sentence has one or the other, never both.
+var adjectives = []modifierClause{{[]string{"blessed"}, "blessed"}}
+
+// postAddressPattern is a post address after "on": https, and none of the
+// characters that would break the sentence's URL form (+ ? # and spaces).
+var postAddressPattern = regexp.MustCompile(`^https://[A-Za-z0-9.-]+(/[^\s+?#]*)?$`)
+
+// IsPostAddress reports whether a Filter's scope is a post address (the
+// scope of "on").
+func IsPostAddress(scope string) bool { return postAddressPattern.MatchString(scope) }
 
 // typeToInternal maps friendly aliases to internal values. Only messages->dms
 // is remapped; the rest pass through. Fully-qualified event types bypass this
@@ -75,6 +91,13 @@ var typeToInternal = map[string]string{
 	"messages": "dms",
 	"drafts":   "drafts",
 	"activity": "activity",
+}
+
+// InternalType maps a type word as a sentence writes it ("messages") to the
+// Filter's internal value ("dms"). ok is false for a word that is not a type.
+func InternalType(token string) (string, bool) {
+	v, ok := typeToInternal[token]
+	return v, ok
 }
 
 // internalToTypeToken inverts typeToInternal for Compose.
@@ -149,6 +172,9 @@ func ParseTenantRelative(sentence, defaultScope string) (*Filter, error) {
 }
 
 func parse(sentence string, tenantRelative bool, defaultScope string) (*Filter, error) {
+	// ⭐ The original tokens are kept for a post address, whose path is
+	// case-sensitive; everything else matches lowercased.
+	original := strings.Fields(strings.TrimSpace(sentence))
 	tokens := strings.Fields(strings.ToLower(strings.TrimSpace(sentence)))
 	if len(tokens) < 2 {
 		return nil, fmt.Errorf("pql: sentence too short")
@@ -159,6 +185,17 @@ func parse(sentence string, tenantRelative bool, defaultScope string) (*Filter, 
 	i++
 	if !qualifiers[qualifier] {
 		return nil, fmt.Errorf("pql: unknown qualifier %q", qualifier)
+	}
+
+	modifier := ""
+	for _, adj := range adjectives {
+		if matchSequence(tokens, i, adj.tokens) {
+			modifier = adj.value
+			i += len(adj.tokens)
+		}
+	}
+	if i >= len(tokens) {
+		return nil, fmt.Errorf("pql: sentence too short")
 	}
 
 	typeToken := tokens[i]
@@ -173,6 +210,14 @@ func parse(sentence string, tenantRelative bool, defaultScope string) (*Filter, 
 
 	hasRelationClause := i < len(tokens) && relations[tokens[i]]
 	switch {
+	case hasRelationClause && tokens[i] == "on":
+		relation = "on"
+		i++
+		if i >= len(original) || !postAddressPattern.MatchString(original[i]) {
+			return nil, fmt.Errorf("pql: 'on' needs a post address (an https URL)")
+		}
+		scope = normalizePostAddress(original[i])
+		i++
 	case hasRelationClause:
 		relation = tokens[i]
 		i++
@@ -186,11 +231,13 @@ func parse(sentence string, tenantRelative bool, defaultScope string) (*Filter, 
 		// No relation clause — default to the serving tenant.
 		scope = defaultScope
 	default:
-		return nil, fmt.Errorf("pql: expected 'from' or 'about'")
+		return nil, fmt.Errorf("pql: expected 'from', 'about' or 'on'")
 	}
 
-	modifier := ""
 	if i < len(tokens) {
+		if modifier != "" {
+			return nil, fmt.Errorf("pql: an adjective and a modifier cannot both be used")
+		}
 		mod, consumed, err := matchModifier(tokens, i)
 		if err != nil {
 			return nil, err
@@ -244,7 +291,10 @@ func matchScope(tokens []string, start int) (string, int, error) {
 	if start < len(tokens) && handlePattern.MatchString(tokens[start]) {
 		return "@" + tokens[start], 1, nil
 	}
-	return "", 0, fmt.Errorf("pql: invalid scope")
+	if start < len(tokens) {
+		return "", 0, fmt.Errorf("pql: invalid scope at %q", tokens[start])
+	}
+	return "", 0, fmt.Errorf("pql: a scope is missing")
 }
 
 func matchModifier(tokens []string, start int) (string, int, error) {
@@ -252,6 +302,9 @@ func matchModifier(tokens []string, start int) (string, int, error) {
 		if matchSequence(tokens, start, clause.tokens) {
 			return clause.value, len(clause.tokens), nil
 		}
+	}
+	if start < len(tokens) {
+		return "", 0, fmt.Errorf("pql: invalid modifier at %q", tokens[start])
 	}
 	return "", 0, fmt.Errorf("pql: invalid modifier")
 }
@@ -300,9 +353,17 @@ func Compose(f *Filter) (string, error) {
 		return "", err
 	}
 
-	parts := []string{qualifier, typeToken, relation}
+	parts := []string{qualifier}
+	isAdjective := false
+	for _, adj := range adjectives {
+		if adj.value == f.Modifier {
+			parts = append(parts, adj.tokens...)
+			isAdjective = true
+		}
+	}
+	parts = append(parts, typeToken, relation)
 	parts = append(parts, scopeTokens...)
-	if f.Modifier != "" {
+	if f.Modifier != "" && !isAdjective {
 		modTokens, err := modifierToTokens(f.Modifier)
 		if err != nil {
 			return "", err
@@ -324,7 +385,21 @@ func typeTokenFor(internal string) (string, error) {
 	return "", fmt.Errorf("pql: invalid type %q", internal)
 }
 
+// normalizePostAddress lowercases a post address's scheme and host and keeps
+// its path exactly as written.
+func normalizePostAddress(addr string) string {
+	rest := strings.TrimPrefix(addr, "https://")
+	host, path := rest, ""
+	if i := strings.Index(rest, "/"); i >= 0 {
+		host, path = rest[:i], rest[i:]
+	}
+	return "https://" + strings.ToLower(host) + path
+}
+
 func scopeToTokens(scope string) ([]string, error) {
+	if postAddressPattern.MatchString(scope) {
+		return []string{scope}, nil
+	}
 	for _, atom := range scopeAtoms {
 		if atom.value == scope {
 			return append([]string(nil), atom.tokens...), nil
@@ -380,10 +455,45 @@ func Vocabulary() string {
 		mods = append(mods, c.tokens)
 	}
 	return "A PQL sentence is: all <type> from|about <scope> [<order or filter>]. " +
-		"type: " + strings.Join(typeTokens, ", ") + ". " +
+		"type: " + strings.Join(typeTokens, ", ") + ". " + oneTypeRule + " " +
 		"scope: " + join(scopes) + ", a site's domain (discover.polis.pub), or a domain's network (discover.polis.pub's network). " +
 		"order or filter (optional, one): " + join(mods) + ". " +
+		"A post's comments: all comments on <the post's https address>, each marked blessed or not; " +
+		"all blessed comments on <address> keeps only the ones its author blessed. " +
 		"Nothing else is a word of PQL: \"all of polis\" is not a scope, \"all polis\" is."
+}
+
+// oneTypeRule is the limit an AI most often walks into: it writes English
+// ("posts and comments") the grammar does not take.
+const oneTypeRule = "One type per sentence; activity covers posts and comments together."
+
+// Explain is the answer to give a caller whose sentence did not parse: the
+// parser's own reason, and for "<type> and <type>" the way to say it.
+//
+// ⛔ It repeats nothing but the caller's own words: the parser's messages
+// quote only the tokens they were given, and the hint quotes none.
+func Explain(sentence string, err error) string {
+	msg := "invalid PQL sentence"
+	if err != nil {
+		msg += ": " + strings.TrimPrefix(err.Error(), "pql: ")
+	}
+	tokens := strings.Fields(strings.ToLower(sentence))
+	for i := 0; i+1 < len(tokens); i++ {
+		if _, isType := typeToInternal[tokens[i]]; isType && tokens[i+1] == "and" {
+			return msg + ". " + oneTypeRule
+		}
+	}
+	return msg
+}
+
+// SentenceOfURL is the sentence a /pql/ path carries, its "+" read as
+// spaces, or "" for a path that is not one.
+func SentenceOfURL(path string) string {
+	m := pqlPathPattern.FindStringSubmatch(path)
+	if m == nil {
+		return ""
+	}
+	return strings.ReplaceAll(m[1], "+", " ")
 }
 
 // ── URL helpers ─────────────────────────────────────────────────────────────
@@ -426,7 +536,20 @@ func ComposeURL(f *Filter, basePath, defaultScope string) string {
 	if err != nil {
 		return basePath + "/"
 	}
-	return basePath + "/pql/" + strings.ReplaceAll(sentence, " ", "+")
+	return basePath + "/pql/" + urlTokens(sentence)
+}
+
+// urlTokens joins a sentence's tokens with + for its URL form. ⛔ A post
+// address's slashes are encoded (%2F): a path holding "//" is cleaned to one
+// slash by HTTP routers, which redirect and break the sentence.
+func urlTokens(sentence string) string {
+	tokens := strings.Fields(sentence)
+	for i, t := range tokens {
+		if postAddressPattern.MatchString(t) {
+			tokens[i] = strings.ReplaceAll(t, "/", "%2F")
+		}
+	}
+	return strings.Join(tokens, "+")
 }
 
 // composeTenantRelative composes a sentence with the relation+scope clause

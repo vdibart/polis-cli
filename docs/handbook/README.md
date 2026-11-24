@@ -12,16 +12,20 @@ For the map of every thread and the recipes that compose them, see [`AGENTS.md`]
 
 ## Tours
 
-### Overview (read first for the stream-screen)
+### Overview (the stream shape's screen in the previous owner app, replaced by v5 on 2026-11-22; kept as the record)
 
-- [stream-overview.md](stream-overview.md) — How the polis.pub infinity stream actually works, end to end. The synthesis tour: the sentence-filter widget, the four-layer composition (shape / filter / data / chrome), the design statement behind the surface, and clear pointers down into the two deep tours below and out to the PQL + DS concept docs.
+- [stream-overview.md](stream-overview.md) — *(v4, replaced.)* How the polis.pub infinity stream worked, end to end. The synthesis tour: the sentence-filter widget, the four-layer composition (shape / filter / data / chrome), the design statement behind the surface, and clear pointers down into the two deep tours below and out to the PQL + DS concept docs.
 
 ### Deep tours (file-by-file walks)
 
-- [url-as-filter.md](url-as-filter.md) — Why does the URL change as you scroll or click an icon? Pull the thread from `app.js` through `pql.js` to `stream.js` and out to the infinity stream philosophy.
-- [ds-to-stream.md](ds-to-stream.md) — How does content from sites you don't host appear in your stream, and where do the cross-tenant comment counts come from? Pull the thread through the webapp sync loop, the DS stream and counts endpoints, the feed transformer, the local JSONL cache, and back to the rendered view.
+- [url-as-filter.md](url-as-filter.md) — *(v4, replaced.)* Why does the URL change as you scroll or click an icon? Pull the thread from `app.js` through `pql.js` to `stream.js` and out to the infinity stream philosophy.
+- [ds-to-stream.md](ds-to-stream.md) — *(v4's stream-screen; the sync it walks is current.)* How does content from sites you don't host appear in your stream, and where do the cross-tenant comment counts come from? Pull the thread through the webapp sync loop, the DS stream and counts endpoints, the feed transformer, the local JSONL cache, and back to the rendered view.
 - [foreign-site-widget.md](foreign-site-widget.md) — How does your nav appear on someone else's polis site when you're logged in? Pull the thread through the serve-time placeholder patch (`hosted.go`), the hydrator (`nav.js`), and the companion comment/follow widget that's in every page's static template.
 - [dm-encryption.md](dm-encryption.md) — How is a direct message encrypted, delivered server-to-server with no broker, stored where its own server can't read it, and unlocked again in your browser? Pull the thread through the epoch keyring (`keyring.go`), the browser-only password upgrade (`dm.js` / `epoch.go`), point-to-point signed delivery (`send.go` / `receive.go`), the ciphertext-at-rest mailbox (`mailbox.go`), and out to the DM-encryption concept doc.
+
+### Agents
+
+- [agent-access.md](agent-access.md) — Why does a post an agent wrote carry `agent:` and `grant:` inside its signature, and why is it refused the moment you switch the connection off? Pull the thread from the generated MCP tools (`mcpgen`) through the token lookup and live-grant check (`router.go`), the request's grant slot (`grantctx.go`) and the publish path's marker splice, out to the delegation spec and the security model.
 
 ## Adding a tour
 

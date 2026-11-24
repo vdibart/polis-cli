@@ -1105,11 +1105,12 @@ func TestRenderAll_StreamCanonical(t *testing.T) {
 		t.Errorf("alpha canonical incorrectly points at charlie")
 	}
 
-	// Index: canonical points at newest post (charlie).
+	// Index: canonical is the site's root, never its newest post (Vincent,
+	// 2026-11-17, an SEO review; it replaced D-CANONICAL for the index).
 	indexHTML := mustReadFile(t, filepath.Join(tempDir, "index.html"))
-	wantIndex := `<link rel="canonical" href="https://example.com/posts/20260325/charlie.html">`
+	wantIndex := `<link rel="canonical" href="https://example.com/">`
 	if !strings.Contains(indexHTML, wantIndex) {
-		t.Errorf("index canonical-to-newest missing.\nWant: %s", wantIndex)
+		t.Errorf("index canonical-to-root missing.\nWant: %s", wantIndex)
 	}
 
 	// No legacy `.md` canonical leaking into output.

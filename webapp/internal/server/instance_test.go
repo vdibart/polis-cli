@@ -22,7 +22,8 @@ import (
 
 // testWebFS is the smallest web UI the SPA handler serves.
 var testWebFS = fstest.MapFS{
-	"index.html": {Data: []byte(`<!doctype html><html {{theme_attr}}><body>polis</body></html>`)},
+	"index.html":    {Data: []byte(`<!doctype html><html {{theme_attr}}><body>polis</body></html>`)},
+	"v5/index.html": {Data: []byte(`<!doctype html><html><head><script nonce="{{csp_nonce}}"></script></head><body>polis</body></html>`)},
 }
 
 // countingStore counts every call that reaches it.
@@ -89,9 +90,9 @@ func netServe(h http.Handler, method, target string, hdr map[string]string) *htt
 // localhost guard would refuse it with 403).
 func TestTheNetworkHandlerServesPagesWithSecurityHeaders(t *testing.T) {
 	_, h := newTestNetworkHandler(t, storage.Backend{Store: storage.NewObjectStore("")}, networkEnv(nil))
-	w := netServe(h, "GET", "/", nil)
+	w := netServe(h, "GET", "/_/", nil)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "polis") {
-		t.Fatalf("GET / over the network: %d %q, want 200 and the SPA", w.Code, w.Body.String())
+		t.Fatalf("GET /_/ over the network: %d %q, want 200 and the app", w.Code, w.Body.String())
 	}
 	if csp := w.Header().Get("Content-Security-Policy"); csp == "" {
 		t.Error("no Content-Security-Policy on a page served through the network handler")

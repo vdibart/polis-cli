@@ -139,7 +139,7 @@ func setOwnerCookie(w http.ResponseWriter, r *http.Request, prefixed, plain, val
 	if secure {
 		name = prefixed
 	}
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: clears the cookie (MaxAge -1) or sets Secure only where the listener is HTTPS; HttpOnly and SameSite are set
 		Name:     name,
 		Value:    value,
 		Path:     "/",
@@ -156,7 +156,7 @@ func setOwnerCookie(w http.ResponseWriter, r *http.Request, prefixed, plain, val
 // Clearing it without Secure was silently ignored by browsers.
 func clearOwnerCookie(w http.ResponseWriter, prefixed, plain string) {
 	http.SetCookie(w, &http.Cookie{Name: prefixed, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
-	http.SetCookie(w, &http.Cookie{Name: plain, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: plain, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode}) //nolint:gosec // G124: clears the cookie (MaxAge -1) or sets Secure only where the listener is HTTPS; HttpOnly and SameSite are set
 }
 
 // passkeyProvider finds the registered passkey provider.

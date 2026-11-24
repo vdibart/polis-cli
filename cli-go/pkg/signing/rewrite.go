@@ -66,7 +66,7 @@ func GuardRewrite(artifact, path string, shape any) error {
 	// the entire seam. Routing it through an interface would not be wrong in
 	// phase 2 — a store reads what is actually there too — but the cost of being
 	// wrong here is a SIGNATURE, and one call does not earn that risk.
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: the signed artifact being rewritten, by its own path
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil

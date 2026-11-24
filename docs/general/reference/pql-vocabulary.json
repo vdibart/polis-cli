@@ -2,12 +2,12 @@
   "$comment": "CANONICAL PQL vocabulary. Single source of truth for ALL parsers (JS: webapp/internal/webui/www/pql.js; Go: cli-go/pkg/pql; TS: discovery-service/core/pql.ts). Each parser embeds/loads this file so the grammar can never drift. The spec prose lives in docs/general/reference/pql.md; this file is the machine-readable form. Golden fixtures that all three parsers assert against: docs/general/reference/pql-golden.jsonl.",
   "version": "pql.v1",
 
-  "grammar": "qualifier type relation scope [modifier]",
+  "grammar": "qualifier [adjective] type relation scope [modifier]",
 
   "qualifiers": ["all", "new"],
 
-  "relations": ["from", "about"],
-  "$relations_comment": "from = authored-by (actor axis). about = concerns/targets (involved axis; maps to the DS involvedDomain filter). Exactly one relation per sentence. On a tenant the relation+scope clause is optional and defaults to (from, @<tenant>).",
+  "relations": ["from", "about", "on"],
+  "$relations_comment": "from = authored-by (actor axis). about = concerns/targets (involved axis; maps to the DS involvedDomain filter). on = the replies to one post, whose address is the scope; only a site's own surface serves it. Exactly one relation per sentence. On a tenant the relation+scope clause is optional and defaults to (from, @<tenant>).",
 
   "types": {
     "posts": "posts",
@@ -45,6 +45,14 @@
     { "tokens": ["with", "comments"], "value": "with-comments" },
     { "tokens": ["to", "bless"], "value": "to-bless" }
   ],
+
+  "adjectives": [
+    { "tokens": ["blessed"], "value": "blessed" }
+  ],
+  "$adjectives_comment": "Between the qualifier and the type ('all blessed comments ...'). An adjective sets the filter's modifier, so a sentence has an adjective or a modifier, never both.",
+
+  "post_address_pattern": "^https://[A-Za-z0-9.-]+(/[^\\s+?#]*)?$",
+  "$post_address_comment": "The scope of 'on': a post's https address, kept as written (scheme and host lowercased), with no + ? # or spaces, which would break the sentence's URL form.",
 
   "handle_pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$",
   "event_type_pattern": "^pub\\.polis\\.[a-z]+(\\.[a-z]+)+$"

@@ -7,7 +7,7 @@ detail. For the whole developer's door, see [the documentation's front page](../
 2. [The graph](../signet/concepts/graph.md): **start here to build**: nodes, edges, and what a reader verifies.
 3. [The recipe book](../signet/recipes/README.md), then recipes [1](../signet/recipes/01-make-a-claim.md), [4](../signet/recipes/04-list-attestations.md) and [13](../signet/recipes/13-verify-a-sites-attestations.md): make, list and verify claims, each run by the test suite.
 4. [Content types](../general/concepts/content-types.md), [bundles](../general/concepts/bundles.md), [shapes](../general/concepts/shapes.md) and [themes](../general/concepts/themes.md): the content model and its presentation. [Writing a theme](../general/guides/themes.md) is the one task here with a guide.
-5. [The content API](../api/developer/reference.md) and [the site API](../api/developer/site-api.md): the webapp's REST surfaces.
+5. [The site's API](../api/developer/reference.md): `/v1`, the one API every caller uses (the owner's app, agents over MCP, scripts, the CLI), described by each site at `/v1/openapi.json`. [What sits outside it](../api/developer/site-api.md), and why.
 6. [The discovery service API](../ds/developer/api-reference.md), then [PQL](../general/reference/pql.md), then [PQL over HTTP](../ds/developer/pql-json-api.md): querying the network.
 7. [JSON mode](../cli/user/json-mode.md): scripting the CLI.
 8. [Snap-off architecture](../general/concepts/snap-off-architecture.md): replacing a layer.

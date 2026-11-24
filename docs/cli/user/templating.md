@@ -62,6 +62,8 @@ Prefixes and extensions can be combined:
 
 ### Default Shape Snippets
 
+⚠️ The default shape is **v5** (`pub.polis.shapes.v5`), which uses no snippets: each page is its frame (`frame.html`) around one template per kind of card (`post.html`, `comment.html`, `about.html`, `following.html`, with `person.html` for one site in the following card). The snippets below belong to the blog and stream shapes, which are no longer supported but still render for a site that records one.
+
 The blog shape (`pub.polis.shapes.v3`) ships these snippets; the stream shape (`pub.polis.shapes.v4`)
 ships `blessed-comment.html`, `sentence-filter.html` and `stream-filter.html`:
 

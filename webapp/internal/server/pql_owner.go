@@ -27,5 +27,9 @@ func PQLRequiresOwner(r *http.Request) bool {
 	case "dms", "drafts":
 		return true
 	}
+	// ⭐ "to bless" is NOT the owner's alone: anyone may ask which comments
+	// are waiting (Vincent, 2026-11-14: "no reason to prevent it in the
+	// grammar or in the API"). Blessing controls who is notified and what the
+	// author's page shows, not who may ask.
 	return pql.IsFirstPerson(f.Scope)
 }

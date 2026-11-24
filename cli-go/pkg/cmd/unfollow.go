@@ -5,7 +5,7 @@ import (
 	"os"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
-	"github.com/vdibart/polis-cli/cli-go/pkg/following"
+	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 )
 
@@ -31,62 +31,26 @@ func handleUnfollow(args []string) {
 	if discoveryURL == "" {
 		discoveryURL = "https://ds.polis.pub"
 	}
-	client := discovery.NewClient(discoveryURL)
-
 	privKey, err := loadPrivateKey(dir)
 	if err != nil {
 		exitError("Failed to load private key: %v", err)
 	}
+	baseURL := os.Getenv("POLIS_BASE_URL")
 
-	// Fetch author email
-	remoteClient := remote.NewClient()
-	remoteWK, err := remoteClient.FetchWellKnown(authorURL)
+	// ⭐ The one implementation of unfollowing (ops.Unfollow): the site's rules,
+	// the signed follow list through its own write point, the stream events.
+	// This command used to deny the author's blessings and rewrite
+	// following.json by hand, so the DS and other sites never heard of it.
+	result, err := ops.Unfollow(cliContext(), ops.FollowSite{
+		Site: getSite(), PrivateKey: privKey, BaseURL: baseURL, DiscoveryURL: discoveryURL,
+		DS:     discovery.NewAuthenticatedClient(discoveryURL, discovery.ExtractDomainFromURL(baseURL), privKey),
+		Remote: remote.NewClient(),
+		Emit:   func(action string, fields map[string]any) { logCLIAction(action, fields) },
+	}, authorURL)
 	if err != nil {
-		// Continue even if we can't fetch - just remove from following
-		remoteWK = nil
+		exitError("Failed to unfollow %s: %v", authorURL, err)
 	}
-
-	// Deny any blessed comments from this author
-	deniedCount := 0
-	failedCount := 0
-	commentCount := 0
-
-	if remoteWK != nil {
-		authorDomain := discovery.ExtractDomainFromURL(authorURL)
-		// Fetch granted blessings where source is from the author's domain
-		grantedResp, err := client.QueryRelationships("pub.polis.comment.blessing", map[string]string{
-			"status": "granted",
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[!] Could not check granted blessings: %v\n", err)
-		}
-
-		if grantedResp != nil {
-			for _, rel := range grantedResp.Records {
-				if discovery.ExtractDomainFromURL(rel.SourceURL) == authorDomain {
-					commentCount++
-					if err := client.UpdateRelationship("pub.polis.comment.blessing", rel.SourceURL, rel.TargetURL, "deny", privKey); err != nil {
-						failedCount++
-						continue
-					}
-					deniedCount++
-				}
-			}
-		}
-	}
-
-	// Remove from following.json
-	f, err := following.LoadSite(getSite())
-	if err != nil {
-		exitError("Failed to load following.json: %v", err)
-	}
-
-	removed := f.Remove(authorURL)
-
-	// SIGNET epic 02: unfollowing is authorship too — re-sign over the new roster.
-	if err := following.SaveSigned(getSite(), f, privKey); err != nil {
-		exitError("Failed to save following.json: %v", err)
-	}
+	commentCount, deniedCount, failedCount, removed := result.CommentsFound, result.CommentsDenied, result.CommentsFailed, result.WasFollowing
 
 	if jsonOutput {
 		outputJSON(map[string]interface{}{

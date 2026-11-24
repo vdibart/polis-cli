@@ -11,14 +11,18 @@ _polis_completion() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     # All top-level commands
-    local commands="about blessing clone comment discover dm extract follow
-        index init notifications post preview
-        rebuild register render republish rotate-key serve tag unfollow
+    local commands="about actor attest blessing branch clone comment did discover dm extract follow
+        index init license mcp notifications post preview
+        rebuild recover register render republish rotate-key serve site tag unfollow
         unpublish unregister validate version"
 
     # Subcommands for specific commands
     local blessing_subcommands="beseech deny grant requests sync"
-    local dm_subcommands="list read send retry config"
+    local dm_subcommands="list read send retry config decrypt publish-key"
+    local attest_subcommands="issue list show verify withdraw register"
+    local actor_subcommands="register withdraw list verify announce declare-operator"
+    local branch_subcommands="deploy announce"
+    local site_subcommands="set rewrite-unsigned"
     local notifications_subcommands="list clear"
     local tag_subcommands="list show apply remove delete"
 
@@ -32,7 +36,10 @@ _polis_completion() {
     local unregister_opts="--force --json"
     local clone_opts="--full --diff --json"
     local discover_opts="--author --since --json"
-    local rotate_key_opts="--delete-old-key --json"
+    local rotate_key_opts="--json"
+    local attest_issue_opts="--predicate --subject --subject-type --subject-version --payload --asserted --json"
+    local branch_opts="--to --out --archive --from-domain --without-private --recovery-key --custody"
+    local site_avatar_opts="--bg --fg --border --border-w --pattern --pattern-color --clear"
     local post_opts="--filename --title --json"
     local comment_opts="--filename --title --json"
     local serve_opts="--data-dir -d"
@@ -147,6 +154,52 @@ _polis_completion() {
                     if [[ "$cur" == -* ]]; then
                         COMPREPLY=($(compgen -W "--json" -- "$cur"))
                     fi
+                    ;;
+                mcp)
+                    [[ "$cur" == -* ]] && COMPREPLY=($(compgen -W "--site --help" -- "$cur"))
+                    ;;
+                attest)
+                    if [[ $effective_pos -eq 1 ]]; then
+                        COMPREPLY=($(compgen -W "$attest_subcommands --json" -- "$cur"))
+                    elif [[ "${COMP_WORDS[$((cmd_pos + 1))]}" == "issue" && "$cur" == -* ]]; then
+                        COMPREPLY=($(compgen -W "$attest_issue_opts" -- "$cur"))
+                    fi
+                    ;;
+                actor)
+                    [[ $effective_pos -eq 1 ]] && COMPREPLY=($(compgen -W "$actor_subcommands --json" -- "$cur"))
+                    ;;
+                branch)
+                    if [[ $effective_pos -eq 1 && "$cur" != -* ]]; then
+                        COMPREPLY=($(compgen -W "$branch_subcommands" -- "$cur"))
+                    elif [[ "$cur" == -* ]]; then
+                        case "${COMP_WORDS[$((cmd_pos + 1))]}" in
+                            deploy) COMPREPLY=($(compgen -W "--config --help" -- "$cur")) ;;
+                            announce) COMPREPLY=($(compgen -W "--help" -- "$cur")) ;;
+                            *) COMPREPLY=($(compgen -W "$branch_opts --help" -- "$cur")) ;;
+                        esac
+                    fi
+                    ;;
+                recover)
+                    if [[ $effective_pos -eq 1 ]]; then
+                        COMPREPLY=($(compgen -W "sign" -- "$cur"))
+                    elif [[ "$cur" == -* ]]; then
+                        COMPREPLY=($(compgen -W "--domain --challenge --key" -- "$cur"))
+                    fi
+                    ;;
+                site)
+                    if [[ $effective_pos -eq 1 ]]; then
+                        COMPREPLY=($(compgen -W "$site_subcommands" -- "$cur"))
+                    elif [[ $effective_pos -eq 2 && "${COMP_WORDS[$((cmd_pos + 1))]}" == "set" ]]; then
+                        COMPREPLY=($(compgen -W "author-name avatar" -- "$cur"))
+                    elif [[ "${COMP_WORDS[$((cmd_pos + 2))]}" == "avatar" && "$cur" == -* ]]; then
+                        COMPREPLY=($(compgen -W "$site_avatar_opts" -- "$cur"))
+                    fi
+                    ;;
+                license)
+                    [[ $effective_pos -eq 1 ]] && COMPREPLY=($(compgen -W "reserved open --json" -- "$cur"))
+                    ;;
+                did)
+                    [[ "$cur" == -* ]] && COMPREPLY=($(compgen -W "--host --write --json" -- "$cur"))
                     ;;
                 serve)
                     [[ "$cur" == -* ]] && COMPREPLY=($(compgen -W "$serve_opts" -- "$cur"))

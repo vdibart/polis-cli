@@ -5,6 +5,32 @@ All notable changes to the Go CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.71.0]
+
+The root `CHANGELOG.md` gives the upgrade notes for this release in full. This is the first signed release: `checksums.txt` carries `checksums.txt.sig`, and every archive has an SBOM.
+
+### Added
+
+- **`polis comment send <id>`**: send a pending comment again. `polis blessing beseech <version>` sends a pending comment of yours again by its full version; any other version is `NOT_FOUND`.
+- **`post.unpublish`** (owner only): unpublish a post through the API; `polis unpublish` runs the same code.
+- **[Webapp]** The API's description lists the scopes a token can carry (`x-polis-scopes`); the v5 style guide is served at `/for/agents/style-guide` and to MCP clients as `polis://style-guide`.
+
+### Changed
+
+- **`polis init` records the v5 shape**, and a site with no shape, or an undeclared one, renders with v5. A site that records a shape keeps it.
+- **`polis comment sign <id>` publishes the comment and registers it** with its blessing request, and exits `1` with the comment kept in pending when the send fails or the site is not registered. Under `--json` it adds `sent`, the service's `status`, `message` and `auto_blessed` (or `send_error`), and `success` means the comment was sent.
+- **An agent's post or comment is registered with its marker** inside the signed request.
+- **Search matches at the start of a word.** The query operation's description states PQL's grammar.
+- **[Webapp]** `polis serve`'s owner app is the v5 app for every site; the previous app, its `/api` routes and the experimental AI page are gone. `/v1`'s preview promise is stated. A v5 site renders only what a post change touches. Direct messages connect only to public addresses.
+
+### Fixed
+
+- **A reply written with the Go CLI reaches the post's author**: `sign` sends it.
+- **`polis comment sign <id>` keeps the draft's id.** `polis init --theme pub.polis.themes.<name>` records it once.
+- **A post's title from a lower heading, and a 60-character cut that never splits a character.**
+- **An edited comment keeps its licence terms.** A draft is listed under the title publishing would give. An unparsed PQL sentence is answered with the reason.
+- **[Webapp]** A failed avatar fetch is logged and retried afresh; "show less" lands on the post's header; the messages key's scripts load at content-hashed addresses.
+
 ## [0.70.0]
 
 The root `CHANGELOG.md` gives the upgrade notes for this release in full. There is no 0.69.0: during development the version number was advanced to 0.70.0 by mistake, and builds have reported 0.70.0 since, so this release keeps that number rather than go backwards. It follows 0.68.0 directly, and nothing was released in between.

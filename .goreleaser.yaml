@@ -153,11 +153,30 @@ archives:
     files:
       - none*
 
+# An SBOM (SPDX JSON, by syft) for every archive, published beside it as <archive>.sbom.json and listed in
+# checksums.txt, so it is signed with everything else. syft is the release tooling's pinned build,
+# put first on PATH by the release scripts (check_BUILD, publish.sh); this config names no version of its own.
+sboms:
+  - id: archives
+    artifacts: archive
+
+# ⭐ checksums.txt is what the release signs (checksums.txt.sig, made by publish.sh with the release key), so it
+# lists every release asset AND the files polis-upgrade fetches from the tagged tree: the bash scripts it
+# installs and the migration manifests that carry each migration script's checksum. Those are listed by their
+# path in the tree, not attached to the release.
 checksum:
   name_template: 'checksums.txt'
   algorithm: sha256
   extra_files:
     - glob: ./vercel-dist/*
+    - glob: ./cli-bash/polis
+      name_template: cli-bash/polis
+    - glob: ./cli-bash/polis-tui
+      name_template: cli-bash/polis-tui
+    - glob: ./migrations/cli/manifest.json
+      name_template: migrations/cli/manifest.json
+    - glob: ./migrations/tui/manifest.json
+      name_template: migrations/tui/manifest.json
 
 release:
   github:
@@ -165,7 +184,9 @@ release:
     name: polis-cli
   extra_files:
     - glob: ./vercel-dist/*
-  draft: false
+  # ⛔ A DRAFT: publish.sh signs checksums.txt and attaches checksums.txt.sig, and only then publishes. Assets
+  # are locked once a release is published (immutable releases), so the signature must go on the draft.
+  draft: true
   prerelease: auto
   mode: replace
   header: |

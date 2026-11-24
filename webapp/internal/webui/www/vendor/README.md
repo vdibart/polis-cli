@@ -1,4 +1,9 @@
-# Vendored browser crypto (DM end-to-end encryption)
+# Vendored browser libraries
+
+Two groups, both **vendored same-origin** (committed here, served by us, never from a CDN): the
+messages key's cryptography, and the owner app's rich-text editor ([below](#the-sheets-rich-text-editor-milkdown-kit)).
+
+## Vendored browser crypto (DM end-to-end encryption)
 
 These are the third-party libraries that sit in the **password path** for encrypted DMs.
 For password epochs, all key derivation and message decryption happen **in the browser** —
@@ -9,7 +14,7 @@ They are **vendored same-origin** (committed here, served by us, `//go:embed`-ed
 `webapp/internal/webui/assets.go`), not loaded from a CDN. Pinning = the exact committed
 build; SRI is not used (it's moot for same-origin assets served like the rest of our JS).
 
-## Pinned builds
+### Pinned builds
 
 | File | Source package | Version | Role | License |
 |------|----------------|---------|------|---------|
@@ -23,7 +28,7 @@ Each file is a single self-contained IIFE (no runtime bundler) that assigns its 
 `globalThis` (`hashwasm`, `nacl`, `scureBip39`). `../dm-crypto.js` wraps them into the
 `PolisDMCrypto` API.
 
-## Why these (and not others)
+### Why these (and not others)
 
 - **Argon2id must match Go's `p=4`.** `libsodium.js`'s `crypto_pwhash` hard-codes
   parallelism=1 and cannot reproduce our params, so a Go-wrapped blob would never unwrap in
@@ -33,7 +38,7 @@ Each file is a single self-contained IIFE (no runtime bundler) that assigns its 
   `internal/server/middleware.go`) so the Argon2id WASM can compile. It permits WASM
   compilation only — not JS `eval()` — and does not widen the script-injection surface.
 
-## Regenerating / bumping a version
+### Regenerating / bumping a version
 
 Bundled with `esbuild` (browser IIFE) from the npm packages, e.g.:
 
@@ -52,3 +57,44 @@ node webapp/internal/webui/www/vendor/conformance.mjs
 It re-derives every vector in `cli-go/pkg/dm/testdata/cross-impl-vectors.json` through the
 vendored bundles + `dm-crypto.js` and fails on any byte mismatch with Go — a version bump
 that breaks Go↔browser interop will not pass.
+
+## The sheet's rich-text editor (Milkdown kit)
+
+| File | Source packages | Version | Role | Licence |
+|------|-----------------|---------|------|---------|
+| `milkdown-kit-7.23.0.js` | [`@milkdown/kit`](https://github.com/Milkdown/milkdown) (commonmark and GFM presets, history, clipboard) and [`mdast-util-to-markdown`](https://github.com/syntax-tree/mdast-util-to-markdown), with their dependencies (ProseMirror, remark, micromark) | 7.23.0 (`mdast-util-to-markdown` 2.2.4) | The owner app's post editor: markdown ↔ rich text | MIT, every package; each one's text is in `milkdown-kit-7.23.0.LICENSES.txt` |
+
+One self-contained **ES module** (it imports nothing), ~473 KB, ~146 KB gzipped. It is not
+loaded with the page: the v5 shell names it, with its content hash, in
+`<meta name="polis-editor">`, and `v5/sheet.js` imports it the first time the sheet is wanted.
+If it cannot load, the sheet stays a markdown text area. `v5/rich.js` is our code around it (what
+the editor is given, how it writes markdown back, the toolbar's commands); this file holds none.
+
+It runs under the owner app's policy (`CSPAdminSPA`) with nothing added: no `eval`, no
+`new Function`, no other origin. Inline styles it sets fall under the existing
+`style-src 'unsafe-inline'`.
+
+**Rebuilding or bumping it.** The build is esbuild 0.25.10 over exactly this entry, from a
+lockfile pinning `@milkdown/kit` 7.23.0:
+
+```js
+export * as core from '@milkdown/kit/core';
+export * as commonmark from '@milkdown/kit/preset/commonmark';
+export * as gfm from '@milkdown/kit/preset/gfm';
+export * as history from '@milkdown/kit/plugin/history';
+export * as clipboard from '@milkdown/kit/plugin/clipboard';
+export * as utils from '@milkdown/kit/utils';
+export * as state from '@milkdown/kit/prose/state';
+export * as commands from '@milkdown/kit/prose/commands';
+export * as schemaList from '@milkdown/kit/prose/schema-list';
+export { defaultHandlers } from 'mdast-util-to-markdown';
+```
+
+with `bundle`, `format: 'esm'`, `minify`, `platform: 'browser'`, `target: 'es2020'`,
+`legalComments: 'none'`, `NODE_ENV=production`, and a one-line banner naming the version and
+the licence file. The build script also writes the licence file, from every package whose code
+is in the bundle, and has a `--check` mode that fails if the committed files differ from a fresh
+build. A new version is a new file name (and the shell's `<meta>` changes with it); after a
+bump, `node --test webapp/internal/webui/v5-rich.test.js` (an untouched body keeps its bytes, an
+edit stays in its region, every button works) must pass, and so must a markdown round trip over
+real posts.

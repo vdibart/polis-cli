@@ -129,9 +129,46 @@ func LoadRegistryOrInit(site storage.Site) (*BundleRegistry, error) {
 		return reg, nil
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		return DefaultRegistry(), nil
+		reg := DefaultRegistry()
+		reg.ActiveShape = ShapeForNewRegistry(site)
+		return reg, nil
 	}
 	return nil, err
+}
+
+// ShapeForNewRegistry is the shape a registry created now should record.
+//
+// ⭐ A SITE THAT ALREADY HAS POSTS BUT NO REGISTRY PREDATES THE STREAM SHAPE.
+// The registry arrived with the stream (v0.63), and every site before it
+// rendered the blog shape, so creating its registry is not the moment to
+// change how it looks: it keeps the blog (v3), and Tailor's
+// active-shape-upgrade reports the stream as available. A new site (polis
+// init, hosted signup) has no posts yet and starts on the stream.
+//
+// On hosted, Medic still moves any v3 tenant to the stream on its next cycle;
+// that is the operator's rule for custodied sites, not this function's.
+func ShapeForNewRegistry(site storage.Site) string {
+	if hasPostSources(site) {
+		return "pub.polis.shapes.v3"
+	}
+	return DefaultRegistry().ActiveShape
+}
+
+// hasPostSources reports whether the site holds any post source, in the
+// current layout or in the pre-0.58 posts/ directory. A listing error reads as
+// "no posts" (the new-site default), because the caller is creating a missing
+// registry and must not fail for it.
+func hasPostSources(site storage.Site) bool {
+	ctx := context.Background()
+	for _, prefix := range []string{"content/pub.polis.core/post", "posts"} {
+		entries, _ := site.Store().List(ctx, prefix, storage.Recursive())
+		for _, e := range entries {
+			if !e.IsDir && strings.HasSuffix(e.Key, ".md") && !strings.Contains(e.Key, "/.versions/") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // LoadRegistryRaw reads .polis/bundles/registry.json as a raw map. Tri-state
@@ -200,7 +237,7 @@ func SaveRegistry(site storage.Site, reg *BundleRegistry) error {
 func DefaultRegistry() *BundleRegistry {
 	return &BundleRegistry{
 		SchemaVersion: CurrentRegistrySchemaVersion,
-		ActiveShape:   "pub.polis.shapes.v4",
+		ActiveShape:   "pub.polis.shapes.v5",
 		InstalledBundles: []InstalledBundle{
 			{
 				Name: "pub.polis.core",
@@ -379,10 +416,22 @@ func ParseFQN(s string) (FQN, error) {
 
 // QualifyTheme builds a fully-qualified theme FQN from an unqualified name
 // (e.g. "vice") under the default pub.polis namespace. Used by the migration
-// from .well-known/polis (which stored bare names) to registry.json.
+// from .well-known/polis (which stored bare names) to registry.json, and by
+// SetActiveThemeName.
+//
+// A name already qualified under the default namespace passes through
+// unchanged, so "vice" and "pub.polis.themes.vice" both give
+// "pub.polis.themes.vice" (qualifying unconditionally once recorded
+// "pub.polis.themes.pub.polis.themes.vice" for `polis init --theme <FQN>`).
 func QualifyTheme(name string) string {
-	return "pub.polis.themes." + name
+	if strings.HasPrefix(name, themeFQNPrefix) {
+		return name
+	}
+	return themeFQNPrefix + name
 }
+
+// themeFQNPrefix is the default namespace and kind of a theme FQN.
+const themeFQNPrefix = "pub.polis.themes."
 
 // IsBareName reports whether s looks like a bare (unqualified) identifier
 // that could be qualified as pub.polis.themes.<s> / pub.polis.shapes.<s>.
@@ -402,9 +451,15 @@ func IsBareName(s string) bool {
 	return true
 }
 
-// QualifyShape builds a fully-qualified shape FQN.
+// QualifyShape builds a fully-qualified shape FQN. A name already qualified
+// is returned as it is: qualifying twice wrote "pub.polis.shapes.pub.polis.shapes.v5"
+// into new sites' registries.
 func QualifyShape(name string) string {
-	return "pub.polis.shapes." + name
+	const prefix = "pub.polis.shapes."
+	if strings.HasPrefix(name, prefix) {
+		return name
+	}
+	return prefix + name
 }
 
 // AdoptLegacyActiveTheme is the REGISTRY half of the active_theme migration:
@@ -439,7 +494,7 @@ func AdoptLegacyActiveTheme(site storage.Site, legacyTheme string) error {
 		reg.ActiveTheme = QualifyTheme(legacyTheme)
 	}
 	if reg.ActiveShape == "" {
-		reg.ActiveShape = "pub.polis.shapes.v4"
+		reg.ActiveShape = ShapeForNewRegistry(site)
 	}
 	if len(reg.InstalledBundles) == 0 {
 		reg.InstalledBundles = DefaultRegistry().InstalledBundles
@@ -500,20 +555,28 @@ func SetActiveThemeName(site storage.Site, themeName string) error {
 }
 
 // GetActiveShapeName mirrors GetActiveThemeName for the active shape.
-// Defaults to "v4" if neither registry nor well-known has a value set.
-// (Pre-cutover this defaulted to "v3"; the v3 → v4 cutover moved the
-// default forward — Medic's upgradeActiveShape remediation covers
-// existing tenants with an explicit v3 stamp, and this default covers
-// tenants with no registry at all.)
+// Defaults to "v5" when the registry names no shape. (It was "v3", then "v4";
+// each cutover moved it forward, and on a custodied deployment Medic's
+// upgradeActiveShape moves a registry that names an older shape.)
+//
+// ⭐ With NO registry at all, the answer is the shape the registry will record
+// when it is created (ShapeForNewRegistry): the blog for a site that already
+// has posts, so reading and creating agree.
 func GetActiveShapeName(site storage.Site) (string, error) {
-	if reg, err := LoadRegistry(site); err == nil && reg.ActiveShape != "" {
+	reg, err := LoadRegistry(site)
+	if err == nil && reg.ActiveShape != "" {
 		fqn, err := ParseFQN(reg.ActiveShape)
 		if err != nil {
 			return "", fmt.Errorf("invalid active_shape in registry: %w", err)
 		}
 		return fqn.Name, nil
 	}
-	return "v4", nil
+	if err != nil && errors.Is(err, os.ErrNotExist) {
+		if fqn, perr := ParseFQN(ShapeForNewRegistry(site)); perr == nil {
+			return fqn.Name, nil
+		}
+	}
+	return "v5", nil
 }
 
 // SetActiveShapeName writes the active shape name into the tenant's registry,

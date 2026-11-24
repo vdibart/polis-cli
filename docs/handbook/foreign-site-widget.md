@@ -3,6 +3,10 @@
 *For* [Contributors](../README.md#contributing-to-polis) — *Kind* [Tour](../README.md#kinds-of-page) — *See also* [concept](../general/concepts/architecture.md)
 
 > A guided tour of how a logged-in polis visitor's nav appears on someone else's polis site, plus the companion comment/follow widget. Source-of-truth concept docs live in [`../general/`](../general/); this tour walks the source code with you. Map of all threads: [`../../AGENTS.md`](../../AGENTS.md).
+>
+> **Scope note.** polis.pub's hosted service, which patches the nav into a page and serves both scripts, is not in the public repository, so the files this tour names under `webapp/internal/hosted/` cannot be opened here. The two scripts themselves are public as served: `https://polis.pub/nav.js` and `https://polis.pub/widget-<version>.js` (view their source). The templates and renderers it names are in this repository.
+>
+> ⚠️ **The walk-through below is told on a v4 (stream-shape) site.** On a v5 site, the default, the same two mechanisms land in different places: the nav is the visitor's way home at the lower left of the page, and the widget renders into `#polis-widget-follow` in the top bar ([`frame.html`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v5/frame.html)) and into each item's reply place ([`render/v5.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/render/v5.go)). The serve-time patch, the hydration and the state machine are the same.
 
 ## The observation
 
@@ -32,7 +36,7 @@ That something is the **serve-time nav injection**. And it's a different mechani
    │   │   <a class="polis-signin" href="https://polis.pub/">sign in</a>│  │
    │   │   ...                                                          │  │
    │   │   <div id="polis-widget" data-author="alice.polis.pub">  ◄─── 2│  │
-   │   │   <script src="https://polis.pub/widget-1.4.5.js" defer>       │  │
+   │   │   <script src="https://polis.pub/widget-1.6.2.js" defer>       │  │
    │   │                                                                │  │
    │   └────────────────────────────────────────────────────────────────┘  │
    │                                                                       │
@@ -47,7 +51,8 @@ That something is the **serve-time nav injection**. And it's a different mechani
    │   │   #1 placeholder's attrs replaced with the HOST's facts        │  │
    │   │   <script type="application/json" id="polis-nav-identity">     │  │
    │   │     (VISITOR identity + nav state, as text)                    │  │
-   │   │   <script src="https://polis.pub/nav.js?v=<hash>" defer>       │  │
+   │   │   <script src="https://polis.pub/nav.js?v=<hash>"              │  │
+   │   │           integrity="sha384-..." defer>                        │  │
    │   │   (both appended right before </body>)                         │  │
    │   │                                                                │  │
    │   └────────────────────────────────────────────────────────────────┘  │
@@ -64,7 +69,7 @@ That something is the **serve-time nav injection**. And it's a different mechani
           comment widget detects "connected" state and shows a reply CTA.
 ```
 
-The two scripts (`widget.js` and `nav.js`) are loaded from `polis.pub` — they're not part of the per-tenant content. The hosted webapp serves both as embedded assets on the canonical domain. `widget.js` is versioned by URL and integrity-protected by SRI; `nav.js` is loaded as `nav.js?v=<hash>`, where the hash is of the script itself, so a page never runs a copy cached (for an hour) from before a deploy; its tag carries no SRI attribute. Tenants don't host or update the widget code; updating `polis.pub`'s binary updates the widget for every tenant simultaneously.
+The two scripts (`widget.js` and `nav.js`) are loaded from `polis.pub` — they're not part of the per-tenant content. The hosted webapp serves both as embedded assets on the canonical domain. `widget.js` is versioned by URL and integrity-protected by SRI; `nav.js` is loaded as `nav.js?v=<hash>`, where the hash is of the script itself, so a page never runs a copy cached (for an hour) from before a deploy, and its tag carries SRI too: an `integrity` hash of the script, computed once at init like the widget's. Tenants don't host or update the widget code; updating `polis.pub`'s binary updates the widget for every tenant simultaneously.
 
 We'll walk each injection separately.
 
@@ -137,7 +142,7 @@ func injectNavWidgetPlaceholder(data []byte, visitorHandle, handle, baseDomain, 
 	// controller, so the controller picks up any DOM moves the widget
 	// makes (e.g. relocating the polis-signin into a handle-label
 	// position) before binding handlers.
-	scriptTag := identityTag + fmt.Sprintf(`<script src="https://%s/nav.js?v=%s" defer></script>`, baseDomain, navJSVersion)
+	scriptTag := identityTag + fmt.Sprintf(`<script src="https://%s/nav.js?v=%s" integrity="%s" crossorigin="anonymous" defer></script>`, baseDomain, navJSVersion, navJSIntegrity)
 	// ... inject before </body> ...
 }
 ```
@@ -145,7 +150,7 @@ func injectNavWidgetPlaceholder(data []byte, visitorHandle, handle, baseDomain, 
 Two things this function does:
 
 1. **Patch the placeholder** — find `<div id="polis-nav-root"`, replace its attributes with ones that identify the host being viewed. Only the **author's** facts are attributes.
-2. **Inject the visitor's identity and the script tag** — the identity as the *text* of a JSON block, `<script type="application/json" id="polis-nav-identity">`, then `<script src="https://polis.pub/nav.js?v=<hash>" defer></script>`, right before `</body>`. The `v` is a hash of nav.js, so a page never meets a copy of the script cached from an earlier deploy.
+2. **Inject the visitor's identity and the script tag** — the identity as the *text* of a JSON block, `<script type="application/json" id="polis-nav-identity">`, then `<script src="https://polis.pub/nav.js?v=<hash>" integrity="sha384-…" crossorigin="anonymous" defer></script>`, right before `</body>`. The `v` is a hash of nav.js, so a page never meets a copy of the script cached from an earlier deploy; the `integrity` hash means the browser runs nav.js only if its bytes are exactly the ones this binary embeds.
 
 ⛔ **Why the visitor is never an attribute:** the page belongs to someone else, whose stylesheet applies to it, and a CSS selector can test any attribute value (`[data-handle="alice"]`, `a[href^="https://alice."]`). Text cannot be selected on. Combined with any way for CSS to fetch, a handle in an attribute would let a site owner learn which logged-in readers visit.
 
@@ -173,7 +178,7 @@ var hostTheme = root.getAttribute('data-host-theme') || '';  // AUTHOR's active 
 If `homeURL` is empty, this is an anonymous-visitor page that somehow ended up loading nav.js — bail. Otherwise, the script:
 
 1. **Reads the visitor's nav state from the same JSON block**: their theme colours, avatar config, counts and badge-dot state, which the server computed from the visitor's own site when it served the page. Their own site is the source of truth; nav.js is just a renderer. ⭐ It makes no request: the cross-origin `GET https://<visitor>.polis.pub/api/nav/state` it used to make needs a widget token on the page's origin, and the visitor's token is scoped to their own site, so on a foreign tenant it answered 401. The fetch remains only for a page served without the state. If there is no state at all, nav.js leaves the host's bar as it is and turns its sign-in link into the visitor's handle.
-2. **Renders the avatar (with its hover menu) and the icon row** into a **closed shadow root** on `#polis-nav-root`, with its styles and the visitor's theme colours inside that root, adds the `pn-nav` class, and hides the host's wordmark. The host page's CSS and scripts cannot reach inside, so the links naming the visitor's home and the unread-badge dots are invisible to them. Each icon links back to the matching PQL view on the visitor's *own* dashboard. The sentence filter in the middle of the bar is the **host's** — nav.js recolours it, in the visitor's theme or, where the host's theme defines filter colours, the host's (`data-host-theme`).
+2. **Renders the avatar (with its hover menu) and the icon row** into a **closed shadow root** on `#polis-nav-root`, with its styles and the visitor's theme colours inside that root, adds the `pn-nav` class, and hides the host's wordmark. The host page's CSS and scripts cannot reach inside, so the links naming the visitor's home and the unread-badge dots are invisible to them. Each icon links back to the matching PQL view on the visitor's *own* site, at the previous owner app's address (`/_/pql/<sentence>`, the avatar menu's *Settings* at `/_/settings`); the v5 owner app sends each to its v5 place (`/_/<section>/pql/<sentence>`, enhance). The sentence filter in the middle of the bar is the **host's** — nav.js recolours it, in the visitor's theme or, where the host's theme defines filter colours, the host's (`data-host-theme`).
 3. **Repurposes the host's `.polis-signin` anchor** as the visitor's handle label (`polis-handle-label`) at the right side of the topbar. Its text is the visitor's hostname; it has **no href**, and goes to the visitor's home from a click handler.
 
 The `pn-nav` rule above then hides the host's sign-in link. (A shadow host has no light children, so the `:not(:empty)` wordmark rule no longer fires; nav.js hides the wordmark itself.) The handshake closes.
@@ -185,7 +190,7 @@ A few elegant properties fall out of "patch at serve time":
 - **Per-tenant static HTML stays identical for every visitor on disk.** The per-visitor part is added at serve time, and ⛔ a response that carries it is `Cache-Control: private, no-store` with `Vary: Cookie` (`serve.Personalised`), so no shared cache can hand one visitor's page to another. The anonymous page stays public and cacheable.
 - **Authentication is a server-side concern.** The browser never decides "am I logged in?" — the server decides and patches accordingly. No client-side flicker between anonymous and logged-in states.
 - **The visitor stays out of the host's reach.** Everything that names them, or shows their unread state, lives in the closed shadow root or in a closure, never in the host page's attributes.
-- **The widget code is centralized.** `nav.js` lives once at `polis.pub/nav.js`, served from the hosted webapp's embedded bytes. Every tenant page that loads it pulls the same byte-identical copy. ⚠️ Unlike `widget.js` (next section), its script tag carries no SRI attribute.
+- **The widget code is centralized.** `nav.js` lives once at `polis.pub/nav.js`, served from the hosted webapp's embedded bytes. Every tenant page that loads it pulls the same byte-identical copy, and its script tag carries an SRI hash (`navJSIntegrity` in `nav_embed.go`), as `widget.js`'s does (next section), so a changed copy does not run.
 
 ---
 
@@ -210,7 +215,7 @@ The comment/follow widget's container and script tag are in the static template:
         crossorigin="anonymous" defer></script>
 ```
 
-Every visitor — anonymous or logged-in — gets this script tag, at a versioned URL (`/widget-1.4.5.js`). The rendered HTML carries **no** integrity attribute: the hosted server adds one at serve time (2.b), so the pin always matches the bytes that server ships. If the bytes get tampered with in transit, the browser refuses to execute.
+Every visitor — anonymous or logged-in — gets this script tag, at a versioned URL (`/widget-1.6.2.js`). The rendered HTML carries **no** integrity attribute: the hosted server adds one at serve time (2.b), so the pin always matches the bytes that server ships. If the bytes get tampered with in transit, the browser refuses to execute.
 
 ### 2.b Embedded asset and serve-time SRI (`webapp/internal/hosted/widget_embed.go`, `injectWidgetIntegrity` in `hosted.go`)
 
@@ -229,7 +234,7 @@ func init() {
 }
 ```
 
-The widget JavaScript is embedded into the hosted binary at compile time and the SHA-384 integrity hash is computed once at init. When `polis.pub` serves `/widget-1.4.5.js`, it streams the embedded bytes. When it serves a tenant's HTML page, `injectWidgetIntegrity` finds the `<script src="https://polis.pub/widget-` tag and inserts `integrity="sha384-..."` (skipping a tag that already has one), so the browser will refuse to run anything that doesn't match. A page served by anything other than the hosted server — a self-hosted site, a static mirror — has no integrity attribute.
+The widget JavaScript is embedded into the hosted binary at compile time and the SHA-384 integrity hash is computed once at init. When `polis.pub` serves `/widget-1.6.2.js`, it streams the embedded bytes. When it serves a tenant's HTML page, `injectWidgetIntegrity` finds the `<script src="https://polis.pub/widget-` tag and inserts `integrity="sha384-..."` (skipping a tag that already has one), so the browser will refuse to run anything that doesn't match. A page served by anything other than the hosted server — a self-hosted site, a static mirror — has no integrity attribute.
 
 ### 2.c State machine (`webapp/internal/hosted/widget/widget.js`)
 
@@ -270,7 +275,8 @@ The nav widget does not use these cookies. Whether it appears is decided on the 
 // WidgetVersion is the single source of truth for the current polis widget version.
 // Update this constant when widget.js changes. Theme snippets reference it via
 // the {{widget_version}} template variable, so they never need manual version bumps.
-const WidgetVersion = "1.4.5"
+// ...
+const WidgetVersion = "1.6.2"
 ```
 
 The render pipeline stamps `{{widget_version}}` into every emitted HTML page, so the `<script src="/widget-X.Y.Z.js">` always points at the version that was current at publish time. The hosted server's `serveWidgetJS` handles versioned requests:
@@ -299,11 +305,11 @@ If you followed the tour end-to-end:
 - The "logged-in visitor template" isn't a different template. It's the **same per-tenant HTML**, **patched at serve time** when the requester is authenticated.
 - The nav widget injection is a serve-time transformation (`injectNavWidgetPlaceholder`) — patch a placeholder, append a script tag, done. CSS handles the visual coordination via `:has()` selectors. No client-side flicker.
 - The comment/follow widget is *not* injected at serve time — it's in the static template, loaded by every visitor, with a state machine that decides what UI to render based on cross-tenant cookies.
-- Both widget scripts are embedded into the polis.pub binary and served only from `polis.pub` — so updating the binary updates every tenant's widget simultaneously. `widget.js` is also versioned by URL and SRI-pinned at serve time; `nav.js` is versioned by a hash of its bytes in its URL (`?v=`), and is not SRI-pinned.
+- Both widget scripts are embedded into the polis.pub binary and served only from `polis.pub` — so updating the binary updates every tenant's widget simultaneously. `widget.js` is also versioned by URL and SRI-pinned at serve time; `nav.js` is versioned by a hash of its bytes in its URL (`?v=`), and SRI-pinned too (`navJSIntegrity`).
 - The comment widget's identity roams via `.polis.pub`-scoped cookies; the nav widget's comes from the server-side session. No OAuth, no per-tenant accounts, no third-party-cookie shenanigans.
 
 If you want to go deeper:
 
 - The starter map of every thread: [`../../AGENTS.md`](../../AGENTS.md)
-- The owner-SPA equivalent of this nav (same anatomy, different hydration): [`url-as-filter.md`](url-as-filter.md) → that tour walks `app.js`, which is the *owner-SPA* nav driver
+- The previous owner app's equivalent of this nav (same anatomy, different hydration): [`url-as-filter.md`](url-as-filter.md), kept as the record; that app, and its `app.js`, are retired. The v5 owner app's menu is its own (`webapp/internal/webui/www/v5/frame.js`)
 - How DS data flows in to populate badge dots in either nav: [`ds-to-stream.md`](ds-to-stream.md)

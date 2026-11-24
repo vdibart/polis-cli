@@ -218,6 +218,21 @@ func TestAuthoredProfileReadsTheTerseFormOnly(t *testing.T) {
 	}
 }
 
+// ExtractBlock returns the block exactly as written, stops at the next
+// column-0 key, ignores a nested `license:` and a body line, and is "" for a
+// work with no terms.
+func TestExtractBlockReturnsTheBlockVerbatim(t *testing.T) {
+	terms, _ := ProfileTerms(ProfileReserved, "https://maya.example", "2026-08-27T00:00:00Z")
+	block := Block(terms)
+	doc := "---\ntitle: A post\nin-reply-to:\n  license: nested\n" + block + "\nagent: rosie\nsignature: abc\n---\n\nlicense: in the body\n"
+	if got := ExtractBlock(doc); got != block {
+		t.Errorf("ExtractBlock =\n%q\nwant\n%q", got, block)
+	}
+	if got := ExtractBlock("---\ntitle: A post\n---\n\nlicense: in the body\n"); got != "" {
+		t.Errorf("ExtractBlock on a work with no terms = %q, want empty", got)
+	}
+}
+
 func TestStripBlockRemovesTheWholeBlock(t *testing.T) {
 	terms, _ := ProfileTerms(ProfileReserved, "https://maya.example", "2026-08-27T00:00:00Z")
 	fm := "title: A post\n" + Block(terms) + "\nsignature: abc"

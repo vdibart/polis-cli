@@ -2,6 +2,8 @@
 
 *For* [Contributors](../README.md#contributing-to-polis) — *Kind* [Tour](../README.md#kinds-of-page) — *See also* [spec](../general/reference/pql.md)
 
+⚠️ **This page describes the v4 owner app and the stream shape, both replaced.** Since 2026-11-22 every site's owner app is the **v5 app** (at `/_/`, on `/v1` only), and every site on polis.pub is on the **v5 shape**; the v4 app (`app.js`, `pql.js` routing and `/_/pql/<sentence>`) is deleted, and the stream shape is no longer supported though a site that records it still renders as before. What follows is kept as the record of how v4 worked. For the current model see [shapes](../general/concepts/shapes.md) and [architecture](../general/concepts/architecture.md).
+
 > A guided tour of the URL-as-filter thread. Source-of-truth concept docs live in [`../general/`](../general/); this tour walks the source code with you. Map of all threads: [`../../AGENTS.md`](../../AGENTS.md).
 
 ## The observation
@@ -28,13 +30,13 @@ What's going on?
 
 That sentence — `all activity from my network` — is a **PQL** sentence (Polis Query Language). It's the active filter on the stream-screen. When you click an icon or change a filter, the polis code mutates the sentence, pushes the new URL through `history.pushState`, and the stream re-filters to match. The URL is the source of truth for "what view is on screen."
 
-This is *not* a feature retrofitted onto a normal SPA router. It's the core design of the v4 stream-screen surface — there's only one screen, the filter is the URL, every navigation gesture is a filter mutation.
+This is *not* a feature retrofitted onto a normal SPA router. It's the core design of the stream shape's screen in the previous owner app — there's only one screen, the filter is the URL, every navigation gesture is a filter mutation.
 
 ## Walking the source
 
 Three files carry the thread, in this order: **producer** (intercepts URLs), **grammar** (parses sentences), **consumer** (renders results).
 
-### 1. Producer: [`webapp/internal/webui/www/app.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/app.js)
+### 1. Producer: `webapp/internal/webui/www/app.js` (the previous owner app, since retired)
 
 The owner SPA's navigation dispatch. When you click any link or icon in the topbar, `App.navigateTo(path)` runs. Inside it, the very first check is the PQL URL intercept:
 
@@ -56,7 +58,7 @@ If the parser hasn't loaded yet (early in page life), the dispatch punts gracefu
 
 If the path *isn't* a PQL URL, the same `navigateTo` continues into a fallback that quietly `replaceState`s to `/_/` and renders the default filter. Old v3 routes (`/_/posts`, `/_/blessings`, `/_/messages`) all land here. Hard-cutover by design.
 
-### 2. Grammar: [`webapp/internal/webui/www/pql.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/pql.js)
+### 2. Grammar: `webapp/internal/webui/www/pql.js` (the previous owner app, since retired)
 
 The parser and composer. Two functions matter most:
 
@@ -125,7 +127,7 @@ Why a *sentence* and not a query string? Because filter views are things you'd s
 
 ### [`docs/general/concepts/infinity-stream.md`](../general/concepts/infinity-stream.md) — why a single screen
 
-Why does the URL go to all this trouble? Because the v4 stream surface is **one screen, many filters** — there is no "Feed page" or "Posts page" or "Messages page" anymore. The previous design had modal tabs; the URL didn't reflect them; switching meant clicking around. PQL turned the filter into a first-class URL-addressable object, which let polis collapse the modal tabs into a single re-filterable surface. Read this if you want to understand the *design pressure* that produced PQL in the first place.
+Why does the URL go to all this trouble? Because the stream shape's surface was **one screen, many filters** — there is no "Feed page" or "Posts page" or "Messages page" anymore. The previous design had modal tabs; the URL didn't reflect them; switching meant clicking around. PQL turned the filter into a first-class URL-addressable object, which let polis collapse the modal tabs into a single re-filterable surface. Read this if you want to understand the *design pressure* that produced PQL in the first place.
 
 ### [`docs/general/concepts/shapes.md`](../general/concepts/shapes.md) — the infinity stream is a *shape*
 
@@ -137,9 +139,9 @@ If you followed the thread end-to-end:
 
 - The URL on polis.pub is meaningful — it's a sentence in a grammar (PQL).
 - The grammar is parseable both ways (sentence ↔ filter-state); the URL is the canonical form of "what view is on screen."
-- The grammar is now **one contract across three languages** — `pql.js` (browser), `cli-go/pkg/pql` (Go), `discovery-service/core/pql.ts` (TS) — all asserting the same `docs/general/reference/pql-golden.jsonl` so they can't drift.
-- The same sentence is also a **server endpoint**: `GET /pql/<sentence>` content-negotiates (JSON envelope for the SPA/devs, HTML infinity-stream for visitors), and the discovery service exposes its own `/pql/` for public cross-tenant queries. A bare tenant root (`<handle>.polis.pub/`) redirects a browser to `/pql/all+posts+by+date`.
-- This isn't a routing trick — it's the core architecture of the v4 stream-screen, which is itself a *shape* polis sites can opt into.
+- The grammar is **one contract** — `cli-go/pkg/pql` (Go) and `discovery-service/core/pql.ts` (TS), both asserting the same `docs/general/reference/pql-golden.jsonl` so they can't drift. (The previous owner app's browser parser, `pql.js`, was a third; it is deleted with that app.)
+- The same sentence is also a **server endpoint**: `GET /pql/<sentence>` content-negotiates (JSON for the owner app and developers, HTML for visitors), and the discovery service exposes its own `/pql/` for public cross-tenant queries.
+- This wasn't a routing trick — it was the core architecture of the stream shape's screen, and the stream shape is itself a *shape* a site could choose.
 - The same grammar that filters the stream is intentionally close to the grammar that writes policy rules. Polis is leaning into "sentence as primary abstraction" across multiple surfaces.
 
 See [`../general/reference/pql.md`](../general/reference/pql.md) for the grammar (incl. the `from`/`about` relations and the scope-resolution boundary) and [`../ds/developer/pql-json-api.md`](../ds/developer/pql-json-api.md) for the JSON API.

@@ -32,6 +32,10 @@ type DiscoveryConfig struct {
 	DiscoveryURL string
 	BaseURL      string
 	Generator    string // e.g. "polis-cli-go/0.59.0" — used in comment metadata
+	// Marker is a user agent's, when the send is its act: signed into the
+	// registration (and so the blessing request) and sent with it
+	// (delegation.md §7). Zero for the owner's own send and for upkeep.
+	Marker discovery.AgentMarker
 }
 
 // BeseechResult contains the result of a comment beseech request.
@@ -75,7 +79,7 @@ func commentRegistrationMetadata(meta *CommentMeta, beseech bool) map[string]int
 	return m
 }
 
-func registerCommentContent(site storage.Site, meta *CommentMeta, commentID string, privateKey []byte, dsURL, baseURL string, beseech bool) (*discovery.ContentRegisterResponse, error) {
+func registerCommentContent(site storage.Site, meta *CommentMeta, commentID string, privateKey []byte, dsURL, baseURL string, beseech bool, marker discovery.AgentMarker) (*discovery.ContentRegisterResponse, error) {
 	ts, err := time.Parse("2006-01-02T15:04:05Z", meta.Timestamp)
 	if err != nil {
 		return nil, fmt.Errorf("invalid timestamp: %w", err)
@@ -99,8 +103,8 @@ func registerCommentContent(site storage.Site, meta *CommentMeta, commentID stri
 			signing.MarkdownSigningBase(string(data), signing.TypeComment))
 	}
 
-	canonical, err := discovery.MakeContentCanonicalJSON(
-		"pub.polis.comment", commentURL, meta.CommentVersion, meta.Author, commentMetadata,
+	canonical, err := discovery.MakeContentCanonicalJSONMarked(
+		"pub.polis.comment", commentURL, meta.CommentVersion, meta.Author, commentMetadata, marker,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("canonical JSON: %w", err)
@@ -119,6 +123,8 @@ func registerCommentContent(site storage.Site, meta *CommentMeta, commentID stri
 		Author:    meta.Author,
 		Metadata:  commentMetadata,
 		Signature: sig,
+		Agent:     marker.Agent,
+		Grant:     marker.Grant,
 	})
 	if err == nil && resp != nil && resp.Witness != nil {
 		// Never fails the registration; see publish.RegisterPost.
@@ -159,9 +165,11 @@ func publishAndRegisterComment(site storage.Site, commentID string, privateKey [
 		return nil, err
 	}
 	var dsURL, baseURL string
+	var marker discovery.AgentMarker
 	if len(dsCfg) > 0 && dsCfg[0] != nil {
 		dsURL = dsCfg[0].DiscoveryURL
 		baseURL = dsCfg[0].BaseURL
+		marker = dsCfg[0].Marker
 	} else {
 		dsURL = DiscoveryURL
 		baseURL = BaseURL
@@ -210,7 +218,7 @@ func publishAndRegisterComment(site storage.Site, commentID string, privateKey [
 
 	// Register the comment content with the discovery service (beseech controls
 	// whether the DS also requests a blessing).
-	resp, err := registerCommentContent(site, signed.Meta, commentID, privateKey, dsURL, baseURL, beseech)
+	resp, err := registerCommentContent(site, signed.Meta, commentID, privateKey, dsURL, baseURL, beseech, marker)
 	if err != nil {
 		return nil, fmt.Errorf("register: %w", err)
 	}

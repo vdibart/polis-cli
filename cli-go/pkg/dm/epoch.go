@@ -154,6 +154,88 @@ func (k *Keyring) AddPasswordEpoch(pubKeyMessagesB64, wrappedDEK, wrappedDEKReco
 //   - both:                 all four set.
 //
 // Callers bump+CAS the keyring exactly as for AddPasswordEpoch.
+// AddFreshPasswordEpoch starts a fresh key when a password epoch already
+// exists and neither its password nor its recovery phrase can be had (the
+// last resort of spec 2.3, "Lost both"): a new epoch, minted and wrapped in
+// the owner's browser, becomes current. The earlier epochs keep their wraps
+// untouched, so their messages wait, sealed, for the old password or phrase
+// to turn up; nothing is deleted. Only wrapped blobs arrive: the server never
+// sees a password, phrase or key.
+func (k *Keyring) AddFreshPasswordEpoch(pubKeyMessagesB64, wrappedDEK, wrappedDEKRecovery string, kdf, recoveryKDF KDFParams) (int, error) {
+	cur, err := k.CurrentEpoch()
+	if err != nil {
+		return 0, err
+	}
+	if cur.Kind != EpochKindPassword {
+		return 0, fmt.Errorf("no password is set yet (current epoch %d is %q); set a password first", cur.ID, cur.Kind)
+	}
+	if err := checkNewEpoch(pubKeyMessagesB64, wrappedDEK, wrappedDEKRecovery, kdf, recoveryKDF); err != nil {
+		return 0, err
+	}
+	kdfCopy, recCopy := kdf, recoveryKDF
+	id := k.nextEpochID()
+	k.Epochs = append(k.Epochs, Epoch{
+		ID:                 id,
+		Kind:               EpochKindPassword,
+		PublicKeyMessages:  pubKeyMessagesB64,
+		WrappedDEK:         wrappedDEK,
+		WrappedDEKRecovery: wrappedDEKRecovery,
+		KDF:                &kdfCopy,
+		RecoveryKDF:        &recCopy,
+		CreatedAt:          nowRFC3339(),
+	})
+	k.Current = id
+	k.Revision++
+	return id, nil
+}
+
+// checkNewEpoch is what a browser-minted epoch must carry.
+func checkNewEpoch(pubKeyMessagesB64, wrappedDEK, wrappedDEKRecovery string, kdf, recoveryKDF KDFParams) error {
+	pub, err := base64.StdEncoding.DecodeString(pubKeyMessagesB64)
+	if err != nil || len(pub) != 32 {
+		return fmt.Errorf("invalid messages public key (want base64 of 32 bytes)")
+	}
+	if wrappedDEK == "" || wrappedDEKRecovery == "" {
+		return fmt.Errorf("wrapped_dek and wrapped_dek_recovery are required")
+	}
+	if kdf.Algo != "argon2id" {
+		return fmt.Errorf("password KDF must be argon2id, got %q", kdf.Algo)
+	}
+	if recoveryKDF.Algo != "hkdf-sha256" {
+		return fmt.Errorf("recovery KDF must be hkdf-sha256, got %q", recoveryKDF.Algo)
+	}
+	return nil
+}
+
+// RewrapEarlierEpoch wraps an earlier password epoch's key under a new
+// password wrap (in practice the current password, so the owner is not asked
+// for the old one again: "Keep unlocked", spec 2.3). Only the password wrap
+// changes; the epoch's recovery wrap stays, so its old phrase still opens it.
+// The current epoch is changed with RewrapCurrentEpoch instead.
+func (k *Keyring) RewrapEarlierEpoch(id int, wrappedDEK string, kdf *KDFParams) error {
+	if id == k.Current {
+		return fmt.Errorf("epoch %d is the current one; change its password instead", id)
+	}
+	ep, err := k.EpochByID(id)
+	if err != nil {
+		return err
+	}
+	if ep.Kind != EpochKindPassword {
+		return fmt.Errorf("epoch %d is %q, not a password epoch", id, ep.Kind)
+	}
+	if wrappedDEK == "" || kdf == nil {
+		return fmt.Errorf("a re-wrap needs both wrapped_dek and kdf")
+	}
+	if kdf.Algo != "argon2id" {
+		return fmt.Errorf("password KDF must be argon2id, got %q", kdf.Algo)
+	}
+	kc := *kdf
+	ep.WrappedDEK = wrappedDEK
+	ep.KDF = &kc
+	k.Revision++
+	return nil
+}
+
 func (k *Keyring) RewrapCurrentEpoch(wrappedDEK string, kdf *KDFParams, wrappedDEKRecovery string, recoveryKDF *KDFParams) error {
 	cur, err := k.CurrentEpoch()
 	if err != nil {

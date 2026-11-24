@@ -564,9 +564,13 @@ var awaitingApproval = map[string]string{}
 var stillCited = map[string]bool{}
 
 // historicalSources record paths as they were when written; a changelog entry
-// is never rewritten. This file names private paths on purpose.
+// is never rewritten. This file names private paths on purpose. The frozen
+// copy of a site (why.polis.pub, served by the hosted service) is signed posts
+// byte for byte: their links are as their author wrote them, and editing one
+// would break its signature.
 func historicalSource(rel string) bool {
-	return path.Base(rel) == "CHANGELOG.md" || rel == "cli-go/cmd/polis/docs_links_test.go"
+	return path.Base(rel) == "CHANGELOG.md" || rel == "cli-go/cmd/polis/docs_links_test.go" ||
+		strings.HasPrefix(rel, "webapp/internal/hosted/why/fixtures/")
 }
 
 // TestDocPathsCitedOutsideDocsResolve is L2.

@@ -1,12 +1,25 @@
-# Content Type API
+# The site's API
 
-The Content Type API provides programmatic access to polis content operations via REST endpoints under `/v1/`.
+**A site has one API: the operations under `/v1/`.** Each site describes its own at `/v1/openapi.json`
+(OpenAPI 3.1, generated from the operations themselves, never written by hand), and every caller runs the
+same operations: the owner's own app, an agent over MCP (whose tools are generated from that description),
+a script with a token, and the `polis` CLI, which runs them in process on a local site with no server.
 
 ## Scope
 
-This API covers **content type operations only**: publishing posts, publishing and republishing comments, direct messages, tags, and reading following lists, themes and licence terms. Site settings, theme switching, dashboard aggregations, and setup wizards remain in the webapp/CLI.
+Content (posts, comments, follows, tags, direct messages, drafts), the site's settings and facts (its name,
+avatar, about, theme and design tokens, policy, terms), its agents (tokens, connections, Rosie), its
+messages key, what the owner has seen, and reads of anything through the query operation (PQL).
 
-Those webapp-owned operations live under `/api/` on a **separate, owner-authenticated surface** with its own auth model — a different audience and a different way in, but documented here alongside the content API rather than somewhere else. See [developer/site-api.md](developer/site-api.md). It indexes every `/api/` route and writes up the site operations a script may rely on. The rest are marked internal: the web app's own plumbing, which may change without notice.
+**What is deliberately outside `/v1`**, each for a reason: getting signed in (a caller cannot need a
+credential to obtain one), polis.pub's account and export (the operator's, not the site's), the capability
+descriptor (read before a caller knows the API), site-to-site calls (the discovery service waking a site, a
+message delivered by another site), and the embeddable widget (polis.pub's own service). All of these are listed in
+[developer/site-api.md](developer/site-api.md). The old browser app and its `/api/` routes are gone; do not
+build on what is left of `/api/`.
+
+⚠️ `/v1` is a **preview**: an operation's shape may still change, and what that promises is stated once, in
+[The API describes itself](developer/reference.md#the-api-describes-itself).
 
 ## Authentication, CORS, limits and a quick start
 
@@ -16,9 +29,10 @@ All in [developer/reference.md](developer/reference.md): reads are mostly public
 
 | Document | Audience | Description |
 |----------|----------|-------------|
-| [developer/reference.md](developer/reference.md) | Developers | Routes, request/response examples, error codes, implementation status |
+| [developer/reference.md](developer/reference.md) | Developers | Authentication, paths, errors and answers, every operation |
+| [developer/mcp.md](developer/mcp.md) | Developers | MCP and agent access: tools generated from the description, the three servers, the grant on every call |
 | [developer/dispatch-engine.md](developer/dispatch-engine.md) | Developers | Engine architecture, handler types, adding operations |
-| [developer/site-api.md](developer/site-api.md) | Developers | The webapp's `/api/` surface: an index of every route, and the site operations written up in full |
+| [developer/site-api.md](developer/site-api.md) | Developers | What is outside `/v1`, and why; where the old `/api/` site operations moved |
 
 ## See Also
 

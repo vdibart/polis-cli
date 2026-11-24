@@ -127,6 +127,8 @@ func newInstance(o instanceOptions) (*Server, error) {
 		instanceMode = mode.RemoteClientSigned
 	}
 	s.Mode = instanceMode
+	// Kay is off unless switched on, and kayOn also requires a remote mode.
+	s.APIPointerEnabled = getenv(APIPointerEnv) == "1"
 
 	// ⛔ A SITE ON A REMOTE BACKEND LOGS TO STDOUT. The rotating log file is
 	// appended to per request, which a store without append cannot take, and a
@@ -156,6 +158,8 @@ func newInstance(o instanceOptions) (*Server, error) {
 		}
 		// ⭐ And the site around that key, the first time. Not fatal.
 		s.EnsureSite(context.Background())
+		// ⭐ And the api pointer, where switched on (EnsureAPIPointer).
+		s.EnsureAPIPointer()
 		// ⭐ And a store never deployed from (a seeded one) is deployed.
 		s.deployIfNeverDeployed(context.Background())
 		// ⭐ And the owner-session key, so an unproven sign-in never reads it.
@@ -194,7 +198,8 @@ func editorRoutes(s *Server, webFS fs.FS) *http.ServeMux {
 	routes.Handle("/bundle-assets/", http.StripPrefix("/bundle-assets/", http.FileServer(http.FS(bundle.ReferencePayloadFS()))))
 
 	// Static files from embedded filesystem with SPA fallback
-	routes.Handle("/", spaHandler(webFS, s.Site()))
+	spa := spaHandler(webFS, s.Site())
+	routes.Handle("/", spa)
 	return routes
 }
 
@@ -207,19 +212,18 @@ func editorRoutes(s *Server, webFS fs.FS) *http.ServeMux {
 // silently never mounted for the life of the instance. Until it can be built,
 // /v1 answers 503, as the rest of a starting instance does.
 func mountV1(routes *http.ServeMux, s *Server) {
-	logEvent := func(event string, fields map[string]interface{}) { s.LogEvent(event, fields) }
 	if !s.StartsOnRequest() {
 		if apiEngine, err := s.newContentEngine(); err != nil {
 			log.Printf("[warning] v1 API not available: %v", err)
 		} else {
-			api.SetupRoutes(routes, apiEngine, s.Site(), logEvent)
+			routes.Handle("/v1/", s.newV1Handler(apiEngine))
 			log.Printf("[info] v1 content API enabled")
 		}
 		return
 	}
 	var mu sync.Mutex
 	var inner http.Handler
-	routes.Handle("/v1/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	lazy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		if inner == nil {
 			apiEngine, err := s.newContentEngine()
@@ -230,13 +234,16 @@ func mountV1(routes *http.ServeMux, s *Server) {
 				return
 			}
 			m := http.NewServeMux()
-			api.SetupRoutes(m, apiEngine, s.Site(), logEvent)
+			api.SetupRoutesWithHost(m, apiEngine, s.Site(), s.apiHost(), func(event string, fields map[string]interface{}) { s.LogEvent(event, fields) })
 			inner = m
 		}
 		h := inner
 		mu.Unlock()
 		h.ServeHTTP(w, r)
-	}))
+	})
+	// ⭐ /mcp reaches the same lazy handler, so its first call starts /v1 too.
+	s.setV1Handler(lazy)
+	routes.Handle("/v1/", lazy)
 }
 
 // instanceHandler is the middleware every self-hosted instance runs inside,

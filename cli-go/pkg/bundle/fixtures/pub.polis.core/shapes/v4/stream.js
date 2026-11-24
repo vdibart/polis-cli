@@ -6,17 +6,26 @@
 // scroll-driven focus changes that update the URL bar (closing the loop:
 // scroll → focused entry → URL → bookmarkable).
 //
+// The v4 (stream) shape is no longer offered to new sites; a site still on it
+// renders as before. The owner app that also loaded this file was deleted on
+// 2026-11-22: every site's owner app is now the v5 app, which does not. The
+// owner SPA, app.js, owner-extras.js and pql.js named in the comments below
+// are that app, describing v4 as it was; they can still be read at release
+// 0.70.0: https://github.com/vdibart/polis-cli/tree/v0.70.0/webapp/internal/webui/www
+//
 // Trail across files (URL-as-filter):
-//   producer  — webapp/internal/webui/www/app.js: intercepts /_/pql/<sentence>
-//   grammar   — webapp/internal/webui/www/pql.js: PQL.parse / .compose
+//   producer  — webapp/internal/server/handlers_pql.go: /pql/<sentence> serves
+//               this site's index.html with the view's filter in it as data
+//               (<script type="application/json" id="polis-initial-pql">)
+//   grammar   — cli-go/pkg/pql/pql.go: the one PQL grammar (Parse / Compose)
 //   consumer  — this file (stream.js): hydration + scroll-as-URL-mutation
 //
 // Pull the thread:
-//   github.com/vdibart/polis-cli/blob/main/docs/general/concepts/infinity-stream.md (why)
-//   github.com/vdibart/polis-cli/blob/main/docs/general/reference/pql.md              (spec)
-//   github.com/vdibart/polis-cli/blob/main/docs/general/concepts/shapes.md           (v3 vs v4)
-//   github.com/vdibart/polis-cli/blob/main/docs/handbook/url-as-filter.md   (tour)
-//   github.com/vdibart/polis-cli/blob/main/AGENTS.md                        (map)
+//   https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/infinity-stream.md (why)
+//   https://github.com/vdibart/polis-cli/blob/main/docs/general/reference/pql.md              (spec)
+//   https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/shapes.md           (v3 vs v4)
+//   https://github.com/vdibart/polis-cli/blob/main/docs/handbook/url-as-filter.md   (tour)
+//   https://github.com/vdibart/polis-cli/blob/main/AGENTS.md                        (map)
 // =============================================================================
 
 // Polis stream controller.
@@ -27,10 +36,9 @@
 // PolisStream namespace for downstream consumers (lazy body fetch, filter
 // integration, owner-SPA compose flow).
 //
-// Same script source is loaded by:
-//   - Public per-post artifacts (via stream.html's <script src="/stream.js">)
-//   - Owner SPA's index.html (loaded alongside its own /app.js for now;
-//     the SPA's existing screens migrate into this controller progressively)
+// Loaded by a v4 site's public pages (via stream.html's
+// <script src="/stream.js">). The deleted v4 owner app loaded it too, which
+// is why comments below still speak of the owner's app.
 //
 // Detection: any page with <body data-polis-stream-direction="..."> is a
 // stream-shape page. Pages without that attribute (legacy v3 templates,
@@ -228,6 +236,11 @@
     // pagination requests use the right grammar value. selectOption(scope)
     // updates this and triggers applyFilter.
     var filterScope = '';                 // '' | 'me' | 'my-network' | 'my-mutuals' | 'all-polis' | '@<handle>'
+    // The sentence's relation: 'from' (the default), 'about', or 'on' (a
+    // post's comments, whose scope is the post's https address). Only a
+    // seeded or parsed sentence sets it; picking any scope returns it to
+    // 'from', since every scope the dropdowns offer reads 'from'.
+    var filterRelation = 'from';
     var filterOpenDropdown = null;        // currently-open dropdown DOM (or null)
     // Empty messages view auto-opens the DM composer once per filter arrival
     // (see renderEmptyState). This guard stops a refresh-driven re-render from
@@ -615,7 +628,7 @@
             }
         } catch (e) { /* ignore */ }
 
-        // PQL hard cutover: the /pql/ HTML branch injects window.__POLIS_INITIAL_PQL
+        // PQL hard cutover: the /pql/ HTML branch puts the filter in the page
         // when the landing isn't the default posts view. The SSR shell is always
         // the posts view, so re-filter into the seeded view (comments/profiles)
         // on hydrate. No-op on the common posts landing and on the owner SPA.
@@ -623,13 +636,29 @@
     }
 
     // applyInitialPQLSeed re-filters the stream to the server-injected initial
-    // PQL filter (see handlers_pql.go HTML branch). Reads the structured filter
-    // window.__POLIS_INITIAL_PQL = {qualifier,type,scope[,modifier]} and applies
-    // it via setFilter (which resets pagination + fetches). Absent → no-op.
+    // PQL filter (see handlers_pql.go HTML branch) and applies it via setFilter
+    // (which resets pagination + fetches). Absent → no-op.
     function applyInitialPQLSeed() {
-        var seed = window.__POLIS_INITIAL_PQL;
-        if (!seed || typeof seed !== 'object') return;
+        var seed = readInitialPQLSeed();
+        if (!seed) return;
         setFilter(seed);
+    }
+
+    // readInitialPQLSeed reads the filter the server put in the page:
+    // {qualifier,type,relation,scope[,modifier]}, as JSON in a data block,
+    // <script type="application/json" id="polis-initial-pql">. ⛔ A data block,
+    // never an inline script: tenant pages are served with script-src 'self',
+    // so an inline script never runs, and a view's own address showed the
+    // posts. A data block is not executed, so the policy leaves it alone.
+    function readInitialPQLSeed() {
+        var el = document.getElementById('polis-initial-pql');
+        if (!el) return null;
+        try {
+            var seed = JSON.parse(el.textContent || '');
+            return seed && typeof seed === 'object' ? seed : null;
+        } catch (e) {
+            return null;
+        }
     }
 
     // Gate URL updates AND lazy prefetch on a real user-initiated scroll.
@@ -1739,6 +1768,7 @@
         // reorder, posts would land on my-network instead of me.
         applyTypePersonalLock(type);
         if (scope) {
+            setRelation('from');
             filterScope = scope;
             var scSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="scope"]');
             // Route through labelForSlot so possessive-network values
@@ -4367,6 +4397,7 @@
             qualifier: filterQualifier,
             type: filterType,
             scope: filterScope,
+            relation: filterRelation,
             modifier: filterModifier,
         };
         for (var i = 0; i < filterChangeListeners.length; i++) {
@@ -4623,7 +4654,16 @@
                     scopeTok = sc;
                 }
         }
-        var parts = [filterQualifier || 'all', typeTok, 'from', scopeTok];
+        // 'blessed' is an adjective before the type ("all blessed comments
+        // on <post>"), never a trailing modifier.
+        var head = filterModifier === 'blessed'
+            ? [filterQualifier || 'all', 'blessed', typeTok]
+            : [filterQualifier || 'all', typeTok];
+        // A post address ('on') is encoded whole: its "//" would otherwise be
+        // collapsed by the server's path cleaning, and its own '+' is refused
+        // by the grammar anyway.
+        if (filterRelation === 'on') scopeTok = encodeURIComponent(scopeTok);
+        var parts = head.concat([filterRelation || 'from', scopeTok]);
         switch (filterModifier) {
             case 'by-date': parts.push('by date'); break;
             case 'by-name': parts.push('by name'); break;
@@ -5331,6 +5371,7 @@
             if (!document.body.classList.contains('is-owner')) {
                 var hostDom = document.body.dataset.polisSiteDomain || paginationTenant;
                 if (hostDom) {
+                    setRelation('from');
                     filterScope = (opt.value === 'profiles')
                         ? '@' + hostDom + ':network'
                         : '@' + hostDom;
@@ -5360,6 +5401,7 @@
                 closeOpenDropdown();
                 return;
             }
+            setRelation('from');
             filterScope = opt.value;
             applyScopeModifierGuard();
         }
@@ -5383,7 +5425,15 @@
     // triggers a re-fetch via applyFilter. opts.label overrides the
     // displayed text (for @<handle>.polis.pub typeahead resolutions where
     // the URL value is "@alice.polis.pub" but the slot reads "@alice").
+    // setRelation sets the relation and the sentence's connector word.
+    function setRelation(rel) {
+        filterRelation = (rel === 'about' || rel === 'on') ? rel : 'from';
+        var conns = document.querySelectorAll('.sentence-filter .sf-connector');
+        for (var i = 0; i < conns.length; i++) conns[i].textContent = filterRelation;
+    }
+
     function setFilterScope(value, opts) {
+        setRelation('from');
         filterScope = value || '';
         var slotEl = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="scope"]');
         if (slotEl) {
@@ -5451,6 +5501,14 @@
     // for the new type, so we still reset to my-network in that case.
     var __wasPersonalType = false;
     function applyTypePersonalLock(type) {
+        // A post's thread ('on <post>') holds comments only: any other type
+        // leaves it, back to the default scope, which reads 'from'.
+        if (filterRelation === 'on' && type !== 'comments') {
+            setRelation('from');
+            filterScope = '';
+            var threadSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="scope"]');
+            if (threadSlot) threadSlot.textContent = labelForSlot('scope', currentScopeParam());
+        }
         // body.is-owner is set only on the owner SPA (app.js init).
         // Public / cross-visit views must keep the scope slot in its
         // initial sf-slot--identity state (locked to the host's
@@ -5467,6 +5525,7 @@
         var qSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="qualifier"]');
 
         function lockScope(value, label) {
+            setRelation('from');
             filterScope = value;
             filterQualifier = 'all';
             if (qSlot) qSlot.textContent = 'all';
@@ -5482,6 +5541,7 @@
         }
         function unlockScopeSlot(resetScope) {
             if (resetScope) {
+                setRelation('from');
                 filterScope = 'my-network';
                 sSlot.textContent = 'my network';
             }
@@ -5516,6 +5576,7 @@
             // Default to my-mutuals (the inbox) when first arriving on
             // dms via the icon preset; the user picks a peer from the
             // dropdown to drill in.
+            setRelation('from');
             filterScope = 'my-mutuals';
             filterQualifier = 'all';
             if (qSlot) qSlot.textContent = 'all';
@@ -5537,6 +5598,7 @@
             if (type === 'profiles' &&
                 filterScope !== 'my-network' &&
                 filterScope !== 'all-polis') {
+                setRelation('from');
                 filterScope = 'my-network';
                 sSlot.textContent = 'my network';
             }
@@ -5625,6 +5687,12 @@
             filterScope = preset.scope;
             var sSlot = document.querySelector('.sentence-filter .sf-slot[data-filter-slot="scope"]');
             if (sSlot) sSlot.textContent = opts.scopeLabel || labelForSlot('scope', filterScope);
+        }
+        // The relation is part of the preset: a parsed or seeded sentence
+        // carries it ('on' a post, 'about' me), and a preset without one
+        // (the icon row) reads 'from'.
+        if (preset.relation !== undefined || preset.scope !== undefined) {
+            setRelation(preset.relation);
         }
         // Modifier comes last so it wins over the type-change reset above.
         if (preset.modifier !== undefined) {
@@ -6013,6 +6081,7 @@
     // owner-SPA compose flow). Read-only by convention; mutating these is
     // undefined behavior.
     window.PolisStream = {
+        initialPQLSeed: readInitialPQLSeed,
         renderEntry: renderEntry,
         renderers: renderers,
         appendEntry: function (domEl) {

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"regexp"
 	"strings"
 	"time"
@@ -24,7 +25,15 @@ import (
 var (
 	frontmatterStripRe = regexp.MustCompile(`(?s)^---\n.*?\n---\n*`)
 	frontmatterParseRe = regexp.MustCompile(`(?s)^---\n(.*?)\n---`)
+	// An ATX heading of any level: one to six #s, then a space or tab.
+	atxHeadingRe = regexp.MustCompile(`^#{1,6}[ \t]`)
+	// An ATX heading's optional closing sequence: #s after a space or tab.
+	atxClosingRe = regexp.MustCompile(`[ \t]+#+$`)
 )
+
+// titleFallbackRunes is how much of a first line that is not a heading
+// becomes the title.
+const titleFallbackRunes = 60
 
 // Version is set at startup by the cmd package.
 var Version = "dev"
@@ -56,7 +65,11 @@ type ManifestData struct {
 }
 
 // ExtractTitle extracts the title from markdown content.
-// Looks for the first # heading, falls back to first non-empty line.
+// The first non-empty line decides: an ATX heading of any level gives its text
+// (the #s, the one space or tab after them, and any closing #s removed), and
+// any other line is the title itself, cut at 60 characters, never inside one.
+// ⚠️ The title is inside a post's signature, so a change here changes only the
+// titles of posts published after it; nothing already published is re-signed.
 func ExtractTitle(markdown string) string {
 	lines := strings.Split(markdown, "\n")
 	for _, line := range lines {
@@ -64,13 +77,15 @@ func ExtractTitle(markdown string) string {
 		if trimmed == "" {
 			continue
 		}
-		// Check for heading
-		if strings.HasPrefix(trimmed, "# ") {
-			return strings.TrimPrefix(trimmed, "# ")
+		if m := atxHeadingRe.FindString(trimmed); m != "" {
+			text := atxClosingRe.ReplaceAllString(trimmed[len(m):], "")
+			if strings.TrimSpace(text) == "" {
+				return "Untitled"
+			}
+			return text
 		}
-		// Fall back to first non-empty line (truncated)
-		if len(trimmed) > 60 {
-			return trimmed[:60]
+		if r := []rune(trimmed); len(r) > titleFallbackRunes {
+			return string(r[:titleFallbackRunes])
 		}
 		return trimmed
 	}
@@ -286,6 +301,14 @@ func UnquoteYAMLString(s string) string {
 // If dsCfg is non-nil, it overrides package-level discovery globals for
 // multi-tenant safety. Pass nil to use globals (single-tenant / CLI mode).
 func PublishPost(site storage.Site, markdown, filename string, privateKey []byte, dsCfg ...*DiscoveryConfig) (*PublishResult, error) {
+	return PublishPostAs(site, markdown, filename, privateKey, discovery.AgentMarker{}, dsCfg...)
+}
+
+// PublishPostAs is PublishPost for an act made by a user agent: the marker's
+// `agent:` and `grant:` lines go into the frontmatter INSIDE the signature.
+// The zero marker is the owner's own act and writes exactly what PublishPost
+// always has.
+func PublishPostAs(site storage.Site, markdown, filename string, privateKey []byte, marker discovery.AgentMarker, dsCfg ...*DiscoveryConfig) (*PublishResult, error) {
 	// Resolve generator from config (or fall back to package global)
 	var cfgForGen *DiscoveryConfig
 	if len(dsCfg) > 0 {
@@ -337,6 +360,13 @@ func PublishPost(site storage.Site, markdown, filename string, privateKey []byte
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve licence terms: %w", err)
 	}
+	// ⛔ The marker rides in the same spliced block as the licence, so it lands
+	// in the unsigned frontmatter (the signing base) and the final file alike.
+	markerYAML, err := marker.FrontmatterYAML()
+	if err != nil {
+		return nil, err
+	}
+	licenseYAML += markerYAML
 
 	// Build content to sign (frontmatter without signature + content)
 	unsignedFrontmatter := fmt.Sprintf(`---
@@ -417,7 +447,9 @@ version-history:
 	if len(dsCfg) > 0 {
 		cfg = dsCfg[0]
 	}
-	if err := RegisterPost(site, result, privateKey, cfg); err != nil {
+	// The registration request carries the same marker the post's frontmatter
+	// does: the agent's act reaches the discovery service marked (delegation §7).
+	if err := registerPost(site, result, privateKey, cfg, marker); err != nil {
 		fmt.Printf("[!] Discovery registration skipped: %v\n", err)
 		fmt.Println("[i] If your site is newly deployed, run: polis register")
 	}
@@ -580,6 +612,12 @@ func ExtractVersionHistory(content string) []string {
 
 // RepublishPost updates an existing published post.
 func RepublishPost(site storage.Site, postPath, markdown string, privateKey []byte, dsCfg ...*DiscoveryConfig) (*PublishResult, error) {
+	return RepublishPostAs(site, postPath, markdown, privateKey, discovery.AgentMarker{}, dsCfg...)
+}
+
+// RepublishPostAs is RepublishPost for an act made by a user agent, marked as
+// PublishPostAs marks it.
+func RepublishPostAs(site storage.Site, postPath, markdown string, privateKey []byte, marker discovery.AgentMarker, dsCfg ...*DiscoveryConfig) (*PublishResult, error) {
 	// Resolve generator from config (or fall back to package global)
 	var cfgForGen *DiscoveryConfig
 	if len(dsCfg) > 0 {
@@ -642,6 +680,13 @@ func RepublishPost(site storage.Site, postPath, markdown string, privateKey []by
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve licence terms: %w", err)
 	}
+	// ⛔ The marker rides in the same spliced block as the licence, so it lands
+	// in the unsigned frontmatter (the signing base) and the final file alike.
+	markerYAML, err := marker.FrontmatterYAML()
+	if err != nil {
+		return nil, err
+	}
+	licenseYAML += markerYAML
 
 	// Build content to sign (frontmatter without signature + content)
 	unsignedFrontmatter := fmt.Sprintf(`---
@@ -732,7 +777,9 @@ signature: %s
 	if len(dsCfg) > 0 {
 		cfg = dsCfg[0]
 	}
-	if err := RegisterPost(site, result, privateKey, cfg); err != nil {
+	// The registration request carries the same marker the post's frontmatter
+	// does: the agent's act reaches the discovery service marked (delegation §7).
+	if err := registerPost(site, result, privateKey, cfg, marker); err != nil {
 		fmt.Printf("[!] Discovery registration skipped: %v\n", err)
 		fmt.Println("[i] If your site is newly deployed, run: polis register")
 	}

@@ -119,6 +119,32 @@ Full shape and the exact signing base:
 
 ---
 
+### What blessing does, and why the answer depends on who you ask
+
+A blessing is one fact about one comment: whether the author of the post it replies to has admitted it. That fact
+controls exactly two things, and nothing else:
+
+1. **Who is told a comment is waiting.** Only the post's author is notified.
+2. **What the author's own site shows.** A comment appears with the author's post, on the author's site, only once
+   the author has blessed it.
+
+Everywhere else an unblessed comment is a comment like any other: it is signed, it lives on its own author's site,
+and anyone may read it, count it, or ask for it.
+
+⚠️ **So the same question can get different answers depending on whom you ask, and that is deliberate.**
+
+| Asked of | Every comment on a post by Alice | The comments waiting for Alice's blessing |
+|---|---|---|
+| **The discovery service** | all of them (its content records: `GET /v1/content?type=pub.polis.comment&metadata.in_reply_to=<post>`) | all of them (its relationship records: `GET /v1/relationships?type=pub.polis.comment.blessing&status=pending`) |
+| **Alice's own site, by anyone but Alice** | only the ones Alice blessed (`all comments on <post>`) | none (`… to bless`): a waiting comment is unblessed |
+| **Alice's own site, by Alice** (signed in, or a token with `read`) | all of them, each marked blessed or not | all of them |
+| **Bob's site** | all of them, each marked blessed or not (`all comments on <Alice's post>`) | (Bob's site answers `to bless` about Bob's own posts, by the same rule as Alice's) |
+
+Alice's site is her page: what it serves about her posts is what she has chosen to stand beside them, whether you
+read it as a page or ask it for data. The discovery service and other sites are not her page, so they tell you
+everything. Anyone who wants Alice's choices from somewhere else can ask for them: `all blessed comments on
+<post>`.
+
 ## Anatomy of a content-type declaration
 
 Every content type is declared in its bundle's `bundle.json`:

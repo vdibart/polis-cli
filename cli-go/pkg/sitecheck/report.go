@@ -15,6 +15,8 @@ const (
 	FamilyPolicy   = "policy-parseability"
 	FamilyIdentity = "key-handle-alignment"
 	FamilyBundle   = "bundle-registry-health"
+	// FamilyAgents: do the acts the site's user agents made add up (agentacts.go).
+	FamilyAgents = "agent-act-accountability"
 )
 
 // Outcome is what happened to one check.

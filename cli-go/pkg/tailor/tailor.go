@@ -3,13 +3,13 @@
 package tailor
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
@@ -47,7 +47,21 @@ type CheckResult struct {
 	Message string      `json:"message"`           // what happened / what would happen
 	Reason  string      `json:"reason"`            // why — references the version that introduced the change
 	Actions []Action    `json:"actions,omitempty"` // specific file operations performed/planned
+
+	// Outcome is set in apply mode on a check that found something: "fixed"
+	// (a dry run afterwards finds nothing left to apply), "failed" (it still
+	// does — the apply did not take), or "reported" (nothing to apply: the
+	// check only reports). ⭐ It is decided by re-checking, not by the check's
+	// own word, so no check can claim a fix that did not happen.
+	Outcome string `json:"outcome,omitempty"`
 }
+
+// Outcomes of an applied check.
+const (
+	OutcomeFixed    = "fixed"
+	OutcomeFailed   = "failed"
+	OutcomeReported = "reported"
+)
 
 // Result is the aggregate output of a tailor run.
 type Result struct {
@@ -64,6 +78,11 @@ type Summary struct {
 	Passed  int `json:"passed"`
 	Failed  int `json:"failed"`
 	Skipped int `json:"skipped"`
+
+	// Apply mode only: how the failed checks came out.
+	Fixed      int `json:"fixed,omitempty"`
+	NotApplied int `json:"not_applied,omitempty"`
+	Reported   int `json:"reported,omitempty"`
 }
 
 // runContext carries shared state extracted before checks modify the site.
@@ -72,90 +91,15 @@ type runContext struct {
 	dryRun    bool
 	baseURL   string // extracted from .well-known/polis or POLIS_BASE_URL before legacy cleanup
 	generator string // e.g. "polis-cli-go/0.59.0"
-	backupDir string // Apply mode: where checks back up files before removing them ("" in Diagnose)
+	backupDir string // Apply mode: where the run backs up files before a check changes them ("" in Diagnose); created on first use
+
+	backedUp map[string]bool // site-relative paths already copied in this run
+	manifest Manifest        // what this apply run did, written into backupDir
 }
 
 // checkFunc is the signature for individual check functions.
 // dryRun=true means diagnose only; dryRun=false means apply fixes.
 type checkFunc func(ctx *runContext) CheckResult
-
-// allChecks returns the ordered list of checks to run.
-func allChecks() []checkFunc {
-	return []checkFunc{
-		// Phase 1: Well-known identity
-		checkWellKnownVersion,
-		checkAuthorFieldMigration,
-		checkWellKnownLegacyConfig,
-		checkWellKnownBundles,
-		checkAvatarConfig,
-		// Phase 2: Bundle definition
-		checkBundleJSON,
-		// Phase 3: Layout migration
-		checkLayoutPosts,
-		checkLayoutComments,
-		checkLayoutFollowing,
-		checkLayoutBlessed,
-		// Phase 4: Cross-platform fixes
-		checkPathSeparators,
-		// Phase 4.5: step-01 bundle/registry/theme refactor migrations
-		// (must run before Phase 5 — index rebuild + render read the new paths)
-		checkBundleReferencePayload,
-		checkLegacyContentPath,
-		checkRegistryMigration,
-		checkLegacyThemeLocations,
-		checkBundleActiveFields,
-		// Phase 4.7: post-step-01 migrations
-		// (notification relocation, v3→v4 shape cutover, R17-2 archive cleanup)
-		checkNotificationRulesMigration,
-		checkActiveShapeUpgrade,
-		checkV3LegacyArchives,
-		// Phase 5: Derived data rebuild
-		checkIndexRebuild,
-		// Phase 5.5: Re-render site (produces HTML at mount points)
-		checkRenderSite,
-		// Phase 6: Provisioning
-		checkPoliciesPublic,
-		checkPoliciesPrivate,
-		checkPolicyContentConverge,
-		checkTagDirectory,
-		checkStorageSalt,
-		checkDMDirectories,
-		checkDMKeyring,
-		checkThemeConsolidation,
-		// Phase 7: Config migration
-		checkWebappConfig,
-		checkWebappViewMode,
-		// Phase 6.5: Content-aware integrity (F1–F9)
-		checkReferencePayloadIntegrity,
-		checkRegistryIntegrity,
-		checkKeyConsistency,
-		checkBundlePathIntegrity,
-		// Before the declarations check, so a tenant the migration reaches is
-		// read against the defaults it now satisfies.
-		checkUnpublishedEmitsMigration,
-		checkThemeShapesMigration,
-		checkBundleDeclarations,
-		checkIndexEntries,
-		checkBlessedFollowingStructure,
-		// Phase 6.7: Tailor-only self-heal (defense-in-depth + schema-version
-		// plumbing for future bumps)
-		checkActiveThemeUnset,
-		checkRegistrySchemaVersion,
-		checkRegistryFQNSanity,
-		// Phase 8: Cleanup
-		checkManifestObsolete,
-		checkEmptyMetadataDir,
-		checkForeignContentInPublicPath,
-		checkBlessedCacheGC,
-		checkStaleScopedFeed,
-		checkStaleFeedViewedAt,
-		checkLegacyFeedScaffolding,
-		checkOrphanedThemeDirs,
-		checkStudio13RenameMigration,
-		// Phase 9: CLI binary (network, runs last)
-		checkCLIUpdate,
-	}
-}
 
 // extractBaseURL reads the base URL from .well-known/polis (legacy fields) or env.
 // Called once before checks run, since legacy config check removes these fields.
@@ -195,7 +139,7 @@ func Diagnose(siteDir string, generator ...string) *Result {
 	if len(generator) > 0 && generator[0] != "" {
 		gen = generator[0]
 	}
-	return run(siteDir, true, "", gen)
+	return run(siteDir, true, "", gen, nil)
 }
 
 // Apply runs all checks and fixes issues, creating a backup first.
@@ -205,20 +149,124 @@ func Apply(siteDir string, generator ...string) *Result {
 	if len(generator) > 0 && generator[0] != "" {
 		gen = generator[0]
 	}
-	backupDir := createBackupDir(siteDir)
-	return run(siteDir, false, backupDir, gen)
+	return run(siteDir, false, newBackupDir(siteDir), gen, nil)
 }
 
-func run(siteDir string, dryRun bool, backupDir string, generator string) *Result {
+// Options selects which checks a run takes. The zero value is every check.
+type Options struct {
+	Only []string // run only these ids (in run order)
+	Skip []string // run every check except these
+}
+
+// SelectionError is a selection that names an unknown check, uses both lists,
+// or leaves out a check another selected check needs. Nothing was changed.
+type SelectionError struct{ Msg string }
+
+func (e *SelectionError) Error() string { return e.Msg }
+
+// selector returns which check ids the options select, or an error naming an
+// unknown id or a contradictory selection.
+func (o Options) selector() (map[string]bool, error) {
+	if len(o.Only) > 0 && len(o.Skip) > 0 {
+		return nil, &SelectionError{"--only and --skip cannot be used together"}
+	}
+	known := map[string]bool{}
+	for _, d := range checkDefs() {
+		known[d.ID] = true
+	}
+	var unknown []string
+	for _, id := range append(append([]string{}, o.Only...), o.Skip...) {
+		if !known[id] {
+			unknown = append(unknown, id)
+		}
+	}
+	if len(unknown) > 0 {
+		return nil, &SelectionError{"unknown check id(s): " + strings.Join(unknown, ", ") + " (tailor --list shows them)"}
+	}
+	sel := map[string]bool{}
+	for id := range known {
+		sel[id] = len(o.Only) == 0
+	}
+	for _, id := range o.Only {
+		sel[id] = true
+	}
+	for _, id := range o.Skip {
+		sel[id] = false
+	}
+	return sel, nil
+}
+
+// DiagnoseWith is Diagnose limited to the selected checks.
+func DiagnoseWith(siteDir string, o Options) (*Result, error) {
+	sel, err := o.selector()
+	if err != nil {
+		return nil, err
+	}
+	return run(siteDir, true, "", GetGenerator(), sel), nil
+}
+
+// ApplyWith applies the selected checks. ⛔ It refuses, changing nothing, when
+// a selected check depends on one left out that does not already pass on this
+// site: applying a check whose prerequisite has not happened is how a
+// cherry-picked upgrade reaches a state no full run could produce.
+func ApplyWith(siteDir string, o Options) (*Result, error) {
+	sel, err := o.selector()
+	if err != nil {
+		return nil, err
+	}
+	if err := unmetDependencies(siteDir, sel); err != nil {
+		return nil, err
+	}
+	return run(siteDir, false, newBackupDir(siteDir), GetGenerator(), sel), nil
+}
+
+// unmetDependencies names every left-out prerequisite of a selected check that
+// a dry run says has not happened on this site.
+func unmetDependencies(siteDir string, sel map[string]bool) error {
+	defs := checkDefs()
+	byID := map[string]CheckDef{}
+	for _, d := range defs {
+		byID[d.ID] = d
+	}
+	ctx := &runContext{siteDir: siteDir, dryRun: true, baseURL: extractBaseURL(siteDir), generator: GetGenerator()}
+	status := map[string]CheckStatus{}
+	var missing []string
+	for _, d := range defs {
+		if !sel[d.ID] {
+			continue
+		}
+		for _, dep := range d.DependsOn {
+			if sel[dep] {
+				continue
+			}
+			st, seen := status[dep]
+			if !seen {
+				st = byID[dep].fn(ctx).Status
+				status[dep] = st
+			}
+			// A skip means the prerequisite could not be evaluated (a read
+			// failed, say), which is not evidence that it happened.
+			if st != StatusPass {
+				missing = append(missing, d.ID+" needs "+dep)
+			}
+		}
+	}
+	if len(missing) > 0 {
+		return &SelectionError{"refused, nothing changed: a selected check needs one you left out that has not been applied yet: " +
+			strings.Join(missing, "; ") + ". Add it to --only (or drop it from --skip), or apply it first."}
+	}
+	return nil
+}
+
+func run(siteDir string, dryRun bool, backupDir string, generator string, sel map[string]bool) *Result {
 	mode := "diagnose"
 	if !dryRun {
 		mode = "apply"
 	}
 
 	result := &Result{
-		SiteDir:   siteDir,
-		Mode:      mode,
-		BackupDir: backupDir,
+		SiteDir: siteDir,
+		Mode:    mode,
 	}
 
 	// Verify .well-known/polis exists — if not, most checks are meaningless
@@ -241,12 +289,33 @@ func run(siteDir string, dryRun bool, backupDir string, generator string) *Resul
 		baseURL:   extractBaseURL(siteDir),
 		generator: generator,
 		backupDir: backupDir,
+		manifest:  Manifest{Generator: generator, SiteDir: siteDir, Started: time.Now().UTC().Format(time.RFC3339)},
 	}
 
-	checks := allChecks()
-	for _, check := range checks {
-		cr := check(ctx)
-		result.Checks = append(result.Checks, cr)
+	for _, def := range checkDefs() {
+		if sel != nil && !sel[def.ID] {
+			continue
+		}
+		check := def.fn
+		if dryRun {
+			result.Checks = append(result.Checks, check(ctx))
+			continue
+		}
+		result.Checks = append(result.Checks, applyWithBackup(ctx, check))
+	}
+
+	if !dryRun {
+		exists, err := ctx.writeManifest()
+		if exists {
+			result.BackupDir = backupDir
+		}
+		if err != nil {
+			result.Checks = append(result.Checks, CheckResult{
+				Name: "backup-manifest", Status: StatusFail,
+				Message: fmt.Sprintf("could not write the backup manifest: %v", err),
+				Reason:  "the manifest records every change this run made, so it can be undone by hand",
+			})
+		}
 	}
 
 	// Compute summary
@@ -257,6 +326,14 @@ func run(siteDir string, dryRun bool, backupDir string, generator string) *Resul
 			result.Summary.Passed++
 		case StatusFail:
 			result.Summary.Failed++
+			switch cr.Outcome {
+			case OutcomeFixed:
+				result.Summary.Fixed++
+			case OutcomeFailed:
+				result.Summary.NotApplied++
+			case OutcomeReported:
+				result.Summary.Reported++
+			}
 		case StatusSkip:
 			result.Summary.Skipped++
 		}
@@ -265,32 +342,55 @@ func run(siteDir string, dryRun bool, backupDir string, generator string) *Resul
 	return result
 }
 
-// createBackupDir creates a timestamped backup directory under .polis/tailor-backup/.
-func createBackupDir(siteDir string) string {
-	ts := time.Now().Format("20060102-150405")
-	dir := filepath.Join(siteDir, ".polis", "tailor-backup", ts)
-	// NOT the storage interface: creates a backup directory that is EMPTY until
-	// something is copied into it, and 0700 because it is under .polis.
-	os.MkdirAll(dir, 0700)
-	return dir
+// applyWithBackup applies one check after backing up everything its plan would
+// rewrite or remove. ⛔ If the backup fails, the check does not apply at all.
+func applyWithBackup(ctx *runContext, check checkFunc) CheckResult {
+	probe := *ctx
+	probe.dryRun = true
+	plan := check(&probe)
+
+	paths := backupPathsFor(ctx.siteDir, plan)
+	for _, p := range paths {
+		if err := ctx.backupPath(p); err != nil {
+			return CheckResult{
+				Name:    plan.Name,
+				Status:  StatusFail,
+				Message: fmt.Sprintf("not applied: could not back up %s first: %v", p, err),
+				Reason:  plan.Reason,
+				Actions: plan.Actions,
+				Outcome: OutcomeFailed,
+			}
+		}
+	}
+	cr := check(ctx)
+	ctx.recordApplied(cr, paths)
+	if cr.Status == StatusFail {
+		cr.Outcome = outcomeOf(plan, check(&probe))
+	}
+	return cr
 }
 
-// backupFile copies a file to the backup directory, preserving its relative path.
-func backupFile(siteDir, backupDir, relPath string) error {
-	if backupDir == "" {
-		return nil
+// outcomeOf decides what an apply achieved from the plan before it and a dry
+// run after it.
+func outcomeOf(before, after CheckResult) string {
+	changes := func(r CheckResult) bool {
+		for _, a := range r.Actions {
+			if a.Op != "flag" {
+				return true
+			}
+		}
+		return false
 	}
-	src := filepath.Join(siteDir, relPath)
-	data, err := storage.ReadAtPath(src)
-	if err != nil {
-		return nil // File doesn't exist, nothing to back up
+	switch {
+	case after.Status != StatusFail:
+		return OutcomeFixed
+	case changes(after):
+		return OutcomeFailed
+	case changes(before):
+		return OutcomeFixed // what could be applied was; what is left only reports
+	default:
+		return OutcomeReported
 	}
-	// ⛔ A store rooted at the backup directory with WithDirMode(0700), NOT
-	// storage.WriteAtPath: the backup lives under .polis, and WriteAtPath roots a
-	// plain POSIX store whose parents come out 0755. Declaring the mode on the
-	// store removes the MkdirAll that used to carry it.
-	return storage.NewPOSIX(backupDir, storage.WithDirMode(0o700)).
-		Put(context.Background(), filepath.ToSlash(relPath), data)
 }
 
 // pass creates a passing CheckResult.
@@ -337,7 +437,20 @@ func moveFile(src, dst string) error {
 	}
 	// Stays: paired with the os.Rename below. The interface has no rename, because a
 	// copy-then-delete is not the same operation.
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil { //nolint:gosec // G301: public tree only; .polis moves go through movePrivateFile at 0700
+		return err
+	}
+	return os.Rename(src, dst)
+}
+
+// movePrivateFile moves src to dst under .polis, creating missing parents at
+// 0700 (moveFile's 0755 would widen a private tree). Refuses an existing dst.
+func movePrivateFile(src, dst string) error {
+	if fileExists(dst) {
+		return fmt.Errorf("destination already exists: %s", dst)
+	}
+	// Stays: paired with the os.Rename below, as in moveFile.
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return err
 	}
 	return os.Rename(src, dst)
@@ -350,7 +463,7 @@ func moveDir(src, dst string) error {
 	}
 	// Stays: paired with the os.Rename below. The interface has no rename, because a
 	// copy-then-delete is not the same operation.
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil { //nolint:gosec // G301: public tree only; .polis moves go through movePrivateFile at 0700
 		return err
 	}
 	return os.Rename(src, dst)

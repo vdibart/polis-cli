@@ -1,0 +1,355 @@
+/*
+    Polis v5 shape stylesheet: the public site as cards under its own menu.
+
+    How it is put together:
+      1. The tokens (spec part 6), at the polis default. A theme's values,
+         written after this file from its one definition (themes/<name>/
+         v5.json, through the token contract in pkg/theme/v5tokens.go), set
+         its own; a theme never supplies CSS. Nothing below names a colour, a
+         font or a texture directly: everything draws from a token.
+      2. The frame: the top bar, the menu in its box, the column, the footer.
+      3. Cards (spec 1.5): the mark, the first row, the lead, the body, the
+         footer, the thread, and the rollover.
+      4. Each kind of card: post, comment, about.
+
+    It follows the v5 design's drawing of the public site.
+*/
+
+/* ---------- 1. The tokens, at the polis default ---------- */
+:root {
+  --scheme: light;                                       /* scheme */
+  --bg: #e0deda;                                         /* bg: the page */
+  --bar: var(--bg);                                      /* bar: the top bar and the footer */
+  --bar-fill: var(--bar);                                /* top-bar: solid, or translucent */
+  --bar-blur: none;
+  --page-image: none;                                    /* texture and bg-gradient, drawn by polis */
+  --page-size: auto;
+  --surface: #eceae6;
+  --card-hover: #efede9;
+  --panel: #d4d2ce;
+  --text: #1c1c2a;
+  --text-soft: #3a3a48;
+  --text-muted: #605c56;
+  --ink: #f8f5ee;
+  --mark-ink: #ffffff;                                   /* mark-ink: an initial on the site colour */
+  --chip: color-mix(in srgb, var(--text) 6%, var(--surface));   /* fields, code and quiet chips, on a card */
+  --site: #397f84;                                       /* the site's own hue */
+  --site-text: #2e6a6e;                                  /* the site colour, darkened to 4.5:1 for text */
+  --site-line: color-mix(in srgb, var(--site) 30%, transparent);
+  --site-soft: color-mix(in srgb, var(--site) 12%, transparent);
+  --site-mid: color-mix(in srgb, var(--site) 50%, transparent);
+  --line: color-mix(in srgb, var(--site) 22%, transparent);
+  --accent-2: var(--site);                               /* accent-2: secondary links, focus rings, selection */
+  --accent-2-text: var(--site-text);                     /* accent-2 as text, darkened to 4.5:1 */
+  --edge: var(--site-line);                              /* card-edge: site */
+  --card-texture: none;                                  /* card-texture */
+  --roll: var(--site);                                   /* rollover-color: stroke */
+  --roll-glow: 0 0 0 0 transparent;                      /* rollover: glow */
+  --card-shadow: 0 0 0 0 transparent;                    /* a dark theme's depth */
+  --title: var(--text);                                  /* heading-color: text */
+  --title-weight: 500;                                   /* heading-weight: medium */
+  --title-style: normal;                                 /* heading-style: upright */
+  --title-caps: normal;                                  /* heading-case: as written */
+  --date-font: var(--font-ui);                           /* date-style: plain */
+  --date-size: 12.5px;
+  --date-color: var(--text-muted);
+  --date-lead: "";
+  --link-line: underline;                                /* link-style: solid */
+  --link-line-style: solid;
+  --quote-edge: 3px;                                     /* quote-style: rule */
+  --quote-bg: transparent;
+  --quote-mark: none;
+  --motion: 1;                                           /* motion: default */
+  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-content: 'Newsreader', Georgia, 'Times New Roman', serif;
+  --font-title: var(--font-content);
+  --font-mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  --wordmark: #005a72;                                   /* wordmark */
+  --ease: cubic-bezier(.22, .8, .24, 1);
+  --bar-h: 64px;
+  --foot: 52px;
+  --col: 632px;                                          /* the cards' width */
+  /* The shape tokens (spec part 6): geometry a theme may choose from a fixed list, never a free number.
+     Each is chosen so the style guide's measured alignment holds by construction: the first row and the
+     mark share one box (.hd), so nothing here can part them, and the space from the first row to the
+     second line is a fixed margin that no token touches. */
+  --corner: 1;                                           /* corner-radius: medium (a factor on every corner) */
+  --stroke: 1px;                                         /* stroke-weight: thin (card and box outlines) */
+  --pad-t: 24px;                                         /* spacing: default (a card's padding, top, */
+  --pad-r: 34px;                                         /*   right, */
+  --pad-b: 22px;                                         /*   bottom, */
+  --pad-edge: 22px;                                      /*   and the mark's distance from its left edge) */
+  --gap: 10px;                                           /* between cards */
+  --rule-gap: 22px;                                      /* a card's footer rule under its body */
+  --rule-pad: 16px;                                      /* the footer row under its rule */
+}
+
+/* ---------- 2. The frame ---------- */
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body { color-scheme: var(--scheme); background-color: var(--bg); background-image: var(--page-image); background-size: var(--page-size); color: var(--text); font-family: var(--font-ui); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+::selection { background: color-mix(in srgb, var(--accent-2) 20%, transparent); }
+
+.topbar { position: fixed; top: 0; left: 0; right: 0; z-index: 10; height: var(--bar-h); background: var(--bar-fill); -webkit-backdrop-filter: var(--bar-blur); backdrop-filter: var(--bar-blur); }
+/* Whose site this is: the author's mark and handle, top left; either opens about. */
+.author { position: absolute; left: 22px; top: 0; height: var(--bar-h); display: flex; align-items: center; gap: 10px; min-width: 0; text-decoration: none; color: var(--title); }
+.author > :first-child { width: 28px; height: 28px; font-size: 14px; flex: none; }
+.author .ah { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 14px var(--font-ui); }
+.author:hover .ah { color: var(--site-text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; }
+body.author-short .author .ah { display: none; }   /* too narrow beside the menu: the mark alone */
+
+/* The site's menu: the current item sits at the right end of a box as wide as the cards; the others
+   trail outside it (spec 1.3). Links all, so it works without script. */
+.menu { position: relative; width: min(var(--col), calc(100% - 48px)); margin: 10px auto 0; height: 44px; }
+.menu .box { height: 44px; display: flex; align-items: center; justify-content: flex-end; padding: 0 calc(7px - var(--stroke)); background: var(--surface); border: var(--stroke) solid var(--site-line); border-radius: calc(12px * var(--corner)); }   /* a heavier stroke grows inward: the items stay where they were */
+.menu .trail { position: absolute; left: calc(100% + 4px); top: 0; height: 44px; display: flex; align-items: center; gap: 2px; }   /* just clear of the box's stroke: the next section stays with the current one, as in the owner's app (2026-11-18) */
+.way { display: inline-flex; align-items: center; padding: 8px 10px; border-radius: calc(8px * var(--corner)); font: 500 13px var(--font-ui); letter-spacing: .02em; color: var(--text-muted); text-decoration: none; opacity: .85; transition: color calc(.25s * var(--motion)), background calc(.25s * var(--motion)), opacity calc(.3s * var(--motion)); white-space: nowrap; }
+.way { gap: 7px; }
+.way svg { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.way:hover { color: var(--site-text); background: var(--surface); opacity: 1; }
+.way.on { color: var(--site-text); opacity: 1; cursor: default; }
+.way.on:hover { background: none; }
+/* The owner's own items (spec 3.8): home in the menu, edit on a post. Hidden for every reader but the
+   site's author, whose page the visitor nav marks pn-owner; for them following gives way to home. */
+.own-only { display: none; }
+.pn-owner .way.own-only { display: inline-flex; }
+.pn-owner .way[data-way="following"] { display: none; }
+.pn-owner .hd .edit { display: inline; margin-left: auto; font: 500 12.5px var(--font-ui); color: var(--text-muted); text-decoration: none; }
+.pn-owner .hd .edit:hover { color: var(--site-text); text-decoration: underline; }
+
+/* Each section's toolbar, at the left of the box: search, and for posts every post or only those with comments.
+   Search and the views need the controller, so they show only where it runs (body.js); an item's own page has
+   none: it is the stream at that item, with nothing to go back to. */
+.menu .box > .tbar { margin-right: auto; }
+.tbar { display: none; align-items: center; gap: 8px; height: 30px; padding-left: 4px; }
+body.js[data-sec="posts"] .tbar[data-for="posts"], body.js[data-sec="comments"] .tbar[data-for="comments"],
+body.js[data-sec="following"] .tbar[data-for="following"], .tbar.on { display: flex; }
+.tbar .note { font: 400 12.5px var(--font-ui); color: var(--text-muted); white-space: nowrap; }
+.tbar .note b { font: 500 12px var(--font-mono); color: var(--text-soft); }
+.sq { width: 30px; height: 30px; border-radius: calc(8px * var(--corner)); padding: 0; cursor: pointer; display: grid; place-items: center; flex: none;
+  background: var(--site-soft); border: 1px solid var(--site-mid); color: var(--site-text); transition: background calc(.25s * var(--motion)), color calc(.25s * var(--motion)); }
+.sq:hover, .sq.on { background: var(--site-text); color: var(--ink); }
+.sq svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; grid-area: 1 / 1; transition: transform calc(.25s * var(--motion)) var(--ease), opacity calc(.25s * var(--motion)); }
+/* Open, the search button turns a quarter and becomes a close (spec 1.13). */
+.sq .x { opacity: 0; transform: rotate(-90deg); }
+.sq.on .lens { opacity: 0; transform: rotate(90deg); }
+.sq.on .x { opacity: 1; transform: none; }
+.find { display: none; align-items: center; height: 30px; width: 150px; padding: 0 10px; border-radius: calc(8px * var(--corner)); background: var(--chip); }
+.find.on { display: flex; }
+/* While searching, the field takes the filters' place, never beside them (spec 1.13; Vincent, 2026-11-17). */
+.tbar:has(.find.on) .views, .tbar:has(.find.on) .note { display: none; }
+.find input { flex: 1; min-width: 0; border: 0; outline: none; background: none; font: 400 13px var(--font-ui); color: var(--text); -webkit-appearance: none; appearance: none; }
+.find input::placeholder { color: var(--text-muted); opacity: .75; }
+.views { display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: calc(9px * var(--corner)); background: var(--chip); }
+.views a { padding: 5px 11px; border-radius: calc(7px * var(--corner)); font: 500 12.5px var(--font-ui); color: var(--text-muted); text-decoration: none; white-space: nowrap; transition: background calc(.2s * var(--motion)), color calc(.2s * var(--motion)); }
+.views a:hover { color: var(--text); }
+.views a.on { background: var(--surface); color: var(--site-text); box-shadow: 0 0 0 1px var(--site-line); }
+.views a b { font: 500 12px var(--font-mono); margin-right: 2px; }
+
+.you { position: absolute; top: 10px; right: 20px; height: 44px; display: flex; align-items: center; gap: 6px; }
+/* A signed-in visitor's way home: polis.pub's nav draws it, fixed at the lower left, in its own shadow
+   root. ⚠️ Never hide #polis-nav-root with :empty: a host whose only content is its shadow root matches it. */
+/* Without the widget's script, the place to reply says where to reply from. */
+.reply-fallback { display: block; margin-top: 14px; font-size: 13px; color: var(--text-muted); }
+.reply-fallback a { color: var(--site-text); }
+
+.col { max-width: calc(var(--col) + 48px); margin: 0 auto; padding: calc(var(--bar-h) + 18px) 24px calc(var(--foot) + 60px); display: flex; flex-direction: column; gap: var(--gap); }
+.needs-script { margin: 0; padding: 12px 16px; border-radius: calc(10px * var(--corner)); background: var(--surface); box-shadow: 0 0 0 var(--stroke) var(--site-line); font: 400 14px/1.5 var(--font-ui); color: var(--text-soft); }
+.empty { color: var(--text-muted); font: 400 16px var(--font-content); text-align: center; padding: 28px 0; margin: 0; background: var(--surface); border-radius: calc(14px * var(--corner)); }   /* text never sits on the page */
+/* The terms pages: the same rule, so a theme's texture or gradient runs behind a card, never behind the text. */
+.license-page .license-body { background-color: var(--surface); background-image: var(--card-texture); border-radius: calc(14px * var(--corner)); box-shadow: 0 0 0 var(--stroke) var(--edge), var(--card-shadow); padding: 32px 40px 36px; margin: 40px auto 64px; max-width: calc(46rem + 80px); box-sizing: border-box; color: var(--text); }
+.license-page .content-col { max-width: calc(46rem + 128px); }
+.license-page .license-lede, .license-page .license-layers, .license-page .license-note, .license-page .license-table th { color: var(--text-muted); }
+.license-page .license-nonretro { background: var(--chip); border-left-color: var(--site); }
+.license-page .license-body a, .license-page .license-body a:visited { color: var(--site-text); }
+@media (max-width: 720px) { .license-page .content-col { padding: 0 16px; } .license-page .license-body { padding: 22px 20px 26px; margin: 16px 0 40px; } }
+
+.foot { position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; height: var(--foot); display: flex; align-items: center; gap: 18px; padding: 0 24px; background: var(--bar-fill); -webkit-backdrop-filter: var(--bar-blur); backdrop-filter: var(--bar-blur); font: 400 12px var(--font-mono); color: var(--text-muted); }
+.foot a { color: var(--text-muted); text-decoration: none; }
+.foot a:hover { color: var(--site-text); }
+.foot .spacer { flex: 1; }
+.foot .made b { font: italic 600 14px var(--font-content); color: var(--wordmark); }   /* polis's wordmark lives here now */
+
+/* ---------- 3. Cards ---------- */
+/* The padding's left side is the mark's distance from the edge, the mark (30px) and the 14px from the mark to
+   the words: spacing moves the mark with the edge and keeps it the same distance from the words. */
+.item { --card: var(--surface); position: relative; background-color: var(--card); background-image: var(--card-texture); border-radius: calc(14px * var(--corner)); padding: var(--pad-t) var(--pad-r) var(--pad-b) calc(var(--pad-edge) + 44px); box-shadow: 0 0 0 var(--stroke) var(--edge), var(--card-shadow); transition: background-color calc(.25s * var(--motion)), box-shadow calc(.25s * var(--motion)); }
+.item:not(.still):not([data-focus]) { cursor: pointer; }
+/* The rollover (spec 1.5): the card lifts, and its edge turns the rollover colour. */
+.item:not(.still):not([data-focus]):hover { --card: var(--card-hover); box-shadow: 0 0 0 var(--stroke) var(--roll), var(--roll-glow), var(--card-shadow); }
+
+/* The mark, hanging in the left gutter level with the first row: the site's own avatar (its colours
+   come inline from .well-known/polis), or its initial on the site colour. */
+.avatar-initial { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; overflow: hidden;
+  background-color: var(--site); color: var(--mark-ink); font: italic 600 15px/1 var(--font-content); }
+.av { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; flex: none; color: var(--mark-ink); font: italic 600 15px/1 var(--font-content); overflow: hidden; }
+.av img, .av svg { width: 100%; height: 100%; }
+.hd { position: relative; display: flex; align-items: center; gap: 6px; min-height: 30px; font-size: 12.5px; color: var(--text-muted); }
+.hd > :first-child { position: absolute; left: -44px; top: 0; width: 30px; height: 30px; }
+.hd .hh { font-weight: 500; color: var(--text-soft); }
+.hd .hdt { font-family: var(--date-font); font-size: var(--date-size); color: var(--date-color); text-decoration: none; }   /* over .perma's inherit */
+.hdt::before { content: var(--date-lead); }
+.hd .hdt:hover { color: var(--site-text); text-decoration: underline; text-underline-offset: 3px; }
+/* The first row on the mark's centre line, optically (style guide, Alignment): the letter's cap height is
+   centred in its circle, and each piece of text on the row has its x-height centred in the row's 30px. Both
+   come from the fonts' own metrics (text-box trims a line to its cap or x-height edge and its baseline), so
+   they hold for any theme font and size, and no measured offset is needed. A browser without text-box
+   centres the whole line, as before. */
+@supports (text-box: trim-both ex alphabetic) {
+  .avatar-initial { display: block; text-align: center; align-content: center; text-box: trim-both cap alphabetic; }
+  .hd > :not(:first-child) { align-self: stretch; align-content: center; text-box: trim-both ex alphabetic; }
+}
+
+/* The lead. */
+.item :is(h1, h3) { margin: 12px 0 10px; font: var(--title-style) var(--title-weight) 22px/1.3 var(--font-title); font-variant-caps: var(--title-caps); color: var(--title); }
+.item.untitled :is(h1, h3) { display: none; }
+.item.untitled .ex { margin-top: 9px; }   /* an untitled post's words lead: 15px under the mark */
+/* A title starts 15px under the mark whatever its font: its first line is trimmed to the font's cap height. */
+@supports (text-box: trim-start cap alphabetic) {
+  .hd + :is(h1, h3):not(.on) { margin-top: 15px; text-box: trim-start cap alphabetic; }
+}
+.perma { color: inherit; text-decoration: none; }
+.item :is(h1, h3) .perma:hover { color: var(--site-text); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; }
+
+/* The body: four lines folded, the last fading; in full when open. */
+.ex { font: 400 16.5px/1.75 var(--font-content); color: var(--text-soft); max-height: 7em; overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 calc(100% - 1.75em), transparent); mask-image: linear-gradient(#000 calc(100% - 1.75em), transparent); }
+.ex.fits { -webkit-mask-image: none; mask-image: none; }
+.item.open .ex { max-height: none; -webkit-mask-image: none; mask-image: none; }
+.ex > :first-child { margin-top: 0; }
+.ex > :last-child { margin-bottom: 0; }
+.ex p, .ex ul, .ex ol, .ex pre, .ex blockquote { margin: 0 0 .9em; }
+.ex ul, .ex ol { padding-left: 1.3em; }
+.ex li::marker { color: var(--site); }
+.ex h2, .ex h3, .ex h4 { font: 500 1.15em/1.3 var(--font-content); color: var(--text); margin: 1.2em 0 .5em; }
+.ex a { color: var(--site-text); text-decoration-line: var(--link-line); text-decoration-style: var(--link-line-style); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.ex a:hover { text-decoration-line: underline; }
+.ex code { font: 400 .82em var(--font-mono); background: var(--chip); padding: 1px 5px; border-radius: calc(4px * var(--corner)); }
+.ex pre { background: var(--chip); border-radius: calc(8px * var(--corner)); padding: 12px 14px; overflow-x: auto; }
+.ex pre code { background: none; padding: 0; }
+.ex hr { border: 0; border-top: 1px solid var(--line); margin: 1.2em 0; }
+.ex blockquote { position: relative; padding: 2px 0 2px 14px; border-left: var(--quote-edge) solid var(--site); background: var(--quote-bg); border-radius: 0 calc(8px * var(--corner)) calc(8px * var(--corner)) 0; font-style: italic; }
+.ex blockquote::before { content: var(--quote-mark); position: absolute; left: -6px; top: -14px; font: 400 48px/1 var(--font-content); color: var(--site); opacity: .5; }
+.ex img { max-width: 100%; height: auto; }
+
+/* The rule and the footer, in the fixed order (spec 1.5). */
+.ifoot { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; margin-top: var(--rule-gap); padding-top: var(--rule-pad); border-top: 1px solid var(--line); font-size: 13px; color: var(--text-muted); }
+.ifoot:empty { display: none; }
+.ifoot .n { color: inherit; text-decoration: none; }
+.ifoot .n:hover { color: var(--text); }
+.ifoot .n b { font: 500 13px var(--font-mono); color: var(--accent-2-text); }   /* accent-2: counts */
+.ifoot .terms { margin-left: auto; font-size: 12px; color: var(--text-muted); text-decoration: none; padding: 2px 8px; border-radius: calc(6px * var(--corner)); background: var(--chip); }
+.ifoot .terms:hover { color: var(--site-text); }
+/* The footer itself does nothing: only its links and buttons point, and a click on it leaves the card be. */
+.item .ifoot { cursor: default; }
+.ifoot .copy { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; padding: 0; cursor: pointer; font: inherit; color: var(--text-muted); }
+.ifoot .terms ~ .copy { margin-left: -6px; }
+.ifoot .copy:hover { color: var(--text); }
+.ifoot .copy svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.ifoot .copy.done::after { content: 'copied'; font-size: 12px; color: var(--text-soft); }
+
+/* The pinned row (spec 1.5): an open card, and a still one, keeps its first line under the menu once its heading
+   scrolls up behind it; the line fades in and out, and a click folds the card (or, still, brings it to the top).
+   It is the top of the same card: its colour and stroke over a rounded top, a strip of page above, no shadow. */
+.stick { position: sticky; top: var(--bar-h); height: 0; z-index: 4; }
+/* It covers the card and its outline exactly: its sides are the card's padding and the stroke, outward. */
+.srow { position: absolute; left: calc(-1 * (var(--pad-edge) + 44px + var(--stroke))); right: calc(-1 * (var(--pad-r) + var(--stroke))); top: 0; padding-top: 10px; background: var(--bg); cursor: pointer; opacity: 0; transform: translateY(-6px); pointer-events: none;
+  transition: opacity calc(.25s * var(--motion)) var(--ease), transform calc(.25s * var(--motion)) var(--ease); }
+/* Its corners are the card's grown by the stroke, as the card's outline is drawn (none on a square card). */
+.sin { position: relative; height: 46px; display: flex; align-items: center; gap: 14px; padding: 0 calc(var(--pad-r) - 5px) 0 calc(var(--pad-edge) + 5px); background-color: var(--card); background-image: var(--card-texture);
+  --sin-r: calc(14px * var(--corner) + min(var(--stroke), 100 * var(--corner) * 1px));
+  border-radius: var(--sin-r) var(--sin-r) 0 0; border: var(--stroke) solid var(--edge); border-bottom: 0; transition: border-color calc(.25s * var(--motion)); }
+.sin::after { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: 44px; pointer-events: none; background: linear-gradient(var(--card) 22%, transparent); }
+.item.stuck .srow { opacity: 1; transform: none; pointer-events: auto; }
+.item:not(.still):not([data-focus]):hover .sin { border-color: var(--roll); }
+.sin > :first-child { width: 24px; height: 24px; font-size: 13px; flex: none; }
+.srow .sdate { flex: none; font-size: 12px; color: var(--text-muted); }
+.srow .sdate:empty { display: none; }
+.srow .sttl { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font: var(--title-weight) 16px var(--font-title); color: var(--title); }
+.srow .sttl small { font: 400 12.5px var(--font-ui); color: var(--text-muted); margin-right: 6px; }
+
+/* The thread: only on an open card. */
+.thread { display: none; }
+.item.open .thread { display: block; margin-top: 14px; padding-top: 6px; border-top: 1px solid var(--line); }
+.cm { position: relative; padding: 12px 0 12px 40px; }
+.cm + .cm { border-top: 1px solid var(--line); }
+.cm > .avatar, .cm > .av, .cm > :first-child { position: absolute; left: 0; top: 12px; width: 28px; height: 28px; }
+.cm-meta { display: flex; gap: 8px; font-size: 12.5px; color: var(--text-muted); }
+.cm-meta a { font-weight: 500; color: var(--accent-2-text); text-decoration: none; }
+.cm-meta a.cm-d { font-weight: 400; color: var(--text-muted); }
+.cm-meta a.cm-d:hover { color: var(--site-text); text-decoration: underline; text-underline-offset: 3px; }
+.item.cmt .on .site a { color: inherit; text-decoration: none; }
+.item.cmt .on .site a:hover { color: var(--accent-2-text); text-decoration: underline; text-underline-offset: 3px; }
+/* A card opens from the keyboard too (spec 1.5): it takes focus, and shows the ring whatever the rollover. */
+.item:not(.still):focus-visible { outline: 2px solid var(--accent-2); outline-offset: 3px; }
+.cm-x { margin-top: 4px; font: 400 16px/1.65 var(--font-content); color: var(--text-soft); }
+.cm-none { padding: 12px 0; font-size: 13px; color: var(--text-muted); }
+
+/* ---------- 4. Each kind of card ---------- */
+/* A comment: what it answered, then its words in the comment panel, in the site's colour. */
+h1.on { font-weight: 400; }   /* a comment's own page: what it answered is its heading (one h1 a page) */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.item.cmt .on { margin: 12px 0; font: 400 15px/1.5 var(--font-content); color: var(--text-muted); }
+.item.cmt .on a.pq { color: var(--text-soft); text-decoration: none; }
+.item.cmt .on a.pq:hover { color: var(--accent-2-text); text-decoration: underline; text-underline-offset: 3px; }
+.item.cmt .ex { color: var(--text); padding: 10px 16px 11px 15px; border-left: 2px solid var(--site-mid); border-radius: 0 calc(10px * var(--corner)) calc(10px * var(--corner)) 0; background: color-mix(in srgb, var(--site) 5%, transparent); }
+
+/* Where a comment is shown: on the post it answered, once that post's author blessed it. */
+.cfoot .shown { color: var(--text-muted); }
+.cfoot .shown a { color: var(--text-soft); text-decoration: none; }
+.cfoot .shown a:hover { color: var(--site-text); text-decoration: underline; text-underline-offset: 3px; }
+
+/* Following: the sites the site reads, one card. A site's mark is its initial, in the quiet colour: the colours
+   are the other site's to choose. */
+.item.people .hh { font-weight: 400; color: var(--text-muted); }
+.item.people .sum { margin: 0 0 12px; font: 400 15px/1.5 var(--font-content); color: var(--text-muted); }
+.rowp { display: flex; align-items: center; gap: 12px; padding: 9px 0; border-top: 1px solid var(--line); color: var(--text-soft); text-decoration: none; font-size: 14px; }
+.rowp:hover { color: var(--site-text); }
+.rowp .h { font-weight: 500; }
+.avatar-initial.other { width: 26px; height: 26px; flex: none; font-size: 13px; background-color: var(--panel); color: var(--text-soft); }
+
+/* A card on its way, while its page is fetched: its place in the view, held. */
+.item.ghost { min-height: 132px; cursor: default; box-shadow: 0 0 0 var(--stroke) var(--line); }
+.item.ghost:hover { --card: var(--surface); box-shadow: 0 0 0 var(--stroke) var(--line); }
+.more { height: 1px; }
+.col.waiting > * { visibility: hidden; }
+
+/* About: the bio and the facts, a card of its own, always open. */
+.item.about h1.name { margin: 12px 0 0; font: var(--title-style) var(--title-weight) 26px/1.25 var(--font-title); font-variant-caps: var(--title-caps); color: var(--title); }
+.fact code { font: 400 12px var(--font-mono); background: var(--chip); padding: 1px 6px; border-radius: calc(5px * var(--corner)); overflow-wrap: anywhere; }
+.item.about .bio { margin-top: 12px; font: 400 17px/1.7 var(--font-content); color: var(--text-soft); }
+.item.about .bio a { color: var(--site-text); text-decoration-line: var(--link-line); text-decoration-style: var(--link-line-style); text-underline-offset: 3px; }
+.item.about .bio a:hover { text-decoration-line: underline; }
+.item.about .facts { margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--line); }
+.fact { display: grid; grid-template-columns: 130px 1fr; gap: 12px; padding: 8px 0; font-size: 13px; color: var(--text-soft); }
+.fact .k { font: 500 11px var(--font-mono); letter-spacing: .06em; color: var(--text-muted); }
+.fact a { color: var(--site-text); }
+
+/* Narrowing, in steps, measured by the controller against the top right corner (spec 1.3, as 06-site does):
+   the trailing items drop to icons (tight), tuck inside the box (inside), the current item drops its label
+   (cramped), and last the toolbar keeps only its leading button (squeezed). With no corner left at all,
+   Follow moves to the footer's right end (you-low). */
+.menu.tight .trail .lbl { display: none; }
+.menu.tight .trail .way { padding: 8px 9px; }
+.menu.inside .box .trail { position: static; height: auto; margin-left: 2px; }
+.menu.cramped .box .way.on .lbl { display: none; }
+.menu.cramped .box .way.on { padding: 8px 9px; }
+body.squeezed .tbar .views, body.squeezed .tbar .note { display: none; }
+body.you-low .you { position: fixed; top: auto; bottom: 0; right: 20px; height: var(--foot); z-index: 5; }
+body.you-low .foot .made { display: none; }
+@media (max-width: 720px) {
+  .menu .trail .lbl { display: none; }   /* without the controller, a phone still reaches every section */
+  .srow { left: calc(-1 * (var(--pad-edge) + 34px + var(--stroke))); right: calc(-1 * (var(--pad-r) - 14px + var(--stroke))); }
+  .sin { padding: 0 calc(var(--pad-r) - 19px) 0 calc(var(--pad-edge) - 5px); }
+  .tbar .note, .tbar .views { display: none; }   /* on a phone the filters hide (spec 1.3); search stays */
+  .item { padding: calc(var(--pad-t) - 4px) calc(var(--pad-r) - 14px) calc(var(--pad-b) - 4px) calc(var(--pad-edge) + 34px); }   /* the mark 10px from the words */
+  .hd > :first-child { left: -40px; }
+}
+@media (max-width: 560px) {
+  .author, .foot .made { display: none; }   /* a phone: the box spans the bar; about is in the menu */
+  .fact { grid-template-columns: 1fr; gap: 2px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: .01s !important; animation-duration: .01s !important; }
+}

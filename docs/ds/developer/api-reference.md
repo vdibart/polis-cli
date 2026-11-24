@@ -159,7 +159,7 @@ Rate limit: per-IP via `DS_RATE_IP_SITES_LIST` (default 300/hr).
 | `limit` | int | 50 | Clamped to 1–100; a non-numeric value means the default |
 | `cursor` | string | — | The `next_cursor` from the previous page. Opaque; a malformed cursor starts from the beginning |
 | `sort` | enum | `name` | `name` (author name, falling back to domain, A→Z) or `activity` (most recently active first). Anything else is `400` |
-| `search` | string | — | Case-insensitive substring match on domain or author name (first 100 characters used) |
+| `search` | string | — | Case-insensitive; every word must begin a word of the author name or of the site's handle (the domain without its shared suffix: `alice.polis.pub` → `alice`, `example.com` → `example`), or begin the domain itself. A word never matches inside another word, and `polis` or `pub` alone matches no hosted site by its suffix. A site whose handle is the whole search comes first. First 100 characters, up to eight words |
 
 ```json
 // Response 200
@@ -197,6 +197,8 @@ Rate limit: per-IP via `DS_RATE_IP_SITES_LIST` (default 300/hr).
 Register or update content metadata. The DS extracts the actor domain from the URL. Accepted types: `pub.polis.post`, `pub.polis.comment`, `pub.polis.tag`, `pub.polis.attestation`.
 
 The actor's domain must be registered (`403` otherwise), and for a comment so must the domain of `metadata.in_reply_to`. The signature is verified against the actor's `.well-known/polis` key (`401` on failure).
+
+**The agent marker.** A registration a user agent caused (a post it published, a comment it wrote, which is also the comment's blessing request) carries `agent` and `grant` beside the other fields, together or not at all (one alone is refused, `400`). They are inside the signature: appended after `type, url, version, author, metadata`, in that order ([delegation](../../signet/spec/delegation.md) §7). An unmarked registration signs the five fields exactly, as before. The service checks the cited grant against its registration rows and answers `grant_state` (`live`, `withdrawn`, `not-found` or `unknown`, as for a blessing decision); it is recorded on the `published`/`republished` and `blessing.requested` events with `agent` and `grant`, and **the registration is accepted whatever it says**. ⚠️ The content witness does not carry the marker: its signed fields are a fixed list every verifier already shipped rebuilds.
 
 Rate limit: per-domain 50/hr (checked after the signature verifies)
 
@@ -336,6 +338,8 @@ Rate limit: IP 600/hr
 
 **Query parameters:** `type` (required), `actor` (optional domain filter), `limit` (default 100, max 100), `offset` (default 0, max 10000), `metadata.<key>` (optional exact-match filters; combine with AND)
 
+`search` (optional, `type=pub.polis.post` only): words, every one of which must begin a word of the post's title, case-insensitive, at most 100 characters and eight words. It searches every active registered post, whoever wrote it and however old. The DS holds a post's title, never its text, so this is a title search. Any other type answers 400 `INVALID_PAYLOAD`. ⚠️ A DS from before `search` ignores the parameter and answers unfiltered, so a client that may talk to one filters the titles it gets back as well.
+
 Only these metadata keys can be filtered, per type. Any other `metadata.*` parameter, including any on a type not listed, is `400 INVALID_PAYLOAD` with an `error` naming the keys that type allows:
 
 | `type` | Filterable keys |
@@ -380,7 +384,7 @@ receives that record's `signature`, because it made it and can reproduce it; eve
 caller, authenticated or not, sees the record without the field. `signature_verified`
 still reports whether the service verified it at registration.
 
-For `pub.polis.comment` queries that list a post's thread (any query without `actor`, or with a `metadata.in_reply_to` / `metadata.root_post` filter): comments with a granted blessing are visible to all; others are visible only to an authenticated caller who wrote the comment or whose domain owns the post. A query by `actor` alone ("comments by this site") returns the site's comments whatever their blessing status. Results ordered by `updated_at` DESC, newest registration first among equal timestamps.
+For `pub.polis.comment` queries, every active comment is returned to every caller, **whatever its blessing status**: a post's thread (`metadata.in_reply_to` / `metadata.root_post`) and a site's own comments (`actor`) alike. A blessing decides only what the post author's own site shows beside the post, and the author's site applies it there; to everyone else an unblessed comment is a comment like any other (see [What blessing does](../../general/concepts/content-types.md#what-blessing-does-and-why-the-answer-depends-on-who-you-ask)). Which comments are blessed is answered by the blessing relationships (`GET /v1/relationships?type=pub.polis.comment.blessing`). The thread's length matches `POST /v1/content/comments/counts`. Results ordered by `updated_at` DESC, newest registration first among equal timestamps.
 
 #### Attestations — `type=pub.polis.attestation`
 
@@ -490,7 +494,7 @@ Rate limit: per-domain 20/hr
 
 **Clean break semantics:** Unpublish severs all ties to the published identity. If the content is republished later, it is treated as a completely fresh publication — orphaned blessings are NOT restored, and comment authors must re-beseech for blessing. See [Unpublish Lifecycle](unpublish-lifecycle.md) for full state transition rules.
 
-For both unregister and unpublish the signature covers `{"type":"…","url":"…","timestamp":"…"}`. `orphaned_blessings` and `denied_blessings` appear only when a post is unpublished.
+For both unregister and unpublish the signature covers `{"type":"…","url":"…","timestamp":"…"}`, and for a request a user agent caused, `agent` and `grant` appended in that order (both or neither; one alone is refused, `400`). A marked request answers `grant_state` and its event carries `agent`, `grant` and `grant_state`; it is never refused on what `grant_state` says. `orphaned_blessings` and `denied_blessings` appear only when a post is unpublished.
 
 Emits `pub.polis.post.unpublished` or `pub.polis.comment.unpublished` stream event.
 

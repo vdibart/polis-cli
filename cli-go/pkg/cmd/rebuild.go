@@ -21,7 +21,7 @@ func handleRebuild(args []string) {
 	// Kept accepted so no one's script breaks; it prints a pointer to the verb
 	// that owns it now. Signet epic 25 D5.
 	rebuildNotifications := fs.Bool("notifications", false, "Deprecated: use `polis notifications clear`")
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 	// If nothing specified, show usage
 	if !*rebuildPosts && !*rebuildComments && !*rebuildTags && !*rebuildAttestations &&

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
+	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
@@ -25,24 +26,64 @@ import (
 // pre-fix profile edit that did a lossy typed SaveWellKnown. Uses the
 // field-preserving raw write, so other well-known fields (author_name, avatar,
 // custom strings) are untouched. No-op-safe to re-run.
-func handleDMPublishKey() {
+//
+// ⭐ A site with no keyring gets one first — an epoch-0 bootstrap keyring and the
+// storage salt, the same provisioning polis init does — so a site created before
+// encrypted DMs can switch them on without a full Tailor run. ⛔ Both are
+// conditional creates: an existing keyring or salt is never replaced.
+func handleDMPublishKey(create bool) {
 	dir := getDataDir()
 	privKey, err := loadPrivateKey(dir)
 	if err != nil {
 		exitError("cannot read identity private key: %v", err)
 	}
-	if err := site.PublishMessagesKey(getSite(), privKey); err != nil {
+	created, err := publishMessagesKey(getSite(), privKey, create)
+	if err != nil {
 		exitError("publish messages key failed: %v", err)
 	}
 	if jsonOutput {
 		outputJSON(map[string]interface{}{
 			"status":  "success",
 			"command": "dm publish-key",
-			"data":    map[string]interface{}{"data_dir": dir},
+			"data":    map[string]interface{}{"data_dir": dir, "keyring_created": created},
 		})
 		return
 	}
+	if created {
+		fmt.Println("[✓] Created a DM keyring (epoch 0) at " + dm.DMDirKey + "/keyring.json")
+	}
 	fmt.Println("[✓] Published DM messages key (current epoch) into .well-known/polis")
+}
+
+// errKeyringElsewhere: no keyring here, but the site already publishes a
+// messages key, so one exists somewhere (another machine, a backup not yet
+// restored, .polis/content/ before Tailor's legacy-content-path). Minting a new
+// one would replace the published key with one senders were never given.
+var errKeyringElsewhere = errors.New("this site publishes a DM messages key but has no keyring here; " +
+	"restore the keyring it belongs to, or pass --create to make a new one and replace the published key")
+
+// publishMessagesKey provisions the keyring when the site has none, then
+// publishes its block. created reports whether a keyring was made. ⛔ Without
+// create it never mints a keyring for a site that already publishes a key.
+func publishMessagesKey(st storage.Site, privKey []byte, create bool) (created bool, err error) {
+	if _, lerr := dm.LoadKeyring(st); lerr != nil {
+		if !errors.Is(lerr, fs.ErrNotExist) {
+			return false, fmt.Errorf("load keyring: %w", lerr)
+		}
+		if raw, _ := site.LoadWellKnownRaw(st); raw != nil && !create {
+			if _, published := raw["public_key_messages"]; published {
+				return false, errKeyringElsewhere
+			}
+		}
+		if err := dm.EnsureSalt(st); err != nil {
+			return false, fmt.Errorf("storage salt: %w", err)
+		}
+		if _, err := site.ProvisionDMKeyring(st); err != nil {
+			return false, err
+		}
+		created = true
+	}
+	return created, site.PublishMessagesKey(st, privKey)
 }
 
 func handleDM(args []string) {
@@ -87,7 +128,16 @@ func handleDM(args []string) {
 	case "decrypt":
 		handleDMDecrypt(subArgs)
 	case "publish-key":
-		handleDMPublishKey()
+		create := false
+		for _, a := range subArgs {
+			switch a {
+			case "--create":
+				create = true
+			default:
+				exitError("Unknown option for 'dm publish-key': %s", a)
+			}
+		}
+		handleDMPublishKey(create)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown dm subcommand: %s\n", subcommand)
 		printDMUsage()
@@ -108,7 +158,9 @@ Subcommands:
   retry [conversation_id] Retry delivering unsent messages
   config                  Show DM acceptance policy
   decrypt [options]       Decrypt and print your messages from a local/exported site
-  publish-key             Re-publish your DM messages key into .well-known/polis (repair)
+  publish-key [--create]  Publish your DM messages key into .well-known/polis,
+                          creating the DM keyring first if the site has none
+                          (--create: even though a messages key is already published)
 
 Options for 'decrypt':
   --phrase                Unlock with your recovery phrase instead of your password
@@ -194,7 +246,7 @@ func handleDMDecrypt(args []string) {
 			if i+1 >= len(args) {
 				exitError("--conversation needs a conversation id")
 			}
-			convFilter = args[i+1]
+			convFilter = args[i+1] //nolint:gosec // G602: bounds-checked on the line above
 			i++
 		default:
 			exitError("Unknown option for 'dm decrypt': %s", args[i])
@@ -410,7 +462,9 @@ func handleDMRead(convID string) {
 	}
 
 	// Mark as read
-	mb.MarkRead(peer)
+	if err := mb.MarkRead(peer); err != nil {
+		fmt.Fprintf(os.Stderr, "[!] Could not mark the conversation read: %v\n", err)
+	}
 }
 
 func handleDMSend(recipientURL, content string) {
@@ -431,34 +485,37 @@ func handleDMSend(recipientURL, content string) {
 		exitError("POLIS_BASE_URL must be set to send DMs")
 	}
 
-	sender := dm.NewSender(privPEM, pubSSH, dm.ExtractDomainFromURL(domain), storage.At(dataDir))
-	msg, err := sender.SendMessage(recipientURL, content, "")
+	// ⭐ The one implementation of sending a message (ops.SendDM). The CLI
+	// works on the owner's own machine, so a recipient on it is allowed.
+	sent, err := ops.SendDM(ops.DMSender{
+		Site: storage.At(dataDir), PrivateKey: privPEM, PublicKey: pubSSH, BaseURL: domain,
+		AllowPrivateRecipients: true,
+	}, recipientURL, content, "")
 
 	if jsonOutput {
 		data := map[string]interface{}{
 			"status":  "success",
 			"command": "dm send",
 		}
-		if msg != nil {
-			data["data"] = map[string]interface{}{
-				"message_id": msg.ID,
-				"status":     msg.Status,
+		if err == nil {
+			d := map[string]interface{}{"message_id": sent.MessageID, "status": sent.Status}
+			if sent.Reason != nil {
+				d["error"] = sent.Reason.Error()
 			}
-		}
-		if err != nil {
-			data["data"].(map[string]interface{})["error"] = err.Error()
+			data["data"] = d
+		} else {
+			data["data"] = map[string]interface{}{"error": err.Error()}
 		}
 		outputJSON(data)
 		return
 	}
 
 	if err != nil {
-		if msg != nil {
-			fmt.Printf("[!] Message saved but delivery failed: %v\n", err)
-			fmt.Printf("    Use 'polis dm retry' to redeliver\n")
-		} else {
-			exitError("Send failed: %v", err)
-		}
+		exitError("Send failed: %v", err)
+	}
+	if !sent.Delivered {
+		fmt.Printf("[!] Message saved but delivery failed: %v\n", sent.Reason)
+		fmt.Printf("    Use 'polis dm retry' to redeliver\n")
 		return
 	}
 

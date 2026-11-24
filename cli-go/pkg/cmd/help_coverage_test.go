@@ -54,6 +54,7 @@ func TestHelp_DocumentsAllCommands(t *testing.T) {
 		"polis site set avatar",
 		"polis site rewrite-unsigned",
 		"polis serve",
+		"polis mcp",
 		"polis preview",
 		"polis extract",
 		"polis republish",
@@ -204,7 +205,7 @@ func TestHelp_EveryDispatchedCommandIsInHelp(t *testing.T) {
 // A user who copies a line from help must get a command that runs.
 func TestHelp_AdvertisesOnlyFormsTheHandlersAccept(t *testing.T) {
 	output := captureHelp(t)
-	for _, sub := range []string{"comment draft", "comment sign", "comment list", "comment sync"} {
+	for _, sub := range []string{"comment draft", "comment sign", "comment send", "comment list", "comment sync"} {
 		if !strings.Contains(output, "polis "+sub) {
 			t.Errorf("expected help to mention 'polis %s'", sub)
 		}

@@ -57,7 +57,7 @@ func removeStaleTemps(dir string) {
 		return
 	}
 	names, _ := f.Readdirnames(-1)
-	f.Close()
+	_ = f.Close() // a directory opened to list it
 	cutoff := time.Now().Add(-StaleAtomicTempAge)
 	for _, n := range names {
 		if !IsAtomicTemp(n) {
@@ -143,7 +143,7 @@ func writeFileAtomic(path string, data []byte, mode fs.FileMode, keepMode, sync 
 		}
 	}()
 	if _, err := f.Write(data); err != nil {
-		f.Close()
+		_ = f.Close() // the write already failed; that error is the one returned
 		return fmt.Errorf("write tmp: %w", err)
 	}
 	if keepMode && existed {
@@ -152,13 +152,13 @@ func writeFileAtomic(path string, data []byte, mode fs.FileMode, keepMode, sync 
 		// os.WriteFile gave it — chmodding it too created 0644 files under
 		// umask 077 where the old write made them 0600.
 		if err := f.Chmod(mode); err != nil {
-			f.Close()
+			_ = f.Close() // the chmod already failed; that error is the one returned
 			return err
 		}
 	}
 	if sync {
 		if err := f.Sync(); err != nil {
-			f.Close()
+			_ = f.Close() // the sync already failed; that error is the one returned
 			return fmt.Errorf("sync tmp: %w", err)
 		}
 	}

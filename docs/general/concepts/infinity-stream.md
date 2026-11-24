@@ -4,7 +4,15 @@
 
 > Builds on: [architecture.md](architecture.md), [shapes.md](shapes.md), [pql.md](../reference/pql.md). Implementation lives in the `pub.polis.shapes.v4` shape; see also [`webapp/designer/pages.md`](../../webapp/designer/pages.md) for the page model and [`webapp/designer/navigation.md`](../../webapp/designer/navigation.md) for the icon-row nav that drives it.
 
-The **infinity stream** is the single-screen, sentence-filtered view of a polis site. It's the shape `pub.polis.shapes.v4` and the experience that polis.pub leads with. Where the [blog shape](shapes.md) gives you per-post pages and per-tag archives, the infinity stream gives you one screen that becomes everything: your network's activity, your own posts, comments awaiting blessing, profiles you might follow, message threads, anything composable from [PQL](../reference/pql.md).
+⚠️ **This page describes the stream shape (`v4`), which is no longer supported.** polis.pub led with it until
+2026-11-22; every site there is now on the **v5** shape, and every new site starts on it. A site that still
+records the stream shape keeps rendering exactly as this page describes; nothing removes it. The owner
+interface it describes (the icon row, the sentence filter at `/_/pql/<sentence>`, `/_/settings`) is gone:
+every site's owner app is the v5 app, at `/_/`. For what replaced the stream and what it kept (each item's own
+page is the stream at that item; views are PQL sentences), see [shapes.md](shapes.md). The ideas below are
+still the stream's, and v5 inherits several of them.
+
+The **infinity stream** is the single-screen, sentence-filtered view of a polis site. It's the shape `pub.polis.shapes.v4` and the experience that polis.pub led with until v5. Where the [blog shape](shapes.md) gives you per-post pages and per-tag archives, the infinity stream gives you one screen that becomes everything: your network's activity, your own posts, comments awaiting blessing, profiles you might follow, message threads, anything composable from [PQL](../reference/pql.md).
 
 This doc is mostly about the *why* — why a single stream-screen is the right primary surface for polis, what "infinity" means in this context, and how the same shape simultaneously serves three different viewpoints (owner, network member, public visitor).
 
@@ -40,9 +48,9 @@ Polis content lives in *three* viewing contexts simultaneously. The infinity str
 
 ### POV 1 — Owner (you, on your own SPA)
 
-The owner POV is the full webapp SPA at `<handle>.polis.pub/_/`. The icon-row presets are wired to PQL sentences that pull from your local site and the DS event stream. The sentence-filter widget is fully composable. Notifications surface as badge dots on the icon-row buttons. The editor is one click away (the `edit` icon).
+The owner POV was the full webapp SPA at `<handle>.polis.pub/_/` (the v4 app, now replaced by the v5 app). The icon-row presets are wired to PQL sentences that pull from your local site and the DS event stream. The sentence-filter widget is fully composable. Notifications surface as badge dots on the icon-row buttons. The editor is one click away (the `edit` icon).
 
-**What runs:** `index.html` + `app.js` + the v4 shape (`stream.html`, `stream.js`, `stream.css`) + `owner-extras.js` (icon-row preset wiring, dropdown menu, future inline editor and stream-item decorators). The script `owner-extras.js` is loaded *only* by the owner SPA — public pages never include it.
+**What ran:** `index.html` + `app.js` + the v4 shape (`stream.html`, `stream.js`, `stream.css`) + `owner-extras.js` (icon-row preset wiring, dropdown menu, future inline editor and stream-item decorators). `owner-extras.js` was loaded *only* by the owner SPA — public pages never included it. `app.js`, `owner-extras.js` and the SPA's `index.html` were deleted with the v4 app; the shape's own files remain.
 
 ### POV 2 — Network member (you, visiting alice.polis.pub)
 
@@ -54,7 +62,7 @@ When you visit a polis site you don't own, you're still authenticated as yoursel
 
 A reader who isn't logged in arrives at a polis site and lands on a **PQL URL**: the bare root `<handle>.polis.pub/` redirects a browser to `<handle>.polis.pub/pql/all+posts+by+date`. The public `/pql/<sentence>` endpoint serves the infinity-stream shell (and the same path returns the standardized JSON envelope to `Accept: application/json` callers — the developer API). On a tenant the `from`/`about` clause is optional and defaults to that tenant, so `/pql/all+comments+by+date` and `/pql/all+profiles+by+name` are the public comments and profiles views. The owner-extras layer is absent — filters that require live data (unread counts, badge dots, the avatar dropdown) don't appear, and owner-relative scopes (`from me`/`from my network`) are rejected for anonymous visitors (the [scope-resolution boundary](../reference/pql.md#scope-resolution-boundary-who-resolves-what)). Scroll behavior is type-dependent: on the posts view the address bar tracks the focused post's canonical URL (share/SEO); on comments/profiles it stays on the PQL filter URL.
 
-This is the layered model owner-extras.js documents at its head: **CSS converges, code diverges along file boundaries**. Every viewer gets the same stream layout and theme; the *behaviors* that require ownership context (editing, blessing, filtering with live counts) gate themselves on whether `owner-extras.js` loaded.
+This was the layered model `owner-extras.js` documented at its head: **CSS converges, code diverges along file boundaries**. Every viewer got the same stream layout and theme; the *behaviors* that required ownership context (editing, blessing, filtering with live counts) gated themselves on whether `owner-extras.js` loaded.
 
 ---
 
@@ -72,17 +80,17 @@ The shape is a small set of files that ship in `pub.polis.core` and install per-
 
 Only posts have a server-side template. Every other item type is rendered in the browser by `stream.js`.
 
-The webapp adds `app.js` (route handling, settings, editor wiring) and `owner-extras.js` (owner-only behaviors).
+The v4 app added `app.js` (route handling, settings, editor wiring) and `owner-extras.js` (owner-only behaviors); both are gone with it.
 
 ### The hydration flow
 
 When the page loads:
 
-1. **Boot** — on the owner SPA, `index.html` loads `theme-boot.js` first (it reads `localStorage` and sets `[data-theme]` before anything paints, avoiding flash-of-wrong-theme), then `stream.js`, `owner-extras.js` and `app.js`. A public page loads the shape's own `stream.js`.
+1. **Boot** — on the owner SPA (the v4 app, now gone), `index.html` loaded `theme-boot.js` first (it reads `localStorage` and sets `[data-theme]` before anything paints, avoiding flash-of-wrong-theme), then `stream.js`, `owner-extras.js` and `app.js`. A public page loads the shape's own `stream.js`.
 2. **Parse** — `stream.js` reads `location.pathname`. For `/pql/<sentence>` or `/_/pql/<sentence>` it parses the sentence; otherwise it uses the default landing sentence.
 3. **Fetch** — `stream.js` asks the site's own `/pql/` endpoint for JSON (`Accept: application/json`), scoped by the sentence, and fetches post bodies and focus comments through the site's `/api/v1/stream/*` proxies.
 4. **Render** — posts that arrived server-rendered are kept; everything else is rendered by `stream.js` into the stream column.
-5. **Decorate** — On the owner SPA, `owner-extras.js` runs `afterRender` hooks per type: wiring bless/deny buttons on comments, edit affordances on owner posts, count refresh on icon-row dots, etc. On public pages this layer is absent — the content renders, but no owner-only affordances appear.
+5. **Decorate** — On the owner SPA, `owner-extras.js` ran `afterRender` hooks per type: wiring bless/deny buttons on comments, edit affordances on owner posts, count refresh on icon-row dots, etc. On public pages this layer was always absent, and with the v4 app gone it is absent everywhere: the content renders, but no owner-only affordances appear.
 6. **Listen** — `stream.js` subscribes to URL changes (so icon clicks and sentence-filter changes don't full-reload) and re-runs the fetch+render cycle.
 
 See [`webapp/developer/feed-architecture.md`](../../webapp/developer/feed-architecture.md) for the cache and sync model behind the fetch step, and [`pql.md`](../reference/pql.md) for the sentence vocabulary the controller parses.

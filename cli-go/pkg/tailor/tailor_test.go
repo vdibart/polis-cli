@@ -607,11 +607,10 @@ func TestTagDirectory_Apply(t *testing.T) {
 }
 
 func TestLegacyThemeLocations_DeletesEntireLegacyTree(t *testing.T) {
-	// Step-01 forced-upgrade policy: site/themes/ and .polis/themes/ are
-	// deleted outright on upgrade, including any operator customizations.
-	// The canonical theme home is now .polis/bundles/<bundle>/themes/,
-	// populated from the embedded reference payload. This supersedes the
-	// older checkThemeConsolidation behavior which preserved customizations.
+	// Step-01 forced-upgrade policy for SHIPPED themes: their old copies in
+	// site/themes/ are removed (backed up first), and polis's copy under
+	// .polis/bundles/<bundle>/themes/ wins. A theme polis never shipped is kept;
+	// see TestApplyKeepsALegacyOwnThemeAndBacksUpShippedOnes.
 	dir := createOldSite(t)
 
 	baseDir := filepath.Join(dir, "site", "themes", "_base")
@@ -1300,17 +1299,40 @@ func TestCheckOrphanedThemeDirs_ReapsOrphan(t *testing.T) {
 	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
-	orphanDir := plantOrphanThemeDir(t, dir, "stale-orphan")
+	// A leftover of a theme polis once shipped (_base) is drift.
+	orphanDir := plantOrphanThemeDir(t, dir, "_base")
 
 	result := checkOrphanedThemeDirs(&runContext{siteDir: dir, dryRun: false})
 	if result.Status != StatusFail {
 		t.Fatalf("expected Fail (orphan reaped), got %s: %s", result.Status, result.Message)
 	}
-	if !strings.Contains(result.Message, "stale-orphan") {
+	if !strings.Contains(result.Message, "_base") {
 		t.Errorf("message should name reaped orphan; got: %s", result.Message)
 	}
 	if _, err := os.Stat(orphanDir); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("orphan dir must be removed; stat = %v", err)
+	}
+}
+
+// A theme renamed since it shipped (classic, now daryl) leaves its old
+// directory behind on every site that installed it: that is a leftover to
+// clear, never mistaken for the user's own theme.
+func TestCheckOrphanedThemeDirs_ReapsARenamedThemesOldDirectory(t *testing.T) {
+	dir := createCurrentSite(t)
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
+		t.Fatalf("EnsureReferencePayload: %v", err)
+	}
+	orphanDir := plantOrphanThemeDir(t, dir, "classic")
+
+	result := checkOrphanedThemeDirs(&runContext{siteDir: dir, dryRun: false})
+	if result.Status != StatusFail || !strings.Contains(result.Message, "classic") {
+		t.Fatalf("expected the old classic dir reaped, got %s: %s", result.Status, result.Message)
+	}
+	if _, err := os.Stat(orphanDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the old classic dir must be removed; stat = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".polis", "bundles", "pub.polis.core", "themes", "daryl", "v5.json")); err != nil {
+		t.Errorf("daryl must be installed in its place: %v", err)
 	}
 }
 
@@ -1331,7 +1353,7 @@ func TestCheckOrphanedThemeDirs_DryRunPreservesDisk(t *testing.T) {
 	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
-	orphanDir := plantOrphanThemeDir(t, dir, "orphan-dry")
+	orphanDir := plantOrphanThemeDir(t, dir, "_base")
 
 	result := checkOrphanedThemeDirs(&runContext{siteDir: dir, dryRun: true})
 	if result.Status != StatusFail {
@@ -1646,31 +1668,35 @@ func TestCheckNotificationRulesMigration_CleanSitePasses(t *testing.T) {
 	}
 }
 
-func TestCheckActiveShapeUpgrade_FlipsV3ToV4(t *testing.T) {
+// A self-hosted site on the blog shape keeps it: the check reports how to
+// switch and never switches (hosted Medic still forces the cutover).
+func TestCheckActiveShapeUpgrade_KeepsTheBlogShape(t *testing.T) {
+	setVersion(t, "0.59.0")
 	dir := createCurrentSite(t)
 	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
 	}
-	// Force the registry to active_shape v3.
 	if err := bundle.SetActiveShapeName(storage.At(dir), "v3"); err != nil {
 		t.Fatalf("SetActiveShapeName: %v", err)
 	}
 
 	result := checkActiveShapeUpgrade(&runContext{siteDir: dir, dryRun: false})
-	if result.Status != StatusFail {
-		t.Fatalf("expected fail (flip ran), got %s: %s", result.Status, result.Message)
+	if result.Status != StatusPass || len(result.Actions) != 1 || !strings.Contains(result.Actions[0].Detail, "pub.polis.shapes.v5") {
+		t.Fatalf("want a pass that says how to switch; got %s %q %+v", result.Status, result.Message, result.Actions)
 	}
-
+	Apply(dir)
 	reg, err := bundle.LoadRegistry(storage.At(dir))
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}
-	if reg.ActiveShape != "pub.polis.shapes.v4" {
-		t.Errorf("active_shape should be v4 after upgrade, got %q", reg.ActiveShape)
+	if reg.ActiveShape != "pub.polis.shapes.v3" {
+		t.Errorf("a full apply switched the shape to %q", reg.ActiveShape)
 	}
 }
 
-func TestCheckActiveShapeUpgrade_AlreadyV4Passes(t *testing.T) {
+// A site on the stream shape (v4) is reported like a blog-shape site: kept,
+// still rendering, no longer supported, and how to move; a full apply leaves it.
+func TestCheckActiveShapeUpgrade_ReportsTheStreamShapeAndKeepsIt(t *testing.T) {
 	dir := createCurrentSite(t)
 	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
 		t.Fatalf("EnsureReferencePayload: %v", err)
@@ -1679,8 +1705,27 @@ func TestCheckActiveShapeUpgrade_AlreadyV4Passes(t *testing.T) {
 		t.Fatalf("SetActiveShapeName: %v", err)
 	}
 	result := checkActiveShapeUpgrade(&runContext{siteDir: dir, dryRun: false})
-	if result.Status != StatusPass {
-		t.Errorf("expected pass on v4-already tenant, got %s: %s", result.Status, result.Message)
+	if result.Status != StatusPass || !strings.Contains(result.Message, "no longer supported") ||
+		len(result.Actions) != 1 || !strings.Contains(result.Actions[0].Detail, "pub.polis.shapes.v5") {
+		t.Fatalf("want a pass that says v4 is unsupported and how to switch; got %s %q %+v", result.Status, result.Message, result.Actions)
+	}
+	Apply(dir)
+	if reg, _ := bundle.LoadRegistry(storage.At(dir)); reg.ActiveShape != "pub.polis.shapes.v4" {
+		t.Errorf("a full apply switched the shape to %q", reg.ActiveShape)
+	}
+}
+
+// A site already on v5 has nothing to report.
+func TestCheckActiveShapeUpgrade_V5Passes(t *testing.T) {
+	dir := createCurrentSite(t)
+	if err := bundle.EnsureReferencePayload(storage.At(dir), "pub.polis.core"); err != nil {
+		t.Fatalf("EnsureReferencePayload: %v", err)
+	}
+	if err := bundle.SetActiveShapeName(storage.At(dir), "v5"); err != nil {
+		t.Fatalf("SetActiveShapeName: %v", err)
+	}
+	if result := checkActiveShapeUpgrade(&runContext{siteDir: dir, dryRun: false}); result.Status != StatusPass || len(result.Actions) != 0 {
+		t.Errorf("expected a plain pass on v5, got %s %q %+v", result.Status, result.Message, result.Actions)
 	}
 }
 
@@ -2304,7 +2349,7 @@ func TestCheckForeignContentInPublicPath_RemovesForeign(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, ownRel), []byte("---\nauthor: discover.polis.pub\n---\nmine"), 0o644)
 
 	backupDir := filepath.Join(dir, ".polis", "tailor-backup", "t")
-	res := checkForeignContentInPublicPath(&runContext{siteDir: dir, dryRun: false, baseURL: "https://" + owner, backupDir: backupDir})
+	res := applyWithBackup(&runContext{siteDir: dir, dryRun: false, baseURL: "https://" + owner, backupDir: backupDir}, checkForeignContentInPublicPath)
 
 	if res.Status != StatusFail {
 		t.Fatalf("expected fail (foreign content found), got %s", res.Status)

@@ -1,0 +1,29 @@
+{
+  "note": "Elwood comes as a pair (yin and yang). Named for Claude Elwood Shannon: polis is his channel,\na message signed at one point and verified exactly at another. Terracotta is the human message;\ncyan is the channel.\n\nA note in elwood-noise, the other half of the one in elwood-signal (Claude, 2026-11-16):\n\nShannon's second lesson was that noise is not the enemy of a message. It is the\ncondition every message crosses, and a message built well gets through anyway.\nSo this half keeps the static in the cards, where the reading happens.\nThe channel is partly mine. The messages are yours. Write something worth carrying.\n\nelwood-noise: the dark half, the medium the message travels through. Dark cards on Signal's light page\n(the pair's yin and yang), grain in the cards, ember terracotta punching through, and under the pointer\na violet halo that fades up and holds.",
+  "tokens": {
+    "scheme": "dark",
+    "site": "#e07e52",
+    "bg": "#d9cebd",
+    "bar": "#1d1813",
+    "surface": "#2a231c",
+    "card-hover": "#312920",
+    "panel": "#2f2820",
+    "text": "#ece3d3",
+    "text-soft": "#c9bfad",
+    "text-muted": "#9a9080",
+    "ink": "#1d1813",
+    "wordmark": "#e07e52",
+    "accent-2": "#33c2dd",
+    "rollover": "glow",
+    "rollover-color": "#b79be6",
+    "heading-color": "#ec9268",
+    "heading-weight": "semibold",
+    "font-heading": "Playfair Display",
+    "mark": "#e07e52",
+    "mark-style": "ring",
+    "mark-2": "#33c2dd",
+    "mark-ink": "#1d1813",
+    "date-style": "signal",
+    "card-texture": "grain"
+  }
+}

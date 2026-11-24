@@ -85,9 +85,10 @@ renderer, _ := render.NewPageRenderer(render.PageConfig{
 })
 stats, _ := renderer.RenderAll(true)
 
-// Publish a post. Some packages still take the site root as a string; they
-// are being converted to the handle one at a time, so expect both forms.
-result, _ := publish.PublishPost(site.Dir(), content, filename, privateKey)
+// Publish a post. This calls the package directly, so it does not render,
+// run hooks or log the write the way `polis post` and /v1 do (those go
+// through the action layer, cli-go/pkg/ops).
+result, _ := publish.PublishPost(site, content, filename, privateKey)
 ```
 
 ## Commands

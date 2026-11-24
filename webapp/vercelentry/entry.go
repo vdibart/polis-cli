@@ -48,6 +48,7 @@ var (
 // environment holds secrets.
 func Handler(w http.ResponseWriter, r *http.Request) {
 	once.Do(func() {
+		server.OneLinePerLogEntry() // one log entry, one line: a value cannot forge a second
 		webFS, err := fs.Sub(webui.Assets, "www")
 		if err == nil {
 			handler, err = server.NewNetworkHandler(webFS, DataDir, Version, os.Getenv)

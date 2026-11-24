@@ -543,7 +543,7 @@ func appendString(b []byte, s string) []byte {
 }
 
 func appendBytes(b []byte, data []byte) []byte {
-	b = appendUint32(b, uint32(len(data)))
+	b = appendUint32(b, uint32(len(data))) //nolint:gosec // G115: a length or filesystem count far below the target type's range
 	return append(b, data...)
 }
 

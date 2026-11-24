@@ -2,6 +2,8 @@
 
 *For* [Contributors](../../README.md#contributing-to-polis) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [Webapp](../README.md)
 
+⚠️ **This page describes the v4 owner app and the stream shape, both replaced.** Since 2026-11-22 every site's owner app is the **v5 app** (at `/_/`, on `/v1` only), and every site on polis.pub is on the **v5 shape**; the v4 app (its three surfaces and `/_/pql/<sentence>` routing) is deleted, and the stream shape is no longer supported though a site that records it still renders as before. What follows is kept as the record of how v4 worked. For the current model see [shapes](../../general/concepts/shapes.md) and [architecture](../../general/concepts/architecture.md).
+
 ## Overview
 
 In the v4 architecture there are **three surfaces**, not five pages. The old "Dashboard" and "My Content" pages collapsed into a single stream-screen that re-filters via PQL sentences. The nav bar (and the editor, and settings) are constants; only the stream filter changes.
@@ -9,10 +11,10 @@ In the v4 architecture there are **three surfaces**, not five pages. The old "Da
 | # | Surface | URL | Nav | Content Theme |
 |---|---------|-----|-----|---------------|
 | 1 | Landing | polis.pub (logged out) | System topbar | SOLS |
-| 2 | Webapp SPA (logged in) | `handle.polis.pub/_/`, `/_/pql/<sentence>`, `/_/settings`, `/_/kay` (own instance only) | User's icon nav | User's theme |
+| 2 | Webapp SPA (logged in) | `handle.polis.pub/_/`, `/_/pql/<sentence>`, `/_/settings`, `/_/kay` (only where switched on) | User's icon nav | User's theme |
 | 3 | Foreign site visit | alice.polis.pub | User's icon nav, mounted into Alice's topbar by the widget | Alice's theme |
 
-Inside surface 2, what used to be separate "Dashboard" and "My Content" pages are now PQL-filtered views of the same stream-screen: each icon button loads a preset sentence (see `navigation.md`), and the sentence-filter widget composes ad-hoc queries. Static routes are limited to `/_/` (default landing sentence), `/_/settings` and `/_/kay`; everything else is `/_/pql/<sentence>`.
+Inside surface 2, what used to be separate "Dashboard" and "My Content" pages are now PQL-filtered views of the same stream-screen: each icon button loads a preset sentence (see `navigation.md`), and the sentence-filter widget composes ad-hoc queries. Static routes are limited to `/_/` (default landing sentence), `/_/settings` and, where Kay is switched on, `/_/kay`; everything else is `/_/pql/<sentence>`.
 
 ## Routing Model
 
@@ -22,7 +24,7 @@ Inside surface 2, what used to be separate "Dashboard" and "My Content" pages ar
 | Click avatar | `/_/` (the default gateway view) |
 | Avatar menu → Follow a site | Opens the follow panel (enter an address to follow); no navigation |
 | Avatar menu → Copy follow link | Copies your follow link; no navigation |
-| Avatar menu → Kay | `/_/kay`, the Kay page (the entry is hidden on polis.pub) |
+| Avatar menu → Kay | `/_/kay`, the Kay page (the entry is hidden unless Kay is switched on, and always on polis.pub) |
 | Avatar menu → Settings | `/_/settings` |
 | Click an icon button | Stream-screen with that icon's PQL preset (gateway, paragraph, comment, people, envelope) |
 | Click edit icon | Opens the inline editor |
@@ -110,8 +112,8 @@ Profiles in your network. Sortable by name or by activity.
 ### Messages view (`envelope` icon)
 `all messages from my mutuals by date` — your DM conversations. DMs are between mutuals, so the scope is locked to `my mutuals`.
 
-### Kay (`/_/kay`)
-One of two non-stream static routes. Accessed via the avatar dropdown (and the mobile menu), beside Settings. Only on the owner's own instance at a public address: on polis.pub the entries are hidden and the Kay API answers 404, because v0 reaches the site through its `/mcp`, which polis.pub does not route. The owner connects a v0 key once, then asks for changes to the site in plain words; v0 acts on the site through the site's own `/mcp`, under a key scoped to its rendered output, and the page shows each step v0 took and what it did on the site.
+### Kay (`/_/kay`): retired
+The Kay page went with the previous owner app (2026-11-22); `/_/kay` is no longer an address of the owner's app.
 
 ### Settings (`/_/settings`)
 The other non-stream static route. Accessed via the avatar dropdown.

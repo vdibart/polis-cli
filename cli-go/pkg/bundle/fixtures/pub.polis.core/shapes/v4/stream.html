@@ -3,21 +3,27 @@
      keep-bang; every other layout comment below is stripped for payload).
 
      This page is an SSR "stream shape" artifact — stream.js hydrates it into an
-     infinity stream. The public per-post page and the owner SPA share one
+     infinity stream. The page and stream.js's renderers share one
      entry-grammar, so keep this markup in lockstep with the JS renderers.
+     The v4 shape is no longer offered to new sites; a site on it renders as
+     before. Every site's owner app is now the v5 app.
 
      Developer trail (stream shape):
        producer (SSR)  — stream.html + stream-post.html   (this template)
        renderer (Go)   — cli-go/pkg/render/stream.go
        consumer (JS)   — pub.polis.core/shapes/v4/stream.js   (hydration)
        styling         — pub.polis.core/shapes/v4/stream.css  (+ active theme)
-       owner overlay   — webapp/internal/webui/www/owner-extras.js
+       the default     — pub.polis.core/shapes/v5/ (docs/general/concepts/shapes.md)
 
-     Pull the thread (github.com/vdibart/polis-cli/blob/main/):
-       docs/general/concepts/infinity-stream.md  (why)
-       docs/general/reference/pql.md             (spec)
-       docs/handbook/url-as-filter.md            (tour)
-       AGENTS.md                                 (map)
+     The owner SPA and owner-extras.js named in the comments below were the v4
+     owner app, deleted after release 0.70.0, where they can still be read:
+     https://github.com/vdibart/polis-cli/tree/v0.70.0/webapp/internal/webui/www
+
+     Pull the thread:
+       https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/infinity-stream.md  (why)
+       https://github.com/vdibart/polis-cli/blob/main/docs/general/reference/pql.md             (spec)
+       https://github.com/vdibart/polis-cli/blob/main/docs/handbook/url-as-filter.md            (tour)
+       https://github.com/vdibart/polis-cli/blob/main/AGENTS.md                                 (map)
      ========================================================================= -->
 <!--
     Polis stream shape — per-post page template (the "stream shell").

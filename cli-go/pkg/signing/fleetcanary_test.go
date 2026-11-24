@@ -351,7 +351,7 @@ func checkFleetSite(ft *fleetTally, client *remote.Client, base string) {
 		case "tag":
 			checkFleetTag(ft, client, rr, base, pubKey, e)
 		case "attestation":
-			checkFleetAttestation(ft, client, rr, base, pubKey, e)
+			checkFleetAttestation(ft, client, rr, base, pubKey, chain, e)
 		}
 	}
 
@@ -530,7 +530,11 @@ func checkFleetTag(ft *fleetTally, client *remote.Client, rr *sitecheck.Remote, 
 	compareRecordURL(ft, rr, "tag", url, string(status))
 }
 
-func checkFleetAttestation(ft *fleetTally, client *remote.Client, rr *sitecheck.Remote, base string, pubKey []byte, e remote.PublicIndexEntry) {
+// checkFleetAttestation verifies an issued record the way every real verifier
+// does: through the issuer's key history, so a record signed before a
+// rotation verifies under the key that held authority when it was signed.
+// chain is nil for a site that never rotated, or whose history is not usable.
+func checkFleetAttestation(ft *fleetTally, client *remote.Client, rr *sitecheck.Remote, base string, pubKey []byte, chain *site.KeyHistoryBlock, e remote.PublicIndexEntry) {
 	url := fleetURL(base, e)
 	body, err := client.FetchContent(url)
 	if err != nil {
@@ -543,6 +547,9 @@ func checkFleetAttestation(ft *fleetTally, client *remote.Client, rr *sitecheck.
 		return
 	}
 	status, verr := attestation.Verify(&r, pubKey)
+	if chain != nil {
+		status, _, verr = attestation.VerifyWithHistory(&r, pubKey, chain)
+	}
 	recordJSONStatus(ft, "attestation", url, string(status), verr)
 	compareRecordURL(ft, rr, "attestation", url, string(status))
 }

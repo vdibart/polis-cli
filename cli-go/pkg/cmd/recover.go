@@ -116,7 +116,7 @@ const maxChallengeBytes = 64 * 1024
 // it on their own machine, outside every site.
 func readChallenge(path string, stdin io.Reader, stdinIsTerminal bool) ([]byte, error) {
 	if path != "" && path != "-" {
-		f, err := os.Open(path)
+		f, err := os.Open(path) //nolint:gosec // G304: a path the user typed
 		if err != nil {
 			return nil, fmt.Errorf("read the challenge file: %w", err)
 		}
@@ -193,7 +193,7 @@ func recoverSign(input []byte, keyPath, domainFlag string) (*recoverSignResult, 
 		return nil, fmt.Errorf("the recovery key %s is readable by others (mode %o): run chmod 600 %s, then sign again",
 			keyPath, info.Mode().Perm(), keyPath)
 	}
-	priv, err := os.ReadFile(keyPath)
+	priv, err := os.ReadFile(keyPath) //nolint:gosec // G304: the owner's recovery key, mode-checked above
 	if err != nil {
 		return nil, fmt.Errorf("read the recovery key %s: %w", keyPath, err)
 	}

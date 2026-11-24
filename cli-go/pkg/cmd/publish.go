@@ -11,6 +11,7 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/license"
+	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
@@ -20,7 +21,7 @@ func handlePublish(args []string) {
 	fs := flag.NewFlagSet("publish", flag.ExitOnError)
 	filename := fs.String("filename", "", "Custom filename for the post (without .md)")
 	licenseFlag := fs.String("license", "", "Licence for this post: reserved, open, or none (default: the site's terms)")
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 	remaining := fs.Args()
 	if len(remaining) < 1 {
@@ -38,7 +39,7 @@ func handlePublish(args []string) {
 	// NOT the storage interface: inputFile is the path the user typed on the
 	// command line and may be anywhere on their disk. The store addresses
 	// keys inside the site and refuses absolute paths by design.
-	content, err := os.ReadFile(inputFile)
+	content, err := os.ReadFile(inputFile) //nolint:gosec // G304: a path the user typed
 	if err != nil {
 		exitError("Failed to read file: %v", err)
 	}
@@ -49,40 +50,16 @@ func handlePublish(args []string) {
 		exitError("Failed to load private key: %v", err)
 	}
 
-	// Read the author's per-work licence override BEFORE stripping, since it
-	// lives in the frontmatter that is about to be discarded. Authors write the
-	// terse form — `license: reserved` — or nothing at all, in which case the
-	// site default applies.
-	authoredLicense, _ := license.AuthoredProfile(string(content))
-	if *licenseFlag != "" {
-		authoredLicense = *licenseFlag
-	}
-
-	// Strip frontmatter if present
+	// The author's per-work licence is the markdown's own `license:` line,
+	// read by the operation; --license states it for them.
 	markdown := string(content)
-	if publish.HasFrontmatter(markdown) {
-		markdown = publish.StripFrontmatter(markdown)
+	if *licenseFlag != "" {
+		markdown = withLicenseLine(markdown, *licenseFlag)
 	}
 
-	// Publish the post
-	dsCfg := &publish.DiscoveryConfig{
-		DiscoveryURL:   discoveryURL,
-		BaseURL:        baseURL,
-		Generator:      generator,
-		LicenseProfile: authoredLicense,
-	}
-	result, err := publish.PublishPost(storage.At(dir), markdown, *filename, privKey, dsCfg)
-	if err != nil {
-		exitError("Failed to publish: %v", err)
-	}
-
-	// v4 incremental render: cascade siblings + index. v3 path unchanged
-	// (CLI publish has never auto-rendered for v3, and continues not to).
-	if shape, err := bundle.GetActiveShapeName(storage.At(dir)); err == nil && shape == "v4" {
-		if err := publishStreamCascade(dir, result.Path, false); err != nil && !jsonOutput {
-			fmt.Fprintf(os.Stderr, "[!] v4 cascade render failed: %v\n", err)
-		}
-	}
+	// ⭐ Publish through the action layer: the operation /v1 serves, in
+	// process, with its render (incremental on v4, full on v5, none on v3).
+	result := dispatchPost(dir, privKey, "create", map[string]any{"markdown": markdown, "filename": *filename})
 
 	// Remove original file if not already in posts/ (matches bash CLI behavior)
 	inputAbs, err1 := filepath.Abs(inputFile)
@@ -116,7 +93,7 @@ func handlePublish(args []string) {
 
 func handleRepublish(args []string) {
 	fs := flag.NewFlagSet("republish", flag.ExitOnError)
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 	remaining := fs.Args()
 	if len(remaining) < 1 {
@@ -195,29 +172,11 @@ func handleRepublish(args []string) {
 		markdown = publish.StripFrontmatter(string(content))
 	}
 
-	// Strip frontmatter if present
-	if publish.HasFrontmatter(markdown) {
-		markdown = publish.StripFrontmatter(markdown)
-	}
-
-	// Republish the post
-	dsCfg := &publish.DiscoveryConfig{
-		DiscoveryURL: discoveryURL,
-		BaseURL:      baseURL,
-		Generator:    generator,
-	}
-	result, err := publish.RepublishPost(storage.At(dir), postPath, markdown, privKey, dsCfg)
-	if err != nil {
-		exitError("Failed to republish: %v", err)
-	}
-
-	// v4 incremental cascade. RepublishPost preserves the post's path/position;
-	// PublishStream handles republish identically (same lookup, same cascade).
-	if shape, err := bundle.GetActiveShapeName(storage.At(dir)); err == nil && shape == "v4" {
-		if err := publishStreamCascade(dir, result.Path, true); err != nil && !jsonOutput {
-			fmt.Fprintf(os.Stderr, "[!] v4 cascade render failed: %v\n", err)
-		}
-	}
+	// ⭐ Republish through the action layer: post.update, the operation /v1
+	// serves, in process. It reads the new version's own `license:` line (a
+	// post re-signed as it stands has only the stamped block, so it takes the
+	// site's current terms) and renders as publish does.
+	result := dispatchPost(dir, privKey, "update", map[string]any{"path": filepath.ToSlash(postPath), "markdown": markdown})
 
 	if jsonOutput {
 		outputJSON(map[string]interface{}{
@@ -320,17 +279,90 @@ func handleRepublishComment(dir, rawPath string, remaining []string) {
 	}
 }
 
+// postResult is what post.create and post.update answer.
+type postResult struct {
+	Success                              bool
+	Path, Title, Version, Signature, URL string
+}
+
+// dispatchPost runs a post operation through the CLI's action layer and
+// exits on failure, as the commands always have.
+func dispatchPost(dir string, privKey []byte, action string, payload map[string]any) postResult {
+	pubKey, _ := storage.NewPOSIX(dir).Get(context.Background(), ".polis/keys/id_ed25519.pub")
+	engine, err := cliEngine(dir, privKey, pubKey)
+	if err != nil {
+		exitError("Failed to start: %v", err)
+	}
+	res, err := engine.Dispatch(cliContext(), ops.ActionRequest{Action: action, ContentType: "pub.polis.post", Payload: payload})
+	if err != nil {
+		verb := map[string]string{"create": "publish", "update": "republish"}[action]
+		exitError("Failed to %s: %v", verb, err)
+	}
+	str := func(k string) string { v, _ := res.Data[k].(string); return v }
+	return postResult{Success: true, Path: str("path"), Title: str("title"), Version: str("version"), Signature: str("signature"), URL: str("url")}
+}
+
+// withLicenseLine sets the markdown's top-level `license:` line to profile,
+// adding frontmatter when it has none: how --license states a work's terms.
+func withLicenseLine(markdown, profile string) string {
+	line := "license: " + profile
+	if !publish.HasFrontmatter(markdown) {
+		return "---\n" + line + "\n---\n" + markdown
+	}
+	rest := strings.TrimPrefix(markdown, "---\n")
+	end := strings.Index(rest, "\n---")
+	if end < 0 {
+		return "---\n" + line + "\n---\n" + publish.StripFrontmatter(markdown)
+	}
+	var kept []string
+	skipping := false // inside a license block being replaced
+	for _, l := range strings.Split(rest[:end], "\n") {
+		indented := strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t")
+		if skipping && indented {
+			continue
+		}
+		skipping = false
+		if k, _, ok := strings.Cut(l, ":"); ok && !indented && strings.TrimSpace(k) == license.FrontmatterKey {
+			skipping = true
+			continue
+		}
+		kept = append(kept, l)
+	}
+	kept = append(kept, line)
+	return "---\n" + strings.Join(kept, "\n") + rest[end:]
+}
+
 func loadPrivateKey(dir string) ([]byte, error) {
 	return storage.NewPOSIX(dir).Get(context.Background(), ".polis/keys/id_ed25519")
 }
 
-// publishStreamCascade constructs a PageRenderer and dispatches the v4 incremental
-// render-on-publish (per step-03/3.a). Used by both publish and republish; both
-// flow through PublishStream because the cascade derivation is the same — a
-// republish keeps the post's index position but its sibling neighbors still
-// need re-rendering for any excerpt/title changes. The isRepublish flag is
-// retained for future telemetry / unpublish symmetry.
-func publishStreamCascade(dir, postPath string, isRepublish bool) error {
+// renderV5AfterChange renders a v5 site after a post is published,
+// republished or unpublished (contentPath, its source): incrementally when the
+// render's record allows (the post's page, the pages showing it, the home page,
+// the sitemap), else in full, as /v1's writes do (ops.RenderAfterRemoval). A
+// comment ("" or a comment's path) renders in full. A no-op on any other
+// shape. A failure is reported and the change stands, as v4's cascade does.
+func renderV5AfterChange(dir, contentPath string) {
+	site := storage.At(dir)
+	if shape, err := bundle.GetActiveShapeName(site); err != nil || shape != "v5" {
+		return
+	}
+	renderer, err := newCascadeRenderer(dir)
+	if err == nil {
+		if strings.HasPrefix(contentPath, "content/pub.polis.core/post/") {
+			_, _, err = ops.RenderAfterRemoval(site, renderer, contentPath)
+		} else {
+			_, err = renderer.RenderAll(false)
+		}
+	}
+	if err != nil && !jsonOutput {
+		fmt.Fprintf(os.Stderr, "[!] v5 render failed: %v\n", err)
+	}
+}
+
+// newCascadeRenderer is the renderer a publish uses: the site's base URL and
+// the core bundle's folders for posts and comments.
+func newCascadeRenderer(dir string) (*render.PageRenderer, error) {
 	url := os.Getenv("POLIS_BASE_URL")
 	if url == "" {
 		url = getBaseURLFromSite(dir)
@@ -341,7 +373,7 @@ func publishStreamCascade(dir, postPath string, isRepublish bool) error {
 	commentsSource, _ := coreBundle.ContentDir("pub.polis.comment")
 	commentsMountDir, _ := coreBundle.MountDir("pub.polis.comment")
 
-	renderer, err := render.NewPageRenderer(render.PageConfig{
+	return render.NewPageRenderer(render.PageConfig{
 		Site:              storage.At(dir),
 		CLIThemesDir:      findCLIThemesDir(),
 		BaseURL:           url,
@@ -350,9 +382,4 @@ func publishStreamCascade(dir, postPath string, isRepublish bool) error {
 		CommentsSourceDir: commentsSource,
 		CommentsMountDir:  commentsMountDir,
 	})
-	if err != nil {
-		return fmt.Errorf("create renderer: %w", err)
-	}
-	_ = isRepublish // reserved for future use; cascade logic identical today
-	return renderer.PublishStream(postPath)
 }

@@ -41,6 +41,13 @@ func (e *Engine) processPartials(template string, ctx *RenderContext, depth int)
 			return match // Return original on error
 		}
 
+		// ⭐ A partial that includes a name resolving back to ITSELF means "the
+		// override, if there is one": the shipped about.html is `{{> global:about}}`,
+		// which finds the site's own about when there is one and, when there is
+		// not, falls through the chain to the very same file. That include renders
+		// nothing, instead of recursing to the depth limit and failing the page.
+		content = e.stripSelfIncludes(content, snippetPath, source)
+
 		// Recursively process the loaded partial
 		processed, err := e.renderWithDepth(content, ctx, depth+1)
 		if err != nil {
@@ -57,6 +64,31 @@ func (e *Engine) processPartials(template string, ctx *RenderContext, depth int)
 	})
 
 	return result, lastErr
+}
+
+// stripSelfIncludes removes an include in content that asks a DIFFERENT tier
+// first (an explicit global: or theme: prefix, from a file in another tier)
+// and resolves back to the file content was loaded from — that tier had
+// nothing, so there is no override. ⛔ A plain self-include ({{> x}} inside x)
+// is left alone and still fails at the depth limit: that is an authoring
+// mistake and should say so.
+func (e *Engine) stripSelfIncludes(content, resolved, fromTier string) string {
+	return partialPattern.ReplaceAllStringFunc(content, func(match string) string {
+		sub := partialPattern.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		path := strings.TrimSpace(sub[1])
+		prefix, _ := parsePartialPrefix(path)
+		if prefix == "" || prefix == fromTier {
+			return match
+		}
+		// The resolved path is relative to its tier, so the tier must match too.
+		if _, p, src, err := e.loadPartial(path); err == nil && p == resolved && src == fromTier {
+			return ""
+		}
+		return match
+	})
 }
 
 // loadPartial loads a partial file from the appropriate location.

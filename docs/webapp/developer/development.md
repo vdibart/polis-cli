@@ -2,7 +2,10 @@
 
 *For* [Contributors](../../README.md#contributing-to-polis) — *Kind* [Guide](../../README.md#kinds-of-page) — *Component* [Webapp](../README.md) — *See also* [tour](../../handbook/README.md)
 
-Development patterns, testing, and architecture for the polis webapp.
+Development patterns, testing, and architecture for the polis webapp: the server, and the owner app it serves.
+Every site's owner app is the v5 app (`webui/www/v5/`), which calls `/v1` only; every site action is one `/v1`
+operation in the action layer (`cli-go/pkg/ops`), described in the [API developer reference](../../api/developer/reference.md).
+The previous owner app (`app.js`, `owner-extras.js`, its stream screen) was deleted on 2026-11-22.
 
 ## Critical Rules
 
@@ -20,75 +23,51 @@ webapp/
 │   cmd/medic/, cmd/tailor/
 ├── internal/server/
 │   ├── server.go               # Server struct, config, logging, sync loop
-│   ├── routes.go               # Route registration (~100 paths)
-│   ├── handlers.go             # Most /api/* handlers
-│   ├── handlers_stream.go      # Stream items, counts, bodies
-│   ├── handlers_pql.go         # GET /pql/<sentence>
+│   ├── routes.go               # The routes outside /v1, each /api/ one with its reason
+│   ├── site_api.go, owner_api.go # The site's own /v1 operations (settings, agents, messages)
+│   ├── handlers.go             # Handlers those operations and routes reach
+│   ├── handlers_stream.go      # The items behind every PQL view, counts, bodies
+│   ├── handlers_pql.go         # GET /pql/<sentence> (and /v1/query, which reaches it)
+│   ├── v5owner.go              # Serves the owner app at /_/ and below
 │   ├── sync.go                 # Unified DS sync + its handlers
 │   ├── middleware.go           # Request logging, correlation IDs
 │   ├── handlers_test.go        # Handler tests
 │   └── server_test.go          # Server/validation tests
 ├── internal/api/
-│   ├── router.go               # v1 content API routes
+│   ├── router.go               # /v1: content operations, auth, the live-grant check
 │   ├── handlers.go             # Thin HTTP → Dispatch → JSON
-│   └── middleware.go           # Auth, CORS, body limits
+│   ├── hostroutes.go           # The host's own /v1 operations (api.HostRoute)
+│   ├── envelope.go             # Every /v1 error as one envelope
+│   └── middleware.go           # Body limits, CORS hook
+├── internal/agentauth/         # An agent signing in (polis.pub)
 ├── internal/serve/             # Shared public-content serving (hosted + reader/mirror modes)
 ├── internal/webui/
 │   ├── assets.go               # Shared embedded FS (//go:embed www/*)
-│   └── www/                    # SPA source (index.html, app.js, owner-extras.js, pql.js, dm*.js, style.css)
+│   ├── *.test.js               # The owner app's tests (node --test)
+│   └── www/
+│       ├── v5/                 # The owner app (index.html, frame.js, api.js, the sections, card.js, sheet.js, rich.js)
+│       └── dm*.js, vendor/     # The messages key's cryptography and the sheet's rich-text editor, served from the site root
 └── internal/hosted/            # Multi-tenant service (polis.pub)
 ```
 
-## Adding an API Endpoint
+## Adding an operation
 
-### 1. Register the route (`routes.go`)
+⛔ **Nothing new goes under `/api/`.** A site action has one implementation, in the action layer
+(`cli-go/pkg/ops`), and every caller reaches it through `/v1`: the owner app, agents (MCP is generated from the
+site's description), scripts and the CLI. What is left under `/api/` is a short list of things that are not API
+operations, each with its reason ([the site API page](../../api/developer/site-api.md)).
 
-Handlers that accept a body are wrapped in `limitBody`, as the neighbouring routes are:
-
-```go
-mux.HandleFunc("/api/your-endpoint", limitBody(s.handleYourEndpoint, MaxDefaultBodySize))
-```
-
-### 2. Add the handler (`handlers.go`, or the `handlers_*.go` file for its area)
-
-Follow the existing pattern:
-1. Method check
-2. Precondition checks (keys, config)
-3. Parse request body
-4. Business logic (use `cli-go/pkg/` packages)
-5. JSON response
-
-### 3. Add the frontend (`app.js` or `owner-extras.js`)
-
-`app.js` holds the `App` object; `owner-extras.js` holds the owner-only stream chrome (icon presets, inline editor, bless/edit rollovers). Owner-only behaviour on the stream belongs in `owner-extras.js`.
-
-```javascript
-async yourFeature() {
-    const response = await fetch('/api/your-endpoint', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ field: value })
-    });
-    // ...
-}
-```
-
-### 4. Add tests (`handlers_test.go`)
-
-```go
-func TestHandleYourEndpoint(t *testing.T) {
-    s := newConfiguredServer(t)
-    body := jsonBody(t, map[string]string{"field": "value"})
-    req := httptest.NewRequest(http.MethodPost, "/api/your-endpoint", body)
-    w := httptest.NewRecorder()
-    s.handleYourEndpoint(w, req)
-    if w.Code != http.StatusOK {
-        t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
-    }
-}
-```
-
-Always test: happy path, wrong HTTP method, missing preconditions, invalid input.
+1. **Declare the operation.** A content operation goes in `cli-go/pkg/ops/builtin_core_ops.go` (type, action,
+   method, path, input schema, auth and scope), its handler in `builtin_core.go` and its success answer in
+   `builtin_core_answers.go`. A setting or a host-only operation is an `api.HostRoute` beside its handler
+   (`webapp/internal/server/site_api.go`, `owner_api.go`), with its answer in `api_answers.go`. Paths follow
+   the [path rule](../../api/developer/reference.md#paths): a content type's operations under `/v1/content/{type}`, a
+   site's settings under `/v1/{area}/…`.
+2. **Declare what a write causes** in the shared after-write module (`cli-go/pkg/ops/afterwrite.go`): its
+   event, its render, its hook. A test fails until it is there.
+3. **Reach it from the owner app** (`webapp/internal/webui/www/v5/`) through `api.js`, which calls `/v1` only.
+4. **Test it through `/v1`** with the helpers in `webapp/internal/server` (`queryRoutes`, `mint`, `apiCall`):
+   the happy path, the refusals, what an agent may and may not do, and the effects.
 
 ## Test Helpers
 
@@ -97,49 +76,43 @@ Always test: happy path, wrong HTTP method, missing preconditions, invalid input
 | `newTestServer(t)` | Temp dir with required subdirectories, no keys |
 | `newConfiguredServer(t)` | Real Ed25519 keys, config, `.well-known/polis` |
 | `jsonBody(t, v)` | Marshal to `*bytes.Buffer` for request bodies |
+| `queryRoutes(t)` | A configured site and its full route set, for calling `/v1` |
+| `mint(t, s, scopes...)` | A token on that site: the owner's own full-access one with no scopes, an agent's scoped one with them |
+| `apiCall(t, h, method, path, token, body)` | One request; returns the status and the decoded answer |
+
+The owner app's JavaScript has its own tests, `webapp/internal/webui/*.test.js`, run with
+`node --test webapp/internal/webui/*.test.js` (part of `make test` when Node is installed). Each file's rules
+are pure functions it exports, and the tests call those.
 
 ## Frontend Architecture
 
-### App Object
+**The owner app is the v5 app, in `webapp/internal/webui/www/v5/`, at `/_/` and below on every instance**
+(`server.ServeV5Owner`, `internal/server/v5owner.go`). It has no build step: `index.html` is its shell, whose
+`{{asset:…}}` references the server fills with each file's address and content hash, and each script is a plain
+file. The rules every page follows (cards, the frame, every label) are the [style guide](../designer/style-guide.md).
 
-Single global `App` object in `app.js` with SPA state and methods — among them `screens` (the screen elements), `counts` (cached badge counts: drafts, pending comments, feed unread, DM unread, …), `siteInfo`, `webappTheme`, and the `isHosted` / `isDev` flags. Some fields (`currentView`, `sidebarMode`) are left over from the retired sidebar UI.
+| File | What it does |
+|---|---|
+| `frame.js`, `frame.css` | The menu and the section box, the addresses, the dots that say something is new, hints and help. `frame.css` holds the app's own tokens: the owner app does not take the site's public theme |
+| `api.js` | The one door to the site: `/v1`, same-origin, on the owner's own sign-in, with no token. Every answer is `{ok, status, data, error}`, the error read from the envelope's `error.message` |
+| `gather.js` · `write.js` · `message.js` · `enhance.js` | The four sections: the network, what the owner wrote (and the comments waiting for a blessing), messages, settings in groups |
+| `card.js` | Every item's card, built from the same parts in the same order as the public site's (a test holds the two together) |
+| `sheet.js` | The one editor, opened in place over the section: a new post, an edit, a reply (in write, and in gather's focus mode). Unfinished writing is saved as a draft on the site. An edit can be republished only once it differs from what was opened, so a post opened and left alone keeps its bytes and its signature. Its `field` (rich text with the formatting buttons and the markdown switch, over a text area) is also the bio's editor in enhance, whose Save likewise stays off until the bio has changed |
+| `rich.js` | The sheet's rich text: the body edited as formatted text and written back as markdown, over the vendored Milkdown kit (`www/vendor/`, fetched only when the sheet first needs it). The editor sees the body only, never the frontmatter; an untouched body is never re-serialised; an edited one is written with the post's own bullet and rule and bare links, so an edit changes only its own region. The writer can switch to markdown, and the sheet falls back to it if the editor cannot load |
+| `msgkey.js`, `help.js` | The messages key (unlocking, sealing, the messages password), and each section's help |
 
-The stream itself is not driven by `App`: it is the v4 shape's controller, `window.PolisStream` (`stream.js`), with owner-only chrome layered on by `owner-extras.js`. See the [URL-as-filter tour](../../handbook/url-as-filter.md).
+**Data:** only `/v1`, through `api.js` (`ctx.api.get/post/put`). ⛔ Nothing in the owner app calls `/api/`.
+Lists are PQL sentences, fetched through `/v1/query` (`api.queryPath`), which runs the site's own `/pql/`
+handler, so a count and its list come from the same sentence.
 
-### Screen Flow
+### Addresses
 
-```
-Welcome Screen (no site) → Init / Link panel
-Error Screen (invalid site)
-Stream Screen (site configured) — every /_/ and /_/pql/<sentence> view
-  └── inline editor card (new post, edit, comment)
-Dashboard Screen — hosts /_/settings only
-```
-
-The v3 sidebar, dashboard views and full-screen editor are gone.
-
-### UI Patterns
-
-- **Screens:** Full-page views toggled via `.hidden` class (`showScreen(name)`)
-- **Panels:** Wizard and detail panels (init, link, registration, follow, key rotation, notifications)
-- **Toasts:** `this.showToast(message, type, duration)`
-- **Confirm:** `await this.showConfirmModal(title, message, confirmText, cancelText, type)` — returns a Promise
-
-### URL Routing (Deep-Linking)
-
-The SPA has only three route shapes: `/_/` (default stream), `/_/pql/<sentence>` (any
-PQL-filtered view — what every icon button and the sentence-filter widget load), and
-`/_/settings`. Any other `/_/…` path falls through to the default stream. The old v3 page
-routes (`/_/posts`, `/_/blessings`, `/_/social/*`, …) were retired.
-
-Routes are registered in `internal/server/routes.go` — read it before changing route handling.
-
-### CSS Design System
-
-The webapp uses a **dual-theme** (light/dark) system of semantic CSS custom properties
-defined on `[data-theme]`, not a fixed palette. Fonts: Inter (UI), Newsreader (serif
-content), JetBrains Mono (editor). The full variable contract lives in
-[Themes](../../general/concepts/themes.md#css-variable-contract) — treat it as authoritative rather than duplicating values here.
+`frame.js` owns them: `/_/<section>` (gather, write, message, enhance), a view as
+`/_/<section>/pql/<sentence>`, an enhance group as `/_/enhance/<group>`; `/_/` opens the section the owner last
+left (gather the first time). An address from the previous app is redirected to its v5 place by the server
+(`V5OwnerPlace` in `internal/server/v5owner.go`). Every other route the server answers is registered in
+`internal/server/routes.go` (outside `/v1`) and `internal/api/router.go` (`/v1`): read them before changing route
+handling.
 
 ## Server Patterns
 
@@ -164,18 +137,21 @@ Logs to `<data-dir>/.polis/logs/YYYY-MM-DD.log`. Thread-safe with mutex.
 
 ### Security
 
-- Path traversal: `validatePostPath()`, `validateContentPath()` — no `..`, no null bytes
-- Post paths restricted to `content/pub.polis.core/post/`
+- Path traversal: `contentpath.Validate()` (`cli-go/pkg/contentpath`), the one rule for every surface that takes a path from a caller — no `..`, no null bytes
 - Content paths restricted to: `content/pub.polis.core/post/`, `content/pub.polis.core/comment/`, `.polis/bundles/pub.polis.core/posts/drafts/`, the rendered `posts/` and `comments/` mounts, and root-level `.md`/`.html`
-- Draft IDs sanitized with an allow-list regex (`draftIDSanitizer`)
+- Draft IDs made safe as file names (`draft.SanitizeID`: anything but letters, digits, `_` and `-` becomes `-`)
 
-### JSON Response Convention
+### Answers
+
+A `/v1` success answer is the operation's own JSON object, with no common wrapper; each operation states its
+shape in `/v1/openapi.json`. Every `/v1` error is one envelope, written by `/v1`'s outermost wrapper
+(`internal/api/envelope.go`) whatever the handler wrote:
 
 ```json
-{"success": true, "data": {...}}
+{"status": "error", "error": {"code": "invalid_request", "message": "…"}}
 ```
 
-Or domain-specific shapes: `{"posts": [...], "count": 5}`.
+See [Answers](../../api/developer/reference.md#answers) and [Error Responses](../../api/developer/reference.md#error-responses).
 
 ## Build Commands
 

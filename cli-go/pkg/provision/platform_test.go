@@ -249,6 +249,7 @@ func TestTheReleasedCodeIsTheBuildItsManifestNames(t *testing.T) {
 		"/" + ReleaseRepo + "/releases/download/v1.2.4/" + FunctionBuildAsset:    code.Archive,
 		"/" + ReleaseRepo + "/releases/download/v1.2.5/" + FunctionManifestAsset: mb,
 	}
+	signRelease(t, served, "1.2.3", "1.2.4", "1.2.5") // signed, so what is refused is refused for its own reason
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, ok := served[r.URL.Path]
 		if !ok {

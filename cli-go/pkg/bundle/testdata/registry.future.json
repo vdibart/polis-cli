@@ -8,7 +8,7 @@
       "path": ".polis/bundles/pub.polis.core",
       "shape_versions": {
         "v3": "1.0.0",
-        "v4": "1.8.65"
+        "v4": "1.8.66"
       },
       "theme_versions": {
         "_shared": "1.2.0",

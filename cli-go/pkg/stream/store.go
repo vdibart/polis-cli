@@ -9,13 +9,13 @@
 //
 // Trail across files (DS-to-stream, continuous sync):
 //   producer       — webapp/internal/server/sync.go: runUnifiedSync()
-//   DS endpoint    — discovery-service/core/handlers/stream.ts
+//   DS endpoint    — the discovery service's GET /v1/stream (its source is not published; docs/ds/developer/api-reference.md)
 //   transformer    — cli-go/pkg/feed/handler.go (FeedHandler)
 //   cursor + cache — this file (Store)
 //
 // Pull the thread:
-//   github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md  (tour)
-//   github.com/vdibart/polis-cli/blob/main/AGENTS.md                      (map)
+//   https://github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md  (tour)
+//   https://github.com/vdibart/polis-cli/blob/main/AGENTS.md                      (map)
 // =============================================================================
 
 // Package stream manages per-projection cursors, state, and config on disk.

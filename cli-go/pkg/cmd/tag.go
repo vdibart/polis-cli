@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
-	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"os"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"github.com/vdibart/polis-cli/cli-go/pkg/tag"
 )
 
@@ -146,119 +148,59 @@ func handleTagShow(name string) {
 }
 
 func handleTagApply(name, targetURI string) {
-	dataDir := getDataDir()
-
-	privKey, err := loadPrivateKey(dataDir)
-	if err != nil {
-		exitError("Failed to load private key: %v", err)
-	}
-	defer signing.ZeroKey(privKey)
-
-	tf, err := tag.ApplyTag(getSite(), name, targetURI, privKey, generator)
-	if err != nil {
-		exitError("Failed to apply tag: %v", err)
-	}
-
-	// DS sync (non-fatal)
-	if discoveryURL != "" && baseURL != "" {
-		dsCfg := &tag.DiscoveryConfig{
-			DiscoveryURL: discoveryURL,
-			BaseURL:      baseURL,
-		}
-		if err := tag.SyncTag(storage.At(dataDir), tf, privKey, dsCfg); err != nil {
-			fmt.Fprintf(os.Stderr, "[!] Discovery sync skipped: %v\n", err)
-		}
-	}
+	// ⭐ The operation /v1 serves (tag.apply), in process: the signed tag
+	// file, its discovery service sync, its render and its event.
+	data := dispatchTag("apply", map[string]any{"tag": name, "target_uri": targetURI})
+	tagName, _ := data["tag"].(string)
+	count := toInt(data["count"])
 
 	if jsonOutput {
 		outputJSON(map[string]interface{}{
 			"status":  "success",
 			"command": "tag",
 			"data": map[string]interface{}{
-				"tag":        tf.Tag,
+				"tag":        tagName,
 				"target_uri": targetURI,
-				"count":      len(tf.Targets),
+				"count":      count,
 			},
 		})
 		return
 	}
 
-	fmt.Printf("[✓] Tagged %s with %q (%d targets)\n", targetURI, tf.Tag, len(tf.Targets))
+	fmt.Printf("[✓] Tagged %s with %q (%d targets)\n", targetURI, tagName, count)
 }
 
 func handleTagRemove(name, targetURI string) {
-	dataDir := getDataDir()
-
-	privKey, err := loadPrivateKey(dataDir)
-	if err != nil {
-		exitError("Failed to load private key: %v", err)
-	}
-	defer signing.ZeroKey(privKey)
-
-	tf, err := tag.RemoveTarget(getSite(), name, targetURI, privKey, generator)
-	if err != nil {
-		exitError("Failed to remove target: %v", err)
-	}
-
-	// DS unregister (non-fatal)
-	if discoveryURL != "" && baseURL != "" {
-		dsCfg := &tag.DiscoveryConfig{
-			DiscoveryURL: discoveryURL,
-			BaseURL:      baseURL,
-		}
-		if err := tag.UnregisterTarget(name, targetURI, privKey, dsCfg); err != nil {
-			fmt.Fprintf(os.Stderr, "[!] Discovery unregister skipped: %v\n", err)
-		}
-	}
+	// ⭐ The operation /v1 serves (tag.remove), in process.
+	data := dispatchTag("remove", map[string]any{"tag": name, "target_uri": targetURI})
+	tagName, _ := data["tag"].(string)
+	count := toInt(data["count"])
 
 	if jsonOutput {
 		outputJSON(map[string]interface{}{
 			"status":  "success",
 			"command": "tag",
 			"data": map[string]interface{}{
-				"tag":        tf.Tag,
+				"tag":        tagName,
 				"target_uri": targetURI,
-				"count":      len(tf.Targets),
+				"count":      count,
 			},
 		})
 		return
 	}
 
-	fmt.Printf("[✓] Removed %s from %q (%d targets remaining)\n", targetURI, tf.Tag, len(tf.Targets))
+	fmt.Printf("[✓] Removed %s from %q (%d targets remaining)\n", targetURI, tagName, count)
 }
 
 func handleTagDelete(name string) {
-	dataDir := getDataDir()
-
 	normalized, err := tag.NormalizeTagName(name)
 	if err != nil {
 		exitError("Invalid tag name: %v", err)
 	}
 
-	// Load tag first to get targets for DS cleanup
-	tf, err := tag.LoadTag(getSite(), normalized)
-	if err != nil {
-		exitError("Failed to load tag %q: %v", normalized, err)
-	}
-
-	if err := tag.DeleteTag(getSite(), normalized); err != nil {
-		exitError("Failed to delete tag: %v", err)
-	}
-
-	// DS unregister all targets (non-fatal)
-	if discoveryURL != "" && baseURL != "" {
-		privKey, err := loadPrivateKey(dataDir)
-		if err == nil {
-			defer signing.ZeroKey(privKey)
-			dsCfg := &tag.DiscoveryConfig{
-				DiscoveryURL: discoveryURL,
-				BaseURL:      baseURL,
-			}
-			for _, target := range tf.Targets {
-				tag.UnregisterTarget(tf.Tag, target.URI, privKey, dsCfg)
-			}
-		}
-	}
+	// ⭐ The operation /v1 serves (tag.delete), in process: it unregisters
+	// every target from the discovery service, then deletes the file.
+	dispatchTag("delete", map[string]any{"tag": normalized})
 
 	if jsonOutput {
 		outputJSON(map[string]interface{}{
@@ -273,4 +215,37 @@ func handleTagDelete(name string) {
 	}
 
 	fmt.Printf("[✓] Deleted tag %q\n", normalized)
+}
+
+// dispatchTag runs a tag operation through the CLI's action layer and exits on
+// failure, as the commands always have.
+func dispatchTag(action string, payload map[string]any) map[string]any {
+	dir := getDataDir()
+	privKey, err := loadPrivateKey(dir)
+	if err != nil {
+		exitError("Failed to load private key: %v", err)
+	}
+	defer signing.ZeroKey(privKey)
+	pubKey, _ := storage.NewPOSIX(dir).Get(context.Background(), ".polis/keys/id_ed25519.pub")
+	engine, err := cliEngine(dir, privKey, pubKey)
+	if err != nil {
+		exitError("Failed to start: %v", err)
+	}
+	res, err := engine.Dispatch(cliContext(), ops.ActionRequest{Action: action, ContentType: "pub.polis.tag", Payload: payload})
+	if err != nil {
+		verbs := map[string]string{"apply": "apply tag", "remove": "remove target", "delete": "delete tag"}
+		exitError("Failed to %s: %v", verbs[action], err)
+	}
+	return res.Data
+}
+
+// toInt reads a JSON-ish number.
+func toInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case float64:
+		return int(n)
+	}
+	return 0
 }

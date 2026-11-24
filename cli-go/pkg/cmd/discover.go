@@ -14,7 +14,7 @@ import (
 func handleDiscover(args []string) {
 	fs := flag.NewFlagSet("discover", flag.ExitOnError)
 	specificAuthor := fs.String("author", "", "Check a specific author")
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 	dir := getDataDir()
 

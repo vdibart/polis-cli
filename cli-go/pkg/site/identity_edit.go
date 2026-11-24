@@ -38,8 +38,9 @@ func ValidateAuthorName(name string) (string, error) {
 // SetAuthorName sets author_name in .well-known/polis, keeping every other
 // member exactly as it was.
 //
-// ⚠️ This changes .well-known/polis, which Judge snapshots: expect one
-// judge.alert.wellknown_change per call.
+// It changes .well-known/polis, which Judge snapshots: author_name is a
+// cosmetic member, so Judge accepts the change on the sweep that sees it and
+// records it, with no alert.
 func SetAuthorName(site storage.Site, name string) (string, error) {
 	name, err := ValidateAuthorName(name)
 	if err != nil {

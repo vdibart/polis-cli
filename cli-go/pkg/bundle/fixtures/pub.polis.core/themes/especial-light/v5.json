@@ -1,0 +1,16 @@
+{
+  "note": "especial-light: the Modelo Especial label. Gold on warm fog, navy.\nReviewed 2026-11-16 (spec 6.2): gold semibold titles as written, a navy mark and accent,\nthe label's paper as a very faint grain, a gold hairline edge, links underlined on hover.",
+  "tokens": {
+    "site": "#6e5600",
+    "heading-color": "site",
+    "heading-weight": "semibold",
+    "mark": "#1a1a30",
+    "mark-ink": "#d8b028",
+    "accent-2": "#1a1a30",
+    "texture": "grain",
+    "texture-scale": "small",
+    "texture-strength": "faint",
+    "card-edge": "hairline",
+    "link-style": "hover"
+  }
+}

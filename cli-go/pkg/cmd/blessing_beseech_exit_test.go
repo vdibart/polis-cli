@@ -16,10 +16,10 @@ import (
 )
 
 // `blessing beseech` used to look the comment up at the discovery service, do
-// nothing, and report "status": "success" with a pointer at `comment sync`,
-// which does not re-request a blessing either. The Go CLI cannot re-request
-// one for an existing version, so the command now says so and exits non-zero.
-func TestBlessingBeseech_RefusesAsNotSupported(t *testing.T) {
+// nothing, and report "status": "success". It now sends a PENDING comment
+// signed here again, by its version; any other version is refused, before the
+// discovery service is asked anything.
+func TestBlessingBeseech_RefusesAVersionNotPendingHere(t *testing.T) {
 	if os.Getenv("POLIS_TEST_BESEECH_HELPER") == "1" {
 		dataDir = os.Getenv("POLIS_TEST_DIR")
 		jsonOutput = os.Getenv("POLIS_TEST_JSON") == "1"
@@ -39,7 +39,7 @@ func TestBlessingBeseech_RefusesAsNotSupported(t *testing.T) {
 	defer ts.Close()
 
 	for _, mode := range []string{"1", "0"} {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestBlessingBeseech_RefusesAsNotSupported$")
+		cmd := exec.Command(os.Args[0], "-test.run=^TestBlessingBeseech_RefusesAVersionNotPendingHere$")
 		cmd.Env = append(os.Environ(),
 			"POLIS_TEST_BESEECH_HELPER=1",
 			"POLIS_TEST_DIR="+dir,
@@ -56,7 +56,7 @@ func TestBlessingBeseech_RefusesAsNotSupported(t *testing.T) {
 		}
 		all := stdout.String() + stderr.String()
 		if strings.Contains(all, "comment sync") {
-			t.Errorf("json=%s: still points at `comment sync`, which does not re-request a blessing:\n%s", mode, all)
+			t.Errorf("json=%s: points at `comment sync`, which does not re-request a blessing:\n%s", mode, all)
 		}
 		if mode != "1" {
 			continue
@@ -72,14 +72,14 @@ func TestBlessingBeseech_RefusesAsNotSupported(t *testing.T) {
 		if err := json.Unmarshal([]byte(stdout.String()), &got); err != nil {
 			t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout.String())
 		}
-		if got.Status != "error" || got.Command != "blessing-beseech" || got.Error.Code != "NOT_SUPPORTED" {
-			t.Errorf("want status error, command blessing-beseech, code NOT_SUPPORTED; got %+v", got)
+		if got.Status != "error" || got.Command != "blessing-beseech" || got.Error.Code != "NOT_FOUND" {
+			t.Errorf("want status error, command blessing-beseech, code NOT_FOUND; got %+v", got)
 		}
-		if !strings.Contains(got.Error.Message, "web app") || !strings.Contains(got.Error.Message, "polis republish") {
-			t.Errorf("message does not say where it can be done: %q", got.Error.Message)
+		if !strings.Contains(got.Error.Message, "polis comment send") || !strings.Contains(got.Error.Message, "polis republish") {
+			t.Errorf("message does not say what can be done: %q", got.Error.Message)
 		}
-		// Republishing or the web app re-requests only a pending comment: the
-		// discovery service returns an earlier denial unchanged.
+		// Only a pending comment is sent again: the discovery service returns
+		// an earlier denial unchanged.
 		if !strings.Contains(got.Error.Message, "PENDING") || !strings.Contains(got.Error.Message, "denied comment cannot be re-requested") {
 			t.Errorf("message does not say only a pending comment can be re-requested: %q", got.Error.Message)
 		}

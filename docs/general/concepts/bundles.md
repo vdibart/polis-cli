@@ -6,7 +6,7 @@
 
 A **bundle** is the package container that ships a coherent set of polis primitives — content types, shapes, themes — together as one versioned unit. It's the unit of extensibility: the difference between "what every polis site knows how to do" (the core bundle) and "what a community ships on top of polis" (third-party bundles) is one `bundle.json` declaration.
 
-Today the network ships a single bundle: **`pub.polis.core`** — nine content types (post, comment, follow, DM, tag, attestation, actor registry, licence, theme), the blog and stream shapes, and the themes. Everything else listed in this doc is the architecture that *would* support more bundles, when they exist.
+Today the network ships a single bundle: **`pub.polis.core`** — nine content types (post, comment, follow, DM, tag, attestation, actor registry, licence, theme), the v5, blog and stream shapes, and the themes. Everything else listed in this doc is the architecture that *would* support more bundles, when they exist.
 
 ---
 
@@ -18,7 +18,7 @@ A bundle is a namespaced unit that declares four kinds of things:
 |---|---|---|
 | **Content types** | The data model — what records the bundle understands (e.g. `pub.polis.post`, `pub.polis.dm`). Each declares its directory, public mount, storage layout, the events it emits, and whether it is private. | [content-types.md](content-types.md) |
 | **Handler declaration** | How the bundle's actions get executed — one for the whole bundle: `builtin` (Go code in the CLI), `executable` (JSON stdin/stdout to a binary), or `http` (JSON POST to a URL). | [api/developer/dispatch-engine.md](../../api/developer/dispatch-engine.md) |
-| **Shapes** | Rendering approaches — the templates that turn content into HTML. The core bundle ships `pub.polis.shapes.v3` (blog) and `pub.polis.shapes.v4` (infinity stream). | [shapes.md](shapes.md) |
+| **Shapes** | Rendering approaches — the templates that turn content into HTML. The core bundle ships `pub.polis.shapes.v5` (the default) and, no longer supported but still rendering, `pub.polis.shapes.v3` (blog) and `pub.polis.shapes.v4` (infinity stream). | [shapes.md](shapes.md) |
 | **Themes** | CSS-only presentation, scoped to the bundle and compatible with one or more of its shapes. | [themes.md](themes.md) |
 
 The bundle is the *binding* between these — a theme is always scoped to a bundle; a shape is always installed under a bundle directory; a content type always belongs to a bundle's namespace.
@@ -39,7 +39,7 @@ Content types, shapes, and themes inside a bundle inherit the bundle's namespace
 | Kind | Example |
 |---|---|
 | Content type | `pub.polis.post`, `pub.polis.dm`, `pub.polis.theme` |
-| Shape | `pub.polis.shapes.v3`, `pub.polis.shapes.v4` |
+| Shape | `pub.polis.shapes.v5`, `pub.polis.shapes.v3`, `pub.polis.shapes.v4` |
 | Theme | `pub.polis.themes.vice`, `pub.polis.themes.studio13` |
 
 The substrings `.themes.` and `.shapes.` are **reserved pivots** — the parser uses them to distinguish a theme name from a content-type name. Bundle names cannot contain these substrings.
@@ -56,9 +56,13 @@ A bundle exists in three places, each with a different role:
 cli-go/pkg/bundle/fixtures/pub.polis.core/
 ├── shapes/
 │   ├── v3/                    # blog shape templates + partials
-│   └── v4/                    # stream shape templates + partials
+│   ├── v4/                    # stream shape templates + partials
+│   └── v5/                    # the default shape: frame and per-item templates
 └── themes/
     ├── _shared/               # base CSS used by themes that don't ship their own
+    ├── daryl/                 # v5 only: its v5.json tokens
+    ├── elwood-noise/          # reserved: v5 only
+    ├── elwood-signal/         # reserved: v5 only
     ├── especial/
     ├── especial-light/
     ├── sols/                  # reserved: the logged-out landing theme
@@ -80,6 +84,7 @@ When `polis init` creates a site, it installs the bundle's reference payload und
 .polis/bundles/pub.polis.core/
 ├── shapes/v3/        # synced from the binary's embedded fixture
 ├── shapes/v4/
+├── shapes/v5/
 └── themes/...
 ```
 
@@ -95,12 +100,12 @@ The tenant's private configuration — which bundle is active, which theme, whic
 {
   "schema_version": 2,
   "active_theme": "pub.polis.themes.vice",
-  "active_shape": "pub.polis.shapes.v4",
+  "active_shape": "pub.polis.shapes.v5",
   "installed_bundles": [
     {
       "name": "pub.polis.core",
       "path": ".polis/bundles/pub.polis.core",
-      "shape_versions": { "v3": "1.0.0", "v4": "1.8.65" },
+      "shape_versions": { "v3": "1.0.0", "v4": "1.8.67", "v5": "0.3.16" },
       "theme_versions": { "vice": "1.1.0", "...": "..." }
     }
   ],
@@ -132,10 +137,11 @@ The bundle manifest declares everything the dispatch engine and renderer need to
   },
   "shapes": {
     "v3": { "name": "v3", "version": "1.0.0", "entry": { "post": "post.html", "index": "index.html", "...": "..." }, "partials": ["snippets/about.html", "..."], "default_css": "themes/_shared/base.css" },
-    "v4": { "name": "v4", "version": "1.8.65", "entry": { "stream": "stream.html", "post": "stream-post.html" }, "partials": ["snippets/sentence-filter.html"], "default_css": "themes/_shared/base.css" }
+    "v4": { "name": "v4", "version": "1.8.67", "entry": { "stream": "stream.html", "post": "stream-post.html" }, "partials": ["snippets/sentence-filter.html"], "default_css": "themes/_shared/base.css" },
+    "v5": { "name": "v5", "version": "0.3.16", "entry": { "frame": "frame.html", "post": "post.html", "comment": "comment.html", "...": "..." } }
   },
   "themes": {
-    "vice": { "name": "vice", "version": "1.1.0", "css": "vice.css", "compatible_shapes": ["pub.polis.shapes.v3", "pub.polis.shapes.v4"] }
+    "vice": { "name": "vice", "version": "1.1.0", "css": "vice.css", "compatible_shapes": ["pub.polis.shapes.v3", "pub.polis.shapes.v4", "pub.polis.shapes.v5"] }
   },
   "artifacts": ["index.jsonl"]
 }

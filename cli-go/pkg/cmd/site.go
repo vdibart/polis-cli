@@ -75,7 +75,7 @@ func handleSiteSet(args []string) {
 		pattern := fs.String("pattern", "", "Pattern: none, rings, cross, grid, dots, stripes, diamond, halves")
 		patternColor := fs.String("pattern-color", "", "Pattern colour (#RRGGBB)")
 		clearAvatar := fs.Bool("clear", false, "Remove the custom avatar")
-		fs.Parse(args[1:])
+		_ = fs.Parse(args[1:]) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 		var avatar *site.AvatarConfig
 		if !*clearAvatar {

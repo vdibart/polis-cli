@@ -123,6 +123,14 @@ type FollowingEntry struct {
 	AddedAt    string `json:"added_at"`
 	SiteTitle  string `json:"site_title,omitempty"`
 	AuthorName string `json:"author_name,omitempty"`
+	// Agent and Grant are the marker of a user agent that followed this site
+	// under the owner's grant: the grant's agent name and the grant record's
+	// source URL. ⛔ Both or neither, set only by AddMarked from the act's own
+	// marker, and OMITTED when absent, so an entry the owner made (and every
+	// entry signed before the marker existed) is byte-identical to before and
+	// no existing signature stops verifying. They are inside the signature.
+	Agent string `json:"agent,omitempty"`
+	Grant string `json:"grant,omitempty"`
 }
 
 // SignatureStatus is the outcome of checking a follow file's signature.
@@ -154,11 +162,11 @@ const (
 // The signable set, in order:
 //
 //	{"version":<generator string>,"following":[{"url":…,"added_at":…,
-//	 "site_title":…,"author_name":…}, …]}
+//	 "site_title":…,"author_name":…,"agent":…,"grant":…}, …]}
 //
 // Compact `encoding/json` output (no indentation, no trailing newline), fields
 // in Go struct-declaration order, `site_title` / `author_name` omitted when
-// empty. `signature` is excluded — it cannot cover itself.
+// empty, and the agent marker (`agent`, `grant`) omitted when absent. `signature` is excluded — it cannot cover itself.
 //
 // Mechanism copied from pkg/tag's canonicalJSON (build a signing-only struct,
 // sign those exact bytes, keep the signature out of it). ⚠️ The mechanism ONLY:
@@ -490,6 +498,15 @@ func writeFile(site storage.Site, f *FollowingFile) error {
 // Add adds an author to the following list.
 // URL comparison ignores trailing slashes.
 func (f *FollowingFile) Add(authorURL string) bool {
+	return f.AddMarked(authorURL, "", "")
+}
+
+// AddMarked adds an author to the following list as a user agent's act: the
+// new entry carries the agent's marker (agent name, grant URL), inside the
+// list's signature once it is signed. Empty agent and grant add an unmarked
+// entry, exactly as Add. An author already followed is left as it was: the
+// entry's maker does not change.
+func (f *FollowingFile) AddMarked(authorURL, agent, grant string) bool {
 	norm := normalizeFollowURL(authorURL)
 	for _, entry := range f.Following {
 		if normalizeFollowURL(entry.URL) == norm {
@@ -500,6 +517,8 @@ func (f *FollowingFile) Add(authorURL string) bool {
 	f.Following = append(f.Following, FollowingEntry{
 		URL:     authorURL,
 		AddedAt: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+		Agent:   agent,
+		Grant:   grant,
 	})
 
 	return true

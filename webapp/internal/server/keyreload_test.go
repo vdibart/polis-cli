@@ -43,7 +43,7 @@ func TestServerReloadsKeysWhenTheKeyFileChanges(t *testing.T) {
 	os.Chtimes(filepath.Join(keys, "id_ed25519"), later, later)
 
 	// The next request, through the real handler, picks it up.
-	s.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/status", nil))
+	s.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/capabilities", nil))
 	if bytes.Equal(s.PrivateKey, old) || !bytes.Equal(s.PrivateKey, newPriv) {
 		t.Fatal("the server still holds the retired key after a request")
 	}

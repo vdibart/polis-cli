@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 )
 
 // mockEngine wraps a dispatch function to avoid needing a real ops.Engine.
@@ -516,47 +519,6 @@ func TestHandleBundleGetEmptyName(t *testing.T) {
 
 // ── Draft handler tests ────────────────────────────────────────────────
 
-func TestHandleDraftsCreateBadPayload(t *testing.T) {
-	mux, _, apiKey := testSetup(t)
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/content/post/drafts", strings.NewReader("bad json"))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestHandleDraftsGetReachesHandler(t *testing.T) {
-	mux, _, apiKey := testSetup(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/content/post/drafts/abc", nil)
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	// Should reach handler with valid auth (drafts require auth)
-	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden || w.Code == http.StatusMethodNotAllowed {
-		t.Errorf("routing failed with %d, should reach handler", w.Code)
-	}
-}
-
-func TestHandleDraftsDeleteReachesHandler(t *testing.T) {
-	mux, _, apiKey := testSetup(t)
-
-	req := httptest.NewRequest(http.MethodDelete, "/v1/content/post/drafts/abc", nil)
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden || w.Code == http.StatusMethodNotAllowed {
-		t.Errorf("routing failed with %d, should reach handler", w.Code)
-	}
-}
-
 // ── DM deliver handler (without signed request) ───────────────────────
 
 func TestHandleDMDeliverNoAuth(t *testing.T) {
@@ -717,5 +679,27 @@ func TestDispatchUsesBackgroundContext(t *testing.T) {
 	ctx := context.Background()
 	if ctx.Err() != nil {
 		t.Error("background context should not have error")
+	}
+}
+
+// ⭐ A message that can't go to its recipient for a reason about the
+// recipient says so in its plain words, naming the site, with a status that
+// is not a bare 500, and never the transport's words.
+func TestARecipientErrorIsSaidPlainly(t *testing.T) {
+	h := &handlers{}
+	for _, c := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{&ops.RecipientError{Site: "bob.example", Unreachable: true}, http.StatusBadGateway, "recipient_unreachable"},
+		{&ops.RecipientError{Site: "bob.example"}, http.StatusUnprocessableEntity, "recipient_cannot_receive"},
+		{fmt.Errorf("send: %w", &ops.RecipientError{Site: "bob.example"}), http.StatusUnprocessableEntity, "recipient_cannot_receive"},
+	} {
+		w := httptest.NewRecorder()
+		h.handleDispatchError(w, httptest.NewRequest(http.MethodPost, "/v1/content/dm/actions/send", nil), c.err)
+		if w.Code != c.status || !strings.Contains(w.Body.String(), c.code) || !strings.Contains(w.Body.String(), "bob.example") {
+			t.Errorf("%v: %d %s", c.err, w.Code, w.Body.String())
+		}
 	}
 }

@@ -22,3 +22,8 @@
 {"sentence": "all posts from me by date extra", "expected": null, "notes": "unconsumed trailing token -> null"}
 {"sentence": "all posts beside me", "expected": null, "notes": "unknown relation keyword -> null"}
 {"sentence": "", "expected": null, "notes": "empty input"}
+{"sentence": "all comments on https://alice.polis.pub/posts/20261113/Hello.html", "url": "all+comments+on+https:%2F%2Falice.polis.pub%2Fposts%2F20261113%2FHello.html", "expected": {"qualifier": "all", "type": "comments", "relation": "on", "scope": "https://alice.polis.pub/posts/20261113/Hello.html", "modifier": null}, "notes": "a thread: every comment on one post; the path keeps its case"}
+{"sentence": "all blessed comments on https://Alice.Polis.pub/posts/20261113/Hello.html", "url": "all+blessed+comments+on+https:%2F%2Falice.polis.pub%2Fposts%2F20261113%2FHello.html", "expected": {"qualifier": "all", "type": "comments", "relation": "on", "scope": "https://alice.polis.pub/posts/20261113/Hello.html", "modifier": "blessed"}, "notes": "the blessed adjective; the host is lowercased, the path is not"}
+{"sentence": "all comments on alice.polis.pub", "url": "", "expected": null, "notes": "on needs a post address (https URL), not a handle"}
+{"sentence": "all comments on https://alice.polis.pub/posts/x.html?draft=1", "url": "", "expected": null, "notes": "a ? would break the sentence's URL form"}
+{"sentence": "all blessed comments on https://alice.polis.pub/posts/x.html by date", "url": "", "expected": null, "notes": "an adjective and a modifier cannot both be used"}

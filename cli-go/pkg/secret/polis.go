@@ -19,6 +19,7 @@ import (
 //	projected key            no        no             no              yes (actors)
 //	RESEND_API_KEY           no        no             no              yes
 //	DATABASE_URL             no        no             no              yes
+//	POLIS_AGENT_SIGNIN_SECRET no       no             no          only with the switch
 //	POLIS_DEPLOY_TOKEN       no        no          optional, handed    no
 //	                                               over on Vercel
 //
@@ -43,12 +44,17 @@ import (
 // Environment variable names, in one place so a typo is a compile error at the
 // call site rather than a silent empty read.
 const (
-	EnvResendAPIKey = "RESEND_API_KEY"
+	EnvResendAPIKey = "RESEND_API_KEY" //nolint:gosec // G101: a setting's or path's name, not a credential
 	EnvDatabaseURL  = "DATABASE_URL"
+
+	// EnvAgentSignInSecret signs the tokens polis.pub's sign-in server for
+	// agents issues. Required only when that server is switched on
+	// (POLIS_AGENT_SIGNIN=1); the boot checks it then, not here.
+	EnvAgentSignInSecret = "POLIS_AGENT_SIGNIN_SECRET" //nolint:gosec // G101: a setting's or path's name, not a credential
 
 	// EnvDeployToken hands a server-signed Vercel instance its project-only
 	// deploy token, once. See RemoteSet.
-	EnvDeployToken = "POLIS_DEPLOY_TOKEN"
+	EnvDeployToken = "POLIS_DEPLOY_TOKEN" //nolint:gosec // G101: a setting's or path's name, not a credential
 )
 
 // CustodiedSet is what a multi-tenant operator deployment reads.
@@ -75,7 +81,27 @@ func CustodiedSet() Set {
 			Validate:   nonEmptyOneLine,
 			Why:        "tenant sign-in sends a magic link",
 		},
+		{
+			// ⭐ Optional in every mode: the sign-in server for agents is dark
+			// until it is switched on, and an instance must not refuse to boot
+			// over a value it would never read.
+			Env:      EnvAgentSignInSecret,
+			Kind:     Reference,
+			Validate: atLeast32,
+			Why:      "the sign-in server for agents signs its tokens with it; it must persist across restarts and machines",
+		},
 	}
+}
+
+// atLeast32 is a signing secret's shape: one line, at least 32 bytes.
+func atLeast32(v string) error {
+	if err := nonEmptyOneLine(v); err != nil {
+		return err
+	}
+	if len(v) < 32 {
+		return errors.New("is shorter than 32 bytes; generate one with: openssl rand -hex 32")
+	}
+	return nil
 }
 
 // RemoteSet is what a hosted-anywhere instance reads.

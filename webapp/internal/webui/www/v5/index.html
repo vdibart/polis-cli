@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>polis</title>
+<!-- The site's own icon, made from its avatar (as today's app links it); without
+     this line a browser asks for /favicon.ico, which a site does not serve. -->
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<!--
+  POLIS · HANDBOOK TRAIL MARKER — the owner app
+
+  The v5 owner app's page: every site's owner app, at /_/
+  and below on every instance. Served by server.ServeV5Owner
+  (webapp/internal/server/v5owner.go), which fills each asset reference with
+  its address and content hash. It draws the place the address names
+  (/_/<section>, /_/<section>/pql/<sentence>, /_/enhance/<group>; spec 3.9)
+  from /v1 alone, on the owner's own sign-in.
+
+  Trail across files (webapp/internal/webui/www/v5/):
+    frame.js, frame.css   — the menu, the section box, the addresses
+    api.js                — the one door: /v1, same-origin, one error envelope
+    gather.js, write.js, message.js, enhance.js — the four sections
+    card.js               — every item's card, in the public site's parts and order
+    sheet.js, rich.js     — the one editor, and its rich text
+  Behind /v1: cli-go/pkg/ops, every site action's one implementation, which
+  agents, scripts and the CLI reach too; its description is /v1/openapi.json.
+
+  Pull the thread:
+    https://github.com/vdibart/polis-cli/blob/main/docs/api/developer/reference.md        (the API this page calls)
+    https://github.com/vdibart/polis-cli/blob/main/docs/webapp/developer/development.md   (how the app and server are built)
+    https://github.com/vdibart/polis-cli/blob/main/docs/handbook/agent-access.md          (agents reach the same API)
+    https://github.com/vdibart/polis-cli/blob/main/AGENTS.md                              (map)
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500;1,6..72,600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{asset:frame.css}}">
+<!-- The sheet's rich-text editor (Milkdown kit, vendored and pinned; www/vendor/README.md): named here
+     with its version, and fetched by sheet.js only when the sheet first needs it. -->
+<meta name="polis-editor" content="{{site:vendor/milkdown-kit-7.23.0.js}}">
+</head>
+<body data-sec="">
+<header class="topbar">
+  <button class="me" id="me" type="button" aria-label=""></button>
+  <a class="me-site" id="me-site" href="/" target="_blank" rel="noopener" title="View my site" hidden><span class="mh" id="me-host"></span><span class="mv">view my site &raquo;</span></a>
+  <div class="box still" id="box"></div>
+  <div class="center" id="center"></div>
+  <nav class="ways" id="ways" aria-label="Sections"></nav>
+  <div class="hint" id="hint" role="status" aria-live="polite"></div>
+</header>
+<main class="col" id="col"></main>
+<div class="esc-hint" aria-hidden="true"><kbd>Esc</kbd> to step back</div>
+<footer class="foot" id="foot"></footer>
+<aside class="fly" id="fly" aria-label="Help" hidden></aside>
+<noscript><p class="noscript">This is your site's own app, and it needs JavaScript. Your site itself works without it.</p></noscript>
+<script src="{{asset:api.js}}" defer></script>
+<script src="{{asset:help.js}}" defer></script>
+<script src="{{asset:card.js}}" defer></script>
+<script src="{{asset:rich.js}}" defer></script>
+<script src="{{asset:sheet.js}}" defer></script>
+<script src="{{asset:frame.js}}" defer></script>
+<script src="{{asset:write.js}}" defer></script>
+<script src="{{asset:gather.js}}" defer></script>
+<!-- The messages key: today's browser cryptography (the vendored tweetnacl, hash-wasm and bip39,
+     then dm-crypto, dm-session and dm), the same files today's app loads, before msgkey.js. -->
+<script src="{{site:vendor/tweetnacl.js}}" defer></script>
+<script src="{{site:vendor/hash-wasm-argon2.js}}" defer></script>
+<script src="{{site:vendor/bip39.js}}" defer></script>
+<script src="{{site:dm-crypto.js}}" defer></script>
+<script src="{{site:dm-session.js}}" defer></script>
+<script src="{{site:dm.js}}" defer></script>
+<script src="{{asset:msgkey.js}}" defer></script>
+<script src="{{asset:message.js}}" defer></script>
+<script src="{{asset:enhance.js}}" defer></script>
+</body>
+</html>

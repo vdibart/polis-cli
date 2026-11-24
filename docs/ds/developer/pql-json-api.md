@@ -3,7 +3,8 @@
 *For* [Developers](../../README.md#building-on-polis) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [Discovery service](../README.md) · [Webapp](../../webapp/README.md) — *Code* [`webapp/internal/server/handlers_pql.go`](../../../webapp/internal/server/handlers_pql.go) — *See also* [spec](../../general/reference/pql.md)
 
 `GET /pql/<sentence>` is the PQL-native query endpoint. The **same
-grammar** drives the owner SPA, the public infinity stream, and this
+grammar** drives the owner app's views, a site's public pages (every view
+has its own address), and this
 developer-facing JSON API — see [`../../general/reference/pql.md`](../../general/reference/pql.md)
 for the full grammar. This page is the contract for consuming it as JSON.
 
@@ -77,6 +78,8 @@ to `all polis`.
 | `items` | Tenant: rendered content items. DS: raw stream events. |
 | `pagination.next_cursor` | Opaque cursor. On a tenant it is empty when there are no more pages; on the DS it is always present (the last event's id, or the cursor you sent when the page is empty). |
 | `pagination.has_more` | Whether another page exists. |
+| `counts` | Tenant only, and only when asked for with `?counts=`: how many items the sentence finds for each named type (below). |
+| `counts_capped` | Tenant only: the types whose count is a lower bound, because it stopped at the read limit or (for posts and comments from `my network` or `my mutuals`) reached the site's feed-cache limit. Absent when none did. |
 
 ## Pagination
 
@@ -89,6 +92,27 @@ DS allows at most 1000). The DS also accepts `?since=` as a synonym for
 curl -H 'Accept: application/json' \
   'https://alice.polis.pub/pql/all+posts+by+date?cursor=<opaque>&limit=30'
 ```
+
+## Counts
+
+`?counts=<type>[,<type>…]` (tenant only) adds a `counts` block: for each named type (`posts`, `comments`,
+`profiles`, `messages`, `drafts`, `activity`), how many items the same sentence finds with that type in place of
+its own. The sentence's other words (qualifier, relation, scope, modifier) stay, so the counts follow the filter
+in force. A type the rest of the sentence cannot be asked of makes the whole request answer `400`. A count reads
+every page, up to a limit; a type that reaches it is named in `counts_capped`. Posts and comments from `my network`
+or `my mutuals` come from the site's own feed cache, which keeps the newest of each up to a bound (300 posts and
+150 comments by default). A count that reaches that bound is named in `counts_capped` too: the network made at
+least that many.
+
+```bash
+curl -H 'Accept: application/json' \
+  'https://alice.polis.pub/pql/all+posts+by+date?counts=posts,comments'
+# ... "counts": {"posts": 12, "comments": 4}
+```
+
+⛔ **A count never widens what the request may see.** A public sentence cannot count a type that only the owner
+may read (`messages`, `drafts`): that answers `400`. The owner's own sentence may. A word that is not a type
+answers `400` too.
 
 ## Scope-resolution boundary
 

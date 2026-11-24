@@ -8,7 +8,7 @@ writing a CSS-only theme of your own. What a theme *is*, the variables it sets a
 
 ## 1 · Switch to a theme that ships
 
-1. **See what you can choose.** The shipped themes, which shapes each one works with, and the two that are reserved are listed in
+1. **See what you can choose.** The shipped themes, which shapes each one works with, and the ones that are reserved are listed in
    [*What ships today*](../concepts/themes.md#what-ships-today). You are only offered themes that work with your site's active
    [shape](../concepts/shapes.md).
 2. **Switch.**
@@ -19,10 +19,15 @@ writing a CSS-only theme of your own. What a theme *is*, the variables it sets a
 3. **Check it.** Open your published site. The theme is private configuration: it lives in the registry, not in
    `.well-known/polis`, so nothing about your public identity changes.
 
-Your site theme and the web app's own light or dark appearance are separate settings
-([*Light vs dark*](../concepts/themes.md#light-vs-dark)). Changing one does not change the other.
+Your site theme does not change the web app's own look, which has its own tokens
+([*Light vs dark*](../concepts/themes.md#light-vs-dark)).
 
 ## 2 · Write your own CSS-only theme
+
+⚠️ **This section is for a site on the blog or stream shape** (no longer supported, still rendering). On the v5 shape, the default,
+a theme is its `v5.json` tokens, not a stylesheet, so a CSS-only theme does not apply there. To change how a v5 site looks, set
+the site's own tokens over its theme's ([*CSS variable contract*](../concepts/themes.md#css-variable-contract)), or add CSS of
+your own in `site/custom.css`.
 
 ### ⚠️ Where a custom theme can run today
 
@@ -32,11 +37,12 @@ declaration, and that has three consequences:
 | Where | What happens to a theme polis did not ship |
 |---|---|
 | **A site on polis.pub** | polis.pub's maintenance cycle moves any undeclared theme directory into quarantine and resets an undeclared `active_theme` to a random shipped theme. **A custom theme cannot be used there.** |
-| **Your own site, after `tailor --apply`** | [Tailor](../concepts/actors.md#tailor) deletes undeclared theme directories as drift and resets an undeclared `active_theme` to a random shipped theme. **Keep your theme's source outside `.polis/`**; after running it, copy the theme back in, set `active_theme` again and re-render. |
+| **Your own site, after `tailor --apply`** | [Tailor](../concepts/actors.md#tailor) keeps it. A theme directory under a name polis never shipped, in `.polis/bundles/pub.polis.core/themes/` or `site/themes/`, is left in place and stays active if it was. One in `.polis/themes/`, which nothing reads, is moved to `site/themes/`. Every file Tailor changes or removes is copied to `.polis/tailor-backup/` first. |
 | **The web app's theme picker** | lists only declared themes, so yours is never offered. Switch to it from the command line. |
 
 ⚠️ **Do not edit a shipped theme's stylesheet in place.** `polis render` reinstalls every shipped file whose bytes differ from the
-copy built into the CLI, so your edits are overwritten on the next render. Copy it under a new name instead, as below.
+copy built into the CLI, so your edit stops being used on the next render. It keeps the edited copy in `.polis/render-backup/` and
+says so; `tailor --apply` does the same, keeping it in its backup. Copy the theme under a new name instead, as below.
 
 ### Steps
 

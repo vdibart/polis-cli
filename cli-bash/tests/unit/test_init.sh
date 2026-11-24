@@ -176,7 +176,38 @@ test_random_theme_never_reserved() {
     return 0
 }
 
+# Test: write_active_theme records the FQN once, whether given the short name
+# or the fully-qualified one (a qualified name used to be prefixed again,
+# giving pub.polis.themes.pub.polis.themes.vice). bash init takes no --theme,
+# so the writer is extracted from the CLI and called directly.
+test_write_active_theme_accepts_both_forms() {
+    setup_test_env "init_theme_forms"
+    trap teardown_test_env EXIT
+
+    local fn
+    fn=$(sed -n '/^write_active_theme()/,/^}/p' "$POLIS_BIN")
+    if ! echo "$fn" | grep -q '^write_active_theme()'; then
+        log "  FAIL: write_active_theme not found in $POLIS_BIN"
+        return 1
+    fi
+    eval "$fn"
+
+    local REGISTRY="$PWD/registry.json" input got
+    for input in vice pub.polis.themes.vice; do
+        rm -f "$REGISTRY"
+        write_active_theme "$input" || { log "  FAIL: write_active_theme $input failed"; return 1; }
+        got=$(jq -r '.active_theme' "$REGISTRY")
+        if [ "$got" != "pub.polis.themes.vice" ]; then
+            log "  FAIL: write_active_theme $input recorded '$got', want pub.polis.themes.vice"
+            return 1
+        fi
+    done
+    unset -f write_active_theme
+    return 0
+}
+
 # Run tests
+run_test "Write Active Theme Accepts Both Forms" test_write_active_theme_accepts_both_forms
 run_test "Random Theme Never Reserved" test_random_theme_never_reserved
 run_test "Init Basic" test_init_basic
 run_test "Init Custom Directories" test_init_custom_dirs

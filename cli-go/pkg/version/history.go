@@ -43,7 +43,7 @@ func GetVersionsFilePath(canonicalFile, versionsDir string) string {
 func ParseHistoryFile(path string) (*HistoryFile, error) {
 	// NOT the storage interface: this STREAMS a versions file line by line, and a
 	// version history grows without bound.
-	file, err := os.Open(path)
+	file, err := os.Open(path) //nolint:gosec // G304: a versions file under the site, named by its post
 	if err != nil {
 		return nil, fmt.Errorf("failed to open versions file: %w", err)
 	}
@@ -316,10 +316,12 @@ func applyReversePatch(content, diff string) (string, error) {
 	defer os.Remove(tempContent.Name())
 
 	if _, err := tempContent.WriteString(content); err != nil {
-		tempContent.Close()
+		_ = tempContent.Close() // the write already failed; that error is the one returned
 		return "", err
 	}
-	tempContent.Close()
+	if err := tempContent.Close(); err != nil {
+		return "", err
+	}
 
 	// Write diff to temp file
 	tempDiff, err := os.CreateTemp("", "polis-diff-*")
@@ -330,10 +332,12 @@ func applyReversePatch(content, diff string) (string, error) {
 	defer os.Remove(tempDiff.Name())
 
 	if _, err := tempDiff.WriteString(diff); err != nil {
-		tempDiff.Close()
+		_ = tempDiff.Close() // the write already failed; that error is the one returned
 		return "", err
 	}
-	tempDiff.Close()
+	if err := tempDiff.Close(); err != nil {
+		return "", err
+	}
 
 	// Apply reverse patch
 	tempOutput, err := os.CreateTemp("", "polis-output-*")
@@ -342,9 +346,9 @@ func applyReversePatch(content, diff string) (string, error) {
 	}
 	// NOT the storage interface: a TEMP FILE from os.CreateTemp, outside the site.
 	defer os.Remove(tempOutput.Name())
-	tempOutput.Close()
+	_ = tempOutput.Close() // empty: patch writes it by name
 
-	cmd := exec.Command("patch", "-R", "-s", "-o", tempOutput.Name(), tempContent.Name(), tempDiff.Name())
+	cmd := exec.Command("patch", "-R", "-s", "-o", tempOutput.Name(), tempContent.Name(), tempDiff.Name()) //nolint:gosec // G204: diff/patch over temp files this function created; no shell
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("failed to apply reverse patch: %w", err)
 	}
@@ -373,10 +377,12 @@ func applyForwardPatch(content, diff string) (string, error) {
 	defer os.Remove(tempContent.Name())
 
 	if _, err := tempContent.WriteString(content); err != nil {
-		tempContent.Close()
+		_ = tempContent.Close() // the write already failed; that error is the one returned
 		return "", err
 	}
-	tempContent.Close()
+	if err := tempContent.Close(); err != nil {
+		return "", err
+	}
 
 	// Write diff to temp file
 	tempDiff, err := os.CreateTemp("", "polis-diff-*")
@@ -387,10 +393,12 @@ func applyForwardPatch(content, diff string) (string, error) {
 	defer os.Remove(tempDiff.Name())
 
 	if _, err := tempDiff.WriteString(diff); err != nil {
-		tempDiff.Close()
+		_ = tempDiff.Close() // the write already failed; that error is the one returned
 		return "", err
 	}
-	tempDiff.Close()
+	if err := tempDiff.Close(); err != nil {
+		return "", err
+	}
 
 	// Apply forward patch
 	tempOutput, err := os.CreateTemp("", "polis-output-*")
@@ -399,9 +407,9 @@ func applyForwardPatch(content, diff string) (string, error) {
 	}
 	// NOT the storage interface: a TEMP FILE from os.CreateTemp, outside the site.
 	defer os.Remove(tempOutput.Name())
-	tempOutput.Close()
+	_ = tempOutput.Close() // empty: patch writes it by name
 
-	cmd := exec.Command("patch", "-s", "-o", tempOutput.Name(), tempContent.Name(), tempDiff.Name())
+	cmd := exec.Command("patch", "-s", "-o", tempOutput.Name(), tempContent.Name(), tempDiff.Name()) //nolint:gosec // G204: diff/patch over temp files this function created; no shell
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("failed to apply forward patch: %w", err)
 	}
@@ -593,7 +601,7 @@ func computeUnifiedDiff(oldContent, newContent string) (string, error) {
 	}
 	// NOT the storage interface: a temp DIRECTORY outside the site.
 	defer os.RemoveAll(tmpDir)
-	os.Chmod(tmpDir, 0700)
+	_ = os.Chmod(tmpDir, 0700) //nolint:gosec // G302: a directory: 0700 is owner-only; MkdirTemp already made it 0700; this only restates it
 
 	oldFile, err := os.CreateTemp(tmpDir, "old-*.txt")
 	if err != nil {
@@ -621,7 +629,7 @@ func computeUnifiedDiff(oldContent, newContent string) (string, error) {
 		return "", fmt.Errorf("failed to close new content file: %w", err)
 	}
 
-	cmd := exec.Command("diff", "-u", oldFile.Name(), newFile.Name())
+	cmd := exec.Command("diff", "-u", oldFile.Name(), newFile.Name()) //nolint:gosec // G204: diff/patch over temp files this function created; no shell
 	output, err := cmd.Output()
 
 	// diff returns exit code 1 when files differ, which is expected.

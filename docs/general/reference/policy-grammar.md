@@ -180,6 +180,46 @@ for the target layer. Invalid combinations fail to parse in tenant files
   default posture explicit and defensive for unknown event types.
 - **Inactive rules.** Rules with `"active": false` are skipped entirely.
 
+## Changes made by anyone but the owner: tighten only
+
+A site's own API lets a token with the `policy:write` scope change the owner's Layer 1 rules, and only in the one
+direction that can never loosen a decision. Because evaluation is first-match-wins, private file first:
+
+- **It may add a `deny` rule, at the top of the private file.** Whatever such a rule matches, it decides
+  first, and it can only refuse. `allow`, `bless` and `review` rules are refused. ⛔ `review` too: it is weaker
+  than `deny`, so `review pub.polis.comment from all` on top would turn every comment the owner denies into one
+  waiting for them.
+- **It may remove only a rule it added that way**, given exactly as it was added. Each such line carries
+  `"added_by"` so it can be told apart. Removing any other rule is the owner's alone: removing an `allow` or
+  `bless` rule can let a later, looser rule decide (an `allow … from following` above a
+  `bless pub.polis.comment from all`, once removed, blesses everyone).
+- **The owner's own lines are never rewritten.** An added rule is inserted as one line after the file's
+  header, and the file still parses. Added rules do not make a file the owner's: a default with only such rules
+  on top still receives upgrades, with the added rules kept (see *Upgrade* below).
+
+A DM rule added this way is enforced by the site when a message arrives, but a sender's pre-flight check reads
+only the public file, so it won't warn the sender in advance.
+
+## Changes made by the owner: any valid rules, and the defaults back
+
+The owner changes their own rules as they like, through the same API, with two owner-only operations that no agent
+is offered. `site.set_policy` replaces the public or the private file with a list of rules, in order; every rule is
+parsed first, and if any does not parse nothing changes and the answer names each one, by its place, with why.
+`site.reset_policy` puts both files back to the defaults this build writes, removing every rule the owner or an
+agent added. Both take the owner's sign-in or their own full-access token: rules can always be reset, and no rule
+locks the owner out.
+
+The owner's interface uses `site.set_policy` for one common choice, which comments show at once. It rewrites only
+the public file's `bless` and `review` lines for `pub.polis.comment`, in the place they stood:
+
+| Choice | Those lines |
+|---|---|
+| no one | `bless … from self`, `review … from all` |
+| people you follow (the default) | `bless … from self`, `bless … from following`, `bless … from thread-blessed`, `review … from all` |
+| anyone | `bless … from self`, `bless … from all` |
+
+Rules that match none of the three are shown as the owner's own and are never overwritten by that choice.
+
 ## Legacy grammar
 
 Prior to v2, blessing rules were written as:
@@ -264,6 +304,14 @@ copy. Either way the tool says so:
 |---|---|---|
 | Medic | `medic.report`, `report_kind: policy_authored` | `medic.report`, `report_kind: policy_unparseable` |
 | `tailor` | the `policy-content-converge` check passes and flags the file | the check fails and flags the file |
+
+**Rules added through the API do not make a file the owner's.** A deny rule
+added with `"added_by"` (above) is set aside before the file is compared with
+the defaults. A default with only such rules on top is still that default: it
+is neither drift nor the site's own rules, and when the defaults change it is
+upgraded with the added rules kept, first after the header, where they were
+added. A rule marked `added_by` that is not a deny is not set aside, so a hand
+edit that loosened one makes the file the owner's as before.
 
 An owner who wants the current defaults back copies them over the file by
 hand. No translator carries a site's own rules into a newer format; the

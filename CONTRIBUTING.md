@@ -11,7 +11,7 @@ Polis has four main components:
 | Component | Language | Status | Description |
 |-----------|----------|--------|-------------|
 | `cli-go/` | Go | Active | Go CLI — core packages imported by the webapp |
-| `webapp/` | Go | Active | Local web interface for managing a Polis site |
+| `webapp/` | Go | Active | The server: the owner app (at `/_/`), the site's API (`/v1`), and the hosted service (polis.pub) |
 | `cli-bash/` | Bash | Feature-frozen | Original CLI — correctness and security fixes only; its version number tracks the Go CLI's, not its capability |
 | Discovery Service | TypeScript | Active (closed for now) | Hono server for discovery coordination. Source not yet in the public repo. The [DS API reference](https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md) is the stable public contract. |
 
@@ -80,6 +80,7 @@ go build -o polis ./cmd/polis
 
 Core packages live in `cli-go/pkg/` and are designed to be importable:
 
+- `pkg/ops/` — The action layer: every site action's one implementation, which `/v1`, MCP and the CLI all reach
 - `pkg/publish/` — Post publishing logic
 - `pkg/comment/` — Comment management
 - `pkg/blessing/` — Blessing workflow
@@ -143,11 +144,17 @@ See the [webapp development guide](https://github.com/vdibart/polis-cli/blob/mai
 
 ### Key Files
 
-- `internal/server/handlers.go` — HTTP handlers
 - `internal/server/server.go` — Server struct and configuration
-- `internal/server/routes.go` — Route registration
-- `internal/webui/www/app.js` — Frontend SPA
-- `internal/webui/www/style.css` — Styles
+- `internal/server/routes.go` — The routes outside `/v1`, each with its reason
+- `internal/api/router.go` — `/v1`, the site's one API: content operations, auth, the live-grant check
+- `internal/server/site_api.go`, `owner_api.go` — the host's own `/v1` operations (settings, agents, messages)
+- `internal/server/handlers.go` — the handlers those operations and routes reach
+- `internal/webui/www/v5/` — the owner app (the v5 app), which calls `/v1` only
+
+⛔ A site action (publish, comment, follow, …) has one implementation, in the action layer
+(`cli-go/pkg/ops`), reached through `/v1`; nothing new goes under `/api/`. The
+[webapp development guide](https://github.com/vdibart/polis-cli/blob/main/docs/webapp/developer/development.md#adding-an-operation)
+says how to add one.
 
 ## Bash CLI (`cli-bash/`)
 

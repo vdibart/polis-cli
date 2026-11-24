@@ -165,11 +165,10 @@ func LoadWitnesses(site storage.Site) (*WitnessFile, error) {
 //
 // ⛔ MERGE, NEVER REPLACE. See discovery.MergeWitnesses.
 //
-// ⚠️ The first call on a site adds a key to .well-known/polis, which Judge
-// snapshots: expect judge.alert.wellknown_change for that site while the change
-// is pending, then silence once Judge accepts it. The check is report-only, so
-// the site's health does not move. A new change for the same site later is the
-// finding.
+// The first call on a site adds the witnesses pointer to .well-known/polis,
+// which Judge snapshots: a pointer equal to DefaultWitnessesPointer is what
+// polis writes, so Judge accepts it at once with no alert. Any other value is
+// held and alerts.
 func RecordWitness(site storage.Site, artifactURL string, witnesses ...discovery.Witness) (bool, error) {
 	if artifactURL == "" {
 		return false, fmt.Errorf("no artifact URL to record a witness under")

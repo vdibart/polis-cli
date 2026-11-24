@@ -46,7 +46,7 @@ Polis is a decentralized social system with **four primary surfaces**. Each surf
 **Where it lives:** `webapp/`. Built as either `polis-server` (HTTP server + web UI, no CLI) or `polis-full` (CLI bundled with a `serve` command).
 
 **What it owns:**
-- The single-tenant web UI: topbar + 640px centered column, icon row driving PQL preset routes, centered sentence-filter widget, editor, settings.
+- The owner app (the v5 app, at `/_/`): the site's menu (write, gather, message, enhance) over one column of cards, on `/v1` only. (The v4 app, with its topbar, icon row and sentence filter, is gone.)
 - The v1 REST [Content Type API](../../api/developer/reference.md) at `/v1/`.
 - The widget that gets embedded in rendered HTML — when you visit someone else's polis site, their static HTML loads the polis widget, which renders the viewer's nav over the foreign content.
 - Per-tenant request logging (`X-Request-Id` correlation, structured events to an observability backend).
@@ -96,7 +96,7 @@ Two more names appear beside the actors and are neither hosted-only nor operator
 - Signature verification on registration and relationship updates.
 - The event stream that lets every site know about activity affecting it.
 - Operator policies (`ds_operator_policies`) for network-level content moderation.
-- Cross-tenant aggregations (e.g. comment counts per post URL for the infinity stream).
+- Cross-tenant aggregations (e.g. comment counts per post URL, for a stream of posts).
 
 **Who it serves:**
 - Polis sites (CLI + webapp instances) coordinating blessing requests, follower notifications, and discovery.

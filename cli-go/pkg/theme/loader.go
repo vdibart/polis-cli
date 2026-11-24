@@ -48,6 +48,11 @@ type Templates struct {
 	// live entry template — included via {{> stream-post}}. Comment/profile/
 	// mention/dm entries render client-side in stream.js; their SSR templates
 	// were removed as dead scaffolding.
+
+	// V5 holds the v5 shape's templates by logical name ("frame", "post",
+	// "comment", "about"): the map-keyed form the note above asked for, used
+	// by v5 alone so the v3 and v4 fields stay as they are.
+	V5 map[string]string
 }
 
 // Manifest represents the site manifest (metadata/manifest.json).
@@ -101,8 +106,10 @@ func LoadShape(site storage.Site, cliThemesDir, shapeName, themeName string) (*T
 		return loadBlogTemplates(themeSrc, shapeSrc)
 	case "v4":
 		return loadStreamTemplates(themeSrc, shapeSrc)
+	case "v5":
+		return loadV5Templates(themeSrc, shapeSrc)
 	default:
-		return nil, fmt.Errorf("unsupported shape %q (known: v3, v4)", shapeName)
+		return nil, fmt.Errorf("unsupported shape %q (known: v3, v4, v5)", shapeName)
 	}
 }
 
@@ -262,6 +269,33 @@ func loadStreamTemplates(themeDir, baseDir templateSource) (*Templates, error) {
 	return templates, nil
 }
 
+// V5Templates are the v5 shape's templates, each required: the frame every
+// page shares, and one template per kind of item.
+var V5Templates = map[string]string{
+	"frame":     "frame.html",
+	"post":      "post.html",
+	"comment":   "comment.html",
+	"about":     "about.html",
+	"following": "following.html",
+	"person":    "person.html",
+}
+
+// loadV5Templates reads the v5 templates. ⚠️ v5 takes NO template override
+// from a theme: a v5 theme is tokens only (the token contract), so a theme
+// that carries v3 markup (studio13-nk's post.html) can never shadow a v5
+// card. Only the shape's own files are read.
+func loadV5Templates(_ templateSource, shapeSrc templateSource) (*Templates, error) {
+	t := &Templates{V5: map[string]string{}}
+	for name, file := range V5Templates {
+		content, err := readFromSources(templateSource{}, shapeSrc, file)
+		if err != nil {
+			return nil, fmt.Errorf("required v5 template %q: %w", file, err)
+		}
+		t.V5[name] = content
+	}
+	return t, nil
+}
+
 // GetActiveTheme returns the active theme name. Reads from
 // .polis/bundles/registry.json (post-1e canonical) with a legacy fallback to
 // active_theme in .well-known/polis for pre-migration sites.
@@ -270,19 +304,32 @@ func GetActiveTheme(site storage.Site) (string, error) {
 }
 
 // reservedThemes are system themes a user never gets by chance or by choice:
-// sols is the logged-out landing theme, stardust is why.polis.pub's. The
+// sols is the logged-out landing theme, stardust is why.polis.pub's, and the
+// Elwood pair is defined in the bundle but not offered until it joins v5. The
 // webapp refuses them in its theme picker (and the SPA filters them from its
 // list); SelectRandomTheme never picks them. Reservation blocks selection
 // only: a site can still be put on one through registry.json directly.
 var reservedThemes = map[string]bool{
-	"sols":     true,
-	"stardust": true,
+	"sols":          true,
+	"stardust":      true,
+	"elwood-signal": true, // defined, until the pair joins v5
+	"elwood-noise":  true,
 }
 
 // IsReserved reports whether a theme name — short ("sols") or fully qualified
 // ("pub.polis.themes.sols") — is a reserved system theme.
 func IsReserved(name string) bool {
 	return reservedThemes[strings.TrimPrefix(name, "pub.polis.themes.")]
+}
+
+// Selectable reports whether an owner (or their agent) may choose a theme by
+// this name: not a system directory (_base, _shared), not reserved, and not
+// retired (bundle.RetiredThemeNames: an old site's bundle.json still declares
+// one). Any list offered as choices filters by it, so nothing is offered that
+// the theme switch would refuse.
+func Selectable(name string) bool {
+	n := strings.TrimPrefix(name, "pub.polis.themes.")
+	return n != "" && n != "_base" && n != "_shared" && !IsReserved(n) && !bundle.IsRetiredTheme(n)
 }
 
 // ErrThemeNotSaved means a theme was chosen but the choice could not be saved.
@@ -302,11 +349,23 @@ var ErrThemeNotSaved = errors.New("theme chosen but not saved")
 // only needs a theme to render with (render) uses the name; a caller that
 // reports a repair (Tailor, Medic) reports the failure, because nothing was
 // repaired.
+//
+// ⛔ IT PICKS ONLY A THEME POLIS SHIPS, compatible with the site's active shape.
+// ListThemes also lists the owner's own themes (site/themes/), and choosing one
+// of those by chance is wrong twice over: a theme of the owner's is theirs to
+// choose, and a stream render reads a theme's CSS from the bundle tree only, so
+// the site stopped rendering. A first render, or Tailor's and Medic's registry
+// repairs, did exactly that on a customised site.
 func SelectRandomTheme(site storage.Site, cliThemesDir string) (string, error) {
 	themes, err := ListThemes(site, cliThemesDir)
 	if err != nil || len(themes) == 0 {
 		return "", fmt.Errorf("no themes found")
 	}
+	themes = shippedForActiveShape(site, themes)
+	if len(themes) == 0 {
+		return "", fmt.Errorf("no themes found: no theme polis ships is installed for this site's shape")
+	}
+	sort.Strings(themes)
 	var eligible []string
 	for _, t := range themes {
 		if !IsReserved(t) {
@@ -316,7 +375,7 @@ func SelectRandomTheme(site storage.Site, cliThemesDir string) (string, error) {
 	if len(eligible) == 0 {
 		eligible = themes
 	}
-	selected := eligible[rand.IntN(len(eligible))]
+	selected := eligible[rand.IntN(len(eligible))] //nolint:gosec // G404: cosmetic randomness (a colour or a default pick), never a secret
 	// Persist the choice so future renders use the same theme
 	if err := SetActiveTheme(site, selected); err != nil {
 		stable := append([]string(nil), eligible...)
@@ -324,6 +383,31 @@ func SelectRandomTheme(site storage.Site, cliThemesDir string) (string, error) {
 		return stable[0], fmt.Errorf("%w: %v", ErrThemeNotSaved, err)
 	}
 	return selected, nil
+}
+
+// shippedForActiveShape keeps the themes polis ships (declared in the core
+// bundle, not a system directory) that declare the site's active shape.
+func shippedForActiveShape(site storage.Site, themes []string) []string {
+	shape, err := bundle.GetActiveShapeName(site)
+	if err != nil || shape == "" {
+		shape = "v5"
+	}
+	want := bundle.QualifyShape(shape)
+	declared := bundle.DefaultCoreBundle().Themes
+	var out []string
+	for _, name := range themes {
+		th, ok := declared[name]
+		if !ok || strings.HasPrefix(name, "_") {
+			continue
+		}
+		for _, s := range th.CompatibleShapes {
+			if s == want {
+				out = append(out, name)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // SetActiveTheme updates the active theme in .polis/bundles/registry.json.
@@ -454,6 +538,91 @@ func CopyStreamCSS(site storage.Site, themeName string) error {
 	out = append(out, '\n')
 	out = append(out, themeCSS...)
 	return writeStyles(site, out)
+}
+
+// V5TokensFile is a theme's v5 definition: its note and its token values,
+// checked against the token contract (v5tokens.go), never CSS. ⭐ A THEME IS DEFINED IN ONE PLACE: this file,
+// in the theme's own directory. The shape, every site and the theme gallery
+// read it; nothing keeps a copy.
+const V5TokensFile = "v5.json"
+
+// CopyV5CSS writes a v5 site's styles.css: the shape's stylesheet (which
+// declares every token at the polis default), then the theme's values, from
+// its one definition (themes/<name>/v5.json, read through the token contract),
+// then the site's own CSS (writeStyles). The parts are joined as written, so
+// their comments reach readers: a theme's note survives as a comment.
+// A theme with no v5 definition draws in the polis default; one whose
+// definition the contract refuses is withheld, and the stylesheet says why.
+// A font polis does not offer draws in the default, and the stylesheet says so.
+func CopyV5CSS(site storage.Site, themeName string) error {
+	ctx := context.Background()
+	shapeCSS, err := site.Store().Get(ctx, bundleShapesKey+"/v5/v5.css")
+	if err != nil {
+		return fmt.Errorf("read v5 shape CSS: %w", err)
+	}
+	out := append([]byte{}, shapeCSS...)
+	t, withheld, err := LoadV5SiteTheme(site, themeName)
+	if err != nil {
+		out = append(out, []byte(fmt.Sprintf("\n/* ---------- The theme %s is withheld: its v5 definition does not pass the token contract ---------- */\n", themeName))...)
+	}
+	if withheld != "" {
+		out = append(out, []byte(styleNote("---------- "+SiteTokensKey+" is withheld: "+withheld+" ----------"))...)
+	}
+	if t != nil {
+		for _, f := range t.FellBack {
+			out = append(out, []byte(styleNote("A font polis does not offer ("+f+"); the default font is used."))...)
+		}
+		name := themeName
+		if err != nil || name == "" {
+			name = "the polis default"
+		}
+		out = append(out, V5ThemeCSS(name, t)...)
+		if own, _ := ReadSiteTokens(site); withheld == "" && own != nil && len(own.Tokens) > 0 {
+			out = append(out, []byte(styleNote("The site's own values ("+SiteTokensKey+") are layered over the theme above."))...)
+		}
+	}
+	return writeStyles(site, out)
+}
+
+// LoadV5Theme reads a theme's v5 definition from the installed bundle: nil
+// when the theme has none (it draws in the polis default), an error when the
+// contract refuses it or it fails the contrast check.
+func LoadV5Theme(site storage.Site, themeName string) (*V5Theme, error) {
+	if themeName == "" {
+		return nil, nil
+	}
+	data, err := site.Store().Get(context.Background(), bundleThemesKey+"/"+themeName+"/"+V5TokensFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read v5 definition of theme %q: %w", themeName, err)
+	}
+	t, err := ParseV5Theme(data)
+	if err != nil {
+		return nil, fmt.Errorf("theme %q: %w", themeName, err)
+	}
+	if problems := CheckV5Contrast(t); len(problems) > 0 {
+		var why []string
+		for _, p := range problems {
+			why = append(why, p.String())
+		}
+		return nil, fmt.Errorf("theme %q fails the contrast check: %s", themeName, strings.Join(why, "; "))
+	}
+	return t, nil
+}
+
+// styleNote is a line for a reader of styles.css. ⛔ Its text may carry a
+// value someone set, so it can never close the comment.
+func styleNote(text string) string {
+	return "\n/* " + strings.ReplaceAll(text, "*/", "* /") + " */\n"
+}
+
+// CopyV5Controller copies the v5 shape's controller to the site root as
+// /v5.js: the script that opens and folds cards and redraws a view from its
+// sentence. Every page reads without it.
+func CopyV5Controller(site storage.Site) error {
+	return copySiteFile(site, bundleShapesKey+"/v5/v5.js", "v5.js")
 }
 
 // CustomCSSKey is the site's own CSS, layered after the theme in styles.css on
@@ -873,6 +1042,21 @@ func ListUserSelectableThemes(site storage.Site, cliThemesDir, activeShape strin
 		filtered = append(filtered, p)
 	}
 	return filtered, nil
+}
+
+// OfferedForShape reports whether a theme may be switched to on a site whose
+// active shape is activeShape: declared in the core bundle and compatible
+// with that shape, the same test the picker applies. ⛔ The theme switch
+// must ask this, not only whether the theme's directory exists: a v5-only
+// theme (daryl, defined by its v5.json alone) has no stylesheet a v3 or v4
+// render could copy, and a theme switched to before that copy fails leaves
+// the site on a theme it cannot draw.
+func OfferedForShape(name, activeShape string) bool {
+	if activeShape == "" {
+		activeShape = "v3"
+	}
+	th, ok := bundle.DefaultCoreBundle().Themes[strings.TrimPrefix(name, "pub.polis.themes.")]
+	return ok && compatibleWithShape(th, bundle.QualifyShape(activeShape))
 }
 
 // compatibleWithShape reports whether a theme declares compatibility with the

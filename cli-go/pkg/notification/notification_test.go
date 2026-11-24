@@ -145,3 +145,24 @@ func TestListPaginated(t *testing.T) {
 		t.Errorf("Expected 0 items for large offset, got %d", len(items))
 	}
 }
+
+// TestPublishedRFC3339ReadsEveryFormAnEntryWasWrittenIn: the state file holds
+// entries from every era of its writers, so each form is read as RFC 3339 UTC.
+func TestPublishedRFC3339ReadsEveryFormAnEntryWasWrittenIn(t *testing.T) {
+	for in, want := range map[string]string{
+		"2026-11-10T10:00:00Z":      "2026-11-10T10:00:00Z",
+		"2026-11-10T05:00:00-05:00": "2026-11-10T10:00:00Z",
+		"2026-11-10T10:00:00.123Z":  "2026-11-10T10:00:00Z",
+		"Wed Mar 04 2026 20:22:19 GMT+0000 (Coordinated Universal Time)": "2026-03-04T20:22:19Z",
+		"Wed Mar 04 2026 15:22:19 GMT-0500 (Eastern Standard Time)":      "2026-03-04T20:22:19Z",
+		"Wed, 04 Mar 2026 20:22:19 GMT":                                  "2026-03-04T20:22:19Z",
+		"1772655739":                                                     "2026-03-04T20:22:19Z",
+		"1772655739000":                                                  "2026-03-04T20:22:19Z",
+		"":                                                               "",
+		"not a time":                                                     "",
+	} {
+		if got := PublishedRFC3339(in); got != want {
+			t.Errorf("PublishedRFC3339(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

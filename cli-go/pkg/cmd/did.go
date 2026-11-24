@@ -23,7 +23,7 @@ func handleDID(args []string) {
 	fs := flag.NewFlagSet("did", flag.ExitOnError)
 	write := fs.Bool("write", false, "(Re)generate .well-known/did.json")
 	hostFlag := fs.String("host", "", "Canonical host (default: from POLIS_BASE_URL)")
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 	dir := getDataDir()
 	if !isPolisSite(dir) {
@@ -92,5 +92,5 @@ func handleDID(args []string) {
 		fmt.Printf("[✓] Wrote %s\n", relPath)
 	}
 	fmt.Println()
-	os.Stdout.Write(document)
+	_, _ = os.Stdout.Write(document) // stdout gone: nobody left to tell
 }

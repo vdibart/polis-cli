@@ -50,7 +50,7 @@ with the discovery service yet.
 func handleBranchAnnounce(args []string) {
 	fs := flag.NewFlagSet("branch announce", flag.ExitOnError)
 	fs.Usage = func() { fmt.Fprint(fs.Output(), branchAnnounceUsage) }
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 	if fs.NArg() != 0 {
 		exitError("Usage: polis branch announce (polis branch announce --help for details)")
 	}

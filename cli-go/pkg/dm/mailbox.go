@@ -142,6 +142,13 @@ type MailboxMessage struct {
 	BoxPub     string `json:"box_pub"`    // base64 X25519 counterparty pubkey for box-open
 	ReplyTo    string `json:"reply_to,omitempty"`
 	Status     string `json:"status,omitempty"`
+	// WireNonce is, on a sent message, the nonce of the box that was DELIVERED
+	// (base64): the recipient's message id is MessageIDFromNonce of it, while
+	// this record's own id comes from its box-to-self. Kept so a resend can
+	// reuse it and be stored once at the recipient (DM-3). Private, and outside
+	// anything signed; absent on messages sent before it was kept, and on
+	// received ones.
+	WireNonce string `json:"wire_nonce,omitempty"`
 }
 
 // ConversationMeta is conversation.json: thread metadata + the read cursor. Mutable
@@ -180,6 +187,12 @@ type DecryptedMessage struct {
 // it to the conversation as an outgoing message — so the sender can re-read their own
 // side later, and the operator cannot. myDomain labels the "to" side.
 func (m *Mailbox) AppendSent(peer, myDomain, plaintext string, keyEpoch int, myEpochPub, myEpochDEK [32]byte, replyTo, status string) (*MailboxMessage, error) {
+	return m.appendSent(peer, plaintext, keyEpoch, myEpochPub, myEpochDEK, replyTo, status, "")
+}
+
+// appendSent is AppendSent recording the delivered box's nonce (wireNonce,
+// base64), as both send paths do.
+func (m *Mailbox) appendSent(peer, plaintext string, keyEpoch int, myEpochPub, myEpochDEK [32]byte, replyTo, status, wireNonce string) (*MailboxMessage, error) {
 	ct, nonce, err := Encrypt([]byte(plaintext), &myEpochPub, &myEpochDEK)
 	if err != nil {
 		return nil, fmt.Errorf("seal sent message: %w", err)
@@ -199,6 +212,7 @@ func (m *Mailbox) AppendSent(peer, myDomain, plaintext string, keyEpoch int, myE
 		BoxPub:     base64.StdEncoding.EncodeToString(myEpochPub[:]),
 		ReplyTo:    replyTo,
 		Status:     status,
+		WireNonce:  wireNonce,
 	}
 	if err := m.appendMessage(peer, &msg); err != nil {
 		return nil, err
@@ -213,6 +227,11 @@ func (m *Mailbox) AppendSent(peer, myDomain, plaintext string, keyEpoch int, myE
 // the sender's epoch pubkey (boxPub). On read the sender opens it with their own
 // epoch DEK, exactly like a server-sealed AppendSent copy.
 func (m *Mailbox) AppendSentRaw(peer string, keyEpoch int, ciphertextB64, nonceB64, boxPubB64, replyTo, status string) (*MailboxMessage, error) {
+	return m.appendSentRaw(peer, keyEpoch, ciphertextB64, nonceB64, boxPubB64, replyTo, status, "")
+}
+
+// appendSentRaw is AppendSentRaw recording the delivered box's nonce.
+func (m *Mailbox) appendSentRaw(peer string, keyEpoch int, ciphertextB64, nonceB64, boxPubB64, replyTo, status, wireNonce string) (*MailboxMessage, error) {
 	nonceRaw, err := base64.StdEncoding.DecodeString(nonceB64)
 	if err != nil || len(nonceRaw) != 24 {
 		return nil, fmt.Errorf("sent box: bad nonce (want 24 bytes base64)")
@@ -240,6 +259,7 @@ func (m *Mailbox) AppendSentRaw(peer string, keyEpoch int, ciphertextB64, nonceB
 		BoxPub:     boxPubB64,
 		ReplyTo:    replyTo,
 		Status:     status,
+		WireNonce:  wireNonce,
 	}
 	if err := m.appendMessage(peer, &msg); err != nil {
 		return nil, err

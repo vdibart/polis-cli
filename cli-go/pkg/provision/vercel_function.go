@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/releasekey"
 )
 
 // ⭐⭐ THE FUNCTION'S FILE LIST IS A MANIFEST OF THE PROGRAM, NOT OF THE
@@ -165,6 +167,56 @@ const (
 // releaseBase is GitHub, or a test's server.
 var releaseBase = "https://github.com"
 
+// releaseKey is the release key the assets must be signed by: the pinned one,
+// or a test's.
+var releaseKey = releasekey.PublicKey
+
+// maxChecksums bounds a release's checksums.txt and its signature; a real
+// checksums.txt is a few kilobytes.
+const maxChecksums = 256 << 10
+
+// fetchReleaseChecksums fetches a release's checksums.txt and checksums.txt.sig
+// and verifies the signature with the pinned release key.
+//
+// ⛔ This, not the manifest, is what makes a release asset trustworthy. The
+// manifest and the build come from the same place, so both could be replaced
+// together; the signature is made by a key that place never holds. A release
+// with no signature (one made before releases were signed) is refused: an
+// instance fetches only its own version, and every version that carries this
+// code is signed.
+func fetchReleaseChecksums(ctx context.Context, hc *http.Client, version string) (releasekey.Checksums, error) {
+	sums, err := fetchAsset(ctx, hc, ReleaseAssetURL(version, releasekey.ChecksumsAsset), maxChecksums)
+	if err != nil {
+		return nil, err
+	}
+	sig, err := fetchAsset(ctx, hc, ReleaseAssetURL(version, releasekey.SignatureAsset), maxChecksums)
+	if err != nil {
+		return nil, fmt.Errorf("provision: the release of %s publishes no signature: %w", version, err)
+	}
+	c, err := releasekey.VerifyWith(releaseKey, sums, string(sig))
+	if err != nil {
+		return nil, fmt.Errorf("provision: the release of %s: %w", version, err)
+	}
+	return c, nil
+}
+
+// fetchSignedAsset fetches one release asset and refuses it unless it is the
+// file the release's signed checksums.txt names.
+func fetchSignedAsset(ctx context.Context, hc *http.Client, version, asset string, limit int64) ([]byte, error) {
+	sums, err := fetchReleaseChecksums(ctx, hc, version)
+	if err != nil {
+		return nil, err
+	}
+	b, err := fetchAsset(ctx, hc, ReleaseAssetURL(version, asset), limit)
+	if err != nil {
+		return nil, err
+	}
+	if err := sums.Check(asset, b); err != nil {
+		return nil, fmt.Errorf("provision: the release of %s: %w", version, err)
+	}
+	return b, nil
+}
+
 // ReleaseAssetURL is where a release's asset is published.
 func ReleaseAssetURL(version, asset string) string {
 	return releaseBase + "/" + ReleaseRepo + "/releases/download/v" + url.PathEscape(strings.TrimPrefix(version, "v")) + "/" + asset
@@ -188,7 +240,7 @@ func FetchFunctionManifest(ctx context.Context, hc *http.Client, version string)
 	if !IsReleasedVersion(version) {
 		return FunctionManifest{}, fmt.Errorf("provision: %q is not a released version, so it has no published function manifest; a development build passes its manifest in %s", version, FunctionManifestEnv)
 	}
-	b, err := fetchAsset(ctx, hc, ReleaseAssetURL(version, FunctionManifestAsset), maxManifest)
+	b, err := fetchSignedAsset(ctx, hc, version, FunctionManifestAsset, maxManifest)
 	if err != nil {
 		return FunctionManifest{}, err
 	}
@@ -213,7 +265,7 @@ func ReleaseFunctionFiles(hc *http.Client, version string) func(context.Context,
 		mu.Lock()
 		defer mu.Unlock()
 		if src == nil {
-			b, err := fetchAsset(ctx, hc, ReleaseAssetURL(version, FunctionBuildAsset), maxBuildArchive)
+			b, err := fetchSignedAsset(ctx, hc, version, FunctionBuildAsset, maxBuildArchive)
 			if err != nil {
 				return nil, err
 			}
@@ -269,9 +321,9 @@ func ReleasedFunctionCode(ctx context.Context, hc *http.Client, version string) 
 	if err != nil {
 		return Code{}, fmt.Errorf("%w: the release of %s publishes no usable function manifest (%v)", ErrNoReleasedCode, version, err)
 	}
-	b, err := fetchAsset(ctx, hc, ReleaseAssetURL(version, FunctionBuildAsset), maxBuildArchive)
+	b, err := fetchSignedAsset(ctx, hc, version, FunctionBuildAsset, maxBuildArchive)
 	if err != nil {
-		return Code{}, fmt.Errorf("%w: the release of %s publishes no function build (%v)", ErrNoReleasedCode, version, err)
+		return Code{}, fmt.Errorf("%w: the release of %s publishes no function build it signed (%v)", ErrNoReleasedCode, version, err)
 	}
 	code := Code{Archive: b, Format: FormatTarGz}
 	got, err := FunctionManifestFor(code, version)

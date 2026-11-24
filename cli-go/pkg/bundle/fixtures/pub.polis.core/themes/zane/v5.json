@@ -1,0 +1,22 @@
+{
+  "note": "zane: an editor's palette. Neutral charcoal, soft teal accents, salmon titles, polis cyan for the wordmark.",
+  "tokens": {
+    "scheme": "dark",
+    "site": "#5fafaf",
+    "bg": "#303030",
+    "surface": "#3a3a3a",
+    "card-hover": "#404040",
+    "panel": "#444444",
+    "text": "#f0f0f0",
+    "text-soft": "#d0d0d0",
+    "text-muted": "#a3a3a3",
+    "ink": "#262626",
+    "wordmark": "#00d4ff",
+    "accent-2": "#87d7d7",
+    "heading-color": "#ea8673",
+    "mark": "#4f8e8e",
+    "mark-style": "gradient",
+    "mark-2": "#5fafaf",
+    "mark-ink": "#ffffff"
+  }
+}

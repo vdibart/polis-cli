@@ -118,8 +118,13 @@ type vocabFile struct {
 		Tokens []string `json:"tokens"`
 		Value  string   `json:"value"`
 	} `json:"modifiers"`
-	HandlePattern    string `json:"handle_pattern"`
-	EventTypePattern string `json:"event_type_pattern"`
+	Adjectives []struct {
+		Tokens []string `json:"tokens"`
+		Value  string   `json:"value"`
+	} `json:"adjectives"`
+	PostAddressPattern string `json:"post_address_pattern"`
+	HandlePattern      string `json:"handle_pattern"`
+	EventTypePattern   string `json:"event_type_pattern"`
 }
 
 // TestVocabularyMatchesCanonical closes the drift loop: the hand-mirrored Go
@@ -180,6 +185,17 @@ func TestVocabularyMatchesCanonical(t *testing.T) {
 		}
 	}
 
+	if len(v.Adjectives) != len(adjectives) {
+		t.Fatalf("adjective count mismatch: JSON %d, Go %d", len(v.Adjectives), len(adjectives))
+	}
+	for i, a := range v.Adjectives {
+		if adjectives[i].value != a.Value || strings.Join(adjectives[i].tokens, " ") != strings.Join(a.Tokens, " ") {
+			t.Errorf("adjective %d mismatch: JSON %+v, Go %+v", i, a, adjectives[i])
+		}
+	}
+	if v.PostAddressPattern != postAddressPattern.String() {
+		t.Errorf("post address pattern: JSON %q, Go %q", v.PostAddressPattern, postAddressPattern.String())
+	}
 	for _, s := range v.FirstPersonScopes {
 		if !FirstPersonScopes[s] {
 			t.Errorf("first-person scope %q in JSON missing from Go", s)
@@ -288,5 +304,46 @@ func TestVocabularyDescribesWhatParseAccepts(t *testing.T) {
 	}
 	if _, err := Parse("all profiles from all of polis by date"); err == nil {
 		t.Error("\"all of polis\" parsed; Vocabulary says it is not a scope")
+	}
+}
+
+// TestExplainGivesTheParsersReason: a sentence that does not parse is
+// answered with why, and the most natural mistake with the way to say it.
+func TestExplainGivesTheParsersReason(t *testing.T) {
+	s := "all posts and comments from my network by date"
+	_, err := Parse(s)
+	if err == nil {
+		t.Fatalf("%q parsed", s)
+	}
+	got := Explain(s, err)
+	if !strings.Contains(got, "expected 'from', 'about' or 'on'") {
+		t.Errorf("no parser reason in %q", got)
+	}
+	if !strings.Contains(got, "activity covers posts and comments") {
+		t.Errorf("no activity hint for <type> and <type> in %q", got)
+	}
+	s = "every posts from me"
+	_, err = Parse(s)
+	got = Explain(s, err)
+	if !strings.Contains(got, `unknown qualifier "every"`) || strings.Contains(got, "activity") {
+		t.Errorf("Explain(%q) = %q", s, got)
+	}
+	if !strings.HasPrefix(got, "invalid PQL sentence: ") {
+		t.Errorf("Explain does not lead with what is wrong: %q", got)
+	}
+}
+
+func TestVocabularyStatesOneTypePerSentence(t *testing.T) {
+	if !strings.Contains(Vocabulary(), oneTypeRule) {
+		t.Error("Vocabulary does not say one type per sentence")
+	}
+}
+
+func TestSentenceOfURL(t *testing.T) {
+	if got := SentenceOfURL("/pql/all+posts+from+me"); got != "all posts from me" {
+		t.Errorf("got %q", got)
+	}
+	if got := SentenceOfURL("/posts/x"); got != "" {
+		t.Errorf("a path that is not /pql/ gave %q", got)
 	}
 }

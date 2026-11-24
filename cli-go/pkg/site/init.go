@@ -738,7 +738,7 @@ func initGitignore(site storage.Site) error {
 // getGitConfig retrieves a git config value.
 // Returns empty string if git is not available or the config key is not set.
 func getGitConfig(key string) string {
-	cmd := exec.Command("git", "config", key)
+	cmd := exec.Command("git", "config", key) //nolint:gosec // G204: a fixed git config key; no shell
 	out, err := cmd.Output()
 	if err != nil {
 		return ""

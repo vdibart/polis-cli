@@ -1,8 +1,11 @@
 package policy
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 func TestClassifyCurrentDefaultWhateverTheGenerator(t *testing.T) {
@@ -106,5 +109,60 @@ func TestHeaderVersion(t *testing.T) {
 		if got := HeaderVersion([]byte(content)); got != want {
 			t.Errorf("HeaderVersion(%q) = %d, want %d", content, got, want)
 		}
+	}
+}
+
+// ⭐ A default with only API-added deny rules on top is still that default:
+// Classify sees the default, Upgraded keeps the additions where TightenPrivate
+// put them, and a loosened "added" line is the site's own.
+func TestClassifySetsAsideRulesAddedThroughTheAPI(t *testing.T) {
+	site := storage.At(t.TempDir())
+	ctx := context.Background()
+	var past string
+	for _, pd := range PastDefaults {
+		if pd.File == PrivateFile {
+			past = pd.Content // any default an earlier build wrote
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		start string
+		want  Class
+	}{
+		{"current default", DefaultPrivatePolicyContent(), Current},
+		{"past default", past, PastDefault},
+	} {
+		if err := site.Store().Put(ctx, PrivateRulesKey, []byte(tc.start)); err != nil {
+			t.Fatal(err)
+		}
+		if err := TightenPrivate(site, "deny pub.polis.comment from all at spam.example", "api"); err != nil {
+			t.Fatal(err)
+		}
+		got, err := site.Store().Get(ctx, PrivateRulesKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := Classify(got, PrivateFile); c != tc.want {
+			t.Errorf("%s + an added deny: Classify = %v, want %v", tc.name, c, tc.want)
+		}
+		up := string(Upgraded(got, PrivateFile))
+		_, added := SplitAdded(string(got))
+		if len(added) != 1 || !strings.Contains(up, added[0]) {
+			t.Errorf("%s: Upgraded dropped the added rule:\n%s", tc.name, up)
+		}
+		if base, _ := SplitAdded(up); ContentKey(base) != ContentKey(DefaultPrivatePolicyContent()) {
+			t.Errorf("%s: Upgraded is not the current default beneath the addition:\n%s", tc.name, up)
+		}
+		if strings.Index(up, added[0]) > strings.Index(up, "\n")+1 {
+			t.Errorf("%s: the added rule is not first after the header, where TightenPrivate puts it:\n%s", tc.name, up)
+		}
+		if Classify([]byte(up), PrivateFile) != Current {
+			t.Errorf("%s: the upgraded file does not classify as current", tc.name)
+		}
+	}
+
+	loosened := DefaultPrivatePolicyContent() + `{"active":true,"policy":"allow pub.polis.dm from all","added_by":"api"}` + "\n"
+	if c := Classify([]byte(loosened), PrivateFile); c != Authored {
+		t.Errorf("a loosening marked added_by: Classify = %v, want authored", c)
 	}
 }

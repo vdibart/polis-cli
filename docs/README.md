@@ -17,6 +17,7 @@ its design stops.
 | Page | What it is for |
 |---|---|
 | [User manual](webapp/user/user-manual.md) | **start here in a browser**: everything the web interface does |
+| [Connect your AI](webapp/user/connect-your-ai.md) | let an AI assistant you use work on your site, under a permission you give and can withdraw |
 | [Themes](general/guides/themes.md) | switch your site's theme, or write your own CSS-only one |
 | [Set your terms](signet/guides/set-your-terms.md) | say how others may use your work |
 | [Policy and licence](general/concepts/policy-and-licence.md) | who may reach you, against what may be done with your work: two different things |
@@ -26,6 +27,7 @@ its design stops.
 | [Registration and privacy](general/security/registration-and-privacy.md) | what the discovery service learns about you, and what leaving removes |
 | [Command reference](cli/user/command-reference.md) | **start here at the command line**: every CLI command |
 | [Policies](cli/user/policies.md) | who may comment on you, and what you accept |
+| [Upgrade a self-hosted site](cli/user/upgrade-a-site.md) | every upgrade step Tailor takes, and how to take each one yourself |
 | [Check a site](signet/guides/verify-content.md) · [Make a claim](signet/guides/attest.md) · [Who blessed this?](signet/guides/who-blessed-this.md) | the signed layer, used by hand |
 | [Implementation parity](cli/implementation-parity.md) | which CLI you need: where the Go and bash CLIs differ |
 | [Glossary](general/reference/glossary.md) | polis's words |
@@ -38,13 +40,13 @@ its design stops.
 |---|---|
 | [The graph](signet/concepts/graph.md) | **start here**: identities, records, and the signed edges between them |
 | [Recipe book](signet/recipes/README.md) | tasks, each run end to end by the test suite |
-| [Content API](api/developer/reference.md) · [Site API](api/developer/site-api.md) | the webapp's REST surfaces |
+| [Content API](api/developer/reference.md) · [Site API](api/developer/site-api.md) · [MCP and agent access](api/developer/mcp.md) | the site's one API, and the agent tools generated from it |
 | [Discovery service API](ds/developer/api-reference.md) · [PQL](general/reference/pql.md) · [PQL over HTTP](ds/developer/pql-json-api.md) | querying the network |
 | [Stream architecture](ds/developer/stream-architecture.md) · [Unpublish lifecycle](ds/developer/unpublish-lifecycle.md) | how events and retractions travel |
 | [JSON mode](cli/user/json-mode.md) | scripting the CLI |
 | [Content types](general/concepts/content-types.md) · [Bundles](general/concepts/bundles.md) · [Shapes](general/concepts/shapes.md) · [Themes](general/concepts/themes.md) · [Templating](cli/user/templating.md) | the content model and its presentation; [writing a theme](general/guides/themes.md) |
 | [Direct-message format](../cli-go/pkg/dm/FORMAT.md) · [delivery protocol](../cli-go/pkg/dm/PROTOCOL.md) | the bytes of an encrypted direct message, at rest and between sites |
-| [Infinity stream](general/concepts/infinity-stream.md) | the single-screen view polis.pub is built around |
+| [Infinity stream](general/concepts/infinity-stream.md) | the stream shape's single-screen view, which polis.pub led with before v5; kept as the record, and still how a site on that shape renders |
 | [Snap-off architecture](general/concepts/snap-off-architecture.md) | replacing any layer |
 | **A second implementation:** [Signet specifications](signet/README.md) · [Signing base](signet/spec/signing-base.md) · [Policy grammar](general/reference/policy-grammar.md) · [Content system](general/concepts/content-system.md) | precise enough to implement |
 
@@ -89,7 +91,7 @@ and the discovery service's source is not public, so operational procedure is no
 | [Contributing](general/contributing.md) | **start here**: setup and conventions |
 | [Handbook](handbook/README.md) | guided tours of the source, reached from trail markers in the code |
 | [CLI packages](cli/developer/packages.md) · [Webapp development](webapp/developer/development.md) · [Feed architecture](webapp/developer/feed-architecture.md) · [Dispatch engine](api/developer/dispatch-engine.md) | the codebase |
-| [Brand](webapp/designer/brand.md) · [Navigation](webapp/designer/navigation.md) · [Pages](webapp/designer/pages.md) | the design system |
+| [v5 style guide](webapp/designer/style-guide.md) · [Brand](webapp/designer/brand.md) · [Navigation](webapp/designer/navigation.md) · [Pages](webapp/designer/pages.md) | the design system; the style guide holds the rules every v5 page follows |
 
 ## Reading paths
 

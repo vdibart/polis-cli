@@ -71,8 +71,14 @@ func TestQualifyHelpers(t *testing.T) {
 	if QualifyTheme("vice") != "pub.polis.themes.vice" {
 		t.Error("QualifyTheme failed")
 	}
+	if got := QualifyTheme("pub.polis.themes.vice"); got != "pub.polis.themes.vice" {
+		t.Errorf("QualifyTheme on a qualified name = %q, want it unchanged", got)
+	}
 	if QualifyShape("v3") != "pub.polis.shapes.v3" {
 		t.Error("QualifyShape failed")
+	}
+	if got := QualifyShape("pub.polis.shapes.v5"); got != "pub.polis.shapes.v5" {
+		t.Errorf("QualifyShape on a qualified name = %q, want it unchanged", got)
 	}
 }
 
@@ -90,8 +96,8 @@ func TestRegistryRoundTrip(t *testing.T) {
 	if loaded.ActiveTheme != "pub.polis.themes.vice" {
 		t.Errorf("ActiveTheme = %q, want pub.polis.themes.vice", loaded.ActiveTheme)
 	}
-	if loaded.ActiveShape != "pub.polis.shapes.v4" {
-		t.Errorf("ActiveShape = %q, want pub.polis.shapes.v4", loaded.ActiveShape)
+	if loaded.ActiveShape != "pub.polis.shapes.v5" {
+		t.Errorf("ActiveShape = %q, want pub.polis.shapes.v5", loaded.ActiveShape)
 	}
 	if len(loaded.InstalledBundles) != 1 || loaded.InstalledBundles[0].Name != "pub.polis.core" {
 		t.Errorf("InstalledBundles unexpected: %+v", loaded.InstalledBundles)
@@ -135,8 +141,8 @@ func TestLoadRegistryOrInit_MissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("missing file should not error: %v", err)
 	}
-	if reg == nil || reg.ActiveShape != "pub.polis.shapes.v4" {
-		t.Errorf("missing file should yield DefaultRegistry (v4 post-cutover); got %+v", reg)
+	if reg == nil || reg.ActiveShape != "pub.polis.shapes.v5" {
+		t.Errorf("missing file should yield DefaultRegistry (v5, the default shape); got %+v", reg)
 	}
 }
 
@@ -232,8 +238,8 @@ func TestAdoptLegacyActiveTheme_CreatesTheRegistry(t *testing.T) {
 	if reg.ActiveTheme != "pub.polis.themes.vice" {
 		t.Errorf("ActiveTheme = %q, want pub.polis.themes.vice", reg.ActiveTheme)
 	}
-	if reg.ActiveShape != "pub.polis.shapes.v4" {
-		t.Errorf("ActiveShape = %q, want pub.polis.shapes.v4 (post-cutover default)", reg.ActiveShape)
+	if reg.ActiveShape != "pub.polis.shapes.v5" {
+		t.Errorf("ActiveShape = %q, want pub.polis.shapes.v5 (the default shape)", reg.ActiveShape)
 	}
 	if _, err := os.Stat(filepath.Join(siteDir, ".well-known", "polis")); !errors.Is(err, fs.ErrNotExist) {
 		t.Error("the registry half must never write .well-known/polis")
@@ -341,8 +347,8 @@ func TestGetActiveShapeName_DefaultsToStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetActiveShapeName: %v", err)
 	}
-	if got != "v4" {
-		t.Errorf("got %q, want v4 (post-cutover default)", got)
+	if got != "v5" {
+		t.Errorf("got %q, want v5 (the default shape)", got)
 	}
 }
 

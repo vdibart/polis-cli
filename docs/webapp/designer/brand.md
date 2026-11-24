@@ -2,6 +2,8 @@
 
 *For* [Contributors](../../README.md#contributing-to-polis) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [Webapp](../README.md)
 
+⚠️ **The logged-out landing page this page measures was retired on 2026-11-19.** polis.pub's front page is now the v5 onboarding page, which sets its own tokens: a light palette, and the wordmark in Newsreader italic at 30px, weight 700. The landing sizes, the SOLS values and the hero headline below are kept as the record of the earlier design. The three type roles and the tone of voice still hold, and the v5 owner app uses the same three families. The rules every v5 page follows are the [v5 style guide](style-guide.md).
+
 ## Logo / Wordmark
 
 The polis logo is the word "polis" set in **Newsreader italic** at weight 550. It is not a graphic mark — the typography *is* the brand.
@@ -9,8 +11,8 @@ The polis logo is the word "polis" set in **Newsreader italic** at weight 550. I
 | Context | Size | Weight | Notes |
 |---------|------|--------|-------|
 | polis.pub landing topbar (logged out) | 24px | 550 | Left edge of the topbar, main text color at 90% opacity |
-| Public site topbar (a tenant's stream shape) | 24px | 550 | Left edge; hidden once a logged-in visitor's nav widget fills the bar |
-| Owner webapp (logged in) | — | — | No wordmark: the avatar and icon row take its place |
+| Public site topbar (a tenant's stream shape, no longer supported) | 24px | 550 | Left edge; hidden once a logged-in visitor's nav widget fills the bar. A v5 site's top bar carries the site's own mark and name instead |
+| Owner webapp (logged in) | — | — | No wordmark: in the v5 app, the site's mark and its menu take its place (in the v4 app, deleted, the avatar and icon row did) |
 
 **Rules:**
 - Always italic, always Newsreader

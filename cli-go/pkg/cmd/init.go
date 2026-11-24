@@ -15,7 +15,7 @@ func handleInit(args []string) {
 	email := fs.String("email", "", "Email address (optional, private by default)")
 	theme := fs.String("theme", "", "Initial theme (default: a random theme, never a reserved one)")
 	licenseFlag := fs.String("license", "", "Terms for your posts: reserved, open, or none (omit to be asked)")
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 	dir := getDataDir()
 

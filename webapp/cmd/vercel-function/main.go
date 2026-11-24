@@ -86,7 +86,7 @@ func build(version, out string) error {
 	if err := os.MkdirAll(fn, 0o755); err != nil {
 		return err
 	}
-	cmd := exec.Command("go", "build", "-trimpath",
+	cmd := exec.Command("go", "build", "-trimpath", //nolint:gosec // G204: the build tool's own fixed go build invocation
 		"-ldflags", "-s -w -X github.com/vdibart/polis-cli/webapp/vercelentry.Version="+version,
 		"-o", filepath.Join(fn, "bootstrap"), "./cmd/vercel-bootstrap")
 	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")

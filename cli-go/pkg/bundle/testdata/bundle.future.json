@@ -144,7 +144,7 @@
     },
     "v4": {
       "name": "v4",
-      "version": "1.8.65",
+      "version": "1.8.66",
       "entry": {
         "post": "stream-post.html",
         "stream": "stream.html"

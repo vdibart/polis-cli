@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<!--! polis · trail marker. A polis site: signed posts on the author's own domain
+     (/.well-known/polis is its identity). This page is the v5 shape, rendered by
+     cli-go/pkg/render/v5.go from cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v5/
+     (frame.html, its card templates, v5.js, v5.css); a theme supplies tokens only.
+     Pull the thread: https://github.com/vdibart/polis-cli/blob/main/docs/README.md (start here) ·
+     https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/shapes.md ·
+     https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/themes.md ·
+     https://github.com/vdibart/polis-cli/blob/main/docs/handbook/foreign-site-widget.md · https://github.com/vdibart/polis-cli/blob/main/AGENTS.md -->
+
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>about — V4 Test</title>
+<link rel="canonical" href="https://example.com/about">
+<meta name="description" content="I write about signed things. one two">
+<link rel="sitemap" type="application/xml" title="Sitemap" href="/sitemap.xml">
+<meta property="og:title" content="V4 Test">
+<meta property="og:description" content="I write about signed things. one two">
+<meta property="og:url" content="https://example.com/about">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://example.com/favicon.svg">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="V4 Test">
+<meta name="twitter:description" content="I write about signed things. one two">
+<meta name="twitter:image" content="https://example.com/favicon.svg">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  "name": "V4 Test",
+  "url": "https://example.com/",
+  "description": "I write about signed things. one two"
+}
+</script>
+
+<link rel="icon" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,500&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<link rel="stylesheet" href="/styles.css?v=0.3.16">
+<script src="/v5.js?v=0.3.16" defer></script>
+</head>
+<body class="v5 single" data-sec="about" data-site="example.com">
+
+<header class="topbar">
+  
+  <a class="author" href="/" aria-label="example.com, home"><span class="avatar-initial">V</span><span class="ah">example.com</span></a>
+  <nav class="menu" aria-label="example.com"><div class="box"><a class="way on" href="/about" data-way="about" title="about" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.6"/><path d="M5 20c.8-3.8 3.6-5.6 7-5.6s6.2 1.8 7 5.6"/></svg><span class="lbl">about</span></a></div><div class="trail"><a class="way" href="/" data-way="posts" title="posts"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 11h14M5 16h9"/></svg><span class="lbl">posts</span></a><a class="way" href="/pql/all+comments+by+date" data-way="comments" title="comments"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/></svg><span class="lbl">comments</span></a><a class="way" href="/pql/all+profiles+from+example.com%27s+network" data-way="following" title="following"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="9" r="3"/><path d="M3.5 19c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5"/><circle cx="16.5" cy="8" r="2.5"/><path d="M15.8 13.6c2.3.1 4.1 1.6 4.7 4.4"/></svg><span class="lbl">following</span></a><a class="way own-only" href="/_/" data-way="home" title="home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11l8-6.5 8 6.5"/><path d="M6.5 9.5V19h11V9.5"/></svg><span class="lbl">home</span></a></div></nav>
+  
+  <div class="you"><div id="polis-widget-follow" data-author="example.com" data-shape="v5"></div></div>
+</header>
+
+<main class="col">
+
+<article class="item about still open" data-path="/about">
+  <div class="stick" aria-hidden="true"><div class="srow"><div class="sin"><span class="sdate"></span><span class="sttl">V4 Author</span></div></div></div>
+  <h1 class="name">V4 Author</h1>
+  <div class="bio"><p>I write about <em>signed</em> things.</p>
+<ul>
+<li>one</li>
+<li>two</li>
+</ul>
+</div>
+  <div class="facts"></div>
+</article>
+
+</main>
+
+<footer class="foot">
+  <a href="/license">terms of use</a>
+  <a href="/.well-known/polis">check the signatures</a>
+  <span class="spacer"></span>
+  <span class="made">a <b>polis</b> site</span>
+</footer>
+
+<div id="polis-nav-root"></div>
+
+<script src="https://polis.pub/widget-1.6.2.js" crossorigin="anonymous" defer></script>
+
+</body>
+</html>

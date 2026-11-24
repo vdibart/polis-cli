@@ -8,19 +8,21 @@
 //
 // Trail across files (DS-to-stream, continuous sync):
 //   producer       — webapp/internal/server/sync.go: runUnifiedSync()
-//   DS endpoint    — discovery-service/core/handlers/stream.ts
+//   DS endpoint    — the discovery service's GET /v1/stream (its source is not published; docs/ds/developer/api-reference.md)
 //   transformer    — this file (FeedHandler.Process)
 //   cursor + cache — cli-go/pkg/stream/store.go (Store)
 //
 // Pull the thread:
-//   github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md  (tour)
-//   github.com/vdibart/polis-cli/blob/main/docs/general/concepts/content-types.md
-//   github.com/vdibart/polis-cli/blob/main/AGENTS.md                      (map)
+//   https://github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md  (tour)
+//   https://github.com/vdibart/polis-cli/blob/main/docs/general/concepts/content-types.md
+//   https://github.com/vdibart/polis-cli/blob/main/AGENTS.md                      (map)
 // =============================================================================
 
 package feed
 
 import (
+	"time"
+
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 )
 
@@ -268,8 +270,8 @@ func (h *FeedHandler) followEventToItem(evt discovery.StreamEvent) FeedItem {
 // followRemoveEventToItem extracts a FeedItem from a follow.removed event.
 // Mirrors followEventToItem but uses an "unfollow:" URL prefix so dedup
 // keys can distinguish announce-then-remove for the same (actor, target)
-// pair. The activity-stream renderer (owner-extras.js appendFollowSignal)
-// reads EventType to choose between "followed" and "unfollowed" verbs.
+// pair. A renderer of the activity reads EventType to choose between the
+// "followed" and "unfollowed" verbs.
 func (h *FeedHandler) followRemoveEventToItem(evt discovery.StreamEvent) FeedItem {
 	targetDomain, _ := evt.Payload["target_domain"].(string)
 
@@ -294,5 +296,32 @@ func (h *FeedHandler) siteRegisteredToItem(evt discovery.StreamEvent) FeedItem {
 		Published:    evt.Timestamp,
 		AuthorURL:    "https://" + evt.Actor,
 		AuthorDomain: evt.Actor,
+	}
+}
+
+// ItemFromContentRecord is a post the discovery service has registered (a
+// GET /v1/content record), as a feed item: the same fields, and the same id,
+// as the post's published event gives (postEventToItem), so a post found both
+// ways is one item.
+func ItemFromContentRecord(rec discovery.ContentRecord) CachedFeedItem {
+	title, _ := rec.Metadata["title"].(string)
+	published, _ := rec.Metadata["published_at"].(string)
+	if published == "" {
+		published = rec.CreatedAt
+	}
+	if t := ParsePublished(published); !t.IsZero() {
+		published = t.UTC().Format(time.RFC3339)
+	}
+	authorURL := "https://" + rec.Actor
+	return CachedFeedItem{
+		ID:           ComputeItemID(authorURL, rec.URL),
+		Type:         "post",
+		EventType:    "pub.polis.post.published",
+		Title:        title,
+		URL:          rec.URL,
+		Published:    published,
+		Hash:         rec.Version,
+		AuthorURL:    authorURL,
+		AuthorDomain: rec.Actor,
 	}
 }

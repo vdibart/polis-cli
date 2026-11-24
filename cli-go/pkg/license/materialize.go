@@ -197,6 +197,42 @@ func StripBlock(frontmatter string) string {
 	return strings.Join(out, "\n")
 }
 
+// ExtractBlock returns a work's `license:` block exactly as its frontmatter
+// carries it: the column-0 key line and the indented lines under it, with no
+// trailing newline. Returns "" when the work carries no terms.
+//
+// Used where a new version of a work keeps the terms its earlier version was
+// published under, byte for byte: terms are not retroactive, so an edit
+// neither drops them nor re-resolves them to the site's current terms.
+// Matches by structural position, like StripBlock.
+func ExtractBlock(content string) string {
+	fm, ok := frontmatterSection(content)
+	if !ok {
+		return ""
+	}
+	var out []string
+	inside := false
+	for _, line := range strings.Split(fm, "\n") {
+		indented := strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")
+		if inside {
+			if line != "" && !indented {
+				break
+			}
+			out = append(out, line)
+			continue
+		}
+		if key, _, cut := strings.Cut(line, ":"); cut && !indented &&
+			strings.TrimSpace(key) == FrontmatterKey {
+			inside = true
+			out = append(out, line)
+		}
+	}
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	return strings.Join(out, "\n")
+}
+
 // Resolve produces the terms to stamp into a work at publish time.
 //
 // Precedence is work > site, resolved here and frozen into the signed payload.

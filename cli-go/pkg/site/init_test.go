@@ -216,6 +216,27 @@ func TestInit_CustomTheme(t *testing.T) {
 	}
 }
 
+// TestInit_ThemeAcceptsBareAndQualifiedNames: `polis init --theme` takes the
+// short name or the fully-qualified one, and the registry records the FQN
+// once either way (a qualified name used to be prefixed a second time).
+func TestInit_ThemeAcceptsBareAndQualifiedNames(t *testing.T) {
+	for _, in := range []string{"vice", "pub.polis.themes.vice"} {
+		t.Run(in, func(t *testing.T) {
+			dir := t.TempDir()
+			if _, err := Init(storage.At(dir), InitOptions{Theme: in}); err != nil {
+				t.Fatalf("Init failed: %v", err)
+			}
+			reg, err := bundle.LoadRegistry(storage.At(dir))
+			if err != nil {
+				t.Fatalf("LoadRegistry: %v", err)
+			}
+			if reg.ActiveTheme != "pub.polis.themes.vice" {
+				t.Errorf("active_theme = %q, want pub.polis.themes.vice", reg.ActiveTheme)
+			}
+		})
+	}
+}
+
 // TestInit_SelectsRandomThemeByDefault verifies that polis init with no
 // theme specified picks one from the declared bundle themes and persists
 // it into the registry — no half-initialized state between init and first

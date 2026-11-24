@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+
 	"github.com/vdibart/polis-cli/cli-go/pkg/blessing"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	polisurl "github.com/vdibart/polis-cli/cli-go/pkg/url"
@@ -45,7 +48,7 @@ Subcommands:
   requests              List pending blessing requests on your posts
   grant <version>       Grant a blessing to a comment
   deny <version>        Deny a blessing request
-  beseech <version>     Re-request blessing by content hash
+  beseech <version>     Send a pending comment again, by its version
   sync                  Sync blessed comments from discovery service
 
 Examples:
@@ -231,36 +234,56 @@ func handleBlessingDeny(args []string) {
 	}
 }
 
-// beseechNotSupported is what `polis blessing beseech` says. The Go CLI has no
-// way to re-request a blessing for a version already sent, and the command used
-// to look the comment up, do nothing, and report success. The discovery service
-// keys a blessing on the comment URL and its reply target, and a re-registration
-// returns an earlier denied or granted answer unchanged, so neither alternative
-// named here can re-request a denied comment.
-const beseechNotSupported = "the Go CLI cannot re-request a blessing for a comment version. " +
-	"For a PENDING comment, re-request it from the web app, or republish the comment " +
-	"(polis republish <comment path>), which signs a new version and asks for the blessing again. " +
-	"A denied comment cannot be re-requested: the discovery service keeps the denial"
+// beseechNotFound is what `polis blessing beseech` says for a version that is
+// not one of this site's pending comments. Only a pending comment signed here
+// can be sent again; the discovery service keys a blessing on the comment URL
+// and its reply target, and a re-registration returns an earlier denied or
+// granted answer unchanged, so a denied comment cannot be re-requested.
+const beseechNotFound = "no pending comment signed on this site has that version. " +
+	"Only a PENDING comment can be re-requested (polis comment send <id> does the same by id). " +
+	"A denied comment cannot be re-requested: the discovery service keeps the denial. " +
+	"polis republish <comment path> signs a new version and asks for the blessing again"
 
+// handleBlessingBeseech sends a pending comment again by its version, through
+// the same send as polis comment send (the API's comment.create by id).
 func handleBlessingBeseech(args []string) {
 	if len(args) < 1 {
 		exitError("Usage: polis blessing beseech <comment-version>")
 	}
-	// Refuse before touching the site or the discovery service: nothing this
-	// command could do would send the request.
-	if jsonOutput {
-		outputJSON(map[string]interface{}{
-			"status":  "error",
-			"command": "blessing-beseech",
-			"error": map[string]interface{}{
-				"code":    "NOT_SUPPORTED",
-				"message": beseechNotSupported,
-			},
-		})
-	} else {
-		fmt.Fprintf(os.Stderr, "[x] Not supported: %s\n", beseechNotSupported)
+	version := args[0]
+	dir := getDataDir()
+	if !isPolisSite(dir) {
+		exitError("Not a polis site directory")
 	}
-	os.Exit(1)
+	// Find it here before touching the discovery service.
+	var commentID string
+	pending, _ := comment.ListComments(storage.At(dir), comment.StatusPending)
+	for _, c := range pending {
+		if c.CommentVersion == version {
+			commentID = c.ID
+			break
+		}
+	}
+	if commentID == "" {
+		if jsonOutput {
+			outputJSON(map[string]interface{}{
+				"status":  "error",
+				"command": "blessing-beseech",
+				"error": map[string]interface{}{
+					"code":    "NOT_FOUND",
+					"message": beseechNotFound,
+				},
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "[x] Not found: %s\n", beseechNotFound)
+		}
+		os.Exit(1)
+	}
+	privKey, err := loadPrivateKey(dir)
+	if err != nil {
+		exitError("Failed to load private key: %v", err)
+	}
+	reportCommentSent(commentID, map[string]interface{}{"id": commentID, "version": version}, sendComment(dir, privKey, commentID))
 }
 
 func handleBlessingSync(args []string) {

@@ -271,7 +271,7 @@ func (w *statusResponseWriter) Write(b []byte) (int, error) {
 
 // shouldSkipRequestLog returns true for paths that are too noisy to log.
 func shouldSkipRequestLog(path string) bool {
-	if path == "/api/sse" || path == "/favicon.ico" || path == "/favicon.svg" {
+	if path == "/favicon.ico" || path == "/favicon.svg" {
 		return true
 	}
 	if strings.HasPrefix(path, "/assets/") {
@@ -321,30 +321,27 @@ func GenerateCSPNonce() string {
 // provisioner that writes their routing cannot import this package.
 func CSPTenantContent() string { return csp.TenantContent() }
 
-// CSPAdminSPA returns the CSP header value for the admin SPA (the
-// authenticated owner's dashboard). Permits the per-response inline-
-// script nonce (used by the importmap in index.html) plus the Milkdown
-// editor's esm.sh CDN. Otherwise as restrictive as CSPTenantContent.
+// CSPAdminSPA returns the CSP header value for the owner app (the signed-in
+// owner's interface, served by ServeV5Owner). Permits the per-response
+// inline-script nonce. Otherwise as restrictive as CSPTenantContent.
 //
-// IMPORTANT — script-src-attr 'unsafe-inline' is set because index.html
-// uses ~40 inline event handlers (`onclick=App.foo()` and similar).
-// CSP3 splits the legacy script-src directive into:
-//   - script-src-elem: applies to <script> tags. Stays strict via the
-//     per-response nonce.
-//   - script-src-attr: applies to inline event-handler attributes
-//     (onclick, onerror, etc.). 'unsafe-inline' is required because
-//     hashes don't apply to event handlers without 'unsafe-hashes',
-//     and listing 40+ hashes is brittle and fights every UI change.
+// ⛔ NO THIRD-PARTY SCRIPT OR CONNECT ORIGIN. This is the page that publishes
+// in the owner's name, so any origin listed in script-src could run there if
+// an injection ever landed. Everything the app loads is its own, vendored at a
+// pinned version (as the messages page's Argon2id WASM is), never from a CDN;
+// TestCSPAdminSPAAllowsNoThirdPartyScriptOrConnectOrigin fails otherwise.
 //
-// Threat admitted: a sanitization bypass that lets attacker HTML reach
-// the SPA's renderer can plant an inline event handler. bluemonday
-// strips on*= attributes by default, so this requires both a
-// sanitization bypass AND the owner clicking the malicious element.
-// Acceptable as a short-term posture; a future refactor to delegated
-// addEventListener in app.js (replacing inline handlers with
-// data-action attributes) will let us drop script-src-attr to 'none'.
+// ⛔ script-src-attr 'none': no inline event-handler attribute (onclick=,
+// onerror= and the rest) runs on this page. CSP3 splits script-src into
+// script-src-elem (<script> tags, held to the per-response nonce) and
+// script-src-attr (handler attributes). The owner app attaches every handler
+// from its own scripts (addEventListener, or .onclick = fn), which this
+// directive does not govern, and builds no handler attribute into markup, so
+// nothing needs an allowance. With one, a sanitization bypass that let
+// attacker HTML reach the app's renderer could plant a handler that runs when
+// the owner clicks; with 'none' it cannot run at all.
 func CSPAdminSPA(nonce string) string {
-	scriptElem := "'self' 'nonce-" + nonce + "' https://esm.sh"
+	scriptElem := "'self' 'nonce-" + nonce + "'"
 	// 'wasm-unsafe-eval' (on script-src only — it governs WASM compilation; not on
 	// script-src-elem, where it's meaningless) lets the admin SPA instantiate the vendored
 	// Argon2id WASM (hash-wasm) that derives the DM message key in-browser. It permits WASM
@@ -358,13 +355,13 @@ func CSPAdminSPA(nonce string) string {
 		// script-src-elem / script-src-attr for CSP3-aware browsers.
 		"script-src " + scriptSrc,
 		"script-src-elem " + scriptElem,
-		"script-src-attr 'unsafe-inline'",
+		"script-src-attr 'none'",
 		// SPA loads Google Fonts (Inter + Newsreader) via <link
 		// rel="stylesheet"> at the top of index.html.
 		"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
 		"img-src 'self' data: https:",
 		"font-src 'self' data: https://fonts.gstatic.com",
-		"connect-src 'self' https://esm.sh",
+		"connect-src 'self'",
 		"frame-src 'none'",
 		"object-src 'none'",
 		"base-uri 'self'",

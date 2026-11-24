@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -50,5 +51,25 @@ func TestTagListAndDeleteRefuseTraversal(t *testing.T) {
 				t.Errorf("tag %s %q succeeded", action, name)
 			}
 		}
+	}
+}
+
+// DELETE /v1/content/tag/{name} passes the name as "id". It used to be read
+// only from "tag", so that route always answered "tag name required".
+func TestTagDeleteTakesTheNameFromTheRoute(t *testing.T) {
+	engine, _ := newTestEngine(t)
+	_, err := engine.Dispatch(context.Background(), ActionRequest{
+		Action: "delete", ContentType: "pub.polis.tag",
+		Payload: map[string]any{"id": "never-made"},
+	})
+	if err == nil || strings.Contains(err.Error(), "tag name required") {
+		t.Errorf("delete by id: err = %v, want the tag looked up (and not found)", err)
+	}
+	// The id is held to the same rule as the body field.
+	if _, err := engine.Dispatch(context.Background(), ActionRequest{
+		Action: "delete", ContentType: "pub.polis.tag",
+		Payload: map[string]any{"id": ".."},
+	}); err == nil {
+		t.Error(`delete with id ".." succeeded`)
 	}
 }

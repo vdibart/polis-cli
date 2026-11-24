@@ -1,0 +1,17 @@
+{
+  "note": "studio13: black, white type, one hot orange.",
+  "tokens": {
+    "scheme": "dark",
+    "site": "#f4541a",
+    "bg": "#0a0a0a",
+    "surface": "#1a1a1a",
+    "card-hover": "#222222",
+    "panel": "#2a2a2a",
+    "text": "#ffffff",
+    "text-soft": "#e0e0e0",
+    "text-muted": "#a0a0a0",
+    "ink": "#000000",
+    "wordmark": "#00d4ff",
+    "accent-2": "#00d4ff"
+  }
+}

@@ -2,7 +2,174 @@
 
 *For* [Developers](../../README.md#building-on-polis) — *Kind* [Reference](../../README.md#kinds-of-page) — *Component* [Webapp](../../webapp/README.md) — *Code* [`webapp/internal/api`](../../../webapp/internal/api)
 
-The Content Type API provides programmatic access to polis content operations. It runs alongside the webapp under the `/v1/` route prefix.
+The site's API: every operation under `/v1/`, its content, settings, agents and messages. It is the one API a
+site has. The owner's own app, an agent over MCP, a script and the `polis` CLI all run these operations, the
+CLI in process on a local site with no server. What is outside it, and why, is in
+[the site API page](site-api.md).
+
+## The API describes itself
+
+⚠️ **Preview.** The API is a preview until every site action has one implementation, and the description
+says so (`info.x-polis-preview` is `true`). Until then an operation and its shape may still change, but
+every change is listed in the changelog and nothing changes silently. When that work is finished, `/v1` is
+declared stable: it then changes only by addition, a breaking change goes to `/v2`, served beside `/v1`, and
+`/v1` is still served three months after `/v2` is announced. `x-polis-preview` becomes `false` on that day.
+
+`GET /v1/openapi.json` is this site's API as an **OpenAPI 3.1** document. It is public and generated from the
+operations the site serves, never written by hand, so it cannot list an operation the site does not have. It is
+**per site**: it lists only what this site can do. A site whose instance never holds the owner's key leaves out
+every operation that signs. A site with no public API leaves out the operations other sites call. A site with
+no operator has no account operations.
+
+Each operation carries:
+
+| Member | Meaning |
+|---|---|
+| `x-polis-auth` | `public` (no credential), `owner` (a token the owner issued, with the scope in `x-polis-scope`), or `site-signed` (another polis site's signed request) |
+| `x-polis-title` | its name for a person, short and plain ("Restyle your site"), what an agent app shows for the tool; every operation an agent can be offered has one |
+| `x-polis-write` | whether it changes anything; a client can ask the owner before calling one |
+| `x-polis-destructive` | whether it removes something no other call restores |
+| `x-polis-signs` | whether it signs with the site's key |
+| `x-polis-owner-only` | whether it is on the owner-only list: served to the owner's own full-access token and never to an agent's scope |
+| `x-polis-sign-in-only` | present and `true` on the owner-only operations served on the owner's own sign-in alone, and to no token, the owner's full-access one included: downloading the site (`site.download`), making a token (`agent.make_token`), rotating the key (`site.rotate_key`), and every change to the messages key (`dm.set_password`, `dm.change_password`, `dm.new_key`, `dm.rewrap_earlier`). A token gets `403` `sign_in_only` |
+
+`x-polis-prompts` lists ready-made requests an agent app can show the owner as suggestions ("What's new in my
+network?", "Restyle my site"), each with the operations it needs. The MCP server offers a connection only the prompts
+whose every operation it may call, as MCP prompts beside the tools.
+
+`x-polis-manual` lists what only the owner can do, by hand, in their own app: rotating the key, downloading the
+site, changing the terms of use, switching agents on or off, reading and protecting messages, managing sign-in.
+Each entry says why it is the owner's alone and gives the steps and a link, so an agent asked to do one can tell
+the owner how. The steps name the owner's app by its labels and link to its places (`steps_provisional` is `false`; while it was `true`, they named an older app).
+
+Most of those actions are also owner-only operations, which the owner's own interface calls: `site.rotate_key`,
+`site.download`, `license.set`, `site.set_policy` and `site.reset_policy` (the owner's own rules, any that are valid, and the defaults back: a token with `policy:write` only tightens), the agents' (`agent.list_tokens`, `agent.make_token`, `agent.revoke_token`,
+`agent.list_connections`, `agent.disconnect`, `agent.rosie`, `agent.set_rosie`) and the messages password's
+(`dm.keyring`, `dm.set_password`, `dm.change_password`, `dm.new_key` for a fresh key when the password and phrase are both lost, `dm.rewrap_earlier` to keep an earlier key open under the current password). `dm.get` also answers a message the site cannot open (under the owner's password) with its box (`ciphertext`, `nonce`, `box_pub`, `key_epoch`), for the owner's browser to open. On `polis.pub` there is no `site.download`: downloading
+a site there is `polis.pub`'s verified export, requested in the owner's account and confirmed from the email, and
+the sign-in email is `polis.pub`'s too.
+
+**Finding it.** A site that publishes its API names it in `.well-known/polis` under `api`:
+
+```json
+"api": {
+  "description": "https://alice.example.com/v1/openapi.json",
+  "version": "v1",
+  "mcp": "https://alice.example.com/mcp"
+}
+```
+
+`mcp` is present only where the site has an MCP endpoint an outside agent can reach. A site with no API an
+outsider can reach publishes no `api` member. Read the pointer rather than assuming the path. The pointer is
+published only where the instance is started with `POLIS_API_POINTER=1`; the description is served either way.
+
+## Agents: MCP tools generated from this description
+
+An agent reaches the site through MCP tools **generated from this description** (`cli-go/pkg/mcpgen`): one tool per
+operation an agent may use, `how_do_i` for what only the owner can do (from `x-polis-manual`), and the prompts above,
+each call made to this same `/v1` with the agent's own token. There are three servers: `polis mcp --site <address>`
+over stdio with the token in `POLIS_TOKEN`, a laptop's or remote instance's own [`/mcp`](site-api.md#mcp-outside-api),
+and on polis.pub each site's `https://<handle>.polis.pub/mcp`, where an agent signs in instead of being handed a
+token. Owner-only operations and every message operation are never tools. The architecture (what the description
+becomes, the three servers, the grant check and the marker on every call) is [MCP and agent access](mcp.md).
+
+The owner sees every connection, however it was made, in the owner app under **enhance › Agents**, and can
+disconnect any of them there: that withdraws the grant first and then ends the connection's tokens.
+
+⭐ **Give an agent a personal token, never your full key.** A scoped key is a personal token: minting it writes
+your signed grant for the connection (see *Scopes*), and everything the agent writes with it is marked as that
+connection's. Your full key acts as you, unmarked.
+
+## Reading content: the query operation
+
+`GET /v1/query?pql=<sentence>` reads content with one sentence in polis's query language, PQL
+([reference](../../general/reference/pql.md)), and answers the same JSON envelope as `/pql/<sentence>`, from the
+same handler. Any other query parameter passes through as one of PQL's transport parameters.
+
+```bash
+# Public content: no credential
+curl "https://mysite.example.com/v1/query?pql=all+posts+by+date"
+
+# The owner's own private content (first-person scopes, drafts, messages): the owner's full-access token
+curl -H "Authorization: Bearer polis_..." "https://mysite.example.com/v1/query?pql=all+posts+from+my+network"
+```
+
+An owner-private sentence answers `401` with no token and `403 insufficient_scope` with a scoped key. Settings
+and site facts are not PQL. `/pql/` itself is unchanged and keeps its session-based check.
+
+`search=<words>` keeps the items whose title or excerpt holds the words, for posts and comments as well as
+profiles. It searches what the site has: its own content and the feeds it has cached from the network and polis;
+nothing yet searches all of polis. `all profiles from <site>'s network` is that site's Following list, only the
+sites it follows; `all profiles from my network` lists the owner's followers too, each marked.
+
+`all activity about me` is the owner's own activity, newest first, from the site's notifications: who followed or
+unfollowed them, who commented on their posts or asked for a blessing, and who blessed or turned away their
+comments. A followed author publishing is in `all posts from my network` instead. It needs the `notify` scope.
+Any other `about` is served by the discovery service's own `/pql/`.
+
+When a request needs several scopes (a counts list, `new_for`), the token must carry every one of them.
+
+`time=<window>` (`1h`, `24h`, `2d`, `7d`, `30d` or `all`) is how far back the network's posts and comments go. A
+request that names none, and `all`, get the widest window the site serves, 30 days; counts read the same window as
+the list. The owner's own content, and comments waiting for a blessing, are never cut by it.
+
+`new_for=<section>` (`gather`, `write` or `message`) marks each item `"new": true` or `false` against the time the
+owner has seen that section up to ([What the owner has seen](#what-the-owner-has-seen)); in a section never marked,
+everything is new. `only_new=1` keeps only the new items. Both need the `read` scope, and neither clears anything.
+
+`all comments from all polis to bless` lists every comment waiting for the owner's blessing, from the discovery
+service's pending list, however old and whoever wrote it. Anyone may ask: blessing decides who is notified (the post
+author) and what the author's page shows, not who may ask which comments are waiting. Asked of the author's own site by anyone but the
+author, it is empty, because the author's site strips unblessed comments about its own posts; the discovery service
+answers in full. See [who you ask decides what you see](../../general/concepts/content-types.md#what-blessing-does-and-why-the-answer-depends-on-who-you-ask).
+
+## The site: its facts and settings
+
+`GET /v1/site` is the site's public facts: its address, the author's name and avatar, the bio (markdown and HTML),
+the identity key and its `did:web` name, when the site began (`since`), how many sites follow it (`followers`, a
+count), the active theme, and where its terms of use are. Everything in it is
+already public on the site. No credential.
+
+The settings an owner changes in their app are operations under `/v1/site`, each served by the app's own code:
+
+| Operation | Body | Scope |
+|---|---|---|
+| `POST /v1/site/name` | `{"author_name"}` | `profile` |
+| `POST /v1/site/avatar` | `{"avatar": {…} or null}` | `profile` |
+| `POST /v1/site/about` | `{"content"}` (markdown) | `profile` |
+| `POST /v1/site/theme` | `{"theme"}` (one of `theme.list`; reserved themes refused) | `appearance` |
+| `POST /v1/site/rebuild` | none: renders every page again | `appearance` |
+| `GET /v1/site/status` | none: the discovery listing and the last publish's state | `status` |
+| `GET /v1/site/policy` | none: the owner's rules, private then public, in evaluation order (first match decides) | `policy:read` |
+| `POST /v1/site/policy/tighten` | `{"rule"}`: one `deny` rule, added at the top of the private rules | `policy:write` |
+| `POST /v1/site/policy/release` | `{"rule"}`: removes a rule added with tighten, and nothing else | `policy:write` |
+
+## Messages
+
+Direct messages are the owner's alone: **every message operation needs the owner's own full-access token**, and
+no agent scope reaches them, for reading or sending. Beside the `pub.polis.dm` content operations, the owner's
+app uses these to start a conversation and send a message it sealed itself:
+
+| Operation | What |
+|---|---|
+| `GET /v1/messages/recipients` | every site the owner follows, each with whether a message can go to it now (`open`) or why not (`no-dm`, `no-follow`, `unknown`) |
+| `GET /v1/messages/recipient-key?recipient_url=…` | the recipient's published messages key and epoch, to seal to |
+| `GET /v1/messages/protection-status?recipient_url=…` | whether the recipient keeps its messages under a password |
+| `POST /v1/messages/send-sealed` | deliver a message sealed in the owner's browser; the site never sees its text |
+
+`all profiles from my mutuals` lists the sites the owner and they both follow: the ones a message can go to.
+
+## What the owner has seen
+
+`GET /v1/seen` returns, for each section of the owner's app (`gather`, `write`, `message`), the time the owner has
+seen it up to. An item is new when it is later than its section's time, and a section with no time has everything
+new. `POST /v1/seen` with `{"section": "gather", "up_to": "<RFC 3339 time>"}` moves a section's time forward: the
+owner's app sends the time it arrived when the owner leaves the section, so everything that was new on arrival
+is seen. The time never moves backwards, a future time is taken as now, and the times belong to the account, so
+every device agrees. Both need the `notify` scope.
+
+Nothing else clears anything: reading content through `/v1/query` or `/v1/content` leaves the seen times as
+they were. An agent marks a section seen only when the owner asks it to.
 
 ## Use Cases
 
@@ -10,13 +177,17 @@ The Content Type API provides programmatic access to polis content operations. I
 - **3rd party integrations**: Any tool that speaks HTTP+JSON can manage content on a polis site.
 - **Instance-to-instance operations**: DMs use signed-request auth for cross-site delivery without discovery service coupling.
 
-This API covers **content type operations only**. Site settings, theme switching, dashboard aggregations, and setup wizards remain in the webapp/CLI.
+This is the site's one API: everything the owner's own app does to the site is an operation here, its settings
+included (`/v1/site`, `/v1/agents`, `/v1/messages`). What stays outside `/v1` (getting signed in, polis.pub's
+own account, the embeddable widget) is listed with its reason in
+[the site API page](site-api.md). Setting up a new site is the CLI's (`polis init`) or the hosted signup's.
 
 ## Quick Start
 
 ```bash
-# Mint a full-access key from the signed-in webapp (or by hand: see Authentication below)
-# POST /api/keys {"name": "my-script", "scopes": ["full"]}  ->  {"key": {...}, "token": "polis_..."}
+# Make a token on your own sign-in: POST /v1/agents/tokens {"name": "my-script", "scopes": ["full"]}
+# (sign-in only: no token can make one), or by hand (see Authentication below). The owner app's
+# enhance → Agents → Tokens → Make a token makes a scoped one.
 KEY="polis_..."                   # the token, shown once
 
 # List posts (public, no auth needed)
@@ -42,32 +213,94 @@ Authorization: Bearer <api-key>
 
 An API key is a token whose **SHA-256 hash** is recorded in `.polis/api-keys.json`; the server hashes the presented Bearer token and compares it against the stored hashes. Only the hash is ever stored.
 
-**Minting a key.** The site's owner mints and revokes keys through the webapp's owner-only routes, which work the same on a laptop and on a remote instance whose files are not on the owner's disk:
+**The owner's own sign-in.** The site's own interface calls `/v1` with no token, on the owner's sign-in: on `polis.pub` the owner's session, on a laptop the loopback listener, on a remote instance a signed-in session. Such a request is the owner, exactly as the owner's full-access key is: every scope, the owner-only operations included, and no grant or marker. ⛔ It holds only for a request from the site's own page: one whose `Origin` is another site's (`null` included), or whose `Sec-Fetch-Site` is anything but `same-origin` or `none`, is not the owner whatever it carries, reads included. ⭐ A request that presents a token is judged by its token alone, even while the owner is signed in, so an agent running in the owner's browser is still the agent.
 
-| Route | Does |
+**Minting a key.** The site's owner mints and revokes keys on their own sign-in, with `agent.make_token` (`POST /v1/agents/tokens`, sign-in only: no token can make another), `agent.list_tokens` and `agent.revoke_token`, which work the same on a laptop and on a remote instance whose files are not on the owner's disk (the `/api/keys` routes they replaced are gone):
+
+| Operation | Does |
 |---|---|
-| `GET /api/keys` | lists the keys: `id`, `name`, `scopes`, `created_at` (never a hash) |
-| `POST /api/keys` `{"name": "...", "scopes": [...]}` | mints a key and returns it once, as `token`, with `Cache-Control: no-store`. ⛔ `scopes` is required: name the scopes the key needs, or `["full"]` for a key with full access. An empty or missing list is refused rather than defaulting to full |
-| `DELETE /api/keys/{id}` | revokes it |
+| `GET /v1/agents/tokens` | lists the keys: `id`, `name`, `scopes`, `created_at`, and `grant` for a personal token (never a hash). A scoped key made before keys carried grants is renewed here, with a grant of its own |
+| `POST /v1/agents/tokens` `{"name": "...", "scopes": [...]}` | mints a key and returns it once, as `token`, with `Cache-Control: no-store`. Sign-in only. ⛔ `scopes` is required: name the scopes the key needs, or `["full"]` for a key with full access. An empty or missing list is refused rather than defaulting to full. A scoped key is a personal token: its grant is written first (see *Personal tokens and grants*) |
+| `POST /v1/agents/tokens/revoke` `{"id": "..."}` | revokes it; a personal token's grant is withdrawn first |
 
 A key can also be made by hand: `KEY="polis_$(openssl rand -hex 32)"`, then add `{"id": "k1", "name": "my-script", "key_hash": "<sha256 of $KEY>", "created_at": "..."}` to the `keys` list in `.polis/api-keys.json`, mode `600`.
 
 ### Scopes
 
-A key with no `scopes` has **full access**, as every key did before scopes existed. A scoped key may act only within its scopes:
+A key with no `scopes` has **full access**: it is the owner's own token, as every key was before scopes existed.
+A scoped key may act only within its scopes. Each operation's scope is in the API's description
+(`x-polis-scope`, see *The API describes itself*). The vocabulary, version 1:
 
 | Scope | Covers |
 |---|---|
-| `render` | the site's rendered output (its appearance), never an authored or signed source |
+| `read` | the owner's own private content except messages: drafts, the network's feed, follows |
+| `publish` | publishing and republishing posts |
+| `comment` | writing, editing and sending comments |
+| `bless` | blessing, turning away and unblessing comments on the owner's posts |
+| `follow` | following and unfollowing |
+| `tag` | tagging posts and comments |
+| `appearance` | the site's theme and styles, never an authored or signed source (`render` is its earlier name and still works) |
+| `profile` | the name, avatar and bio |
+| `policy:read` | the owner's rules for who may comment and message |
+| `policy:write` | tightening those rules: adding `deny` rules at the top of the private rules, and removing only rules the same grant added, never anything that could loosen a decision |
+| `notify` | that something happened (a message from someone, a new follower, a comment waiting), never what it said |
+| `status` | how the site is running: when it last synced, whether it published, its version |
 
-The content API on this page acts on authored content, so it accepts **only full-access keys**. A scoped key is refused with `403` and the error code `insufficient_scope`.
+The description publishes this vocabulary as `x-polis-scopes`: for each scope its `name`, the `sentence` a consent
+screen shows for it, `agent` (whether an agent's grant may carry it) and, for `policy:write`, the `warning` said
+beside it. Every place an owner grants scopes (polis.pub's consent page, the owner app's *Make a token*) renders
+from that one list.
+
+No scope reaches messages: they need the owner's full-access token. A token outside its scopes is refused with
+`403` and the error code `insufficient_scope`, saying which scope was needed.
 
 ⚠️ A scoped key is only as narrow as the build reading it: a build older than scopes ignores the field and treats every key as full access.
 
-A key may also be **bound** to one path (`"bound": "/mcp"` in its entry): it works there and nowhere else. The keys an instance mints
-for Kay are bound, one per MCP address, so a key handed to a chat limited to one part of the site cannot be used at another. A bound
-key is always scoped. Only the instance mints bound keys: `POST /api/keys` makes unbound ones, and `GET /api/keys` does not show
-`bound`. ⚠️ Like scopes, a build older than binding ignores it.
+### Personal tokens and grants
+
+A scoped key is a **personal token**: it presents one signed grant on the owner's site, and the grant, not the
+key, says what it may do. The owner makes one in the owner app, **enhance → Agents → Tokens → Make a token**:
+they say what it is for and tick what it may do, and the token is shown once. That control calls
+`POST /v1/agents/tokens` (`agent.make_token`), which is sign-in only: a script cannot make a token with a token.
+
+- **Minting one writes the grant first.** It is a `pub.polis.attestation.grant` with behaviour set `agent/1`,
+  basis `user-signed`, the key's name as `agent`, and the granted scopes in `scopes` ([delegation](../../signet/spec/delegation.md)).
+  The key stores only the grant's URL. ⛔ An agent's grant can hold any scope above except `tag` (tagging
+  stays with the owner, in the CLI or the app); `full` is never a grant. `follow` became grantable once the
+  follow list's entries could carry the marker: a grant names its scopes, so no grant made before then holds it.
+- **Every request checks the grant is live**: on the site, verifying, never withdrawn, and holding the scope the
+  operation needs. If it isn't, the request is refused with `403` `grant_withdrawn`, reads included.
+- **Every write is marked.** A post or comment carries `agent:` and `grant:` in its frontmatter, inside the
+  signature. A blessing decision carries the marker in its signed request, a follow's entry in the signed
+  follow list carries it (an unfollow removes an entry, so it is recorded instead), and a policy rule records
+  the grant in `added_by`. Every write, signed or not, is recorded in the site's private act log
+  (`.polis/connections/acts.jsonl`): the agent, the grant, the operation, the status and the request's
+  `X-Request-Id`. The owner's own writes are recorded there too, unmarked, so the log answers "what changed
+  my site?"; each kind keeps its own newest entries, so the owner's frequent writes never push an agent's
+  record out.
+- **Revoking the key withdraws its grant**, so the connection is switched off on the record.
+- **The description a token is served** (`/v1/openapi.json` with its `Authorization`) leaves out what its grant
+  cannot do, so generated tools never offer an operation that would be refused.
+- ⚠️ **A scoped key made before keys carried grants** can read but not write, until the owner lists the
+  tokens (`GET /v1/agents/tokens`), which renews it with a grant of its own (dropping `tag`, and `follow` too: the key was minted before an
+  agent could be granted it, so the owner grants it by making a new connection).
+- ⚠️ **The grant is public.** Like every attestation, it is published on the site and registered with the
+  discovery service, and the site's agents page lists it. A connection's name is visible to anyone, so name it
+  accordingly. Minting a personal token answers with a `warning` saying so, and a token minted with no `name`
+  is called `Agent <n>`, which names no software.
+
+A key may also be **bound** to one path (`"bound": "/mcp"` in its entry): it works there and nowhere else, and `/v1` accepts it only
+on a call the instance's `/mcp` makes for it. Bound keys were minted for Kay (the instance's built-in agent, whose page went with
+the previous owner app on 2026-11-22), each a personal token with its own grant like any agent's; one made then still works at `/mcp`,
+and this build mints no new ones. A bound key is always scoped. `POST /v1/agents/tokens` makes unbound keys, and `GET /v1/agents/tokens`
+does not show `bound`. ⚠️ Like scopes, a build older than binding ignores it.
+
+**Rate limits.** Past a limit the answer is `429` with the error code `rate_limited` and a `Retry-After` header:
+- each token other than the owner's full-access one may make **200 writes an hour**, of which at most **50 deletes**
+  (reads are not counted), so an agent caught in a loop stops there;
+- a call with no token is limited to **600 an hour per address**.
+
+The counters are kept in memory by each server process.
 
 **`/mcp` limits.** [`/mcp`](site-api.md#mcp-outside-api) is where the owner's AI acts on the site. An address whose requests keep failing to authenticate is refused with `429` for the rest of the minute; successful
 calls are never counted. The instance keeps its list of keys in memory for a few seconds, so a key revoked on one instance of a
@@ -79,9 +312,11 @@ multi-instance deployment can keep working on another for up to ten seconds.
 | `GET /v1/content/{type}/{id}` | No (public types only) |
 | `GET /v1/bundles` | No |
 | `GET /v1/bundles/{name}` | No |
-| `GET /v1/content/{type}/drafts[/{id}]` | Yes |
 | `GET` on private types (`dm`, `follow`) and on any type the core bundle does not declare | Yes |
 | Everything else | Yes |
+
+On `/v1/query`, a public sentence needs nothing, the owner's own private content needs `read`, and messages need
+the full-access token. Asking for `counts` needs whatever the most private counted type needs.
 
 Private content types (`pub.polis.dm`, `pub.polis.follow`) require Bearer token auth for all operations including reads. Every other type allows unauthenticated reads.
 
@@ -99,32 +334,32 @@ The signed canonical JSON is `{"action","body_sha256","domain","recipient","time
 
 Missing auth returns `401 Unauthorized`. Invalid key, or a signed request that fails verification, returns `403 Forbidden`. A valid key without the access an operation needs returns `403` with the code `insufficient_scope`.
 
-## Routes
+## Paths
 
-### Content CRUD
+Every operation's path follows one rule, so a client can tell from a path what kind of operation it is. The
+description at `/v1/openapi.json` is the full list; a build test checks every operation in it against this rule.
 
-```
-GET    /v1/content/{type}                    List content
-GET    /v1/content/{type}/{id}               Get content by ID
-POST   /v1/content/{type}                    Create content
-PUT    /v1/content/{type}/{id}               Update content
-DELETE /v1/content/{type}/{id}               Delete content
-```
-
-### Type-Specific Actions
+**A content type's operations**, under `/v1/content/{type}` (`post`, `comment`, `follow`, `tag`, `dm`, `theme`,
+`license`):
 
 ```
-POST   /v1/content/{type}/actions/{action}   Dispatch action
+GET    /v1/content/{type}                    list
+POST   /v1/content/{type}                    create
+GET    /v1/content/{type}/{id}               get one
+PUT    /v1/content/{type}/{id}               update one
+POST   /v1/content/{type}/actions/{action}   any other action; {action} is the operation's own name
+                                             (post.save_draft is /v1/content/post/actions/save_draft)
+GET    /v1/content/{type}/{view}             a named read of the type, its subject in the query string:
+                                             /v1/content/post/source?path=…, /v1/content/post/body?url=…,
+                                             /v1/content/license/current
 ```
 
-### Drafts
+**A site's settings, agents and messages**, under `/v1/{area}`, where `{area}` is `site`, `agents`, `messages`,
+`query` or `seen`: `GET` reads and `POST` changes, and nested nouns are kebab-case
+(`/v1/site/policy/tighten`, `/v1/messages/recipient-key`).
 
-```
-GET    /v1/content/{type}/drafts             List drafts
-GET    /v1/content/{type}/drafts/{id}        Get draft
-POST   /v1/content/{type}/drafts             Save draft
-DELETE /v1/content/{type}/drafts/{id}        Delete draft
-```
+Drafts are actions on the post type (`save_draft`, `discard_draft`), read through the query operation
+(`all drafts from me`). There is no `DELETE`: removing something is an action.
 
 ### Bundle Introspection
 
@@ -160,14 +395,22 @@ Resolution: short names try `pub.polis.<name>` first, then search all bundles fo
 | Action | Method + Path | Status |
 |--------|---------------|--------|
 | List posts | `GET /v1/content/post` | Implemented |
-| Get post | `GET /v1/content/post/{id}` | Routed, not wired |
+| Get one of your posts (its markdown) | `GET /v1/content/post/source?path=…` | Implemented |
+| Read any post in full | `GET /v1/content/post/body?url=…` | Implemented |
 | Create (publish) | `POST /v1/content/post` | Implemented |
-| Update (republish) | `PUT /v1/content/post/{id}` | Routed, not wired |
-| Delete (unpublish) | `DELETE /v1/content/post/{id}` | Routed, not wired |
-| Render preview | `POST /v1/content/post/actions/render` | Routed, not wired |
-| Draft CRUD | `*/v1/content/post/drafts[/{id}]` | Routed, not wired |
+| Update (republish) | `PUT /v1/content/post/{id}` (the post named by `path` in the body) | Implemented |
+| Unpublish | `POST /v1/content/post/actions/unpublish` (`{"path": …}`), owner only | Implemented |
+| Save a draft | `POST /v1/content/post/actions/save_draft`, owner only | Implemented |
+| Discard a draft | `POST /v1/content/post/actions/discard_draft`, owner only | Implemented |
+| Read drafts | the query operation, `all drafts from me` | Implemented |
 
-A route marked *not wired* answers `400 unsupported_action`.
+Not offered: `GET /v1/content/post/{id}` (read a post's markdown through `…/post/source`), `DELETE
+/v1/content/post/{id}` (taking a post down is `unpublish`), and a render preview (`POST …/post/actions/render`):
+a post is rendered when it is published, and the whole site by `POST /v1/site/rebuild`. Each answers
+`400 unsupported_action`, and none is in the description. Unpublishing takes the post off the
+site and the discovery service, removes its page, its earlier versions and its index entry, and puts its
+text back in the drafts, without its signature. It cannot be undone: publishing the draft again is a new
+post. `/v1/openapi.json` is the authoritative list.
 
 **Create post request:**
 ```json
@@ -219,14 +462,18 @@ Posts are returned newest-first (reverse index order). Only `type: "post"` entri
 
 | Action | Method + Path | Status |
 |--------|---------------|--------|
-| List comments | `GET /v1/content/comment` | Routed, not wired |
-| Get comment | `GET /v1/content/comment/{id}` | Routed, not wired |
+| List comments | the query operation (`all comments from me`; waiting ones, `all comments from all polis to bless`) | Implemented |
+| Get one of your comments (its markdown) | `GET /v1/content/comment/source?path=…` | Implemented |
 | Create (beseech) | `POST /v1/content/comment` | Implemented |
 | Update (republish) | `PUT /v1/content/comment/{id}` | Implemented |
-| Bless | `POST /v1/content/comment/actions/bless` | Routed, not wired |
-| Deny | `POST /v1/content/comment/actions/deny` | Routed, not wired |
-| Revoke | `POST /v1/content/comment/actions/revoke` | Routed, not wired |
-| Sync | `POST /v1/content/comment/actions/sync` | Routed, not wired |
+| Bless | `POST /v1/content/comment/actions/bless` | Implemented |
+| Deny | `POST /v1/content/comment/actions/deny` | Implemented |
+| Unbless | `POST /v1/content/comment/actions/unbless` | Implemented |
+
+Not offered: `GET /v1/content/comment` and `GET /v1/content/comment/{id}` (list and read comments through the
+query operation and `…/comment/source`), `revoke` (taking a blessing back is `unbless`) and `sync` (the site
+syncs its blessings itself, in the background). Each answers `400 unsupported_action`, and none is in the
+description.
 
 **Create (beseech) request:**
 ```json
@@ -275,8 +522,8 @@ Signs a new version of an already-published comment and re-registers it; a grant
 | Action | Method + Path | Status |
 |--------|---------------|--------|
 | List following | `GET /v1/content/follow` | Implemented |
-| Follow | `POST /v1/content/follow` | Routed, not wired |
-| Unfollow | `DELETE /v1/content/follow/{url}` | Routed, not wired |
+| Follow | `POST /v1/content/follow` (`{"url": …}`) | Implemented |
+| Unfollow | `POST /v1/content/follow/actions/delete` (`{"url": …}`) | Implemented |
 
 **List following response** (200):
 ```json
@@ -477,7 +724,7 @@ With nothing unsent the response is `{"retried": 0, "message": "no unsent messag
 | List tags | `GET /v1/content/tag` | Implemented |
 | Apply tag | `POST /v1/content/tag/actions/apply` | Implemented |
 | Remove target | `POST /v1/content/tag/actions/remove` | Implemented |
-| Delete tag | `POST /v1/content/tag/actions/delete` | Implemented |
+| Delete tag | `POST /v1/content/tag/actions/delete` (body `{"tag": ...}`) or `DELETE /v1/content/tag/{name}` | Implemented |
 
 **List tags response** (200, all tags):
 ```json
@@ -571,7 +818,7 @@ Deletes the tag file locally and unregisters all targets from the discovery serv
 
 ### `pub.polis.theme`
 
-Read-only access to the themes declared by the site's bundle. The active theme is set via the webapp settings page (which writes `.polis/bundles/registry.json`) — there is no `set`/`update` action on this content type at the API layer today, and the API does not report which theme is active.
+Read-only access to the themes declared by the site's bundle. The active theme is a site setting, not an action on this type: `GET /v1/site` reports it and `POST /v1/site/theme` sets it (see *The site: its facts and settings*), writing `.polis/bundles/registry.json`.
 
 **Actions:** `list`, `get`
 
@@ -650,7 +897,7 @@ The dispatch engine supports external handlers for custom content types via `bun
 }
 ```
 
-`actions` lists exactly the actions the handler accepts; every other action on the type answers `400 unsupported_action`. A route marked *Routed, not wired* in the tables above exists and is not in this list.
+`actions` lists exactly the actions the handler accepts; every other action on the type answers `400 unsupported_action`. A route named *Not offered* in the tables above answers that way and is in neither this list nor the description.
 
 ## Dispatch Engine Internals
 
@@ -665,9 +912,21 @@ All content routes dispatch through `Engine.Dispatch()`:
 
 **Write actions** (require private key): `create`, `update`, `delete`, `bless`, `deny`, `revoke`, `sync`, `draft.save`, `draft.delete`, `refresh`, `send`, `deliver`, `mark_read`, `retry`, `apply`, `remove`
 
+## Answers
+
+**A success answer is the operation's own JSON object**, not wrapped in a common envelope, and each operation
+states its shape in `/v1/openapi.json`: the schema of its `2xx` response. A shape is open: an operation may
+add a field, so read the fields you know and ignore the rest. The code is `201` for a create, `200`
+otherwise, unless the operation says differently: making a token is `201`, revoking one `204` with no body,
+following a site `200`, and the site download is a zip, not JSON.
+
+⚠️ **A `2xx` can still say something did not fully happen**, and the operation's answer says so: a comment
+signed but not sent is `201` with `"sent": false` and `send_error`; a message saved but not delivered is `202`
+with a `warning` (both message sends). Each can be sent again.
+
 ## Error Responses
 
-All errors follow a consistent format:
+Every `/v1` error, whichever operation answers it, is one JSON envelope:
 
 ```json
 {
@@ -679,7 +938,12 @@ All errors follow a consistent format:
 }
 ```
 
-`message` is a fixed sentence per code, never the underlying error (which may contain server paths). The underlying error is logged server-side as `pub.polis.api.dispatch_error` with the request's `X-Request-Id`.
+Branch on `code`, which is machine-readable and stable; `message` is for a person. When an error says more
+than its message (the reasons a change was refused, which rule in a list failed), the extra fields are inside
+`error` beside `code` and `message`, for example `"reasons": [...]`. Every answer, error or not, carries the
+request's `X-Request-Id` header; quote it when reporting a problem. For a content operation `message` is a fixed
+sentence per code, never the underlying error (which may contain server paths); the underlying error is logged
+server-side with the request id.
 
 | HTTP Status | Error Code | When |
 |-------------|-----------|------|
@@ -687,10 +951,15 @@ All errors follow a consistent format:
 | 400 | `unsupported_action` | Action not available for this content type |
 | 401 | `unauthorized` | Missing Authorization header, or not a `Bearer` token |
 | 403 | `forbidden` | Invalid API key, signed-request verification failed, or a DM site-to-site action refused |
+| 403 | `insufficient_scope` | A valid token whose scopes do not include the operation's |
+| 403 | `sign_in_only` | An operation only the owner, signed in, may do; no token can |
 | 404 | `not_found` | Unknown content type, content not found |
 | 405 | `method_not_allowed` | Wrong HTTP method for this route |
+| 409 | `conflict` | The thing changed meanwhile (a keyring revision, for one); read it again and retry |
+| 413 | `too_large` | The body is over the limit |
+| 429 | `rate_limited` | A limit was reached; wait for `Retry-After` |
 | 500 | `internal_error` | Unexpected server error |
-| 503 | `not_configured` | Site not configured (e.g., no signing keys) |
+| 503 | `not_configured` / `unavailable` | Site not configured (e.g., no signing keys), or a dependency is down |
 
 ## CORS
 
@@ -702,9 +971,10 @@ Request bodies are limited to 1MB. Write actions time out after 30 seconds.
 
 ## Current Implementation Status
 
-### Fully Implemented (20 operations)
+### Fully Implemented (32 content operations)
 
-These operations work end-to-end through the dispatch engine:
+These content operations work end to end (the site's settings, agents and messages are in their own sections
+above, and `/v1/openapi.json` is the full list):
 
 1. **`pub.polis.post/list`** — Reads index.jsonl, keeps post entries, returns newest-first
 2. **`pub.polis.post/create`** — Signs content, writes post, updates index, registers with DS
@@ -726,14 +996,30 @@ These operations work end-to-end through the dispatch engine:
 18. **`pub.polis.theme/list`** — Lists themes declared by the bundle
 19. **`pub.polis.theme/get`** — Returns a single theme's declaration (`GET /v1/content/theme/{name}` or `POST …/actions/get`)
 20. **`pub.polis.license/get`** — Returns the site's current terms, or `stated: false`
+21. **`pub.polis.post/update`** — Signs a new version of one of the site's posts at the same path (`PUT /v1/content/post/{id}` with `{"path", "markdown"}`; scope `publish`)
+22. **`pub.polis.comment/bless`** — Blesses a comment waiting on one of the owner's posts (`POST …/comment/actions/bless` with `{"comment_url", "in_reply_to"}`; scope `bless`; needs a discovery service the site is registered with)
+23. **`pub.polis.comment/deny`** — Turns a waiting comment away ("not here"; scope `bless`; same requirement)
+24. **`pub.polis.comment/unbless`** — Takes a blessed comment off a post; it leaves other sites at their next sync (scope `bless`)
+25. **`pub.polis.follow/create`** — Follows a site (`POST /v1/content/follow` with `{"url"}`; scope `follow`)
+26. **`pub.polis.follow/delete`** — Unfollows a site (`POST /v1/content/follow/actions/delete` with `{"url"}`; scope `follow`)
+27. **`pub.polis.post/unpublish`** — Takes one of the owner's posts down, back to a draft (`POST /v1/content/post/actions/unpublish` with `{"path"}`; owner only)
+28. **`pub.polis.post/save_draft`** — Saves the owner's unfinished post (`POST /v1/content/post/actions/save_draft`; owner only); drafts are read through the query operation (`all drafts from me`)
+29. **`pub.polis.post/discard_draft`** — Discards one of the owner's drafts (`POST /v1/content/post/actions/discard_draft`; owner only)
+30. **`pub.polis.post/get`** — The markdown of one of the site's posts, for editing (`GET /v1/content/post/source?path=…`; scope `read`)
+31. **`pub.polis.comment/get`** — The markdown of one of the site's comments (`GET /v1/content/comment/source?path=…`; scope `read`)
+32. **`pub.polis.post/body`** — Any site's post in full, rendered to HTML (`GET /v1/content/post/body?url=…`; scope `read`)
 
-### Routed but Not Wired (16 operations)
+Bless, deny, unbless, follow and unfollow are declared by the host (`webapp/internal/api/blessing.go`, `follow.go`), as are the three reads by path (`webapp/internal/server/content_source.go`), and served by the host's own functions, the one implementation of each, which the owner app reaches through these same operations.
 
-These have REST routes and dispatch correctly through the engine, but the handler returns "unsupported action". Each needs the corresponding cli-go package logic wired into `builtin_core.go`:
+### Not Offered
 
-- Post: get, update, delete, render, draft.list, draft.get, draft.save, draft.delete
-- Comment: list, get, bless, deny, revoke, sync
-- Follow: create, delete
+The generic routes answer these, with `400 unsupported_action`; none is in `/v1/openapi.json`, and a test fails
+if a described operation ever answers that way:
+
+- Post: get by id (read it through `…/post/source`), delete (taking a post down is `unpublish`), render (the
+  site is rendered by `POST /v1/site/rebuild`)
+- Comment: list and get by id (the query operation and `…/comment/source`), revoke (taking a blessing back is
+  `unbless`), sync (the site syncs its blessings itself)
 
 ### Known Gaps
 

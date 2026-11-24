@@ -12,24 +12,32 @@ _polis() {
 
     commands=(
         'about:Show site, versions, config, keys, discovery info'
+        'actor:The registry of system actors this operator runs'
+        'attest:Signed claims about other people and works'
         'blessing:Manage comment blessings'
+        'branch:Turn an export of your site into a new site at a new address'
         'clone:Clone a remote polis site (--full, --diff)'
         'comment:Create a comment on a post (--filename, --title for stdin)'
+        'did:Show or write the site'"'"'s DID document (.well-known/did.json)'
         'discover:Check followed authors for new content (--author, --since)'
-        'dm:Direct messages (list, read, send, retry, config)'
+        'dm:Direct messages (list, read, send, retry, config, decrypt, publish-key)'
         'extract:Reconstruct a specific version of a file'
         'follow:Follow an author (--announce to broadcast)'
         'index:View content index'
         'init:Initialize Polis directory structure'
+        'license:Show or state the terms your work may be used under'
         'notifications:View and manage notifications'
         'post:Create a new post (--filename, --title for stdin)'
         'preview:Preview a post or comment with signature verification'
         'rebuild:Rebuild the content index (--posts, --comments, --tags, --attestations, --all)'
+        'recover:Sign a sign-in recovery challenge with your recovery key'
         'register:Register site with discovery service'
         'render:Render markdown to HTML (--force, --init-templates)'
         'republish:Update an already-published file'
-        'rotate-key:Generate new keypair and re-sign content (--delete-old-key)'
+        'rotate-key:Generate a new keypair and record the handover in the key history'
+        'mcp:Serve MCP over stdio for an agent on this machine (token in POLIS_TOKEN)'
         'serve:Start local web server (bundled binary only, -d/--data-dir)'
+        'site:Set the author name or avatar, or rewrite a signed file unsigned'
         'tag:Manage content tags (list, show, apply, remove, delete)'
         'unfollow:Unfollow an author (--announce to broadcast)'
         'unpublish:Remove a published post and notify discovery service'
@@ -52,6 +60,8 @@ _polis() {
         'send:Send a DM to a recipient'
         'retry:Retry delivering unsent messages'
         'config:Show DM acceptance policy'
+        'decrypt:Decrypt messages with your messages key'
+        'publish-key:Publish (or create) your messages key'
     )
 
     notifications_subcommands=(
@@ -202,9 +212,95 @@ _polis() {
                         '--since[Show items since date]:date:'
                     ;;
                 rotate-key)
+                    _arguments '--json[Output in JSON format]'
+                    ;;
+                attest)
+                    if [[ $CURRENT -eq $((cmd_pos + 1)) ]]; then
+                        local -a attest_subcommands=(
+                            'issue:Issue a new attestation' 'list:List attestations this site has issued'
+                            'show:Show one attestation' 'verify:Verify issued attestations'
+                            'withdraw:Retract a claim you issued' 'register:Announce a record to the discovery service')
+                        _describe -t subcommands 'attest subcommands' attest_subcommands
+                    elif [[ "$words[$((cmd_pos + 1))]" == issue ]]; then
+                        _arguments \
+                            '--predicate[What is being asserted, fully qualified]:predicate:' \
+                            '--subject[What the claim is about (an https URL)]:url:' \
+                            '--subject-type[identity or uri]:type:(identity uri)' \
+                            '--subject-version[Pin a uri subject: sha256:<hex>]:hash:' \
+                            '*--payload[Predicate-specific detail, k=v]:payload:' \
+                            '--asserted[RFC 3339 time]:time:' \
+                            '--json[Output in JSON format]'
+                    fi
+                    ;;
+                actor)
+                    if [[ $CURRENT -eq $((cmd_pos + 1)) ]]; then
+                        local -a actor_subcommands=(
+                            'register:Add or update an actor in the registry' 'withdraw:Remove an actor, permanently'
+                            'list:Show the registry' 'verify:Check the registry or a signed action'
+                            'announce:Announce a registered actor' 'declare-operator:Name the operator accountable for this actor')
+                        _describe -t subcommands 'actor subcommands' actor_subcommands
+                    fi
+                    ;;
+                branch)
+                    if [[ $CURRENT -eq $((cmd_pos + 1)) && "$PREFIX" != -* ]]; then
+                        local -a branch_subcommands=('deploy:Deploy a branched site' 'announce:Tell your discovery service where this site was branched from')
+                        _describe -t subcommands 'branch subcommands' branch_subcommands
+                        _files
+                    else
+                        case "$words[$((cmd_pos + 1))]" in
+                            deploy) _arguments '--config[Deploy settings]:file:_files' ':branch-output:_files -/' ;;
+                            announce) _arguments '--help[Show help]' ;;
+                            *) _arguments \
+                                '--to[The new address (https://…)]:url:' \
+                                '--out[Directory for the new site]:directory:_files -/' \
+                                '--archive[Write a zip archive instead]:file:_files' \
+                                '--from-domain[The origin'"'"'s domain]:domain:' \
+                                '--without-private[Reset the private residue to defaults]' \
+                                '--recovery-key[Where to write the recovery key]:file:_files' \
+                                '--custody[Which key you keep]:custody:(server)' \
+                                ':export:_files' ;;
+                        esac
+                    fi
+                    ;;
+                recover)
+                    if [[ $CURRENT -eq $((cmd_pos + 1)) ]]; then
+                        local -a recover_subcommands=('sign:Sign a recovery challenge')
+                        _describe -t subcommands 'recover subcommands' recover_subcommands
+                    else
+                        _arguments \
+                            '--domain[The site you are signing in to]:host:' \
+                            '--challenge[The challenge, as a file]:file:_files' \
+                            '--key[Your recovery key]:file:_files'
+                    fi
+                    ;;
+                site)
+                    if [[ $CURRENT -eq $((cmd_pos + 1)) ]]; then
+                        local -a site_subcommands=('set:Set the author name or avatar' 'rewrite-unsigned:Rewrite a signed file unsigned (never signs)')
+                        _describe -t subcommands 'site subcommands' site_subcommands
+                    elif [[ "$words[$((cmd_pos + 1))]" == set && $CURRENT -eq $((cmd_pos + 2)) ]]; then
+                        local -a site_set=('author-name:The name shown on your site' 'avatar:Your mark'"'"'s colours and pattern')
+                        _describe -t fields 'site set' site_set
+                    elif [[ "$words[$((cmd_pos + 2))]" == avatar ]]; then
+                        _arguments \
+                            '--bg[Background colour]:colour:' '--fg[Foreground colour]:colour:' \
+                            '--border[Border colour]:colour:' '--border-w[Border width, 0-3]:width:' \
+                            '--pattern[Pattern]:pattern:(none rings cross grid dots stripes diamond halves)' \
+                            '--pattern-color[Pattern colour]:colour:' '--clear[Remove the custom avatar]'
+                    elif [[ "$words[$((cmd_pos + 1))]" == rewrite-unsigned ]]; then
+                        _files
+                    fi
+                    ;;
+                license)
+                    if [[ $CURRENT -eq $((cmd_pos + 1)) ]]; then
+                        local -a license_choices=('reserved:Read and quote with a link; no AI training' 'open:Anyone may use it for anything')
+                        _describe -t choices 'terms' license_choices
+                    fi
+                    ;;
+                did)
                     _arguments \
-                        '--json[Output in JSON format]' \
-                        '--delete-old-key[Delete old keypair instead of archiving]'
+                        '--host[Canonical host]:host:' \
+                        '--write[(Re)generate .well-known/did.json]' \
+                        '--json[Output in JSON format]'
                     ;;
                 post)
                     _arguments \
@@ -236,6 +332,11 @@ _polis() {
                         '--json[Output in JSON format]' \
                         ':file:_files' \
                         ':version-hash:'
+                    ;;
+                mcp)
+                    _arguments \
+                        '--site[The site address]:address:' \
+                        '--help[Show help]'
                     ;;
                 serve)
                     _arguments \

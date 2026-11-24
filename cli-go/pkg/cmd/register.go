@@ -18,7 +18,7 @@ import (
 
 func handleRegister(args []string) {
 	fs := flag.NewFlagSet("register", flag.ExitOnError)
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 	dir := getDataDir()
 
@@ -119,7 +119,7 @@ func handleUnregister(args []string) {
 	var force bool
 	fs.BoolVar(&force, "force", false, "Skip the confirmation prompt (same as -f)")
 	fs.BoolVar(&force, "f", false, "Skip the confirmation prompt (same as --force)")
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 	dir := getDataDir()
 

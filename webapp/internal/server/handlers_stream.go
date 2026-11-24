@@ -1,24 +1,33 @@
 // =============================================================================
 // HANDBOOK TRAIL MARKER — DS-to-stream thread (webapp stream surface)
 // =============================================================================
-// This file exposes the webapp's stream HTTP endpoints to the SPA, including
-// the comment-count stamping that backs Path B (on-demand aggregation).
+// This file reads the site's stream: the items behind every PQL view, which
+// /pql/<sentence> (handlers_pql.go) serves to the v5 owner app, the public
+// pages and agents (through /v1/query), plus the two public routes a v4
+// (stream-shape) site's pages still call, /api/v1/stream/focus-comment and
+// /api/v1/stream/body. It includes the comment-count stamping that backs
+// Path B (on-demand aggregation).
 // populateCrossTenantCommentCounts batches every post on the rendered page
 // into one synchronous DS counts call (bounded by a strict timeout) so the
 // badge is deterministic each render, with a short-lived local cache to skip
 // the roundtrip across requests.
 //
+// Comments further down that say "the SPA" or "the owner SPA" mean the v4
+// owner app this file also served, deleted after release 0.70.0, where it can
+// still be read: https://github.com/vdibart/polis-cli/tree/v0.70.0/webapp/internal/webui/www
+//
 // Trail across files (DS-to-stream, aggregation):
 //   webapp surface — this file (populateCrossTenantCommentCounts)
-//   DS endpoint    — discovery-service/core/handlers/counts.ts (getCommentCounts)
+//   DS endpoint    — the discovery service's POST /v1/content/comments/counts
+//                    (its source is not published; docs/ds/developer/api-reference.md)
 //
 // Companion to the continuous sync path:
 //   producer       — webapp/internal/server/sync.go: runUnifiedSync()
 //
 // Pull the thread:
-//   github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md      (tour)
-//   github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md
-//   github.com/vdibart/polis-cli/blob/main/AGENTS.md                          (map)
+//   https://github.com/vdibart/polis-cli/blob/main/docs/handbook/ds-to-stream.md      (tour)
+//   https://github.com/vdibart/polis-cli/blob/main/docs/ds/developer/api-reference.md
+//   https://github.com/vdibart/polis-cli/blob/main/AGENTS.md                          (map)
 // =============================================================================
 
 package server
@@ -39,13 +48,14 @@ import (
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/blessing"
-	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"github.com/vdibart/polis-cli/cli-go/pkg/dm"
 	"github.com/vdibart/polis-cli/cli-go/pkg/feed"
 	"github.com/vdibart/polis-cli/cli-go/pkg/following"
 	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
+	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
+	"github.com/vdibart/polis-cli/cli-go/pkg/sitecheck"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"github.com/vdibart/polis-cli/cli-go/pkg/stream"
 	"github.com/vdibart/polis-cli/cli-go/pkg/template"
@@ -83,6 +93,12 @@ const (
 type streamItemResponse struct {
 	feed.CachedFeedItem
 	PublishedHuman string `json:"published_human"`
+
+	// Waiting is how many comments on one of the owner's own posts wait for
+	// the owner to bless or turn away, stamped only for the owner (left out
+	// when 0). It comes from the same pending list "all comments on <post>
+	// to bless" answers from (waitingByPost), so the two never disagree.
+	Waiting int `json:"waiting,omitempty"`
 
 	// Enrichment fields populated only for type=comments thread-entry
 	// items (own-handle scope). The stream's renderCommentThread
@@ -142,9 +158,9 @@ type streamItemResponse struct {
 	// It carries the storage-form path (`content/pub.polis.core/post/...md`
 	// or `content/pub.polis.core/comment/...md`) so owner-side decorators
 	// can drive operations that key off the source path — most importantly
-	// `/api/unpublish` which validates the prefix and reads the on-disk
-	// file directly. Without this field, owner-extras would have to derive
-	// the source path from URL (the rendered .html mount-path), which is
+	// unpublish, which validates the prefix and reads the on-disk file
+	// directly. Without this field, a client would have to derive the
+	// source path from URL (the rendered .html mount-path), which is
 	// brittle and duplicates `loadOwnContentAsFeedItems`'s forward
 	// mapping. Empty for cross-tenant items (the unpublish action doesn't
 	// apply to them).
@@ -160,12 +176,6 @@ type streamItemResponse struct {
 	// snake_case (bg/fg/border/border_w/pattern/pattern_color) to match the
 	// JS buildAvatar consumer.
 	AuthorAvatar *render.AvatarConfig `json:"author_avatar,omitempty"`
-
-	// Mark is the owner's stream mark for a post a rule picked out
-	// (streammark: "alert", drawn as a "!" in the timeline dot); empty when
-	// no rule matches. Computed here, on the server, so a rule is never
-	// interpreted in the browser.
-	Mark string `json:"mark,omitempty"`
 }
 
 // blessedCommentResponse is the JSON shape the stream emits per blessed
@@ -388,8 +398,7 @@ var validStreamTypes = map[string]string{
 	"posts":    "post",
 	"comments": "comment",
 	// 06-profiles: "follows" removed from grammar. Follow events fold
-	// into ACTIVITY as standard entries (see appendFollowSignal in
-	// owner-extras.js). The "profiles" type now has its own dispatch
+	// into ACTIVITY as standard entries. The "profiles" type now has its own dispatch
 	// (handleStreamItemsProfiles below), backed by the same
 	// loadOwnFollowsAsFeedItems data source for scope=my-network in
 	// Phase 1; Phase 2 enriches with recent-post + relationship.
@@ -509,6 +518,12 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 		} else {
 			scope = "my-network"
 		}
+	}
+	// The owner reading their network (or any first-person view the sync
+	// feeds) keeps it current. Only the owner: these scopes are owner-gated,
+	// and a stranger's read must never spend this site's DS calls.
+	if strings.HasPrefix(scope, "my-") && s.isOwnerReading(r) {
+		s.syncIfStale()
 	}
 	if timeWindow == "" {
 		timeWindow = "24h"
@@ -657,6 +672,10 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// pendingBlessing: the items are the waiting blessing requests, which
+	// no time window applies to.
+	pendingBlessing := false
+
 	// Validate scope
 	scopeKind, scopeArg, err := parseStreamScope(scope)
 	if err != nil {
@@ -696,7 +715,7 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 	if itemType == "mentions" {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"items": []interface{}{},
 		})
 		return
@@ -736,18 +755,30 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 		isOwnSurface := scopeKind == "my" ||
 			(scopeKind == "handle" && scopeArg != "" && scopeArg == myDomain) ||
 			(scopeKind == "handle-network" && scopeArg != "" && scopeArg == myDomain) ||
-			scopeKind == "my-network"
+			scopeKind == "my-network" || scopeKind == "my-mutuals"
 		if !isOwnSurface && scopeKind != "all-polis" {
 			writeStreamError(w, http.StatusBadRequest,
-				fmt.Sprintf("type=profiles supports scope in {me, my-network, @<this-tenant>, @<this-tenant>:network, all-polis} (got scope=%s)", scope))
+				fmt.Sprintf("type=profiles supports scope in {me, my-network, my-mutuals, @<this-tenant>, @<this-tenant>:network, all-polis} (got scope=%s)", scope))
 			return
 		}
 		profileScope := "my-network"
 		if scopeKind == "all-polis" {
 			profileScope = "all-polis"
 		}
+		// ⭐ "<this tenant>'s network" is a site's Following list: the sites
+		// it follows. "my network" and "@<this tenant>" keep followers too,
+		// marked by relationship (an existing contract).
+		// "my mutuals" is who the owner and they both follow: the sites a
+		// message can go to.
+		keep := ""
+		switch scopeKind {
+		case "handle-network":
+			keep = "follows"
+		case "my-mutuals":
+			keep = "mutuals"
+		}
 		s.handleStreamItemsProfiles(w, r, profileScope, sortBy,
-			q.Get("search"), q.Get("cursor"), parseStreamLimit(q.Get("limit")))
+			q.Get("search"), q.Get("cursor"), parseStreamLimit(q.Get("limit")), keep)
 		return
 	}
 
@@ -904,6 +935,16 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 			if netErr != nil {
 				s.LogDebug("stream items: network-cache union failed for all-polis: %v", netErr)
 			}
+			// ⭐ A search for posts on all of polis asks the discovery
+			// service, which holds every registered post's title, whoever
+			// wrote it and however old: the caches above hold only recent
+			// posts. Title search only (the DS holds no post text). The search
+			// filter below still applies, so a DS from before search (which
+			// ignores it and answers unfiltered) adds nothing that does not
+			// match, and a DS that fails leaves the caches' answer.
+			if term := strings.TrimSpace(q.Get("search")); term != "" && feedType == "post" {
+				items = s.withDSPostSearch(r, items, term)
+			}
 		}
 		// R20-4: drop self-authored items from cross-scope views
 		// (my-network, all-polis, my-mutuals, @other-handle). The
@@ -941,17 +982,22 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 				s.LogError("stream items: pending-blessing fetch failed: %v", perr)
 				items = items[:0]
 			} else {
-				pendingURLs := make(map[string]struct{}, len(pending))
-				for _, p := range pending {
-					pendingURLs[p.CommentURL] = struct{}{}
+				// ⭐ THE PENDING LIST IS THE SOURCE, the cache only fills in.
+				// This used to keep the cached comments that were pending,
+				// so a request from someone whose comments were never cached
+				// (anyone outside the network) was silently left out, and
+				// so was any request older than the stream's time window.
+				items = pendingAsFeedItems(pending, items, myDomain)
+				pendingBlessing = true
+				// ⛔ WHO YOU ASK DECIDES WHAT YOU SEE. A site strips unblessed
+				// comments from what it serves about its own posts, for
+				// everyone but its owner; waiting comments are unblessed by
+				// definition, so asked of this site by anyone else, "to bless"
+				// is empty. The discovery service answers the same question
+				// in full.
+				if !s.isOwnerReading(r) {
+					items = items[:0]
 				}
-				filtered := items[:0]
-				for _, it := range items {
-					if _, ok := pendingURLs[it.URL]; ok {
-						filtered = append(filtered, it)
-					}
-				}
-				items = filtered
 			}
 		}
 	}
@@ -971,7 +1017,27 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 	// the client to send time=all. When a per-user time slot lands in the
 	// owner UI we'll revisit — at that point an explicit non-default time
 	// value should still post-filter.
-	if timeDelta > 0 && !isOwnSurface {
+	// search=<words>: keep the items whose title or excerpt has every word at
+	// the start of one of its words (case-insensitive; searchMatches), the
+	// public site's post and comment search. It searches what this surface
+	// already has (the site's own content, and the cached network and polis
+	// feeds), plus, for posts on all of polis, what the discovery service
+	// finds by title (withDSPostSearch, above).
+	if term := strings.TrimSpace(q.Get("search")); term != "" {
+		kept := items[:0]
+		for _, it := range items {
+			if searchMatches(it.Title+" "+it.Excerpt, term) {
+				kept = append(kept, it)
+			}
+		}
+		items = kept
+	}
+
+	// ⭐ A waiting request waits until the owner acts, however old it is.
+	// ⭐ A search of posts on all of polis is not windowed either: what the
+	// discovery service finds is every matching post, however old.
+	dsPostSearch := scopeKind == "all-polis" && feedType == "post" && strings.TrimSpace(q.Get("search")) != ""
+	if timeDelta > 0 && !isOwnSurface && !pendingBlessing && !dsPostSearch {
 		items = filterStreamItemsByTime(items, time.Now().Add(-timeDelta))
 	}
 
@@ -1141,7 +1207,9 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 	authorAvatars := s.buildAuthorAvatars(page)
 
 	out := toStreamItemResponses(page, enrich, postComments, titleRedundant, sourcePaths, postBodies, authorAvatars)
-	s.applyStreamMarks(out)
+	if isOwnSurface && (feedType == "post" || feedType == "") {
+		s.stampWaiting(r, out)
+	}
 	resp := map[string]interface{}{
 		"items": out,
 	}
@@ -1152,7 +1220,7 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 	itemCount = len(page)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleStreamItemsDrafts returns the local tenant's unpublished post drafts
@@ -1165,9 +1233,8 @@ func (s *Server) handleStreamItems(w http.ResponseWriter, r *http.Request) {
 // Item shape: ID = filename minus .md suffix; Title = first H1 line;
 // Excerpt = first 3 non-blank body lines (truncated 200 chars); Published =
 // file mtime (so newest-first ordering works without explicit timestamps in
-// the draft). URL = /_/posts/drafts/<id> so a click on the entry routes to
-// the editor (App.navigateTo handler in app.js — wired more directly via
-// owner-extras in 6.h).
+// the draft). URL = /_/posts/drafts/<id>, an owner-app address (the v5 app
+// opens a draft in its editor).
 //
 // sort=by-name sorts alphabetically by title (case-insensitive), falling
 // back to ID when titles match. sort=by-date (default) sorts newest-first
@@ -1178,7 +1245,7 @@ func (s *Server) handleStreamItemsDrafts(w http.ResponseWriter, sortBy string, l
 	// Drafts ride the existing post renderer (renderPost in stream.js)
 	// — they're unpublished posts, and the renderer just needs Title/
 	// URL/Excerpt. Type stays "post" so the polymorphic dispatch finds
-	// a renderer; an additional `draft: true` flag lets owner-extras /
+	// a renderer; an additional `draft: true` flag lets a renderer /
 	// CSS hang draft-specific chrome (e.g. an edit affordance) off the
 	// entry without the v4 renderer needing draft awareness.
 	// Earlier shape used Type:"draft" — the v4 renderers map had no
@@ -1257,47 +1324,12 @@ func (s *Server) handleStreamItemsDrafts(w http.ResponseWriter, sortBy string, l
 			PublishedHuman: template.FormatHumanDateTime(mtime.UTC().Format(time.RFC3339)),
 			AuthorDomain:   myDomain,
 		}
-		// Title + excerpt extraction mirrors handleDrafts (handlers.go:500-533).
 		if content, rErr := st.Get(context.Background(), ent.Key); rErr == nil {
-			lines := strings.Split(string(content), "\n")
-			bodyStart := 0
-			for i, line := range lines {
-				trimmed := strings.TrimSpace(line)
-				if item.Title == "" && strings.HasPrefix(trimmed, "# ") {
-					item.Title = strings.TrimPrefix(trimmed, "# ")
-					bodyStart = i + 1
-				} else if item.Title == "" && trimmed != "" {
-					bodyStart = i
-					break
-				}
-			}
-			var excerptLines []string
-			for i := bodyStart; i < len(lines) && len(excerptLines) < 3; i++ {
-				trimmed := strings.TrimSpace(lines[i])
-				if trimmed != "" {
-					excerptLines = append(excerptLines, trimmed)
-				}
-			}
-			if len(excerptLines) > 0 {
-				excerpt := strings.Join(excerptLines, " ")
-				if len(excerpt) > 200 {
-					excerpt = excerpt[:200] + "..."
-				}
-				item.Excerpt = excerpt
-			}
-			// R23 #9: render the body markdown to HTML so the stream
-			// can display the formatted draft in place. Strip the
-			// leading H1 (if any) — title is already handled in the
-			// dedicated title slot.
-			bodyMD := strings.Join(lines[bodyStart:], "\n")
-			if rendered, mdErr := render.MarkdownToHTML(bodyMD); mdErr == nil {
-				item.BodyHTML = rendered
-			}
+			item.Title, item.Excerpt, item.BodyHTML = draftTitleAndBody(string(content))
 		}
-		// Untitled draft: substitute a placeholder so the renderer's
-		// title chrome stays consistent across all entries (R20-10).
-		// Without this, drafts that are body-only or empty rendered as
-		// just an excerpt or as nothing — visually breaking the column.
+		// Empty draft: substitute a placeholder so the renderer's title
+		// chrome stays consistent across all entries (R20-10). A draft with
+		// any text has the title publishing would give it.
 		if item.Title == "" {
 			item.Title = "(untitled draft)"
 		}
@@ -1347,7 +1379,7 @@ func (s *Server) handleStreamItemsDrafts(w http.ResponseWriter, sortBy string, l
 //
 // limit is honored. Cursor and search are passed through unchanged
 // (empty values are fine — the builder treats them as no-op).
-func (s *Server) handleStreamItemsProfiles(w http.ResponseWriter, r *http.Request, scope, sortBy, search, cursor string, limit int) {
+func (s *Server) handleStreamItemsProfiles(w http.ResponseWriter, r *http.Request, scope, sortBy, search, cursor string, limit int, keep string) {
 	if scope == "all-polis" {
 		items, nextCursor, err := s.buildAllPolisProfiles(r, sortBy, search, cursor, limit)
 		if err != nil {
@@ -1388,16 +1420,26 @@ func (s *Server) handleStreamItemsProfiles(w http.ResponseWriter, r *http.Reques
 		writeStreamError(w, http.StatusInternalServerError, "failed to load profiles")
 		return
 	}
-	// Search filter — case-insensitive substring against display name
-	// and handle. The follow list is small enough that filtering in
-	// memory after building is fine (and avoids changing the
-	// buildProfilesList signature for the shared /api/profiles caller).
+	// keep: "follows" (only the sites the owner follows) or "mutuals" (only
+	// those that follow back); "" keeps both directions.
+	if keep != "" {
+		kept := items[:0]
+		for _, it := range items {
+			if (keep == "follows" && it.Following) || (keep == "mutuals" && it.Relationship == relationshipMutual) {
+				kept = append(kept, it)
+			}
+		}
+		items = kept
+	}
+	// Search filter: every word begins a word of the display name or the
+	// handle, or begins the domain (profileMatches, the discovery service's
+	// rule). The follow list is small enough that filtering in memory after
+	// building is fine (and avoids changing the buildProfilesList signature
+	// for the shared /api/profiles caller).
 	if q := strings.TrimSpace(search); q != "" {
-		needle := strings.ToLower(q)
 		filtered := items[:0]
 		for _, it := range items {
-			if strings.Contains(strings.ToLower(it.DisplayName), needle) ||
-				strings.Contains(strings.ToLower(it.AuthorDomain), needle) {
+			if profileMatches(it.DisplayName, it.AuthorDomain, q) {
 				filtered = append(filtered, it)
 			}
 		}
@@ -1948,9 +1990,11 @@ func (s *Server) loadOwnContentAsFeedItems(feedType string) ([]feed.CachedFeedIt
 		// Excerpt comes from the source markdown (same path /api/posts uses).
 		// Failure is non-fatal — empty excerpt is acceptable, the entry still
 		// renders with title + date.
-		var excerpt string
+		var excerpt, edited, agentName, grantAddr string
 		if raw, rErr := s.Site().Store().Get(context.Background(), filepath.ToSlash(e.Path)); rErr == nil {
 			excerpt = makeExcerpt(stripFrontmatter(string(raw)), feed.ExcerptCharCap)
+			edited = editedAt(string(raw), e.Published)
+			agentName, grantAddr = agentMarkerOf(string(raw))
 		}
 		item := feed.CachedFeedItem{
 			ID:           e.CurrentVersion,
@@ -1962,6 +2006,9 @@ func (s *Server) loadOwnContentAsFeedItems(feedType string) ([]feed.CachedFeedIt
 			AuthorURL:    myAuthorURL,
 			AuthorDomain: myDomain,
 			Excerpt:      excerpt,
+			Edited:       edited,
+			Agent:        agentName,
+			Grant:        grantAddr,
 		}
 		// Comments carry the target-post URL from the public index's
 		// in_reply_to entry. Used by the stream's `type=comments`
@@ -1975,6 +2022,48 @@ func (s *Server) loadOwnContentAsFeedItems(feedType string) ([]feed.CachedFeedIt
 		sourcePaths[url] = e.Path
 	}
 	return out, sourcePaths, nil
+}
+
+// agentMarkerOf is the agent marker of the version a source holds: who made
+// it and under which grant, from its signed frontmatter. Read with the
+// parser that matches keys by structural position, so a nested or body line
+// named agent is never taken for it. ⛔ Half a marker is no marker: both or
+// neither.
+func agentMarkerOf(raw string) (agent, grant string) {
+	fm, _, err := sitecheck.ParseFrontmatter(raw)
+	if err != nil || fm == nil || fm.Agent == "" || fm.Grant == "" {
+		return "", ""
+	}
+	return fm.Agent, fm.Grant
+}
+
+// editedAt is when a post or comment of the owner's was last republished:
+// its frontmatter's top-level updated, as RFC 3339, or "" when it was never
+// republished (no updated, or the same moment as published). Only the
+// frontmatter block is read, and only a key at column 0, so a body line or a
+// nested field named updated is never taken for it.
+func editedAt(raw, published string) string {
+	if !strings.HasPrefix(raw, "---\n") {
+		return ""
+	}
+	end := strings.Index(raw[4:], "\n---")
+	if end < 0 {
+		return ""
+	}
+	for _, line := range strings.Split(raw[4:4+end], "\n") {
+		if v, ok := strings.CutPrefix(line, "updated:"); ok {
+			v = strings.Trim(strings.TrimSpace(v), `"'`)
+			t, err := time.Parse(time.RFC3339, v)
+			if err != nil {
+				return ""
+			}
+			if p, perr := time.Parse(time.RFC3339, published); perr == nil && !t.After(p) {
+				return ""
+			}
+			return t.UTC().Format(time.RFC3339)
+		}
+	}
+	return ""
 }
 
 // loadOwnFollowsAsFeedItems builds feed items for the stream's
@@ -2659,7 +2748,7 @@ func (s *Server) populateCrossTenantCommentCounts(r *http.Request, page []feed.C
 	if len(overflow) > 0 {
 		urls := overflow
 		bgClient := s.NewDSClient(nil)
-		go func() {
+		go func() { //nolint:gosec // G118: a deliberate background fill that must outlive the request; bounded by its own timeout
 			bgCtx, bgCancel := context.WithTimeout(context.Background(), backgroundCountFetchTimeout)
 			defer bgCancel()
 			bgCounts, bgErr := s.commentCountFlight.Do(flightKey(urls), func() (map[string]int, error) {
@@ -2957,7 +3046,7 @@ type streamBodyResponse struct {
 // tenant entries. GET /api/v1/stream/body?url=<postURL>.
 //
 // Why a server-side proxy instead of a direct browser fetch: the owner SPA
-// ships a Content-Security-Policy with `connect-src 'self' https://esm.sh`,
+// ships a Content-Security-Policy with `connect-src 'self'`,
 // so the browser can't fetch a followed tenant's origin directly even though
 // those origins serve Access-Control-Allow-Origin:* — CSP blocks the connect
 // before CORS is consulted. This same-origin endpoint is allowed by 'self';
@@ -2978,29 +3067,78 @@ func (s *Server) handleStreamBody(w http.ResponseWriter, r *http.Request) {
 	}
 	postURL = s.absolutizeStreamURL(postURL)
 
-	start := time.Now()
-	// 24h disk cache + SSRF gate live inside LoadOrFetchReplyContext; the
-	// owner's own posts are same-origin (the SPA never proxies them — they
-	// ship body_html inline and are already expanded), so this path is
-	// effectively cross-tenant only.
-	entry, ok := render.LoadOrFetchReplyContext(s.Site(), postURL, 24*time.Hour)
-	resp := streamBodyResponse{HasBody: false}
-	if ok && entry.BodyMD != "" {
-		// Strip the leading title heading (the entry already shows the title)
-		// then render the same goldmark + sanitizer pipeline buildPostBodies
-		// uses for own posts, so injected cross-tenant bodies match.
-		cleaned := render.StripLeadingTitleHeading(entry.BodyMD, entry.Title)
-		if html, err := render.MarkdownToHTML(cleaned); err == nil && strings.TrimSpace(html) != "" {
-			resp = streamBodyResponse{HasBody: true, BodyHTML: html}
-		}
+	// ⛔ The site fetches the address itself, so this route must not be
+	// anyone's fetching proxy. The owner may read any post (as post.body on
+	// /v1 allows); anyone else only this site's posts or a followed site's,
+	// the only cross-origin posts a public page shows.
+	if !s.streamBodyAllowed(r, postURL) {
+		s.LogEvent("pub.polis.stream.body_refused", map[string]interface{}{"url": postURL})
+		_ = json.NewEncoder(w).Encode(streamBodyResponse{HasBody: false})
+		return
 	}
 
-	s.LogEvent("pub.polis.stream.body", map[string]interface{}{
-		"url":         postURL,
-		"has_body":    resp.HasBody,
-		"duration_ms": time.Since(start).Milliseconds(),
-	})
+	resp := streamBodyResponse{HasBody: false}
+	if html, ok := s.remotePostBody(postURL); ok {
+		resp = streamBodyResponse{HasBody: true, BodyHTML: html}
+	}
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// streamBodyAllowed reports whether a request may make the site fetch
+// postURL for /api/v1/stream/body: always for the owner, and for anyone else
+// only an address on this site or on a site it follows.
+func (s *Server) streamBodyAllowed(r *http.Request, postURL string) bool {
+	if s.ownerSignedIn(r) {
+		return true
+	}
+	host := extractDomainFromURL(postURL)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, extractDomainFromURL(s.GetBaseURL())) {
+		return true
+	}
+	ff, err := following.LoadSite(s.Site())
+	if err != nil || ff == nil {
+		return false
+	}
+	for _, e := range ff.Following {
+		if strings.EqualFold(extractDomainFromURL(e.URL), host) {
+			return true
+		}
+	}
+	return false
+}
+
+// remotePostBody is another site's post, by its address, rendered to HTML for
+// reading in place: the one pipeline behind /api/v1/stream/body and the /v1
+// post body read. The 24h disk cache and the SSRF gate live inside
+// LoadOrFetchReplyContext. The leading title heading is stripped (the card
+// already shows the title) and the body goes through the same goldmark and
+// sanitizer pipeline buildPostBodies uses for the owner's own posts, so the
+// two read alike. false when the post could not be read or has no body.
+//
+// ⭐ It logs pub.polis.stream.body itself, once, whichever route asked, since
+// the site fetched an address on someone's behalf either way.
+func (s *Server) remotePostBody(postURL string) (html string, ok bool) {
+	start := time.Now()
+	defer func() {
+		s.LogEvent("pub.polis.stream.body", map[string]interface{}{
+			"url":         postURL,
+			"has_body":    ok,
+			"duration_ms": time.Since(start).Milliseconds(),
+		})
+	}()
+	entry, found := render.LoadOrFetchReplyContext(s.Site(), postURL, 24*time.Hour)
+	if !found || entry.BodyMD == "" {
+		return "", false
+	}
+	cleaned := render.StripLeadingTitleHeading(entry.BodyMD, entry.Title)
+	out, err := render.MarkdownToHTML(cleaned)
+	if err != nil || strings.TrimSpace(out) == "" {
+		return "", false
+	}
+	return out, true
 }
 
 // localFocusComment resolves the latest BLESSED comment for one of the
@@ -3276,150 +3414,107 @@ func parseStreamLimit(raw string) int {
 func writeStreamError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"error": msg,
 	})
 }
 
-// handleNotificationRules returns the registry's notification rule
-// declarations as JSON. Step-06/6.f.2: backs the SPA's activity-mode
-// renderer (owner-extras.js fetches once at init, indexes by event
-// type, looks up per-entry on afterRender to format the rule
-// template + icon).
-//
-// Read-only. The same rule data that used to live in the public-served
-// bundle.json (now relocated to private registry.json per 6.f.1) — no
-// secret content here. A dedicated endpoint keeps the SPA's index.html
-// statically cacheable while the rule set can update independently
-// (Patrol/Medic re-syncs rules on tenant cycles).
-func (s *Server) handleNotificationRules(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+// pendingAsFeedItems turns the discovery service's pending blessing requests
+// into stream items: the cached copy of each comment where the feed cache has
+// one, and otherwise an item built from the request itself.
+func pendingAsFeedItems(pending []blessing.IncomingRequest, cached []feed.CachedFeedItem, myDomain string) []feed.CachedFeedItem {
+	byURL := make(map[string]feed.CachedFeedItem, len(cached))
+	for _, it := range cached {
+		byURL[it.URL] = it
 	}
-	reg, err := bundle.LoadRegistryOrInit(s.Site())
-	if err != nil {
-		s.LogError("notification rules: load registry: %v", err)
-		writeStreamError(w, http.StatusInternalServerError, "registry unavailable")
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	// step-06/6.f.2 review nit #10: short-lived browser caching.
-	// Rules change infrequently (only on registry edits / fresh init /
-	// Medic remediation); SPA fetches once at init. 5min cache +
-	// must-revalidate keeps repeat fetches cheap without making the
-	// rules-update latency noticeable.
-	w.Header().Set("Cache-Control", "max-age=300, must-revalidate")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"rules": reg.Notifications,
-	})
-}
-
-// allowedClientEvents is the allowlist of event names the SPA can emit
-// via POST /api/v1/event. Step-06/6.e ships exactly one entry; future
-// expansion adds entries here as new SPA-emitted telemetry surfaces
-// land. Restricting the allowlist prevents the endpoint from becoming
-// a generic "log anything" sink that could be abused or noised up
-// with unstructured events.
-var allowedClientEvents = map[string]bool{
-	"pub.polis.stream.preset_loaded": true,
-}
-
-// clientEventFieldSchema defines per-event-name field validation:
-// allowed field names + a max-length cap for string values.
-// Step-06/6.f.2 review concern #2: without this, an attacker (or a
-// misbehaving SPA) could submit fields of any shape — nested objects,
-// arrays, unbounded strings — and the structured-log writer would
-// faithfully serialize them, polluting Axiom queries. The schema
-// enforces shape-of-truth: only known string fields, length-capped.
-//
-// To add a new event: extend allowedClientEvents above AND add a
-// schema entry here. Events with no schema entry are accepted but
-// drop all fields (anti-spoof default).
-const clientEventFieldMaxLen = 256
-
-var clientEventFieldSchemas = map[string]map[string]bool{
-	"pub.polis.stream.preset_loaded": {
-		"preset_name": true,
-		"qualifier":   true,
-		"type":        true,
-		"scope":       true,
-		"modifier":    true,
-	},
-}
-
-// validateClientEventFields filters the caller's fields to the
-// schema-allowed set, enforces string-only values, and length-caps
-// strings. Returns a fresh map; the input is left untouched. Unknown
-// or non-string-typed fields are silently dropped (callers shouldn't
-// be sending them per the schema contract).
-func validateClientEventFields(eventName string, in map[string]interface{}) map[string]interface{} {
-	out := map[string]interface{}{}
-	allowed := clientEventFieldSchemas[eventName]
-	if allowed == nil {
-		return out
-	}
-	for k, v := range in {
-		if !allowed[k] {
+	out := make([]feed.CachedFeedItem, 0, len(pending))
+	for _, p := range pending {
+		if it, ok := byURL[p.CommentURL]; ok {
+			out = append(out, it)
 			continue
 		}
-		s, ok := v.(string)
-		if !ok {
-			continue
+		author := discovery.ExtractDomainFromURL(p.Author)
+		if author == "" {
+			author = p.Author
 		}
-		if len(s) > clientEventFieldMaxLen {
-			s = s[:clientEventFieldMaxLen]
-		}
-		out[k] = s
+		out = append(out, feed.CachedFeedItem{
+			ID:           "pending:" + p.ID,
+			Type:         "comment",
+			EventType:    "pub.polis.comment.blessing.requested",
+			URL:          p.CommentURL,
+			Published:    p.CreatedAt,
+			Hash:         p.CommentVersion,
+			AuthorURL:    "https://" + author,
+			AuthorDomain: author,
+			TargetURL:    p.InReplyTo,
+			TargetDomain: myDomain,
+		})
 	}
 	return out
 }
 
-// handleClientEvent accepts {event, fields} from the SPA and routes it
-// to the standard structured-event log. Step-06/6.e: backs the icon-
-// preset usage telemetry. Allowlist-gated; events outside the list
-// return 400 (caller bug — the SPA should only emit known events).
-//
-// step-06/6.f.2 review concern #2: per-event field shape validation
-// via clientEventFieldSchemas. Caller fields are filtered to the
-// allowed set, coerced to string-only, and length-capped before
-// reaching s.LogEvent. Prevents log pollution from arbitrary nested
-// structures or unbounded string values.
-//
-// No auth check here: the route is not on the owner gate's public list,
-// so the gate refuses anyone it does not recognise as the owner.
-func (s *Server) handleClientEvent(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+// withDSPostSearch adds to items the posts the discovery service finds whose
+// title matches term (GET /v1/content?type=pub.polis.post&search=), one item
+// per post, each carrying the id its published event would.
+func (s *Server) withDSPostSearch(r *http.Request, items []feed.CachedFeedItem, term string) []feed.CachedFeedItem {
+	res, err := s.NewReadDSClient(r).QueryContent("pub.polis.post", map[string]string{"search": term, "limit": "100"})
+	if err != nil {
+		s.LogWarn("stream items: discovery post search failed, answering from the caches: %v", err)
+		return items
 	}
-	var body struct {
-		Event  string                 `json:"event"`
-		Fields map[string]interface{} `json:"fields"`
+	seen := make(map[string]struct{}, len(items))
+	for _, it := range items {
+		seen[it.ID] = struct{}{}
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeStreamError(w, http.StatusBadRequest, "invalid JSON body")
-		return
+	for _, rec := range res.Records {
+		it := feed.ItemFromContentRecord(rec)
+		if _, dup := seen[it.ID]; dup {
+			continue
+		}
+		seen[it.ID] = struct{}{}
+		items = append(items, it)
 	}
-	if !allowedClientEvents[body.Event] {
-		writeStreamError(w, http.StatusBadRequest,
-			fmt.Sprintf("event %q not in allowlist (step-06/6.e ships %d allowed events; see allowedClientEvents)", body.Event, len(allowedClientEvents)))
-		return
-	}
-	// Filter caller fields through the per-event schema (drops unknown
-	// keys, drops non-string values, length-caps strings). Yields a
-	// fresh map so the caller's input can't smuggle anything past
-	// validation via reference aliasing.
-	cleanFields := validateClientEventFields(body.Event, body.Fields)
-	// Stamp a source marker so downstream log queries can distinguish
-	// SPA-emitted events from server-emitted ones (both share the
-	// pub.polis.* namespace). Server-stamped after validation so the
-	// caller can't spoof a different origin marker.
-	cleanFields["client_origin"] = "owner-spa"
-	s.LogEvent(body.Event, cleanFields)
+	return items
+}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"ok": true,
-	})
+// draftTitleAndBody gives a draft the title publishing it would give
+// (publish.ExtractTitle: a heading of any level, or the first line cut by
+// runes), and an excerpt and rendered body that start after the line used as
+// the title, so that line is not shown twice. An empty draft has no title.
+func draftTitleAndBody(content string) (title, excerpt, bodyHTML string) {
+	lines := strings.Split(content, "\n")
+	titleLine := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			titleLine = i
+			break
+		}
+	}
+	if titleLine < 0 {
+		return "", "", ""
+	}
+	title = publish.ExtractTitle(content)
+	body := lines[titleLine+1:]
+
+	var excerptLines []string
+	for _, line := range body {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			excerptLines = append(excerptLines, trimmed)
+			if len(excerptLines) == 3 {
+				break
+			}
+		}
+	}
+	if len(excerptLines) > 0 {
+		excerpt = strings.Join(excerptLines, " ")
+		if r := []rune(excerpt); len(r) > 200 {
+			excerpt = string(r[:200]) + "..."
+		}
+	}
+	// R23 #9: render the body so the stream can show the formatted draft in
+	// place; the title has its own slot.
+	if rendered, err := render.MarkdownToHTML(strings.Join(body, "\n")); err == nil {
+		bodyHTML = rendered
+	}
+	return title, excerpt, bodyHTML
 }

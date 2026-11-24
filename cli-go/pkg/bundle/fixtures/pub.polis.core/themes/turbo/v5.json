@@ -1,0 +1,17 @@
+{
+  "note": "turbo: midnight blue, electric cyan, a mauve accent.",
+  "tokens": {
+    "scheme": "dark",
+    "site": "#00d4ff",
+    "bg": "#001030",
+    "surface": "#001448",
+    "card-hover": "#001a58",
+    "panel": "#001a58",
+    "text": "#ffffff",
+    "text-soft": "#a0c0d8",
+    "text-muted": "#7f9db4",
+    "ink": "#000818",
+    "wordmark": "#00d4ff",
+    "accent-2": "#c080c0"
+  }
+}

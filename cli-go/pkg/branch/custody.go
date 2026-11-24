@@ -106,7 +106,7 @@ func writeRecoveryKey(p string, priv []byte) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return fmt.Errorf("create the recovery key's directory: %w", err)
 	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // G304: the recovery-key path the owner named, checked by the caller
 	if err != nil {
 		return fmt.Errorf("write the recovery key: %w", err)
 	}
@@ -118,7 +118,9 @@ func writeRecoveryKey(p string, priv []byte) error {
 		werr = err
 	}
 	if werr != nil {
-		os.Remove(p)
+		if rerr := os.Remove(p); rerr != nil {
+			return fmt.Errorf("write the recovery key: %w (and the partial file %s could not be removed: %v)", werr, p, rerr)
+		}
 		return fmt.Errorf("write the recovery key: %w", werr)
 	}
 	return nil

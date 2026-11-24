@@ -399,6 +399,16 @@ func init() {
 	owner.Register(NewPasskeyProvider())
 }
 
+// CredentialCount is how many authenticators the owner has enrolled. A read
+// failure is an error, never zero, so a guard that asks it fails closed.
+func (p *PasskeyProvider) CredentialCount(inst owner.Instance) (int, error) {
+	rec, err := p.loadFresh(inst)
+	if err != nil {
+		return 0, err
+	}
+	return len(rec.Credentials), nil
+}
+
 // RemoveCredential removes one enrolled authenticator, named by its credential
 // ID (base64url), and ends every session.
 //

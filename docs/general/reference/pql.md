@@ -4,10 +4,12 @@
 
 > See also: [infinity-stream.md](../concepts/infinity-stream.md) (the surface PQL drives) and [policy-grammar.md](policy-grammar.md) (the sibling grammar PQL is intentionally aligned with).
 
-PQL is the sentence-filter grammar that drives every filter view in
-the v4 stream surface. The same sentence you see at the top of the
-stream ("all activity from my network") is also the bookmarkable URL
-form (`/_/pql/all+activity+from+my+network`). This doc is the
+PQL is the sentence grammar behind every list view in polis: each view
+in the owner app's gather and write is a PQL sentence run on `/v1/query`,
+and the same sentences are served to anyone at a site's `/pql/<sentence>`,
+to agents through the `query_pql` tool, and across the network by the
+discovery service. A view's sentence is also its address
+(`/_/gather/pql/all+activity+from+my+network`). This doc is the
 canonical spec — what tokens are valid, how they compose, and how
 they map to the URL.
 
@@ -21,8 +23,8 @@ asking "how did you see that?" gets a description, not a link.
 PQL turns the filter into a **sentence the user can read and a URL
 the user can share.** Every view in the stream surface is one PQL
 sentence. The sentence is the source of truth: change the URL,
-the stream re-filters; change the slots in the topbar widget, the
-URL updates. There is no separate "filter state" hiding anywhere.
+the view re-filters; change the view's filters, the URL updates.
+There is no separate "filter state" hiding anywhere.
 
 That property — *the filter is a first-class citizen, in the URL,
 in human-readable form* — is what makes PQL more than a query
@@ -34,7 +36,7 @@ syntax. It's how polis avoids the modal-nav trap (see
 | Concept | Form |
 |---|---|
 | Sentence (UI) | `all activity from my network` |
-| URL | `/_/pql/all+activity+from+my+network` |
+| URL | `/pql/all+activity+from+my+network` (a site's); in the owner app `/_/gather/pql/all+activity+from+my+network` |
 | Encoding | every token separated by `+` |
 | Grammar | `qualifier type "from" scope [modifier]` |
 
@@ -44,11 +46,16 @@ become `+` in the URL, nothing else.
 ## Grammar
 
 ```
-sentence    := qualifier type relation scope [modifier]
+sentence    := qualifier [adjective] type relation scope [modifier]
 
 qualifier   := "all" | "new"
                ; "new" is reserved but currently locked off in the UI
                ; (see "Reserved tokens" below).
+
+adjective   := "blessed"
+               ; only the comments the post's author blessed. It takes
+               ; the modifier's place: a sentence has an adjective or a
+               ; modifier, never both.
 
 type        := "posts" | "comments" | "profiles"
              | "messages" | "drafts" | "activity"
@@ -59,10 +66,12 @@ type        := "posts" | "comments" | "profiles"
                ; type (pub.polis.follow.announced) is also accepted for
                ; operational precision — see "The type slot" below.
 
-relation    := "from" | "about"
+relation    := "from" | "about" | "on"
                ; "from"  = authored-by (the actor axis).
                ; "about" = concerns / is-directed-at (the involved axis;
                ;           maps to the DS involvedDomain filter).
+               ; "on"    = the replies to one post; its scope is the
+               ;           post's address. Served by a site, not the DS.
                ; Exactly one relation per sentence. On a tenant the
                ; relation+scope clause is OPTIONAL (see "Tenant-relative
                ; PQL" below).
@@ -73,8 +82,12 @@ scope       := "me"
              | "all" "polis"
              | <handle>
              | <handle> "'s" "network"
+             | <post-address>
                ; <handle> is a fully-qualified domain (e.g.
                ; alice.polis.pub, sub.alice.polis.pub).
+               ; <post-address> follows "on" only: an https URL, kept
+               ; as written (scheme and host lowercased), with no
+               ; + ? # or spaces.
 
 modifier    := "by" sort_key
              | "with" filter_key
@@ -100,6 +113,29 @@ it concerns** (target/source — the event "involves" that handle):
 `involvedDomain` filter (target OR source = handle). Combining
 relations (`from X about Y`) is reserved for a future grammar
 extension; today a sentence carries exactly one.
+
+## A post's comments: `on`
+
+`all comments on <post address>` is **every comment made on that post**, oldest first, each naming its
+author (`author_domain`, `author_url`) and marked `"blessed": true` or `false`. Blessing never filters it: whether a comment is blessed matters to the post's
+author, and for anyone else it is information shown on each comment. `all blessed comments on <post address>`
+asks for only the blessed ones.
+
+⛔ **On a site's own posts, only blessed comments appear, to everyone but the site's owner** (who you ask decides
+what you see: [content types](../concepts/content-types.md#what-blessing-does-and-why-the-answer-depends-on-who-you-ask)). Comments that
+aren't blessed never appear next to an author's content on the author's own site: asked of `alice.polis.pub`
+about one of Alice's posts, the sentence answers blessed comments only, through every surface the site serves
+(its pages, `/pql/` and `/v1/query`). Alice herself, signed in or with a token carrying `read`, sees every
+comment, marked. Asked about anyone else's post, it is every comment, marked.
+
+| Sentence | Meaning |
+|---|---|
+| `all comments on https://alice.polis.pub/posts/20261113/hello.html` | the whole thread, each comment marked |
+| `all blessed comments on https://alice.polis.pub/posts/20261113/hello.html` | only what Alice blessed |
+
+The post's address keeps its case (paths are case-sensitive). `on` is for comments only, and a polis site
+serves it from the discovery service's records; the discovery service's own `/pql/` refuses `on` and `blessed`
+(`PQL_ON_UNSUPPORTED`, `PQL_BLESSED_UNSUPPORTED`).
 
 ## The type slot — aliases and fully-qualified event types
 
@@ -139,6 +175,11 @@ the dispatcher (server + UI) narrows valid combinations per type:
 - Allowed modifiers: `by date` (default), `to bless`
 - Type-conditional: `scope=me` drops `to bless` (your own comments
   don't need blessing).
+- `to bless` is public, like every other modifier: blessing decides
+  who is notified (the post author) and what the author's page
+  shows, not who may ask which comments are waiting. Asked of the
+  author's own site by anyone but the author, it is empty: see
+  [what blessing does, and why the answer depends on who you ask](../concepts/content-types.md#what-blessing-does-and-why-the-answer-depends-on-who-you-ask).
 
 ### `type=profiles`
 - Allowed scopes: `my network`, `all polis` (the only meaningful
@@ -167,24 +208,29 @@ the dispatcher (server + UI) narrows valid combinations per type:
 
 ## URL encoding
 
-Path-form: `/_/pql/<sentence-with-+>`.
+Path-form: `/pql/<sentence-with-+>`, and the same encoding wherever the owner's app puts a sentence in its own
+addresses (`/_/<section>/pql/<sentence>`; the full set is [Addresses](../../webapp/developer/development.md#addresses)).
 
 - Every sentence token is separated by `+`.
 - The URL form is isomorphic to the displayed sentence — spaces in
-  the UI become `+` in the URL, nothing else.
+  the UI become `+` in the URL, and a post address's slashes become
+  `%2F` (`all+comments+on+https:%2F%2Falice.polis.pub%2Fposts%2F…`),
+  nothing else. ⛔ The slashes must be encoded: HTTP routers clean a
+  path holding `//` to one slash and redirect, which breaks the
+  sentence.
 - Handles (`alice.polis.pub`) keep their dots — domain separators
   are inside the token, not between tokens.
 - `decodeURIComponent` + `+` → ` ` reproduces the displayed sentence.
 
-The bare path `/_/` is the canonical default landing — it lands on
-the user's default filter (`all activity from my network`) without
-the `/pql/` prefix. Any unknown `/_/*` path falls back to this
-default with `replaceState`, so retired bookmarks land somewhere
-working with a clean URL bar.
+Where `/_/` lands, and what happens to an address from the previous app, is the owner app's, stated in
+[Addresses](../../webapp/developer/development.md#addresses).
 
 ## Worked examples
 
-Every icon-preset in the topbar nav maps to a canonical PQL URL:
+⚠️ The tables below are the previous (v4) owner app's icon presets and addresses, kept as worked examples of the
+encoding; the v5 app puts the same sentences under a section (`/_/write/pql/all+comments+from+all+polis+to+bless`).
+
+Every icon-preset in the topbar nav mapped to a canonical PQL URL:
 
 | Icon | Sentence | URL |
 |---|---|---|
@@ -203,6 +249,11 @@ specific handle, producing URLs like:
 | all posts from alice.polis.pub by date | `/_/pql/all+posts+from+alice.polis.pub+by+date` |
 
 ## The sentence-filter widget
+
+⚠️ This widget was the previous (v4) owner app's, removed with that app in November 2026; this section is
+kept as the record of how it composed sentences. The v5 app has no slot widget: gather offers its filters and
+a search, each a sentence on `/v1/query`, and any other sentence can be given as an address
+(`/_/<section>/pql/<sentence>`), to `/v1/query`, or to the `query_pql` tool.
 
 The topbar's centered widget is a UI surface for composing PQL sentences without typing. It is the inverse of the URL parser: the user manipulates slots, the widget produces a sentence, the sentence becomes a URL.
 
@@ -391,9 +442,12 @@ PQL is intentionally aligned with [`policy-grammar.md`](policy-grammar.md) (the 
 
 ### Already shipped
 
-Two extensions this page once listed as future work are live:
+Three extensions this page once listed as future work are live:
 
 - **Cross-network queries.** The discovery service serves `GET /pql/<sentence>` with the same vocabulary, returning raw stream events as JSON (public scopes only — see [Scope-resolution boundary](#scope-resolution-boundary-who-resolves-what)). A reader without a polis site of their own can query it.
+- **PQL as a programmable surface.** A site answers a sentence as JSON at `/v1/query` (the owner's token for
+  sentences only the owner may read), and an agent asks it through the `query_pql` tool: "all posts from my
+  network by date" is something a script, a digest or an assistant can run.
 - **Public-surface PQL.** Every tenant serves `/pql/<sentence>` to anonymous visitors, with the relation+scope clause defaulting to the tenant (see [Tenant-relative PQL](#tenant-relative-pql-the-from-clause-is-optional-on-a-tenant)).
 
 ### Near-term extensions
@@ -404,21 +458,23 @@ Two extensions this page once listed as future work are live:
 
 ### Architectural ambitions
 
-- **PQL as a programmable surface.** A future polis tool might accept a PQL sentence as its input — "give me all posts from my network with comments, by date" — and return JSON. A bot, a digest emailer, a translation pipeline, an RSS bridge.
 - **Policy ↔ PQL convergence.** A user-author who writes `deny pub.polis.comment from all polis at spam.example.com` in their policy file is already speaking a PQL-shaped sentence. A future tool could let an author *select content via PQL* and then *write a policy rule from the same selection*. The shared grammar makes this a one-step UI.
-- **Saved sentences.** A user marking a sentence as a favorite — "all comments from my network to bless" — gets a personalized icon-row preset. The plumbing is already there; the UX is the gap.
+- **Saved sentences.** A user marking a sentence as a favorite — "all comments from my network to bless" — gets it as one of their own views in gather. The plumbing is already there; the UX is the gap.
 - **Composed sentences.** Future grammar growth might allow `and` / `or` between scopes ("from my network or from alice.polis.pub"). The parser is positional today; intersecting/uniting scopes requires a small grammar extension.
 
-This doc is the authoritative spec — the JS, Go and TypeScript parsers, and any future one, agree on the vocabulary documented here. The grammar is the contract.
+This doc is the authoritative spec — the Go and TypeScript parsers, and any future one, agree on the vocabulary documented here. The grammar is the contract.
 
 ## Pointer
 
 Parser implementations (all assert against the shared
 [`pql-golden.jsonl`](pql-golden.jsonl) + [`pql-vocabulary.json`](pql-vocabulary.json)):
 
-- **JS** — `webapp/internal/webui/www/pql.js` (owner SPA + public template)
-- **Go** — `cli-go/pkg/pql/` (webapp `/pql/` handler; future CLI)
-- **TS** — `discovery-service/core/pql.ts` (DS `/pql/` endpoint)
+- **Go** — `cli-go/pkg/pql/` (a site's `/pql/` and `/v1/query`; `TestGoldenCorpus`, `TestVocabularyMatchesCanonical`)
+- **TS** — `discovery-service/core/pql.ts` (DS `/pql/` endpoint; `core/pql.test.ts`)
+
+The previous owner app's JS parser (`pql.js`) was removed with that app. The stream shape's page script
+keeps only the mapping from its filters to sentence tokens, against `pql-vocabulary.json`; the server
+parses every sentence.
 
 Endpoints: tenant `GET /pql/<sentence>`
 (`webapp/internal/server/handlers_pql.go`); discovery service

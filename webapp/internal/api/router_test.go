@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/vdibart/polis-cli/cli-go/pkg/apidesc"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -373,7 +375,7 @@ func TestRenderScopedKeyIsRefusedByContentOperations(t *testing.T) {
 		{http.MethodPut, "/v1/content/post/some-id"},
 		{http.MethodDelete, "/v1/content/post/some-id"},
 		{http.MethodGet, "/v1/content/follow"},
-		{http.MethodGet, "/v1/content/post/drafts"},
+		{http.MethodPost, "/v1/content/post/actions/save_draft"},
 		{http.MethodPost, "/v1/content/post/actions/republish"},
 	}
 	for _, c := range cases {
@@ -496,46 +498,6 @@ func TestNoCORSOnContentRoute(t *testing.T) {
 
 // ── Draft routes ────────────────────────────────────────────────────
 
-func TestDraftsListRequiresAuth(t *testing.T) {
-	mux, _, _ := testSetup(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/content/post/drafts", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 for GET drafts without auth, got %d", w.Code)
-	}
-}
-
-func TestDraftsListWithAuth(t *testing.T) {
-	mux, _, apiKey := testSetup(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/content/post/drafts", nil)
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	// Should reach handler, not be blocked by auth
-	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
-		t.Errorf("expected drafts list to pass auth, got %d", w.Code)
-	}
-}
-
-func TestDraftSaveRequiresAuth(t *testing.T) {
-	mux, _, _ := testSetup(t)
-
-	body := jsonBody(t, map[string]any{"title": "Draft", "content": "test"})
-	req := httptest.NewRequest(http.MethodPost, "/v1/content/post/drafts", body)
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", w.Code)
-	}
-}
-
 // ── Full type name vs short name ────────────────────────────────────
 
 func TestFullTypeName(t *testing.T) {
@@ -637,87 +599,6 @@ func TestContentByIDMethodNotAllowed(t *testing.T) {
 }
 
 // ── Drafts by ID ────────────────────────────────────────────────────
-
-func TestDraftsGetByIDRequiresAuth(t *testing.T) {
-	mux, _, _ := testSetup(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/content/post/drafts/draft-123", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 for GET drafts/{id} without auth, got %d", w.Code)
-	}
-}
-
-func TestDraftsGetByIDWithAuth(t *testing.T) {
-	mux, _, apiKey := testSetup(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/content/post/drafts/draft-123", nil)
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	// Should reach handler, not be blocked by auth
-	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
-		t.Errorf("expected drafts get to pass auth, got %d", w.Code)
-	}
-}
-
-func TestDraftsDeleteRequiresAuth(t *testing.T) {
-	mux, _, _ := testSetup(t)
-
-	req := httptest.NewRequest(http.MethodDelete, "/v1/content/post/drafts/draft-123", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 for DELETE drafts without auth, got %d", w.Code)
-	}
-}
-
-func TestDraftsDeleteWithAuth(t *testing.T) {
-	mux, _, apiKey := testSetup(t)
-
-	req := httptest.NewRequest(http.MethodDelete, "/v1/content/post/drafts/draft-123", nil)
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	// Should reach handler
-	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden || w.Code == http.StatusMethodNotAllowed {
-		t.Errorf("routing failed with %d, should have reached handler", w.Code)
-	}
-}
-
-func TestDraftsByIDMethodNotAllowed(t *testing.T) {
-	mux, _, apiKey := testSetup(t)
-
-	req := httptest.NewRequest(http.MethodPut, "/v1/content/post/drafts/draft-123", nil)
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 for PUT on drafts/{id}, got %d", w.Code)
-	}
-}
-
-func TestDraftsCreateWithAuth(t *testing.T) {
-	mux, _, apiKey := testSetup(t)
-
-	body := jsonBody(t, map[string]any{"title": "My Draft", "content": "draft content"})
-	req := httptest.NewRequest(http.MethodPost, "/v1/content/post/drafts", body)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	// Should reach handler (will fail at dispatch since draft.save isn't wired, but not at auth)
-	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden || w.Code == http.StatusMethodNotAllowed {
-		t.Errorf("routing failed with %d, should have reached handler", w.Code)
-	}
-}
 
 // ── Bad JSON payload ────────────────────────────────────────────────
 
@@ -931,6 +812,67 @@ func TestEveryV1ContentTypeIsClassified(t *testing.T) {
 	for _, name := range []string{"feed", "pub.polis.feed", "notafeed", "DM"} {
 		if code := get(name); code != http.StatusUnauthorized {
 			t.Errorf("GET /v1/content/%s (undeclared) without auth = %d, want 401", name, code)
+		}
+	}
+}
+
+// ⭐ The description is served, public, and lists the operations this site
+// serves.
+func TestDescriptionIsServedAndPublic(t *testing.T) {
+	mux, _, _ := testSetup(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/openapi.json", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /v1/openapi.json = %d: %s", w.Code, w.Body.String())
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if doc["openapi"] != "3.1.0" {
+		t.Errorf("openapi = %v", doc["openapi"])
+	}
+	listed := map[string]bool{}
+	for _, v := range doc["x-polis-operations"].([]any) {
+		listed[v.(string)] = true
+	}
+	for _, want := range []string{"post.list", "post.create", "license.get", "dm.get"} {
+		if !listed[want] {
+			t.Errorf("description lacks %s: %v", want, listed)
+		}
+	}
+}
+
+// ⛔ Every described operation is reachable at the method and path the
+// description gives, and reaches the action it names: a described route the
+// router doesn't have, or one that dispatches a different action, is a lie
+// an agent would act on.
+func TestEveryDescribedOperationReachesItsAction(t *testing.T) {
+	mux, _, apiKey := testSetup(t)
+	for _, op := range ops.NewBuiltinCoreHandler().Operations() {
+		path := strings.ReplaceAll(op.Path, "{id}", "x")
+		var body io.Reader
+		if op.Method != http.MethodGet {
+			body = strings.NewReader("{}")
+		}
+		req := httptest.NewRequest(op.Method, path, body)
+		req.Header.Set("Content-Type", "application/json")
+		if op.Auth != apidesc.AuthSiteSigned {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		got := w.Body.String()
+		switch {
+		case w.Code == http.StatusMethodNotAllowed:
+			t.Errorf("%s: %s %s = 405: %s", op.ID(), op.Method, path, got)
+		case strings.Contains(got, "unknown path"):
+			t.Errorf("%s: %s %s is not a route: %s", op.ID(), op.Method, path, got)
+		case strings.Contains(got, "unsupported_action"):
+			t.Errorf("%s: %s %s does not reach action %q: %s", op.ID(), op.Method, path, op.Action, got)
+		case op.Auth == apidesc.AuthPublic && w.Code == http.StatusUnauthorized:
+			t.Errorf("%s: described as public but %s %s = 401", op.ID(), op.Method, path)
 		}
 	}
 }

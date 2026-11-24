@@ -319,6 +319,10 @@ func AnnounceRotation(ctx context.Context, site storage.Site, ds RotationDS, req
 		ErrRotationPending, StagedKeyKey, err)
 }
 
+// DSCurrentKey is the key the DS's witnessed history says is current, read the
+// way a rotation reads it. Empty means the DS holds no key for the domain.
+func DSCurrentKey(h *discovery.KeyHistoryResponse) string { return dsCurrentKey(h) }
+
 // dsCurrentKey is the key the DS's witnessed history says is current: the one
 // with no valid_until, or failing that the latest.
 func dsCurrentKey(h *discovery.KeyHistoryResponse) string {

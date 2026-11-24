@@ -87,6 +87,7 @@ func RunLocalWithThemes(siteDir string, dsKeys DSKeyLookup, cliThemesDir string)
 	checkIndexLocal(r, siteDir)
 	checkPolicyLocal(r, siteDir, hasPrivate)
 	checkContentLocal(r, siteDir, pubKey, keyErr, chain, chainNote)
+	checkAgentActsLocal(r, siteDir)
 
 	return r
 }

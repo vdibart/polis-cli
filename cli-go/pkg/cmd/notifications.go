@@ -39,7 +39,7 @@ func handleNotifications(args []string) {
 // "rebuild" should only contain things that can be rebuilt. Signet epic 25 D5.
 func handleNotificationsClear(args []string) {
 	fs := flag.NewFlagSet("notifications clear", flag.ExitOnError)
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 	dir := getDataDir()
 	if !isPolisSite(dir) {
@@ -66,7 +66,7 @@ func handleNotificationsList(args []string) {
 	fs := flag.NewFlagSet("notifications list", flag.ExitOnError)
 	showAll := fs.Bool("all", false, "Show all notifications")
 	fs.Bool("a", false, "Show all notifications (alias)")
-	fs.Parse(args)
+	_ = fs.Parse(args) // ExitOnError: a bad flag exits, so Parse never returns an error
 
 	dir := getDataDir()
 

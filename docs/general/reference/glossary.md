@@ -16,7 +16,7 @@ Request blessing from a post author. Publishing a comment registers it with the 
 
 ### API key
 
-A `polis_`-prefixed Bearer token for authenticating with the Content Type API (`/v1/`). Stored as a SHA-256 hash in `.polis/api-keys.json` (minted by the site's owner through the webapp, or added by hand; a key may carry `scopes` that narrow it). Required for all write operations; read operations are public.
+A `polis_`-prefixed Bearer token for authenticating with the Content Type API (`/v1/`). Stored as a SHA-256 hash in `.polis/api-keys.json` (minted by the site's owner through the webapp, or added by hand; a key may carry `scopes` that narrow it). A write needs one, or the owner's own sign-in in the owner app; most reads are public, and a read of what only the owner may see (drafts, messages, first-person views) needs one too.
 
 **Related**: Content Type API, bundle
 
@@ -196,7 +196,7 @@ A reusable template fragment (HTML or markdown) included in rendered pages via `
 
 ### shape
 
-A rendering approach declared by a bundle, comprising the templates and (optionally) client-side scripts that turn content into a user-facing surface. The core bundle ships two shapes: `pub.polis.shapes.v3` (the classic blog — per-post pages, comment threads inline) and `pub.polis.shapes.v4` (the *infinity stream* — single stream-screen, PQL-driven filtering, used on polis.pub and the webapp logged-in view). The active shape is set in `.polis/bundles/registry.json`. Themes are independent: a theme may target one or more shapes, and may override individual shape templates.
+A rendering approach declared by a bundle, comprising the templates and (optionally) client-side scripts that turn content into a user-facing surface. The core bundle ships three: `pub.polis.shapes.v5` (the default, used on polis.pub — the site as cards under its own menu, each item's page the item open among its neighbours, views as PQL sentences), and two that are no longer supported but still render: `pub.polis.shapes.v3` (the classic blog — per-post pages, comment threads inline) and `pub.polis.shapes.v4` (the *infinity stream* — single stream-screen, PQL-driven filtering). The active shape is set in `.polis/bundles/registry.json`. Themes are independent: a theme may target one or more shapes, and may override individual shape templates.
 
 **Related**: bundle, theme, content type
 
@@ -204,7 +204,7 @@ A rendering approach declared by a bundle, comprising the templates and (optiona
 
 ### theme
 
-A CSS-only presentation package scoped to a bundle and compatible with one or more shapes. Themes live at `.polis/bundles/pub.polis.core/themes/<name>/` per-tenant; the active theme is set via `active_theme` in `.polis/bundles/registry.json`. The core bundle ships: `especial`, `especial-light`, `vice`, `turbo`, `zane`, `studio13`, `studio13-nk` (user-selectable), plus `sols` (the logged-out landing theme) and `stardust`, which are reserved and cannot be chosen as a personal theme. See [themes.md](../concepts/themes.md). A theme may override individual shape templates (e.g. `post.html`) to customize markup.
+A CSS-only presentation package scoped to a bundle and compatible with one or more shapes. Themes live at `.polis/bundles/pub.polis.core/themes/<name>/` per-tenant; the active theme is set via `active_theme` in `.polis/bundles/registry.json`. The core bundle ships: `daryl`, `especial`, `especial-light`, `vice`, `turbo`, `zane`, `studio13`, `studio13-nk` (user-selectable), plus `sols` (the logged-out landing theme), `stardust`, and `elwood-signal` and `elwood-noise` (defined, not yet offered), which are reserved and cannot be chosen as a personal theme. `classic` is retired (it is now `daryl`): an old site may still declare it, and it is never offered. See [themes.md](../concepts/themes.md). A theme may override individual shape templates (e.g. `post.html`) to customize markup.
 
 **Related**: shape, snippet, bundle, render
 

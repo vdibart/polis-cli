@@ -426,7 +426,7 @@ func readTokenFile(path string) (secret.Value, error) {
 	if info.Mode().Perm()&0o077 != 0 {
 		return secret.Value{}, fmt.Errorf("the token file %s is readable by others (mode %o): run chmod 600 %s, then deploy again", path, info.Mode().Perm(), path)
 	}
-	b, err := os.ReadFile(p)
+	b, err := os.ReadFile(p) //nolint:gosec // G304: the owner's token file, mode-checked above
 	if err != nil {
 		return secret.Value{}, fmt.Errorf("cannot read the token file %s: %w", path, err)
 	}
@@ -599,7 +599,7 @@ func waitForPages(ctx context.Context, plat provision.Platform, inst provision.I
 		if req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/", nil); err == nil && d.httpClient != nil {
 			if resp, err := d.httpClient.Do(req); err == nil {
 				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-				resp.Body.Close()
+				_ = resp.Body.Close() // a drained probe; nothing to recover
 			}
 		}
 		if st, err := plat.Status(ctx, inst); err == nil && st.ActiveRelease != "" && st.ActiveRelease != rel.ID {

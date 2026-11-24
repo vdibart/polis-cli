@@ -79,6 +79,12 @@
       "reason": ""
     },
     {
+      "name": "layout-private-drafts",
+      "status": "pass",
+      "message": "no private drafts at pre-0.58 paths",
+      "reason": ""
+    },
+    {
       "name": "registry-migration",
       "status": "pass",
       "message": "active_theme already migrated out of .well-known/polis",
@@ -104,14 +110,14 @@
     },
     {
       "name": "active-shape-upgrade",
-      "status": "fail",
-      "message": "active_shape is on legacy v3; should be flipped to v4",
-      "reason": "v3 → v4 SHAPE cutover — registry.json's active_shape is flipped from pub.polis.shapes.v3 to pub.polis.shapes.v4 so render dispatches produce v4 chrome; pairs with the v3-archive cleanup below",
+      "status": "pass",
+      "message": "on the blog shape (v3), which is kept and still renders but is no longer supported; the default shape (v5) is available",
+      "reason": "the blog shape (v3) and the stream shape (v4) still render but are no longer supported; v5 is the default, and a self-hosted site keeps the shape its owner chose",
       "actions": [
         {
-          "op": "migrate",
+          "op": "flag",
           "path": ".polis/bundles/registry.json",
-          "detail": "active_shape pub.polis.shapes.v3 → pub.polis.shapes.v4"
+          "detail": "to switch: set active_shape to pub.polis.shapes.v5 and run polis render --force"
         }
       ]
     },
@@ -328,16 +334,9 @@
     },
     {
       "name": "cli-update",
-      "status": "fail",
-      "message": "Would download polis-full vdev for $GOOS/$GOARCH",
-      "reason": "Your site is now at vdev format — the latest CLI ensures full compatibility",
-      "actions": [
-        {
-          "op": "create",
-          "path": ".polis/bin/polis-full-$GOOS-$GOARCH",
-          "detail": "download polis-full vdev for $GOOS/$GOARCH"
-        }
-      ]
+      "status": "pass",
+      "message": "not compared (development build, or release lookup disabled)",
+      "reason": ""
     }
   ],
   "dry_run": [

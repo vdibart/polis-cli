@@ -996,3 +996,27 @@ func TestProcessPartials_BlocksTraversalToOutsideFile(t *testing.T) {
 		t.Errorf("partial traversal succeeded — result contains secret content: %q", result)
 	}
 }
+
+// A shipped snippet that defers to the site's own override ({{> global:about}}
+// inside about.html) renders the override when there is one and nothing when
+// there is not, instead of including itself until the depth limit fails the page.
+func TestSelfIncludingPartialRendersTheOverrideOrNothing(t *testing.T) {
+	tempDir := t.TempDir()
+	themeSnippets := filepath.Join(tempDir, "site", "themes", "t", "snippets")
+	os.MkdirAll(themeSnippets, 0755)
+	os.WriteFile(filepath.Join(themeSnippets, "about.html"), []byte("{{> global:about}}"), 0644)
+	engine := New(Config{Site: storage.At(tempDir), ActiveTheme: "t"})
+
+	got, err := engine.Render(`<div>{{> theme:about}}</div>`, NewRenderContext())
+	if err != nil || got != "<div></div>" {
+		t.Fatalf("no override: got %q, %v; want an empty div and no error", got, err)
+	}
+
+	os.MkdirAll(filepath.Join(tempDir, "site", "snippets"), 0755)
+	os.WriteFile(filepath.Join(tempDir, "site", "snippets", "about.html"), []byte("<p>mine</p>"), 0644)
+	engine = New(Config{Site: storage.At(tempDir), ActiveTheme: "t"})
+	got, err = engine.Render(`<div>{{> theme:about}}</div>`, NewRenderContext())
+	if err != nil || got != "<div><p>mine</p></div>" {
+		t.Fatalf("with override: got %q, %v", got, err)
+	}
+}

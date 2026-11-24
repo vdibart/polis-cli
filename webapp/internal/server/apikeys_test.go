@@ -44,8 +44,10 @@ func TestAPIKeysMintListRevoke(t *testing.T) {
 	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "key_hash") || strings.Contains(w.Body.String(), token) {
 		t.Fatalf("list = %d %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"scopes":["render"]`) {
-		t.Errorf("list does not show the key's scopes: %s", w.Body.String())
+	// ⭐ A scoped key is a personal token: it presents a signed grant, and its
+	// render scope is granted under its current name, appearance.
+	if !strings.Contains(w.Body.String(), `"scopes":["appearance"]`) || !strings.Contains(w.Body.String(), `"grant":"https://`) {
+		t.Errorf("list does not show the key's scopes and grant: %s", w.Body.String())
 	}
 
 	w = httptest.NewRecorder()

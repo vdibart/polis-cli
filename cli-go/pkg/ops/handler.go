@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
 	"io"
 	"net/http"
 	"os/exec"
@@ -35,6 +36,14 @@ type HandlerEnv struct {
 	// sink (e.g. the webapp's Server.LogEvent → action=<name>). nil = discard.
 	EmitEvent func(action string, fields map[string]any)
 	Bundle    *bundle.Bundle
+	// Marker is the user agent's marker for this act, or the zero marker for
+	// the owner's own. ⭐ Every signing path below passes it on, so an act made
+	// under a grant is marked inside its signature.
+	Marker discovery.AgentMarker
+	// DMHTTPClient and AllowPrivateDMRecipients are how a message is sent
+	// from this host (dm_send.go: the outbound address rule).
+	DMHTTPClient             *http.Client
+	AllowPrivateDMRecipients bool
 }
 
 // ExecutableHandler dispatches to an external binary via JSON stdin/stdout.
@@ -53,7 +62,7 @@ func (h *ExecutableHandler) Handle(ctx context.Context, req ActionRequest, env H
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, h.Path)
+	cmd := exec.CommandContext(ctx, h.Path) //nolint:gosec // G204: an executable handler the site's own bundle declares, by design
 	cmd.Stdin = bytes.NewReader(input)
 
 	// Set environment variables for the handler

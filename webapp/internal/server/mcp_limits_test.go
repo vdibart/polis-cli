@@ -23,7 +23,7 @@ func mcpStatus(s *Server, token, addr string) int {
 // ⛔ An address that keeps sending bad keys is refused before its key is
 // looked at; another address, and the owner's AI with a good key, are not.
 func TestMCPRefusesAnAddressThatKeepsFailing(t *testing.T) {
-	s := newConfiguredServer(t)
+	s, _ := mcpSite(t)
 	token, _, err := ops.MintAPIKey(s.Site(), "Kay", []string{ops.ScopeRender})
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +49,7 @@ func TestMCPRefusesAnAddressThatKeepsFailing(t *testing.T) {
 
 // The key cache never outlives a mint or a revoke made by this instance.
 func TestMCPKeyCacheFollowsThisInstancesWrites(t *testing.T) {
-	s := newConfiguredServer(t)
+	s, _ := mcpSite(t)
 	if code := mcpStatus(s, "polis_none", "198.51.100.1"); code != http.StatusUnauthorized {
 		t.Fatalf("no keys = %d", code)
 	}
@@ -62,14 +62,5 @@ func TestMCPKeyCacheFollowsThisInstancesWrites(t *testing.T) {
 	}
 	if code := mcpStatus(s, token, "198.51.100.1"); code != http.StatusUnauthorized {
 		t.Errorf("a revoked key = %d, want 401", code)
-	}
-}
-
-// The owner-private reads need the scope that can change them.
-func TestMCPPrivateConfigReadsAreScoped(t *testing.T) {
-	for _, tl := range mcpTools {
-		if (tl.name == "get_stream_marks" || tl.name == "get_nav_shortcuts") && tl.scope != ops.ScopeRender {
-			t.Errorf("%s needs no scope", tl.name)
-		}
 	}
 }

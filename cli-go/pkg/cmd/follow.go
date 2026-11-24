@@ -5,7 +5,7 @@ import (
 	"os"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
-	"github.com/vdibart/polis-cli/cli-go/pkg/following"
+	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 	"github.com/vdibart/polis-cli/cli-go/pkg/policy"
 	"github.com/vdibart/polis-cli/cli-go/pkg/remote"
 	"github.com/vdibart/polis-cli/cli-go/pkg/site"
@@ -41,12 +41,11 @@ func handleFollow(args []string) {
 		exitError("Failed to load private key: %v", err)
 	}
 
-	// The site's own rules decide which waiting comments a follow blesses, as
-	// they do in the web app. This command used to grant every pending AND
+	// The site's own rules decide which waiting comments a follow blesses
+	// (ops.Follow loads them). This command used to grant every pending AND
 	// denied comment from the author unconditionally, overturning a deny the
 	// user had made, with no rule saying so.
-	policies, err := policy.LoadPolicies(getSite())
-	if err != nil {
+	if _, err := policy.LoadPolicies(getSite()); err != nil {
 		exitError("Failed to load policies: %v", err)
 	}
 
@@ -59,8 +58,13 @@ func handleFollow(args []string) {
 	myDomain := discovery.ExtractDomainFromURL(baseURL)
 	client := discovery.NewAuthenticatedClient(discoveryURL, myDomain, privKey)
 
-	result, err := following.FollowWithBlessing(getSite(), authorURL, client, remote.NewClient(), privKey, policies,
-		&following.FollowConfig{DiscoveryURL: discoveryURL, BaseURL: baseURL})
+	// ⭐ The one implementation of following (ops.Follow): the same checks,
+	// rules, follow and event as /v1 follow.create and the web app.
+	result, err := ops.Follow(cliContext(), ops.FollowSite{
+		Site: getSite(), PrivateKey: privKey, BaseURL: baseURL, DiscoveryURL: discoveryURL,
+		DS: client, Remote: remote.NewClient(),
+		Emit: func(action string, fields map[string]any) { logCLIAction(action, fields) },
+	}, authorURL)
 	if err != nil {
 		exitError("Failed to follow %s: %v", authorURL, err)
 	}

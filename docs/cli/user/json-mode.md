@@ -83,8 +83,7 @@ the run with discovery-service logs).
 
 ### The standard envelope
 
-Most commands — `about`, `actor`, `attest`, `blessing requests`, `blessing sync`, `blessing beseech`,
-`clone`, `did`, `discover`, `dm`, `extract`, `follow`, `index`, `init`, `license`, `notifications`,
+Most commands — `about`, `actor`, `attest`, `blessing requests`, `blessing sync`, `clone`, `did`, `discover`, `dm`, `extract`, `follow`, `index`, `init`, `license`, `notifications`,
 `preview`, `rebuild`, `rotate-key`, `site`, `tag`, `unfollow`, `unpublish`, `version`:
 
 ```json
@@ -97,13 +96,13 @@ Most commands — `about`, `actor`, `attest`, `blessing requests`, `blessing syn
 ```
 
 `command` is not always the typed name: every `attest`, `actor` and `tag` subcommand reports `attest`,
-`actor` and `tag`, and the blessing subcommands report `blessing-requests`, `blessing-sync` and
-`blessing-beseech`.
+`actor` and `tag`, and the blessing subcommands report `blessing-requests`, `blessing-sync` and (in
+its error) `blessing-beseech`.
 
 ### A flat object
 
-`post`, `republish`, `comment draft`, `comment sign`, `render`, `register`, `unregister`, `blessing grant`
-and `blessing deny` put their fields at the **top level**, with a `success` boolean and no `data`
+`post`, `republish`, `comment draft`, `comment sign`, `comment send`, `render`, `register`, `unregister`,
+`blessing grant`, `blessing deny` and a sent `blessing beseech` put their fields at the **top level**, with a `success` boolean and no `data`
 (`comment list` and `comment sync` are flat too, and carry no `success`):
 
 ```json
@@ -123,9 +122,9 @@ A command that fails prints, **on stdout**, and exits `1`:
 ```
 
 There is **no error code** — `error` is a human-readable sentence, and a script should branch on the
-exit status, not parse it. The one differently shaped error is `blessing beseech`, which the Go CLI does
-not support: it returns `{"status": "error", "command": "blessing-beseech", "error": {"code":
-"NOT_SUPPORTED", "message": …}}` — and, like every other failure, exits `1`.
+exit status, not parse it. The one differently shaped error is `blessing beseech` for a version that is
+not a pending comment of this site: it returns `{"status": "error", "command": "blessing-beseech",
+"error": {"code": "NOT_FOUND", "message": …}}` — and, like every other failure, exits `1`.
 
 > **bash:** errors are `{"status": "error", "command": …, "error": {"code", "message", "details"}}` on
 > **stderr**. Its codes include `FILE_NOT_FOUND`, `INVALID_INPUT`, `API_ERROR`, `SIGNATURE_ERROR`,
@@ -344,11 +343,20 @@ a flat object.
 { "success": true, "id": "…", "in_reply_to": "https://bob.example/content/pub.polis.core/post/20260101/hello.md" }
 ```
 
-`polis comment sign <id>` (moves the draft to pending):
+`polis comment sign <id>` (signs the draft, which moves to pending, then publishes and sends it):
 
 ```json
-{ "success": true, "id": "…", "version": "sha256:…", "signature": "-----BEGIN SSH SIGNATURE-----…" }
+{ "success": true, "sent": true, "id": "…", "version": "sha256:…", "signature": "-----BEGIN SSH SIGNATURE-----…",
+  "status": "created", "message": "…", "auto_blessed": false }
 ```
+
+`success` and `sent` are both whether the comment reached the discovery service with its blessing
+request; `status` and `message` are the service's answer, and `auto_blessed` is true only when the post's
+author had already blessed it. When it did not reach the service, the comment is still signed and kept in
+pending, `success` and `sent` are `false`, the command exits `1`, and either `send_error` says why or
+`status` is `"deferred"` (the site is not registered with the discovery service).
+`polis comment send <id>` sends a pending comment again and answers the same way, without `version` and
+`signature`.
 
 `polis comment list [drafts|pending|blessed|denied|all]` returns `{"comments": [...]}`; with `all`, each
 entry is `{"status", "id"}`.
@@ -434,21 +442,22 @@ A flat object:
 
 ### `polis blessing beseech <version>`
 
-⚠️ **The Go CLI does not support this command.** It cannot re-request a blessing for a comment version,
-so it contacts nothing, exits `1`, and returns:
+For a version that is one of this site's **pending** comments, it sends that comment again and answers as
+`polis comment send` does (above), with `id` and `version`. For any other version it contacts nothing,
+exits `1`, and returns:
 
 ```json
 {
   "status": "error",
   "command": "blessing-beseech",
   "error": {
-    "code": "NOT_SUPPORTED",
-    "message": "the Go CLI cannot re-request a blessing for a comment version. For a PENDING comment, re-request it from the web app, or republish the comment (polis republish <comment path>), which signs a new version and asks for the blessing again. A denied comment cannot be re-requested: the discovery service keeps the denial"
+    "code": "NOT_FOUND",
+    "message": "no pending comment signed on this site has that version. Only a PENDING comment can be re-requested (polis comment send <id> does the same by id). A denied comment cannot be re-requested: the discovery service keeps the denial. polis republish <comment path> signs a new version and asks for the blessing again"
   }
 }
 ```
 
-Without `--json` it prints `[x] Not supported:` and the same message to stderr.
+Without `--json` it prints `[x] Not found:` and the same message to stderr.
 
 ### `polis follow <url>`
 
@@ -1381,8 +1390,8 @@ run from anywhere with no site and no key. Shape (values abridged):
 # Draft, sign and send a comment
 id=$(polis --json comment draft https://bob.example/content/pub.polis.core/post/20260101/hello.md | jq -r '.id')
 "$EDITOR" ".polis/bundles/pub.polis.core/comments/drafts/$id.md"
-polis --json comment sign "$id" | jq -r '.version'
-polis --json comment sync
+polis --json comment sign "$id" | jq -r '.version'   # exits 1 if it could not be sent
+polis --json comment sync                              # later: has the author answered?
 ```
 
 ### Automated Blessing Workflow

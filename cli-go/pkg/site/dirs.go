@@ -29,7 +29,7 @@ func MkdirAllPrivate(site storage.Site, path string) error {
 	rel, err := filepath.Rel(site.Dir(), path)
 	if err != nil {
 		// Path is not under the site root — use default permissions
-		return os.MkdirAll(path, 0755)
+		return os.MkdirAll(path, 0755) //nolint:gosec // G301: not under .polis, so the public default
 	}
 
 	// Check if this path is under .polis
@@ -45,5 +45,5 @@ func MkdirAllPrivate(site storage.Site, path string) error {
 
 	// Stays: creates a directory that may remain EMPTY, and carries the
 	// 0700-under-.polis rule that nothing may widen.
-	return os.MkdirAll(path, 0755)
+	return os.MkdirAll(path, 0755) //nolint:gosec // G301: not under .polis (handled above), so the public default
 }

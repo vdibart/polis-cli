@@ -167,10 +167,11 @@ var ServedExtensions = publicfile.ServedExtensions
 // `.html`/`.md` because of how snippet resolution works, drafts are `.md` and
 // hooks are `.sh` under `.polis/` (which this file refuses as a dot-path), and
 // post bodies go through bluemonday. The guarantee is real but incidental, so
-// it is asserted in static_execution_test.go rather than left to be rediscovered.
+// it is asserted in static_execution_test.go rather than left to be rediscovered,
+// and Patrol reports a script-capable file polis did not ship (patrol.ownScript).
 //
 // ⚠️ `.svg` counts. It is served as `image/svg+xml` and an SVG can carry script.
-var ScriptCapableExtensions = map[string]bool{".js": true, ".svg": true}
+var ScriptCapableExtensions = publicfile.ScriptCapableExtensions
 
 func ServeTenantPublic(
 	w http.ResponseWriter, r *http.Request,
@@ -212,19 +213,20 @@ func ServeTenantPublicGated(
 		urlPath = "/"
 	}
 
-	// Map root to index.html
-	if urlPath == "/" || urlPath == "" || urlPath == "/index.html" {
-		// PQL landing redirect: a human browser (Accept: text/html) landing on
-		// the bare tenant root — or the explicit /index.html — is sent to the
-		// canonical PQL URL so the address bar reflects the filter (and
-		// scroll-driven post URLs build on it). Programmatic / non-HTML clients
-		// still get index.html unchanged. handlers_pql.go's HTML branch reads
-		// index.html directly (relPath), never via "/" or "/index.html", so
-		// this can't loop back into itself.
-		if r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
-			http.Redirect(w, r, "/pql/all+posts+by+date", http.StatusFound)
-			return
+	// Map root to index.html. ⛔ The root SERVES the home page, with 200 and no
+	// redirect (Vincent, 2026-11-17, an SEO review: / used to answer a browser
+	// or crawler with a 302 to /pql/all+posts+by+date, whose canonical was /
+	// again, a loop). /index.html is the same page under a second address, so
+	// it redirects to / (one page, one address), keeping the query.
+	if urlPath == "/index.html" && r.Method == http.MethodGet {
+		target := "/"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
 		}
+		http.Redirect(w, r, target, http.StatusMovedPermanently) //nolint:gosec // G710: the path is the fixed same-site "/"; the caller's query only follows its "?", so no value can change the host or the path (TestTenantRoot_IndexRedirectNeverLeavesTheSite)
+		return
+	}
+	if urlPath == "/" || urlPath == "" || urlPath == "/index.html" {
 		urlPath = "/index.html"
 	}
 
@@ -265,7 +267,7 @@ func ServeTenantPublicGated(
 		b := storage.LoadBundle(handle)
 		if b != nil {
 			if mounted := b.SourceToMountPath(clean); mounted != clean {
-				http.Redirect(w, r, "/"+mounted, http.StatusMovedPermanently)
+				http.Redirect(w, r, "/"+mounted, http.StatusMovedPermanently) //nolint:gosec // G710: the target is built from the session's own handle and the base domain, a validated return URL, or the site's own mount map
 				return
 			}
 		}
@@ -287,7 +289,7 @@ func ServeTenantPublicGated(
 	if strings.HasSuffix(clean, ".md") {
 		if b := storage.LoadBundle(handle); b != nil {
 			if src := b.MountToSourcePath(clean); src != clean {
-				http.Redirect(w, r, "/"+src, http.StatusMovedPermanently)
+				http.Redirect(w, r, "/"+src, http.StatusMovedPermanently) //nolint:gosec // G710: the target is built from the session's own handle and the base domain, a validated return URL, or the site's own mount map
 				return
 			}
 		}
@@ -303,7 +305,7 @@ func ServeTenantPublicGated(
 		w.Header().Set("Content-Type", ctype)
 		w.Header().Set("Cache-Control", "no-cache")
 		setCrossOrigin(w, clean)
-		w.Write(data)
+		_, _ = w.Write(data) //nolint:gosec // G705: serving the site's own files is this handler's job; tenant pages carry the tenant CSP, and no tenant can write a script type
 		return
 	}
 
@@ -339,7 +341,7 @@ func ServeTenantPublicGated(
 				}
 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
 				setCrossOrigin(w, clean)
-				w.Write(data)
+				_, _ = w.Write(data) //nolint:gosec // G705: application/json; serving the site's own files is this handler's job
 				return
 			}
 		}
@@ -428,5 +430,5 @@ func ServeTenantPublicGated(
 		data = postProcess(data, r)
 	}
 
-	w.Write(data)
+	_, _ = w.Write(data) //nolint:gosec // G705: serving the site's own files is this handler's job; tenant pages carry the tenant CSP, and no tenant can write a script type
 }

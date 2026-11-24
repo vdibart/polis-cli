@@ -554,7 +554,7 @@ func writeRegistry(r *Registry, path string) error {
 	// Stays: the write below goes through atomicfile, which owns atomicity OUTSIDE
 	// the interface and does NOT create parent directories. Removing this is the
 	// judgepublish mistake, which has been made twice in this detach.
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil { //nolint:gosec // G301: the actor registry is a published file, in the public tree
 		return fmt.Errorf("create registry directory: %w", err)
 	}
 	// 0644: this is PUBLIC served content, and a registry a stranger cannot

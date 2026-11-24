@@ -9,9 +9,14 @@ package ops
 import (
 	"context"
 	"fmt"
+	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
+	"net/http"
+	"sort"
 	"strings"
 
+	"github.com/vdibart/polis-cli/cli-go/pkg/apidesc"
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
+	"github.com/vdibart/polis-cli/cli-go/pkg/capability"
 	"github.com/vdibart/polis-cli/cli-go/pkg/resolve"
 )
 
@@ -37,10 +42,51 @@ type Engine struct {
 	// signals) to the host's event sink. nil = discard.
 	EmitEvent func(action string, fields map[string]any)
 
-	// OnContentChanged is called after any write operation succeeds.
-	OnContentChanged func()
+	// AfterWrite is called once after each write operation succeeds, with
+	// what it did. ⭐ A host passes NewAfterWrite(...).Apply, so a write's
+	// render, hook and draft removal happen the same way whoever called.
+	AfterWrite func(ctx context.Context, w Written)
+
+	// DMHTTPClient and AllowPrivateDMRecipients: how messages are sent from
+	// this host (dm_send.go, the outbound address rule).
+	DMHTTPClient             *http.Client
+	AllowPrivateDMRecipients bool
+
+	// Capabilities is what the site can do, derived from its mode by the
+	// host. The API's description lists only what these allow.
+	Capabilities capability.Set
 
 	handlers map[string]Handler // bundle name → handler
+}
+
+// Describer is a Handler that describes its operations (apidesc). The core
+// handler is one; a handler that is not is left out of the description.
+type Describer interface {
+	Operations() []apidesc.Operation
+}
+
+// Operations is every described operation the engine's handlers serve, in a
+// stable order.
+func (e *Engine) Operations() []apidesc.Operation {
+	var names []string
+	for name := range e.handlers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []apidesc.Operation
+	for _, name := range names {
+		if d, ok := e.handlers[name].(Describer); ok {
+			out = append(out, d.Operations()...)
+		}
+	}
+	return out
+}
+
+// Describe is the site's API description (OpenAPI 3.1), generated from the
+// described operations and the site's capabilities.
+func (e *Engine) Describe(mcp string) map[string]any {
+	return apidesc.Describe(e.Operations(), apidesc.Manual(), e.Capabilities,
+		apidesc.Options{SiteURL: e.BaseURL, MCP: mcp})
 }
 
 // Logger is the interface for engine logging.
@@ -61,6 +107,10 @@ type ActionRequest struct {
 type ActionResult struct {
 	Status string         `json:"status"`
 	Data   map[string]any `json:"data,omitempty"`
+	// Code is the HTTP status for the answer when the transport's default
+	// (201 for a create, 200 otherwise) is not it: 202 for a message saved
+	// but not delivered. Not sent in the body.
+	Code int `json:"-"`
 }
 
 // Event represents a side-effect event emitted by an operation.
@@ -83,18 +133,22 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	}
 
 	e := &Engine{
-		Resolver:         cfg.Resolver,
-		Bundles:          cfg.Bundles,
-		PrivateKey:       cfg.PrivateKey,
-		Keys:             cfg.Keys,
-		PublicKey:        cfg.PublicKey,
-		BaseURL:          cfg.BaseURL,
-		DiscoveryURL:     cfg.DiscoveryURL,
-		CLIThemesDir:     cfg.CLIThemesDir,
-		Logger:           cfg.Logger,
-		EmitEvent:        cfg.EmitEvent,
-		OnContentChanged: cfg.OnContentChanged,
-		handlers:         make(map[string]Handler),
+		Resolver:     cfg.Resolver,
+		Bundles:      cfg.Bundles,
+		PrivateKey:   cfg.PrivateKey,
+		Keys:         cfg.Keys,
+		PublicKey:    cfg.PublicKey,
+		BaseURL:      cfg.BaseURL,
+		DiscoveryURL: cfg.DiscoveryURL,
+		CLIThemesDir: cfg.CLIThemesDir,
+		Logger:       cfg.Logger,
+		EmitEvent:    cfg.EmitEvent,
+		AfterWrite:   cfg.AfterWrite,
+		Capabilities: cfg.Capabilities,
+
+		DMHTTPClient:             cfg.DMHTTPClient,
+		AllowPrivateDMRecipients: cfg.AllowPrivateDMRecipients,
+		handlers:                 make(map[string]Handler),
 	}
 
 	// Register handlers for each bundle
@@ -111,17 +165,22 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 
 // EngineConfig holds the configuration for creating an Engine.
 type EngineConfig struct {
-	Resolver         *resolve.Resolver
-	Bundles          map[string]*bundle.Bundle
-	PrivateKey       []byte
-	PublicKey        []byte
-	Keys             func() (private, public []byte)
-	BaseURL          string
-	DiscoveryURL     string
-	CLIThemesDir     string
-	Logger           Logger
-	EmitEvent        func(action string, fields map[string]any)
-	OnContentChanged func()
+	Resolver     *resolve.Resolver
+	Bundles      map[string]*bundle.Bundle
+	PrivateKey   []byte
+	PublicKey    []byte
+	Keys         func() (private, public []byte)
+	BaseURL      string
+	DiscoveryURL string
+	CLIThemesDir string
+	Logger       Logger
+	EmitEvent    func(action string, fields map[string]any)
+	AfterWrite   func(ctx context.Context, w Written)
+	Capabilities capability.Set
+	// DMHTTPClient is the host's shared HTTP client for sending messages, and
+	// AllowPrivateDMRecipients is true only in local mode (dm_send.go).
+	DMHTTPClient             *http.Client
+	AllowPrivateDMRecipients bool
 }
 
 // Dispatch routes an ActionRequest to the appropriate handler.
@@ -155,6 +214,19 @@ func (e *Engine) Dispatch(ctx context.Context, req ActionRequest) (*ActionResult
 		return nil, fmt.Errorf("not configured: no private key available")
 	}
 
+	// ⭐ Name the operation on the request, and stamp every event the write
+	// emits (the DM package's lifecycle events included) with D8's fields.
+	op := fullType + "." + req.Action
+	NoteOp(ctx, op)
+	marker := MarkerOf(GrantFrom(ctx))
+	emit := e.EmitEvent
+	if emit != nil {
+		raw := emit
+		emit = func(action string, fields map[string]any) {
+			raw(action, EventFields(ctx, op, marker, fields))
+		}
+	}
+
 	// Build handler environment
 	env := HandlerEnv{
 		Resolver:     e.Resolver,
@@ -163,8 +235,12 @@ func (e *Engine) Dispatch(ctx context.Context, req ActionRequest) (*ActionResult
 		BaseURL:      e.BaseURL,
 		DiscoveryURL: e.DiscoveryURL,
 		CLIThemesDir: e.CLIThemesDir,
-		EmitEvent:    e.EmitEvent,
+		EmitEvent:    emit,
 		Bundle:       b,
+		Marker:       marker,
+
+		DMHTTPClient:             e.DMHTTPClient,
+		AllowPrivateDMRecipients: e.AllowPrivateDMRecipients,
 	}
 
 	// Dispatch to handler
@@ -173,9 +249,9 @@ func (e *Engine) Dispatch(ctx context.Context, req ActionRequest) (*ActionResult
 		return nil, err
 	}
 
-	// Post-write: render + notify
-	if isWrite && e.OnContentChanged != nil {
-		e.OnContentChanged()
+	// Post-write: what the write causes, once, whoever called.
+	if isWrite && e.AfterWrite != nil {
+		e.AfterWrite(ctx, writtenFrom(req, result, env.Marker))
 	}
 
 	return result, nil
@@ -284,7 +360,7 @@ func isWriteAction(action string) bool {
 	switch action {
 	case "create", "update", "delete",
 		"bless", "deny", "revoke", "sync",
-		"draft.save", "draft.delete",
+		"save_draft", "discard_draft", "unpublish",
 		"refresh",
 		"send", "deliver", "mark_read", "retry",
 		"apply", "remove":
@@ -300,3 +376,17 @@ type nopLogger struct{}
 func (nopLogger) Info(string, ...interface{})  {}
 func (nopLogger) Error(string, ...interface{}) {}
 func (nopLogger) Debug(string, ...interface{}) {}
+
+// writtenFrom is the Written value for a successful write: the operation, and
+// what its answer says about the item it wrote.
+func writtenFrom(req ActionRequest, result *ActionResult, marker discovery.AgentMarker) Written {
+	w := Written{Type: req.ContentType, Action: req.Action, Marker: marker}
+	if result != nil {
+		w.Result = result.Data
+		w.Path, _ = result.Data["path"].(string)
+		w.Title, _ = result.Data["title"].(string)
+		w.Version, _ = result.Data["version"].(string)
+	}
+	w.DraftID, _ = req.Payload["draft_id"].(string)
+	return w
+}

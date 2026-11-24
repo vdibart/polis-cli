@@ -6,9 +6,9 @@
 
 ## The observation
 
-Open Messages on your polis.pub site and send someone a message. It arrives on their site — not on a central server, because there isn't one. Their *own* server received it, stored it, and will hand it back to them when they log in.
+Open *message* in your polis.pub site's owner app and send someone a message. It arrives on their site — not on a central server, because there isn't one. Their *own* server received it, stored it, and will hand it back to them when they log in.
 
-Now set a password on your messages (the "Set a password to secure your messages" bar). From that moment your server can still *receive* and *store* messages addressed to you, and still *deliver* the ones you send — but it can no longer *read* either side. Your password never went to the server when you set it. There was no key exchange round-trip, no "messaging server" handshake.
+Now set a password on your messages (*message* says "Your messages aren't under a password yet" and links to *Set a password*, in enhance). From that moment your server can still *receive* and *store* messages addressed to you, and still *deliver* the ones you send — but it can no longer *read* either side. Your password never went to the server when you set it. There was no key exchange round-trip, no "messaging server" handshake.
 
 Three things are happening at once, and none of them are obvious:
 
@@ -83,7 +83,7 @@ ServerDEK string `json:"server_dek,omitempty"` // base64 X25519 private DEK, pla
     // window, then cleared (see FORMAT.md)
 ```
 
-The bootstrap epoch is convenience without a security claim: until you set a password, your server (and whoever operates it) *can* read your messages. The "Set a password to secure your messages" bar exists to move you off epoch 0.
+The bootstrap epoch is convenience without a security claim: until you set a password, your server (and whoever operates it) *can* read your messages. The owner app's "not under a password yet" line, and its *Set a password*, exist to move you off epoch 0.
 
 ### 1.2 The KEK derivation — [`cli-go/pkg/dm/keywrap.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/dm/keywrap.go)
 
@@ -127,7 +127,7 @@ The browser mirrors the Go Argon2id cost exactly so a keyring minted in the brow
 // params_test.go: t=3, m=64MiB, p=4). Recorded per-epoch in keyring.json's kdf block.
 ```
 
-`setPassword(password)` runs locally: generate a fresh X25519 DEK for the new epoch, derive the password-KEK (Argon2id) and recovery-KEK (HKDF over a freshly generated BIP39 phrase), wrap the DEK under both, and `POST /api/dm/password` with only `{public_key_messages, wrapped_dek, wrapped_dek_recovery, kdf, recovery_kdf}`. The plaintext password, both KEKs, the unwrapped DEK, and the recovery phrase never leave the tab. The phrase is shown to you exactly once.
+`setPassword(password)` runs locally: generate a fresh X25519 DEK for the new epoch, derive the password-KEK (Argon2id) and recovery-KEK (HKDF over a freshly generated BIP39 phrase), wrap the DEK under both, and `POST /v1/messages/password` (the owner app's `msgkey.js`) with only `{public_key_messages, wrapped_dek, wrapped_dek_recovery, kdf, recovery_kdf}`. The plaintext password, both KEKs, the unwrapped DEK, and the recovery phrase never leave the tab. The phrase is shown to you exactly once.
 
 ### 2.2 Go side, same protocol: [`cli-go/pkg/dm/epoch.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/dm/epoch.go)
 
@@ -224,31 +224,33 @@ Messages live under the tenant DM dir as append-only JSONL, one conversation per
     conversation.json               # thread metadata + read cursor
 ```
 
-Each `messages.jsonl` line stores `ciphertext`, `nonce`, `box_pub`, and `key_epoch` — the wire box, not plaintext. The conversation ID is deterministic (`sha256` over the two sorted domains), so both sides compute the same thread identity without coordinating. For a password epoch, this file is exactly as opaque to your server as it is to an attacker who steals the disk.
+Each `messages.jsonl` line stores `ciphertext`, `nonce`, `box_pub`, and `key_epoch` — the wire box, not plaintext. A message you sent also keeps `wire_nonce`, the nonce of the box that went to the recipient: their copy's id is derived from it (your own copy's id comes from your box-to-self), so a resend can reuse it and arrive once. Messages sent before it was kept have none. The conversation ID is deterministic (`sha256` over the two sorted domains), so both sides compute the same thread identity without coordinating. For a password epoch, this file is exactly as opaque to your server as it is to an attacker who steals the disk.
 
 ---
 
 ## 6. Unlocking — back in the browser
 
-### 6.1 The in-session DEK cache + decrypt — [`webapp/internal/webui/www/owner-extras.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/owner-extras.js)
+### 6.1 The in-session DEK cache + decrypt — [`webapp/internal/webui/www/v5/msgkey.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/v5/msgkey.js)
 
-When you open Messages, the server hands the SPA the locked wire box for password-epoch messages — it cannot do otherwise. The trail marker says it directly:
+When you open *message*, the server hands the owner app the locked wire box for password-epoch messages — it cannot do otherwise. The file's opening comment says where the keys live:
 
 ```js
-// Password-epoch messages arrive from the server as a locked placeholder
-// plus the raw wire box (ciphertext / nonce / box_pub / key_epoch). The
-// server can't read them — only the user's password can. When the epoch
-// DEK is unlocked in-session (PolisDMSession), we open the box in the
-// browser and swap in the plaintext; otherwise we surface an inline
-// "enter your password" CTA over the messages view. The password, KEK,
-// and DEK never leave the browser.
+// The owner's messages key in the v5 app (spec 2.3, 2.4): unlocking, opening
+// and sealing messages, and setting or changing the messages password. The
+// cryptography is today's (dm-crypto.js over the vendored tweetnacl,
+// hash-wasm and bip39; dm-session.js holds unlocked keys in this tab's memory
+// only), so a blob wrapped here opens in today's app and back.
+//
+// ⛔ The password, the recovery phrase and every key stay in the browser. The
+// site receives only what is wrapped (dm.set_password, dm.change_password,
+// dm.new_key, dm.rewrap_earlier), and those are sign-in only.
 ```
 
-The unwrapped DEK is held only in memory (`PolisDMSession`) for the session; each message is opened with `PolisDMCrypto.openBox(ciphertext, nonce, box_pub, dek)`. Lock the tab, the DEK is gone, the messages are ciphertext again.
+The messages key is `none` (no password: the site seals), `locked` or `unlocked`. The unwrapped DEK is held only in memory (`PolisDMSession`) for the session; each locked message is opened with `PolisDMCrypto.openBox(ciphertext, nonce, box_pub, dek)`. Lock the tab, the DEK is gone, the messages are ciphertext again.
 
 ### 6.2 The protection-status gate — [`cli-go/pkg/dm/protection.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/dm/protection.go)
 
-Before you message someone, the composer warns you if *they* haven't secured their messages (their inbound mail would land in a bootstrap epoch their operator can read). The browser can't make that query — it requires a mutuals-gated, signed cross-tenant call — so your **server** asks theirs (`/v1/content/dm/actions/protection_status`), gated so it leaks nothing to non-mutuals. The amber "be careful what you send" banner you see in the composer (see the [`dm-banner-doc` link in `owner-extras.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/owner-extras.js)) is that result.
+Before you message someone, the composer warns you if *they* haven't secured their messages (their inbound mail would land in a bootstrap epoch their operator can read). The browser can't make that query — it requires a mutuals-gated, signed cross-tenant call — so the owner app asks your own **server** (`GET /v1/messages/protection-status`), and your server asks theirs (`/v1/content/dm/actions/protection_status`), gated so it leaks nothing to non-mutuals. The line above the composer, "<site> hasn't set a messages password. Be careful what you send." (`v5/message.js`), is that result.
 
 ### 6.3 Offline read — `polis dm decrypt` ([`cli-go/pkg/cmd/dm.go`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/cmd/dm.go))
 
@@ -260,7 +262,7 @@ decrypt [options]       Decrypt and print your messages from a local/exported si
   Neither secret is ever stored or transmitted — decryption happens locally.
 ```
 
-It loads `keyring.json`, prompts for your password (or `--phrase`), reproduces the KEK, unwraps the DEK, and opens each `messages.jsonl` line — the same crypto as the browser, proving the export is self-contained. (On a running localhost site, `polis serve` is read-only for DMs unless you pass `--dev`; the "Reading only — sending is disabled" banner is that distinction.)
+It loads `keyring.json`, prompts for your password (or `--phrase`), reproduces the KEK, unwraps the DEK, and opens each `messages.jsonl` line — the same crypto as the browser, proving the export is self-contained. (On a running localhost site, `polis serve` is read-only for DMs unless you pass `--dev`.)
 
 ---
 

@@ -97,6 +97,16 @@ type CachedFeedItem struct {
 	// items leave it zero; the stream renderer hides the badge when
 	// the value is zero (renderPost's is-empty class).
 	CommentCount int `json:"comment_count,omitempty"`
+	// Edited is when the owner's own post or comment was last republished
+	// (its frontmatter's updated), RFC 3339, left out when it never was.
+	// Set for own-scope items only.
+	Edited string `json:"edited,omitempty"`
+	// Agent and Grant are the agent marker of the version shown: the name of
+	// the owner's connected agent that made it and the address of the grant
+	// it acted under, from the signed frontmatter. Both left out when the
+	// owner made that version. Set for own-scope items only.
+	Agent string `json:"agent,omitempty"`
+	Grant string `json:"grant,omitempty"`
 }
 
 // FeedConfig holds user-editable feed configuration.
@@ -133,6 +143,19 @@ func (cfg *FeedConfig) effectiveMaxPosts() int {
 		return cfg.MaxItems
 	}
 	return 300
+}
+
+// Limit is how many items of a type ("post" or "comment") the cache keeps, or
+// 0 for a type it does not bound. A count that reaches it is a lower bound:
+// the network made at least that many, and the cache kept the newest.
+func (cfg *FeedConfig) Limit(itemType string) int {
+	switch itemType {
+	case "post":
+		return cfg.effectiveMaxPosts()
+	case "comment":
+		return cfg.effectiveMaxComments()
+	}
+	return 0
 }
 
 // effectiveMaxComments returns the comments cap, falling back to MaxItems if unset.
@@ -560,8 +583,9 @@ func (cm *CacheManager) MergeItemsResult(items []FeedItem) (MergeResult, error) 
 		return MergeResult{}, err
 	}
 
-	// Prune after merge
-	cm.pruneLocked()
+	// Prune after merge. The merge is already written; a prune that fails is
+	// redone by the next merge or Prune.
+	_, _ = cm.pruneLocked()
 
 	// Count how many of the newly added items survived pruning
 	retained := len(newIDs)
@@ -810,7 +834,7 @@ func pruneByType(items []CachedFeedItem, cfg *FeedConfig) []CachedFeedItem {
 
 	// Apply per-type count limits (items already sorted by published desc from listLocked)
 	if len(posts) > maxPosts {
-		posts = posts[:maxPosts]
+		posts = capKeepingEachSitesNewest(posts, maxPosts, PostsKeptPerSite)
 	}
 	if len(comments) > maxComments {
 		comments = comments[:maxComments]
@@ -829,6 +853,66 @@ func pruneByType(items []CachedFeedItem, cfg *FeedConfig) []CachedFeedItem {
 	})
 
 	return result
+}
+
+// PostsKeptPerSite is how many of each followed site's newest posts the
+// posts cap never evicts. One site that posts every two hours fills a
+// 300-post cap in under a month on its own; without a floor every quieter
+// site the owner follows falls out of their history.
+//
+// ⚠️ This bounds what the owner's own cache DISPLAYS. It is not eviction of
+// the network's content (that needs a signed revocation): the posts stay
+// on their sites, and a sync that drops one still advances its cursor.
+const PostsKeptPerSite = 10
+
+// capKeepingEachSitesNewest cuts items (sorted newest first) to max, except
+// that each site keeps its newest `floor` items. The floors together never
+// exceed max (with many sites each floor shrinks to max/sites), so the
+// result is never larger than the cap the owner set. What the floors leave
+// goes to the newest of the rest. Order is preserved.
+func capKeepingEachSitesNewest(items []CachedFeedItem, max, floor int) []CachedFeedItem {
+	siteOf := func(it CachedFeedItem) string {
+		if it.AuthorDomain != "" {
+			return it.AuthorDomain
+		}
+		return it.AuthorURL
+	}
+	sites := map[string]bool{}
+	for _, it := range items {
+		if s := siteOf(it); s != "" {
+			sites[s] = true
+		}
+	}
+	if len(sites) > 0 && floor > max/len(sites) {
+		floor = max / len(sites)
+	}
+	keep := make([]bool, len(items))
+	perSite := map[string]int{}
+	kept := 0
+	for i, it := range items {
+		// An item naming no site has no site to keep a floor for.
+		if s := siteOf(it); s != "" && perSite[s] < floor {
+			perSite[s]++
+			keep[i] = true
+			kept++
+		}
+	}
+	for i := range items {
+		if kept >= max {
+			break
+		}
+		if !keep[i] {
+			keep[i] = true
+			kept++
+		}
+	}
+	out := items[:0:0]
+	for i, it := range items {
+		if keep[i] {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 // SetStalenessMinutes updates the staleness threshold.
@@ -872,7 +956,7 @@ func (cm *CacheManager) writeAll(items []CachedFeedItem) error {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	file, err := os.Create(path)
+	file, err := os.Create(path) //nolint:gosec // G304: the cache file under the site's own .polis
 	if err != nil {
 		return fmt.Errorf("failed to create cache file: %w", err)
 	}
@@ -883,7 +967,9 @@ func (cm *CacheManager) writeAll(items []CachedFeedItem) error {
 		if err != nil {
 			continue
 		}
-		file.WriteString(string(data) + "\n")
+		if _, err := file.WriteString(string(data) + "\n"); err != nil {
+			return fmt.Errorf("failed to write cache file: %w", err)
+		}
 	}
 
 	return nil

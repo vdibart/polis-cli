@@ -887,46 +887,6 @@ func TestFollowSyncHandler_Process_MultipleFolowers(t *testing.T) {
 }
 
 // ============================================================================
-// broadcastCounts on zero-event sync
-// ============================================================================
-
-func TestBroadcastCounts_ZeroEvents_StillBroadcasts(t *testing.T) {
-	s := newConfiguredServer(t)
-	s.sseClients = make(map[chan SSEEvent]struct{})
-	s.syncTrigger = make(chan struct{}, 1)
-
-	// Register an SSE client
-	ch := make(chan SSEEvent, 10)
-	s.addSSEClient(ch)
-	// Drain trigger from first-client connect
-	select {
-	case <-s.syncTrigger:
-	default:
-	}
-
-	// Call broadcastCounts with an empty SyncResult (simulates 0-event sync)
-	s.broadcastCounts(SyncResult{})
-
-	// SSE client should receive a counts event
-	select {
-	case evt := <-ch:
-		if evt.Event != "counts" {
-			t.Errorf("expected event type 'counts', got %q", evt.Event)
-		}
-		var counts CountsPayload
-		if err := json.Unmarshal([]byte(evt.Data), &counts); err != nil {
-			t.Fatalf("failed to decode SSE counts data: %v", err)
-		}
-		// Verify we got valid counts data
-		if counts.FeedUnread < 0 {
-			t.Error("expected non-negative feed unread count in SSE broadcast")
-		}
-	default:
-		t.Error("SSE client did not receive a counts event from broadcastCounts")
-	}
-}
-
-// ============================================================================
 // Verify handler registration patterns
 // ============================================================================
 

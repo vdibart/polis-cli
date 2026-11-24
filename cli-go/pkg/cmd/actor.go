@@ -740,7 +740,7 @@ func handleActorVerifyAction(source, operator string) {
 		// NOT the storage interface: source is a path the user typed, which
 		// may be anywhere on their disk. The store addresses keys inside the
 		// site and refuses absolute paths by design.
-		b, err := os.ReadFile(source)
+		b, err := os.ReadFile(source) //nolint:gosec // G304: a path the user typed
 		if err != nil {
 			exitError("Could not read the action: %v", err)
 		}

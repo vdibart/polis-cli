@@ -12,11 +12,16 @@ import (
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
-// UpgradeActiveShape flips a tenant's active_shape from
-// `pub.polis.shapes.v3` to `pub.polis.shapes.v4` on the v4 cutover.
-// Idempotent: returns (false, nil) for tenants already on v4, or on any
-// other (empty/unknown) shape value — we only touch tenants we know are
-// on the legacy default.
+// UpgradeActiveShape flips a custodied site's active_shape from the blog shape
+// (v3) or the stream (v4) to `pub.polis.shapes.v5`, the default. Both older
+// shapes are no longer supported, and still render exactly as before for a
+// site that keeps them (Vincent, 2026-11-22: "if someone has v3 or v4 the
+// instance should continue to work and render the same way they do now").
+// ⛔ Medic runs it, on polis.pub and other custodied deployments, never Tailor:
+// a self-hosted site is never moved, only told how to move.
+// Idempotent: returns (false, nil) for a site already on v5, on any other
+// shape value, or with a registry from a newer schema, which this build does
+// not rewrite.
 //
 // The cutover is signaled by the active_shape value change, not by a
 // registry schema bump; CurrentRegistrySchemaVersion is unaffected.
@@ -35,11 +40,11 @@ func UpgradeActiveShape(site storage.Site) (bool, error) {
 		}
 		return false, err
 	}
-	if reg.ActiveShape != "pub.polis.shapes.v3" {
+	if !shapeMovedOnCustodied(reg.ActiveShape) || reg.SchemaVersion > CurrentRegistrySchemaVersion {
 		return false, nil
 	}
-	if err := SetActiveShapeName(site, "v4"); err != nil {
-		return false, fmt.Errorf("flip active_shape v3→v4: %w", err)
+	if err := SetActiveShapeName(site, "v5"); err != nil {
+		return false, fmt.Errorf("flip active_shape %s→v5: %w", reg.ActiveShape, err)
 	}
 	return true, nil
 }
@@ -183,6 +188,17 @@ func NotificationRulesNeedMigration(site storage.Site) bool {
 		if notifs, ok := ct["notifications"].([]interface{}); ok && len(notifs) > 0 {
 			return true
 		}
+	}
+	return false
+}
+
+// shapeMovedOnCustodied reports whether an active_shape value (short or fully
+// qualified) is one Medic moves a custodied site off: the blog shape (v3) and
+// the stream (v4).
+func shapeMovedOnCustodied(shape string) bool {
+	switch shape {
+	case "v3", "v4", "pub.polis.shapes.v3", "pub.polis.shapes.v4":
+		return true
 	}
 	return false
 }

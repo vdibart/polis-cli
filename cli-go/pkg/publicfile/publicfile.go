@@ -25,6 +25,13 @@ var ServedExtensions = map[string]bool{
 	".jsonl": true, ".md": true, ".svg": true, ".xml": true,
 }
 
+// ScriptCapableExtensions are the members of ServedExtensions a browser may
+// execute as script from a site's own origin. ⚠️ `.svg` counts: it is served as
+// image/svg+xml and can carry script. On polis.pub no tenant may hold one that
+// polis did not ship (serve.ScriptCapableExtensions explains why; Patrol
+// reports one).
+var ScriptCapableExtensions = map[string]bool{".js": true, ".svg": true}
+
 // RootFiles are files served at the site root by EXACT NAME, whatever their
 // extension, because a protocol names them (robots.txt), with their type.
 var RootFiles = map[string]string{

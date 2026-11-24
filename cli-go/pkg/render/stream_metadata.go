@@ -129,6 +129,34 @@ func buildBlogPostingJSONLD(title, isoPublished, isoModified, authorName, author
 	return wrapJSONLDScript(body), nil
 }
 
+// buildCommentJSONLD renders a v5 comment page's JSON-LD: a schema.org
+// Comment by the site's author, about the post it answers (on another site,
+// usually), with its licence when it states one.
+func buildCommentJSONLD(name, isoPublished, authorName, authorURL, canonicalURL, aboutURL, licenseURL string) (string, error) {
+	v := map[string]any{
+		"@context":         "https://schema.org",
+		"@type":            "Comment",
+		"name":             name,
+		"url":              canonicalURL,
+		"mainEntityOfPage": canonicalURL,
+		"author":           jsonLDAuthor{Type: "Person", Name: authorName, URL: authorURL},
+	}
+	if isoPublished != "" {
+		v["datePublished"] = isoPublished
+	}
+	if aboutURL != "" {
+		v["about"] = aboutURL
+	}
+	if licenseURL != "" {
+		v["license"] = licenseURL
+	}
+	body, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal Comment JSON-LD: %w", err)
+	}
+	return wrapJSONLDScript(body), nil
+}
+
 // buildWebSiteJSONLD renders a homepage WebSite JSON-LD block. Used for
 // /index.html. Description is optional; pass empty if no tenant blurb is
 // available.

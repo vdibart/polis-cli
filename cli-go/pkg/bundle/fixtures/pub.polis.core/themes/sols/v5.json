@@ -1,0 +1,22 @@
+{
+  "note": "sols: Nine Sols at dusk. Deep violet, warm cream type, peach titles, a cherry-blossom pink for the site, teal beside it.",
+  "tokens": {
+    "scheme": "dark",
+    "site": "#d4829a",
+    "bg": "#1a1525",
+    "surface": "#251e30",
+    "card-hover": "#2c2438",
+    "panel": "#302840",
+    "text": "#f0e8dc",
+    "text-soft": "#d4c8b8",
+    "text-muted": "#b0a090",
+    "ink": "#1a1525",
+    "wordmark": "#00d4ff",
+    "accent-2": "#5fbfaf",
+    "heading-color": "#e8a060",
+    "mark": "#a06078",
+    "mark-style": "gradient",
+    "mark-2": "#d4829a",
+    "mark-ink": "#ffffff"
+  }
+}

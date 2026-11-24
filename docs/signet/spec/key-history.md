@@ -329,41 +329,10 @@ check for an omitted entry. And genesis stays unwitnessed: nothing observed a ke
 
 ## 6 The `did:web` projection
 
-The same facts appear a second time in `.well-known/did.json`, in the standard's own vocabulary.
-Carry the standard, own the binding.
-
-```json
-{
-  "id": "did:web:alice.polis.pub",
-  "verificationMethod": [
-    { "id": "did:web:alice.polis.pub#key-2", "…": "the CURRENT key" },
-    { "id": "did:web:alice.polis.pub#key-1", "…": "a RETIRED key" }
-  ],
-  "authentication":  ["did:web:alice.polis.pub#key-2"],
-  "assertionMethod": ["did:web:alice.polis.pub#key-2"]
-}
-```
-
-**The whole design is which list a retired key appears in:**
-
-| List | Contents | Says |
-|---|---|---|
-| `verificationMethod` | every key, current and retired | *these keys are mine, and some of them were mine* |
-| `authentication` | the current key only | *this key can act as me now* |
-| `assertionMethod` | the current key only | *this key speaks for me now* |
-
-A retired key must stay **resolvable** (a signature it made two years ago is still checkable) and must
-stop being **authoritative** (it can no longer act or assert). Those are different claims, and a DID
-document already has two lists for exactly that.
-
-**Fragments are `key-<epoch+1>`**, so genesis is `#key-1` — the fragment every polis DID document has
-carried since the profile shipped. ⭐ A site that has never rotated therefore publishes a
-**byte-identical** document, which is why adding history support changed nothing across the fleet.
-
-Retired methods are listed **newest-first after the current one**, so reading down the list walks
-backwards in time from now — the direction someone resolving a DID to check an old signature is
-travelling. *(The native block is oldest-first because a verifier walks it forward from genesis.
-Different readers, different order, one source.)*
+The same facts appear a second time in `.well-known/did.json`, in the standard's own vocabulary: every key in
+`verificationMethod`, only the current one in `authentication` and `assertionMethod`. How the document
+carries them (which list a retired key appears in, the `#key-<epoch+1>` fragments, the newest-first order) is
+specified once, in the [`did:web` profile, §3.4 and §3.5](did-web.md#35-key-history).
 
 ⚠️ **`did.json` is a PROJECTION; `public_key_history` is the source.** The DID format cannot express
 `valid_from` / `valid_until` or the transition signatures, which is the whole reason both exist.

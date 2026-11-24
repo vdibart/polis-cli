@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
+	"github.com/vdibart/polis-cli/webapp/internal/api"
 	"net/http"
 	"strings"
 	"time"
@@ -69,7 +70,10 @@ func (s *Server) LogSecurityEvent(event string, fields map[string]interface{}) {
 // rosieLiveGrant is the gate: Rosie's live grant for blessing, or nil. Nil
 // while the hosted operator switch is off, whatever the user's records say.
 func (s *Server) rosieLiveGrant() *attestation.LiveGrant {
-	if s.RosiePaused {
+	// ⭐ The live switch sits beside the boot-time one: every Rosie decision,
+	// on the sync cycle and in catch-up, starts from this grant, so with either
+	// off the cycle simply has nothing to decide with.
+	if s.RosiePaused || s.switchedOff(api.SwitchRosie) {
 		return nil
 	}
 	g, err := agent.LiveRosieGrant(s.Site())
@@ -513,7 +517,7 @@ func (s *Server) handleRosieSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"rosie": s.rosieSettings()})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"rosie": s.rosieSettings()})
 		return
 	case http.MethodPost:
 	default:
@@ -562,7 +566,7 @@ func (s *Server) handleRosieSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "success",
 		"rosie":  s.rosieSettings(),
 	})

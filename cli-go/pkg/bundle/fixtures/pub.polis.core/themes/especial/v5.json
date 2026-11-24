@@ -1,0 +1,17 @@
+{
+  "note": "especial: the label after dark. Gold on charcoal, cream text, polis cyan.",
+  "tokens": {
+    "scheme": "dark",
+    "site": "#c8a014",
+    "bg": "#1a1a20",
+    "surface": "#22222a",
+    "card-hover": "#282830",
+    "panel": "#2a2a34",
+    "text": "#f0ece4",
+    "text-soft": "#c8c4b8",
+    "text-muted": "#8e8980",
+    "ink": "#121216",
+    "wordmark": "#00d4ff",
+    "accent-2": "#00d4ff"
+  }
+}

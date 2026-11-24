@@ -23,6 +23,17 @@ import (
 	"testing"
 )
 
+// closedAndAbsent reports whether a repo file is missing because this is the
+// public repository, where closed source does not ship (and plans/ is absent
+// too). Anywhere else a missing file is the test's to fail on.
+func closedAndAbsent(rel string) bool {
+	if _, err := os.Stat(filepath.Join(repoRoot, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+		return false
+	}
+	_, perr := os.Stat(filepath.Join(repoRoot, "plans"))
+	return os.IsNotExist(perr)
+}
+
 const explainerPage = "webapp/internal/hosted/for-trust.html"
 
 func readExplainer(t *testing.T) string {

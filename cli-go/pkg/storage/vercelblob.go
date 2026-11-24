@@ -522,7 +522,7 @@ func (v *VercelBlob) list(ctx context.Context, prefix string) ([]blobItem, error
 		dec := json.NewDecoder(resp.Body)
 		derr := dec.Decode(&page)
 		code := resp.StatusCode
-		resp.Body.Close()
+		_ = resp.Body.Close() // read side; the body is already decoded
 		if code/100 != 2 {
 			return nil, fmt.Errorf("storage: blob list %q: HTTP %d", prefix, code)
 		}

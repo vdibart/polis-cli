@@ -2,6 +2,8 @@
 
 *For* [Contributors](../README.md#contributing-to-polis) — *Kind* [Tour](../README.md#kinds-of-page) — *See also* [concept](../general/concepts/infinity-stream.md)
 
+⚠️ **This page describes the v4 owner app and the stream shape, both replaced.** Since 2026-11-22 every site's owner app is the **v5 app** (at `/_/`, on `/v1` only), and every site on polis.pub is on the **v5 shape**; the v4 app (its stream-screen, sentence filter and icon row) is deleted, and the stream shape is no longer supported though a site that records it still renders as before. What follows is kept as the record of how v4 worked. For the current model see [shapes](../general/concepts/shapes.md) and [architecture](../general/concepts/architecture.md).
+
 > A higher-order tour. Knits together what's happening on the polis.pub stream-screen — the filter widget, the URL behavior, the live data appearing from across the network, the design choices behind it all. Points down into the two deep tours ([url-as-filter](url-as-filter.md), [ds-to-stream](ds-to-stream.md)) for the file-level walks, and out to the [PQL spec](../general/reference/pql.md), the [infinity stream concept doc](../general/concepts/infinity-stream.md), and the [DS architecture](../ds/developer/stream-architecture.md) for the philosophy and protocol layers.
 >
 > **Scope note.** The Discovery Service source is not in the public repository. The DS-side files named here (`stream.ts`, `counts.ts`) describe behaviour that the [DS API reference](../ds/developer/api-reference.md) and the [stream architecture doc](../ds/developer/stream-architecture.md) specify in full. The webapp and CLI files named here are in this repository.
@@ -44,7 +46,7 @@ The four layers are independent in the codebase — they live in different files
 
 ## The sentence-filter widget — chrome meets filter
 
-The centered widget in the topbar is the single piece of UI that ties chrome and filter together. From [`index.html`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/index.html) (search `polis-topbar-filter`; slot contents abridged):
+The centered widget in the topbar is the single piece of UI that ties chrome and filter together. From `index.html` (the previous owner app, since retired) (search `polis-topbar-filter`; slot contents abridged):
 
 ```html
 <div class="polis-topbar-filter" id="polis-topbar-filter">
@@ -61,7 +63,7 @@ The centered widget in the topbar is the single piece of UI that ties chrome and
 
 It's a `role="group"` of slots — a locked qualifier, three dropdowns (type, scope, modifier) and a site typeahead — that together compose a [PQL sentence](../general/reference/pql.md). The user clicks slot 2 ("activity") and picks "posts"; the widget updates the local sentence state, composes the new URL (`/_/pql/all+posts+from+my+network+by+date`), `replaceState`s history, and tells the stream controller `setFilter(state)` — which clears the visible items and re-fetches matching ones.
 
-The icon row to the left is a *shortcut layer over the same widget*. Each icon is a **preset PQL sentence** that the widget would otherwise compose by hand. From [`owner-extras.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/owner-extras.js):
+The icon row to the left is a *shortcut layer over the same widget*. Each icon is a **preset PQL sentence** that the widget would otherwise compose by hand. From `owner-extras.js` (the previous owner app, since retired):
 
 ```javascript
 // abridged: each preset also carries a `display` block of slot labels
@@ -89,7 +91,7 @@ Clicking an icon is **shorthand for "set the sentence to this and re-fire."** Bo
 
 This is why the URL stays a meaningful sentence even when the user uses icons: the user isn't bypassing the language, they're picking phrases from it.
 
-For the file-by-file walk of how the URL pushes through the parser into the controller, **dive into the [URL-as-filter tour](url-as-filter.md)**. It walks [`app.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/app.js) (the URL intercept), [`pql.js`](https://github.com/vdibart/polis-cli/blob/main/webapp/internal/webui/www/pql.js) (the parser/composer), and [`stream.js`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js) (the consumer).
+For the file-by-file walk of how the URL pushes through the parser into the controller, **dive into the [URL-as-filter tour](url-as-filter.md)**. It walks `app.js` (the previous owner app, since retired) (the URL intercept), `pql.js` (the previous owner app, since retired) (the parser/composer), and [`stream.js`](https://github.com/vdibart/polis-cli/blob/main/cli-go/pkg/bundle/fixtures/pub.polis.core/shapes/v4/stream.js) (the consumer).
 
 ---
 
@@ -155,7 +157,7 @@ posts. Now open a single post's canonical URL directly
 *the same stream*, just anchored on that post. The two pages are
 **UI-indistinguishable**, and that's on purpose.
 
-The reason is that both pages render the **same v4 shape**, driven by the same
+The reason is that both pages render the **same stream shape**, driven by the same
 `stream.js` controller, paginating against the same `GET /pql/<sentence>` endpoint (the `/api/v1/stream/items` endpoint was retired in the PQL hard cutover; its engine still backs `/pql/` internally):
 
 - The **index** SSRs the newest post as the focal entry, with siblings below.
@@ -215,13 +217,13 @@ into the same room.
 
 ## The design — why polis.pub is shaped this way
 
-The stream isn't just the v4 shape, the filter widget, and the sync loop wired together. It's a **design statement** about what a social-network surface should be.
+The stream isn't just the stream shape, the filter widget, and the sync loop wired together. It's a **design statement** about what a social-network surface should be.
 
 A few of the load-bearing claims:
 
 - **The filter is a first-class citizen, in the URL, in human-readable form.** Tabs and modes hide their state; a sentence in the URL doesn't. Sharing a view is sharing a link. Discovering what someone else is looking at is reading their address bar.
 - **One screen, many views.** The single stream-screen replaces what would otherwise be a Feed page, a Posts page, a Comments page, a Messages page, a People page, a Pending-Blessings page. Modal navigation was rejected because the underlying data is the same — the only thing that changes is *whose* and *which type* and *when*.
-- **Continuous data, not push.** Polis avoids websockets and SSE-pushes-content. The webapp polls the DS every ~30 seconds and stages events in a local cache. The "live" feeling comes from the polling rhythm matching human attention rhythm — fast enough to surprise you with new content, slow enough to be cheap to operate.
+- **Continuous data, not push.** Polis avoids websockets and SSE-pushes-content. The webapp polled the DS every ~30 seconds and staged events in a local cache. The "live" feeling came from the polling rhythm matching human attention rhythm — fast enough to surprise you with new content, slow enough to be cheap to operate. (Since 2026-11-18 no timer syncs: a site syncs when the DS wakes it, after a write, and when the owner reads their network and the last sync is more than two minutes old; see [ds-to-stream](ds-to-stream.md).)
 - **Decentralized data, centralized aggregation.** Every site holds its own content; the DS knows about URLs + signatures + events; cross-tenant aggregations like comment counts are computed at query time off an indexed column, not maintained as a counter. The DS is *coordinator*, not *host*.
 - **The shape is replaceable.** Sites that prefer per-post pages can stay on the blog shape (`pub.polis.shapes.v3`); the stream is one shape among possible others. The infinity stream is a *choice*, not a baked-in identity.
 
@@ -256,7 +258,9 @@ This overview points at three layers of deeper reading. Pick what matches your q
 
 ## A recipe that uses the composition
 
-If you want to do something concrete that touches both threads, the canonical exercise is **adding a new icon-row preset**:
+⚠️ **This recipe can no longer be followed**: the previous owner app's `owner-extras.js`, `index.html` and `pql.js`, and the test that held the icon copies together, are deleted. It is kept as the record of how the composition was extended. In the v5 owner app a view is a PQL sentence at `/_/<section>/pql/<sentence>`.
+
+If you wanted to do something concrete that touched both threads, the canonical exercise was **adding a new icon-row preset**:
 
 1. Decide the sentence — say, **all comments from my mutuals by date** (a "what my close circle is saying" view).
 2. Pick an icon (or design one).

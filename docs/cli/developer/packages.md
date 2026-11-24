@@ -26,6 +26,9 @@ All core packages live in `cli-go/pkg/`. Grouped by concern:
 | `metadata/` | Content index entry type + append/update/remove (`index.jsonl`) |
 | `index/` | Rebuilding the content index — **the one implementation**; `polis rebuild` and Tailor's `index-rebuild` both call it |
 | `version/` | Version history parsing/reconstruction |
+| `draft/` | The owner's unfinished posts: private, unsigned markdown under `.polis`, saved, updated by id and discarded |
+| `seen/` | How far the owner has seen each section of their app (one time per section) |
+| `navshortcut/` | The owner's nav shortcuts: buttons that each open one PQL sentence |
 | **Discovery / remote** | |
 | `discovery/` | HTTP client for discovery service endpoints |
 | `following/` | `following.json` management |
@@ -44,7 +47,7 @@ All core packages live in `cli-go/pkg/`. Grouped by concern:
 | `theme/` | Theme template loading |
 | `snippet/` | Snippet file management |
 | `bundle/` | Bundle loading, registry, fixture install (`pub.polis.core`) |
-| `pql/` | PQL sentence parsing and composition (the Go sibling of the JS parser) |
+| `pql/` | PQL sentence parsing and composition: the site's parser, behind `/pql/<sentence>` and `/v1/query` (the discovery service's TypeScript parser is its sibling; both pass one golden corpus) |
 | `sitemap/` | Sitemap generation |
 | **Site state** | |
 | `site/` | Site initialization, `.well-known/polis`, key history |
@@ -54,9 +57,30 @@ All core packages live in `cli-go/pkg/`. Grouped by concern:
 | `policycheck/` | Remote policy evaluation — composes `policy`, `remote` and `following` to check another site's policy |
 | `url/` | URL normalization |
 | `atomicfile/` | Atomic file writes (write-temp-then-rename) |
+| `jsonextra/` | Keeps the members of an unsigned JSON file that a struct does not model, so a rewrite loses nothing |
+| `storage/` | The one seam between polis and where its bytes live (POSIX on a laptop or hosted, a Blob store on a remote instance) |
+| `privatepath/` | The one declared list of names a site must never serve, and its exceptions |
+| `publicfile/` | The one rule for which of a site's files a reader may fetch: what the server answers and what a remote deploy publishes |
+| `csp/` | The Content-Security-Policy a site's public pages are served with |
+| **Deployment and instance** | |
+| `mode/` | The four ways an instance can be deployed (`local`, `remote-client-signed`, `remote-server-signed`, `custodied`): the value and nothing else |
+| `capability/` | What an instance can do, derived from its mode and published as a versioned descriptor |
+| `secret/` | The one seam every secret an instance holds is read through |
+| `owner/` | Whether a request came from the person whose site this is |
+| `branch/` | `polis branch`: an exported site turned into a new site at a new address, its key already rotated |
+| `provision/` | The deploy seam: standing up an instance on a platform (Vercel first), and fetching its signed function assets |
+| `deploy/` | Queues and coalesces the deploys that publish a remote instance's site |
+| `releasekey/` | The pinned release-signing key, and the check of a release's `checksums.txt` against it |
+| `tenantguard/` | Keeps one tenant's panic from ending a background actor's fleet sweep |
 | **API / dispatch** | |
-| `ops/` | Content-type dispatch engine (wraps packages for API) |
-| **Background actors** (used by webapp's `polis-server` / `polis-full`) | |
+| `ops/` | **The action layer**: every site action's one implementation (the dispatch engine behind `/v1/content/*`, the shared comment, message and follow writes, and the after-write module that renders, runs hooks and logs each write). `/v1`, MCP and the CLI (in-process, `cmd/engine.go`) all reach it |
+| `apidesc/` | The site API's description (OpenAPI 3.1 at `/v1/openapi.json`), generated from the operations each handler declares |
+| `mcpgen/` | Turns that description into MCP tools (`polis mcp`, an instance's `/mcp`, polis.pub's hosted MCP) |
+| `connection/` | The owner's grant to an agent that connects to the API |
+| `contentpath/` | Which site-relative paths an editing action may name: one rule for every surface |
+| `agentguide/` | The know-how served to every agent as MCP resources (`polis://guides/…`): titles, replies, blessing review, untrusted content |
+| `styleguide/` | The v5 style guide, served to agents as `polis://style-guide` and over HTTP at `/for/agents/style-guide` |
+| **Background actors** (run by the hosted service, `webapp/internal/hosted`, and by the standalone `webapp/cmd/patrol`, `cmd/medic` and `cmd/tailor` binaries) | |
 | `patrol/` | Patrol — local integrity checks on tenant sites (keys, permissions, signatures, hashes) |
 | `medic/` | Medic — safe, reversible fixes for what Patrol finds |
 | `judge/` | Judge — cross-boundary verification (what a site publishes vs. what the discovery service witnessed) |
@@ -124,21 +148,24 @@ var Version = "dev"
 func GetGenerator() string { return "polis-cli-go/" + Version }
 ```
 
-The CLI entry point (`cmd/root.go`) propagates the version to the 11 packages that write generator strings into files:
+The CLI entry point (`cmd/root.go`) propagates the version to the 12 packages that write generator strings into files:
 
 ```go
-func Execute(version string) {
-    publish.Version = version
-    comment.Version = version
-    metadata.Version = version
-    following.Version = version
-    index.Version = version
-    site.Version = version
-    tag.Version = version
-    attestation.Version = version
-    dm.Version = version
-    license.Version = version
-    actor.Version = version
+func Execute(args []string) {
+    // Version is the cmd package's own, copied from main.Version (stamped with -ldflags)
+    publish.Version = Version
+    comment.Version = Version
+    dm.Version = Version
+    metadata.Version = Version
+    following.Version = Version
+    policy.Version = Version
+    index.Version = Version
+    site.Version = Version
+    tag.Version = Version
+    attestation.Version = Version
+    license.Version = Version
+    actor.Version = Version
+    // …
 }
 ```
 
@@ -167,15 +194,23 @@ import (
     "os"
 
     "github.com/vdibart/polis-cli/cli-go/pkg/publish"
+    "github.com/vdibart/polis-cli/cli-go/pkg/storage"
 )
 
 // Publish a post programmatically. privateKey is the PEM bytes of
 // .polis/keys/id_ed25519; the optional *publish.DiscoveryConfig registers
 // the post with a discovery service.
 privateKey, _ := os.ReadFile("/path/to/site/.polis/keys/id_ed25519")
-result, err := publish.PublishPost("/path/to/site", markdown, "", privateKey)
+result, err := publish.PublishPost(storage.At("/path/to/site"), markdown, "", privateKey)
 // result.Path, result.Version, result.Signature
 ```
+
+This signs and writes the post, updates the index and, given a discovery config, registers it. It does not
+render the site, run the owner's hook or log the write: the action layer's after-write module does those for
+every caller. A program that should behave exactly as the
+owner app and the CLI do calls the site's API instead (`POST /v1/content/post`; see the
+[API reference](../../api/developer/reference.md)). Inside this repository a site action is called only from
+the action layer (`cli-go/pkg/ops`), and a test fails the build on a second caller.
 
 ## Building
 

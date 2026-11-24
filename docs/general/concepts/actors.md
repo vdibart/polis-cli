@@ -52,15 +52,15 @@ nothing in the roster changes because of it.**
 [the operator's guide](../../ops/admin/operator-guide.md).** What follows is only the part that is about
 the *actors* specifically.
 
-### 1. Five lanes, plus one agent — and the sixth is not a lane
+### 1. Six lanes, plus one agent — and the agent is not a lane
 
 **The lanes are domains of STATE.** They answer *"which part of the world is this actor responsible
 for?"*
 
 ```
-        PROTOCOL      SOCIAL      CRYPTO     LIFECYCLE      ← lanes (domains of state)
-        Patrol        Clerk       Judge      Reaper         ← measure
-        Medic         Chaplain    (—)        (—)            ← repair
+        PROTOCOL      SOCIAL      CRYPTO     LIFECYCLE    ROLLOUT      ← lanes (domains of state)
+        Patrol        Clerk       Judge      Reaper       (—)          ← measure
+        Medic         Chaplain    (—)        (—)          Jester       ← repair (Jester: holds to a record)
 ```
 
 | Lane | Actors | What it holds |
@@ -69,6 +69,7 @@ for?"*
 | **Social network state** | Clerk · Chaplain | parity between what a site holds and what the network was told |
 | **Crypto validity** | Judge | signature verification · attestation validity · key continuity · tamper detection |
 | **Lifecycle** | Reaper | reminders · reap · archive. ⭐ **The only actor that destroys, and its isolation is a feature** |
+| **Rollout** | Jester | which version each site runs, held to the operator's rollout record |
 | ⚠️ **not a lane** | **Rosie** (user agent) | **acts in the tenant's name, under the tenant's grant — see below** |
 
 ⚠️ **Two known strains in the model, named rather than smoothed over.** Key-permission, key-leak and
@@ -144,10 +145,11 @@ marker, by design**, because they restore or complete what the tenant already di
 cannot see what these did in their name on the wire.** Making that legible in the published artifact is
 design work, and [the operator's guide](../../ops/admin/operator-guide.md) has the shape.
 
-⭐ **Two other paths sign with a tenant's key, and both ARE legible in what they publish.** Rosie the user
-agent's comment decisions carry an `agent` and `grant` marker inside the signed bytes. The hosted service's
-default-grant pass signs a grant record whose `basis: hosting-terms` records that the tenant did not write
-it.
+⭐ **Three other paths sign with a tenant's key, and all ARE legible in what they publish.** Rosie the user
+agent's comment decisions carry an `agent` and `grant` marker inside the signed bytes. An agent the tenant
+connects to the site's API (see [*Rosie*](#rosie)) has its writes marked the same way, by the site's own server,
+with the connection's grant. The hosted service's default-grant pass signs a grant record whose
+`basis: hosting-terms` records that the tenant did not write it.
 
 ⭐ **What DOES exist now is the audit trail on the operator's side: events for an act that signs name which
 identity signed.** Chaplain's events carry `attribution: as-tenant` without exception, because that is
@@ -192,7 +194,7 @@ Full mechanics: [the custody spec](../../signet/spec/custody.md).
 
 | Channel | Speaks as | For | Status |
 |---|---|---|---|
-| `patrol.*` `medic.*` `judge.*` `clerk.*` `chaplain.*` `reaper.*` | **each actor, by name** | **operators** | ✅ **shipped** |
+| `patrol.*` `medic.*` `judge.*` `clerk.*` `chaplain.*` `reaper.*` `jester.*` | **each actor, by name** | **operators** | ✅ **shipped** |
 | **actions-in-your-name** | ⭐ **one voice, always** | **the tenant** | 🔧 **design, not built** |
 
 ⭐ **Why they are separate, and why only one of them consolidates.** An operator *needs* the actor name: it
@@ -262,6 +264,7 @@ reported as a failed signature. An old alert may have that cause; a new one does
 | [Clerk](#clerk) | Daily | Hosted only | State parity measurement |
 | [Chaplain](#chaplain) | After Clerk | Hosted only | Cross-boundary reconciliation |
 | [Reaper](#reaper) | Daily | Hosted only | Account lifecycle |
+| [Jester](#jester) | Every 5 minutes | Hosted only | Rollouts: which version each site runs |
 | [Rosie](#rosie) | Per tenant sync | Hosted | User agent — not an operator actor |
 | [Tailor](#tailor) | Manual | Self-hosted | Site migration & upgrade |
 
@@ -607,8 +610,9 @@ repaired**: moving the file does not un-expose the key.
   Patrol watches** (keys, hooks, policies): there it reports the file and leaves it, so a file planted
   there is noticed rather than cleaned up
 - Upgrades a policy file that still holds a default an earlier release wrote to the current default
-- Re-renders tenant sites if theme files were cleaned up or the active shape was upgraded, and when Chaplain
-  asks after changing `blessed.json`
+- Re-renders tenant sites if theme files were cleaned up, the active shape was upgraded, or it reinstalled the
+  shapes and themes because a deploy changed them (so a site's pages and its `/stream.js` follow a shape change in
+  the same sweep, not at the owner's next publish), and when Chaplain asks after changing `blessed.json`
 
 ### What it does NOT do
 
@@ -771,7 +775,7 @@ attestations.*
 | 4 | **Policy snapshot verification** | Local FS | Hashes the tenant's policy files and alerts once on any change. It compares hashes and knows nothing about blessings |
 | 5 | **Index consistency** | Local FS | Verifies `index.jsonl` entries match real signed files — detects orphans, phantoms, hash mismatches — for **every entry type: post, comment, tag, attestation**. Each type is hashed by its own rule (a markdown body hash, or the canonical signing JSON), declared in one table. A clean result **names what it checked** (*"34 entries checked (attestation 2, comment 23, post 8, tag 1)"*); an entry of a type with no rule is counted as **NOT checked**. Same predicate as `polis validate <dir>` |
 | 6 | **Cross-site comment verification** | External HTTP | Verifies every comment file in the tenant's own comment directory against the key of the author it names. ⚠️ **Those are the tenant's own comments**: a commenter publishes on their own site, and another author's copy there is quarantined. So the author is normally the tenant itself; the name predates the comment cache. Key order: ⭐ **current key first, then the key the author's published history resolves for the comment's claimed signing time**, read from the same `.well-known/polis` fetch. A retired-key pass is named in the message. A comment whose author's key could not be read is **disclosed** (*"n of m signed comments verified, k could not be checked"*), never counted as checked and never a failure. ⚠️ Uses the **comment** signing base, which excludes the `author:` line written after signing; applying the post base here reports every valid comment as invalid, which is exactly how the blessed-comment cache once starved |
-| 7 | **Well-known snapshot verification** | Local FS | Hashes `.well-known/polis` and alerts on tampering with identity metadata (handle, base_url, display_name, default_theme, etc.); complements check 3, which covers `public_key` specifically. A change the key history proves to be a rotation is accepted at once; any other is held pending and alerts. ⚠️ **Report-only**: it never moves a site's health, so Judge publishes nothing because of it, since it cannot yet tell an honest edit from a tamper |
+| 7 | **Well-known snapshot verification** | Local FS | Keeps the previous `.well-known/polis` and classifies a change member by member. **Cosmetic** members (`author_name`, `avatar`, `site_title`, `version`, and the removal of a legacy member) are accepted at once and recorded. The **key** members (`public_key`, `public_key_history`, `public_key_messages`) are left to checks 3, 8, 13 and 14. A **trust pointer** (`license`, `agents`, `witnesses`, `actor_registry`, `operator`, `api`) is accepted only when it is what polis itself writes for the site, on its own origin. **Anything else** is held pending and alerts. ⚠️ **Report-only for now**: it never moves a site's health, so Judge publishes nothing because of it, until the classifier has been watched in production |
 | 8 | **Messages-key signature verification** | Local FS | Verifies every `public_key_messages` entry carries a valid identity-key signature, detecting a forged or unsigned DM messages key (an operator or man-in-the-middle key swap). Stateless (no baseline): verifies against the current `public_key`, so an identity rotation that re-signs the block passes with no re-baseline; an absent block (pre-DM-encryption or mid-upgrade) is not an alarm |
 | 9 | **Follow-file signature verification** | Local FS | Verifies `content/pub.polis.core/follow/following.json` against the identity key published in `.well-known/polis`. The follow graph is what the trust layer weights by, so an unsigned-and-editable roster is a hole under every attestation. Stateless, like check 8. ⚠️ **An unsigned follow file reports OK**: signing happens on the tenant's next follow or unfollow, so unsigned is the expected majority state and is a fact, not a defect. Only a *present-and-failing* signature is a finding. The file carries no signing time, so it is checked against the current key only; the tenant's key rotation re-signs it, but only if it verified under the old key, so a rotation neither raises this check nor silences it |
 | 10 | **Blessing-list signature verification** | Local FS | Verifies `content/pub.polis.core/comment/blessed.json` against the identity key published in `.well-known/polis`. The blessing list is what a site says it has admitted onto its own pages, so an unsigned-and-editable list is a way to put words on someone's site under their name. Stateless, like checks 8 and 9. ⚠️ **An unsigned blessing list reports OK**: signing happens on the tenant's next bless or unbless, so unsigned is the expected majority state for a long while and is a fact, not a defect. Only a *present-and-failing* signature is a finding. Re-signed by the tenant's key rotation on the same terms as check 9 |
@@ -785,6 +789,7 @@ attestations.*
 | 18 | **Tag-file signature verification** | Local FS | Verifies the signature on every tag file, resolving a retired key by its `updated`. Check 1 fetches tags over the wire; this is the signature over the file on disk. ⛔ **Report only** |
 | 19 | **Actor-registry signature verification** | Local FS | On an operator's site, verifies the operator's signature over its actor registry, resolving a retired key by its `asserted`. The entries' countersignatures are not checked here. ⛔ **Report only** |
 | 20 | **Private files are not served** | Local loopback | Asks the tenant, through its own host name, for every name a site must never serve: the identity key and the rest of `.polis/`, `.env`, a `.git` or `.ssh` directory at any depth, key files, editor backups, and encoded spellings of the key path. A `2xx` that is not the home page, or any response holding a private key, is an exposure. This is the one check that asks the server rather than the filesystem: a key file with the right mode is still served if the handler lets its path through. ⛔ **Never published, and never part of a site's health.** A public record naming a site whose key can be downloaded would point at the open file before anyone had closed it, so an exposure goes to the operator's security log only. ⛔ **The response is never kept**: the probe reads only far enough to look for a key header. ⛔ **Report only** |
+| 21 | **Agent acts add up** | Local | For every post, comment and blessing marked as a user agent's: its grant is on the site, verifies and names the same agent; it was signed after the grant was made and before any withdrawal; the grant allowed it (`publish`, `comment`, `bless`, or Rosie's behaviour set); and a marked post or comment has its write in the site's act log, for that grant, within minutes of its signed time. polis.pub's own server does the marking, so a failure is a bug or a write made around it. ⛔ **Never published, and never part of a site's health**: part of it rests on the site's private, unsigned act log, which is evidence for the operator, not grounds for a public record. ⚠️ It cannot see an agent holding the owner's full key, and a signed time is the signer's claim. `polis validate` runs the same check on any site. ⛔ **Report only** |
 
 ⭐ **Plus two global probes per sweep, before the per-tenant checks:**
 
@@ -1123,6 +1128,73 @@ content from other sites' caches, and that is currently the intended default.
 
 ---
 
+## Jester
+
+*The juggler — keeps each site on the version its rollout says, and moves it back when the rollout
+does.*
+
+| | |
+|---|---|
+| Schedule | Every 5 minutes, and once on start |
+| Runs | Inside the hosted service only |
+| Code | No public package; implemented in the hosted service |
+
+A new version of the public site is not switched on for everyone at once. It is rolled out: one site
+first, then a handful, then everyone, and any site can be moved back. Jester is what carries a rollout
+out, so that a switch is a line in a record rather than a hand edit to a site, and so that the state of a
+rollout can be read in one place.
+
+### What it does
+
+- **Reads the operator's rollout record**, a file on the service's own volume, outside every site's
+  directory, naming each site being rolled out and the version it should run (the v4 or v5 public
+  site). No site owner can reach it.
+- **Holds each named site to the record.** Where a site's version differs, Jester switches it and has it
+  re-rendered. Moving a site back is naming it with its old version: the next sweep switches it back.
+- **Holds back a site the new version cannot yet draw**, and says why: a site with its own custom CSS
+  (written for the old version), a theme not yet offered for the new one, or a site still on the older
+  blog shape. Such a site stays where it is until it can move.
+- **Reports** each switch, each hold and a record it could not read, in the `jester.*` namespace.
+
+### What it does NOT do
+
+- **It never touches a site its record does not name.** No record means no rollout.
+- **It never signs anything and holds no key.** A switch changes the HTML a site is rendered to, never
+  its signed sources: no post, comment or signed file is touched.
+- **It does not render on its own.** Rendering has one renderer on the service, and Jester asks it, as
+  Chaplain does. That is the only thing it asks of another actor.
+- **It does not repair.** Medic repairs a site that has drifted from what it should be; Jester moves a
+  site between versions that are both valid. Medic never undoes a rollout, and a test holds it to that.
+- **It does not deploy.** Shipping a new version is the deploy's work; Jester decides which sites run
+  it.
+- **A record it cannot read whole changes nothing.** A typo never moves a site anywhere.
+
+### Key design decisions
+
+- **A record, not a command.** A rollout happens in stages, and something has to remember which sites
+  are meant to be where; otherwise a site can drift back, and nobody can see the rollout's state. The
+  record is that memory, and changing it is the only way to move a site.
+- **Separate from Medic.** Repair and rollout are different jobs: Medic's work is to bring a site back
+  to what it should be, Jester's to change what it should be.
+
+### Known gaps
+
+The first version does the least a rollout needs. Not yet:
+
+- **A default.** Every site to move is named one by one; the record has no "everyone else" entry for
+  the final switch-over.
+- **A way to change the record without a shell** on the service, and a record of who changed it and
+  when.
+- **Pacing.** A large batch is switched and re-rendered within one sweep.
+- **The owner's own switch.** Today only the operator moves a site.
+- **Telling an owner.** A held site's owner is not told why it was held, or what would let it move.
+- **The owner's app.** Jester moves only the public site. The owner app was not rolled out this way: the v5 app
+  replaced the previous one for every site at once.
+- **Checking after a switch.** Jester does not fetch a switched site to confirm it renders as
+  expected, and does not move it back on its own if it does not.
+
+---
+
 ## Rosie
 
 *The housekeeper (ref: the Jetsons) — the tenant's own agent.*
@@ -1134,6 +1206,14 @@ marking every act inside the signed bytes. She has no loop, key, site or registr
 
 ⚠️ **The cache upkeep that used to carry her name is Medic's.** It signs nothing and decides nothing, so it
 is operator work; see [*Medic — cache upkeep*](#cache-upkeep).
+
+⭐ **Rosie is no longer the only user agent.** An owner can connect any agent (Claude, a script, any MCP
+client) to the site's API, with a personal token or, on polis.pub, by signing in. Each connection has a grant
+of its own (behaviour set `agent/1`, basis `user-signed`), and the site's server checks the grant is live
+before every request and marks every write with it. Like Rosie, these agents are not operator actors: they
+work for the tenant, under the tenant's grant, and have no key or registry entry. Unlike Rosie, they run
+outside polis, so polis sees only what they ask the API to do. See
+[delegation §2.1](../../signet/spec/delegation.md#21-connections-agents-the-owner-connects-to-the-api).
 
 ---
 
@@ -1151,24 +1231,26 @@ at a time.*
 
 ### What it does
 
-Tailor runs **53 ordered checks** (`allChecks` in `cli-go/pkg/tailor/tailor.go`), each with a reason
-explaining **why** the change is needed. They are grouped in phases, listed here in the order they run:
+Tailor runs **54 ordered checks** (declared in `cli-go/pkg/tailor/checkdefs.go`; `tailor --list` prints them), each
+with a reason explaining **why** the change is needed. Every one of them, with how to apply it yourself, is in
+[*Upgrade a self-hosted site, one change at a time*](../../cli/user/upgrade-a-site.md). They are grouped in phases,
+listed here in the order they run:
 
 | Phase | Checks |
 |-------|--------|
 | 1. Well-known identity | Version format, author-field migration, legacy config fields, bundle references, avatar config |
 | 2. Bundle definition | `bundle.json` presence and validity |
-| 3. Layout migration | Posts, comments, following, blessed content moved to content-type paths |
+| 3. Layout migration | Posts, comments, following, blessed content moved to content-type paths; private drafts and pending comments moved into the bundle tree |
 | 4. Cross-platform fixes | Path separator normalization (Windows) |
 | 4.5 Bundle/registry/theme migrations | Reference payload, legacy content path, registry migration, legacy theme locations, active bundle fields |
-| 4.7 Later migrations | Notification rules relocation, active shape upgrade, legacy v3 archives |
+| 4.7 Later migrations | Notification rules relocation, a report of a blog-shape site (never switched; Medic switches on hosted), legacy v3 archives |
 | 5. Derived data | Index rebuild, then site re-render |
 | 6. Provisioning | Public/private policies, policy content convergence, tag directory, storage salt, DM directories, epoch-0 DM keyring, theme consolidation |
 | 7. Config migration | Webapp config, view mode settings |
 | 6.5 Content-aware integrity | Reference payload integrity, registry integrity, key consistency, bundle path integrity, unpublished-emits migration, theme compatible-shapes migration, bundle declarations, index entries, blessed/following structure |
 | 6.7 Tailor-only self-heal | Active theme unset, registry schema version, registry theme/shape name sanity |
 | 8. Cleanup | Obsolete manifests, empty metadata dirs, foreign content in public paths, blessed-cache GC, stale scoped feed files, stale feed viewed_at, legacy feed scaffolding, orphaned theme dirs, studio13 rename migration |
-| 9. CLI binary | Check for CLI updates (network call, runs last) |
+| 9. CLI binary | Report a newer release (network call, runs last; never downloads) |
 
 Like Medic, Tailor signs with the site's own key in one place: publishing the DM messages key when it
 provisions the epoch-0 keyring. It carries no marker, because it completes what the site already did.
@@ -1210,11 +1292,20 @@ not produce.
 ### Usage
 
 ```bash
-tailor [site-dir]              # Dry-run (default): diagnose only
-tailor --apply [site-dir]      # Apply fixes with backup
-tailor --json [site-dir]       # JSON output
-tailor --quiet [site-dir]      # Suppress per-check detail
+tailor [site-dir]                          # Dry-run (default): diagnose only
+tailor --apply [site-dir]                  # Apply fixes with backup
+tailor --json [site-dir]                   # JSON output
+tailor --quiet [site-dir]                  # Suppress per-check detail
+tailor --list [--json]                     # Every check: id, phase, kind, summary, what it needs first
+tailor [--apply] --only id,id [site-dir]   # Only these checks
+tailor [--apply] --skip id,id [site-dir]   # Every check but these
 ```
+
+`--apply` with `--only` or `--skip` refuses, changing nothing, when a chosen check needs one you left out that has
+not been applied yet, and names it. Exit code 2 for that, as for any usage error.
+
+After `--apply`, every check that found something carries an `outcome` — `fixed`, `failed` (shown as NOT APPLIED) or
+`reported` — decided by running the check again, not by the check's own report.
 
 Exit codes: 0 = healthy, 1 = issues found, 2 = usage error.
 
@@ -1222,10 +1313,17 @@ Tailor emits no events: its findings are its own output, with per-check granular
 
 ### What it does NOT do
 
-- **It changes nothing without `--apply`**, and never changes anything without a backup first.
+- **It changes nothing without `--apply`**, and never changes anything without a backup first. Before each change
+  it copies every file the change rewrites or removes into `.polis/tailor-backup/{YYYYMMDD-HHMMSS}/`, and that
+  directory's `manifest.json` lists every change the run made. Rendered HTML is the one exception: it is
+  regenerated from your signed sources.
+- **It never loses a customisation.** A theme under a name polis never shipped is yours: Tailor leaves it in place,
+  keeps it active if it was, and moves one out of `.polis/themes/` (which nothing reads) into `site/themes/`. A
+  shipped file you edited is reinstalled, and your edited copy is kept in the backup.
 - **It never rewrites a drifted core-bundle `dir` or `mount`** (see above).
-- **It does not download binaries.** It migrates site data and layout; the Go CLI ships as a single binary
-  you replace directly. Its last phase only checks whether an update exists.
+- **It does not download binaries.** It migrates site data and layout; the Go CLI ships as a single binary you
+  replace yourself. Its last check, `cli-update`, asks GitHub for the latest release and, if it is newer than the polis
+  you run, says so and where to get it. That lookup is its only network call; `--skip cli-update` leaves it out.
 - **It does not run on a schedule** and provides no periodic backstop; see [*Medic — cache upkeep*](#self-hosted).
 
 ### Key design decisions
@@ -1254,7 +1352,9 @@ so self-hosters get the same upgrade path.
 
 The per-check matrix (every check with its scope, trigger, severity and remediating actor) is operational
 detail and is not documented publicly. Each actor's section above lists what it checks or does and what it
-leaves to a person.
+leaves to a person. **Tailor is the exception:** it runs on your own machine against your own files, so every
+one of its checks is public, with how to apply it yourself, in
+[*Upgrade a self-hosted site, one change at a time*](../../cli/user/upgrade-a-site.md).
 
 ### Reading the matrix
 
@@ -1283,7 +1383,7 @@ A few patterns become visible once everything is side by side:
 ## Event Catalog
 
 Every operator actor reports what it finds as structured events on the operator's observability channel,
-in its own namespace (`patrol.*`, `medic.*`, `judge.*`, `clerk.*`, `chaplain.*`, `reaper.*`).
+in its own namespace (`patrol.*`, `medic.*`, `judge.*`, `clerk.*`, `chaplain.*`, `reaper.*`, `jester.*`).
 Event names, payloads and severities are operational detail and are not documented publicly. Tailor emits
 no events.
 

@@ -816,9 +816,9 @@ func GetActiveTheme(site storage.Site) string {
 func GenerateDefaultAvatar() *AvatarConfig {
 	const fg = "#ffffff"
 	for i := 0; i < 10; i++ {
-		h := rand.Float64() * 360
-		s := 25 + rand.Float64()*35 // [25, 60]
-		l := 25 + rand.Float64()*30 // [25, 55]
+		h := rand.Float64() * 360   //nolint:gosec // G404: cosmetic randomness (a colour or a default pick), never a secret
+		s := 25 + rand.Float64()*35 //nolint:gosec // G404 (range [25, 60]): cosmetic randomness (a colour or a default pick), never a secret
+		l := 25 + rand.Float64()*30 //nolint:gosec // G404 (range [25, 55]): cosmetic randomness (a colour or a default pick), never a secret
 		bg := hslToHex(h, s, l)
 		if ContrastRatio(bg, fg) >= 4.5 {
 			return &AvatarConfig{BG: bg, FG: fg}
@@ -864,7 +864,7 @@ func hexToRGB(hex string) (int, int, int) {
 		return 0, 0, 0
 	}
 	var r, g, b int
-	fmt.Sscanf(hex[1:], "%02x%02x%02x", &r, &g, &b)
+	_, _ = fmt.Sscanf(hex[1:], "%02x%02x%02x", &r, &g, &b) // an unparseable colour stays 0,0,0, the documented fallback
 	return r, g, b
 }
 
@@ -979,17 +979,24 @@ func GenerateFaviconSVG(config *AvatarConfig, initial string) string {
 // and writes it to the site root directory. Returns an error if .well-known/polis
 // cannot be read; missing avatar config produces a fallback initial-based favicon.
 func WriteFavicon(site storage.Site) error {
+	svg, err := FaviconSVG(site)
+	if err != nil {
+		return err
+	}
+	return site.Store().Put(context.Background(), "favicon.svg", []byte(svg))
+}
+
+// FaviconSVG is the favicon.svg polis writes for the site, from the avatar
+// settings in its .well-known/polis. Patrol compares the file on disk with it.
+func FaviconSVG(site storage.Site) (string, error) {
 	wk, err := LoadWellKnown(site)
 	if err != nil {
-		return fmt.Errorf("load .well-known/polis: %w", err)
+		return "", fmt.Errorf("load .well-known/polis: %w", err)
 	}
-
 	// Determine initial from author name, falling back to "?"
 	initial := "?"
 	if runes := []rune(wk.AuthorName); len(runes) > 0 {
 		initial = string([]rune{runes[0]})
 	}
-
-	svg := GenerateFaviconSVG(wk.Avatar, initial)
-	return site.Store().Put(context.Background(), "favicon.svg", []byte(svg))
+	return GenerateFaviconSVG(wk.Avatar, initial), nil
 }

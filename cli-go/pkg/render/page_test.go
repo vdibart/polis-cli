@@ -41,10 +41,10 @@ func TestNewPageRenderer(t *testing.T) {
 
 // --- step-02/2.b.4: shape-selection wiring tests ---
 
-func TestNewPageRenderer_DefaultsToStreamWhenRegistryEmpty(t *testing.T) {
-	// Post-cutover: no active_shape set → bundle.GetActiveShapeName
-	// returns "v4" default. Tenant should render v4 stream fixtures
-	// without error. v4 regression sentinel — was previously v3-default.
+func TestNewPageRenderer_DefaultsToV5WhenRegistryEmpty(t *testing.T) {
+	// No active_shape set → bundle.GetActiveShapeName returns the default
+	// shape, v5 (every tenant runs it since the cutover; it was v4, and v3
+	// before that). The renderer boots on it without error.
 	//
 	// Note: setupTestSite pins to v3 explicitly for the v3 test scaffold.
 	// This test deliberately bypasses that by installing the reference
@@ -72,9 +72,8 @@ func TestNewPageRenderer_DefaultsToStreamWhenRegistryEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPageRenderer with empty active_shape: %v", err)
 	}
-	// v4 Stream template must be populated (default post-cutover).
-	if renderer.templates.Stream == "" {
-		t.Error("default-shape tenant: Stream template must be populated (v4)")
+	if renderer.shapeName != "v5" {
+		t.Errorf("default-shape tenant renders with %q, want v5", renderer.shapeName)
 	}
 }
 

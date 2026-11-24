@@ -500,11 +500,15 @@ A bundle ships not only **content types** (post, comment, …) but also
 
 A **shape** declares the rendering approach for a class of polis output —
 the markup templates plus supporting partials. The `pub.polis.core` bundle
-ships two shapes: the **blog** shape (post pages, index, archive, tag pages)
-and the **stream** shape (infinity-stream rendering — focus post inlined +
-adjacent sibling excerpts). Wire names remain `pub.polis.shapes.v3` and
-`pub.polis.shapes.v4` for tenant-data compatibility; `v3`/`v4` are the
-on-disk shorthand the blog/stream shapes were originally introduced under.
+ships three shapes: **v5** (`pub.polis.shapes.v5`, the current default: the
+site as cards under its own menu, each item's own page the item open with its
+neighbours folded around it, themes as tokens), and two that are no longer
+supported but still render for a site that records one: the **blog** shape
+(post pages, index, archive, tag pages) and the **stream** shape
+(infinity-stream rendering — focus post inlined + adjacent sibling excerpts).
+Their wire names remain `pub.polis.shapes.v3` and `pub.polis.shapes.v4` for
+tenant-data compatibility; `v3`/`v4` are the on-disk shorthand the blog/stream
+shapes were originally introduced under. See [shapes.md](shapes.md).
 
 Shapes are declared in `bundle.json` under the `shapes` key:
 
@@ -562,8 +566,8 @@ when it differs from the name.
 #### The site's own CSS — `site/custom.css`
 
 A site can carry CSS of its own, layered **after** the active theme: every
-writer of `styles.css` (the blog shape's render, the stream shape's render and a
-theme switch) appends `site/custom.css` when it exists, below a marker comment.
+writer of `styles.css` (the v5, blog and stream shapes' renders and a theme
+switch) appends `site/custom.css` when it exists, below a marker comment.
 The file is checked again at every one of those writes, not only when it is
 set: one that fails the checks below (written by hand, restored, or left by an
 older build) is withheld, a comment says so in its place, and the site renders
@@ -587,9 +591,10 @@ place: the site's own file, which nothing interprets.
   prefixed forms) are
   refused, and `url()` is allowed only for a path on the site or a
   `data:image/` value. It is capped at 20,000 bytes.
-- The owner reads and replaces it at `/api/settings/custom-css` (owner-only).
-  A replace keeps the version it replaced as `site/custom.css.prev` and
-  re-renders.
+- No route or agent tool reads or replaces it any more (the old app's
+  `/api/settings/custom-css` and the MCP tools for it went with that app): the
+  owner edits the file on disk and re-renders. On a v5 site, the site's own
+  tokens (`site.set_tokens`) are the described way to change its look.
 - ⚠️ **The bash CLI does not apply it**: its render writes the theme's CSS alone
   ([implementation parity](../../cli/implementation-parity.md)).
 
@@ -613,9 +618,10 @@ Each tenant has the bundle's reference payload installed at
 
 `polis init` writes this on new sites. On hosted tenants Patrol compares the
 installed shape and theme versions with the binary's on every cycle, and Medic
-resyncs when they fall behind — the binary's embedded reference payload is
-always the source of truth, so a binary upgrade ships new shape templates
-or theme CSS without a manual step. Self-hosters get the same migrations by
+resyncs when they fall behind, then re-renders the site so its pages (and the
+`/stream.js` they load) use the new shape at once — the binary's embedded
+reference payload is always the source of truth, so a binary upgrade ships
+new shape templates or theme CSS without a manual step. Self-hosters get the same migrations by
 running the standalone `tailor --apply` binary against their site.
 
 ### Active selections
@@ -764,15 +770,12 @@ Posts are the primary content unit in polis -- markdown files with signed frontm
 | Action | Description |
 |--------|-------------|
 | `list` | Read from `content/pub.polis.core/index.jsonl`, return post entries (newest first). |
-| `get` | Retrieve a single post by path or ID. |
 | `create` | Publish a new post: sign content, write to content dir, update index, register with DS. |
 | `update` | Republish an existing post with updated content (new version). |
-| `delete` | Remove a post (unpublish). |
-| `render` | Render markdown to HTML using the active theme. |
-| `draft.list` | List saved drafts. |
-| `draft.get` | Retrieve a single draft. |
-| `draft.save` | Save a draft to `.polis/bundles/pub.polis.core/posts/drafts/`. |
-| `draft.delete` | Delete a draft. |
+| `save_draft` | Save unfinished writing to `.polis/bundles/pub.polis.core/posts/drafts/`, new or replacing a draft by id. Owner only. |
+| `discard_draft` | Remove one draft. Owner only. |
+
+Drafts are read with PQL (`all drafts from me`). Saving and discarding them are owner-only: they need the owner's own full-access token, and no agent's token reaches them. The site's API description (`/v1/openapi.json`) is the authoritative list of what each type does.
 
 **Events declared:** `pub.polis.post.published`, `pub.polis.post.republished`, `pub.polis.post.unpublished`
 
@@ -1216,7 +1219,7 @@ The following constraints are enforced by the DS when accepting events:
 2. The Ed25519 signature must be valid over the canonical payload.
 3. `pub.polis.*` event types cannot be published by clients (except the five above).
 4. The actor and type must not be denied by operator policy.
-5. Rate limit: 100 events/hour/actor by default (`domainRateLimits.streamPublish`).
+5. Rate limit: a number of events per hour per actor (`domainRateLimits.streamPublish`; the default is in the [DS API reference](../../ds/developer/api-reference.md#per-domain-limits)).
 6. Payload must be a JSON object of at most 8KB serialized by default (`sizeLimits.streamPayloadMaxBytes`).
 7. Events are immutable once inserted -- operators cannot modify content after insertion.
 

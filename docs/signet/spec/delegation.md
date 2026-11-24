@@ -2,9 +2,10 @@
 
 *For* [Reviewers](../../README.md#reviewing-the-security-and-identity-design) · [Developers](../../README.md#building-on-polis) — *About* [Identity](../../general/README.md#identity) · [Relationships](../../general/README.md#relationships) — *Kind* [Spec](../../README.md#kinds-of-page) — *Code* [`cli-go/pkg/agent`](../../../cli-go/pkg/agent) — *See also* [concept](../concepts/delegation.md) · [guide](../guides/who-blessed-this.md)
 
-Implemented for one agent, Rosie. The grant, the writer rule and live-grant resolution are in
-`cli-go/pkg/attestation/grant.go`; Rosie is `cli-go/pkg/agent/`; the marker is carried by
-`cli-go/pkg/discovery/client.go` and `cli-go/pkg/metadata/blessed.go`.
+Implemented for Rosie (§2) and for agents connected to the site's API (§2.1). The grant, the writer rule and
+live-grant resolution are in `cli-go/pkg/attestation/grant.go`; Rosie is `cli-go/pkg/agent/`; connections are
+`cli-go/pkg/connection/`; the marker is carried by `cli-go/pkg/discovery/client.go` and
+`cli-go/pkg/metadata/blessed.go`, and into posts and comments by `cli-go/pkg/publish` and `cli-go/pkg/comment`.
 
 > ⭐ **A user agent is software that works for a user. It acts under the user's own record of what it is
 > to her, and marks every act — inside the signature — with its name and that record's URL.**
@@ -52,6 +53,50 @@ polis's first user agent. Mode A.
 switching her off to stop it. Site upkeep — re-registration, DM keyring provisioning, cache repair — is
 **not** hers; it is operator custody and carries no marker.
 
+### 2.1 Connections: agents the owner connects to the API
+
+An agent the owner connects to the site's API (Claude, a script, any MCP client) holds a token that presents
+**one grant of its own** (a personal token the owner minted, or, on polis.pub, a sign-in token issued when the
+owner approved the connection), so switching off one connection never touches another, and each act names
+the connection that made it.
+
+| | |
+|---|---|
+| `agent` | the name the owner gave the connection |
+| `provider` | the client's own name for itself, a claim |
+| behaviour set | `agent/1` — **act through the site's API within the grant's `scopes`** |
+| basis | `user-signed`: written while the owner is present, when they mint a token, renew an older one, or approve an agent's sign-in on polis.pub's consent page |
+| live-grant check | §3.2, for **that** grant (the one the token points at), not the newest for its name |
+
+Its marker goes inside the signed bytes of posts and comments (`agent:` and `grant:` frontmatter), blessing
+decisions (§5.1, §5.2), follow-list entries (§5.5) and nowhere else: an act with nothing signed is recorded in
+the site's private act log. `tag` is not granted: tagging stays with the owner.
+
+⭐ **A scope becoming grantable is not a new behaviour version.** `agent/1` means *act within the scopes the
+grant lists*, and each grant lists its own. `follow` became grantable after the first connections were made;
+no grant written before then names it, so no existing connection gained it, and a new connection holds it only
+if the owner grants it. A key minted before keys carried grants is renewed without `follow` (the owner never
+agreed that an agent could follow in her name); she grants it by making a new connection.
+
+### 2.2 Attribution follows the route
+
+⭐ **Whose act it is depends on the route it takes, not on who or what is typing.**
+
+| Route | Whose act | Authority | Marker |
+|---|---|---|---|
+| **The owner's own CLI** (`polis`, on the owner's machine, with the owner's key) | **the owner's** | the owner's key, held by the owner | — none, as for every CLI act |
+| **MCP or `/v1` under a connection** (§2.1: a personal token, or a polis.pub sign-in) | **the agent's** | the connection's grant, checked on every request (§3.2) | ✅ `agent` + `grant` (§5) |
+
+The CLI is the owner's own authority, not authority lent by a grant: whoever drives it (the owner, a script
+they wrote, or an agent they asked to run it) acts with the owner's key, as the owner. So a CLI act is signed
+as the owner's and unmarked. An act through MCP or `/v1` under a connection rides on a grant, and is the
+agent's: checked against that grant and marked.
+
+⛔ **The marker claims that an agent acted under a grant. It never claims that no software, or no AI, was
+involved in an unmarked act.** A reader cannot tell that an agent drove a CLI write, exactly as they cannot
+tell that a script did; that is accepted, not a gap. An agent that offers both routes says, before a CLI
+write, that it goes out signed as the owner and unmarked.
+
 ## 3 The grant record
 
 An ordinary attestation ([`attestation.md`](attestation.md)) with predicate
@@ -83,6 +128,7 @@ An ordinary attestation ([`attestation.md`](attestation.md)) with predicate
 | `behaviours` | ✅ | a versioned behaviour set, `<name>/<n>` (`n` ≥ 1). The provider documents each set |
 | `basis` | ✅ | `hosting-terms` — the hosting operator issued it under its terms · `user-signed` — a present person switched the agent on. The values are [`custody.md` §12](custody.md)'s |
 | `terms` | — | an https URL |
+| `scopes` | — | for an agent that acts through the site's API (behaviour set `agent/1`): the space-separated scopes it may act in, from the API's vocabulary. A grant with none allows no API act |
 
 **Writer rule** (what an implementation must refuse to write; readers accept anything, per
 [`attestation.md`](attestation.md)):
@@ -201,16 +247,50 @@ approved nor *who decided* — while an entry decided by an agent carries a vers
 [The guide](../guides/who-blessed-this.md) reads them side by side with `curl`, and covers what the
 marker does **not** tell you.
 
-### 5.3 Acts that are not the agent's carry no marker
+### 5.3 A request about content — `POST /v1/content`, `/v1/content/unpublish`, `/v1/content/unregister`
+
+A post the agent publishes, a comment it writes (whose registration is also the comment's blessing request),
+and an unpublish or unregister it causes are signed requests to the discovery service, and each carries the
+marker after its existing fields, in this order:
+
+```
+{"type":"pub.polis.post","url":"https://alice.example/content/pub.polis.core/post/20261122/hello.md","version":"sha256:…","author":"alice.example","metadata":{…},"agent":"Claude Code","grant":"https://alice.example/content/pub.polis.core/attestation/g.json"}
+{"type":"pub.polis.post","url":"https://alice.example/content/pub.polis.core/post/20261122/hello.md","timestamp":"2026-11-22T12:00:00Z","agent":"Claude Code","grant":"https://alice.example/content/pub.polis.core/attestation/g.json"}
+```
+
+The post's or comment's own frontmatter carries the same marker, inside its signature. Golden bytes for all
+four shapes, marked and unmarked: `discovery-service/core/contract-fixtures/content-marker-signature.json`.
+⛔ **A re-registration is not the agent's act**: operator upkeep re-registers unmarked (next section), whatever
+the file says, which is why the marker comes from the act and is never read back from the file.
+
+### 5.4 Acts that are not the agent's carry no marker
 
 | Act | Signer | Marker |
 |---|---|---|
 | Blessing grant / deny by the agent | the user's key | ✅ |
 | The user's own grant / deny | the user's key | — |
+| Any act through the user's own CLI, whoever drives it (§2.2) | the user's key | — |
 | Operator upkeep (re-registration, repairs, DM keyring provisioning) | the user's key, as declared custody | — |
 | Operator writes of the blessing list from a projection | none — **unsigned** | — |
 
 ⛔ **No operator actor writes a marker, and no agent act lacks one.**
+
+### 5.5 A follow-list entry — `following.json`
+
+A site an agent follows gets an entry in the owner's signed follow list, and the entry carries the marker
+after its existing fields, in the list's signed bytes. Canonical form and golden bytes:
+[`signing-base.md`](signing-base.md), *the follow file*. Only that entry changes; an entry the owner made is
+byte-identical to before. Each blessing the follow causes (comments the owner's rules bless once the site is
+followed) is a marked relationship request (§5.1).
+
+- **An unfollow writes no entry**: removing one leaves nothing to carry the marker, so the unfollow is
+  recorded in the site's act log, and each denial it causes is a marked relationship request.
+- **Following a site already followed** leaves the entry as it was: who made it does not change.
+- ⚠️ **The `pub.polis.follow.announced` and `.removed` stream events stay unmarked.** They are delivery
+  notices, not the record, and their payload has no marker fields; the signed follow list is the record.
+  Operator upkeep that re-announces a follow (Chaplain) is unmarked by §5.4.
+- ⚠️ **Every writer of the list must declare both fields**, as for the blessing list: a writer that rebuilds
+  entries from four fields drops the marker and signs the list with the owner's key.
 
 ## 6 What an agent is to this site — the projection
 
@@ -286,14 +366,22 @@ match, granted the blessing itself, signing the decision with its own key (`auto
 on the event). Those records stay on the stream and their attestation still verifies
 ([witness](witness.md) §3); nothing produces a new one.
 
+The same holds for a marked **content request** (§5.3): accepted with `agent` and `grant` appended after the
+type's own fields, one half refused (`400`), the grant checked against the acting site's registrations,
+`grant_state` answered and recorded with the marker on every event the request causes, and never a reason to
+refuse. ⚠️ The **content witness** does not carry the marker: its signed fields are a fixed list that
+verifiers already shipped rebuild, and adding one would make them call a marked record forged.
+
 ⚠️ **Deploy order.** An implementation that sends marked requests must not do so until the discovery service
-it talks to accepts the fields: an older one rebuilds the five fields and answers `401`. polis.pub keeps
-`POLIS_ROSIE` off until then.
+it talks to accepts the fields: an older one rebuilds the older fields and answers `401`. polis.pub keeps
+`POLIS_ROSIE` off until then, and deploys the discovery service before a hosted build that marks content
+requests.
 
 ## 8 What this design does NOT claim
 
 - ⛔ **The marker is self-declared.** In Mode A, whoever holds the user's key could sign without it. Marked
-  acts are **fully traceable**; unmarked acts are **no more visible than before**.
+  acts are **fully traceable**; unmarked acts are **no more visible than before**. An agent driving the
+  user's own CLI is one such case, and by rule the user's act (§2.2).
 - ⛔ **`hosting-terms` is not consent.**
 - ⛔ **Enforcement is the agent's own code.** It checks the live grant before signing. The discovery service
   witnesses and flags; it does not stop an act.

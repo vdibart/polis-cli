@@ -1,0 +1,21 @@
+{
+  "note": "vice: warm Miami blue, coral pink, palm teal, cream text, polis cyan for the wordmark.",
+  "tokens": {
+    "scheme": "dark",
+    "site": "#d06888",
+    "bg": "#1a2c50",
+    "surface": "#223860",
+    "card-hover": "#263e68",
+    "panel": "#2a4070",
+    "text": "#f0e8e0",
+    "text-soft": "#d0c4b8",
+    "text-muted": "#9ba2af",
+    "ink": "#122040",
+    "wordmark": "#00d4ff",
+    "accent-2": "#50c8a0",
+    "mark": "#d06888",
+    "mark-style": "gradient",
+    "mark-2": "#e88050",
+    "mark-ink": "#ffffff"
+  }
+}

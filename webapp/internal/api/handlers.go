@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/vdibart/polis-cli/cli-go/pkg/storage"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -22,6 +23,8 @@ const writeActionTimeout = 30 * time.Second
 type handlers struct {
 	engine         *ops.Engine
 	securityLogger SecurityLogger
+	host           *Host // nil where the host serves nothing beyond the engine
+	site           storage.Site
 }
 
 // logSecurity emits a security event if a logger is configured.
@@ -41,7 +44,7 @@ func (h *handlers) handleContentList(w http.ResponseWriter, r *http.Request, con
 		h.handleDispatchError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result.Data)
+	writeJSON(w, statusOf(result, http.StatusOK), result.Data)
 }
 
 // handleContentGet handles GET /v1/content/{type}/{id}
@@ -55,7 +58,7 @@ func (h *handlers) handleContentGet(w http.ResponseWriter, r *http.Request, cont
 		h.handleDispatchError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result.Data)
+	writeJSON(w, statusOf(result, http.StatusOK), result.Data)
 }
 
 // handleContentCreate handles POST /v1/content/{type}
@@ -77,7 +80,7 @@ func (h *handlers) handleContentCreate(w http.ResponseWriter, r *http.Request, c
 		h.handleDispatchError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, result.Data)
+	writeJSON(w, statusOf(result, http.StatusCreated), result.Data)
 }
 
 // handleContentUpdate handles PUT /v1/content/{type}/{id}
@@ -100,7 +103,7 @@ func (h *handlers) handleContentUpdate(w http.ResponseWriter, r *http.Request, c
 		h.handleDispatchError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result.Data)
+	writeJSON(w, statusOf(result, http.StatusOK), result.Data)
 }
 
 // handleContentDelete handles DELETE /v1/content/{type}/{id}
@@ -116,7 +119,7 @@ func (h *handlers) handleContentDelete(w http.ResponseWriter, r *http.Request, c
 		h.handleDispatchError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result.Data)
+	writeJSON(w, statusOf(result, http.StatusOK), result.Data)
 }
 
 // handleContentAction handles POST /v1/content/{type}/actions/{action}
@@ -138,72 +141,7 @@ func (h *handlers) handleContentAction(w http.ResponseWriter, r *http.Request, c
 		h.handleDispatchError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result.Data)
-}
-
-// handleDraftsList handles GET /v1/content/{type}/drafts
-func (h *handlers) handleDraftsList(w http.ResponseWriter, r *http.Request, contentType string) {
-	result, err := h.engine.Dispatch(r.Context(), ops.ActionRequest{
-		Action:      "draft.list",
-		ContentType: contentType,
-	})
-	if err != nil {
-		h.handleDispatchError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, result.Data)
-}
-
-// handleDraftsGet handles GET /v1/content/{type}/drafts/{id}
-func (h *handlers) handleDraftsGet(w http.ResponseWriter, r *http.Request, contentType, id string) {
-	result, err := h.engine.Dispatch(r.Context(), ops.ActionRequest{
-		Action:      "draft.get",
-		ContentType: contentType,
-		Payload:     map[string]any{"id": id},
-	})
-	if err != nil {
-		h.handleDispatchError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, result.Data)
-}
-
-// handleDraftsCreate handles POST /v1/content/{type}/drafts
-func (h *handlers) handleDraftsCreate(w http.ResponseWriter, r *http.Request, contentType string) {
-	payload, err := parsePayload(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), writeActionTimeout)
-	defer cancel()
-	result, err := h.engine.Dispatch(ctx, ops.ActionRequest{
-		Action:      "draft.save",
-		ContentType: contentType,
-		Payload:     payload,
-	})
-	if err != nil {
-		h.handleDispatchError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, result.Data)
-}
-
-// handleDraftsDelete handles DELETE /v1/content/{type}/drafts/{id}
-func (h *handlers) handleDraftsDelete(w http.ResponseWriter, r *http.Request, contentType, id string) {
-	ctx, cancel := context.WithTimeout(r.Context(), writeActionTimeout)
-	defer cancel()
-	result, err := h.engine.Dispatch(ctx, ops.ActionRequest{
-		Action:      "draft.delete",
-		ContentType: contentType,
-		Payload:     map[string]any{"id": id},
-	})
-	if err != nil {
-		h.handleDispatchError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, result.Data)
+	writeJSON(w, statusOf(result, http.StatusOK), result.Data)
 }
 
 // handleBundlesList handles GET /v1/bundles
@@ -255,7 +193,7 @@ func (h *handlers) handleDMDeliver(w http.ResponseWriter, r *http.Request, sende
 		h.handleDispatchError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, result.Data)
+	writeJSON(w, statusOf(result, http.StatusCreated), result.Data)
 }
 
 // handleDMProtectionStatus handles POST /v1/content/dm/actions/protection_status with
@@ -275,7 +213,7 @@ func (h *handlers) handleDMProtectionStatus(w http.ResponseWriter, r *http.Reque
 		h.handleDispatchError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result.Data)
+	writeJSON(w, statusOf(result, http.StatusOK), result.Data)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -312,7 +250,18 @@ func (h *handlers) handleDispatchError(w http.ResponseWriter, r *http.Request, e
 
 	var status int
 	var code, publicMessage string
+	var recipient *ops.RecipientError
 	switch {
+	case errors.As(err, &recipient):
+		// A reason about the recipient: its plain words, naming the site,
+		// never the transport's (logged below).
+		status = http.StatusUnprocessableEntity
+		code = "recipient_cannot_receive"
+		if recipient.Unreachable {
+			status = http.StatusBadGateway
+			code = "recipient_unreachable"
+		}
+		publicMessage = recipient.Error()
 	case errors.Is(err, ops.ErrNotFound):
 		// Checked before the message matching below, which would read a name
 		// containing "invalid" as an invalid request.
@@ -375,17 +324,29 @@ func (h *handlers) handleDispatchError(w http.ResponseWriter, r *http.Request, e
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
+	if c, ok := w.(errorCoder); ok {
+		c.noteErrorCode(code) // for the request's one error event
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status": "error",
 		"error": map[string]any{
 			"code":    code,
 			"message": message,
 		},
 	})
+}
+
+// statusOf is the answer's status: the operation's own when it names one (a
+// message saved but not delivered is 202), the transport's default otherwise.
+func statusOf(result *ops.ActionResult, def int) int {
+	if result != nil && result.Code != 0 {
+		return result.Code
+	}
+	return def
 }

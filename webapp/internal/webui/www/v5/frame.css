@@ -1,0 +1,780 @@
+/* The v5 owner app's frame: the top bar, your mark, the section box and the
+   menu, the toolbar, the footer, cards, threads, hints, the help flyout and
+   the editor (v5 spec part 1, 3.2; style guide).
+
+   ⭐ LIFTED FROM THE MOCKUPS, not redrawn: this is the v5 design's write
+   mockup's stylesheet, whose frame the gather, message and enhance mockups
+   share. Each section's own rules are added beside it by that
+   section. The mockup's sample avatar colours on .me and .av are defaults;
+   the app sets the site's own avatar on each mark.
+
+   ⛔ Built on /v1 alone: nothing here, or in the app, reaches /api/. */
+
+/* Write: your own writing, once you are in. Standalone; it continues 01-onboarding.html.
+   Palette and type are the same especial-light tokens. The posts are the real public posts of
+   vdibart.polis.pub (titles, dates, signed markdown and comment counts as published on 2026-11-11).
+   Waiting-for-blessing counts are private to the site, so they are shown as 0 here. */
+:root {
+  --bg: #d8d6d2;
+  --bg-light: #e0deda;
+  --bg-focus: #eceae6;
+  --surface: #eceae6;
+  --panel: #d4d2ce;
+  --peach: #8a6c04;
+  --peach-soft: #6e5600;
+  --peach-dim: #b39a50;
+  --pink: #8a5a28;
+  --pink-soft: #7a4e20;
+  --teal: #0090b8;
+  --teal-soft: #00728f;
+  --cyan: #0090b8;
+  --text: #1c1c2a;
+  --text-soft: #3a3a48;
+  --text-muted: #605c56;
+  --ink: #f8f5ee;
+  --line: rgba(138, 108, 4, 0.22);
+  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-content: 'Newsreader', Georgia, 'Times New Roman', serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+  --ease: cubic-bezier(.22, .8, .24, 1);
+  --bar: 64px;
+  --foot: 52px;
+  --t: .55s;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  background: var(--bg-light); color: var(--text); font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased; overflow-x: hidden;
+  transition: background-color var(--t) var(--ease);
+}
+body.focus { background: var(--bg-focus); }
+:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+/* ---------- Top bar ---------- */
+.topbar {
+  position: fixed; isolation: isolate; top: 0; left: 0; right: 0; z-index: 10; height: var(--bar);
+  display: flex; align-items: center; padding: 0 20px; background: var(--bg-light);
+  transition: background-color var(--t) var(--ease);
+}
+body.focus .topbar { background: var(--bg-focus); }
+/* You, where the wordmark was: vdibart.polis.pub's own avatar colours. */
+.me {
+  width: 34px; height: 34px; border-radius: 50%; border: 0; cursor: pointer; display: grid; place-items: center;
+  background: radial-gradient(circle, #71bcc2 1px, transparent 1.4px) 0 0 / 7px 7px, #397f84;
+  color: #fff; font: italic 600 18px/1 var(--font-content);
+  box-shadow: 0 0 0 2px var(--bg-light), 0 0 0 3.5px #4ca85d;
+  transition: opacity var(--t) var(--ease);
+}
+body.focus .me { opacity: .5; }
+/* Beside your mark, your address; over it, the way to your public site. Both open it. */
+.me-site { position: relative; margin-left: 12px; display: inline-flex; flex-direction: column; text-decoration: none; font: 500 13px var(--font-ui); color: var(--text-soft); transition: opacity var(--t) var(--ease); }
+.me-site[hidden] { display: none; }
+.me-site .mv { position: absolute; top: 100%; left: 0; margin-top: 1px; white-space: nowrap; font-size: 11.5px; color: var(--peach-soft); opacity: 0; transform: translateY(-2px); transition: opacity .2s var(--ease), transform .2s var(--ease); }
+.me-site:hover .mh { color: var(--text); }
+.me-site:hover .mv, .me-site:focus-visible .mv { opacity: 1; transform: none; }
+body.focus .me-site { opacity: .5; }
+@media (max-width: 1100px) { .me-site { display: none; } }
+/* The section you are in moves to the front of the menu. A box joins it to its toolbar: it runs from
+   the left edge of the page's content to that menu item, and the toolbar sits at its left end,
+   inside it. Switching section slides the menu (FLIP) and stretches the box to the new item. */
+.box {
+  position: absolute; top: 10px; height: 44px; left: 0; width: 0; z-index: 0;
+  background: var(--surface); border: 1px solid var(--sec-line, var(--line)); border-radius: 12px;
+  transition: left .48s var(--ease), width .48s var(--ease), border-color .25s;
+}
+.box.still { transition: border-color .25s; }
+/* Colour-coding: each section's own hue, faint, strokes the box and the cards, so what you are
+   looking at reads as belonging to the menu item that is lit. */
+body[data-sec="write"]    { --sec-line: rgba(110, 86, 0, .28); }
+body[data-sec="gather"]   { --sec-line: rgba(0, 114, 143, .28); }
+body[data-sec="message"]  { --sec-line: rgba(122, 78, 32, .28); }
+body[data-sec="enhance"]  { --sec-line: rgba(110, 86, 0, .28); }
+/* The rollover colour: each section's own stroke at full strength (spec 1.5). */
+body[data-sec="write"]    { --sec-hue: rgb(110, 86, 0); }
+body[data-sec="gather"]   { --sec-hue: rgb(0, 114, 143); }
+body[data-sec="message"]  { --sec-hue: rgb(122, 78, 32); }
+body[data-sec="enhance"]  { --sec-hue: rgb(110, 86, 0); }
+/* Each section washes the page's ground in its own hue, so a switch reads as a change of room. Only
+   the ground moves (--bg, --bg-light, --bg-focus, and so everything drawn in the page's colour);
+   cards and text stay as they are. --wash is gather's strength; --wash-k lifts the lighter hues to
+   read at the same quiet level. Registered as colours so a switch eases instead of snapping. */
+@property --bg-light { syntax: '<color>'; inherits: true; initial-value: #e0deda; }
+@property --bg-focus { syntax: '<color>'; inherits: true; initial-value: #eceae6; }
+@property --bg       { syntax: '<color>'; inherits: true; initial-value: #d8d6d2; }
+:root { --wash: 5%; }
+body[data-sec="write"]   { --wash-hue: rgb(120, 130, 255); --wash-k: 1.8; }
+body[data-sec="gather"]  { --wash-hue: rgb(0, 120, 150);   --wash-k: 1; }
+body[data-sec="message"] { --wash-hue: rgb(150, 118, 60);  --wash-k: 1.5; }   /* ochre, softened to write's and gather's strength */
+body[data-sec="enhance"] { --wash-hue: rgb(160, 95, 125);  --wash-k: 1.7; }   /* dusty rose, likewise */
+body {
+  --bg-light: color-mix(in oklab, #e0deda, var(--wash-hue, #e0deda) calc(var(--wash) * var(--wash-k, 1)));
+  --bg-focus: color-mix(in oklab, #eceae6, var(--wash-hue, #eceae6) calc(var(--wash) * var(--wash-k, 1) * .6));
+  --bg:       color-mix(in oklab, #d8d6d2, var(--wash-hue, #d8d6d2) calc(var(--wash) * var(--wash-k, 1)));
+  transition: background-color .4s var(--ease), --bg-light .4s var(--ease), --bg-focus .4s var(--ease), --bg .4s var(--ease);
+}
+body[data-sec="write"] .box { cursor: text; }
+body[data-sec="write"]:not(.focus) .box:hover, body[data-sec="write"]:not(.focus) .box:has(+ .center:hover) { border-color: var(--peach-dim); }
+.center { position: absolute; left: 0; top: 10px; height: 44px; z-index: 1; display: flex; align-items: center; transition: left .48s var(--ease); }
+.box.still + .center { transition: none; }
+.ways { position: absolute; top: 10px; height: 44px; left: 0; z-index: 2; display: flex; align-items: center; gap: 2px; }
+.way {
+  position: relative; display: inline-flex; align-items: center; gap: 7px;
+  background: none; border: 0; cursor: pointer; padding: 8px 12px; border-radius: 8px;
+  font: 500 13px var(--font-ui); letter-spacing: .02em; color: var(--text-muted); opacity: .85;
+  transition: opacity var(--t) var(--ease), color .25s, background .25s;
+}
+.way svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.way:not(.on):hover { color: var(--text); background: var(--surface); }
+.way[data-way="write"]:hover, .way.on[data-way="write"] { color: var(--peach-soft); }
+.way[data-way="gather"]:hover, .way.on[data-way="gather"] { color: var(--teal-soft); }
+.way[data-way="message"]:hover, .way.on[data-way="message"] { color: var(--pink-soft); }
+.way[data-way="enhance"]:hover, .way.on[data-way="enhance"] { color: var(--peach-soft); }
+.way.on { opacity: 1; z-index: 1; }  /* still a pointer: a click on it goes back to the top (1.13) */
+/* When the sections trailing the box would run off the page, they drop to their icons. */
+.way.on + .way { margin-left: 4px; }   /* just clear of the box's stroke: the next section stays with the current one (2026-11-18) */
+.ways.tight .way:not(.on) { padding: 8px 9px; }
+.ways.tight .way:not(.on) .lbl { display: none; }
+.ways.cramped .way.on { padding: 8px 9px; }
+.ways.cramped .way.on .lbl { display: none; }
+body.squeezed .kinds { display: none; }   /* last step, a phone: the filters go, leaving the toolbar's leading button */
+body.focus .way:not(.on) { opacity: .4; }
+body.focus .way:not(.on):hover { opacity: 1; }
+.tbar { display: none; align-items: center; gap: 8px; height: 30px; }
+body[data-sec="write"] .tbar[data-for="write"], body[data-sec="gather"] .tbar[data-for="gather"], body[data-sec="message"] .tbar[data-for="message"], body[data-sec="enhance"] .tbar[data-for="enhance"] { display: flex; animation: slidein .4s var(--ease) .2s both; }
+@keyframes slidein { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.tbar[data-for="write"] { cursor: text; }
+.tbar[data-for="write"] .plus { margin-right: 12px; }
+.find { display: flex; align-items: center; gap: 7px; height: 30px; width: 210px; padding: 0 10px; border-radius: 8px; background: var(--bg-light); }
+.find svg { width: 14px; height: 14px; stroke: var(--text-muted); fill: none; stroke-width: 1.8; flex: none; }
+.find input { flex: 1; min-width: 0; border: 0; outline: none; background: none; font: 400 13px var(--font-ui); color: var(--text); }
+.find input::placeholder { color: var(--text-muted); opacity: .75; }
+/* A dot means something new since you last looked, as in the webapp's topbar; never a count. */
+.way .dot { display: none; position: absolute; top: 6px; left: 23px; width: 7px; height: 7px; border-radius: 50%; background: #c2412d; box-shadow: 0 0 0 2px var(--bg-light); }
+.way.has-new .dot { display: block; animation: fadein .5s var(--ease) both; }   /* the current section too: gather lights while the owner is in it, for what just arrived */
+.hint {
+  position: absolute; top: 56px; right: 20px; width: max-content; max-width: 300px;
+  background: var(--panel); color: var(--text-soft); font-size: 12.5px; line-height: 1.45;
+  padding: 9px 12px; border-radius: 8px; opacity: 0; transform: translateY(-4px); pointer-events: none;
+  transition: opacity .25s, transform .25s;
+}
+.hint.show { opacity: 1; transform: none; }
+
+/* ---------- Footer ---------- */
+.foot {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 4; height: var(--foot);
+  display: flex; align-items: center; gap: 18px; padding: 0 24px; background: var(--bg);
+  font: 400 12px var(--font-mono); color: var(--text-muted);
+  transition: transform var(--t) var(--ease);
+}
+.foot a { color: var(--text-muted); text-decoration: none; }
+.foot a:hover { color: var(--peach-soft); }
+.foot .how { background: none; border: 0; padding: 0; cursor: pointer; font: inherit; color: var(--text-muted); }
+.foot .how:hover { color: var(--peach-soft); }
+.foot .spacer { flex: 1; }
+body.focus .foot { transform: translateY(100%); }
+
+/* ---------- Invite, parked in the footer: noticeable, not loud ---------- */
+.foot .invite { display: inline-flex; align-items: center; gap: 7px; padding: 6px 14px; border-radius: 8px; cursor: pointer;
+  background: rgba(138, 108, 4, .12); border: 1px solid var(--peach); color: var(--peach-soft); font: 500 12.5px var(--font-ui); letter-spacing: .02em; transition: background .25s, color .25s; }
+.foot .invite:hover { background: var(--peach); color: var(--ink); }
+.foot .invite svg { width: 12px; height: 12px; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+
+/* ---------- The page ---------- */
+.col { max-width: 680px; margin: 0 auto; padding: calc(var(--bar) + 18px) 24px 140px; }
+.pane { display: none; }
+body[data-sec="write"] .pane[data-pane="write"], body[data-sec="gather"] .pane[data-pane="gather"], body[data-sec="message"] .pane[data-pane="message"], body[data-sec="enhance"] .pane[data-pane="enhance"] { display: block; animation: fadein .4s var(--ease) both; }
+.soon { margin: 40px 0 0; text-align: center; font: italic 400 17px/1.6 var(--font-content); color: var(--text-muted); }
+
+/* The editor, folded to its toolbar. Opening it is one motion: the box's edge and fill give way
+   to the page, the sheet grows beneath the toolbar, and your pieces step back. No page change. */
+.fmt { display: flex; align-items: center; gap: 2px; }
+.fmt button {
+  width: 30px; height: 28px; border: 0; border-radius: 6px; background: none; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text-muted); font: 600 15px var(--font-content); transition: background .2s, color .2s;
+}
+.fmt button.i { font-style: italic; font-weight: 500; }
+.fmt button svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.fmt button:hover { background: var(--bg-light); color: var(--text); }
+.fmt .sep { width: 1px; height: 16px; background: var(--line); margin: 0 6px; }
+/* Pressed: the selection is already bold, a heading, in a list…; the section's own gold. */
+.fmt button[aria-pressed="true"] { background: var(--bg-light); color: var(--peach-soft); }
+/* Markdown is a choice of how to write, not a format: a small mono label at the end. */
+.fmt button.md { width: auto; padding: 0 7px; font: 500 11px var(--font-mono); letter-spacing: .04em; }
+.fmt button.md[aria-pressed="true"] { background: var(--bg-light); color: var(--peach-soft); box-shadow: 0 0 0 1px var(--line); }
+/* The text area has its own undo (the keyboard's); the buttons are the rich text's. With no rich text
+   to switch to (the editor could not load), markdown is all there is, so it is not offered. */
+.fmt.plain .hist, .fmt.no-rich .md, .fmt.no-rich .mdsep { display: none; }
+/* A narrow page scrolls the buttons sideways rather than running them under the menu (sheet.js
+   sets the room they have, up to the menu). */
+.fmt { overflow-x: auto; scrollbar-width: none; }
+.fmt::-webkit-scrollbar { display: none; }
+.fmt button, .fmt .sep { flex: none; }
+/* A phone: the menu fills the box, so while writing the buttons take a row of their own, at the top
+   of the sheet (sheet.js moves them there, and back). */
+.fmt.below { height: 38px; margin: 0 0 16px; padding: 0 4px; background: var(--surface); border: 1px solid var(--sec-line, var(--line)); border-radius: 10px; }
+/* The + follows the button shapes: a rounded square, not a circle. */
+.plus {
+  width: 30px; height: 30px; border-radius: 8px; padding: 0; cursor: pointer;
+  display: grid; place-items: center;
+  background: rgba(138, 108, 4, .12); border: 1px solid var(--peach); color: var(--peach-soft);
+  transition: background .25s, color .25s, opacity .3s var(--ease), transform .3s var(--ease);
+}
+.plus svg { width: 14px; height: 14px; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; display: block; }
+.tbar[data-for="write"]:hover .plus, .plus:hover { background: var(--peach); color: var(--ink); }
+/* In focus the + turns into the way out: a quarter-turn makes it an x that closes the sheet. */
+#plus svg { transition: transform .45s var(--ease); }
+body.focus #plus { background: none; border-color: var(--peach-dim); color: var(--text-muted); }
+body.focus #plus svg { transform: rotate(45deg); }
+body.focus #plus:hover { background: var(--panel); border-color: var(--peach); color: var(--text); }
+
+.sheet { display: grid; grid-template-rows: 0fr; transition: grid-template-rows var(--t) var(--ease); }
+.sheet > div { min-height: 0; overflow: hidden; opacity: 0; transition: opacity .35s var(--ease); }
+body.focus .sheet { grid-template-rows: 1fr; }
+body.focus .list { margin-top: 0; }
+body.focus .sheet > div { opacity: 1; transition: opacity .45s var(--ease) .15s; }
+.body-wrap { position: relative; padding-top: 4px; }
+.body-in {
+  display: block; width: 100%; resize: none; background: none; border: 0; outline: none; padding: 0 0 2.4em;
+  font: 400 22px/1.7 var(--font-content); color: var(--text); caret-color: var(--peach); min-height: 42vh;
+}
+/* The words in rich text: the same type as the text area, drawn as the post will read. */
+.body-rich .ProseMirror {
+  outline: none; padding: 0 0 2.4em; min-height: 42vh; white-space: pre-wrap; word-wrap: break-word;
+  font: 400 22px/1.7 var(--font-content); color: var(--text); caret-color: var(--peach);
+}
+.body-rich .ProseMirror > :first-child { margin-top: 0; }
+.body-rich p { margin: 0 0 .7em; }
+.body-rich h1, .body-rich h2, .body-rich h3, .body-rich h4, .body-rich h5, .body-rich h6 { font: 500 1.3em/1.3 var(--font-content); color: var(--text); margin: 1em 0 .4em; }
+.body-rich h1 { font-size: 1.5em; }
+.body-rich h3, .body-rich h4, .body-rich h5, .body-rich h6 { font-size: 1.1em; }
+.body-rich blockquote { margin: 0 0 .7em; padding-left: 16px; border-left: 3px solid var(--peach-dim); color: var(--text-soft); }
+.body-rich ul, .body-rich ol { margin: 0 0 .7em; padding-left: 1.3em; }
+.body-rich li > p { margin: 0 0 .2em; }
+.body-rich code { font: 400 .8em var(--font-mono); background: var(--panel); border-radius: 4px; padding: 1px 5px; }
+.body-rich pre { margin: 0 0 .7em; padding: 12px 14px; background: var(--panel); border-radius: 8px; overflow-x: auto; }
+.body-rich pre code { background: none; padding: 0; }
+.body-rich a { color: var(--teal-soft); text-decoration: underline; text-underline-offset: 3px; }
+.body-rich hr { border: 0; border-top: 1px solid var(--line); margin: 1.2em 0; }
+.body-rich img { max-width: 100%; }
+.body-rich table { border-collapse: collapse; margin: 0 0 .7em; font-size: .8em; }
+.body-rich th, .body-rich td { border: 1px solid var(--line); padding: 4px 10px; }
+.body-rich .ProseMirror-selectednode { outline: 2px solid var(--peach-dim); }
+.body-in[hidden] { display: none; }
+.signoff {
+  position: absolute; left: 0; bottom: 0; pointer-events: none;
+  font: italic 400 19px/1.6 var(--font-content); color: var(--peach); transition: opacity .25s var(--ease);
+}
+.signoff.gone { opacity: 0; }
+.pub-row { margin-top: 18px; padding: 18px 0 4px; border-top: 1px solid var(--line); text-align: right; }
+.pub-row .unpub { float: left; margin-top: 6px; color: var(--text-muted); }   /* taking a post down: quiet, at the left, away from Republish */
+.pub-row .unpub:hover { color: var(--text); }
+
+.slim {
+  font: 500 13px var(--font-ui); letter-spacing: .02em; cursor: pointer; padding: 7px 16px; border-radius: 8px;
+  background: none; color: var(--peach-soft); border: 1px solid var(--peach-dim);
+  transition: background .25s, color .25s, border-color .25s, opacity .3s;
+}
+.slim:hover { background: var(--peach); border-color: var(--peach); color: var(--ink); }
+.slim:disabled { opacity: .35; cursor: default; background: none; color: var(--peach-soft); border-color: var(--peach-dim); }
+.link { background: none; border: 0; padding: 0; cursor: pointer; font: 500 13px var(--font-ui); color: var(--text-muted); text-decoration: underline; text-decoration-color: rgba(160, 144, 128, .45); text-underline-offset: 3px; }
+.link:hover { color: var(--peach-soft); }
+
+/* ---------- Your pieces, newest on top ---------- */
+.list { display: flex; flex-direction: column; gap: 10px; margin-top: 0; transition: opacity .3s var(--ease), transform var(--t) var(--ease), visibility 0s; }
+body.focus .list { opacity: 0; transform: translateY(24px); visibility: hidden; pointer-events: none; transition: opacity .3s var(--ease), transform var(--t) var(--ease), visibility 0s .3s; }
+.item { --card: var(--surface); position: relative; background: var(--card); border-radius: 14px; padding: 24px 34px 22px 66px; cursor: pointer; box-shadow: 0 0 0 1px var(--sec-line, transparent); transition: background .25s, box-shadow .25s; }  /* a left gutter holds your mark, as on gather */
+/* Your mark beside each piece, hanging in the gutter level with the title, so every card reads the same way. */
+/* The card's header, as on gather: your mark in the gutter and the date beside it. The handle is left
+   off, since every piece here is yours; the title sits below, the date no longer in the footer. */
+.item .hd { position: relative; display: flex; align-items: center; gap: 6px; min-height: 30px; font-size: 12.5px; line-height: 18px; color: var(--text-muted); }   /* as tall as the mark: the date sits on its centre */
+.item .hd > .av { position: absolute; left: -44px; top: 0; }
+.item .hd .hdt { position: relative; top: .5px; }   /* measured: date and edit on the centre of the mark's letter */
+.item .tools .edit { position: relative; top: -1px; }
+.item .hd ~ h3 { margin-top: 12px; }   /* the title starts below the mark */
+.item.untitled .ex { margin-top: 9px; }
+/* A comment of yours: what it answered leads, below the mark as a title would, then your words. */
+.item.cmt .on { margin: 12px 0 12px; font: 400 15px/1.5 var(--font-content); color: var(--text-muted); }
+.item.cmt .on q { quotes: '\201C' '\201D'; color: var(--text-soft); }
+.item.cmt .ex { font-size: 16.5px; line-height: 1.7; color: var(--text); }
+/* Your comment, as on gather: set apart from the line naming the post, quietly. A faint tint and a thin
+   gold rule at its edge mark it as the comment; full-colour type, nothing louder than a title. */
+.item.cmt .ex { padding: 10px 16px 11px 15px; border-left: 2px solid rgba(179, 154, 80, .55); border-radius: 0 10px 10px 0; background: rgba(138, 108, 4, .045); }   /* measured: 15px from the mark to the words, as for a title */
+.av { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; color: #fff; font: italic 600 15px/1 var(--font-content);
+  background: radial-gradient(circle, #71bcc2 1px, transparent 1.4px) 0 0 / 6px 6px, #397f84; }
+.srow .av { width: 24px; height: 24px; font-size: 13px; flex: none; }
+.item:hover { --card: #efede9; }
+/* The rollover: where a card lifts, its edge (and its pinned row's) turns the section's hue (spec 1.5). */
+.item:hover { box-shadow: 0 0 0 1px var(--sec-hue); }
+.item:hover .sin { border-color: var(--sec-hue); }   /* the row's stroke is its .sin's, so the pinned top turns with the card */
+.item.new { animation: rise .6s var(--ease) both; }
+.item .tools { position: absolute; top: 24px; right: 30px; height: 30px; display: flex; align-items: center; gap: 10px; }   /* level with the date row */
+.item .out { width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center; color: var(--text-muted); transition: background .2s, color .2s; }
+.item .out:hover { background: var(--bg-light); color: var(--teal-soft); }
+.item .out svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.item h3 { margin: 0 0 10px; font: 500 22px/1.3 var(--font-content); color: var(--text); }
+/* A card scrolled to (show less) stops just below the fixed bar, never under it. */
+.item { scroll-margin-top: calc(var(--bar) + 12px); }
+/* Collapsed, a piece shows its opening; a click lets the whole of it out, and another folds it back. */
+.ex {
+  font: 400 16.5px/1.75 var(--font-content); color: var(--text-soft);
+  max-height: 7em; overflow: hidden; transition: max-height .5s var(--ease);
+  -webkit-mask-image: linear-gradient(#000 calc(100% - 1.75em), transparent); mask-image: linear-gradient(#000 calc(100% - 1.75em), transparent);   /* only the last line fades */
+}
+.item.open .ex, .ex.fits { -webkit-mask-image: none; mask-image: none; }   /* a piece that fits does not fade */
+.ex > :first-child { margin-top: 0; }
+.ex p, .ex ul, .ex ol, .ex pre, .ex blockquote { margin: 0 0 .9em; }
+.ex > :last-child { margin-bottom: 0; }
+.ex ul, .ex ol { padding-left: 1.3em; }
+.ex li::marker { color: var(--peach-dim); }
+.ex h2, .ex h3, .ex h4 { font: 500 1.15em/1.3 var(--font-content); color: var(--text); margin: 1.2em 0 .5em; }
+.ex a { color: var(--teal-soft); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.ex code { font: 400 .82em var(--font-mono); background: var(--bg-light); padding: 1px 5px; border-radius: 4px; }
+.ex pre { background: var(--bg-light); border-radius: 8px; padding: 12px 14px; overflow-x: auto; }
+.ex pre code { background: none; padding: 0; }
+.ex hr { border: 0; border-top: 1px solid var(--line); margin: 1.2em 0; }
+.ex blockquote { padding-left: 14px; border-left: 2px solid var(--peach-dim); font-style: italic; }
+.ifoot { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--text-muted); }
+.ifoot .n { display: inline-flex; align-items: center; gap: 6px; }
+.ifoot .n b { font: 500 13px var(--font-mono); color: var(--text-soft); }
+.ifoot svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+/* "show less" sits above the rule, at the right, quietly: it belongs to the words, not to the footer's actions. */
+.item > .fold { display: block; margin: 10px 0 -8px auto; background: none; border: 0; padding: 0; cursor: pointer; font: italic 400 12.5px var(--font-ui); color: var(--text-muted); opacity: .8; }
+.item > .fold:hover { color: var(--peach-soft); opacity: 1; }
+.item > .fold:empty { display: none; }
+/* The comments are open: the count says so, and closes them again. */
+.item.talk .ifoot .cm-n, .item.talk .ifoot .cm-n b { color: var(--text); }
+/* Under the rule: the counts on the left; on the right, copy the link, open it, reply. The footer itself
+   does nothing, so only its links and buttons point. */
+.item .ifoot { cursor: default; }
+.ifoot .sp { flex: 1; }
+.ifoot .copy { display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; padding: 0; cursor: pointer; font: inherit; color: inherit; }
+.ifoot :is(.copy, .out) { margin: 0 -5px; color: var(--text-muted); }
+.ifoot :is(.copy, .out):hover { color: var(--text); }
+.ifoot .copy.done::after { content: 'copied'; font-size: 12px; color: var(--text-soft); }
+/* Reading a long piece: once its heading scrolls away, a single row of it waits under the menu,
+   and the piece scrolls behind. A click on the row folds the piece back up. */
+.stick { position: sticky; top: var(--bar); height: 0; z-index: 4; }
+/* The row keeps the card's rounded top: a strip of page colour above it, the row's own corners
+   rounded, and the piece fading out beneath it rather than meeting a hard edge. No shadow. */
+.srow {
+  position: absolute; left: -67px; right: -35px; top: 0; padding-top: 10px; background: var(--bg-light); cursor: pointer;
+  opacity: 0; transform: translateY(-6px); pointer-events: none; transition: opacity .25s var(--ease), transform .25s var(--ease);
+}
+.sin {
+  position: relative; height: 46px; margin: 0; padding: 0 29px 0 27px; display: flex; align-items: center; gap: 14px;
+  background: var(--card); border-radius: 15px 15px 0 0;
+  border: 1px solid var(--sec-line, transparent); border-bottom: 0;   /* carries the card's section stroke over its top */
+  transition: border-color .25s;   /* in step with the card's own edge */
+}
+.sin::after { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: 44px; pointer-events: none; background: linear-gradient(var(--card) 22%, transparent); }
+.item.stuck .srow { opacity: 1; transform: none; pointer-events: auto; }
+.srow .sdate { flex: none; font-size: 12px; color: var(--text-muted); }
+.srow .sttl { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font: 500 16px var(--font-content); color: var(--text); }
+.srow .stools { flex: none; display: flex; align-items: center; gap: 10px; }
+.srow .out { width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center; color: var(--text-muted); }
+.srow .out svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.ifoot button.n { background: none; border: 0; padding: 0; cursor: pointer; font: inherit; color: inherit; }
+.ifoot button.n:hover { color: var(--text); }
+/* Something waiting: the count warms to gold and carries the nav's "new since you looked" dot. */
+.ifoot .n.wait.has, .ifoot .n.wait.has b { color: var(--peach-soft); }
+.ifoot .n.wait.has::after { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #c2412d; margin-left: 1px; }
+
+/* ---------- Comments, inside the opened card ----------
+   A comment lives on its writer's site; under your post you see the ones you have blessed.
+   Requests to comment sit first, tinted, with Bless on the right and a quiet "not here". */
+.thread { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .5s var(--ease); cursor: default; }
+.thread > div { min-height: 0; overflow: hidden; }
+.item.open .thread, .item.talk .thread { grid-template-rows: 1fr; }
+.thread-in { margin-top: 18px; }   /* one rule per card: the thread runs on under the footer without a second */
+.cm { padding: 18px 0 14px; transition: opacity .25s var(--ease); }
+.cm + .cm:not(.req) { border-top: 1px solid rgba(138, 108, 4, .12); }
+.cm.new { animation: rise .5s var(--ease) both; }
+.cm.going { opacity: 0; }
+.cm-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; color: var(--text-muted); }
+.cm-meta b { font-weight: 500; color: var(--text-soft); }
+.cm.mine .cm-meta b { color: var(--peach-soft); }
+.cm-meta .auto { font-size: 11.5px; padding: 2px 7px; border-radius: 6px; background: var(--bg-light); }
+.cm-x { margin-top: 6px; font: 400 16px/1.7 var(--font-content); color: var(--text-soft); }
+.cm-act { display: flex; align-items: center; gap: 16px; margin-top: 6px; }
+.cm-act .out { position: static; }
+.cm.req { margin: 16px 0 4px; padding: 16px 20px 14px; border-radius: 10px; background: rgba(138, 108, 4, .08); }
+.cm.req + .cm.req { margin-top: 10px; }
+.cm.req .cm-meta { color: var(--peach-soft); }
+.cm.req .cm-act { justify-content: flex-end; margin-top: 10px; }
+.cm-none { padding: 18px 0 4px; font: italic 400 15.5px var(--font-content); color: var(--text-muted); }
+.item .tools .out, .cm-act .out { width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center; color: var(--text-muted); }
+
+/* Across every post: one pill in the box, on the content's right edge, "3 waiting", that narrows the list to what needs you. */
+.pill {
+  position: absolute; top: 20px; z-index: 2; display: none; align-items: center; gap: 7px; height: 24px; padding: 0 10px;
+  border: 1px solid var(--peach-dim); border-radius: 999px; background: rgba(138, 108, 4, .1); cursor: pointer;
+  font: 500 12px var(--font-ui); color: var(--peach-soft); transition: background .25s, color .25s, opacity .3s;
+}
+.pill::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #c2412d; }
+.pill:hover, body.only-waiting .pill { background: var(--peach); color: var(--ink); border-color: var(--peach); }
+body.only-waiting .pill::before { background: var(--ink); }
+body[data-sec="write"]:not(.focus) .pill.has { display: none; }  /* "N waiting" now lives in the filters */
+.views { display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 9px; background: var(--bg-light); cursor: default; }
+.views button { border: 0; background: none; cursor: pointer; padding: 5px 11px; border-radius: 7px; font: 500 12.5px var(--font-ui); color: var(--text-muted); transition: background .2s, color .2s; }
+.views button:hover { color: var(--text); }
+.views button.on { background: var(--surface); color: var(--peach-soft); box-shadow: 0 0 0 1px var(--line); }
+.kinds button b { font: 500 12px var(--font-mono); margin-right: 2px; }
+/* Waiting is a state, not a kind: after a hairline, with the red dot while anything waits. */
+.kinds .ksep { width: 1px; height: 16px; background: var(--line); margin: 0 3px; }
+.kinds .newk { display: inline-flex; align-items: center; gap: 4px; }
+.kinds .newk.has::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #c2412d; margin-right: 2px; }
+/* Filters at rest, formatting while writing: one swaps for the other (write's, and gather's while
+   replying in focus mode). */
+body:not(.focus) .tbar .fmt { display: none; }
+body.focus .kinds { display: none; }
+body.focus .tbar .fmt { animation: slidein .3s var(--ease) both; }
+body.off-post .item[data-kind="post"], body.off-comment .item[data-kind="comment"] { display: none; }
+body.only-waiting .item:not(.has-wait) { display: none; }
+
+/* Replying is writing: the comment you are answering sits above the sheet. */
+.re { display: none; margin: 4px 0 6px; padding: 12px 16px; border-left: 3px solid var(--peach-dim); border-radius: 0 10px 10px 0; background: var(--bg-light); }
+body.replying .re { display: block; }
+.re .k { font: 500 11px var(--font-mono); letter-spacing: .03em; color: var(--text-muted); }
+.re .x { margin-top: 4px; font: 400 15.5px/1.5 var(--font-content); color: var(--text-soft); max-height: 3em; overflow: hidden; }
+
+.esc-hint { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); font: 400 11px var(--font-ui); color: var(--text-muted); opacity: 0; z-index: 5; white-space: nowrap; pointer-events: none; transition: opacity .4s var(--ease); }
+body.focus .esc-hint { opacity: .5; transition-delay: .3s; }
+.esc-hint kbd { background: var(--surface); padding: 2px 6px; border-radius: 3px; font: 10px var(--font-ui); color: var(--text-soft); }
+
+@media (max-width: 560px) {
+  .way .lbl { display: none; }
+  .ifoot .url { margin-left: 0; }
+  .foot a { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01s !important; transition-duration: .01s !important; transition-delay: 0s !important; }
+}
+
+/* ---------- Help: kay's flyout from onboarding (01), with this page's help in it ----------
+   Full height, slides in from the right, no dark overlay: the page stays live beside it. (It does not
+   push the column aside here: the nav places itself from where it is drawn, so it would move twice.)
+   Any click outside it, or Esc, puts it away. */
+.way[data-way="help"]:hover, body.flying .way[data-way="help"] { color: var(--teal-soft); }
+body.flying .way[data-way="help"] { background: var(--surface); }
+.fly {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 50; width: min(400px, 100vw);
+  display: flex; flex-direction: column; background: var(--surface);
+  border-left: 1px solid var(--line); box-shadow: none;
+  transform: translateX(102%); transition: transform .35s var(--ease), box-shadow .35s;
+}
+body.flying .fly { transform: none; box-shadow: -18px 0 40px rgba(40, 34, 20, .08); }
+.fly-head { display: flex; align-items: center; padding: 16px 18px 16px 24px; background: var(--bg-light); border-bottom: 1px solid var(--line); flex: none; }
+.fly-who { flex: 1; display: flex; align-items: center; gap: 12px; }
+.fly-mark { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: var(--teal-soft); color: var(--surface); font: italic 500 18px/1 var(--font-content); }
+.fly-name { font: 500 16px/1.2 var(--font-ui); color: var(--text); }
+.fly-sub { font-size: 12px; color: var(--text-muted); }
+.fly-x { background: none; border: 0; color: var(--text-muted); font-size: 24px; line-height: 1; padding: 4px 6px; cursor: pointer; border-radius: 6px; }
+.fly-x:hover { color: var(--text); background: var(--panel); }
+.fly-body { flex: 1; overflow-y: auto; padding: 22px 24px 28px; }
+.fly-body .k { font: 400 17px/1.6 var(--font-content); color: var(--text-soft); margin: 0 0 12px; animation: rise .5s var(--ease) both; }
+.fly-body em { font-style: normal; color: var(--text); }
+.fly-body .k.lead { color: var(--text); }
+.fly-body a { color: var(--teal-soft); text-underline-offset: 3px; }
+/* The page's controls, one per row: its name as it appears, then what it does. */
+.fly-body .els { margin: 18px 0 4px; animation: rise .5s var(--ease) both; }
+.fly-body .el { padding: 11px 0 12px; border-top: 1px solid var(--line); }
+.fly-body .en { font: 500 13px var(--font-ui); color: var(--text); margin-bottom: 3px; }
+.fly-body .en i { font-style: normal; display: inline-block; min-width: 18px; padding: 0 5px; margin-right: 6px; border-radius: 5px; background: var(--bg-light); text-align: center; color: var(--text-soft); }
+.fly-body .ed { font: 400 15px/1.55 var(--font-content); color: var(--text-soft); }
+.fly-body .else { margin-top: 16px; padding: 12px 14px 13px; border-radius: 10px; background: var(--bg-light); font: 400 14.5px/1.6 var(--font-content); color: var(--text-soft); animation: rise .5s var(--ease) both; }
+.fly-body .else .lbl { font: 500 11px var(--font-mono); letter-spacing: .03em; color: var(--text-muted); margin-bottom: 4px; }
+.fly-body .you { font: 500 13px var(--font-ui); color: var(--peach-soft); margin: 18px 0 8px; animation: rise .4s var(--ease) both; }
+.fly-body .you::before { content: '› '; }
+.fly-body .asks { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); animation: rise .5s var(--ease) both; }
+.fly-body .asks .lbl { font-size: 12px; color: var(--text-muted); margin-bottom: 2px; }
+.fly-body .ask { font: 400 14px var(--font-ui); color: var(--text-soft); background: var(--bg-light); border: 1px solid transparent; border-radius: 999px; padding: 6px 14px; cursor: pointer; transition: border-color .2s, color .2s; }
+.fly-body .ask:hover { border-color: var(--peach-dim); color: var(--text); }
+
+/* ---------- The first row as gather draws it: someone else's item ----------
+   From the v5 gather mockup: the handle, the verb, the time at the right edge,
+   the new dot in the gutter, and an event's lead line (spec 1.5). */
+.item .hd .hh { font-weight: 500; color: var(--text); }
+.item .hd .hh, .item .hd .vb { position: relative; top: -.5px; }
+.item .hd .vb { color: var(--text-soft); }
+.item .hd .sp { flex: 1; }
+.item .hd .tools { position: static; margin-left: 10px; }
+.item .hd .hdt { white-space: nowrap; }
+.item .hd .sp + .hdt { font-size: 12.5px; color: var(--text-muted); }
+.what { font: 400 17px/1.5 var(--font-content); color: var(--text-soft); }
+.what a { color: var(--teal-soft); text-underline-offset: 3px; }
+.item .hd + .what { margin-top: 11px; }
+.srow .shandle { flex: none; font-size: 13px; font-weight: 500; color: var(--text-soft); }
+.new-dot { position: absolute; left: -57px; top: 50%; width: 6px; height: 6px; margin-top: -3px; border-radius: 50%; background: #c2412d; transition: opacity .6s var(--ease); }
+/* A comment card's "replied to" link takes the page's colours, never the browser's. */
+.item .on a, .item .on a:visited { color: var(--text-soft); text-decoration-color: rgba(160, 144, 128, .45); text-underline-offset: 3px; }
+.item .on a:hover { color: var(--sec-hue, var(--teal-soft)); }
+.item .on .site { color: var(--text-muted); }
+/* A thread opens from its count, not with the card (spec 1.5). */
+.item.open:not(.talk) .thread { grid-template-rows: 0fr; }
+/* The sheet's own error, said in place next to what failed (spec 1.16). */
+.sheet-err { margin: 12px 0 0; font: 400 13px/1.5 var(--font-ui); color: #a2321f; }
+/* A control's icon in help's list is drawn as a line, as in the menu. */
+.fly-body .en i svg { width: 12px; height: 12px; vertical-align: -1px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+
+/* ---------- gather (spec 2.2, 3.4): its toolbar, search, follow, threads and replies ---------- */
+body[data-sec="gather"] .views button.on { color: var(--teal-soft); }
+.tbar[data-for="gather"] { gap: 10px; }
+/* The search button sits where write's + does: a rounded square at the toolbar's left end. */
+.sq {
+  width: 30px; height: 30px; border-radius: 8px; padding: 0; cursor: pointer; display: grid; place-items: center; margin-right: 6px; flex: none;
+  background: rgba(0, 114, 143, .08); border: 1px solid var(--teal-soft); color: var(--teal-soft); transition: background .25s, color .25s, border-color .25s;
+}
+.sq:hover { background: var(--teal-soft); color: var(--ink); }
+.sq svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.9; stroke-linecap: round; grid-area: 1 / 1; transition: opacity .25s, transform .35s var(--ease); }
+.sq .x { opacity: 0; transform: rotate(-45deg); }
+body.searching .sq svg:first-child, body.focus .sq svg:first-child { opacity: 0; transform: rotate(45deg); }
+body.searching .sq .x, body.focus .sq .x { opacity: 1; transform: none; }
+body.focus .sq { background: none; color: var(--text-muted); border-color: var(--peach-dim); }
+/* Search takes the filters' place, never sits beside them. */
+.tbar[data-for="gather"] .find { display: none; width: 340px; }
+.tbar[data-for="gather"] .find:focus-within { box-shadow: 0 0 0 1px var(--teal-soft); }
+.tbar[data-for="gather"] .find input::-webkit-search-cancel-button { display: none; }
+body.searching .tbar[data-for="gather"] .kinds { display: none; }
+body.searching .tbar[data-for="gather"] .find { display: flex; animation: slidein .3s var(--ease) both; }
+body.focus .tbar[data-for="gather"] .find { display: none; }
+body.focus .found { opacity: 0; visibility: hidden; pointer-events: none; }
+.found .lbl2 { display: flex; align-items: center; gap: 8px; margin: 26px 2px 10px; font: 500 11px var(--font-mono); letter-spacing: .04em; color: var(--text-muted); }
+.found .lbl2:first-child { margin-top: 4px; }
+.found .lbl2::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--teal); }
+.nothing { padding: 18px 30px; font: italic 400 15.5px var(--font-content); color: var(--text-muted); }
+/* Follow: under the words, on their margin (spec 1.5). */
+.cta { margin: 12px 0 0; }
+.cta .slim { padding: 4px 12px; font-size: 12.5px; }
+.slim.following { background: none; color: var(--text-muted); border-color: var(--line); }
+.slim.following:hover { background: none; color: var(--text); border-color: var(--teal-soft); }
+.slim.pulse { animation: folpulse .36s var(--ease); }
+@keyframes folpulse { 40% { transform: scale(1.08); } }
+/* A comment in gather: someone's words in their panel, in the section's colour. */
+body[data-sec="gather"] .item.cmt .ex { border-left-color: rgba(0, 114, 143, .45); background: rgba(0, 114, 143, .045); }
+body[data-sec="gather"] .cm.mine .cm-meta b { color: var(--teal-soft); }
+body[data-sec="gather"] .cm + .cm { border-top: 1px solid rgba(0, 114, 143, .12); }
+/* Replying in the card: a small sheet between the post and the other comments. */
+.ir-in { margin-top: 22px; padding: 16px 18px 12px; border-radius: 12px; background: var(--bg-light); border: 1px solid var(--line); transition: border-color .25s; cursor: default; }
+.ir-in:focus-within { border-color: var(--peach-dim); }
+.ir-k { display: none; margin-bottom: 8px; padding-left: 12px; border-left: 2px solid var(--peach-dim); font: 400 14.5px/1.5 var(--font-content); color: var(--text-muted); }
+.ir-k b { font: 500 11px var(--font-mono); letter-spacing: .03em; display: block; color: var(--text-muted); }
+.ir-k.on { display: block; }
+.ir-t { display: block; width: 100%; resize: none; border: 0; outline: none; background: none; padding: 0; min-height: 3.4em; font: 400 17px/1.7 var(--font-content); color: var(--text); caret-color: var(--peach); }
+.ir-t::placeholder { color: var(--text-muted); font-style: italic; }
+.ir-row { display: flex; align-items: center; gap: 14px; margin-top: 8px; }
+.ir-row .sp { flex: 1; }
+.ir-row .slim { padding: 5px 14px; font-size: 12.5px; }
+.slim.go { border-color: var(--peach); background: rgba(138, 108, 4, .12); font-weight: 600; }
+.item.composing .thread { grid-template-rows: 1fr; }
+/* A list a section hides (gather's, while search shows what it found) is gone, whatever its display. */
+.pane .list[hidden], .pane .found[hidden] { display: none; }
+
+/* ---------- message (spec 2.3, 3.5): conversations, the picker ---------- */
+body[data-sec="message"] .views button.on { color: var(--pink-soft); }
+.kinds .newk:not(.has)::before { display: none; }
+/* The + starts a conversation: write's rounded square, in message's copper. */
+.newbtn { width: 30px; height: 30px; border-radius: 8px; padding: 0; cursor: pointer; display: grid; place-items: center; margin-right: 6px; flex: none;
+  background: rgba(138, 90, 40, .1); border: 1px solid var(--pink); color: var(--pink-soft); transition: background .25s, color .25s; }
+.newbtn:hover, .newbtn.on { background: var(--pink); color: var(--ink); }
+.newbtn svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; transition: transform .4s var(--ease); }
+.newbtn.on svg { transform: rotate(45deg); }
+.feed.convos { display: flex; flex-direction: column; gap: 10px; }
+.item.convo { cursor: pointer; }
+.item.convo.open { cursor: default; }
+.convo .srow .sttl { flex: none; max-width: 45%; }
+.srow .slead { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font: 400 15px var(--font-content); color: var(--text-muted); }
+.convo .pre { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convo .pre .you { font: 500 13px var(--font-ui); color: var(--teal-soft); margin-right: 6px; }
+.convo.unread .pre { color: var(--text); }
+.convo.open .pre, .convo.open .hdt { display: none; }
+.convo .what.mutual { display: none; font-size: 15px; color: var(--text-muted); }
+.convo.open .what.mutual { display: block; }
+.convo > .av { position: absolute; left: 22px; top: 24px; }
+.convo > .new-dot { left: 9px; top: 36px; margin-top: 0; }
+.convo .corner { float: right; display: flex; align-items: center; height: 30px; margin: 0 -2px 4px 24px; }
+.convo .corner .ch { position: relative; top: -.5px; font: 400 12.5px/18px var(--font-ui); color: var(--text-muted); white-space: nowrap; }
+.convo .corner .hdt::after { content: '\00b7'; margin: 0 6px; }
+.convo .corner .hh { font-weight: 500; color: var(--text-soft); }
+.convo .what.pre, .convo .what.mutual { margin-top: 0; padding-top: 3.5px; }
+.convo .msgs { clear: both; }
+.msgs { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .5s var(--ease); cursor: default; }
+.msgs > div { min-height: 0; overflow: hidden; }
+.convo.open .msgs { grid-template-rows: 1fr; }
+.msgs-in { margin-top: 18px; border-top: 1px solid var(--line); }
+.msg { padding: 16px 0 10px; }
+.msg + .msg { border-top: 1px solid rgba(138, 108, 4, .1); }
+.msg.new { animation: rise .45s var(--ease) both; }
+.msg .mm { font-size: 12.5px; color: var(--text-muted); display: flex; gap: 8px; }
+.msg .mm b { font-weight: 500; color: var(--text-soft); }
+.msg.mine .mm b { color: var(--teal-soft); }
+.msg .mx { margin-top: 4px; font: 400 16.5px/1.7 var(--font-content); color: var(--text-soft); white-space: pre-wrap; }
+.msg-none { padding: 18px 0 6px; font: italic 400 15.5px var(--font-content); color: var(--text-muted); }
+.convo .ir-in { margin-top: 16px; }
+.convo .cfoot { display: none; justify-content: flex-end; margin-top: 12px; }
+.convo.open .cfoot { display: flex; }
+.convo .cfoot .link { font-size: 12.5px; }
+body.only-unread .convo:not(.unread) { display: none; }
+.locked-line { margin: 0 0 12px; padding: 12px 18px; border-radius: 10px; background: var(--bg-light); font: 400 14px/1.5 var(--font-ui); color: var(--text-muted); }
+/* Starting a conversation: a panel under the toolbar, pointing at the +. */
+.newc { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .45s var(--ease), margin .45s var(--ease); }
+.newc > div { min-height: 0; overflow: hidden; }
+body.starting .newc { grid-template-rows: 1fr; margin-bottom: 14px; }
+.newc-in { position: relative; margin-top: 10px; background: var(--panel); border: 1px solid var(--pink); border-radius: 14px; padding: 22px 26px 16px; }
+.newc h4 { margin: 0 0 4px; font: 500 20px/1.3 var(--font-content); color: var(--text); }
+.newc p { margin: 0 0 14px; font-size: 13.5px; color: var(--text-muted); }
+.newc .find { display: flex; width: 100%; height: 38px; background: var(--surface); margin-bottom: 8px; }
+.newc .find input { font-size: 14px; }
+.pick { display: flex; align-items: center; gap: 12px; padding: 10px 2px; border-top: 1px solid rgba(138, 108, 4, .12); }
+.pick-lbl + .pick { border-top: 0; }
+.pick .av { position: static; }
+.pick b { font-weight: 500; font-size: 14px; color: var(--text); flex: 1; }
+.pick .why { font-size: 12.5px; color: var(--text-muted); }
+.pick .slim { padding: 4px 12px; font-size: 12.5px; }
+.pick.cant b { color: var(--text-muted); }
+.pick-lbl { margin: 14px 2px 2px; font: 500 11px var(--font-mono); letter-spacing: .04em; color: var(--text-muted); }
+
+/* ---------- enhance (spec 2.4, 1.15, 3.6): groups that fold, rows, switches ---------- */
+.feed.groups { display: flex; flex-direction: column; gap: 10px; }
+.grp { cursor: pointer; }
+.grp.open { cursor: default; }
+.grp.open::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 48px; cursor: pointer; }  /* the open card's heading band is a target too; it stops above the rows */
+.grp.found-hide, .grp[hidden], .grp .row[hidden], .grp .sub-lbl[hidden] { display: none; }
+.grp .mark { position: absolute; left: 22px; top: 24px; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: var(--bg-light); color: var(--peach-soft); }
+.grp .mark svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.grp h3 { position: relative; margin: 2px 0 0; font: 500 21px/1.3 var(--font-content); color: var(--text); cursor: pointer; }
+.grp .sum { margin-top: 6px; font-size: 13.5px; color: var(--text-muted); line-height: 1.5; }
+.grp.open .sum { display: none; }
+.rows { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .5s var(--ease); }
+.rows > div { min-height: 0; overflow: hidden; }
+.grp.open .rows { grid-template-rows: 1fr; }
+.rows-in { margin-top: 14px; }
+.row { display: grid; grid-template-columns: 1fr auto; gap: 4px 18px; align-items: center; padding: 16px 0; border-top: 1px solid rgba(138, 108, 4, .13); }
+.row:first-child { border-top: 0; }
+.row .k { font: 500 14px var(--font-ui); color: var(--text); }
+.row .k .tag { margin-left: 8px; font: 500 11px var(--font-ui); padding: 2px 7px; border-radius: 6px; background: var(--bg-light); color: var(--text-muted); vertical-align: 1px; }
+.row .d { grid-column: 1; font-size: 13px; line-height: 1.5; color: var(--text-muted); }
+.row .v { grid-column: 1; font-size: 14px; color: var(--text-soft); overflow-wrap: anywhere; }
+.row .v code, .row .d code { font: 400 12.5px var(--font-mono); background: var(--bg-light); padding: 2px 6px; border-radius: 5px; }
+.row .act { grid-column: 2; grid-row: 1 / span 3; display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.row .act .slim { padding: 5px 13px; font-size: 12.5px; text-decoration: none; }
+.row .av { width: 28px; height: 28px; font-size: 15px; }
+.slim.danger { color: #9a3a26; border-color: rgba(154, 58, 38, .45); }
+.slim.danger:hover { background: #9a3a26; border-color: #9a3a26; color: var(--ink); }
+.sub-lbl { margin: 22px 0 2px; font: 500 11px var(--font-mono); letter-spacing: .04em; color: var(--text-muted); }
+.sub-lbl:first-child { margin-top: 0; }
+.sub-lbl + .row { border-top: 0; }
+.seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: 9px; background: var(--bg-light); flex-wrap: wrap; }
+.seg button { border: 0; background: none; cursor: pointer; padding: 5px 10px; border-radius: 7px; font: 500 12px var(--font-ui); color: var(--text-muted); transition: background .2s, color .2s; white-space: nowrap; }
+.seg button:hover { color: var(--text); }
+.seg button.on { background: var(--surface); color: var(--peach-soft); box-shadow: 0 0 0 1px var(--line); }
+.tog { width: 34px; height: 20px; border-radius: 999px; border: 0; padding: 0; cursor: pointer; position: relative; background: rgba(96, 92, 86, .3); transition: background .25s; }
+.tog::after { content: ''; position: absolute; left: 3px; top: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--surface); transition: transform .25s var(--ease); }
+.tog.on { background: var(--peach); }
+.tog.on::after { transform: translateX(14px); }
+/* Editing in the row: the field spans the row, under its words. */
+.row-edit { grid-column: 1 / -1; margin-top: 8px; }
+.row-edit .edit-in { display: block; width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 8px 10px; font: 400 15px/1.6 var(--font-content); color: var(--text); }
+/* The bio in rich text: the sheet's buttons above it, in a strip of their own (they scroll sideways on
+   a narrow page), and the words in the field's own size and frame, not the sheet's. */
+.row-edit { min-width: 0; }
+.row-edit .edit-in[hidden] { display: none; }
+.row-edit .row-fmt { height: 34px; margin-bottom: 6px; padding: 0 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.row-edit .edit-rich .ProseMirror {
+  min-height: 7.5em; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
+  font: 400 15px/1.6 var(--font-content);
+}
+.row-edit .edit-rich .ProseMirror:focus-within { border-color: var(--peach-dim); }
+.row-edit .edit-row { display: flex; justify-content: flex-end; align-items: center; gap: 14px; margin-top: 8px; }
+.row-edit .scopes { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 13px; color: var(--text-soft); }
+.row-edit .scopes .warn { display: block; margin: 2px 0 0 20px; font-size: 12px; color: #9a3a26; }
+.row-edit code.token { display: block; margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: var(--bg-light); font: 400 12.5px var(--font-mono); overflow-wrap: anywhere; }
+/* Search takes the groups' place, as in gather. */
+.tbar[data-for="enhance"] .find { display: none; width: 300px; }
+body.searching .tbar[data-for="enhance"] .kinds { display: none; }
+body.searching .tbar[data-for="enhance"] .find { display: flex; animation: slidein .3s var(--ease) both; }
+body[data-sec="enhance"] .views button.on { color: var(--peach-soft); }
+@media (max-width: 560px) {
+  .row { grid-template-columns: 1fr; }
+  .row .act { grid-column: 1; grid-row: auto; justify-content: flex-start; margin-top: 6px; }
+}
+/* An open group's pinned row: its mark, its name and where it stands (1.5). */
+.srow .smark { flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--bg-light); color: var(--peach-soft); }
+.srow .smark svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.grp .srow .sttl { flex: none; }
+.srow .ssum { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; color: var(--text-muted); }
+/* Someone else's mark and handle go to their site (2026-11-17). */
+.item .hd > .who-mark { position: absolute; left: -44px; top: 0; border-radius: 50%; }
+.item .hd > .who-mark .av { display: grid; }
+.item .hd a.hh { color: var(--text); font-weight: 500; text-decoration: none; }
+.item .hd a.hh:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+/* ---------- message: encrypted messages (spec 2.3) ---------- */
+.pwline { display: none; margin: 0 0 12px; padding: 11px 18px; border-radius: 10px; background: var(--bg-light); font: 400 13.5px/1.5 var(--font-ui); color: var(--text-muted); }
+.pwline a { color: var(--pink-soft); font-weight: 500; text-underline-offset: 3px; margin-left: 4px; }
+body.msg-nopw .pwline { display: block; }
+.unlock { display: none; cursor: default; margin-bottom: 10px; box-shadow: 0 0 0 1px var(--pink); }
+body.msg-locked .unlock { display: block; animation: rise .4s var(--ease) both; }
+/* Locked: the whole list blurred behind the unlock card, nothing recognisable or clickable (Vincent, 2026-11-17). */
+body.msg-locked .feed.convos { filter: blur(7px); opacity: .55; pointer-events: none; user-select: none; }
+.unlock .lk { position: absolute; left: 22px; top: 24px; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: var(--bg-light); color: var(--pink-soft); }
+.unlock .lk svg, .earlier .eh svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.unlock h3 { margin: 2px 0 4px; font: 500 20px/1.3 var(--font-content); color: var(--text); }
+.unlock p { margin: 0 0 14px; font-size: 13.5px; line-height: 1.5; color: var(--text-muted); }
+.unlock .fld, .earlier .fld { display: block; width: 100%; box-sizing: border-box; height: 40px; padding: 0 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font: 400 15px var(--font-ui); color: var(--text); outline: none; }
+.unlock .fld:focus, .earlier .fld:focus { border-color: var(--pink); }
+.unlock textarea.fld, .earlier textarea.fld { height: auto; min-height: 64px; padding: 10px 12px; font: 400 14px/1.6 var(--font-mono); resize: none; }
+.unlock .row2, .earlier .row2 { display: flex; align-items: center; gap: 14px; margin-top: 12px; }
+.unlock .row2 .sp, .earlier .row2 .sp { flex: 1; }
+.unlock .err, .earlier .err { margin: 8px 0 0; font-size: 13px; color: #a2321f; }
+.unlock .ok { margin: 8px 0 0; font-size: 12.5px; color: var(--teal-soft); }
+.unlock .warn { padding: 12px 14px; border-radius: 10px; background: rgba(154, 58, 38, .07); border-left: 2px solid rgba(154, 58, 38, .45); font-size: 13.5px; line-height: 1.55; color: var(--text-soft); }
+.unlock .words { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 6px 0 12px; }
+.unlock .words span, .pwflow .words span { padding: 6px 8px; border-radius: 6px; background: var(--surface); font: 400 13px var(--font-mono); color: var(--text); }
+.unlock .words span i, .pwflow .words span i { font-style: normal; color: var(--text-muted); margin-right: 6px; font-size: 11px; }
+/* The other person has no password: above the composer, with nothing for the owner to set. */
+.theirs { margin: 0 0 10px; padding: 9px 12px; border-radius: 8px; background: rgba(208, 168, 96, .14); font-size: 13px; color: var(--text-soft); }
+/* Messages under an earlier key: one box, above the rest; it is the control. */
+.earlier { margin: 14px 0 4px; padding: 12px 16px; border-radius: 10px; background: var(--bg-light); border: 1px dashed var(--line); cursor: pointer; }
+.earlier .eh { display: flex; align-items: center; gap: 8px; font: 500 13px var(--font-ui); color: var(--text-soft); }
+.earlier .eh .more { margin-left: auto; font-weight: 400; color: var(--pink-soft); }
+.earlier .eb { display: none; margin-top: 12px; cursor: default; }
+.earlier.open .eb { display: block; }
+.earlier.open .eh .more { display: none; }
+.earlier.asked .eh { display: none; }
+.earlier .q { font-size: 13px; color: var(--text-muted); }
+.earlier .q b { display: block; font-weight: 500; color: var(--text); margin-bottom: 2px; }
+.earlier .q .fld { margin-top: 8px; height: 36px; }
+/* enhance: the messages password, set or changed in its row. */
+.pwflow { grid-column: 1 / -1; margin-top: 10px; padding: 16px 18px; border-radius: 12px; background: var(--bg-light); border: 1px solid var(--line); }
+.pwflow h4 { margin: 0 0 4px; font: 500 16px/1.4 var(--font-content); color: var(--text); }
+.pwflow p { margin: 0 0 10px; font-size: 13px; line-height: 1.5; color: var(--text-muted); }
+.pwflow input { display: block; width: 100%; box-sizing: border-box; height: 36px; margin-bottom: 8px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font: 400 14px var(--font-ui); outline: none; }
+.pwflow .words { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 6px 0 10px; }
+.pwflow .warn { padding: 9px 12px; border-radius: 8px; background: rgba(154, 58, 38, .07); font-size: 12.5px; color: var(--text-soft); }
+.pwflow .err { color: #a2321f; }
+.pwflow .row2 { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 10px; }
+/* "· edited <date>" after the date on the owner's republished items (3.3). */
+.item .hd .edited { white-space: nowrap; color: var(--text-muted); position: relative; top: .5px; }
+/* The agent's mark is one more fact in the date's own type, not a badge (2.1). */
+.item .hd .by-agent, .item .hd .by-agent:visited { white-space: nowrap; color: var(--text-muted); position: relative; top: .5px; text-decoration: none; }
+.item .hd .by-agent:hover { text-decoration: underline; }
+/* The agents notice, at the top of enhance (Vincent 2026-11-20): what an agent the owner connects can do,
+   and the three steps to connect one. The owner can put it away (remembered in this browser). */
+.mcpnote { position: relative; margin: 0; padding: 20px 50px 18px 22px; border-radius: 14px; background: rgba(138, 108, 4, .06); border: 1px solid rgba(110, 86, 0, .28); }
+.mcpnote[hidden], body.searching .mcpnote { display: none; }
+.mcpnote h4 { margin: 0 0 6px; display: flex; align-items: center; gap: 8px; font: 500 18px/1.3 var(--font-content); color: var(--text); }
+.mcpnote h4 svg { width: 18px; height: 18px; flex: none; stroke: var(--peach-soft); fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.mcpnote p { margin: 0; font: 400 13.5px/1.55 var(--font-ui); color: var(--text-muted); }
+.mcpnote ol { margin: 14px 0 0; padding: 0; list-style: none; counter-reset: step; display: grid; gap: 9px; }
+.mcpnote li { counter-increment: step; position: relative; padding-left: 30px; font: 400 13.5px/1.5 var(--font-ui); color: var(--text-soft); }
+.mcpnote li::before { content: counter(step); position: absolute; left: 0; top: 0; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font: 600 11px/1 var(--font-ui); color: var(--peach-soft); background: rgba(138, 108, 4, .13); }
+.mcpnote .mcp-addr { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.mcpnote .mcp-addr code { font: 500 13px var(--font-mono); padding: 6px 10px; border-radius: 8px; background: var(--surface); color: var(--text); overflow-wrap: anywhere; }
+.mcpnote .mcp-more { display: inline-block; margin-top: 14px; font: 500 13px var(--font-ui); color: var(--peach-soft); text-underline-offset: 3px; }
+.mcpnote .mcp-x { position: absolute; top: 12px; right: 12px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--text-muted); cursor: pointer; display: grid; place-items: center; transition: background .2s, color .2s; }
+.mcpnote .mcp-x:hover { background: rgba(110, 86, 0, .1); color: var(--text); }
+.mcpnote .mcp-x svg { width: 14px; height: 14px; stroke: currentColor; stroke-width: 1.8; fill: none; stroke-linecap: round; }

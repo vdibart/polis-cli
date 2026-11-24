@@ -192,10 +192,10 @@ func ensureSSHFormat(key string) (string, error) {
 	keyType := []byte("ssh-ed25519")
 	var blob []byte
 	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(keyType)))
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(keyType))) //nolint:gosec // G115: a length or filesystem count far below the target type's range
 	blob = append(blob, lenBuf...)
 	blob = append(blob, keyType...)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(raw)))
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(raw))) //nolint:gosec // G115: a length or filesystem count far below the target type's range
 	blob = append(blob, lenBuf...)
 	blob = append(blob, raw...)
 

@@ -38,7 +38,7 @@ func TestRequestLoggingMiddleware_SetsRequestIDHeader(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/capabilities", nil)
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)
@@ -60,7 +60,7 @@ func TestRequestLoggingMiddleware_PreservesIncomingRequestID(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/capabilities", nil)
 	req.Header.Set("X-Request-Id", incomingID)
 	w := httptest.NewRecorder()
 
@@ -101,12 +101,11 @@ func TestShouldSkipRequestLog(t *testing.T) {
 		path string
 		want bool
 	}{
-		{"/api/sse", true},
 		{"/favicon.ico", true},
 		{"/favicon.svg", true},
 		{"/assets/style.css", true},
 		{"/assets/app.js", true},
-		{"/api/status", false},
+		{"/api/capabilities", false},
 		{"/api/posts", false},
 		{"/v1/content/pub.polis.post", false},
 	}
@@ -128,7 +127,7 @@ func TestRequestLoggingMiddleware_SkipsNoisyPaths(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/sse", nil)
+	req := httptest.NewRequest(http.MethodGet, "/favicon.ico", nil)
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, req)

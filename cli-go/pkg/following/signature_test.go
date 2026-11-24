@@ -437,3 +437,27 @@ func TestGetGenerator(t *testing.T) {
 		t.Errorf("GetGenerator() = %q, want %q", got, "polis-cli-go/0.67.0")
 	}
 }
+
+// ⭐ A list carrying an agent's entry signs and verifies, and the marker is a
+// recognised field of this build (so the valid status is not qualified).
+// ⛔ The marker is inside the signature: stripping it breaks verification.
+func TestAMarkedEntryIsInsideTheSignature(t *testing.T) {
+	priv, pub := newTestKeys(t)
+	site := storage.At(t.TempDir())
+	f := sampleFile()
+	f.AddMarked("https://carol.example", "Claude Desktop", "https://alice.example/content/pub.polis.core/attestation/g.json")
+	if err := SaveSigned(site, f, priv); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadSite(site)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, err := Verify(loaded, pub); st != StatusValid || len(loaded.UnrecognisedFields()) != 0 {
+		t.Fatalf("marked list = %s %v (unrecognised %v)", st, err, loaded.UnrecognisedFields())
+	}
+	loaded.Get("https://carol.example").Agent, loaded.Get("https://carol.example").Grant = "", ""
+	if st, _ := Verify(loaded, pub); st != StatusInvalid {
+		t.Errorf("stripping the marker left the signature %s", st)
+	}
+}

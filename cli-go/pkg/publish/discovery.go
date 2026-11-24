@@ -71,6 +71,15 @@ func resolveGenerator(cfg *DiscoveryConfig) string {
 // If both dsURL and baseURL are empty (unconfigured), returns nil with a
 // diagnostic log. If cfg is nil, falls back to package-level globals.
 func RegisterPost(site storage.Site, result *PublishResult, privateKey []byte, cfg *DiscoveryConfig) error {
+	return registerPost(site, result, privateKey, cfg, discovery.AgentMarker{})
+}
+
+// registerPost is RegisterPost for the act that published the post: a user
+// agent's marker, when it made it, is signed into the registration request and
+// sent with it. ⛔ Only the act's own publish passes one: a re-registration
+// (Chaplain's upkeep, a repair) is operator custody and carries none
+// (delegation.md §5.4), which is why it is not read from the file.
+func registerPost(site storage.Site, result *PublishResult, privateKey []byte, cfg *DiscoveryConfig, marker discovery.AgentMarker) error {
 	dsURL, baseURL := resolveDiscoveryConfig(cfg)
 	if dsURL == "" || baseURL == "" {
 		var missing []string
@@ -126,8 +135,8 @@ func RegisterPost(site storage.Site, result *PublishResult, privateKey []byte, c
 	}
 
 	// Build canonical JSON for signing
-	canonical, err := discovery.MakeContentCanonicalJSON(
-		"pub.polis.post", postURL, result.Version, author, metadata,
+	canonical, err := discovery.MakeContentCanonicalJSONMarked(
+		"pub.polis.post", postURL, result.Version, author, metadata, marker,
 	)
 	if err != nil {
 		return fmt.Errorf("canonical JSON: %w", err)
@@ -146,6 +155,8 @@ func RegisterPost(site storage.Site, result *PublishResult, privateKey []byte, c
 		Author:    author,
 		Metadata:  metadata,
 		Signature: sig,
+		Agent:     marker.Agent,
+		Grant:     marker.Grant,
 	}
 
 	// Retry once on transient failures (e.g., DS timeout fetching public key).

@@ -559,6 +559,7 @@ func (rr *Remote) RunSite(baseURL string) *Report {
 	r.na("identity.key_perms", FamilyIdentity, notServedOverHTTP)
 	r.na("identity.key_match", FamilyIdentity, notServedOverHTTP+" — the published key has nothing local to be compared against")
 	r.na("bundle.registry", FamilyBundle, notServedOverHTTP)
+	r.na("agents.acts", FamilyAgents, notServedOverHTTP+" — the act log an agent's writes are checked against is private")
 
 	rr.checkRemoteDID(r, base, pubKey)
 	rr.checkRemoteKeyHistory(r, base, []byte(wkBody), wk.PublicKey)

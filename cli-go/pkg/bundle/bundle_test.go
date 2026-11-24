@@ -439,8 +439,9 @@ func TestDefaultCoreBundle_Stardust(t *testing.T) {
 	if th.CSS != "stardust.css" {
 		t.Errorf("stardust CSS = %q, want %q", th.CSS, "stardust.css")
 	}
-	if len(th.CompatibleShapes) != 1 || th.CompatibleShapes[0] != "pub.polis.shapes.v4" {
-		t.Errorf("stardust CompatibleShapes = %v, want [pub.polis.shapes.v4]", th.CompatibleShapes)
+	// Never v3; v5 since its v5 definition (still reserved from the picker).
+	if len(th.CompatibleShapes) != 2 || th.CompatibleShapes[0] != "pub.polis.shapes.v4" || th.CompatibleShapes[1] != "pub.polis.shapes.v5" {
+		t.Errorf("stardust CompatibleShapes = %v, want [pub.polis.shapes.v4 pub.polis.shapes.v5]", th.CompatibleShapes)
 	}
 }
 
@@ -466,9 +467,10 @@ func TestDefaultCoreBundle_Studio13Rename(t *testing.T) {
 	if th.CSS != "studio13-nk.css" {
 		t.Errorf("studio13-nk CSS = %q, want %q", th.CSS, "studio13-nk.css")
 	}
-	// blog-only: the preserved HTML overrides target v3 markup.
-	if len(th.CompatibleShapes) != 1 || th.CompatibleShapes[0] != "pub.polis.shapes.v3" {
-		t.Errorf("studio13-nk CompatibleShapes = %v, want [pub.polis.shapes.v3]", th.CompatibleShapes)
+	// Never v4: the preserved HTML overrides target v3 markup. v5 draws every
+	// page itself and reads only the theme's v5 definition.
+	if len(th.CompatibleShapes) != 2 || th.CompatibleShapes[0] != "pub.polis.shapes.v3" || th.CompatibleShapes[1] != "pub.polis.shapes.v5" {
+		t.Errorf("studio13-nk CompatibleShapes = %v, want [pub.polis.shapes.v3 pub.polis.shapes.v5]", th.CompatibleShapes)
 	}
 
 	// "studio13" is the v4-era CSS-only relaunch authored in step-02/2.a.1.
@@ -487,9 +489,9 @@ func TestDefaultCoreBundle_Studio13Rename(t *testing.T) {
 	if newS.CSS != "studio13.css" {
 		t.Errorf("new studio13 CSS = %q, want %q", newS.CSS, "studio13.css")
 	}
-	// stream-only: CSS targets shared markup but positioning is v4-era.
-	if len(newS.CompatibleShapes) != 1 || newS.CompatibleShapes[0] != "pub.polis.shapes.v4" {
-		t.Errorf("new studio13 CompatibleShapes = %v, want [pub.polis.shapes.v4]", newS.CompatibleShapes)
+	// never v3: CSS targets shared markup but positioning is v4-era; v5 from its v5 definition.
+	if len(newS.CompatibleShapes) != 2 || newS.CompatibleShapes[0] != "pub.polis.shapes.v4" || newS.CompatibleShapes[1] != "pub.polis.shapes.v5" {
+		t.Errorf("new studio13 CompatibleShapes = %v, want [pub.polis.shapes.v4 pub.polis.shapes.v5]", newS.CompatibleShapes)
 	}
 }
 
@@ -636,17 +638,18 @@ func TestDefaultCoreBundle_StreamShape(t *testing.T) {
 		}
 	}
 
-	// studio13-nk stays blog-only (HTML overrides target v3 markup).
+	// studio13-nk is never offered for v4 (its HTML overrides target v3 markup);
+	// v5 draws every page itself, so its v5 definition offers it there.
 	if s, _ := b.GetTheme("studio13-nk"); s != nil {
-		if len(s.CompatibleShapes) != 1 || s.CompatibleShapes[0] != "pub.polis.shapes.v3" {
-			t.Errorf("studio13-nk CompatibleShapes = %v, want [pub.polis.shapes.v3] (blog-only)", s.CompatibleShapes)
+		if len(s.CompatibleShapes) != 2 || s.CompatibleShapes[0] != "pub.polis.shapes.v3" || s.CompatibleShapes[1] != "pub.polis.shapes.v5" {
+			t.Errorf("studio13-nk CompatibleShapes = %v, want [pub.polis.shapes.v3 pub.polis.shapes.v5] (never v4)", s.CompatibleShapes)
 		}
 	}
 
-	// new studio13 stays stream-only (v4-era relaunch).
+	// new studio13 is never offered for v3 (v4-era relaunch); v5 from its v5 definition.
 	if s, _ := b.GetTheme("studio13"); s != nil {
-		if len(s.CompatibleShapes) != 1 || s.CompatibleShapes[0] != "pub.polis.shapes.v4" {
-			t.Errorf("new studio13 CompatibleShapes = %v, want [pub.polis.shapes.v4] (stream-only)", s.CompatibleShapes)
+		if len(s.CompatibleShapes) != 2 || s.CompatibleShapes[0] != "pub.polis.shapes.v4" || s.CompatibleShapes[1] != "pub.polis.shapes.v5" {
+			t.Errorf("new studio13 CompatibleShapes = %v, want [pub.polis.shapes.v4 pub.polis.shapes.v5] (never v3)", s.CompatibleShapes)
 		}
 	}
 }
@@ -939,5 +942,22 @@ func TestActorRegistryDeclaresItsEmits(t *testing.T) {
 	}
 	if len(ct.Emits) != len(want) {
 		t.Errorf("emits = %v, want exactly %v", ct.Emits, want)
+	}
+}
+
+// The site's own pages own /_, /pql and /about: no content type may be
+// mounted at one, in any spelling of the slash.
+func TestValidateRejectsReservedMounts(t *testing.T) {
+	for _, m := range []string{"/about", "about", "/pql", "pql/", "/_"} {
+		b := &Bundle{Name: "test", Version: "1.0.0", Handler: Handler{Type: "builtin"},
+			Types: map[string]ContentType{"a": {Dir: "adir", Mount: m}}}
+		if err := b.Validate(); err == nil {
+			t.Errorf("mount %q: expected a refusal, it is the site's own", m)
+		}
+	}
+	ok := &Bundle{Name: "test", Version: "1.0.0", Handler: Handler{Type: "builtin"},
+		Types: map[string]ContentType{"a": {Dir: "adir", Mount: "/aboutness"}}}
+	if err := ok.Validate(); err != nil {
+		t.Errorf("a mount that only starts like a reserved one is fine: %v", err)
 	}
 }

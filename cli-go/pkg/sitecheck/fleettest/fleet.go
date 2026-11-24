@@ -206,7 +206,7 @@ func bareSignature(pem string) string {
 // Healthy builds a site that passes every Patrol check.
 func Healthy(t testing.TB, dir string) *Site {
 	t.Helper()
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0755); err != nil { //nolint:gosec // G301: a test fixture's site root
 		t.Fatal(err)
 	}
 	s := &Site{Dir: dir, Handle: filepath.Base(dir)}
@@ -233,7 +233,7 @@ func StampTimes(t testing.TB, dir string) {
 		if info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
-		return os.Chtimes(p, T0, T0)
+		return os.Chtimes(p, T0, T0) //nolint:gosec // G122: a test fixture builder over a temp directory it created
 	})
 	if err != nil {
 		t.Fatal(err)

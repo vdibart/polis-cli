@@ -105,7 +105,7 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	// Create target directory
 	// NOT the storage interface: creating the store's own ROOT is a backend
 	// concern, not a key operation — an object store has no root to create.
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
+	if err := os.MkdirAll(targetDir, 0755); err != nil { //nolint:gosec // G301: the root of a clone of a public site
 		return nil, fmt.Errorf("failed to create target directory: %w", err)
 	}
 
@@ -157,7 +157,7 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	// real site EVEN WHEN THEY STAY EMPTY, and a prefix store has no way to
 	// represent an empty directory. Put creates parents, which covers every
 	// MkdirAll that is followed by a write — but not these.
-	if err := os.MkdirAll(bundleDir, 0755); err != nil {
+	if err := os.MkdirAll(bundleDir, 0755); err != nil { //nolint:gosec // G301: a clone of a public site's bundle tree
 		return nil, fmt.Errorf("failed to create bundle directory: %w", err)
 	}
 
@@ -260,7 +260,7 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 	} else {
 		// See the note at the bundle root: a deliberately empty directory
 		// cannot be expressed through the storage interface.
-		_ = os.MkdirAll(filepath.Dir(blessedDest), 0755)
+		_ = os.MkdirAll(filepath.Dir(blessedDest), 0755) //nolint:gosec // G301: a clone of a public site's comment tree
 		if content, err := client.FetchContent(serverURL + "/" + filepath.ToSlash(blessedRel)); err == nil {
 			if err := putUnder(targetDir, blessedDest, []byte(content)); err == nil {
 				var bc struct {
@@ -284,7 +284,7 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 		result.RejectedPaths = append(result.RejectedPaths, followingRel)
 	} else {
 		// See the note at the bundle root.
-		_ = os.MkdirAll(filepath.Dir(followingDest), 0755)
+		_ = os.MkdirAll(filepath.Dir(followingDest), 0755) //nolint:gosec // G301: a clone of a public site's follow tree
 		if content, err := client.FetchContent(serverURL + "/" + filepath.ToSlash(followingRel)); err == nil {
 			_ = putUnder(targetDir, followingDest, []byte(content))
 		}
@@ -347,7 +347,9 @@ func Clone(serverURL, targetDir string, opts CloneOptions) (*CloneResult, error)
 		newState.ClonedAt = state.ClonedAt
 		newState.PostsCount = state.PostsCount + result.PostsDownloaded
 	}
-	saveState(targetDir, statePath, newState)
+	if err := saveState(targetDir, statePath, newState); err != nil {
+		result.Errors++ // the next clone cannot be incremental; counted like any other failed write
+	}
 
 	return result, nil
 }

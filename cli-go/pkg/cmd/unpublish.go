@@ -6,14 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/vdibart/polis-cli/cli-go/pkg/bundle"
-	"github.com/vdibart/polis-cli/cli-go/pkg/comment"
 	"github.com/vdibart/polis-cli/cli-go/pkg/discovery"
-	"github.com/vdibart/polis-cli/cli-go/pkg/metadata"
+	"github.com/vdibart/polis-cli/cli-go/pkg/ops"
 	"github.com/vdibart/polis-cli/cli-go/pkg/publish"
 	"github.com/vdibart/polis-cli/cli-go/pkg/render"
 	"github.com/vdibart/polis-cli/cli-go/pkg/signing"
@@ -128,7 +128,6 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 	// Verify file exists
 	st := storage.NewSite(dataDir)
 	ctx := context.Background()
-	fullPath := filepath.Join(dataDir, contentPath)
 	contentKey := filepath.ToSlash(contentPath)
 	// Only a GENUINE absence is "not found"; any other failure is reported by the
 	// read below with its own cause, as it was before.
@@ -151,10 +150,6 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 	}
 
 	// Determine content type for DS
-	dsContentType := "pub.polis.post"
-	if isComment {
-		dsContentType = "pub.polis.comment"
-	}
 
 	// Confirmation prompt unless -y. --json chooses an output format, not
 	// consent: it cannot show a prompt, so it refuses rather than proceed.
@@ -184,7 +179,7 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 		fmt.Print("Proceed? [y/N] ")
 
 		var response string
-		fmt.Scanln(&response)
+		_, _ = fmt.Scanln(&response) // no input reads as "no"
 		response = strings.TrimSpace(strings.ToLower(response))
 		if response != "y" && response != "yes" {
 			fmt.Println("[i] Cancelled")
@@ -192,153 +187,38 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 		}
 	}
 
-	// Read .well-known/polis for domain + base URL
 	polisBaseURL := os.Getenv("POLIS_BASE_URL")
 	if polisBaseURL == "" {
 		return fmt.Errorf("POLIS_BASE_URL not set")
 	}
-	domain := polisurl.ExtractDomain(polisBaseURL)
-	if domain == "" {
+	if polisurl.ExtractDomain(polisBaseURL) == "" {
 		return fmt.Errorf("could not extract domain from POLIS_BASE_URL")
 	}
-
-	// Build content URL
-	contentURLPath := strings.TrimSuffix(contentPath, ".md")
-	contentURL := strings.TrimRight(polisBaseURL, "/") + "/" + contentURLPath + ".md"
-
-	// Load private key for signing
 	privKey, err := loadPrivateKey(dataDir)
 	if err != nil {
 		return fmt.Errorf("failed to load private key: %v", err)
 	}
-
-	// Build canonical JSON and sign. R20-C-F1 (2026-05-18): the
-	// canonical now includes a fresh ISO 8601 timestamp. DS rejects
-	// timestamps further than ±5min from server clock — defeats
-	// signature replay (captured unpublish events can't be re-submitted
-	// later to delete URLs a second time).
-	timestamp := time.Now().UTC().Format(time.RFC3339)
-	canonical := discovery.MakeContentUnpublishCanonicalJSON(dsContentType, contentURL, timestamp)
-	sig, err := signing.SignContent([]byte(canonical), privKey)
-	if err != nil {
-		return fmt.Errorf("failed to sign unpublish request: %v", err)
-	}
-
-	// Call DS to unpublish — skip if not registered
 	dsURL := os.Getenv("DISCOVERY_SERVICE_URL")
 	if dsURL == "" {
 		dsURL = "https://ds.polis.pub"
 	}
 
-	if discovery.IsRegisteredLocally(storage.At(dataDir), dsURL) {
-		dsClient := discovery.NewClient(dsURL)
-
-		if !jsonOutput {
-			fmt.Println("[i] Unpublishing from discovery service...")
-		}
-
-		if err := dsClient.UnpublishContent(dsContentType, contentURL, timestamp, sig); err != nil {
-			// Non-fatal: DS might be unreachable, still clean up locally
-			if !jsonOutput {
-				fmt.Printf("[!] Warning: DS unpublish failed: %v\n", err)
-			}
-		} else {
-			if !jsonOutput {
-				fmt.Println("[✓] Unpublished from discovery service")
-			}
-		}
-	} else if !jsonOutput {
-		fmt.Println("[i] DS unpublish skipped: site not registered with discovery service")
-	}
-
-	body := publish.StripFrontmatter(contentStr)
-
-	// Build draft content
-	var draftContent string
-	if isPost {
-		// Post draft format: # Title\n\nbody. ⛔ Unquote BEFORE the strip: the
-		// publisher escapes the title (publish.escapeYAMLString) while the body
-		// heading keeps the plain text, so comparing the raw frontmatter value
-		// never matched and each cycle stacked a heading AND re-escaped the
-		// title (close-out R3-1). Same helper as the comment builder.
-		title = publish.UnquoteYAMLString(title)
-		body = render.StripLeadingTitleHeading(body, title)
-		draftContent = "# " + title + "\n\n" + body
-	} else {
-		// A comment draft keeps its reply fields in the format LoadDraft reads,
-		// so `polis comment sign` can sign it again (close-out E2). The builder
-		// owns the unquote + heading strip; the body arrives as published.
-		draftContent = comment.UnpublishedDraftContent(contentStr, title, body)
-	}
-
-	// Determine draft destination path
-	baseName := filepath.Base(contentPath)
-	var draftsDir string
-	if isPost {
-		draftsDir = filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "posts", "drafts")
-	} else {
-		draftsDir = filepath.Join(dataDir, ".polis", "bundles", "pub.polis.core", "comments", "drafts")
-	}
-
-	// No directory is created: Put makes parent prefixes implicitly, which is
-	// the whole of what the MkdirAll here used to do.
-	draftPath := filepath.Join(draftsDir, baseName)
-	draftKey, err := storage.RelKey(dataDir, draftPath)
+	// ⭐ The one implementation, which /v1's post.unpublish runs too.
+	res, err := ops.Unpublish(storage.At(dataDir), contentPath, polisBaseURL, dsURL, privKey)
 	if err != nil {
-		return fmt.Errorf("failed to resolve the draft path: %v", err)
+		return err
 	}
-	if err := st.Put(ctx, draftKey, []byte(draftContent)); err != nil {
-		return fmt.Errorf("failed to write draft: %v", err)
-	}
-
-	// Delete the .versions/ history file (posts only — comments don't have .versions)
-	if isPost {
-		dateDir := filepath.Base(filepath.Dir(contentPath)) // e.g., "20260201"
-		versionsFile := filepath.Join(dataDir, "content", "pub.polis.core", "post", dateDir, ".versions", baseName)
-		if k, kerr := storage.RelKey(dataDir, versionsFile); kerr == nil {
-			_ = st.Delete(ctx, k, storage.IgnoreMissing())
-		}
-	}
-
-	// Delete the original published file
-	if err := st.Delete(ctx, contentKey); err != nil {
-		return fmt.Errorf("failed to delete published file: %v", err)
-	}
-
-	// Delete rendered HTML if exists
-	if isPost {
-		htmlPath := strings.TrimSuffix(fullPath, ".md") + ".html"
-		if k, kerr := storage.RelKey(dataDir, htmlPath); kerr == nil {
-			_ = st.Delete(ctx, k, storage.IgnoreMissing())
-		}
-
-		// Also check the posts mount point
-		dateDir := filepath.Base(filepath.Dir(contentPath))
-		htmlName := strings.TrimSuffix(baseName, ".md") + ".html"
-		mountHtmlPath := filepath.Join(dataDir, "posts", dateDir, htmlName)
-		if k, kerr := storage.RelKey(dataDir, mountHtmlPath); kerr == nil {
-			_ = st.Delete(ctx, k, storage.IgnoreMissing())
-		}
-	} else {
-		// Comment HTML in comments mount dir
-		htmlPath := strings.TrimSuffix(fullPath, ".md") + ".html"
-		if k, kerr := storage.RelKey(dataDir, htmlPath); kerr == nil {
-			_ = st.Delete(ctx, k, storage.IgnoreMissing())
-		}
-	}
-
-	// Remove from index.jsonl
-	if err := metadata.RemoveIndexEntry(storage.At(dataDir), contentPath); err != nil {
-		// Non-fatal: index entry may not exist
-		if !jsonOutput {
-			fmt.Printf("[!] Warning: could not remove index entry: %v\n", err)
-		}
-	}
-
-	// Update manifest
-	if err := publish.UpdateManifest(storage.At(dataDir)); err != nil {
-		if !jsonOutput {
-			fmt.Printf("[!] Warning: failed to update manifest: %v\n", err)
+	contentURL := res.ContentURL
+	draftsDir := filepath.Join(dataDir, filepath.FromSlash(pathpkg.Dir(res.DraftKey)))
+	baseName := filepath.Base(contentPath)
+	if !jsonOutput {
+		switch {
+		case res.Discovery == "unpublished":
+			fmt.Println("[✓] Unpublished from discovery service")
+		case strings.HasPrefix(res.Discovery, "failed: "):
+			fmt.Printf("[!] Warning: DS unpublish failed: %s\n", strings.TrimPrefix(res.Discovery, "failed: "))
+		default:
+			fmt.Println("[i] DS unpublish skipped: site not registered with discovery service")
 		}
 	}
 
@@ -353,6 +233,8 @@ func RunUnpublish(dataDir, contentPath string, skipConfirm bool) error {
 			}
 		}
 	}
+	// v5: the pages that showed an unpublished post; a comment renders in full.
+	renderV5AfterChange(dataDir, contentPath)
 
 	if jsonOutput {
 		contentKind := "post"
@@ -420,7 +302,7 @@ func RunUnpublishURL(dataDir, contentURL, contentType string, skipConfirm bool) 
 		fmt.Println("This removes ONLY the discovery-service row. Local files are NOT touched.")
 		fmt.Print("Proceed? [y/N] ")
 		var response string
-		fmt.Scanln(&response)
+		_, _ = fmt.Scanln(&response) // no input reads as "no"
 		if r := strings.TrimSpace(strings.ToLower(response)); r != "y" && r != "yes" {
 			fmt.Println("[i] Cancelled")
 			return nil

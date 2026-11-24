@@ -3,14 +3,22 @@
 # polis-upgrade - Upgrade script for Polis CLI/TUI
 #
 # Handles version migrations and binary updates via CURL (no git dependency).
-# Fetches migration scripts from GitHub (tag-pinned) and verifies SHA-256
-# checksums before execution. An updated polis/polis-tui script is installed
-# only after it matches the .sha256 published beside it at the same tag.
-# Every download is https-only, including redirects.
+# Fetches migration scripts from GitHub (tag-pinned) and verifies them before
+# anything runs or is installed. Every download is https-only, including
+# redirects.
 #
-# The checksums come from the same origin as the files they cover, so they
-# prove integrity (the bytes arrived as published), not authenticity (who
-# published them).
+# Trust starts at the release's signature. Each release publishes
+# checksums.txt and checksums.txt.sig, an SSH signature by the polis release
+# key, whose public half is PINNED below (never fetched). polis-upgrade
+# verifies the signature with ssh-keygen, then checks the updated script and
+# the migration manifest against checksums.txt, and each migration script
+# against the manifest. So a file that verifies was published by whoever
+# holds the release key, not merely by whoever could change the repository.
+#
+# A release made before releases were signed has no checksums.txt.sig.
+# polis-upgrade refuses it unless --allow-unsigned is given, and then falls
+# back to the .sha256 published beside each script, which proves only that
+# the bytes arrived as published (integrity), not who published them.
 #
 # Usage:
 #   polis-upgrade [OPTIONS]
@@ -23,9 +31,10 @@
 #   --site-dir PATH       Path to polis site directory (auto-detected if omitted)
 #   --yes                 Skip confirmation prompts
 #   --check               Only check for updates, don't apply
+#   --allow-unsigned      Accept a release made before releases were signed
 #   --help                Show this help message
 #
-# Dependencies: bash 4.0+, curl, jq, sha256sum/shasum
+# Dependencies: bash 4.0+, curl, jq, sha256sum/shasum, ssh-keygen (OpenSSH 8.0+)
 #
 
 set -euo pipefail
@@ -37,6 +46,17 @@ set -euo pipefail
 UPGRADE_VERSION="0.1.0"
 GITHUB_REPO="vdibart/polis-cli"
 GITHUB_RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPO}"
+GITHUB_RELEASE_BASE="https://github.com/${GITHUB_REPO}/releases/download"
+
+# ⛔ The polis release key, PINNED: a key fetched from where the files come from
+# would prove nothing. Generated from release/release-signing-key.pub by
+# the release tooling's set-release-key.sh; a test fails if they differ.
+RELEASE_SIGNING_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAING2XN2oftAR/Z2d29gQm1vSaTsRyvlTeWt0WxNugooY polis-release"
+RELEASE_NAMESPACE="polis-release"
+
+# Set by fetch_signed_checksums to the path of a checksums.txt whose signature
+# verified; empty when none did (then only --allow-unsigned proceeds).
+RELEASE_CHECKSUMS=""
 
 # Colors
 GREEN='\033[0;32m'
@@ -174,11 +194,68 @@ verify_published_sha256() {
     return 0
 }
 
-# Download a script, verify it against its published checksum, and only then
-# replace the installed copy. On any failure the installed file is untouched.
-# Usage: install_verified_script URL INSTALL_PATH NAME
+# Fetch a release's checksums.txt and checksums.txt.sig into DIR and verify
+# the signature with the pinned key. On success sets RELEASE_CHECKSUMS.
+# Returns 3 when the release publishes no signature (one made before releases
+# were signed), 1 on any other failure.
+# Usage: fetch_signed_checksums TAG DIR
+fetch_signed_checksums() {
+    local tag="$1" dir="$2"
+    local base="${GITHUB_RELEASE_BASE}/v${tag}"
+    local typ b64 rest
+    read -r typ b64 rest <<<"$RELEASE_SIGNING_KEY"
+    if [[ "$typ" != "ssh-ed25519" || -z "$b64" ]]; then
+        error "This polis-upgrade has no release key pinned, so it cannot verify a release."
+        return 1
+    fi
+    if ! command -v ssh-keygen &>/dev/null; then
+        error "ssh-keygen (OpenSSH 8.0+) is needed to verify the release signature."
+        return 1
+    fi
+    if ! fetch_https "${base}/checksums.txt" "${dir}/checksums.txt" 30; then
+        error "Could not fetch the release's checksums.txt: ${base}/checksums.txt"
+        return 1
+    fi
+    if ! fetch_https "${base}/checksums.txt.sig" "${dir}/checksums.txt.sig" 30; then
+        return 3
+    fi
+    printf '%s namespaces="%s" %s %s\n' "$RELEASE_NAMESPACE" "$RELEASE_NAMESPACE" "$typ" "$b64" > "${dir}/allowed_signers"
+    if ! ssh-keygen -Y verify -f "${dir}/allowed_signers" -I "$RELEASE_NAMESPACE" -n "$RELEASE_NAMESPACE" \
+            -s "${dir}/checksums.txt.sig" < "${dir}/checksums.txt" >/dev/null 2>&1; then
+        error "The checksums.txt of v${tag} is not signed by the polis release key. Nothing was changed."
+        return 1
+    fi
+    RELEASE_CHECKSUMS="${dir}/checksums.txt"
+    return 0
+}
+
+# Check a file against its line in the verified checksums.txt.
+# Usage: verify_listed FILE NAME   (NAME as checksums.txt lists it, e.g. cli-bash/polis)
+verify_listed() {
+    local file="$1" name="$2"
+    local expected
+    if ! expected=$(awk -v n="$name" 'substr($0, 67) == n { print tolower(substr($0, 1, 64)); c++ } END { exit c != 1 }' "$RELEASE_CHECKSUMS"); then
+        error "The release's signed checksums.txt does not list ${name} exactly once"
+        return 1
+    fi
+    local actual
+    actual=$(compute_sha256 "$file")
+    if [[ "$actual" != "$expected" ]]; then
+        error "Checksum mismatch for ${name}: it is not the file the release signed"
+        echo "  Expected: ${expected}" >&2
+        echo "  Got:      ${actual}" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Download a script, verify it, and only then replace the installed copy. It is
+# checked against the signed checksums.txt (entry LISTED_NAME) when there is
+# one, and against the .sha256 beside it only for an unsigned release the user
+# accepted with --allow-unsigned. On any failure the installed file is untouched.
+# Usage: install_verified_script URL INSTALL_PATH NAME [LISTED_NAME]
 install_verified_script() {
-    local url="$1" install_path="$2" name="$3"
+    local url="$1" install_path="$2" name="$3" listed="${4:-cli-bash/$3}"
 
     require_https "$url" || return 1
 
@@ -191,7 +268,15 @@ install_verified_script() {
         return 1
     fi
 
-    if ! verify_published_sha256 "$tmp_file" "$url"; then
+    local verified=false
+    if [[ -n "$RELEASE_CHECKSUMS" ]]; then
+        verify_listed "$tmp_file" "$listed" && verified=true
+    elif [[ "${ALLOW_UNSIGNED:-false}" == "true" ]]; then
+        verify_published_sha256 "$tmp_file" "$url" && verified=true
+    else
+        error "No verified release signature for ${name}"
+    fi
+    if [[ "$verified" != "true" ]]; then
         error "Refusing to install ${name}; ${install_path} was not changed"
         rm -f "$tmp_file"
         return 1
@@ -309,52 +394,44 @@ read_polis_version() {
 }
 
 # ============================================================================
-# DISCOVERY SERVICE FUNCTIONS
+# LATEST VERSION
 # ============================================================================
 
-# Query discovery service for latest version of a component
-query_latest_version() {
+# Print the version of the latest published release of polis-cli (the tag
+# vMAJOR.MINOR.PATCH, without the "v"). The release is the source of truth:
+# the scripts and manifests this tool downloads are pinned to its tag.
+# Usage: latest_release_version COMPONENT
+latest_release_version() {
     local component="$1"
-    local current="${2:-}"
 
-    # Need DISCOVERY_SERVICE_URL
-    if [[ -z "${DISCOVERY_SERVICE_URL:-}" ]]; then
-        # Try to read from .env
-        if [[ -f "${SITE_DIR:-.}/.env" ]]; then
-            DISCOVERY_SERVICE_URL=$(grep -E '^DISCOVERY_SERVICE_URL=' "${SITE_DIR:-.}/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
-        fi
+    # A release tag carries the CLI's version, not the TUI's.
+    if [[ "$component" != "cli" ]]; then
+        error "Cannot determine the latest ${component} version automatically."
+        echo "  Pass the version to upgrade to with --to VERSION." >&2
+        return 1
     fi
 
-    if [[ -z "${DISCOVERY_SERVICE_URL:-}" ]]; then
-        error "DISCOVERY_SERVICE_URL not set. Cannot check for updates."
-        echo "  Set it in your environment or .env file." >&2
-        exit 1
+    local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+    local body
+    body=$(mktemp) || return 1
+    if ! fetch_https "$api_url" "$body" 15; then
+        rm -f "$body"
+        error "Could not reach GitHub to find the latest release: ${api_url}"
+        echo "  Check your connection, or pass the version with --to VERSION." >&2
+        return 1
     fi
 
-    local endpoint="${DISCOVERY_SERVICE_URL}/polis-version?component=${component}"
-    if [[ -n "$current" ]]; then
-        endpoint="${endpoint}&current=${current}"
+    local tag
+    tag=$(jq -r '.tag_name // empty' "$body" 2>/dev/null || true)
+    rm -f "$body"
+
+    local version="${tag#v}"
+    if [[ "$tag" != v* ]] || ! is_valid_version "$version"; then
+        error "The latest release has an unexpected tag: '${tag}'"
+        echo "  Pass the version to upgrade to with --to VERSION." >&2
+        return 1
     fi
-
-    local response
-    response=$(curl -s --max-time 15 \
-        --location --request GET "$endpoint" \
-        --header 'Content-Type: application/json' 2>/dev/null)
-
-    if [[ -z "$response" ]]; then
-        error "Failed to reach discovery service"
-        exit 1
-    fi
-
-    # Check for error response
-    local err
-    err=$(echo "$response" | jq -r '.error // empty' 2>/dev/null)
-    if [[ -n "$err" ]]; then
-        error "Discovery service: $err"
-        exit 1
-    fi
-
-    echo "$response"
+    echo "$version"
 }
 
 # ============================================================================
@@ -370,9 +447,26 @@ fetch_manifest() {
 
     require_https "$manifest_url" || exit 1
 
+    # Downloaded to a file, not captured, so the bytes hashed are the bytes served.
+    local manifest_file
+    manifest_file=$(mktemp) || exit 1
+    if ! fetch_https "$manifest_url" "$manifest_file" 15; then
+        rm -f "$manifest_file"
+        error "Failed to fetch migration manifest from: $manifest_url"
+        echo "  Ensure the tag v${tag} exists on GitHub." >&2
+        exit 1
+    fi
+    # ⛔ The manifest carries every migration script's checksum, so it is checked
+    # against the signed checksums.txt first (an unsigned release only with
+    # --allow-unsigned, which the caller has already decided).
+    if [[ -n "$RELEASE_CHECKSUMS" ]] && ! verify_listed "$manifest_file" "migrations/${component}/manifest.json"; then
+        rm -f "$manifest_file"
+        error "Refusing the migration manifest of v${tag}"
+        exit 1
+    fi
     local response
-    response=$(curl -s --proto '=https' --proto-redir '=https' \
-        --max-time 15 -L "$manifest_url" 2>/dev/null)
+    response=$(cat "$manifest_file")
+    rm -f "$manifest_file"
 
     if [[ -z "$response" ]] || echo "$response" | jq -e '.message' &>/dev/null 2>&1; then
         error "Failed to fetch migration manifest from: $manifest_url"
@@ -470,12 +564,13 @@ show_help() {
     echo "  --site-dir PATH       Path to polis site directory"
     echo "  --yes                 Skip confirmation prompts"
     echo "  --check               Only check for updates, don't apply"
+    echo "  --allow-unsigned      Accept a release made before releases were signed"
     echo "  --help                Show this help message"
     echo ""
     echo "Examples:"
     echo "  polis-upgrade                      # Upgrade CLI to latest"
     echo "  polis-upgrade --to 0.39.0          # Upgrade CLI to specific version"
-    echo "  polis-upgrade --component tui      # Upgrade TUI to latest"
+    echo "  polis-upgrade --component tui --to 0.40.0  # Upgrade TUI (needs --to)"
     echo "  polis-upgrade --check              # Check what's available"
     echo "  polis-upgrade --from 0.33.0        # Override version detection"
 }
@@ -489,6 +584,7 @@ main() {
     local SITE_DIR=""
     local AUTO_YES="false"
     local CHECK_ONLY="false"
+    local ALLOW_UNSIGNED="false"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -520,6 +616,10 @@ main() {
                 AUTO_YES="true"
                 shift
                 ;;
+            --allow-unsigned)
+                ALLOW_UNSIGNED="true"
+                shift
+                ;;
             --check)
                 CHECK_ONLY="true"
                 shift
@@ -541,7 +641,7 @@ main() {
     done
 
     # Export for use in functions
-    export AUTO_YES SITE_DIR POLIS_PATH
+    export AUTO_YES SITE_DIR POLIS_PATH ALLOW_UNSIGNED
 
     echo -e "${BOLD}${CYAN}polis-upgrade${NC} ${DIM}v${UPGRADE_VERSION}${NC}"
     echo ""
@@ -580,21 +680,7 @@ main() {
     # Step 3: Determine target version
     if [[ -z "$TO_VERSION" ]]; then
         info "Checking latest ${COMPONENT} version..."
-        local version_response
-        version_response=$(query_latest_version "$COMPONENT" "$FROM_VERSION")
-
-        TO_VERSION=$(echo "$version_response" | jq -r '.latest // empty')
-        if [[ -z "$TO_VERSION" ]]; then
-            error "Could not determine latest version for ${COMPONENT}"
-            exit 1
-        fi
-
-        local upgrade_available
-        upgrade_available=$(echo "$version_response" | jq -r '.upgrade_available // false')
-        if [[ "$upgrade_available" != "true" ]]; then
-            success "${COMPONENT} is already up to date (${FROM_VERSION})"
-            exit 0
-        fi
+        TO_VERSION=$(latest_release_version "$COMPONENT") || exit 1
 
         info "Latest ${COMPONENT} version: ${TO_VERSION}"
     else
@@ -622,7 +708,32 @@ main() {
 
     echo ""
 
-    # Step 4: Fetch manifest and identify migrations
+    # One working directory for everything downloaded, removed on exit.
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap "rm -rf '$tmp_dir'" EXIT
+
+    # Step 4: verify the release's signature. Everything after trusts only what
+    # the signed checksums.txt names.
+    info "Verifying the release signature..."
+    local sig_rc=0
+    fetch_signed_checksums "$TO_VERSION" "$tmp_dir" || sig_rc=$?
+    if [[ "$sig_rc" -eq 0 ]]; then
+        success "v${TO_VERSION} is signed by the polis release key"
+    elif [[ "$sig_rc" -eq 3 && "$ALLOW_UNSIGNED" == "true" ]]; then
+        warn "v${TO_VERSION} predates signed releases. With --allow-unsigned, each file is checked only against"
+        warn "the .sha256 published beside it, which proves it arrived intact, not who published it."
+    elif [[ "$sig_rc" -eq 3 ]]; then
+        error "v${TO_VERSION} has no release signature (checksums.txt.sig): it predates signed releases."
+        echo "  Upgrade to the latest release instead, or pass --allow-unsigned to accept it" >&2
+        echo "  with only the unsigned .sha256 checks." >&2
+        exit 1
+    else
+        exit 1
+    fi
+    echo ""
+
+    # Step 5: Fetch manifest and identify migrations
     info "Fetching migration manifest..."
     local manifest
     manifest=$(fetch_manifest "$COMPONENT" "$TO_VERSION")
@@ -656,7 +767,7 @@ main() {
         exit 0
     fi
 
-    # Step 5: Apply migrations
+    # Step 6: Apply migrations
     if [[ "$migration_count" -gt 0 ]]; then
         if ! confirm "Proceed with migrations?"; then
             info "Upgrade cancelled."
@@ -664,11 +775,6 @@ main() {
         fi
 
         echo ""
-
-        # Create temp directory for downloaded scripts
-        local tmp_dir
-        tmp_dir=$(mktemp -d)
-        trap "rm -rf '$tmp_dir'" EXIT
 
         # Download and verify all scripts first
         info "Downloading and verifying migration scripts..."
@@ -736,7 +842,7 @@ main() {
         echo ""
     fi
 
-    # Step 6: Offer to download updated binary
+    # Step 7: Offer to download updated binary
     local binary_name="polis"
     if [[ "$COMPONENT" == "tui" ]]; then
         binary_name="polis-tui"

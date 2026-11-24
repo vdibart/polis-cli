@@ -15,6 +15,7 @@ import (
 var Version = "dev"
 
 func main() {
+	server.OneLinePerLogEntry() // one log entry, one line: a value cannot forge a second
 	// Default to current working directory (matches bundled binary behavior)
 	dataDir := "."
 	port := 0 // 0 = auto-pick an available port
@@ -61,7 +62,7 @@ Options:
 			if i+1 < len(args) {
 				p, err := strconv.Atoi(args[i+1])
 				if err != nil || p <= 0 || p > 65535 {
-					log.Fatalf("invalid --port %q", args[i+1])
+					log.Fatalf("invalid --port %q", args[i+1]) //nolint:gosec // G706: %q quotes the argument
 				}
 				port = p
 				i++
